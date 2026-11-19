@@ -138,19 +138,29 @@ test('a library that cannot move has its base again once it is unloaded, in the 
         // Two libraries with no relocations, both linked at 0x10000000, which
         // is in the heap's arena: the second cannot load beside the first, and
         // loads there once the first is gone; the first loads there again once
-        // the second is. Where the first was is readable across both its edges
-        // once it is gone: the heap's again, one region with the heap either
-        // side rather than a gap, or a region of its own. Exit code bits: the
-        // first loaded (1), the second refused beside it (2), readable across
-        // the lower edge (4) and the upper (8), the second loaded at the base
-        // (16), the first loaded there again (32).
+        // the second is. Where the first was is free again across both its
+        // edges once it is gone, as on Windows (IsBadReadPtr says so of free
+        // pages): the heap's again, one region with the heap either side rather
+        // than a gap or a region of its own, so a page committed across an
+        // edge at that address is there and readable. Exit code bits: the
+        // first loaded (1), the second refused beside it (2), committed and
+        // readable across the lower edge (4) and the upper (8), the second
+        // loaded at the base (16), the first loaded there again (32).
         const BASE = 0x10000000;
-        const fixed = ()=>buildExe({
-            dll: true,
-            imageBase: BASE,
-            imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
-            code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00], // mov eax, TRUE; ret 12
-        });
+        // Relocations stripped (IMAGE_FILE_RELOCS_STRIPPED): one merely without
+        // them would be moved as it lies.
+        const fixed = ()=>{
+            const file = buildExe({
+                dll: true,
+                imageBase: BASE,
+                imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
+                code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00], // mov eax, TRUE; ret 12
+            });
+            const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+            const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+            view.setUint16(characteristics, view.getUint16(characteristics, true) | 1, true);
+            return file;
+        };
         const first = fixed();
         const header = new DataView(first.buffer, first.byteOffset, first.byteLength);
         const end = BASE + header.getUint32(header.getUint32(0x3c, true) + 24 + 56, true);
@@ -158,17 +168,37 @@ test('a library that cannot move has its base again once it is unloaded, in the 
         const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
         const executable = buildExe({
             imports: { 'KERNEL32.dll': ['LoadLibraryA', 'FreeLibrary', 'IsBadReadPtr',
-                'ExitProcess'] },
+                'VirtualAlloc', 'VirtualFree', 'ExitProcess'] },
             data: { first: cString('first.dll'), second: cString('second.dll') },
-            codeSize: 0x100,
+            codeSize: 0x200,
             code: ({ iat, at })=>{
                 /** @param {string} fn */
                 const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
                 /** @param {string} name */
                 const load = name=>[0x68, ...u32(at(name)), ...call('LoadLibraryA')];
-                /** IsBadReadPtr(edge - 16, 32); test eax, eax @param {number} edge */
-                const across = edge=>[0x6a, 0x20, 0x68, ...u32(edge - 0x10),
-                    ...call('IsBadReadPtr'), 0x85, 0xc0];
+                /**
+                 * The pages either side of `edge` reserved and committed at that
+                 * very address, IsBadReadPtr(edge - 16, 32) asked of them and
+                 * the pages given back; eax is 0 where both held; test eax, eax.
+                 *
+                 * @param {number} edge
+                 */
+                const across = edge=>{
+                    // A reservation starts on the 64 KiB allocation granularity.
+                    const from = (edge - 0x1000) - (edge - 0x1000) % 0x10000;
+                    return [
+                        0x6a, 0x04, 0x68, ...u32(0x3000), // PAGE_READWRITE, reserve and commit
+                        0x68, ...u32(edge + 0x1000 - from), 0x68, ...u32(from),
+                        ...call('VirtualAlloc'),
+                        0x89, 0xc7, //                              mov edi, eax
+                        0x3d, ...u32(from), 0x75, 31, //            cmp eax, from; jne bad
+                        0x6a, 0x20, 0x68, ...u32(edge - 0x10), ...call('IsBadReadPtr'),
+                        0x50, 0x68, ...u32(0x8000), 0x6a, 0x00, 0x57, // push eax; MEM_RELEASE
+                        ...call('VirtualFree'), 0x58, 0xeb, 0x05, // pop eax; jmp done
+                        0xb8, ...u32(1), //                         bad: mov eax, 1
+                        0x85, 0xc0, //                              done: test eax, eax
+                    ];
+                };
                 /** @param {number} bit */
                 const unlessNotEqual = bit=>[0x75, 0x03, 0x80, 0xcb, bit];
                 return [

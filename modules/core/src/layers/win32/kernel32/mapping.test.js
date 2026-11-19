@@ -6,13 +6,17 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMappingFunctions } from './mapping.js';
+import { createMappingFunctions, imageRefusal, imageSections } from './mapping.js';
+import { imageKind } from '../../loader/internal/pe.js';
+import { imageWriteCopy, protectionWithin, sectionRights, viewProtection }
+    from './view-rights.js';
 import { createNamedObjects } from './named-objects.js';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const PAGE_READWRITE = 0x04;
 const PAGE_READONLY = 0x02;
+const FILE_MAP_COPY = 0x0001;
 const FILE_MAP_WRITE = 0x0002;
 const FILE_MAP_READ = 0x0004;
 
@@ -226,6 +230,41 @@ test('a read-only view is not written back', ()=>{
     assert.equal(file.data[0], 1, 'the file kept what it had');
 });
 
+test('a view asks no more of its section than the section\'s protection allows', ()=>{
+    // Wine's kernel32:virtual (test_mapping): writing needs a read-write
+    // section, executing an executable one, and anything else reads; a view
+    // past that is ERROR_ACCESS_DENIED. Its pages start with the protection
+    // its access names, and VirtualProtect gives them one within the
+    // section's (heap.js).
+    assert.deepEqual([0x02, 0x04, 0x08, 0x20, 0x40, 0x80].map(sectionRights),
+        [0x05, 0x07, 0x05, 0x2d, 0x2f, 0x2d]);
+    assert.equal(sectionRights(0x01), 0, 'PAGE_NOACCESS allows nothing');
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 0x20, 0x21, 0x22, 0x24].map(viewProtection),
+        [0x01, 0x08, 0x04, 0x04, 0x02, 0x02, 0x04, 0x01, 0x80, 0x40, 0x20]);
+    // A page takes no access its view's protection lacks: a read-only view's
+    // pages read or copy; an image's (PAGE_EXECUTE_WRITECOPY) take any, its
+    // writable ones as their copy-on-write forms.
+    const pages = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+    assert.deepEqual(pages.filter(page=>protectionWithin(0x02, page)), [0x01, 0x02, 0x08]);
+    assert.deepEqual(pages.filter(page=>protectionWithin(0x01, page)), [0x01]);
+    assert.deepEqual(pages.map(imageWriteCopy),
+        [0x01, 0x02, 0x08, 0x08, 0x10, 0x20, 0x80, 0x80]);
+    assert.ok(pages.map(imageWriteCopy).every(page=>protectionWithin(0x80, page)));
+
+    const { fns, errors, fileHandle } = setup();
+    const readOnly = fns.CreateFileMappingA.handler([fileHandle, 0, 0x02, 0, 8, 0]);
+    assert.equal(fns.MapViewOfFile.handler([readOnly, FILE_MAP_WRITE, 0, 0, 8]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(fns.MapViewOfFile.handler([readOnly, 0x20 | 4, 0, 0, 8]), 0, 'not executable');
+    assert.notEqual(fns.MapViewOfFile.handler([readOnly, 0, 0, 0, 8]), 0, 'nothing asked reads');
+    assert.notEqual(fns.MapViewOfFile.handler([readOnly, FILE_MAP_COPY, 0, 0, 8]), 0);
+    for (const refused of [0x01, 0x10, 0])
+    {
+        assert.equal(fns.CreateFileMappingA.handler([fileHandle, 0, refused, 0, 8, 0]), 0);
+        assert.equal(errors.at(-1), 87, `ERROR_INVALID_PARAMETER for 0x${refused.toString(16)}`);
+    }
+});
+
 test('a copy-on-write view is written in memory and never reaches its file', ()=>{
     // PAGE_WRITECOPY and PAGE_EXECUTE_WRITECOPY give the process its own copy
     // of each page it writes; the file, which may be open for reading alone,
@@ -234,7 +273,9 @@ test('a copy-on-write view is written in memory and never reaches its file', ()=
     {
         const { fns, bytes, file, fileHandle } = setup();
         const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, page, 0, 8, 0]);
-        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]);
+        assert.equal(fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 8]), 0,
+            'a copy-on-write section is never written through');
+        const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_COPY, 0, 0, 8]);
         assert.notEqual(view, 0);
         bytes[view] = 0x77;
         assert.equal(fns.FlushViewOfFile.handler([view, 0]), 1);
@@ -542,19 +583,27 @@ test('an image linked for ASLR is moved even where its base is free, as Windows 
     assert.equal(imageBaseOf(bytes, view), view);
 });
 
-test('an image without fixups whose base is out of reach is not mapped', ()=>{
+test('an image without fixups whose base is taken is mapped elsewhere as it lies', ()=>{
+    // Windows maps the view where there is room, nothing fixed up, and
+    // NtMapViewOfSection answers STATUS_IMAGE_NOT_AT_BASE (Wine's
+    // kernel32:loader test_image_mapping); MapViewOfFile takes that as success.
     const at = setup();
-    const { fns, file, fileHandle, errors } = at;
-    const ERROR_INVALID_ADDRESS = 487;
+    const { fns, bytes, file, fileHandle } = at;
+    const STATUS_IMAGE_NOT_AT_BASE = 0x40000003;
     file.data = imageAt(0x79720000, false);
     const mapping = fns.CreateFileMappingA.handler(
         [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
-    assert.equal(fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]), 0);
-    assert.equal(errors.at(-1), ERROR_INVALID_ADDRESS);
-    const STATUS_CONFLICTING_ADDRESSES = 0xc0000018;
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.notEqual(view, 0x79720000);
+    assert.equal(dword(bytes, pointerAt(view)), 0x79720000 + 0x1000, 'nothing fixed up');
+    assert.equal(imageBaseOf(bytes, view), 0x79720000, 'the header names its own base');
+    at.bytes.fill(0, 0x200, 0x204);
+    at.bytes.fill(0, 0x210, 0x214);
     assert.equal(fns.CreateFileMappingW.natives.NtMapViewOfSection.handler(
         [mapping, CURRENT_PROCESS, 0x200, 0, 0, 0, 0x210, 1, 0, PAGE_READONLY]),
-    STATUS_CONFLICTING_ADDRESSES);
+    STATUS_IMAGE_NOT_AT_BASE);
+    assert.notEqual(dword(bytes, 0x200), 0);
 });
 
 test('a fresh page-file view reads zeroes, whatever the memory it is given held before', ()=>{
@@ -582,6 +631,74 @@ test('a read-write mapping that names its commit is still written back to its fi
     bytes[view + 2] = 0x77;
     assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
     assert.equal(file.data[2], 0x77);
+});
+
+test('a SEC_IMAGE section refuses each kind of file as Windows answers it', ()=>{
+    // Wine's kernel32:loader NtCreateSection cases, by what the headers say.
+    const image = imageAt(0x10000000);
+    const lfanew = dword(image, 0x3c);
+    /** @param {(view: DataView) => void} edit */
+    const kind = edit=>{
+        const copy = image.slice();
+        edit(new DataView(copy.buffer));
+        return imageRefusal(imageKind(copy), false);
+    };
+    assert.equal(kind(()=>{}), null, 'a 32-bit PE image is taken');
+    assert.equal(kind(view=>view.setUint16(0, 0, true)), 0xc000012f, 'no MZ: NOT_MZ');
+    assert.equal(kind(view=>view.setUint32(0x3c, 0x98760000, true)), 0xc0000130,
+        'a new header past the file: PROTECT');
+    assert.equal(kind(view=>view.setUint32(lfanew, 0xdeadbeef, true)), 0xc0000130,
+        'a signature of no kind: PROTECT');
+    /** @param {number} system */
+    const ne = system=>kind(view=>{
+        view.setUint16(lfanew, 0x454e, true);
+        view.setUint8(lfanew + 0x36, system);
+    });
+    assert.deepEqual([0, 1, 2, 3, 4, 5, 6].map(ne), [0xc000011b, 0xc000011b, 0xc0000131,
+        0xc000011b, 0xc000011b, 0xc0000130, 0xc000011b], 'NE: Windows 16-bit, a VxD, the rest');
+    assert.equal(kind(view=>view.setUint16(lfanew + 24, 0xdead, true)), 0xc000007b,
+        'an optional header of no magic: FORMAT');
+    assert.equal(kind(view=>view.setUint16(lfanew + 4, 0x8664, true)), 0xc000007b,
+        'a PE32 of the other machine: FORMAT');
+    /** @param {boolean} machine64 */
+    const pe64 = machine64=>{
+        const copy = image.slice();
+        const view = new DataView(copy.buffer);
+        view.setUint16(lfanew + 24, 0x20b, true);
+        view.setUint16(lfanew + 4, 0x8664, true);
+        return imageRefusal(imageKind(copy), machine64);
+    };
+    assert.equal(pe64(false), 0xc000035a, 'PE32+ on a 32-bit Windows: WIN_64');
+    assert.equal(pe64(true), null, 'and taken where x86-64 runs');
+});
+
+test('an image section answers its image information and keeps the size it was made with', ()=>{
+    const at = setup();
+    const { fns, bytes, file, fileHandle, errors } = at;
+    file.data = imageAt(0x10000000, true, true);
+    const mapping = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 0, 0]);
+    const query = fns.CreateFileMappingW.natives.NtQuerySection.handler;
+    assert.equal(query([mapping, 1, 0x300, 48, 0]), 0);
+    const lfanew = dword(file.data, 0x3c);
+    const optional = lfanew + 24;
+    assert.equal(dword(bytes, 0x300), 0x10000000 + dword(file.data, optional + 16),
+        'TransferAddress: the base and the entry point');
+    assert.equal(dword(bytes, 0x308), dword(file.data, optional + 72), 'MaximumStackSize');
+    assert.equal(dword(bytes, 0x310) & 0xffff, file.data[optional + 68], 'SubSystemType');
+    assert.equal(bytes[0x300 + 32] | bytes[0x300 + 33] << 8, 0x14c, 'Machine');
+    assert.equal(bytes[0x300 + 34], 1, 'ImageContainsCode');
+    assert.equal(bytes[0x300 + 35] & 0x0c, 0x04, 'dynamically relocated, not flat');
+    assert.equal(dword(bytes, 0x300 + 40), file.data.length, 'ImageFileSize');
+
+    // A maximum size up to the image's is the section's; past it, refused.
+    const size = basicInformation(at, mapping).size;
+    const small = fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, 1, 0]);
+    assert.equal(basicInformation(at, small).size, 1);
+    assert.equal(fns.CreateFileMappingA.handler(
+        [fileHandle, 0, PAGE_READONLY | SEC_IMAGE, 0, size + 1, 0]), 0);
+    assert.equal(errors.at(-1), 8, 'STATUS_SECTION_TOO_BIG, ERROR_NOT_ENOUGH_MEMORY');
 });
 
 test('NtQuerySection refuses a short buffer, a plain section\'s image class, a non-section', ()=>{
@@ -682,4 +799,18 @@ test('NtOpenSection opens a section by its object name, and refuses physical mem
     assert.equal(open('\\BaseNamedObjects\\Nothing'), STATUS_OBJECT_NAME_NOT_FOUND);
     assert.equal(NtOpenSection.handler([0, 0x4, 0x400]), STATUS_ACCESS_VIOLATION);
     assert.equal(NtOpenSection.argBytes, 12);
+});
+
+test('an image view\'s sections take the protection a loaded image\'s do', ()=>{
+    // Wine's kernel32:loader (test_image_mapping): a section only executed is
+    // PAGE_EXECUTE, not PAGE_EXECUTE_READ, mapped as a view as loaded.
+    /** @param {number} characteristics */
+    const of = characteristics=>imageSections(/** @type {any} */ ({ sectionAlignment: 0x1000,
+        sections: [{ virtualAddress: 0x1000, virtualSize: 0x10, rawSize: 0x200,
+            characteristics }] }))[0].protect;
+    assert.equal(of(0x20000000), 0x10, 'executed only');
+    assert.equal(of(0x60000020), 0x20, 'read and executed');
+    assert.equal(of(0xc0000040), 0x08, 'written: copy-on-write');
+    assert.equal(of(0xd0000040), 0x04, 'shared: written through');
+    assert.equal(of(0x00000040), 0x01, 'none');
 });

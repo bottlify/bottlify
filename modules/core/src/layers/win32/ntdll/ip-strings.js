@@ -49,7 +49,9 @@ export function ipv6ToString(bytes){
     const zeros = (/** @type {number} */ from, /** @type {number} */ to)=>
         groups.slice(from, to).every(group=>group === 0);
     const tail = ipv4ToString(bytes.subarray(12, 16));
-    if (zeros(0, 5) && groups[5] === 0xffff)
+    // A mapped address whose IPv4 part starts with a zero group is written
+    // as groups.
+    if (zeros(0, 5) && groups[5] === 0xffff && groups[6] !== 0)
     {
         return `::ffff:${tail}`;
     }
@@ -92,50 +94,74 @@ export function ipv6ToString(bytes){
 }
 
 /**
- * One number of an IPv4 address: its value and the characters it took, or
- * null for none there.
+ * One number as ntdll reads it: `0x` before hexadecimal digits, `0` before a
+ * decimal digit an octal number, else decimal. The digits accumulate in 32
+ * bits, and one that would wrap the value is a fault where it stands. A
+ * decimal digit the radix has no room for is a fault if it is the first after
+ * the prefix, and otherwise ends the number. Strict reading refuses a prefix,
+ * the fault just past it.
  *
- * @param {string} text @param {number} from @param {boolean} strict  decimal only
+ * @param {string} text @param {number} from @param {boolean} strict
+ * @returns {{ value: number, end: number } | { error: true, end: number } | null}
+ *          null for no number there
  */
-function ipv4Part(text, from, strict){
+function readNumber(text, from, strict){
     let at = from;
     let radix = 10;
-    if (!strict && text[at] === '0')
+    if (text[at] === '0' && (text[at + 1] === 'x' || text[at + 1] === 'X'))
     {
-        if (text[at + 1] === 'x' || text[at + 1] === 'X')
-        {
-            radix = 16;
-            at += 2;
-        }
-        else
-        {
-            radix = 8;
-        }
+        radix = 16;
+        at += 2;
     }
-    const start = at;
+    else if (text[at] === '0' && /[0-9]/.test(text[at + 1] ?? ''))
+    {
+        radix = 8;
+        at += 1;
+    }
+    if (strict && radix !== 10)
+    {
+        return { error: true, end: at };
+    }
     let value = 0;
+    let digits = 0;
     for (; at < text.length; at++)
     {
-        const digit = parseInt(text[at], radix);
+        const character = text[at];
+        const digit = radix === 16 ? parseInt(character, 16)
+            : (/[0-9]/.test(character) ? Number(character) : NaN);
         if (Number.isNaN(digit))
         {
             break;
         }
-        value = value * radix + digit;
-        if (value > 0xffffffff)
+        if (digit >= radix)
         {
-            return null;
+            if (digits === 0)
+            {
+                return { error: true, end: at };
+            }
+            break;
         }
+        const next = (value * radix + digit) >>> 0;
+        if (next < value)
+        {
+            return { error: true, end: at };
+        }
+        value = next;
+        digits++;
     }
-    if (at === start && radix !== 8)
+    if (digits === 0)
     {
-        return null;
+        // A prefix with nothing after it is a fault past the prefix.
+        return radix === 10 ? null : { error: true, end: at };
     }
     return { value, end: at };
 }
 
 /**
- * Reads an IPv4 address at the start of `text`.
+ * Reads an IPv4 address at the start of `text`. Where the reading stopped is
+ * part of the answer: a part missing at a dot is a fault past that dot, a dot
+ * after the fourth part a fault at it, and the parts' sizes are judged once
+ * all of them are read.
  *
  * @param {string} text @param {boolean} strict  four decimal parts and nothing else
  * @returns {{ bytes: Uint8Array, end: number } | { error: true, end: number }}
@@ -146,16 +172,24 @@ export function parseIpv4(text, strict){
     let at = 0;
     for (;;)
     {
-        const part = ipv4Part(text, at, strict);
-        if (!part)
+        const part = readNumber(text, at, strict);
+        if (part === null)
         {
-            return { error: true, end: at };
+            return { error: true, end: text[at] === '.' ? at + 1 : at };
+        }
+        if ('error' in part)
+        {
+            return part;
         }
         parts.push(part.value);
         at = part.end;
-        if (text[at] !== '.' || parts.length === 4)
+        if (text[at] !== '.')
         {
             break;
+        }
+        if (parts.length === 4)
+        {
+            return { error: true, end: at };
         }
         at++;
     }
@@ -183,96 +217,204 @@ export function parseIpv4(text, strict){
 }
 
 /**
- * Reads an IPv6 address at the start of `text`: hexadecimal groups, one `::`
- * at most, the last 32 bits in dotted decimal if they are written so.
+ * The digits of one radix at `from`: how many, their value and where they end.
+ *
+ * @param {string} text @param {number} from @param {10 | 16} radix
+ */
+function digitsAt(text, from, radix){
+    let at = from;
+    let value = 0;
+    for (; at < text.length; at++)
+    {
+        const digit = radix === 16 ? parseInt(text[at], 16)
+            : (/[0-9]/.test(text[at]) ? Number(text[at]) : NaN);
+        if (Number.isNaN(digit))
+        {
+            break;
+        }
+        value = value * radix + digit;
+    }
+    return { count: at - from, value, end: at };
+}
+
+/**
+ * Reads an IPv6 address at the start of `text` as ntdll does, into `bytes`.
+ *
+ * What it reads is stored as it is read: each group a following `:` closes,
+ * each dotted byte a following `.` closes, so a reading that fails leaves the
+ * groups before the fault in the caller's address. A `::` marks where the
+ * groups after it go; only an address read whole moves them to its end and
+ * zeroes the gap. A leading `::` stores a zero group of its own first.
+ *
+ * Where the reading stopped is the rest of the answer. A group of more than
+ * four digits, or a dotted byte of more than three or past 255, is noticed
+ * when the part that holds it ends: there, with the address ended, the
+ * reading stops at it; with more to read it stops with no place at all
+ * (`end` null). A last group written `0x...` ends at its `x`, its value the
+ * hexadecimal after the prefix, held to a positive 32-bit number and cut to
+ * 16 bits; an address that has one is refused by the Ex readers.
  *
  * @param {string} text
- * @returns {{ bytes: Uint8Array, end: number } | { error: true, end: number }}
+ * @param {Uint8Array} [bytes]  the caller's address as it was
+ * @returns {{ bytes: Uint8Array, end: number | null, error?: true, prefixed?: true }}
  */
-export function parseIpv6(text){
-    /** @type {number[]} */
-    const head = [];
-    /** @type {number[]} */
-    const tail = [];
-    let gap = false;
+export function parseIpv6(text, bytes = new Uint8Array(16)){
     let at = 0;
-    if (text.startsWith('::'))
+    let stored = 0;
+    let gap = -1;
+    let dotted = 0;
+    let tooBig = false;
+    /** @param {number | null} end */
+    const fail = end=>/** @type {const} */ ({ bytes, end, error: true });
+    /** @param {number} value */
+    const storeGroup = value=>{
+        bytes[stored] = value >> 8 & 0xff;
+        bytes[stored + 1] = value & 0xff;
+    };
+    const closeGap = ()=>{
+        if (gap >= 0)
+        {
+            const after = bytes.slice(gap, stored);
+            bytes.fill(0, gap);
+            bytes.set(after, 16 - after.length);
+        }
+    };
+    if (text[0] === ':')
     {
-        gap = true;
-        at = 2;
+        if (text[1] !== ':')
+        {
+            return fail(0);
+        }
+        storeGroup(0);
+        stored = 2;
+        at = 1;
     }
     for (;;)
     {
-        const groups = gap ? tail : head;
-        if (head.length + tail.length >= 8)
+        if (dotted === 0 && text[at] === ':')
         {
-            break;
-        }
-        // Dotted decimal ends the address, as its last two groups.
-        const dotted = /^[0-9]+\./.test(text.slice(at)) ? parseIpv4(text.slice(at), true) : null;
-        if (dotted && !('error' in dotted) && head.length + tail.length <= 6)
-        {
-            const { bytes } = dotted;
-            groups.push(bytes[0] << 8 | bytes[1], bytes[2] << 8 | bytes[3]);
-            at += dotted.end;
-            break;
-        }
-        const group = /^[0-9a-fA-F]{1,4}/.exec(text.slice(at));
-        if (!group)
-        {
-            if (groups.length === 0 && gap)
+            if (gap >= 0)
+            {
+                return fail(at);
+            }
+            at++;
+            gap = stored;
+            if (stored === 14 || digitsAt(text, at, 16).count === 0)
             {
                 break;
             }
-            return { error: true, end: at };
         }
-        groups.push(parseInt(group[0], 16));
-        at += group[0].length;
-        if (text.startsWith('::', at) && !gap)
+        const begin = at;
+        if (dotted === 0 && stored <= (gap >= 0 ? 10 : 12))
         {
-            gap = true;
-            at += 2;
-            continue;
+            const decimal = digitsAt(text, at, 10);
+            if (decimal.count > 0 && text[decimal.end] === '.')
+            {
+                dotted = 1;
+            }
         }
-        if (text.startsWith('::', at))
+        if (dotted > 0)
         {
-            // A second gap: no address has two.
-            return { error: true, end: at };
+            const part = digitsAt(text, at, 10);
+            if (part.count === 0)
+            {
+                return fail(at);
+            }
+            at = part.end;
+            if (part.count > 3 || part.value > 255)
+            {
+                tooBig = true;
+            }
+            else
+            {
+                // A byte with no dot after it ends the address: the fourth,
+                // and only where it fills the last place or a gap takes up
+                // the room.
+                if (text[at] !== '.' && (dotted < 4 || (stored < 15 && gap < 0)))
+                {
+                    return fail(at);
+                }
+                bytes[stored++] = part.value;
+            }
+            if (dotted === 4 || text[at] !== '.')
+            {
+                break;
+            }
+            dotted++;
         }
-        if (text[at] !== ':')
+        else
+        {
+            const group = digitsAt(text, at, 16);
+            if (group.count === 0)
+            {
+                return fail(at);
+            }
+            at = group.end;
+            if (text[begin] === '0' && (text[begin + 1] === 'x' || text[begin + 1] === 'X'))
+            {
+                const end = begin + 1;
+                if (stored < 14 && gap < 0)
+                {
+                    return fail(end);
+                }
+                const after = digitsAt(text, begin + 2, 16).value;
+                storeGroup(Math.min(after, 0x7fffffff) & 0xffff);
+                stored += 2;
+                closeGap();
+                return { bytes, end, prefixed: true };
+            }
+            if (text[at] !== ':' && stored < 14 && gap < 0)
+            {
+                return fail(at);
+            }
+            if (group.count > 4)
+            {
+                tooBig = true;
+            }
+            else
+            {
+                storeGroup(group.value);
+            }
+            stored += 2;
+            if (text[at] !== ':' || (gap >= 0 && text[at + 1] === ':'))
+            {
+                break;
+            }
+        }
+        if (stored === (gap >= 0 ? 14 : 16))
         {
             break;
         }
+        if (tooBig)
+        {
+            return fail(null);
+        }
         at++;
     }
-    const total = head.length + tail.length;
-    if (gap ? total > 7 : total !== 8)
+    if (tooBig || (gap < 0 && stored < 16))
     {
-        return { error: true, end: at };
+        return fail(at);
     }
-    const groups = [...head, ...new Array(8 - total).fill(0), ...tail];
-    const bytes = new Uint8Array(16);
-    groups.forEach((group, index)=>{
-        bytes[index * 2] = group >> 8;
-        bytes[index * 2 + 1] = group & 0xff;
-    });
+    closeGap();
     return { bytes, end: at };
 }
 
 /**
- * A port written after an address, `:port` in decimal, up to 65535.
+ * A port written after an address: `:` and a number read as an address part
+ * is (decimal, octal or hexadecimal), up to 65535, ending the string.
  *
  * @param {string} text @param {number} from
  * @returns {number | null}  in host order; null for none or a bad one
  */
 function portAt(text, from){
-    const written = /^:([0-9]{1,5})$/.exec(text.slice(from));
+    const number = text[from] === ':' ? readNumber(text, from + 1, false) : null;
     // A port written is one: zero is none, and refused as a written one.
-    if (!written || Number(written[1]) > 0xffff || Number(written[1]) === 0)
+    if (!number || 'error' in number || number.end !== text.length
+        || number.value > 0xffff || number.value === 0)
     {
         return null;
     }
-    return Number(written[1]);
+    return number.value;
 }
 
 /**
@@ -420,14 +562,13 @@ export function createIpStringFunctions(host){
                 return STATUS_ACCESS_VIOLATION;
             }
             const text = width(wide).read(string >>> 0);
-            const read = parseIpv6(text);
-            putDword(terminator >>> 0, (string >>> 0) + read.end * width(wide).unit);
-            if ('error' in read)
+            const read = parseIpv6(text, host.readMemory(address >>> 0, 16).slice());
+            if (read.end !== null)
             {
-                return STATUS_INVALID_PARAMETER;
+                putDword(terminator >>> 0, (string >>> 0) + read.end * width(wide).unit);
             }
             host.writeMemory(address >>> 0, read.bytes);
-            return STATUS_SUCCESS;
+            return read.error ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS;
         },
     });
 
@@ -477,18 +618,24 @@ export function createIpStringFunctions(host){
             const text = width(wide).read(string >>> 0);
             const bracketed = text.startsWith('[');
             const inner = bracketed ? text.slice(1) : text;
-            const read = parseIpv6(inner);
-            if ('error' in read)
+            // The address is stored as it is read, whatever comes after it.
+            const read = parseIpv6(inner, host.readMemory(address >>> 0, 16).slice());
+            host.writeMemory(address >>> 0, read.bytes);
+            if (read.error || read.prefixed || read.end === null)
             {
                 return STATUS_INVALID_PARAMETER;
             }
             let at = read.end;
             let scopeId = 0;
-            const named = /^%([0-9]{1,10})/.exec(inner.slice(at));
-            if (named)
+            if (inner[at] === '%')
             {
-                scopeId = Number(named[1]);
-                at += named[0].length;
+                const named = digitsAt(inner, at + 1, 10);
+                if (named.count === 0 || named.value > 0xffffffff)
+                {
+                    return STATUS_INVALID_PARAMETER;
+                }
+                scopeId = named.value;
+                at = named.end;
             }
             let number = 0;
             if (bracketed)
@@ -505,11 +652,10 @@ export function createIpStringFunctions(host){
                 }
                 number = written;
             }
-            else if (at !== inner.length || scopeId > 0xffffffff)
+            else if (at !== inner.length)
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            host.writeMemory(address >>> 0, read.bytes);
             putDword(scope >>> 0, scopeId >>> 0);
             host.writeMemory(port >>> 0, Uint8Array.of(number >> 8, number & 0xff));
             return STATUS_SUCCESS;

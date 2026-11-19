@@ -1306,6 +1306,16 @@ export function createCpuModule(){
                     state.tableWritten = true;
                     return state.thunks.image();
                 },
+                /**
+                 * The bytes of the stub at a guest address, null for none.
+                 *
+                 * @param {number} address
+                 * @returns {Uint8Array | null}
+                 */
+                stubAt(address){
+                    started();
+                    return state.thunks.stubAt(address);
+                },
                 /** Where a terminating call returns to instead of into its caller. */
                 parkAddress: ()=>state.thunks.parkAddress,
 
@@ -1668,6 +1678,13 @@ export function createCpuModule(){
                     context.eip = entry;
                     context.reg32[4] = stackTop; // ESP
                     context.reg32[5] = stackTop; // EBP
+                    // A thread begins with interrupts enabled and no other
+                    // flag, as GetThreadContext reads a new thread on Windows;
+                    // the template's are its creator's.
+                    if (context.block)
+                    {
+                        setContextEflags(context, 0x202);
+                    }
                     context.inHlt = 0;
                     return context;
                 },

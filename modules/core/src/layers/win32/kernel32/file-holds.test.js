@@ -234,12 +234,13 @@ test('a duplicate of a file handle outlives the handle it was made from', async(
     // A duplicate names the same open file, so closing the original leaves
     // the duplicate reading where the two of them had got to.
     const DUPLICATE = 0x2000;
+    const DUPLICATE_SAME_ACCESS = 2;
     const BUFFER = 0x2100;
     const READ = 0x2200;
     const { fns, bytes, dword, open, openFiles } = await setup();
     const file = open(GENERIC_READ);
     assert.equal(fns.DuplicateHandle.handler(
-        [CURRENT_PROCESS, file, CURRENT_PROCESS, DUPLICATE, 0, 0, 0]), 1);
+        [CURRENT_PROCESS, file, CURRENT_PROCESS, DUPLICATE, 0, 0, DUPLICATE_SAME_ACCESS]), 1);
     const duplicate = dword(DUPLICATE);
     assert.equal(fns.CloseHandle.handler([file]), 1);
 

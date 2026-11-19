@@ -18,7 +18,7 @@
  * left alone, as the kernel leaves it.
  */
 
-import { OBJ_INHERIT, OBJ_OPENIF, readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { OBJ_INHERIT, OBJ_OPENIF, nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { TAKEN } from './named-objects.js';
 import { KEYEDEVENT_WAIT, KEYEDEVENT_WAKE, MODIFY_STATE, QUERY_STATE, allows,
     grantedAccess } from './access.js';
@@ -51,6 +51,9 @@ const TIMER_BASIC_SIZE = 12;
  *     keyedEvent: Function }} creates
  *     kernel32's creates over a name already read (`threading.js`)
  * @property {(name: string | null, kind: string) => any} existing
+ * @property {(given: import('./object-attributes.js').ObjectAttributes, kind: string)
+ *     => string | number} keyOf  where a native name is kept, or the status refusing it
+ *     (`named-objects.js`)
  * @property {(found: any) => void} reference  a named object's count, for a handle opened on it
  * @property {(handle: number, kind?: string) => any} object
  * @property {() => any} currentThread
@@ -119,16 +122,24 @@ export function createSyncNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
+        // The handle's place is written first: a call that cannot answer
+        // makes nothing.
+        writeDword(out, 0);
         const given = readObjectAttributes(host.readMemory, attributes);
-        let name = null;
-        if (given !== null && given.name !== null && given.name !== '')
+        const walked = nameToWalk(given, false);
+        if ('status' in walked)
         {
-            const win32 = win32NameOf(given);
-            if (win32 === undefined)
+            return walked.status;
+        }
+        let name = null;
+        if (given !== null && walked.name !== null)
+        {
+            const key = host.keyOf(given, kind);
+            if (typeof key === 'number')
             {
-                return STATUS.OBJECT_PATH_NOT_FOUND;
+                return key;
             }
-            name = win32;
+            name = key;
         }
         const found = host.existing(name, kind);
         if (found === TAKEN)
@@ -167,15 +178,17 @@ export function createSyncNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
+        writeDword(out, 0);
         const given = readObjectAttributes(host.readMemory, attributes);
-        if (given === null || given.name === null || given.name === '')
+        const walked = nameToWalk(given, true);
+        if ('status' in walked || given === null)
         {
-            return STATUS.OBJECT_NAME_INVALID;
+            return 'status' in walked ? walked.status : STATUS.INVALID_PARAMETER;
         }
-        const name = win32NameOf(given);
-        if (name === undefined)
+        const name = host.keyOf(given, kind);
+        if (typeof name === 'number')
         {
-            return STATUS.OBJECT_PATH_NOT_FOUND;
+            return name;
         }
         const found = host.existing(name, kind);
         if (found === TAKEN)

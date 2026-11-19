@@ -16,6 +16,7 @@ import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
 import { createThreadInfoFunctions } from './thread-info.js';
 import { createProcessPolicyFunctions } from './process-policy.js';
 import { askChild, threadArg, threadEnd } from './cross-process.js';
+import { mergeContextGroups } from './debug-events.js';
 import { SYNCHRONIZE, allows } from './access.js';
 import { floatGroupsOf, writeFloatGroups } from './fpu-context.js';
 import { CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup }
@@ -90,19 +91,14 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SIGNAL_REFUSED = 156;
 /** A thread that has ended cannot be suspended. */
 const ERROR_ACCESS_DENIED = 5;
+/** NTSTATUS of a native call on a child that cannot be asked. */
+const STATUS_ACCESS_DENIED = 0xc0000022;
 /** What GetThreadContext answers for a thread that has ended. */
 const ERROR_GEN_FAILURE = 31;
 /** What GetThreadSelectorEntry answers for a selector it holds nothing for. */
 const ERROR_NOACCESS = 998;
 const ERROR_INVALID_THREAD_ID = 1444;
-const ERROR_SEM_TIMEOUT = 121;
-/** The pseudo-handle for the running process. */
-const OWN_PROCESS = 0xffffffff;
 
-/** The debug events a child reports here, and the size of the record they fill. */
-const CREATE_PROCESS_DEBUG_EVENT = 3;
-const EXIT_PROCESS_DEBUG_EVENT = 5;
-const DEBUG_EVENT_SIZE = 96;
 /** The CONTEXT groups GetThreadContext fills, and the size of the record. */
 const CONTEXT_CONTROL = 0x10001;
 const CONTEXT_INTEGER = 0x10002;
@@ -139,6 +135,15 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
  *           the run's one namespace, where a job made by name is found again
  * @property {any} kernel                        The kernel layer's API.
+ * @property {{ major: number, build: number }} [windows]  The Windows the run is.
+ * @property {(process: any, code: number) => any} [terminateProcess]  A job's process ended
+ *           as TerminateProcess ends it, null for this one (`process-policy.js`).
+ * @property {() => boolean} [debugged]  Whether this process's parent debugs it.
+ * @property {import('./process-policy.js').ProcessPolicyHost['postCompletion']} [postCompletion]
+ * @property {import('./process-policy.js').ProcessPolicyHost['cancelSynchronous']}
+ *     [cancelSynchronous]
+ * @property {import('./process-policy.js').ProcessPolicyHost['listen']} [listenJobs]  Where
+ *     the jobs are told of a process that exited and of a job's handle closed.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
@@ -727,6 +732,33 @@ export function createSyncFunctions(host){
         return asked;
     };
 
+    /**
+     * A native call on a thread of a child, made where the child runs: its
+     * NTSTATUS, STATUS_ACCESS_DENIED for a child the run cannot ask; null
+     * for a handle that names no child's thread.
+     *
+     * @param {number} handle @param {string} name
+     * @param {import('./cross-process.js').CrossArg[]} rest @param {(number | null)[]} into
+     * @returns {number | Promise<number> | null}
+     */
+    const onChildNative = (handle, name, rest, into)=>{
+        /** @type {import('./cross-process.js').ChildThread | null} */
+        const child = (handle >>> 0) === CURRENT_THREAD ? null : object(handle, 'process-thread');
+        if (!child)
+        {
+            return null;
+        }
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, child.process,
+        { call: name, args: [threadArg(child), ...rest] }, [null, ...into],
+        // A child gone, or one that refused the call, answers no buffers:
+        // refused, never a success of 0.
+        (answer, result)=>(answer.outs.every(bytes=>!bytes) ? STATUS_ACCESS_DENIED : result))
+            : null;
+        return asked ?? STATUS_ACCESS_DENIED;
+    };
+
     /** @param {number} handle */
     const threadOf = handle=>(handle >>> 0) === CURRENT_THREAD
         ? host.currentThread()
@@ -775,32 +807,6 @@ export function createSyncFunctions(host){
         writeI32(address + cs.SPIN_COUNT, spinCount);
     };
 
-    /**
-     * A DEBUG_EVENT of the two kinds a debugged child gives here: its
-     * creation, and its exit with the code it left.
-     *
-     * @param {number} address @param {any} child @param {boolean} exited
-     */
-    const writeDebugEvent = (address, child, exited)=>{
-        const bytes = new Uint8Array(DEBUG_EVENT_SIZE);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(0, exited ? EXIT_PROCESS_DEBUG_EVENT : CREATE_PROCESS_DEBUG_EVENT, true);
-        view.setUint32(4, child.id >>> 0, true);
-        view.setUint32(8, child.threadId >>> 0, true);
-        if (exited)
-        {
-            view.setUint32(12, child.exitCode >>> 0, true);
-        }
-        else
-        {
-            // hFile, hProcess, hThread: no file is handed over, and the
-            // process and thread are the handles CreateProcess gave.
-            view.setUint32(16, child.handle >>> 0, true);
-            view.setUint32(20, child.threadHandle >>> 0, true);
-        }
-        host.writeMemory(address, bytes);
-    };
-
     return {
         // Jobs, policies, power requests, the cycle counters and the stack:
         // what a sandboxing browser asks before anything else.
@@ -820,6 +826,11 @@ export function createSyncFunctions(host){
             threadOf,
             objectOf: object,
             processors,
+            terminateProcess: host.terminateProcess,
+            debugged: host.debugged,
+            postCompletion: host.postCompletion,
+            listen: host.listenJobs,
+            cancelSynchronous: host.cancelSynchronous,
         }),
         ...createThreadInfoFunctions({
             kernel,
@@ -832,152 +843,13 @@ export function createSyncFunctions(host){
             setLastError: host.setLastError,
             allocate: host.allocate,
             divergence: host.divergence,
+            onChildThread: onChildNative,
             threadTimes: (handle, at)=>{
                 const thread = threadOf(handle);
                 writeTimes([at, at + 8, at + 16, at + 24],
                     (thread?.exitCode ?? null) !== null, thread?.cpuMs ?? 0);
             },
         }),
-
-        /**
-         * BOOL WaitForDebugEvent(LPDEBUG_EVENT lpDebugEvent, DWORD dwMilliseconds)
-         *
-         * A child started with DEBUG_PROCESS reports its creation and then
-         * its exit -- no thread, library or exception of its own is reported,
-         * since nothing stops it to report one -- the second waited for as a
-         * wait on the child is. With no debugged child to hear from, or no
-         * time to wait, the wait times out.
-         */
-        WaitForDebugEvent: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([event, timeout])=>{
-                const child = (kernel.processes?.all() ?? []).find(
-                    (/** @type {any} */ made)=>made.debugEvents?.length > 0);
-                if (!child || (event >>> 0) === 0)
-                {
-                    host.setLastError?.(ERROR_SEM_TIMEOUT);
-                    return 0;
-                }
-                if (child.debugEvents[0] === 'create')
-                {
-                    child.debugEvents.shift();
-                    writeDebugEvent(event >>> 0, child, false);
-                    return 1;
-                }
-                const report = ()=>{
-                    child.debugEvents = [];
-                    writeDebugEvent(event >>> 0, child, true);
-                    return 1;
-                };
-                if (child.completed || child.exitCode !== kernel.processes.STILL_ACTIVE)
-                {
-                    return report();
-                }
-                if ((timeout >>> 0) === 0)
-                {
-                    host.setLastError?.(ERROR_SEM_TIMEOUT);
-                    return 0;
-                }
-                const thread = host.currentThread();
-                (child.waiters ??= []).push({ thread, result: 1, settle: report });
-                kernel.block(thread, `debug event of ${child.imagePath}`);
-                return host.park(thread);
-            },
-        },
-
-        /** BOOL ContinueDebugEvent(DWORD dwProcessId, DWORD dwThreadId, DWORD dwContinueStatus) */
-        ContinueDebugEvent: { argBytes: 12, handler: ()=>1 },
-
-        /**
-         * BOOL DebugActiveProcessStop(DWORD dwProcessId)
-         *
-         * A child this process debugs stops reporting to it and goes on. A
-         * process it does not debug is refused as one with no debug object
-         * between them, and an id naming no process as a bad parameter.
-         */
-        DebugActiveProcessStop: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([id])=>{
-                const child = (kernel.processes?.all() ?? []).find(
-                    (/** @type {any} */ made)=>(made.id >>> 0) === (id >>> 0));
-                if (!child)
-                {
-                    host.setLastError?.(ERROR_INVALID_PARAMETER);
-                    return 0;
-                }
-                if (!child.debugEvents)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                child.debugEvents = null;
-                return 1;
-            },
-        },
-
-        /**
-         * BOOL DebugSetProcessKillOnExit(BOOL KillOnExit)
-         *
-         * Whether the children this thread debugs end when it does. A caller
-         * that debugs none has no debug object to set it on, and is refused
-         * as such. The choice is kept on each child; no child of a debugger
-         * outlives its parent here, since a child runs only when the parent
-         * hands over to it.
-         */
-        DebugSetProcessKillOnExit: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([kill])=>{
-                const debugged = (kernel.processes?.all() ?? []).filter(
-                    (/** @type {any} */ made)=>made.debugEvents);
-                if (debugged.length === 0)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                for (const child of debugged)
-                {
-                    child.killOnExit = (kill >>> 0) !== 0;
-                }
-                return 1;
-            },
-        },
-
-        /**
-         * BOOL DebugBreakProcess(HANDLE Process)
-         *
-         * On Windows the target gets a thread that breaks only if a debugger
-         * is attached and otherwise just ends, and the call succeeds either
-         * way. Neither this process nor a child it does not debug has one,
-         * so nothing happens and the call succeeds; a child it debugs would
-         * report a breakpoint, which the debug events here do not carry, and
-         * that is said. A handle that is no process is refused.
-         */
-        DebugBreakProcess: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([handle])=>{
-                if ((handle >>> 0) === OWN_PROCESS)
-                {
-                    return 1;
-                }
-                const plain = untagged(handle);
-                const child = kernel.handles.typeOf?.(plain) === 'process' ? object(plain) : null;
-                if (!child)
-                {
-                    host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                if (child.debugEvents)
-                {
-                    host.divergence?.('DebugBreakProcess',
-                        'a debugged child\'s breakpoint is not reported as a debug event');
-                }
-                return 1;
-            },
-        },
 
         /**
          * VOID ReinitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection):
@@ -1200,7 +1072,8 @@ export function createSyncFunctions(host){
                     objects.push(kind === 'process' ? target.exited
                         : kind === 'process-thread'
                             ? threadEnd({ kernel, askChild: host.askChild }, target)
-                            : FILE_OBJECT_KINDS.has(kind ?? '') ? alwaysReady() : target);
+                            : FILE_OBJECT_KINDS.has(kind ?? '') ? alwaysReady()
+                                : target.waitable ?? target);
                     indices.push(at);
                 }
 
@@ -1509,6 +1382,17 @@ export function createSyncFunctions(host){
                     return 0;
                 }
                 const own = thread === host.currentThread();
+                // A thread stopped at a debug event for an exception goes on
+                // from the context its exception carries: that is its context.
+                if (!own && handleSize === 4 && thread.debugStop)
+                {
+                    const wanted = host.readMemory(out >>> 0, CONTEXT_BYTES).slice();
+                    const record = host.readMemory(thread.debugStop >>> 0, CONTEXT_BYTES).slice();
+                    record.set(wanted.subarray(0, 4), 0);
+                    mergeContextGroups(wanted, record);
+                    host.writeMemory(out >>> 0, wanted);
+                    return 1;
+                }
                 const answer = ()=>{
                     if (handleSize === 8 && !own)
                     {
@@ -1566,6 +1450,16 @@ export function createSyncFunctions(host){
                 {
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
+                }
+                // Stopped at a debug event for an exception, it goes on from the
+                // exception's context once continued: that is what is replaced.
+                if (thread !== host.currentThread() && handleSize === 4 && thread.debugStop)
+                {
+                    const record = host.readMemory(thread.debugStop >>> 0, CONTEXT_BYTES).slice();
+                    mergeContextGroups(record,
+                        host.readMemory(context >>> 0, CONTEXT_BYTES).slice());
+                    host.writeMemory(thread.debugStop >>> 0, record);
+                    return 1;
                 }
                 // The debug registers are the thread's to keep, its own
                 // included (`debug-registers.js`); a record that names nothing

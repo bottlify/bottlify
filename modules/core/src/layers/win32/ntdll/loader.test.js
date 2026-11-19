@@ -15,7 +15,11 @@ const TEXT = 0x200;
 const OUT = 0x300;
 
 /** Guest memory, a bump heap, and a kernel32 loader knowing one module. */
-function machine(){
+/**
+ * @param {Record<string, any>} [also]  kernel32 calls beside the ones here, or
+ *     in place of them
+ */
+function machine(also = {}){
     const bytes = new Uint8Array(0x30000);
     const view = new DataView(bytes.buffer);
     // Above 64 KiB: GetProcAddress takes a pointer below it for an ordinal.
@@ -77,6 +81,7 @@ function machine(){
         GetLastError: { handler: ()=>lastError },
         SetDllDirectoryW: { handler: ()=>1 },
         GetDllDirectoryW: { handler: ()=>1 },
+        ...also,
     };
     const table = createLoaderFunctions({
         readMemory: (address, length)=>bytes.slice(address, address + length),
@@ -115,7 +120,11 @@ function machine(){
     };
     /** @param {string} name @param {number[]} args */
     const call = (name, ...args)=>table[name].handler(args);
-    return { view, call, counted, asked, loads, wideAt, registered };
+    /** @param {number} code */
+    const failWith = code=>{
+        lastError = code;
+    };
+    return { view, call, counted, asked, loads, wideAt, registered, failWith };
 }
 
 test('a loaded module by its name, its count left alone; one not loaded is not found', ()=>{
@@ -162,6 +171,71 @@ test('a search path is the directories looked in alone; low bit set, it is searc
     assert.deepEqual(loads.splice(0), ['C:\\Full\\x.dll'], 'a full path is not searched for');
 });
 
+test('a library found and refused ends the search: its section\'s status, or its failed start',
+    async()=>{
+        // Wine's kernel32:loader (test_image_mapping): LdrLoadDll maps what it
+        // finds; a file NtCreateSection(SEC_IMAGE) refuses ends the search
+        // with that status, one whose DllMain fails with
+        // STATUS_DLL_INIT_FAILED, and one a section takes but the load still
+        // refuses is passed over for the next directory.
+        const STATUS_INVALID_IMAGE_NOT_MZ = 0xc000012f;
+        /** @type {Map<string, number>} */
+        const files = new Map();
+        /** @type {number[]} */
+        const closed = [];
+        let opened = '';
+        /** @type {(code: number) => void} */
+        let failWith = ()=>{};
+        let wideAt = (/** @type {number} */ at)=>String(at);
+        const one = machine({
+            LoadLibraryW: { handler: (/** @type {number[]} */ [name])=>{
+                const text = wideAt(name);
+                if (text === 'C:\\One\\x.dll' && (files.get(text) ?? 0) < 0)
+                {
+                    failWith(files.get(text) === -1 ? 1114 : 87);
+                }
+                else
+                {
+                    failWith(126);
+                }
+                return text === 'D:\\Two\\x.dll' ? 0x20000000 : 0;
+            } },
+            CreateFileW: { handler: (/** @type {number[]} */ [name])=>{
+                opened = wideAt(name);
+                return files.has(opened) ? 0x44 : 0xffffffff;
+            } },
+            CloseHandle: { handler: (/** @type {number[]} */ [handle])=>closed.push(handle) },
+            CreateFileMappingW: { handler: ()=>0, natives: { NtCreateSection: {
+                handler: ()=>Math.max(files.get(opened) ?? 0, 0) } } },
+        });
+        ({ failWith, wideAt } = one);
+        const { view, call, counted } = one;
+        const PATH = 0x400;
+        const path = 'C:\\One;D:\\Two';
+        for (let i = 0; i < path.length; i++)
+        {
+            view.setUint16(PATH + i * 2, path.charCodeAt(i), true);
+        }
+        counted('x.dll');
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.SUCCESS,
+            'none there: the next directory');
+        files.set('C:\\One\\x.dll', 0);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.SUCCESS,
+            'a section takes it, the load does not: the next directory');
+        assert.deepEqual(closed.splice(0), [0, 0x44], 'the section and the file closed');
+        files.set('C:\\One\\x.dll', STATUS_INVALID_IMAGE_NOT_MZ);
+        view.setUint32(OUT, 0xdeadbeef, true);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS_INVALID_IMAGE_NOT_MZ);
+        assert.equal(view.getUint32(OUT, true), 0xdeadbeef);
+        assert.deepEqual(closed.splice(0), [0x44], 'the file closed');
+        files.set('C:\\One\\x.dll', -1);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), 0xc0000142,
+            'STATUS_DLL_INIT_FAILED');
+        files.set('C:\\One\\x.dll', -2);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.INVALID_PARAMETER,
+            'refused as asked');
+    });
+
 test('LdrGetDllPath answers the search\'s directories in a block RtlReleasePath gives back', ()=>{
     const { view, call, wideAt } = machine();
     const MODULE = 0x400;
@@ -202,12 +276,112 @@ test('an export by name or ordinal, and the status each miss is', ()=>{
     assert.equal(call('LdrGetProcedureAddress', 0x10000000, 0, 8, OUT), 0xc0000138);
 });
 
+test('an export through a forwarder waits for its target, and a forwarder loop or a missing'
+    + ' target is its status', async()=>{
+    let lastError = 0;
+    const { view, call } = machine({
+        GetProcAddress: { handler: (/** @type {number[]} */ [, ordinal])=>{
+            if (ordinal === 1)
+            {
+                return Promise.resolve(0x30001000);
+            }
+            lastError = ordinal === 2 ? 193 : 126;
+            return 0;
+        } },
+        GetLastError: { handler: ()=>lastError },
+    });
+    assert.equal(await call('LdrGetProcedureAddress', 0x10000000, 0, 1, OUT), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x30001000);
+    assert.equal(call('LdrGetProcedureAddress', 0x10000000, 0, 2, OUT),
+        STATUS.INVALID_IMAGE_FORMAT);
+    assert.equal(call('LdrGetProcedureAddress', 0x10000000, 0, 3, OUT), STATUS.DLL_NOT_FOUND);
+});
+
 test('the loader lock is taken with a cookie; a try with nowhere to answer is refused', ()=>{
     const { view, call } = machine();
     assert.equal(call('LdrLockLoaderLock', 0, OUT, OUT + 4), STATUS.SUCCESS);
     assert.equal(view.getUint32(OUT, true), 1);
-    assert.notEqual(view.getUint32(OUT + 4, true), 0);
+    const cookie = view.getUint32(OUT + 4, true);
+    assert.notEqual(cookie, 0);
     assert.equal(call('LdrLockLoaderLock', 2, 0, OUT + 4), 0xc00000f0);
-    assert.equal(call('LdrUnlockLoaderLock', 0, view.getUint32(OUT + 4, true)), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT + 4, true), 0, 'the cookie cleared, by a refusal too');
+    view.setUint32(OUT, 10, true);
+    assert.equal(call('LdrLockLoaderLock', 0, OUT, 0), 0xc00000f1, 'no cookie');
+    assert.equal(view.getUint32(OUT, true), 0, 'the disposition cleared');
+    assert.equal(call('LdrUnlockLoaderLock', 0, cookie), STATUS.SUCCESS);
     assert.equal(call('LdrUnlockLoaderLock', 0, 0), 0xc00000f0);
+});
+
+test('LdrGetDllDirectory fills a counted string; one too small is told the bytes it needs',
+    ()=>{
+    // Wine's kernel32:module (test_SetDllDirectory): a string with room has
+    // the directory and its length without the terminator; one without is
+    // STATUS_BUFFER_TOO_SMALL, its length the bytes needed with the
+    // terminator, its buffer an empty string.
+        const directory = 'C:\\Libs';
+        /** @type {DataView} */
+        let into = new DataView(new ArrayBuffer(0));
+        const one = machine({
+            GetDllDirectoryW: { handler: (/** @type {number[]} */ [size, buffer])=>{
+                if (directory.length + 1 > size)
+                {
+                    return directory.length + 1;
+                }
+                for (let i = 0; i <= directory.length; i++)
+                {
+                    const unit = i < directory.length ? directory.charCodeAt(i) : 0;
+                    into.setUint16(buffer + i * 2, unit, true);
+                }
+                return directory.length;
+            } },
+        });
+        into = one.view;
+        const { view, call, wideAt } = one;
+        const STRING = 0x400;
+        const BUFFER = 0x500;
+        view.setUint32(STRING + 4, BUFFER, true);
+        view.setUint16(STRING + 2, 64, true);
+        assert.equal(call('LdrGetDllDirectory', STRING), STATUS.SUCCESS);
+        assert.equal(view.getUint16(STRING, true), directory.length * 2);
+        assert.equal(wideAt(BUFFER), directory);
+        for (let at = BUFFER; at < BUFFER + 16; at += 2)
+        {
+            view.setUint16(at, 0xcccc, true);
+        }
+        view.setUint16(STRING + 2, (directory.length - 1) * 2, true);
+        assert.equal(call('LdrGetDllDirectory', STRING), STATUS.BUFFER_TOO_SMALL);
+        assert.equal(view.getUint16(STRING, true), (directory.length + 1) * 2);
+        assert.deepEqual([view.getUint16(BUFFER, true), view.getUint16(BUFFER + 2, true)],
+            [0, 0xcccc]);
+    });
+
+test('LdrShutdownProcess begins the shutdown RtlDllShutdownInProgress answers', async()=>{
+    // Wine's kernel32:loader (child phase 0): before it the process is not
+    // shutting down; LdrShutdownProcess tells the images DLL_PROCESS_DETACH,
+    // the process goes on, and from then on it is.
+    let begun = false;
+    let told = 0;
+    /** @param {number} address @param {number} length */
+    const readMemory = (address, length)=>new Uint8Array(length);
+    const table = createLoaderFunctions({
+        readMemory, writeMemory: ()=>{}, kernel32: {}, allocate: ()=>0x1000, free: ()=>true,
+        shutdown: {
+            inProgress: ()=>begun,
+            begin: ()=>{
+                begun = true;
+                told++;
+                return Promise.resolve();
+            },
+            terminate: ()=>{},
+        },
+    });
+    assert.equal(table.RtlDllShutdownInProgress.handler([]), 0);
+    assert.equal(await table.LdrShutdownProcess.handler([]), STATUS.SUCCESS);
+    assert.equal(told, 1, 'the images told');
+    assert.equal(table.RtlDllShutdownInProgress.handler([]), 1);
+
+    const none = createLoaderFunctions({
+        readMemory, writeMemory: ()=>{}, kernel32: {}, allocate: ()=>0, free: ()=>true });
+    assert.equal(none.LdrShutdownProcess, undefined, 'not exported with no shutdown to begin');
+    assert.equal(none.RtlDllShutdownInProgress.handler([]), 0);
 });

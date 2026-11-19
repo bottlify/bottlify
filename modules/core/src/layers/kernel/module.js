@@ -447,6 +447,9 @@ export function createKernelModule(){
                  *   the thread -- and then enters it: placed in the word above the
                  *   parameter for that routine to find, so the start routine is
                  *   entered with the stack it would have had as `entry`.
+                 * @param {{ entry: number, block: number }} [options.first]
+                 *   A process's first thread: its image's entry point and its
+                 *   process block, which its context names before it runs.
                  * @returns {any} null once this instance is disposed -- there is
                  *     no scheduler left to give a thread to -- or when the pool has
                  *     no room for its stack, which is a thread that cannot be made
@@ -454,7 +457,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo, id, start,
+                    tebAddress, name, returnTo, id, start, first,
                 })
                 {
                     if (!live())
@@ -539,6 +542,15 @@ export function createKernelModule(){
                             gpr[2] = BigInt(routine >= 2 ** 32 ? routine : routine >>> 0);
                             cpu.setContextLong?.(thread.context, { gpr });
                         }
+                    }
+                    else if (thread.context?.reg32)
+                    {
+                        // Where a new thread's context says it will go, as
+                        // Windows' i386 start leaves it: EAX the start routine,
+                        // EBX its parameter (a first thread's: the image's entry
+                        // point and its process block).
+                        thread.context.reg32[0] = (first?.entry ?? start ?? entry) | 0;
+                        thread.context.reg32[3] = (first?.block ?? parameter) | 0;
                     }
                     thread.stackBase = region;
                     thread.handle = state.handles.open('thread', thread);
@@ -829,6 +841,51 @@ export function createKernelModule(){
                  *     thread already carries the most suspensions it can
                  */
                 suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
+
+                /**
+                 * Runs `work` once, before the first slice any of the process's
+                 * threads gets, on the scheduler's turn that gives it: what a
+                 * process's loader leaves in it is there from its first
+                 * instruction and not before. At once when a thread already ran.
+                 *
+                 * @param {() => void} work
+                 */
+                beforeFirstSlice: work=>{
+                    if (live())
+                    {
+                        state.scheduler.beforeFirstSlice(work);
+                    }
+                },
+
+                /**
+                 * Stops a thread as a suspension does without counting in its
+                 * suspend count (`scheduler.freeze`): a debuggee's freeze.
+                 *
+                 * @param {any} thread
+                 */
+                freezeThread: thread=>{
+                    if (live())
+                    {
+                        state.scheduler.freeze(thread);
+                    }
+                },
+
+                /**
+                 * Undoes one `freezeThread`; a thread free again is handed what
+                 * it waits on, as a resumed one is.
+                 *
+                 * @param {any} thread
+                 */
+                thawThread: thread=>{
+                    if (live())
+                    {
+                        state.scheduler.thaw(thread);
+                        if (!(thread.suspendCount > 0))
+                        {
+                            state.sync.retry(thread);
+                        }
+                    }
+                },
 
                 /**
                  * Brings a thread running on another of the process's executors
@@ -1265,6 +1322,17 @@ export function createKernelModule(){
                             (/** @type {any} */ record)=>record.id === id)
                             ?? config?.processDirectory?.get(id) ?? acrossProcess(id);
                     },
+                    /**
+                     * Every process of the run this thread's directory holds,
+                     * whoever started it: a grandchild a child made is listed
+                     * where a snapshot of the run is taken, as on Windows,
+                     * where every process sees every other. Empty without a
+                     * directory.
+                     *
+                     * @returns {any[]}
+                     */
+                    run: ()=>live() && config?.processDirectory
+                        ? [...config.processDirectory.values()] : [],
                     pending: ()=>live() ? state.processes.pending() : null,
                     all: ()=>live() ? state.processes.all() : [],
                     /** @param {any} record */
@@ -1285,10 +1353,18 @@ export function createKernelModule(){
                     finish: (record, code)=>{
                         record.exitCode = code >>> 0;
                         record.completed = true;
-                        if (live() && record.exited)
+                        if (!record.exited)
                         {
-                            state.sync.setEvent(record.exited);
+                            return;
                         }
+                        // A child that outlived the process that made it (a
+                        // grandchild its parent left suspended and the root
+                        // resumed) ends after this machine is gone: its exit
+                        // is the event `settleRecords` left, set where it
+                        // stands, and whoever waits on it is woken by its own
+                        // scheduler.
+                        (live() && state.sync.owns(record.exited) ? state.sync : SETTLED_EVENTS)
+                            .setEvent(record.exited);
                     },
                 },
 
@@ -1341,6 +1417,19 @@ export function createKernelModule(){
         },
     };
 }
+
+/**
+ * Where an event `settleRecords` left is set: no machine's, and nothing waits
+ * on this table itself - every thread waiting on such an event is woken by its
+ * own scheduler (`sync.js`).
+ */
+const SETTLED_EVENTS = createSyncObjects({ scheduler: {
+    block(){
+        throw new Error('settled events: a wait here is a thread\'s own, never a block');
+    },
+    wake(){},
+    onTimeout(){},
+} });
 
 /**
  * A process's records stay in the run's directory after it is gone - another

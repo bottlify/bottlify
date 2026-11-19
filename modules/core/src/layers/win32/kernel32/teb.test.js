@@ -14,7 +14,7 @@ import { WINDOWS_VERSIONS } from './versions.js';
 
 /** Guest memory as a flat array, with a bump allocator over it. */
 function guest(){
-    const bytes = new Uint8Array(0x20000);
+    const bytes = new Uint8Array(0x40000);
     let next = 0x1000;
     return {
         bytes,
@@ -64,6 +64,21 @@ test('a thread block points at itself, because FS cannot be read as a pointer', 
     assert.equal(memory.view.getUint32(teb + TEB.STACK_LIMIT, true), 0x2f0000);
     assert.equal(memory.view.getUint32(teb + TEB.DEALLOCATION_STACK, true), 0x2f0000,
         'the stack is committed whole: its reservation begins at its limit');
+});
+
+test('an i386 thread block names its ids again and its static string, as Windows makes it', ()=>{
+    // What a parent reads of its suspended child's thread before it runs
+    // (Wine's process.c test_SuspendProcessState).
+    const memory = guest();
+    const { teb } = build(memory).createThreadBlock(
+        { id: 7, stackBase: 0x300000, stackLimit: 0x2f0000 });
+
+    assert.equal(memory.view.getUint32(teb + TEB.REAL_CLIENT_ID, true), 0x1234);
+    assert.equal(memory.view.getUint32(teb + TEB.REAL_CLIENT_ID + 4, true), 7);
+    assert.equal(memory.view.getUint16(teb + TEB.STATIC_UNICODE_STRING, true), 0, 'empty');
+    assert.equal(memory.view.getUint16(teb + TEB.STATIC_UNICODE_STRING + 2, true), 261 * 2);
+    assert.equal(memory.view.getUint32(teb + TEB.STATIC_UNICODE_STRING + 4, true),
+        teb + TEB.STATIC_UNICODE_BUFFER);
 });
 
 test('the thread-local array is somewhere real, not at offset zero', ()=>{
@@ -276,6 +291,13 @@ test('the process block holds the process heap, for GetProcessHeap compiled inli
     assert.equal(memory.view.getUint32(peb + PEB.PROCESS_HEAP, true), 0x50004);
 });
 
+test('the process block names the critical section time-out, thirty days relative', ()=>{
+    const memory = guest();
+    const { peb } = build(memory);
+    assert.equal(memory.view.getBigInt64(peb + PEB.CRITICAL_SECTION_TIMEOUT, true),
+        -30n * 24n * 3600n * 10_000_000n);
+});
+
 test('the process block counts the processors the machine has, one when it is not told', ()=>{
     // Read with no call by a runtime sizing its thread pool, and the same
     // count GetSystemInfo gives.
@@ -454,6 +476,12 @@ test('the modules given at build time are all three lists, in order, walkable fr
             modules[index].name);
         assert.equal(readUnicodeString(memory, entry + LDR_ENTRY.FULL_DLL_NAME),
             modules[index].path ?? modules[index].name);
+        // Past the names' descriptors the entry goes on, its names after
+        // it: a program reading TlsIndex reads 0, not a name's characters.
+        assert.equal(memory.view.getUint16(entry + LDR_ENTRY.TLS_INDEX, true), 0, 'TlsIndex');
+        assert.equal(memory.view.getUint16(entry + LDR_ENTRY.LOAD_COUNT, true), 0, 'LoadCount');
+        assert.equal(memory.view.getUint32(entry + 0x50, true), 0,
+            'a later Windows\' DdagNode: none, not a pointer made of a name');
     }
 
     // The same entries, reached through either of the other two orderings --

@@ -58,6 +58,11 @@ C2 nn nn         ret N              ; C3 for cdecl
 CC ...           int3 up to 16 bytes
 ```
 
+ntdll's system calls (`Nt*`, `Zw*`) are not slots: each export is its stub's own bytes. On Windows
+a system call is a few position-independent instructions, and a program may copy one elsewhere and
+call the copy; a slot's relative JMP, copied, lands nowhere, while a stub carries its id and runs
+wherever it is (`trapExport` in `app.js`, `stubAt` in `cpu/internal/thunks.js`).
+
 How many bytes `ret N` takes off, the bridge decides from the calling convention: stdcall takes all
 of `argBytes`, cdecl none, and thiscall and fastcall leave out the arguments passed in registers.
 
@@ -190,20 +195,55 @@ flowchart TD
   each of those in turn; a full path, one from a drive's current folder (`C:x.dll`) or one that
   starts with `.\` or `..\` names one file. `LoadLibraryEx`'s `LOAD_LIBRARY_SEARCH_*` flags (or
   the default `SetDefaultDllDirectories` set) replace the whole search with their folders - the
-  library's own for its imports, the `.exe` folder, those `AddDllDirectory` and `SetDllDirectory`
-  named, `system32` - for the library and its imports alike; the engine's own libraries count as
+  library's own for its imports, the `.exe` folder, those `AddDllDirectory` named (the last added
+  first) and `SetDllDirectory`'s, `system32` - for the library and its imports alike; the engine's own libraries count as
   `system32`'s. `LdrGetDllPath` answers that list. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
   there would be a second library of the name in the process beside the engine's.
-- **A file that is no image** (a section or relocation past the image's end) fails `LoadLibrary`
-  with `ERROR_BAD_EXE_FORMAT`; a library file is read sharing reading and deletion, as Windows'
-  loader opens it. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
+- **A file that is no image** (no optional header, a `SizeOfImage` of zero, a file alignment
+  coarser than its section alignment, a section or relocation past the image's end) fails
+  `LoadLibrary` and `NtCreateSection(SEC_IMAGE)` alike with `ERROR_BAD_EXE_FORMAT`
+  (`loader/internal/image.js`); `NtCreateSection(SEC_IMAGE)` first tells the other kinds apart as
+  Windows does - no MZ, an unreadable or unknown new header, a 16-bit NE file, a PE32+ image on a
+  32-bit Windows (`kernel32/mapping.js` `imageRefusal`) - and answers `SectionImageInformation`
+  from the headers. An image is mapped in whole pages, one aligned below a page flat
+  (the file as it lies), and an optional header cut short has no data directory past its end.
+  A library with no relocation directory goes to its own base; where that is taken it is
+  refused if its relocations are marked stripped (`IMAGE_FILE_RELOCS_STRIPPED`), and otherwise
+  moved as it lies, nothing fixed up, as Windows' loader moves one (`app.js` `placeLibrary`).
+  Once mapped and bound, an image's copy-on-write pages are watched by the engine's page marks:
+  the first write to one makes it the process's own, `PAGE_READWRITE`, as `VirtualQuery` then
+  answers on Windows (`win32.imageMapped`, decisions.md A248; 32-bit).
+  A `DllMain` (or TLS callback) that raises on `DLL_PROCESS_ATTACH` is ended by the loader's
+  own frame, and one that answers FALSE is told `DLL_PROCESS_DETACH`: either way the library is
+  unloaded and `LoadLibrary` fails with `ERROR_DLL_INIT_FAILED`. A library file is read sharing
+  reading and deletion, as Windows' loader opens it: one held open for writing fails the load with
+  `ERROR_SHARING_VIOLATION`. A name's trailing spaces are dropped (`"kernel32   "` is kernel32).
+  `LdrLoadDll` with a search path ends at the first file it finds: a file no image section takes
+  answers that section's refusal, a failed `DllMain` `STATUS_DLL_INIT_FAILED`. A load as data
+  (`LOAD_LIBRARY_AS_DATAFILE`) is of a file: a path not there is `ERROR_FILE_NOT_FOUND` even when
+  a module of its name is loaded (one of the engine's answers its path in `system32`), an empty
+  file `ERROR_FILE_INVALID`, any other that is no image `ERROR_BAD_EXE_FORMAT`. One made
+  `LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE` holds the file open against writers until its last
+  `FreeLibrary`. `LdrRegisterDllNotification`'s callbacks hear of every library read off the
   volume after it is mapped and before its `DllMain`, and on unload after it.
+- **`GetProcAddress(NULL, ...)`** looks in the program's own image; what it does not export is
+  `ERROR_PROC_NOT_FOUND`.
+- **An export forwarder** (`"LIB.Name"`, `"LIB.#7"`) is followed to the library it names by one
+  resolver (`exportOf` in `app.js`) for `GetProcAddress`, `LdrGetProcedureAddress` and the import
+  tables. `GetProcAddress` loads a target not yet loaded, the caller waiting; an import through a
+  forwarder has its target planned before the library at the start (`planDependencies`) and loaded
+  before a run-time library is bound. The forwarding library then holds its target, a reference
+  given back when it is unloaded, so a `FreeLibrary` of the target by name leaves it loaded while
+  the forwarder stands. A missing target is `ERROR_MOD_NOT_FOUND`, a name it lacks
+  `ERROR_PROC_NOT_FOUND`; past 32 forwarders, or back to itself, `ERROR_BAD_EXE_FORMAT`.
 - **A DLL already loaded** is handed back with its count raised. A bare name finds the first module
   of that name; a path finds only the module read from that file, so a second file of a loaded
   module's name is a module of its own (the .NET Framework loads a mixed assembly's native image
   so while the assembly is loaded).
-- **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
+- **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first (one
+  loaded at run time holds the libraries its import table names, and gives them back when it is
+  unloaded, as Windows counts a dependency; the program's own imports stay for the run), its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. Every image's TLS is supported, a library's loaded at run time too: a slot, a
   copy of its block in every thread (those already running when it is loaded included), and TLS
@@ -219,7 +259,8 @@ flowchart TD
   textures through the device's own creates, the compiles go to `D3DCompile`.
 - **Where an engine library stands as a file:** in the system folder, as a file a setup or a
   program can find, read and replace (`withSystemLibraries`). The programs the engine runs in
-  place of the system's (`msiexec`, `rundll32`, `regsvr32`, `reg`, `regedit`, `notepad`) stand the same way
+  place of the system's (`msiexec`, `rundll32`, `regsvr32`, `reg`, `regedit`, `notepad`, `winver`)
+  stand the same way
   where Windows keeps them: a setup checks that the Windows Installer service's `msiexec.exe` is
   there before it installs anything.
 - **The Windows Imaging Component** (`windowscodecs.dll`) is the engine's too, its factory a COM

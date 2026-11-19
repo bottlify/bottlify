@@ -27,6 +27,7 @@
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { createDescriptorCodec } from './descriptors.js';
+import { probedNatives } from '../ntdll/probe.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -57,6 +58,8 @@ const STATUS_ACCESS_DENIED = 0xc0000022;
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
+/** ImpersonateNamedPipeClient before the server has read from its client. */
+const ERROR_CANNOT_IMPERSONATE = 1368;
 const ERROR_INVALID_PARAMETER = 87;
 
 /** Software Restriction Policy: the two scopes and five levels SaferCreateLevel opens. */
@@ -823,6 +826,8 @@ export const accountNamed = written=>{
  * @property {() => any} [currentThread]
  *           The calling thread, whose impersonation token SetThreadToken and
  *           ImpersonateSelf set. Absent, every caller is one thread.
+ * @property {(handle: number) => 'none' | 'unknown' | 'client'} [pipeClient]
+ *           What a named pipe's server end knows of its client (`PIPE_CLIENT`).
  */
 
 /**
@@ -2103,7 +2108,7 @@ export function createTokenFunctions(host){
             storeParts(object, parts, wanted);
         },
 
-        [TOKEN_NATIVES]: {
+        [TOKEN_NATIVES]: probedNatives({
             RtlAreAllAccessesGranted: accessesGranted(true),
             RtlAreAnyAccessesGranted: accessesGranted(false),
             RtlMapGenericMask: mapGenericMask,
@@ -2263,7 +2268,7 @@ export function createTokenFunctions(host){
                     return STATUS_SUCCESS;
                 },
             },
-        },
+        }),
 
         /**
          * BOOL InitializeSecurityDescriptor(PSECURITY_DESCRIPTOR, DWORD dwRevision)
@@ -2865,6 +2870,36 @@ export function createTokenFunctions(host){
             handler: ([level])=>{
                 impersonating.set(callingThread(),
                     { process: CURRENT_PROCESS, impersonationLevel: level >>> 0 });
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL ImpersonateNamedPipeClient(HANDLE hNamedPipe)
+         *
+         * The calling thread takes on the identity of the client at the
+         * other end of a server end, at SecurityImpersonation, once the
+         * server has read what the client wrote; before that there is no
+         * identity to take (ERROR_CANNOT_IMPERSONATE). Every process of the
+         * run is the one account, so the identity is the process's own: the
+         * security quality of service a client opened with, and a token it
+         * impersonated while it did, are not carried.
+         */
+        ImpersonateNamedPipeClient: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pipe])=>{
+                const client = host.pipeClient?.(pipe >>> 0) ?? 'none';
+                if (client === 'none')
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if (client === 'unknown')
+                {
+                    return fail(ERROR_CANNOT_IMPERSONATE);
+                }
+                impersonating.set(callingThread(),
+                    { process: CURRENT_PROCESS, impersonationLevel: SECURITY_IMPERSONATION });
                 return 1;
             },
         },

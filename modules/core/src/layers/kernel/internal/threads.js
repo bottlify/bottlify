@@ -1424,6 +1424,16 @@ export function createScheduler(options){
     };
 
     /**
+     * What runs once, before the first slice any of the process's threads
+     * gets (`beforeFirstSlice` in the scheduler's api).
+     *
+     * @type {(() => void) | null}
+     */
+    let beforeFirstSlice = null;
+    /** Whether any thread of the process has had a slice. */
+    let sliced = false;
+
+    /**
      * A thread started on a second executor while one runs it diverges in ways
      * found much later -- a lock taken twice, a count lost -- so the start
      * itself fails.
@@ -1431,6 +1441,16 @@ export function createScheduler(options){
      * @param {any} next
      */
     const runsOnce = next=>{
+        // The process's first slice of any thread: what its loader leaves in
+        // the process is put there now, on the thread that runs first, as
+        // Windows' loader initialises a process in whichever thread starts.
+        if (!sliced)
+        {
+            sliced = true;
+            const first = beforeFirstSlice;
+            beforeFirstSlice = null;
+            first?.();
+        }
         for (const [remote, on] of placed)
         {
             if (on.thread === next)
@@ -2574,6 +2594,21 @@ export function createScheduler(options){
         },
 
         /**
+         * Runs `work` once, before the first slice any thread of the process
+         * gets. A process whose threads already ran runs it at once.
+         *
+         * @param {() => void} work
+         */
+        beforeFirstSlice(work){
+            if (sliced)
+            {
+                work();
+                return;
+            }
+            beforeFirstSlice = work;
+        },
+
+        /**
          * Adds one to a thread's suspend count. Past the most a thread can
          * carry the count is left as it was and the call refused.
          *
@@ -2582,7 +2617,7 @@ export function createScheduler(options){
          */
         suspend(thread){
             const previous = thread.suspendCount ?? 0;
-            if (previous >= MAXIMUM_SUSPEND_COUNT)
+            if (previous - (thread.frozen ?? 0) >= MAXIMUM_SUSPEND_COUNT)
             {
                 return null;
             }
@@ -2594,7 +2629,34 @@ export function createScheduler(options){
             {
                 cpu.executorBell?.()?.goOn?.(false);
             }
-            return previous;
+            return previous - (thread.frozen ?? 0);
+        },
+
+        /**
+         * Stops a thread as a suspension does, in a count of its own that
+         * SuspendThread and ResumeThread neither report nor take away: how
+         * Windows freezes a debuggee while its debugger holds an event, the
+         * threads' suspend counts as they were.
+         *
+         * @param {any} thread
+         */
+        freeze(thread){
+            thread.frozen = (thread.frozen ?? 0) + 1;
+            this.suspend(thread);
+        },
+
+        /** @param {any} thread  Undoes one `freeze`. */
+        thaw(thread){
+            if ((thread.frozen ?? 0) > 0)
+            {
+                thread.frozen -= 1;
+                thread.suspendCount = Math.max(0, (thread.suspendCount ?? 0) - 1);
+                if (thread.suspendCount === 0)
+                {
+                    thread.readySince = now();
+                    noteReady(thread);
+                }
+            }
         },
 
         /**
@@ -2671,10 +2733,10 @@ export function createScheduler(options){
          * @returns {number} the count before
          */
         resume(thread){
-            const previous = thread.suspendCount ?? 0;
+            const previous = (thread.suspendCount ?? 0) - (thread.frozen ?? 0);
             if (previous > 0)
             {
-                thread.suspendCount = previous - 1;
+                thread.suspendCount -= 1;
                 // Measured from here: time spent suspended is not time spent
                 // passed over, and counting it would boost the thread over
                 // every other on its first turn back.

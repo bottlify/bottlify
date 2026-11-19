@@ -23,12 +23,14 @@ import { floatGroupsOf } from './fpu-context.js';
 import { debugGroupOf, setDebugRegisters } from './debug-registers.js';
 import { PROCESSOR } from './processor.js';
 import { TAKEN } from './named-objects.js';
-import { OBJ_OPENIF, readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { OBJ_OPENIF, nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS } from '../ntdll/status.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
+/** GetExitCodeProcess's answer for a process that runs. */
+const STILL_ACTIVE = 0x103;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_INVALID_PARAMETER = 87;
@@ -73,6 +75,24 @@ const JOB = Object.freeze({
 });
 /** JOBOBJECT_BASIC_LIMIT_INFORMATION: two LARGE_INTEGERs, then seven words, padded to 8. */
 const BASIC_LIMIT_BYTES = 48;
+/** Its LimitFlags, and the one limit kept to: the job's processes end with its last handle. */
+const LIMIT_FLAGS = 16;
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+/** A child may leave the job when it asks to (CREATE_BREAKAWAY_FROM_JOB). */
+const JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x800;
+/** A child leaves the job without asking. */
+const JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK = 0x1000;
+/**
+ * The messages a job posts to its completion port (winnt.h's JOB_OBJECT_MSG_*),
+ * each as the packet's byte count, with the job's key as the completion key
+ * and the process id as the OVERLAPPED pointer.
+ */
+const JOB_OBJECT_MSG = Object.freeze({
+    ACTIVE_PROCESS_ZERO: 4,
+    NEW_PROCESS: 6,
+    EXIT_PROCESS: 7,
+    ABNORMAL_EXIT_PROCESS: 8,
+});
 /** The basic limits, IO_COUNTERS, then four SIZE_Ts. */
 const EXTENDED_LIMIT_BYTES = BASIC_LIMIT_BYTES + 48 + 16;
 /**
@@ -155,8 +175,14 @@ const HANDLE_PROBE = 1 << 20;
  * @property {() => Record<string, number>} [registers]
  * @property {number} [pointerSize]
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
+ * @property {(thread: any, block?: number) => number} [cancelSynchronous]  Ends cancelled
+ *     the synchronous I/O a thread waits in - the one whose IO_STATUS_BLOCK is `block`,
+ *     when given - how many there were: a pipe's reads, writes and connects.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
+ * @property {(process: any, code: number) => any} [terminateProcess]  A process ended as
+ *     TerminateProcess ends it, null for this one (which does not return: its answer is the park).
  * @property {number} [processId]  This process's id, which a job's id list names.
+ * @property {() => boolean} [debugged]  Whether this process's parent debugs it.
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} [namedObjects]
  *     the run's one namespace, where a job made by name is found again
  * @property {{ count: () => number, systemMask: () => number }} [processors]  The
@@ -166,6 +192,15 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(values: Record<string, number>) => void} [setRegisters]  The running
  *           thread's registers, EIP and ESP among them: where it goes on from.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(port: any, packet: { transferred: number, key: number, overlapped: number })
+ *     => void} [postCompletion]  A packet posted to a completion port object.
+ * @property {(events: { exited: (process: any, code: number) => void,
+ *     closed: (job: any) => void, started: (process: any) => void,
+ *     refusesBreakaway: () => boolean,
+ *     listed: (handles: number[]) => any[] | null }) => void} [listen]
+ *     Where a job is told of a process of this one's that has exited, of a job's
+ *     handle closed, and of a child this one started, and asked whether a child
+ *     may break away.
  */
 
 /** @param {ProcessPolicyHost} host */
@@ -301,13 +336,41 @@ export function createProcessPolicyFunctions(host){
     // ---- Job objects -----------------------------------------------------
 
     /**
+     * A job: the processes ever assigned to it (`total` of them), and the
+     * event a wait on it waits for, set once TerminateJobObject has ended
+     * them and never reset, as Windows' job object is.
+     *
      * @typedef {{ kind: 'job', name: string | null, processes: Set<any>, terminated: boolean,
-     *     extended: Uint8Array, kept: Map<number, Uint8Array> }} Job
+     *     total: number, waitable: any, extended: Uint8Array, kept: Map<number, Uint8Array>,
+     *     port: { object: any, key: number } | null, parent: Job | null }} Job
      */
-    /** @param {number} handle @returns {Job | null} */
-    const jobOf = handle=>host.objectOf(handle >>> 0, 'job');
-    /** Every job made, a closed one let go when it is next looked through. @type {Set<Job>} */
+    /** Every job made or reached, a closed one let go when it is next looked through. @type {Set<Job>} */
     const jobs = new Set();
+    /**
+     * The job a handle names; one this process reached by name, duplication or
+     * inheritance is among its jobs from then, as one it made.
+     *
+     * @param {number} handle @returns {Job | null}
+     */
+    const jobOf = handle=>{
+        const job = host.objectOf(handle >>> 0, 'job');
+        if (job)
+        {
+            jobs.add(job);
+        }
+        return job;
+    };
+    /** When this process joined each job it is in: a later one is nested in the earlier. */
+    const selfJoined = /** @type {Map<Job, number>} */ (new Map());
+    let joins = 0;
+
+    /**
+     * Whether a process a job holds is still running: this one is.
+     *
+     * @param {any} process
+     */
+    const running = process=>process === SELF
+        || !(process.completed || (process.exitCode ?? STILL_ACTIVE) !== STILL_ACTIVE);
 
     /**
      * The jobs holding a process that a handle still names: a job whose
@@ -323,6 +386,84 @@ export function createProcessPolicyFunctions(host){
         }
         return job.processes.has(process);
     });
+
+    /**
+     * Jobs nest (Windows 8 on): a job a process is assigned to while it is in
+     * another becomes that one's child, and a process in a job is in each job
+     * above it. A job's depth is how many jobs are above it.
+     *
+     * @param {Job} job
+     */
+    const depth = job=>{
+        let count = 0;
+        for (let above = job.parent; above; above = above.parent)
+        {
+            count++;
+        }
+        return count;
+    };
+
+    /** The jobs holding a process, the innermost - the deepest - first. @param {any} process */
+    const chainOf = process=>jobsHolding(process).sort((a, b)=>depth(b) - depth(a)
+        || (selfJoined.get(b) ?? 0) - (selfJoined.get(a) ?? 0));
+
+    /** @param {Job} job @param {Job} above whether `above` is `job` or a job over it */
+    const under = (job, above)=>{
+        for (let at = /** @type {Job | null} */ (job); at; at = at.parent)
+        {
+            if (at === above)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * A process joins a job and every job above it it is not in yet, each
+     * hearing of it as a new process.
+     *
+     * @param {Job} job @param {any} process
+     */
+    const join = (job, process)=>{
+        for (let at = /** @type {Job | null} */ (job); at && !at.processes.has(process); at = at.parent)
+        {
+            at.processes.add(process);
+            at.total++;
+            tell(at, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+            if (process === SELF)
+            {
+                selfJoined.set(at, ++joins);
+            }
+        }
+    };
+
+    /**
+     * AssignProcessToJobObject's rule for a process already in a job: a job
+     * below the process's innermost one takes it; a job of no hierarchy and
+     * no process of its own becomes the innermost one's child and takes it;
+     * any other is refused (ERROR_ACCESS_DENIED), the process being in another
+     * hierarchy. True when the process is in the job after it.
+     *
+     * @param {Job} job @param {any} process
+     */
+    const nestInto = (job, process)=>{
+        if (job.processes.has(process))
+        {
+            return true;
+        }
+        const innermost = chainOf(process)[0];
+        if (innermost && !(job.parent && under(job.parent, innermost)))
+        {
+            if (job.parent || job.total > 0)
+            {
+                return false;
+            }
+            job.parent = innermost;
+        }
+        join(job, process);
+        return true;
+    };
 
     /**
      * The name a Create/OpenJobObject string gives, null for none.
@@ -366,7 +507,10 @@ export function createProcessPolicyFunctions(host){
         }
         /** @type {Job} */
         const job = found ?? { kind: 'job', name, processes: new Set(), terminated: false,
-            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map() };
+            total: 0, waitable: kernel.createEvent({ manualReset: true, signalled: false,
+                name: name ?? 'job' }),
+            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map(), port: null,
+            parent: null };
         jobs.add(job);
         host.namedObjects?.remember(name, 'job', job, found !== null, ()=>{});
         return { handle: kernel.handles.open('job', job), reused: found !== null };
@@ -442,15 +586,204 @@ export function createProcessPolicyFunctions(host){
         }
     };
 
-    /** The ids of the processes a job holds, this one's as its own. @param {Job} job */
-    const jobProcessIds = job=>[...job.processes].map(process=>(process === SELF
-        ? host.processId ?? 0 : process.id ?? 0) >>> 0);
+    /** @param {any} process @returns {number} its id, this one's as its own */
+    const idOf = process=>(process === SELF ? host.processId ?? 0 : process.id ?? 0) >>> 0;
+
+    /** The ids of the processes a job holds that run, this one's as its own. @param {Job} job */
+    const jobProcessIds = job=>[...job.processes].filter(running).map(idOf);
+
+    /**
+     * Posts a job's message to the completion port it was associated with,
+     * if any: the message as the byte count, the job's key, the id.
+     *
+     * @param {Job} job @param {number} message @param {number} id
+     */
+    const tell = (job, message, id)=>{
+        if (job.port)
+        {
+            host.postCompletion?.(job.port.object, { transferred: message,
+                key: job.port.key, overlapped: id >>> 0 });
+        }
+    };
+
+    /**
+     * JobObjectAssociateCompletionPortInformation: a job takes one port, for
+     * good - a second is a bad parameter, as is a handle that names no port;
+     * no port at all is accepted and changes nothing, as from Windows 8. The
+     * port hears at once of each process the job already runs.
+     *
+     * @param {Job} job @param {Uint8Array} given  JOBOBJECT_ASSOCIATE_COMPLETION_PORT
+     */
+    const associatePort = (job, given)=>{
+        const view = new DataView(given.slice().buffer);
+        const key = view.getUint32(0, true);
+        const handle = view.getUint32(4, true);
+        if (handle === 0)
+        {
+            return 1;
+        }
+        const object = job.port ? null : host.objectOf(handle, 'iocp');
+        if (!object)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        job.port = { object, key };
+        job.kept.set(JOB.ASSOCIATE_COMPLETION_PORT, given.slice());
+        for (const process of [...job.processes].filter(running))
+        {
+            tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+        }
+        return 1;
+    };
+
+    // A process of this one's has exited: each job holding it tells its port,
+    // and that its last running process has gone. A code with an error's
+    // severity, an exception's, is an abnormal end.
+    /** @param {Job} job */
+    const limitFlags = job=>new DataView(job.extended.buffer).getUint32(LIMIT_FLAGS, true);
+    /**
+     * Whether a child leaves a job: always where the job says
+     * SILENT_BREAKAWAY_OK, when it asked where it says BREAKAWAY_OK.
+     *
+     * @param {Job} job @param {boolean} asked
+     */
+    const letsGo = (job, asked)=>(limitFlags(job) & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) !== 0
+        || asked && (limitFlags(job) & JOB_OBJECT_LIMIT_BREAKAWAY_OK) !== 0;
+    /** The jobs this process is in, the innermost first. */
+    const nesting = ()=>chainOf(SELF);
+    host.listen?.({
+        // CREATE_BREAKAWAY_FROM_JOB is refused while the innermost job this
+        // process is in keeps its children.
+        refusesBreakaway(){
+            const innermost = nesting()[0];
+            return innermost !== undefined && !letsGo(innermost, true);
+        },
+
+        // A child this process starts is in each job this process is in, but
+        // those it breaks away from: from the innermost out, each that lets
+        // it go, until one keeps it - that one and those around it hold it.
+        started(process){
+            const holding = nesting();
+            let kept = 0;
+            while (kept < holding.length && letsGo(holding[kept], process.breakaway === true))
+            {
+                kept++;
+            }
+            for (const job of holding.slice(kept))
+            {
+                join(job, process);
+            }
+            // Then each job PROC_THREAD_ATTRIBUTE_JOB_LIST names, in turn, each
+            // nesting under the one before it. One that is in another
+            // hierarchy refuses the child, which was never; the jobs it had
+            // joined hear it come and go.
+            for (const job of process.jobList ?? [])
+            {
+                if (!nestInto(job, process))
+                {
+                    process.refused = ERROR_ACCESS_DENIED;
+                    process.completed = true;
+                    process.exitCode = 0;
+                    for (const holder of jobsHolding(process))
+                    {
+                        tell(holder, JOB_OBJECT_MSG.EXIT_PROCESS, idOf(process));
+                        if (![...holder.processes].some(running))
+                        {
+                            tell(holder, JOB_OBJECT_MSG.ACTIVE_PROCESS_ZERO, 0);
+                        }
+                    }
+                    return;
+                }
+            }
+        },
+
+        /**
+         * The jobs a PROC_THREAD_ATTRIBUTE_JOB_LIST names, null when one of
+         * them names no job (CreateProcess's ERROR_INVALID_HANDLE).
+         *
+         * @param {number[]} handles
+         * @returns {Job[] | null}
+         */
+        listed(handles){
+            const found = handles.map(jobOf);
+            return found.every(Boolean) ? /** @type {Job[]} */ (found) : null;
+        },
+
+        exited(process, code){
+            for (const job of jobsHolding(process))
+            {
+                tell(job, (code >>> 30) === 3 ? JOB_OBJECT_MSG.ABNORMAL_EXIT_PROCESS
+                    : JOB_OBJECT_MSG.EXIT_PROCESS, idOf(process));
+                if (![...job.processes].some(running))
+                {
+                    tell(job, JOB_OBJECT_MSG.ACTIVE_PROCESS_ZERO, 0);
+                }
+            }
+        },
+
+        // With a job's last handle, a job set to kill on close ends every
+        // process it runs, this one last (TerminateJobObject's order).
+        closed(job){
+            if (kernel.handles.holds(job))
+            {
+                return;
+            }
+            jobs.delete(job);
+            const flags = new DataView(job.extended.buffer).getUint32(LIMIT_FLAGS, true);
+            if ((flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) === 0)
+            {
+                return;
+            }
+            const ending = [...job.processes].filter(running);
+            for (const process of ending.filter(each=>each !== SELF))
+            {
+                host.terminateProcess?.(process, 0);
+            }
+            if (ending.includes(SELF))
+            {
+                host.terminateProcess?.(null, 0);
+            }
+        },
+    });
 
     /**
      * The native calls over the same jobs, which ntdll publishes: a job one
-     * front door makes by name the other opens.
+     * front door makes by name the other opens - and NtCancelSynchronousIoFile,
+     * CancelSynchronousIo's.
      */
     const jobNatives = {
+        /**
+         * NTSTATUS NtCancelSynchronousIoFile(HANDLE ThreadHandle,
+         *   PIO_STATUS_BLOCK IoRequestToCancel, PIO_STATUS_BLOCK IoStatusBlock)
+         *
+         * CancelSynchronousIo's, native: the thread's synchronous I/O - the one
+         * whose block is named, or any - ends cancelled; STATUS_NOT_FOUND when
+         * there was none. The answer is written in the block, which is probed
+         * before anything is cancelled: one that cannot be written is
+         * STATUS_ACCESS_VIOLATION (ntdll's wrapper answers the fault so).
+         */
+        NtCancelSynchronousIoFile: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, request, block])=>{
+                const thread = host.threadOf(handle);
+                if (!thread)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                if ((block >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                writeDword(block >>> 0, 0);
+                const status = (host.cancelSynchronous?.(thread, request >>> 0) ?? 0) > 0
+                    ? STATUS.SUCCESS : STATUS.NOT_FOUND;
+                writeDword(block >>> 0, status);
+                writeDword((block >>> 0) + 4, 0);
+                return status;
+            },
+        },
+
         /**
          * NTSTATUS NtCreateJobObject(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES)
          *
@@ -466,11 +799,16 @@ export function createProcessPolicyFunctions(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
-                const name = given === null || given.name === null || given.name === '' ? null
-                    : win32NameOf(given);
-                if (name === undefined)
+                const walked = nameToWalk(given, false);
+                if ('status' in walked)
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return walked.status;
+                }
+                const name = given === null || walked.name === null ? null
+                    : host.namedObjects?.keyOf(given, 'job') ?? STATUS.OBJECT_PATH_NOT_FOUND;
+                if (typeof name === 'number')
+                {
+                    return name;
                 }
                 const found = host.namedObjects?.existing(name, 'job') ?? null;
                 if (found === TAKEN)
@@ -500,14 +838,16 @@ export function createProcessPolicyFunctions(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const given = readObjectAttributes(host.readMemory, attributes, wide ? 8 : 4);
-                if (given === null || given.name === null || given.name === '')
+                const walked = nameToWalk(given, true);
+                if ('status' in walked || given === null)
                 {
-                    return STATUS.OBJECT_NAME_INVALID;
+                    return 'status' in walked ? walked.status : STATUS.INVALID_PARAMETER;
                 }
-                const name = win32NameOf(given);
-                if (name === undefined)
+                const name = host.namedObjects?.keyOf(given, 'job')
+                    ?? STATUS.OBJECT_PATH_NOT_FOUND;
+                if (typeof name === 'number')
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return name;
                 }
                 const found = host.namedObjects?.existing(name, 'job') ?? null;
                 if (found === TAKEN)
@@ -700,12 +1040,15 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (job.terminated)
+                // A process that has ended joins nothing; a job that was
+                // terminated still takes new ones, and stays signalled.
+                if (!running(process))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                job.processes.add(process);
-                return 1;
+                // In a job already, the process is in a hierarchy: the job
+                // nests under its innermost one, or is refused.
+                return nestInto(job, process) ? 1 : fail(ERROR_ACCESS_DENIED);
             },
         },
 
@@ -746,8 +1089,10 @@ export function createProcessPolicyFunctions(host){
          * BOOL SetInformationJobObject(HANDLE hJob, JOBOBJECTINFOCLASS,
          *     LPVOID lpJobObjectInformation, DWORD cbJobObjectInformationLength)
          *
-         * The limits are kept and read back; none is enforced, there being
-         * one address space and no processor time to ration.
+         * The limits are kept and read back; of them only
+         * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE is kept to, there being one
+         * address space and no processor time to ration. A completion port
+         * associated hears the job's messages (`associatePort`).
          */
         SetInformationJobObject: {
             argBytes: 16,
@@ -766,6 +1111,10 @@ export function createProcessPolicyFunctions(host){
                 if ((length >>> 0) !== record.length)
                 {
                     return fail(ERROR_BAD_LENGTH);
+                }
+                if ((type >>> 0) === JOB.ASSOCIATE_COMPLETION_PORT)
+                {
+                    return associatePort(job, host.readMemory(from >>> 0, record.length));
                 }
                 record.set(host.readMemory(from >>> 0, record.length));
                 return 1;
@@ -799,8 +1148,9 @@ export function createProcessPolicyFunctions(host){
                     case JOB.BASIC_AND_IO_ACCOUNTING: {
                         answer = new Uint8Array(type === JOB.BASIC_ACCOUNTING ? 48 : 96);
                         const view = new DataView(answer.buffer);
-                        view.setUint32(36, job.processes.size, true);
-                        view.setUint32(40, job.processes.size, true);
+                        // TotalProcesses, then ActiveProcesses.
+                        view.setUint32(36, job.total, true);
+                        view.setUint32(40, [...job.processes].filter(running).length, true);
                         break;
                     }
                     case JOB.BASIC_PROCESS_ID_LIST: {
@@ -844,20 +1194,31 @@ export function createProcessPolicyFunctions(host){
         /**
          * BOOL TerminateJobObject(HANDLE hJob, UINT uExitCode)
          *
-         * The job takes no more processes. The ones it holds are not ended:
-         * a child runs where its driver runs it, and ending it is
-         * TerminateProcess's, by its own handle.
+         * Every process the job holds that still runs is ended with the code,
+         * as TerminateProcess ends it, and the job is signalled for good. This
+         * process, if the job holds it, is ended last: the call does not
+         * return to it.
          */
         TerminateJobObject: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>{
+            handler: ([handle, code])=>{
                 const job = jobOf(handle);
                 if (!job)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 job.terminated = true;
+                const ending = [...job.processes].filter(running);
+                for (const process of ending.filter(each=>each !== SELF))
+                {
+                    host.terminateProcess?.(process, code >>> 0);
+                }
+                kernel.setEvent(job.waitable);
+                if (ending.includes(SELF))
+                {
+                    return host.terminateProcess?.(null, code >>> 0) ?? 1;
+                }
                 return 1;
             },
         },
@@ -1129,49 +1490,53 @@ export function createProcessPolicyFunctions(host){
         /**
          * BOOL CancelSynchronousIo(HANDLE hThread)
          *
-         * No synchronous read or write here waits in a way another thread
-         * can cut short, so there is never one to cancel (ERROR_NOT_FOUND).
+         * The synchronous I/O the thread waits in ends cancelled, its call
+         * failing ERROR_OPERATION_ABORTED, and the last error is left alone.
+         * A file's reads and writes have finished by the time their calls
+         * answer; what waits is a pipe's read or connect. A thread waiting in
+         * none, or only in overlapped I/O, has nothing to cancel
+         * (ERROR_NOT_FOUND).
          */
         CancelSynchronousIo: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>fail(host.threadOf(handle) ? ERROR_NOT_FOUND
-                : ERROR_INVALID_HANDLE),
+            handler: ([handle])=>{
+                const thread = host.threadOf(handle);
+                if (!thread)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return (host.cancelSynchronous?.(thread) ?? 0) > 0 ? 1 : fail(ERROR_NOT_FOUND);
+            },
         },
 
         /**
          * BOOL CheckRemoteDebuggerPresent(HANDLE hProcess, PBOOL pbDebuggerPresent)
          *
-         * No debugger attaches to anything here.
+         * Whether a debugger debugs the process: a child this process started
+         * with DEBUG_PROCESS or DEBUG_ONLY_THIS_PROCESS is debugged by it, and
+         * this process is when its parent started it so (`debug-events.js`).
+         * No process handle, or nowhere to
+         * answer, is a bad parameter; a handle that names no process a bad
+         * handle. The last error is left alone on success.
          */
         CheckRemoteDebuggerPresent: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([process, out])=>{
-                if (!processOf(process))
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if ((out >>> 0) === 0)
+            handler: ([handle, out])=>{
+                if ((handle >>> 0) === 0 || (out >>> 0) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, 0);
+                const process = processOf(handle);
+                if (!process)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                writeDword(out >>> 0, (process === SELF ? host.debugged?.() === true
+                    : Boolean(process.debugged)) ? 1 : 0);
                 return 1;
             },
-        },
-
-        /**
-         * BOOL DebugActiveProcess(DWORD dwProcessId)
-         *
-         * There is no debugging interface to attach through: no process id
-         * is ERROR_INVALID_PARAMETER, any other is refused as a process the
-         * caller may not debug.
-         */
-        DebugActiveProcess: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([id])=>fail((id >>> 0) === 0 ? ERROR_INVALID_PARAMETER : ERROR_ACCESS_DENIED),
         },
 
         /** HANDLE PowerCreateRequest(PREASON_CONTEXT Context) */

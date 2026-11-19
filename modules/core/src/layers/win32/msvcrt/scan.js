@@ -243,7 +243,7 @@ function scanset(body){
  *        conversion is actually going to store through it.
  * @param {ScanStore} store
  * @param {{ wide?: boolean, secure?: boolean, standard?: boolean, pointerBytes?: number,
- *     progress?: ScanProgress }} [options]
+ *     progress?: ScanProgress, floats?: boolean }} [options]
  *        `wide` for the wscanf family, where %s and %c are wide and %S and
  *        %C narrow; `secure` for the _s family, where each %c, %s and %[
  *        takes its buffer's size in characters after its pointer, and text
@@ -252,7 +252,9 @@ function scanset(body){
  *        `standard` for the universal runtime's, which reads numbers as C99
  *        spells them (`scanStandardFloat`), takes `hh`, `I`, `z` and `t`, a
  *        pointer after `0x`, and stops at a conversion it does not know;
- *        `progress` is filled in with how far the scan read.
+ *        `progress` is filled in with how far the scan read; `floats`
+ *        false for ntdll's, which reads no floating-point field and stops
+ *        at one as at a conversion it does not know.
  * @returns {number} Assignments made, or SCAN_EOF.
  */
 export function runScan(input, format, nextPointer, store, options = {}){
@@ -517,6 +519,10 @@ export function runScan(input, format, nextPointer, store, options = {}){
         }
         if ('eEfgGaA'.includes(conversion))
         {
+            if (options.floats === false)
+            {
+                return stop();
+            }
             const scanned = scanFloat(field);
             starved ||= short(scanned);
             if (scanned === null)
@@ -640,6 +646,12 @@ export function createScanStore(host){
 export const STANDARD_SCAN = Symbol('standard scans');
 
 /**
+ * The key ntdll's sscanf is carried under in the runtime's table: msvcrt's
+ * reading without the floating-point fields.
+ */
+export const KERNEL_SCAN = Symbol('kernel scan');
+
+/**
  * @param {ScanHost} host
  */
 export function createScanFunctions(host){
@@ -654,9 +666,11 @@ export function createScanFunctions(host){
      * @param {(pointer: number) => string} [formatOf]
      * @param {boolean} [wide]
      * @param {boolean} [secure]
+     * @param {boolean} [standard]
+     * @param {boolean} [floats]
      */
     const scanf = (fixed, inputOf, formatOf = readString, wide = false, secure = false,
-        standard = false)=>({
+        standard = false, floats = true)=>({
         convention: 'cdecl',
         // The pointers to store through are the variadic tail, and only as
         // many slots as are declared are read: with the fixed part alone,
@@ -667,7 +681,7 @@ export function createScanFunctions(host){
             let taken = fixed;
             const assigned = runScan(inputOf(args), formatOf(args[fixed - 1]),
                 ()=>args[taken++] ?? 0, store,
-                { wide, secure, standard, pointerBytes: host.pointerSize ?? 4 });
+                { wide, secure, standard, floats, pointerBytes: host.pointerSize ?? 4 });
             // msvcrt's wide scan answers no input with nothing assigned, not
             // with EOF, as the later runtimes do.
             return wide && !standard && assigned === SCAN_EOF ? 0 : assigned;
@@ -693,6 +707,9 @@ export function createScanFunctions(host){
 
         /** int sscanf_s(const char *buffer, const char *format, ...) */
         sscanf_s: scanf(2, args=>readString(args[0]), readString, false, true),
+
+        [KERNEL_SCAN]: scanf(2, args=>readString(args[0]), readString, false, false, false,
+            false),
 
         // The universal runtime's string scans (`runScan`'s `standard`), the
         // count bounding the input or not, secure or not.

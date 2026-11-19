@@ -105,16 +105,39 @@ give, and when a run falls back to `compatible`, is in
 thread, and a child process runs beside it there from `CreateProcess` on, the two machines
 taking turns. With 2 or 4 every process has a thread of its own, and one past that many takes
 turns with its parent on the parent's thread. A call a parent makes in its child
-(`VirtualAllocEx`, `ReadProcessMemory`, `SuspendThread` on its thread and the like) is sent to the
+(`VirtualAllocEx`, `ReadProcessMemory`, `SuspendThread` or `NtQueryInformationThread` on its
+thread and the like; the thread's rights are the parent's handle's) is sent to the
 child and made there with its own kernel32, between its turns, whichever way it runs
 ([`kernel32/cross-process.js`](../../modules/core/src/layers/win32/kernel32/cross-process.js)); only
-bytes cross. The engine
+bytes cross. A copy of memory between them is one copy for both libraries' calls
+([`kernel32/process-memory.js`](../../modules/core/src/layers/win32/kernel32/process-memory.js)):
+the child reads or writes its own pages through their protection, the parent its side, and the
+process block a call made between the child's turns reads is the child's, no thread of it running. The other way, a child its parent started with `DEBUG_PROCESS` reports its debug
+events to the parent as values - its start (the process, every library mapped with it, the loader's
+breakpoint), a library loaded or unloaded, a thread made or ended, `OutputDebugString`, an exception
+first and, unhandled, again - and the whole child stops, its threads frozen (their suspend counts
+untouched) until the status `ContinueDebugEvent` answers, called directly: a child its parent
+debugs is always started beside it, on its thread or
+in its worker, never in a worker of its own, so its parent always hears it. While a
+thread waits on an exception's answer the exception's context is its context, so a debugger's
+`GetThreadContext` and `SetThreadContext` read and change the context it goes on from
+([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A
+debuggee belongs to its debugger's debug object, a kernel object kept in the debugging thread's
+block; a wait through an object hears only its debuggees, the event handed out as the state
+change the native wait gives and `WaitForDebugEvent` converted from it, and with the object's last
+handle, or the debugger's end, its debuggees end where it says `DEBUG_KILL_ON_CLOSE` and go on
+otherwise. A child run beside its parent always carries its parent's ear and is heard only while
+its record says it is debugged, so `DebugActiveProcess` attaches by marking it and asking it, as
+a cross-process call no program can name, to tell what it already is and break in on a thread of
+its own. What `NtQueryInformationProcess` says of a process's debugger - its port, a handle to its
+debug object, its debug flags - and whether `UnhandledExceptionFilter` leaves the exception to the
+debugger are read from that same record, never answered to suit the program that asks. The engine
 thread then runs no program and is the system (what it builds before any process starts is in
 section 4), and what the page asks of the program it asks the program's thread.
 
 What the processes of a run share stays on the engine thread: the registry, the volume and the
-sharing of its open files, the window directory, ids, named events, semaphores and mutexes, the
-bundle, COM's class table and the services it started ([`core/src/com-link.js`](../../modules/core/src/com-link.js)), the run's directory of processes, the translation store ([`core/src/layers/cpu/internal/store-link.js`](../../modules/core/src/layers/cpu/internal/store-link.js)),
+sharing of its open files, the window directory, ids, named events, semaphores and mutexes and
+the object directories and links a native call names them through, the bundle, COM's class table and the services it started ([`core/src/com-link.js`](../../modules/core/src/com-link.js)), the run's directory of processes, the translation store ([`core/src/layers/cpu/internal/store-link.js`](../../modules/core/src/layers/cpu/internal/store-link.js)),
 and the batch modules the processes in workers compile: each is posted to the engine thread,
 which keeps it alive for the run (`withHeldModules`, as many wasm bytes as `sharedModuleBytes`),
 so a later process that compiles the same bytes from the store gets the code V8 compiled and
@@ -132,6 +155,9 @@ threads held is abandoned to the next waiter, and an object another process stil
 state and nothing of the gone process - not its memory, its scheduler or its link
 ([`core/src/system-objects.js`](../../modules/core/src/system-objects.js),
 [`kernel32/named-objects.js`](../../modules/core/src/layers/win32/kernel32/named-objects.js)).
+A name is one key in that table whatever its spelling: kernel32's `Global\X`, `Local\X` and a
+native call's `\BaseNamedObjects\X` take the object namespace's one walk to the same object
+(decisions.md A271).
 The engine thread answers a process thread across a link: two rings in shared memory, one each
 way, with a doorbell word per side ([`core/src/system/link.js`](../../modules/core/src/system/link.js), values encoded by `codec.js`). The
 process thread blocks on its doorbell for each answer and answers what it is asked meanwhile (the

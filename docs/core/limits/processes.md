@@ -9,7 +9,7 @@
 - With several executors, a locked instruction whose operand lies across two aligned quadwords (a
   split lock) and `lock cmpxchg16b` are indivisible against each other, not against an aligned
   locked access of another width on part of the same bytes at the same instant
-  (`roadmap/decisions.md`, A274).
+  (`roadmap/decisions.md`, A279).
 - With several executors, a store into bytes another executor is translating at that instant can
   be missed: when the store's page check came before the other set the page's code flag, and the
   store landed after it read the bytes back. The window is a few instructions, longer (at most a
@@ -49,7 +49,8 @@
 - With `concurrency` 1 a child started with `CreateProcess` takes turns with its parent on one
   thread; with 2 or 4 they run at once (`concurrency` in [api.md](../api.md)). Either way a parent
   reaches into its child: its memory (`VirtualAllocEx`, `VirtualFreeEx`, `VirtualProtectEx`,
-  `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms), its first
+  `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms, each copy going
+  through the pages' protection on both sides as Windows' does), its first
   thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`, `SetThreadContext`), and a thread it makes there with
   `CreateRemoteThread`, which it waits on and reads the exit code of. A wait on a
   child's thread is answered within a few milliseconds of its end, asked of the child until
@@ -58,7 +59,7 @@
   another thread's registers where it next runs, after the wait it may be in, as Windows does at its
   return to user mode; the calling thread's own and the x87 state of a 32-bit context are not
   replaced. Not yet: `OpenThread` of a child's
-  thread the parent was not told of, and reading another process's TEB or PEB. Any process of the
+  thread the parent was not told of, and reading another process's TEB. Any process of the
   run opens another by its id (`OpenProcess`) wherever each of them runs: a wait on that handle
   ends with the other's exit and `GetExitCodeProcess` reads its code; nothing else of it is asked
   across a link. A call made in a
@@ -67,9 +68,32 @@
 - A mutex, event, semaphore or waitable timer opened by name carries the rights it was granted: no
   rights at all, or rights the kind does not have, are refused, and a handle without SYNCHRONIZE
   cannot be waited on, nor one without the modify right set, reset or released. A keyed event
-  carries the rights asked for when it is made as well. Other handles a process creates, and every
-  other kind, have every right. A job and a completion port made by name share the one namespace
-  of named objects. Not exported, as on Windows 7: the
+  carries the rights asked for when it is made as well. A process opened by id (`OpenProcess`)
+  carries the rights asked for: its memory calls need `PROCESS_VM_OPERATION`, `PROCESS_VM_READ`,
+  `PROCESS_VM_WRITE` or `PROCESS_QUERY_INFORMATION` as on Windows, and a handle it opens to its own
+  id is this process to them. A file opened by `CreateFile` or `NtCreateFile` carries what was
+  asked, generic rights mapped to `FILE_GENERIC_*`: reads need `FILE_READ_DATA`, writes
+  `FILE_WRITE_DATA` or `FILE_APPEND_DATA`, and its duplicate cannot be granted a right it lacks
+  (`ERROR_ACCESS_DENIED`). Other handles a process creates, and every other kind, have every
+  right. A job and a completion port made by name share the one namespace
+  of named objects. `TerminateJobObject` ends every process of the job with its code, as
+  `TerminateProcess` does, and leaves the job signalled for good; a process that has ended joins
+  no job, and a job's accounting counts the processes ever assigned and those still running. A
+  job associated with a completion port tells it of each process it takes (those it already runs
+  as it is associated), of each child that exits (an exception's code as an abnormal exit) and of
+  its last running process gone; with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` its last handle closed
+  ends its processes. A child of a process in a job is in the job too, unless the job lets it
+  break away (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`, or `JOB_OBJECT_LIMIT_BREAKAWAY_OK` and a
+  `CREATE_BREAKAWAY_FROM_JOB` child), and `CREATE_BREAKAWAY_FROM_JOB` from a job that allows
+  neither is refused (`ERROR_ACCESS_DENIED`). Jobs nest: a job of no hierarchy and no process
+  of its own that a process in a job is assigned to becomes its innermost job's child, a process
+  in a job is in every job above it, and a job of another hierarchy refuses it
+  (`ERROR_ACCESS_DENIED`). `PROC_THREAD_ATTRIBUTE_JOB_LIST` makes a child in the jobs it names,
+  each nested under the one before; a handle that names no job fails `CreateProcess`
+  (`ERROR_INVALID_HANDLE`), a job of another hierarchy refuses the child (`ERROR_ACCESS_DENIED`)
+  after the jobs before it heard it come and go. The job's other limits are kept and read back, not
+  enforced, and this
+  process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
 - In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
   no arena to lend it a table on), and goes on after a parent that exits first.
@@ -118,8 +142,20 @@
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails
-  (`ERROR_INVALID_HANDLE`, said as a divergence). Writes are never held back by a full buffer, and `GetOverlappedResult` on a pipe
-  operation whose OVERLAPPED has no event waits on nothing.
+  (`ERROR_INVALID_HANDLE`, said as a divergence); so does a `ReadFileEx` or `WriteFileEx` on one,
+  which works on a pipe of the engine's thread. A write waits, as on Windows, until what is
+  queued up to its end fits the buffer the pipe was made with (the server's output size one way,
+  its input size the other) and `FlushFileBuffers` until the reader has taken everything; a write
+  from a process in a worker of its own is the exception and finishes at once, said as a
+  divergence. `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on
+  nothing. The pipe device opens by its own names (`\Device\NamedPipe` and its root
+  `\Device\NamedPipe\`): pipes are made under the root, one made there with no name is a pipe
+  only its server's handle opens, and `FSCTL_PIPE_WAIT` through the root waits for an instance
+  to listen, its thread waiting whatever the handle's mode; a wait given an absolute time-out
+  answers `STATUS_IO_TIMEOUT` at once, said as a divergence.
+  `ImpersonateNamedPipeClient` takes on the client once the server has read from it, as the
+  process's own account at SecurityImpersonation: every process is the one user, and a client's
+  security quality of service and impersonated token are not carried.
 - A child in a worker of its own shares the run's registry, files, window directory (it finds,
   reads, posts and sends to every other process's windows, and they to its), ids, bundle (a block
   it misses is fetched for it), named events, semaphores and mutexes, and the position of a file
@@ -142,3 +178,24 @@
 - Windows are the run's: a process finds another's window (`FindWindow`), reads who made it, its
   caption and class, and posts to it. A message sent to another process's window is answered with
   every concurrency; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`.
+- A child started with `DEBUG_PROCESS` or `DEBUG_ONLY_THIS_PROCESS` reports its debug events to
+  its parent, each stopping the whole child until `ContinueDebugEvent`. `DebugActiveProcess`
+  attaches to a running child the parent hears - one run beside it, as every child is at
+  concurrency 1: it is told the process, ntdll, its threads and its libraries, the child stopped
+  until each is continued, then breaks in on a thread of its own running `DbgUiRemoteBreakin`,
+  as `DebugBreakProcess` breaks into a debuggee: its `DbgBreakPoint` is what the debugger hears,
+  and a breakpoint the debugger declines ends that thread, not the process (a 64-bit process's
+  thread runs `DbgBreakPoint` alone, with no such frame). A debuggee belongs to a debug object - the
+  debugging thread's, made at its first `DEBUG_PROCESS` or attach (`DbgUiConnectToDbg`), or one
+  made by `NtCreateDebugObject` and attached through (`NtDebugActiveProcess`); when its last
+  handle closes, or its process ends, the debuggees end (`STATUS_DEBUGGER_INACTIVE`) where it
+  says `DEBUG_KILL_ON_CLOSE` (`DebugSetProcessKillOnExit`, `NtSetInformationDebugObject`) and
+  go on otherwise. A child in a worker of its own cannot be attached to (refused). A breakpoint
+  shows its debugger the thread past the `int3`. A wait hears only the debuggees of the debug
+  object it waits on - `WaitForDebugEvent` and `ContinueDebugEvent` the calling thread's, as
+  `DbgUiWaitStateChange` and `DbgUiContinue`, `NtWaitForDebugEvent` and `NtDebugContinue` the one
+  named - and hands out the state change `DbgUiConvertStateChangeStructure` converts. Not done:
+  an alertable native wait is not ended by an APC; a debuggee's own children are not debugged
+  under `DEBUG_PROCESS`;
+  hardware breakpoints and the trap flag raise nothing; a 64-bit debuggee reports neither its
+  start nor its exceptions; `hFile` and `lpImageName` are always null.

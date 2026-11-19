@@ -20,20 +20,23 @@
  */
 
 import { pointerArg } from '../common/pointers.js';
-import { createGlobalMemory } from './moveable.js';
+import { createGlobalMemory, MOVEABLE_USER_FLAGS } from './moveable.js';
 import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
+import { PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION } from './process-target.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import {
-    globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
+    CONTROL, globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode,
+    heapSizeCode,
 } from './guest-heap.js';
 import {
     bindLong, globalAllocLongCode, globalFreeLongCode, heapAllocLongCode, heapFreeLongCode,
     heapReAllocLongCode, heapSizeLongCode,
 } from './guest-heap-long.js';
 import { createPageRuns } from './page-runs.js';
+import { copyOnWrite, imageWriteCopy, protectionWithin, writtenCopy } from './view-rights.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
@@ -61,6 +64,17 @@ const MEM_DECOMMIT = 0x00004000;
 const MEM_RELEASE = 0x00008000;
 const MEM_RESET = 0x00080000;
 const MEM_WRITE_WATCH = 0x00200000;
+/**
+ * VirtualAlloc2's placeholders: a reservation made to be replaced by an
+ * allocation of exactly its span (MEM_REPLACE_PLACEHOLDER), and VirtualFree's
+ * ways back - an allocation that replaced one freed back to it, or a
+ * placeholder split (MEM_PRESERVE_PLACEHOLDER), and neighbours joined
+ * (MEM_COALESCE_PLACEHOLDERS).
+ */
+const MEM_REPLACE_PLACEHOLDER = 0x00004000;
+const MEM_RESERVE_PLACEHOLDER = 0x00040000;
+const MEM_COALESCE_PLACEHOLDERS = 0x1;
+const MEM_PRESERVE_PLACEHOLDER = 0x2;
 /** GetWriteWatch's one flag: start the watch over once the pages are told. */
 const WRITE_WATCH_FLAG_RESET = 0x1;
 
@@ -108,9 +122,22 @@ const HEAP_COMPATIBILITY_INFORMATION = 0;
 const HEAP_ENABLE_TERMINATION_ON_CORRUPTION = 1;
 const LOW_FRAGMENTATION_HEAP = 2;
 
+/**
+ * PROCESS_HEAP_ENTRY at 32 bits, and its flags: the union is the region's
+ * committed and uncommitted sizes and first and last block, or a moveable
+ * block's handle.
+ */
+const HEAP_ENTRY = Object.freeze({ lpData: 0, cbData: 4, cbOverhead: 8, wFlags: 10, union: 12,
+    SIZE: 28 });
+const PROCESS_HEAP_REGION = 0x1;
+const PROCESS_HEAP_ENTRY_BUSY = 0x4;
+const PROCESS_HEAP_ENTRY_MOVEABLE = 0x10;
+
 /** Codes this surface reports. */
+const ERROR_SUCCESS = 0;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_ACCESS_DENIED = 5;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NOACCESS = 998;
@@ -135,6 +162,9 @@ const HEAP_SUMMARY_SIZE = 20;
  * protection and restores it must get something true both times.
  */
 const PAGE_NOACCESS = 0x01;
+const PAGE_GUARD = 0x100;
+/** A guard page's touch, which VirtualLock answers as its error. */
+const STATUS_GUARD_PAGE_VIOLATION = 0x80000001;
 const PAGE_EXECUTE_READWRITE = 0x40;
 /** A page's base protections, of which a protection names exactly one. */
 const PAGE_BASES = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
@@ -308,14 +338,58 @@ export const TABLES = Symbol('tables');
 export const HEAP_USER_INFO = Symbol('heap user info');
 export const GLOBAL_MEMORY = Symbol('global memory');
 /**
- * VirtualQuery's state and protection of a page, for the calls that ask the
- * same question of the same pages - IsBadWritePtr - without a buffer in the
+ * VirtualQuery's state and protection of a page, and where the run of pages
+ * answered alike ends, for the calls that ask the same question of the same
+ * pages - IsBadWritePtr, a copy between processes - without a buffer in the
  * guest. Carried under a symbol, so no export is made of it.
  */
 export const PAGE_STATE = Symbol('page state');
+/**
+ * The guard pages of the reservations, for the exception dispatch: `touch`
+ * takes a committed page's PAGE_GUARD away, as the processor's first touch of
+ * it does on Windows, and says whether it had one; `commitGuard` commits a
+ * page of a reservation PAGE_READWRITE | PAGE_GUARD, where a stack grows its
+ * next guard page.
+ */
+export const GUARD_PAGES = Symbol('guard pages');
+/**
+ * Told by the loader that an image was mapped and bound at a base: its
+ * copy-on-write pages are watched from then on, so the first write to one
+ * makes it the process's own, read-write, as on Windows (`decisions.md` A248).
+ */
+export const IMAGE_MAPPED = Symbol('image mapped');
+/**
+ * NtFreeVirtualMemory's MEM_RELEASE of whole pages inside one allocation:
+ * the pages go and what is left either side is an allocation of its own,
+ * as Windows splits it. Answers 1, or 0 with the last error set.
+ */
+export const RELEASE_PART = Symbol('release part');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
+
+/**
+ * Where `value` is in an ascending list, or where it would go.
+ *
+ * @param {number[]} list @param {number} value
+ */
+const sortedIndex = (list, value)=>{
+    let low = 0;
+    let high = list.length;
+    while (low < high)
+    {
+        const middle = (low + high) >>> 1;
+        if (list[middle] < value)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+};
 
 /**
  * @typedef {Object} HeapBlock
@@ -1083,6 +1157,54 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
 }
 
 /**
+ * A view of a section, as mapping.js records it for VirtualQuery: its length,
+ * whether it writes through, the protection it was mapped with (`protect`, its
+ * AllocationProtect: PAGE_EXECUTE_WRITECOPY for an image's), whether its
+ * section is the page file's (`anonymous`), each page VirtualProtect has
+ * given another protection (`pages`), the watch its copy-on-write pages are
+ * written under and the pages it found copied (`copies`), and an image's sections, each with the
+ * protection its pages start with.
+ *
+ * @typedef {{ length: number, writable: boolean, protect?: number, anonymous?: boolean,
+ *     pages?: Map<number, number>, copies?: ViewCopies,
+ *     sections?: { start: number, end: number, protect: number }[] }} ViewRegion
+ */
+
+/**
+ * The engine's watch over a view's writes, for its copy-on-write pages: a
+ * written one is the process's own copy from then on, read-write. Undefined
+ * until a page of the view is first copy-on-write; null where the engine
+ * cannot tell writes, and then such a page keeps its protection (A248).
+ *
+ * @typedef {{ watch: { take: (address: number, length: number) => number[] }
+ *     | null | undefined, copied?: Set<number> }} ViewCopies
+ */
+
+/**
+ * The protection a view's page has now: what VirtualProtect last gave it,
+ * else what its image section or the view itself was mapped with; an image's
+ * headers, and a page of it no section holds, read-only.
+ *
+ * @param {ViewRegion & { base: number }} view
+ * @param {number} page
+ * @returns {number}
+ */
+const viewPageProtection = (view, page)=>{
+    const given = view.pages?.get(page);
+    if (given !== undefined)
+    {
+        return given;
+    }
+    if (view.sections)
+    {
+        const rva = page - view.base;
+        return view.sections.find(each=>rva >= each.start && rva < each.end)?.protect
+            ?? PAGE_READONLY_VIEW;
+    }
+    return view.protect ?? (view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW);
+};
+
+/**
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
  * @property {(end: number) => boolean} [reach]  Grows the guest's memory to hold `end`
@@ -1100,17 +1222,18 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  *           a buffer holding the pattern would be allocated, zeroed and copied
  *           inside the program's own call, for bytes that can be filled once.
  * @property {(code: number) => void} setLastError
- * @property {(handle: number) => any} [childOf]  The child process a handle names, or null.
+ * @property {(handle: number, right: number) => import('./process-target.js').ProcessTarget}
+ *     [processTarget]  The process a handle names, if it carries the right (`process-target.js`).
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
  *           A call made in a child where it runs; absent, no child is reached.
  * @property {() => any} [currentThread]
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {(address: number) => { base: number, size: number, kind?: string } | null} [regionAt]
- * @property {(address: number) => { base: number, length: number, writable: boolean,
- *     sections?: { start: number, end: number, protect: number }[] } | null}
+ * @property {(address: number) => ViewRegion & { base: number } | null}
  *     [viewAt]  The view of a section an address is in (mapping.js): VirtualQuery answers
  *     its pages as Windows does, MEM_MAPPED and as long as the view; an image's view
  *     MEM_IMAGE, each of its sections (RVAs, end exclusive) with its own protection.
+ *     VirtualProtect and a commit change a plain view's pages (`pages`).
  *           The memory layer's region map, when the assembling caller wired one.
  *           A region of kind `image` is answered as MEM_IMAGE.
  *           Without it VirtualQuery knows only the arena.
@@ -1381,8 +1504,9 @@ export function createHeapFunctions(host){
     const committed = new Map();
 
     /**
-     * The pages of each reservation protected PAGE_NOACCESS, committed or not:
-     * a commit with that protection, or VirtualProtect to it; in runs.
+     * The pages of each reservation the processor is to refuse, committed or
+     * not: those protected PAGE_NOACCESS, and those carrying PAGE_GUARD until
+     * their first touch (`GUARD_PAGES`); in runs.
      *
      * @type {Map<number, ReturnType<typeof createPageRuns<true>>>}
      */
@@ -1392,8 +1516,8 @@ export function createHeapFunctions(host){
      * What each reservation was given, as VirtualQuery answers it: the
      * protection it was reserved with (AllocationProtect) and each committed
      * page's, as its last commit or VirtualProtect set it, in runs (`page-runs.js`).
-     * Only NOACCESS is enforced (`unreadable`); the rest is what the program
-     * asked and reads back.
+     * Only NOACCESS and PAGE_GUARD are enforced (`unreadable`); the rest is
+     * what the program asked and reads back.
      *
      * @type {Map<number, { allocation: number,
      *     pages: ReturnType<typeof createPageRuns<number>> }>}
@@ -1401,11 +1525,30 @@ export function createHeapFunctions(host){
     const protections = new Map();
 
     /**
-     * The protections VirtualProtect gave a loaded image's pages, by the
-     * image's base, with the header fields that tell that image from one
-     * mapped at the same base after it is gone.
+     * The reservations that are placeholders, by base, and the allocations
+     * that replaced one, which a release with MEM_PRESERVE_PLACEHOLDER turns
+     * back into it.
      *
-     * @type {Map<number, { stamp: string, pages: Map<number, number> }>}
+     * @type {Set<number>}
+     */
+    const placeholders = new Set();
+    /** @type {Set<number>} */
+    const replaced = new Set();
+
+    /**
+     * The protections a loaded image's pages were given - by VirtualProtect,
+     * or by the first write to a copy-on-write page (`watch`, armed when the
+     * loader maps it) - by the image's base, with what tells that image from
+     * one mapped at the same base after it is gone: the arena block the
+     * loader took for it (a new load is a new block, its headers the same or
+     * not - a program that writes one DLL file over and over with only a
+     * section's characteristics changed loads each at the same base with the
+     * same stamp), and the header fields for an image mapped as a region.
+     *
+     * @typedef {{ holder: object | null, stamp: string, pages: Map<number, number>,
+     *     watch?: { take: (address: number, length: number) => number[] } | null,
+     *     copied?: Set<number> }} ImageRecord
+     * @type {Map<number, ImageRecord>}
      */
     const imageProtections = new Map();
 
@@ -1416,7 +1559,7 @@ export function createHeapFunctions(host){
      *
      * @param {number} page
      * @returns {{ base: number, layout: NonNullable<ReturnType<typeof imageLayout>>,
-     *     changed: Map<number, number> | null } | null}
+     *     holder: object | null, kept: ImageRecord | null } | null}
      */
     const imageAt = page=>{
         const block = allocator.blockContaining(page);
@@ -1432,9 +1575,75 @@ export function createHeapFunctions(host){
         {
             return null;
         }
+        const holder = block ?? null;
         const kept = imageProtections.get(base);
-        return { base, layout,
-            changed: kept && kept.stamp === imageStamp(base) ? kept.pages : null };
+        return { base, layout, holder, kept: kept && kept.holder === holder
+            && kept.stamp === imageStamp(base) ? kept : null };
+    };
+
+    /**
+     * The record of an image's own protections, made when first needed.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image
+     * @returns {ImageRecord}
+     */
+    const imageRecord = image=>{
+        if (!image.kept)
+        {
+            image.kept = { holder: image.holder, stamp: imageStamp(image.base), pages: new Map() };
+            imageProtections.set(image.base, image.kept);
+        }
+        return image.kept;
+    };
+
+    /**
+     * The copy-on-write pages of an image written since the last look become
+     * the process's own, read-write (`writtenCopy`), as `takeCopies` makes a
+     * view's. Only [from, to) is looked at.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image
+     * @param {number} from @param {number} to
+     */
+    const takeImageCopies = (image, from, to)=>{
+        const watch = image.kept?.watch;
+        if (!watch || to <= from)
+        {
+            return;
+        }
+        for (const number of watch.take(from, to - from))
+        {
+            const page = number * PAGE_SIZE;
+            const now = imagePageProtection(image, page);
+            const record = /** @type {ImageRecord} */ (image.kept);
+            if (copyOnWrite(now))
+            {
+                record.pages.set(page, writtenCopy(now));
+                (record.copied ??= new Set()).add(page);
+            }
+        }
+    };
+
+    /**
+     * The loader mapped and bound an image at `base`: where it has
+     * copy-on-write pages, their writes are watched from now on - the
+     * loader's own writes before this are its making, as Windows' are.
+     *
+     * @param {number} base
+     */
+    const imageMapped = base=>{
+        if (host.pointerSize === 8)
+        {
+            return;
+        }
+        const image = imageAt(base);
+        if (!image || !image.layout.runs.some(run=>copyOnWrite(run.protect)))
+        {
+            return;
+        }
+        // A new mapping at the base: what an earlier one was given is gone.
+        imageProtections.delete(image.base);
+        image.kept = null;
+        imageRecord(image).watch = host.watchWrites?.(image.base, image.layout.size) ?? null;
     };
 
     /**
@@ -1452,7 +1661,7 @@ export function createHeapFunctions(host){
      *
      * @param {NonNullable<ReturnType<typeof imageAt>>} image @param {number} page
      */
-    const imagePageProtection = (image, page)=>image.changed?.get(page)
+    const imagePageProtection = (image, page)=>image.kept?.pages.get(page)
         ?? image.layout.runs.find(run=>page - image.base < run.to)?.protect ?? PAGE_NOACCESS;
 
     /**
@@ -1464,11 +1673,33 @@ export function createHeapFunctions(host){
      * @returns {[number, number, number, number, number, number, number]}
      */
     const imageAnswer = (image, page)=>{
+        // The writes found are taken as a view's are (`regionAnswer`): through
+        // a copy-on-write run in doubling steps, and at a copy-on-write page
+        // that ends any other run; never the rest of the image.
+        let taken = page + PAGE_SIZE;
+        takeImageCopies(image, page, taken);
         const protect = imagePageProtection(image, page);
+        const copying = copyOnWrite(protect);
         const end = image.base + image.layout.size;
         let to = page + PAGE_SIZE;
-        while (to < end && imagePageProtection(image, to) === protect)
+        while (to < end)
         {
+            if (copying && to >= taken)
+            {
+                const ahead = Math.min(end, to + Math.max(PAGE_SIZE, to - page));
+                takeImageCopies(image, taken, ahead);
+                taken = ahead;
+            }
+            let next = imagePageProtection(image, to);
+            if (next !== protect && !copying && copyOnWrite(next))
+            {
+                takeImageCopies(image, to, to + PAGE_SIZE);
+                next = imagePageProtection(image, to);
+            }
+            if (next !== protect)
+            {
+                break;
+            }
             to += PAGE_SIZE;
         }
         return [page, image.base, IMAGE_ALLOCATION_PROTECT, to - page, MEM_COMMIT, protect,
@@ -1505,7 +1736,7 @@ export function createHeapFunctions(host){
 
     /**
      * Notes the protection [from, to) of a reservation was given: PAGE_NOACCESS
-     * closes the pages, anything else leaves them to their commit.
+     * and PAGE_GUARD close the pages, anything else leaves them to their commit.
      *
      * @param {number} reservation @param {number} from @param {number} to
      * @param {number} protection
@@ -1513,7 +1744,7 @@ export function createHeapFunctions(host){
     const noteProtection = (reservation, from, to, protection)=>{
         protections.get(reservation)?.pages.set(from, to, protection);
         let pages = unreadable.get(reservation);
-        if ((protection & 0xff) === PAGE_NOACCESS)
+        if ((protection & 0xff) === PAGE_NOACCESS || (protection & PAGE_GUARD) !== 0)
         {
             if (!pages)
             {
@@ -1528,13 +1759,13 @@ export function createHeapFunctions(host){
 
     /**
      * The reservations made with MEM_WRITE_WATCH, by base: the engine's watch
-     * over its pages (`watchWrites`), made at the first GetWriteWatch or
-     * ResetWriteWatch, and the pages it found written that no reset has taken
-     * since. Until that first look every page counts as written; null where
-     * the engine cannot tell writes, and then every committed page is told.
+     * over its pages (`watchWrites`), made with the reservation, as Windows
+     * tracks writes from it on, and the pages it found written that no reset
+     * has taken since; null where the engine cannot tell writes, and then
+     * every committed page is told.
      *
      * @type {Map<number, { watch: { take: (address: number, length: number) => number[] }
-     *     | null | undefined, written: Set<number> }>}
+     *     | null, written: Set<number> }>}
      */
     const watched = new Map();
 
@@ -1548,18 +1779,6 @@ export function createHeapFunctions(host){
     const writesIn = (block, address, end)=>{
         const state = /** @type {NonNullable<ReturnType<typeof watched.get>>} */ (
             watched.get(block.address));
-        if (state.watch === undefined)
-        {
-            state.watch = host.watchWrites?.(block.address, block.capacity) ?? null;
-            // Windows tracks writes from the reservation on, and a watch
-            // begins at its first look, which takes nothing written before
-            // it: every page counts as written until a reset takes it.
-            for (let page = block.address >>> 12;
-                page < (block.address + block.capacity) >>> 12; page++)
-            {
-                state.written.add(page);
-            }
-        }
         if (state.watch === null)
         {
             return null;
@@ -1756,22 +1975,45 @@ export function createHeapFunctions(host){
         // length: a program that opens a section another made learns the
         // section's size from its view's RegionSize.
         const view = host.viewAt?.(at) ?? null;
-        if (view?.sections)
-        {
-            // An image's view: each section a region of its own protection,
-            // as Windows maps an image, the headers read-only.
-            const rva = page - view.base;
-            const part = view.sections.find(each=>rva >= each.start && rva < each.end)
-                ?? { start: 0, end: PAGE_SIZE, protect: PAGE_READONLY_VIEW };
-            return [page, view.base, PAGE_EXECUTE_WRITECOPY, view.base + part.end - page,
-                MEM_COMMIT, part.protect, MEM_IMAGE];
-        }
         if (view)
         {
-            const end = (view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
-            const protection = view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW;
-            return [page, view.base, protection, (end >>> 0) - page, MEM_COMMIT, protection,
-                MEM_MAPPED];
+            // Each page has the protection the view, or an image's section,
+            // was mapped with until VirtualProtect gives it another; a run is
+            // the pages that share one, as Windows answers a view.
+            const end = ((view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) >>> 0;
+            // The writes found are taken only where they can change the
+            // answer: through a copy-on-write run, in doubling steps ahead of
+            // it (twice its pages at most), and at a copy-on-write page that
+            // ends any other run, which a write turns into one of its own. A
+            // look never touches the rest of the view.
+            let taken = page + PAGE_SIZE;
+            takeCopies(view, page, taken);
+            const protection = viewPageProtection(view, page);
+            const copying = copyOnWrite(protection);
+            let to = page + PAGE_SIZE;
+            while (to < end)
+            {
+                if (copying && to >= taken)
+                {
+                    const ahead = Math.min(end, to + Math.max(PAGE_SIZE, to - page));
+                    takeCopies(view, taken, ahead);
+                    taken = ahead;
+                }
+                let next = viewPageProtection(view, to);
+                if (next !== protection && !copying && copyOnWrite(next))
+                {
+                    takeCopies(view, to, to + PAGE_SIZE);
+                    next = viewPageProtection(view, to);
+                }
+                if (next !== protection)
+                {
+                    break;
+                }
+                to += PAGE_SIZE;
+            }
+            return [page, view.base, view.sections ? PAGE_EXECUTE_WRITECOPY
+                : view.protect ?? (view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW),
+            to - page, MEM_COMMIT, protection, view.sections ? MEM_IMAGE : MEM_MAPPED];
         }
         const image = imageAt(page);
         if (image)
@@ -1871,6 +2113,13 @@ export function createHeapFunctions(host){
      */
     const userInfo = new Map();
 
+    /**
+     * Each heap's blocks by address as its HeapWalk began.
+     *
+     * @type {Map<number, number[]>}
+     */
+    const walks = new Map();
+
     const globals = createGlobalMemory({
         allocate: bytes=>allocator.allocate(bytes, { owner: processHeap }),
         free: address=>{
@@ -1878,6 +2127,14 @@ export function createHeapFunctions(host){
             return allocator.free(address);
         },
         block: address=>allocator.block(address),
+        readable: address=>{
+            if (address >= spaceTop())
+            {
+                return false;
+            }
+            const [, , , , state, protect] = regionAnswer(address);
+            return state === MEM_COMMIT && (protect & (PAGE_NOACCESS | PAGE_GUARD)) === 0;
+        },
         reallocate: (block, wanted, how)=>{
             const moved = reallocate(block, wanted, how);
             const info = userInfo.get(block.address);
@@ -1996,6 +2253,183 @@ export function createHeapFunctions(host){
         : {});
 
     /**
+     * A reservation of exactly this span at its start, committed whole when
+     * the type asks; false where any of it is taken.
+     *
+     * @param {number} start @param {number} span @param {number} kind
+     * @param {number} protection
+     * @returns {boolean}
+     */
+    const reserveAt = (start, span, kind, protection)=>{
+        if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
+        {
+            return false;
+        }
+        decommitted.delete(start);
+        committed.set(start, []);
+        unreadable.delete(start);
+        protections.set(start, { allocation: protection, pages: createPageRuns() });
+        // Committed with it, the whole of what was reserved: from the
+        // granule's start, which is the address answered, not from the page
+        // asked for -- a program writes from the base it was handed (Wine's
+        // virtual_alloc maps the one range both ways).
+        if ((kind & MEM_COMMIT) !== 0)
+        {
+            markCommitted(start, start, start + span, true);
+            noteProtection(start, start, start + span, protection);
+        }
+        if ((kind & MEM_WRITE_WATCH) !== 0)
+        {
+            watched.set(start, { watch: host.watchWrites?.(start, span) ?? null,
+                written: new Set() });
+        }
+        handOverReservation(start, span, (kind & MEM_COMMIT) !== 0);
+        settleAccess(start, start, start + span);
+        return true;
+    };
+
+    /**
+     * Gives [from, to) of a view of a section `protection`, as VirtualProtect
+     * does: within the view, and no access the view was not mapped with (an
+     * image's writes its own copies, `imageWriteCopy`), else
+     * ERROR_INVALID_PARAMETER; the old protection of the first page written to
+     * `oldProtect`, a PAGE_NOACCESS page closed to the processor and any
+     * other open.
+     *
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} to @param {number} protection
+     * @param {number} oldProtect
+     * @returns {boolean}
+     */
+    const protectView = (view, from, to, protection, oldProtect)=>{
+        const end = roundUp(to, PAGE_SIZE);
+        const given = view.sections ? imageWriteCopy(protection) : protection;
+        const allocation = view.sections ? PAGE_EXECUTE_WRITECOPY
+            : view.protect ?? PAGE_READWRITE_VIEW;
+        if (end > view.base + roundUp(view.length, PAGE_SIZE) || !imageProtection(protection)
+            || !protectionWithin(allocation, given))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return false;
+        }
+        takeCopies(view, from, end);
+        writeDword(oldProtect, viewPageProtection(view, from));
+        settleView(view, from, end, given);
+        return true;
+    };
+
+    /**
+     * VirtualAlloc's MEM_COMMIT over a view: its pages are committed already.
+     * A view of a file or an image takes none (ERROR_ACCESS_DENIED); a
+     * page-file section's view takes a protection within the view's, which
+     * its pages then have, and refuses one past it (ERROR_INVALID_PARAMETER).
+     *
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} to @param {number} protection
+     * @returns {boolean}
+     */
+    const commitView = (view, from, to, protection)=>{
+        const end = roundUp(to, PAGE_SIZE);
+        if (end > view.base + roundUp(view.length, PAGE_SIZE))
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return false;
+        }
+        if (!view.anonymous || view.sections)
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return false;
+        }
+        if (!imageProtection(protection)
+            || !protectionWithin(view.protect ?? PAGE_READWRITE_VIEW, protection))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return false;
+        }
+        settleView(view, from, end, protection);
+        return true;
+    };
+
+    /**
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} end @param {number} protection
+     */
+    const settleView = (view, from, end, protection)=>{
+        // What was written under the old protection is settled first: a write
+        // the new one follows is the only one it sees.
+        takeCopies(view, from, end);
+        // A page already copied is the process's own: asked to be
+        // copy-on-write again, it is read-write, as Windows answers it.
+        const copied = view.copies?.copied;
+        for (let page = from; page < end; page += PAGE_SIZE)
+        {
+            view.pages?.set(page, copied?.has(page) ? writtenCopy(protection) : protection);
+        }
+        if (copyOnWrite(protection) && view.copies && view.copies.watch === undefined)
+        {
+            view.copies.watch = host.watchWrites?.(view.base, roundUp(view.length, PAGE_SIZE))
+                ?? null;
+        }
+        host.pageAccess?.(from, end - from, (protection & 0xff) !== PAGE_NOACCESS);
+    };
+
+    /**
+     * The copy-on-write pages of a view written since the last look become
+     * the process's own copies, read-write (`writtenCopy`), as the first write
+     * to one does on Windows. The engine marks a page at its first store
+     * after the watch armed it, by the page check every store makes anyway,
+     * so an ordinary page pays nothing and a watched one once
+     * (`watchWrites`); the look is made where a protection is read.
+     *
+     * Only [from, to) is looked at: a page past it keeps its mark for a
+     * later look.
+     *
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} to
+     */
+    const takeCopies = (view, from, to)=>{
+        const copies = view.copies;
+        if (!copies?.watch || to <= from)
+        {
+            return;
+        }
+        for (const number of copies.watch.take(from, to - from))
+        {
+            const page = number * PAGE_SIZE;
+            const now = viewPageProtection(view, page);
+            if (copyOnWrite(now))
+            {
+                view.pages?.set(page, writtenCopy(now));
+                (copies.copied ??= new Set()).add(page);
+            }
+        }
+    };
+
+    /**
+     * The touch of a guard page: a committed page of a reservation carrying
+     * PAGE_GUARD loses it, and with it the processor's refusal, as the first
+     * touch of one does on Windows. False for a page with no guard.
+     *
+     * @param {number} address
+     * @returns {boolean}
+     */
+    const touchGuard = address=>{
+        const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        const block = allocator.blockContaining(page);
+        const protection = block?.owner === VIRTUAL
+            ? protections.get(block.address)?.pages.get(page) : undefined;
+        if (!block || protection === undefined || (protection & PAGE_GUARD) === 0
+                || !(committed.get(block.address) ?? [])
+                    .some(range=>range.from <= page && range.to > page))
+        {
+            return false;
+        }
+        noteProtection(block.address, page, page + PAGE_SIZE, protection & ~PAGE_GUARD);
+        settleAccess(block.address, page, page + PAGE_SIZE);
+        return true;
+    };
+
+    /**
      * VirtualAlloc's body, and VirtualAlloc2's: `where` is the address
      * requirements of a new reservation -- an alignment past the allocation
      * granularity, and the lowest and highest address it may take -- or null.
@@ -2016,6 +2450,16 @@ export function createHeapFunctions(host){
         const requested = pointer >>> 0;
         const protection = protect >>> 0;
         const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
+        const view = (acting === MEM_COMMIT || acting === MEM_RESET) && requested !== 0
+            && size !== 0 ? host.viewAt?.(requested) ?? null : null;
+        if (view)
+        {
+            // A view's pages are committed already (`commitView`); a reset
+            // of them changes nothing a program sees, as of private pages.
+            const first = (requested & ~(PAGE_SIZE - 1)) >>> 0;
+            return acting === MEM_RESET || commitView(view, first, requested + size, protection)
+                ? first : 0;
+        }
         // A protection is asked of a reservation as of a commit, and a reset
         // takes any: it changes none.
         if ((kind & ~ALLOCATION_TYPES) !== 0 || acting === 0
@@ -2045,7 +2489,7 @@ export function createHeapFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
+            if (!reserveAt(start, span, kind, protection))
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
                 host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
@@ -2054,26 +2498,6 @@ export function createHeapFunctions(host){
                     ? 'something is already there' : 'not free in the arena'}`);
                 return 0;
             }
-            decommitted.delete(start);
-            committed.set(start, []);
-            unreadable.delete(start);
-            protections.set(start, { allocation: protection, pages: createPageRuns() });
-            // Committed with it, the whole of what was reserved: from
-            // the granule's start, which is the address answered, not
-            // from the page asked for -- a program writes from the
-            // base it was handed (Wine's virtual_alloc maps the one
-            // range both ways).
-            if ((kind & MEM_COMMIT) !== 0)
-            {
-                markCommitted(start, start, start + span, true);
-                noteProtection(start, start, start + span, protection);
-            }
-            if ((kind & MEM_WRITE_WATCH) !== 0)
-            {
-                watched.set(start, { watch: undefined, written: new Set() });
-            }
-            handOverReservation(start, span, (kind & MEM_COMMIT) !== 0);
-            settleAccess(start, start, start + span);
             return start;
         }
 
@@ -2099,7 +2523,17 @@ export function createHeapFunctions(host){
             const needed = roundUp(requested + size - page, PAGE_SIZE);
             const existing = allocator.blockContaining(requested);
             const offset = existing ? page - existing.address : 0;
-            if (!existing || existing.owner !== VIRTUAL
+            // A placeholder holds no pages until an allocation replaces it.
+            // A loaded image's pages are its own, committed with it: a commit
+            // over one is refused as over a view of a file (Wine's
+            // kernel32:loader, test_Loader).
+            if (acting === MEM_COMMIT && (!existing || existing.owner !== VIRTUAL)
+                && imageAt(page))
+            {
+                host.setLastError(ERROR_ACCESS_DENIED);
+                return 0;
+            }
+            if (!existing || existing.owner !== VIRTUAL || placeholders.has(existing.address)
                     || existing.capacity - offset < needed)
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
@@ -2205,11 +2639,274 @@ export function createHeapFunctions(host){
         }
         if ((kind & MEM_WRITE_WATCH) !== 0)
         {
-            watched.set(address, { watch: undefined, written: new Set() });
+            watched.set(address, { watch: host.watchWrites?.(address, span) ?? null,
+                written: new Set() });
         }
         handOverReservation(address, span, (kind & MEM_COMMIT) !== 0);
         settleAccess(address, address, address + span);
         return address;
+    };
+
+    /**
+     * A reservation given back to the arena, whose next owner -- a heap,
+     * another reservation -- finds it open.
+     *
+     * @param {number} address @param {number} end
+     */
+    const release = (address, end)=>{
+        host.pageAccess?.(address, end - address, true);
+        allocator.free(address);
+        decommitted.delete(address);
+        committed.delete(address);
+        unreadable.delete(address);
+        protections.delete(address);
+        watched.delete(address);
+        placeholders.delete(address);
+        replaced.delete(address);
+    };
+
+    /**
+     * Splits a reservation at page boundaries into allocations of their own,
+     * each keeping what its pages were: their commit, protections, guards,
+     * write watch and contents, none of it handed over again (the allocator's
+     * block is given up and taken back in parts, in place).
+     *
+     * @param {number} base @param {number[]} cuts  inside it, ascending
+     */
+    const splitReservation = (base, cuts)=>{
+        const block = /** @type {NonNullable<ReturnType<typeof allocator.block>>} */ (
+            allocator.block(base));
+        const end = base + block.capacity;
+        const was = {
+            decommitted: decommitted.get(base) ?? [],
+            committed: committed.get(base) ?? [],
+            unreadable: unreadable.get(base),
+            protection: protections.get(base),
+            watch: watched.get(base),
+        };
+        allocator.free(base);
+        const bounds = [base, ...cuts, end];
+        for (let index = 0; index + 1 < bounds.length; index++)
+        {
+            const from = bounds[index];
+            const to = bounds[index + 1];
+            allocator.allocateAt(from, to - from, { owner: VIRTUAL, reserving: true });
+            /** @param {{ from: number, to: number }[]} ranges */
+            const cut = ranges=>ranges.filter(range=>range.from < to && range.to > from)
+                .map(range=>({ from: Math.max(range.from, from), to: Math.min(range.to, to) }));
+            const gone = cut(was.decommitted);
+            if (gone.length > 0)
+            {
+                decommitted.set(from, gone);
+            }
+            else
+            {
+                decommitted.delete(from);
+            }
+            committed.set(from, cut(was.committed));
+            const closed = createPageRuns();
+            for (const run of was.unreadable?.within(from, to) ?? [])
+            {
+                closed.set(run.from, run.to, true);
+            }
+            if (closed.size > 0)
+            {
+                unreadable.set(from, closed);
+            }
+            else
+            {
+                unreadable.delete(from);
+            }
+            const pages = createPageRuns();
+            for (const run of was.protection?.pages.within(from, to) ?? [])
+            {
+                pages.set(run.from, run.to, run.value);
+            }
+            protections.set(from, { allocation: was.protection?.allocation ?? PAGE_NOACCESS,
+                pages });
+            if (was.watch)
+            {
+                watched.set(from, was.watch);
+            }
+        }
+    };
+
+    /**
+     * MEM_RELEASE of [address, address + size) in whole pages, inside the one
+     * allocation that holds it (`RELEASE_PART`): the pages are given back and
+     * the allocation is what is left either side, each part its own.
+     *
+     * @param {number} address @param {number} size
+     * @returns {number}
+     */
+    const releasePart = (address, size)=>{
+        const block = allocator.blockContaining(address);
+        const from = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        const to = roundUp(address + size, PAGE_SIZE);
+        if (!block || block.owner !== VIRTUAL || placeholders.has(block.address)
+            || to > block.address + block.capacity || size === 0)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        const end = block.address + block.capacity;
+        splitReservation(block.address, [from, to].filter(at=>at > block.address && at < end));
+        release(from, to);
+        return 1;
+    };
+
+    /**
+     * A placeholder over exactly this span, nothing committed in it.
+     *
+     * @param {number} start @param {number} span
+     * @returns {boolean}
+     */
+    const reservePlaceholder = (start, span)=>{
+        if (!reserveAt(start, span, MEM_RESERVE, PAGE_NOACCESS))
+        {
+            return false;
+        }
+        placeholders.add(start);
+        return true;
+    };
+
+    /**
+     * VirtualAlloc2 with a placeholder flag: a new placeholder
+     * (MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS and nothing
+     * else), or an allocation that replaces one - at its base, of exactly its
+     * span, reserved and committed as VirtualAlloc would. Null for a type
+     * with neither flag.
+     *
+     * @param {number} pointer @param {number} bytes @param {number} type
+     * @param {number} protect
+     * @param {{ alignment: number, lowest: number, highest: number }} where
+     * @returns {number | null}
+     */
+    const placeholderAlloc = (pointer, bytes, type, protect, where)=>{
+        const kind = type >>> 0;
+        if ((kind & MEM_RESERVE_PLACEHOLDER) !== 0)
+        {
+            if (kind !== (MEM_RESERVE | MEM_RESERVE_PLACEHOLDER)
+                || (protect >>> 0) !== PAGE_NOACCESS)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            const address = virtualAlloc(pointer, bytes, MEM_RESERVE, PAGE_NOACCESS, where);
+            if (address !== 0)
+            {
+                placeholders.add(address);
+            }
+            return address;
+        }
+        if ((kind & MEM_REPLACE_PLACEHOLDER) === 0)
+        {
+            return null;
+        }
+        const rest = kind & ~MEM_REPLACE_PLACEHOLDER;
+        if ((rest & MEM_RESERVE) === 0 || (rest & ~(MEM_RESERVE | MEM_COMMIT)) !== 0)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const start = pointer >>> 0;
+        const block = allocator.blockContaining(start);
+        if (!block || !placeholders.has(block.address) || block.address !== start
+            || roundUp(bytes >>> 0, PAGE_SIZE) !== block.capacity)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        if (!privateProtection(protect >>> 0))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        // Exactly the placeholder's span, which a split may have left off
+        // an allocation granule.
+        const span = block.capacity;
+        release(start, start + span);
+        reserveAt(start, span, rest, protect >>> 0);
+        replaced.add(start);
+        return start;
+    };
+
+    /**
+     * VirtualFree's placeholder releases: MEM_PRESERVE_PLACEHOLDER frees an
+     * allocation that replaced a placeholder back to it, whole, or splits a
+     * placeholder in two or three at pages; MEM_COALESCE_PLACEHOLDERS
+     * joins the neighbouring placeholders that exactly fill the range into one.
+     *
+     * @param {number} address @param {number} size @param {number} flag
+     * @returns {number}
+     */
+    const placeholderFree = (address, size, flag)=>{
+        const block = allocator.blockContaining(address);
+        if (!block || block.owner !== VIRTUAL)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        const end = address + size;
+        if (flag === MEM_COALESCE_PLACEHOLDERS)
+        {
+            /** @type {number[]} */
+            const joined = [];
+            let at = address;
+            while (at < end)
+            {
+                const part = allocator.blockContaining(at);
+                if (!part || part.address !== at || !placeholders.has(at))
+                {
+                    break;
+                }
+                joined.push(at);
+                at += part.capacity;
+            }
+            if (at !== end || joined.length < 2)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            for (const part of joined)
+            {
+                release(part, part + /** @type {any} */ (allocator.block(part)).capacity);
+            }
+            reservePlaceholder(address, size);
+            return 1;
+        }
+        if (!placeholders.has(block.address))
+        {
+            // Only an allocation that replaced a placeholder goes back to
+            // one, and whole; any other is in the way of one.
+            if (!replaced.has(block.address) || address !== block.address
+                || (size !== 0 && size !== block.capacity))
+            {
+                host.setLastError(ERROR_INVALID_ADDRESS);
+                return 0;
+            }
+            const span = block.capacity;
+            release(address, address + span);
+            reservePlaceholder(address, span);
+            return 1;
+        }
+        const whole = block.address + block.capacity;
+        if (size === 0 || end > whole || address % PAGE_SIZE !== 0 || size % PAGE_SIZE !== 0
+            || (address === block.address && end === whole))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        const base = block.address;
+        release(base, whole);
+        for (const [from, to] of [[base, address], [address, end], [end, whole]])
+        {
+            if (to > from)
+            {
+                reservePlaceholder(from, to - from);
+            }
+        }
+        return 1;
     };
 
     /**
@@ -2223,6 +2920,11 @@ export function createHeapFunctions(host){
      */
     const extendedParameters = (list, count)=>{
         const where = { alignment: 0, lowest: 0, highest: 0xffffffff };
+        // A count with no list to count is no list.
+        if ((list >>> 0) === 0 && (count >>> 0) !== 0)
+        {
+            return null;
+        }
         const pointerSize = host.pointerSize ?? 4;
         /** @param {number} at */
         const pointerAt = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
@@ -2425,6 +3127,7 @@ export function createHeapFunctions(host){
                 heaps.delete(heap);
                 unserialized.delete(heap);
                 lowFragmentation.delete(heap);
+                walks.delete(heap);
                 return 1;
             },
         },
@@ -2475,20 +3178,31 @@ export function createHeapFunctions(host){
                 const [handle, flags, pointer, bytes] = args;
                 const heap = handle >>> 0;
                 const address = pointer >>> 0;
+                // No block to resize is no failure of memory: Windows answers
+                // NULL and clears the last error (Wine's heap test).
+                if (address === 0)
+                {
+                    host.setLastError(ERROR_SUCCESS);
+                    return 0;
+                }
                 const block = blockOf(heap, address);
                 if (!block)
                 {
                     return 0;
                 }
-                if (wholeSize(args, 3) !== bytes >>> 0 || !fits(heap, bytes >>> 0, block.size))
+                const moved = wholeSize(args, 3) === bytes >>> 0
+                    && fits(heap, bytes >>> 0, block.size)
+                    ? reallocate(block, bytes >>> 0, {
+                        zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
+                        mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
+                    })
+                    : 0;
+                // Grown nowhere, in place or not: STATUS_NO_MEMORY's error.
+                if (moved === 0)
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
-                    return 0;
                 }
-                return reallocate(block, bytes >>> 0, {
-                    zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
-                    mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
-                });
+                return moved;
             },
             ...routine('reAlloc'),
         },
@@ -2556,8 +3270,9 @@ export function createHeapFunctions(host){
          * alignment and the span it must lie in
          * (MemExtendedParameterAddressRequirements), and a NUMA node, which a
          * machine of one node has no choice of. A process is this one, as
-         * NULL or the pseudo-handle; placeholders are not kept, and their
-         * flags are refused as an unknown type is.
+         * NULL or the pseudo-handle. A placeholder is a reservation made to be
+         * replaced (`placeholderAlloc`); VirtualFree splits, joins and
+         * restores them (`placeholderFree`).
          */
         VirtualAlloc2: {
             returns: 'pointer',
@@ -2578,14 +3293,17 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return virtualAlloc(pointer, wholeSize(args, 2), type, protect, where);
+                const size = wholeSize(args, 2);
+                return placeholderAlloc(pointer, size, type, protect, where)
+                    ?? virtualAlloc(pointer, size, type, protect, where);
             },
         },
 
         /**
          * BOOL VirtualFree(LPVOID lpAddress, SIZE_T dwSize, DWORD dwFreeType)
          *
-         * Exactly one of MEM_DECOMMIT and MEM_RELEASE. A release names the
+         * Exactly one of MEM_DECOMMIT and MEM_RELEASE, the release perhaps with
+         * a placeholder flag (`placeholderFree`). A release names the
          * reservation by its base and frees all of it, so it takes no size; a
          * decommit names pages anywhere inside one. Each failure says why
          * through the last error: an address that is not a reservation's is
@@ -2604,6 +3322,11 @@ export function createHeapFunctions(host){
                     // More than the address space holds: no range of a reservation.
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
+                }
+                if (kind === (MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)
+                    || kind === (MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
+                {
+                    return placeholderFree(address, size, kind & ~MEM_RELEASE);
                 }
                 if (kind !== MEM_DECOMMIT && kind !== MEM_RELEASE)
                 {
@@ -2629,15 +3352,7 @@ export function createHeapFunctions(host){
                         host.setLastError(ERROR_INVALID_ADDRESS);
                         return 0;
                     }
-                    // Back to the arena, whose next owner -- a heap, another
-                    // reservation -- finds it open.
-                    host.pageAccess?.(address, end - address, true);
-                    allocator.free(address);
-                    decommitted.delete(address);
-                    committed.delete(address);
-                    unreadable.delete(address);
-                    protections.delete(address);
-                    watched.delete(address);
+                    release(address, end);
                     return 1;
                 }
                 // Decommit keeps the reservation and closes the pages where the
@@ -3001,16 +3716,102 @@ export function createHeapFunctions(host){
         /**
          * BOOL HeapWalk(HANDLE hHeap, LPPROCESS_HEAP_ENTRY lpEntry)
          *
-         * Not implemented, and it says so with the code that ends a walk. A
-         * caller loops until this returns FALSE and then checks the error; told
-         * there are no more items it stops cleanly, where any other failure
-         * would have it report a corrupt heap.
+         * The heap as one region, its control block, and then each of its
+         * busy blocks by address: the heaps share the process's arena rather
+         * than each holding reservations of its own (decisions.md A272), so
+         * there is no free block or uncommitted range that is a heap's to
+         * report. A walk starts at a NULL lpData and goes on from the entry
+         * it was handed back; it ends with ERROR_NO_MORE_ITEMS, and an entry
+         * that is none of the heap's is ERROR_INVALID_PARAMETER.
          */
         HeapWalk: {
             argBytes: 8,
-            handler: ()=>{
-                host.setLastError(ERROR_NO_MORE_ITEMS);
-                return 0;
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>{
+                const heap = handle >>> 0;
+                const at = entry >>> 0;
+                if (!heaps.has(heap))
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if (at === 0)
+                {
+                    host.setLastError(ERROR_NOACCESS);
+                    return 0;
+                }
+                if ((host.pointerSize ?? 4) === 8)
+                {
+                    // PROCESS_HEAP_ENTRY's 64-bit layout waits for that width's
+                    // work; a walk that finds nothing ends cleanly.
+                    host.setLastError(ERROR_NO_MORE_ITEMS);
+                    return 0;
+                }
+                const previous = readDword(at + HEAP_ENTRY.lpData);
+                // The blocks are listed once, as the walk starts, and each step
+                // finds its place in that list: a walk of n blocks is not n sorts.
+                if (previous === 0 || !walks.has(heap))
+                {
+                    walks.set(heap, allocator.owned(heap)
+                        .sort((/** @type {number} */ x, /** @type {number} */ y)=>x - y));
+                }
+                const blocks = /** @type {number[]} */ (walks.get(heap));
+                const regionSize = guestHeap?.isHeap(heap) ? CONTROL.SIZE
+                    : bounded.has(heap) ? FIXED_HEAP_HANDLE : 0;
+                const write = (/** @type {number[]} */ fields)=>{
+                    const data = new Uint8Array(HEAP_ENTRY.SIZE);
+                    const view = new DataView(data.buffer);
+                    const [lpData, cbData, cbOverhead, flags, ...union] = fields;
+                    view.setUint32(HEAP_ENTRY.lpData, lpData, true);
+                    view.setUint32(HEAP_ENTRY.cbData, cbData, true);
+                    view.setUint8(HEAP_ENTRY.cbOverhead, cbOverhead);
+                    view.setUint16(HEAP_ENTRY.wFlags, flags, true);
+                    union.forEach((value, i)=>
+                        view.setUint32(HEAP_ENTRY.union + i * 4, value, true));
+                    host.writeMemory(at, data);
+                    return 1;
+                };
+                if (previous === 0)
+                {
+                    const last = blocks.at(-1);
+                    const end = last === undefined ? heap + regionSize
+                        : last + (allocator.block(last)?.size ?? 0);
+                    const first = blocks[0] ?? heap + regionSize;
+                    let used = 0;
+                    for (const address of blocks)
+                    {
+                        used += allocator.block(address)?.size ?? 0;
+                    }
+                    return write([heap, regionSize, 0, PROCESS_HEAP_REGION,
+                        regionSize + used, 0, first, end]);
+                }
+                let index = previous === heap ? 0 : sortedIndex(blocks, previous);
+                if (previous !== heap && blocks[index] !== previous)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                index += previous === heap ? 0 : 1;
+                // A block freed since the walk began is passed over.
+                while (index < blocks.length && blockOf(heap, blocks[index]) === null)
+                {
+                    index++;
+                }
+                const next = blocks[index];
+                if (next === undefined)
+                {
+                    walks.delete(heap);
+                    host.setLastError(ERROR_NO_MORE_ITEMS);
+                    return 0;
+                }
+                const size = allocator.block(next)?.size ?? 0;
+                const info = userInfo.get(next);
+                const moveable = info !== undefined && (info.flags & MOVEABLE_USER_FLAGS) !== 0;
+                // A block's header, and the bytes its size was rounded up by.
+                const overhead = BLOCK_HEADER + roundUp(size, ALIGNMENT) - size;
+                return write([next, size, overhead,
+                    PROCESS_HEAP_ENTRY_BUSY | (moveable ? PROCESS_HEAP_ENTRY_MOVEABLE : 0),
+                    moveable ? info.value : 0, 0, 0, 0]);
             },
         },
 
@@ -3054,9 +3855,10 @@ export function createHeapFunctions(host){
          * BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
          *                     PDWORD lpflOldProtect)
          *
-         * PAGE_NOACCESS is the one protection enforced, on a reservation's pages
-         * and where the processor faults a closed page: a program that closes
-         * pages to catch the touch of them gets its fault. Every other request
+         * PAGE_NOACCESS and PAGE_GUARD are the protections enforced, on a
+         * reservation's pages and where the processor faults a closed page: a
+         * program that closes pages to catch the touch of them gets its fault
+         * (a guard page once, `GUARD_PAGES`). Every other request
          * is already satisfied -- a page that is open is readable, writable and
          * executable -- so a runtime making its generated code executable gets
          * what it asked for.
@@ -3105,12 +3907,20 @@ export function createHeapFunctions(host){
                         return 0;
                     }
                 }
+                const view = block?.owner === VIRTUAL ? null : host.viewAt?.(first) ?? null;
+                if (view)
+                {
+                    return protectView(view, first, (address >>> 0) + (size >>> 0),
+                        protect >>> 0, oldProtect >>> 0) ? 1 : 0;
+                }
                 const image = block?.owner === VIRTUAL ? null : imageAt(first);
                 if (image)
                 {
-                    // An image's pages keep what they are given, read back
-                    // and handed back as the old protection; the range stays
-                    // inside the image.
+                    // An image's pages keep what they are given, a writable
+                    // protection as its copy-on-write form as a view of an
+                    // image's are (`imageWriteCopy`), read back and handed
+                    // back as the old protection; the range stays inside the
+                    // image.
                     const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
                     if (end > image.base + image.layout.size || !imageProtection(protect >>> 0))
                     {
@@ -3118,13 +3928,21 @@ export function createHeapFunctions(host){
                             ? ERROR_INVALID_ADDRESS : ERROR_INVALID_PARAMETER);
                         return 0;
                     }
+                    // What was written under the old protection is settled
+                    // first, and a page already copied asked to be
+                    // copy-on-write again is read-write, as a view's is.
+                    takeImageCopies(image, first, end);
                     writeDword(oldProtect >>> 0, imagePageProtection(image, first));
-                    const changed = image.changed ?? new Map();
-                    imageProtections.set(image.base,
-                        { stamp: imageStamp(image.base), pages: changed });
+                    const record = imageRecord(image);
+                    const given = imageWriteCopy(protect >>> 0);
                     for (let page = first; page < end; page += PAGE_SIZE)
                     {
-                        changed.set(page, protect >>> 0);
+                        record.pages.set(page,
+                            record.copied?.has(page) ? writtenCopy(given) : given);
+                    }
+                    if (copyOnWrite(given) && record.watch === undefined)
+                    {
+                        record.watch = host.watchWrites?.(image.base, image.layout.size) ?? null;
                     }
                     return 1;
                 }
@@ -3292,13 +4110,34 @@ export function createHeapFunctions(host){
          *
          * Locking pages into the working set is a promise about paging, and
          * there is no paging here -- guest memory is one buffer that is always
-         * present. The promise therefore already holds.
+         * present. The promise therefore already holds, except over a guard
+         * page: locking touches it, which takes its guard away and fails the
+         * call with STATUS_GUARD_PAGE_VIOLATION as its error, so that a second
+         * call succeeds.
          */
         VirtualLock: {
             argBytes: 8,
             sizes: [1],
             /** @param {number[]} args */
-            handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
+            handler: ([address, size])=>{
+                if (address === 0 || (size >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                let guarded = false;
+                for (let page = (address & ~(PAGE_SIZE - 1)) >>> 0; page < end;
+                    page += PAGE_SIZE)
+                {
+                    guarded = touchGuard(page) || guarded;
+                }
+                if (guarded)
+                {
+                    host.setLastError(STATUS_GUARD_PAGE_VIOLATION);
+                    return 0;
+                }
+                return 1;
+            },
         },
 
         /** BOOL VirtualUnlock(LPVOID lpAddress, SIZE_T dwSize) */
@@ -3515,29 +4354,35 @@ export function createHeapFunctions(host){
         argBytes,
         /** @param {number[]} args */
         handler: ([process, ...rest])=>{
-            const child = (process >>> 0) === CURRENT_PROCESS ? null : host.childOf?.(process);
-            if (child && host.currentThread && host.setLastErrorFor)
+            // With no handle table, only the pseudo-handle names a process.
+            const target = host.processTarget ? host.processTarget(process,
+                name === 'VirtualQuery' ? PROCESS_QUERY_INFORMATION : PROCESS_VM_OPERATION)
+                : (process >>> 0) === CURRENT_PROCESS ? { here: true }
+                    : { error: ERROR_INVALID_HANDLE };
+            if ('error' in target)
+            {
+                host.setLastError(target.error);
+                return 0;
+            }
+            if ('here' in target)
+            {
+                return table[name].handler(rest);
+            }
+            if (host.currentThread && host.setLastErrorFor)
             {
                 const { args, into } = crossing[name](rest);
                 const asked = askChild({ askChild: host.askChild, writeMemory: host.writeMemory,
                     currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor },
-                child, { call: name, args }, into);
+                target.child, { call: name, args }, into);
                 if (asked)
                 {
                     return asked;
                 }
             }
-            if ((process >>> 0) !== CURRENT_PROCESS)
-            {
-                if ((process >>> 0) !== 0)
-                {
-                    host.divergence?.(`${name}Ex`, `process 0x${(process >>> 0).toString(16)}`
-                        + ' is not the running one, and no other is reachable');
-                }
-                host.setLastError(ERROR_INVALID_HANDLE);
-                return 0;
-            }
-            return table[name].handler(rest);
+            host.divergence?.(`${name}Ex`, `process 0x${(process >>> 0).toString(16)}`
+                + ' is a child the run cannot reach');
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return 0;
         },
     });
 
@@ -3565,10 +4410,22 @@ export function createHeapFunctions(host){
             return info ?? { value: undefined, flags: 0 };
         },
         [GLOBAL_MEMORY]: globals,
-        /** @param {number} address @returns {{ state: number, protect: number }} */
+        [IMAGE_MAPPED]: imageMapped,
+        [RELEASE_PART]: releasePart,
+        [GUARD_PAGES]: {
+            touch: touchGuard,
+            /** @param {number} page @returns {boolean} */
+            commitGuard: page=>virtualAlloc(page, PAGE_SIZE, MEM_COMMIT,
+                PAGE_READWRITE | PAGE_GUARD, null) !== 0,
+        },
+        /**
+         * @param {number} address
+         * @returns {{ state: number, protect: number, end: number }}  `end`: where
+         *          the run of pages with this answer stops
+         */
         [PAGE_STATE]: address=>{
             const answer = regionAnswer(address);
-            return { state: answer[4], protect: answer[5] };
+            return { state: answer[4], protect: answer[5], end: answer[0] + answer[3] };
         },
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
         VirtualAllocEx: { ...inProcess('VirtualAlloc', 20), returns: 'pointer', sizes: [2] },

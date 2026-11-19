@@ -123,12 +123,80 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             .find(([key])=>key.toUpperCase() === wanted)?.[1];
     };
     /**
-     * `%NAME%` replaced by its value; one with no variable left as it was.
+     * The expansion's pieces: the text between variables as it is, each
+     * `%NAME%` with a variable as its value; one with no variable is text.
      *
      * @param {number} block @param {string} text
+     * @returns {{ text: string, value: boolean }[]}
      */
-    const expand = (block, text)=>text.replace(/%([^%]+)%/g,
-        (whole, name)=>lookup(block, name) ?? whole);
+    const expand = (block, text)=>{
+        /** @type {{ text: string, value: boolean }[]} */
+        const pieces = [];
+        let last = 0;
+        for (const match of text.matchAll(/%([^%]+)%/g))
+        {
+            const found = lookup(block, match[1]);
+            if (found === undefined)
+            {
+                continue;
+            }
+            pieces.push({ text: text.slice(last, match.index), value: false },
+                { text: found, value: true });
+            last = match.index + match[0].length;
+        }
+        pieces.push({ text: text.slice(last), value: false });
+        return pieces;
+    };
+    /**
+     * An expansion written into `count` characters as ntdll writes it, its
+     * length in characters with the terminator returned. What does not fit
+     * is written as far as it goes and the writing stops there: text one
+     * character at a time, keeping a place for the terminator and writing
+     * none; a value whole with its terminator, or, not fitting, a terminator
+     * alone where it would have gone. All of it fitting, it is terminated.
+     *
+     * @param {{ text: string, value: boolean }[]} pieces
+     * @param {number} destination @param {number} count
+     */
+    const writeExpanded = (pieces, destination, count)=>{
+        const total = pieces.reduce((sum, piece)=>sum + piece.text.length, 0) + 1;
+        let written = 0;
+        let stopped = false;
+        for (const { text, value } of pieces)
+        {
+            if (value)
+            {
+                if (written + text.length + 1 <= count)
+                {
+                    writeMemory(destination + written * 2, wide(`${text}\0`));
+                    written += text.length;
+                    continue;
+                }
+                if (written < count)
+                {
+                    writeMemory(destination + written * 2, wide('\0'));
+                }
+                stopped = true;
+                break;
+            }
+            const fits = Math.max(0, Math.min(text.length, count - 1 - written));
+            if (fits > 0)
+            {
+                writeMemory(destination + written * 2, wide(text.slice(0, fits)));
+                written += fits;
+            }
+            if (fits < text.length)
+            {
+                stopped = true;
+                break;
+            }
+        }
+        if (!stopped && written < count)
+        {
+            writeMemory(destination + written * 2, wide('\0'));
+        }
+        return total;
+    };
     /** A new block of these entries. @param {[string, string][]} list */
     const blockOf = list=>{
         const text = `${list.map(([key, value])=>`${key}=${value}\0`).join('')}\0`;
@@ -212,26 +280,28 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
          * NTSTATUS RtlExpandEnvironmentStrings_U(PWSTR Environment,
          *     PUNICODE_STRING Source, PUNICODE_STRING Destination, PULONG ReturnLength)
          *
-         * ReturnLength is the expansion's size in bytes with its terminator.
+         * ReturnLength is the expansion's size in bytes with its terminator;
+         * what does not fit is written as RtlExpandEnvironmentStrings writes it.
          */
         RtlExpandEnvironmentStrings_U: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([block, source, destination, returned])=>{
-                const expanded = expand(block >>> 0, counted(source >>> 0));
+                const pieces = expand(block >>> 0, counted(source >>> 0));
+                const head = readMemory(destination >>> 0, 4);
+                const room = (head[2] | head[3] << 8) >>> 1;
+                const total = writeExpanded(pieces, u32((destination >>> 0) + 4), room);
                 if ((returned >>> 0) !== 0)
                 {
-                    setU32(returned >>> 0, expanded.length * 2 + 2);
+                    setU32(returned >>> 0, total * 2);
                 }
-                const head = readMemory(destination >>> 0, 4);
-                const room = head[2] | head[3] << 8;
-                if (expanded.length * 2 + 2 > room)
+                if (total > room)
                 {
                     return STATUS.BUFFER_TOO_SMALL;
                 }
-                writeMemory(destination >>> 0, Uint8Array.of(expanded.length * 2 & 0xff,
-                    expanded.length * 2 >>> 8 & 0xff));
-                return put(expanded, u32((destination >>> 0) + 4), room);
+                writeMemory(destination >>> 0, Uint8Array.of(total * 2 - 2 & 0xff,
+                    total * 2 - 2 >>> 8 & 0xff));
+                return STATUS.SUCCESS;
             },
         },
 
@@ -240,23 +310,22 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
          *     SIZE_T SourceLength, PWSTR Destination, SIZE_T DestinationLength,
          *     PSIZE_T ReturnLength)
          *
-         * In characters, the count including the terminator.
+         * In characters, the count including the terminator; what does not
+         * fit is written as far as it goes (`writeExpanded`).
          */
         RtlExpandEnvironmentStrings: {
             argBytes: 24,
             sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, source, sourceLength, destination, destinationLength, returned])=>{
-                const expanded = expand(block >>> 0, readUnits(source >>> 0, sourceLength >>> 0));
+                const pieces = expand(block >>> 0, readUnits(source >>> 0, sourceLength >>> 0));
+                const total = writeExpanded(pieces, destination >>> 0, destinationLength >>> 0);
                 if ((returned >>> 0) !== 0)
                 {
-                    setU32(returned >>> 0, expanded.length + 1);
+                    setU32(returned >>> 0, total);
                 }
-                if (expanded.length + 1 > (destinationLength >>> 0))
-                {
-                    return STATUS.BUFFER_TOO_SMALL;
-                }
-                return put(expanded, destination >>> 0, (destinationLength >>> 0) * 2);
+                return total > (destinationLength >>> 0) ? STATUS.BUFFER_TOO_SMALL
+                    : STATUS.SUCCESS;
             },
         },
 

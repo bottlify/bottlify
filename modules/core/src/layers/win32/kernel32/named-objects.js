@@ -25,9 +25,14 @@
  * at all, just carried into the process that took its place.
  */
 
+import { DIRECTORY, SYMBOLIC_LINK, bootNamespace, createObjectNamespace, nameIn }
+    from './object-namespace.js';
+
 /** What a create reports when the name was already taken. */
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_SUCCESS = 0;
+/** A name another kind of object holds, as a native call answers it. */
+const STATUS_OBJECT_TYPE_MISMATCH = 0xc0000024;
 
 /** A live name standing for an object of a different kind. */
 export const TAKEN = Symbol('taken');
@@ -38,8 +43,43 @@ export const TAKEN = Symbol('taken');
  *        The backing store. Handed in so it can be created once and outlive a
  *        process replacement, and defaults to one that does not, for a caller
  *        with nothing to carry across.
+ * @param {{ typeOf: (handle: number) => string | null, resolve: (handle: number) => any }}
+ *        [options.handles]  this process's handles, which a name relative to a
+ *        directory handle is read against; absent, no handle names a directory
  */
-export function createNamedObjects({ table = new Map() } = {}){
+export function createNamedObjects({ table = new Map(), handles } = {}){
+    bootNamespace(table);
+    /**
+     * What the table keeps under a key; in any case, the most recently made
+     * of the keys that differ only in case.
+     *
+     * @param {string} key @param {boolean} insensitive
+     */
+    const at = (key, insensitive)=>{
+        const held = table.get(key);
+        if (held || !insensitive)
+        {
+            return held ? { key, kind: held.kind, object: held.object } : null;
+        }
+        const folded = key.toLowerCase();
+        /** @type {{ key: string, kind: string, object: any } | null} */
+        let found = null;
+        for (const [one, entry] of table)
+        {
+            if (one.toLowerCase() === folded)
+            {
+                found = { key: one, kind: entry.kind, object: entry.object };
+            }
+        }
+        return found;
+    };
+    const namespace = createObjectNamespace({
+        at,
+        handle: handle=>{
+            const kind = handles?.typeOf(handle >>> 0) ?? null;
+            return { kind, object: kind === null ? null : handles?.resolve(handle >>> 0) };
+        },
+    });
     /**
      * The references this process holds, by name: what its end takes back,
      * since a process's exit closes every handle it held and closes none of
@@ -61,7 +101,76 @@ export function createNamedObjects({ table = new Map() } = {}){
             mine.delete(name);
         }
     };
+    /**
+     * The key a Win32 name is kept under: every spelling of one object
+     * (`Global\X`, `Local\X`, the native path) is one key, through the
+     * namespace's one walk. A name whose path leads nowhere stays as it is
+     * spelt: no other spelling can reach it.
+     *
+     * @param {string | null} name
+     */
+    const win32Key = name=>{
+        if (name === null)
+        {
+            return null;
+        }
+        const key = namespace.win32(name);
+        return typeof key === 'string' ? key : name;
+    };
     return {
+        win32Key,
+
+        /**
+         * The key a native call's OBJECT_ATTRIBUTES names in the namespace
+         * (`object-namespace.js`) - a name something holds already in the
+         * spelling it was made with - or the status that refuses the name.
+         *
+         * @param {import('./object-attributes.js').ObjectAttributes} given
+         * @param {string} kind
+         * @returns {string | number}
+         */
+        keyOf(given, kind){
+            const place = namespace.place(given, kind);
+            if ('status' in place)
+            {
+                return place.status;
+            }
+            if (place.held && place.held.kind !== kind)
+            {
+                return STATUS_OBJECT_TYPE_MISMATCH;
+            }
+            return place.held ? at(place.key, true)?.key ?? place.key : place.key;
+        },
+
+        /**
+         * The names a directory holds, in the order they were made, each with
+         * its kind (NtQueryDirectoryObject).
+         *
+         * @param {string} directory  the directory's path
+         * @returns {{ name: string, kind: string }[]}
+         */
+        list(directory){
+            /** @type {{ name: string, kind: string }[]} */
+            const found = [];
+            for (const [key, held] of table)
+            {
+                const name = nameIn(directory, key);
+                if (name !== null)
+                {
+                    found.push({ name, kind: held.kind });
+                }
+            }
+            return found;
+        },
+
+        /**
+         * Where a native call's OBJECT_ATTRIBUTES names, as the walk found it.
+         *
+         * @param {import('./object-attributes.js').ObjectAttributes} given
+         * @param {string} kind
+         */
+        place: (given, kind)=>namespace.place(given, kind),
+
         /**
          * The object this name already stands for, TAKEN if another kind holds
          * it, or null if the name is free.
@@ -69,11 +178,12 @@ export function createNamedObjects({ table = new Map() } = {}){
          * @param {string | null} name @param {string} kind
          */
         existing(name, kind){
-            if (name === null)
+            const key = win32Key(name);
+            if (key === null)
             {
                 return null;
             }
-            const held = table.get(name);
+            const held = table.get(key);
             return !held ? null : held.kind === kind ? held.object : TAKEN;
         },
 
@@ -88,18 +198,19 @@ export function createNamedObjects({ table = new Map() } = {}){
          * @param {(code: number) => void} setLastError
          */
         remember(name, kind, made, reused, setLastError){
-            if (name !== null)
+            const key = win32Key(name);
+            if (key !== null)
             {
-                const held = table.get(name);
+                const held = table.get(key);
                 if (reused && held)
                 {
                     held.refs++;
                 }
                 else
                 {
-                    table.set(name, { kind, object: made, refs: 1 });
+                    table.set(key, { kind, object: made, refs: 1 });
                 }
-                count(name, 1);
+                count(key, 1);
             }
             setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
         },
@@ -194,7 +305,11 @@ export function createNamedObjects({ table = new Map() } = {}){
             {
                 for (const entry of table.values())
                 {
-                    forsake(entry.object);
+                    // A directory or a link has no waiters and no owner.
+                    if (entry.kind !== DIRECTORY && entry.kind !== SYMBOLIC_LINK)
+                    {
+                        forsake(entry.object);
+                    }
                 }
             }
         },
@@ -212,13 +327,14 @@ export function createNamedObjects({ table = new Map() } = {}){
  * @param {Object} options
  * @param {any} options.objects  the link's `objects` calls
  * @param {any} options.kernel   for the stand-ins
+ * @param {any} [options.handles]  this process's handles (`createNamedObjects`)
  */
-export function createRemoteNamedObjects({ objects, kernel }){
+export function createRemoteNamedObjects({ objects, kernel, handles }){
     /** One stand-in per object, so two handles onto it are one object here. @type {Map<number, any>} */
     const standIns = new Map();
     // A file mapping or a waitable timer is not carried across the link yet:
     // its name is this process's own, as every name was before.
-    const own = createNamedObjects();
+    const own = createNamedObjects({ handles });
     /** @param {string} kind */
     const across = kind=>kind === 'event' || kind === 'semaphore' || kind === 'mutex';
     /** The references this process holds there, by number, for its end to close. @type {Map<number, number>} */
@@ -252,18 +368,23 @@ export function createRemoteNamedObjects({ objects, kernel }){
         return made;
     };
     return {
+        win32Key: own.win32Key,
+        keyOf: own.keyOf,
+        place: own.place,
+        list: own.list,
         /** @param {string | null} name @param {string} kind */
         existing(name, kind){
             if (!across(kind))
             {
                 return own.existing(name, kind);
             }
-            if (name === null)
+            const key = own.win32Key(name);
+            if (key === null)
             {
                 return null;
             }
-            const found = objects.peek(kind, name);
-            return found === null ? null : found.taken ? TAKEN : standInFor(kind, found.id, name);
+            const found = objects.peek(kind, key);
+            return found === null ? null : found.taken ? TAKEN : standInFor(kind, found.id, key);
         },
 
         /**
@@ -280,7 +401,8 @@ export function createRemoteNamedObjects({ objects, kernel }){
                 own.remember(name, kind, made, reused, setLastError);
                 return;
             }
-            if (name !== null)
+            const key = own.win32Key(name);
+            if (key !== null)
             {
                 if (reused)
                 {
@@ -289,14 +411,14 @@ export function createRemoteNamedObjects({ objects, kernel }){
                 }
                 else
                 {
-                    const answer = objects.create(kind, name, {
+                    const answer = objects.create(kind, key, {
                         manualReset: made.manualReset === true, signalled: made.signalled === true,
                         initial: made.count, maximum: made.maximum,
                         owner: made.owner ? made.owner.id : null,
                     });
                     made.remote = answer.id;
                     standIns.set(answer.id, made);
-                    names.set(answer.id, name);
+                    names.set(answer.id, key);
                     count(answer.id, 1);
                     reused = answer.reused === true;
                 }

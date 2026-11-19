@@ -187,11 +187,14 @@ const isWideSpace = character=>character !== undefined && (WHITESPACE.includes(c
  * any of them the one a `0x` prefix or an octal number begins with.
  *
  * @param {string} text @param {number} requestedBase
+ * @param {(character: string | undefined) => boolean} [isSpace]  The white
+ *        space skipped before the number: msvcrt's, unless a runtime with its
+ *        own rule asks (`WIDE_READINGS`).
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  */
-export function scanWideInteger(text, requestedBase){
+export function scanWideInteger(text, requestedBase, isSpace = isWideSpace){
     let at = 0;
-    while (isWideSpace(text[at]))
+    while (isSpace(text[at]))
     {
         at++;
     }
@@ -228,6 +231,34 @@ export function scanWideInteger(text, requestedBase){
         at++;
     }
     return at === start ? null : { magnitude, negative, end: at };
+}
+
+/**
+ * atoi's reading of a wide string, as `_wtoi` in the guest reads it: the
+ * white space `isSpace` names, a sign, ASCII digits, the value wrapping in
+ * 32 bits.
+ *
+ * @param {string} text
+ * @param {(character: string | undefined) => boolean} isSpace
+ */
+export function wideAtoi(text, isSpace){
+    let at = 0;
+    while (isSpace(text[at]))
+    {
+        at++;
+    }
+    const negative = text[at] === '-';
+    if (negative || text[at] === '+')
+    {
+        at++;
+    }
+    let total = 0;
+    while (at < text.length && text[at] >= '0' && text[at] <= '9')
+    {
+        total = (Math.imul(total, 10) + text.charCodeAt(at) - 0x30) | 0;
+        at++;
+    }
+    return negative ? (0 - total) | 0 : total;
 }
 
 /** As much of a floating-point literal as C recognises, and where it ends. */
@@ -306,6 +337,15 @@ export function scanDecimal(text){
  * the runtime's table: a symbol, so it is no export a program could name.
  */
 export const STANDARD_NUMBERS = Symbol('standard numbers');
+
+/**
+ * The key a factory of the wide integer readings is carried under in the
+ * runtime's table, for a runtime that reads them as msvcrt does but skips
+ * other white space before the number (ntdll's: the Latin-1 blanks alone).
+ * Given that rule it answers `_wtoi`, `_wtol`, `_wtoi64`, `wcstol` and
+ * `wcstoul`, read by the host.
+ */
+export const WIDE_READINGS = Symbol('wide readings');
 
 /**
  * A hexadecimal significand's digits and the power of two they are scaled
@@ -495,15 +535,18 @@ export function createConversionFunctions(host){
      * @param {(negative: boolean) => bigint} limit
      * @param {boolean} [wide]  A wide string, two bytes a character.
      * @param {boolean} [quadword]  An __int64 answer, its high half in EDX.
+     * @param {(character: string | undefined) => boolean} [isSpace]  The
+     *        white space a wide reading skips first.
      */
-    const strtoInteger = (argBytes, convert, limit, wide = false, quadword = false)=>({
+    const strtoInteger = (argBytes, convert, limit, wide = false, quadword = false,
+        isSpace = isWideSpace)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
         handler: ([string, end, base])=>{
             const scanned = wide
                 ? scanWideInteger(wideStringAt(/** @type {(address: number, length: number)
-                    => Uint8Array} */ (host.readMemory), string), base | 0)
+                    => Uint8Array} */ (host.readMemory), string), base | 0, isSpace)
                 : scanInteger(readString(string), base | 0);
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
@@ -863,6 +906,31 @@ export function createConversionFunctions(host){
 
             _wtoi: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
             _wtol: guestEntry(inGuest._wtoi, COMPILED._wtoi, entryHost),
+
+            /**
+             * The same readings with another runtime's white space, read by
+             * the host: `_wtoi` and `_wtol` wrap in 32 bits as atoi does,
+             * `_wtoi64` clamps as `_wcstoi64` does.
+             *
+             * @param {(character: string | undefined) => boolean} isSpace
+             */
+            [WIDE_READINGS]: (/** @type {(character: string | undefined) => boolean} */
+                isSpace)=>{
+                const int64 = strtoInteger(12, toInt64, int64Limit, true, true, isSpace);
+                const atoi = { convention: 'cdecl', argBytes: 4,
+                    handler: (/** @type {number[]} */ [string])=>wideAtoi(
+                        wideStringAt(readMemory, string), isSpace) };
+                return {
+                    _wtoi: atoi,
+                    _wtol: atoi,
+                    _wtoi64: { convention: 'cdecl', argBytes: 4,
+                        handler: (/** @type {number[]} */ [string])=>
+                            int64.handler([string, 0, 10]) },
+                    wcstol: strtoInteger(12, toLong, longLimit, true, false, isSpace),
+                    wcstoul: strtoInteger(12, toUnsignedLong, unsignedLongLimit, true, false,
+                        isSpace),
+                };
+            },
         } : {},
 
         /** wchar_t *_itow(int value, wchar_t *buffer, int radix) -- _ltoa's text, wide */

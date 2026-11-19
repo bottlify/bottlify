@@ -36,8 +36,13 @@
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
-import { askChild, childThread } from './cross-process.js';
+import { childThread } from './cross-process.js';
+import { createProcessMemory } from './process-memory.js';
+import { debuggeeFor } from './debug-events.js';
+import { grantedAccess } from './access.js';
+import { createProcessTarget } from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
+import { dropUnclaimed } from './pipes.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -46,14 +51,12 @@ const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
-/** ReadProcessMemory of a range nothing is at. */
-const ERROR_PARTIAL_COPY = 299;
+const ERROR_DIRECTORY = 267;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_OBJECT_NAME_EXISTS = 5010;
-const ERROR_NOACCESS = 998;
 /** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
 const PROCESS_NAME_NATIVE = 1;
 /** CreateProcess's flag saying the environment block is UTF-16. */
@@ -105,6 +108,8 @@ const ATTRIBUTE_LIST_HEADER = 20;
 const ATTRIBUTE_ENTRY = 12;
 /** The attribute that names the handles a child inherits, and none else. */
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002;
+/** The jobs a child is made in besides those it inherits (Windows 10 on). */
+const PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x2000d;
 /** CreateProcess's flag: the STARTUPINFO is a STARTUPINFOEX, its attribute list behind it. */
 const EXTENDED_STARTUPINFO_PRESENT = 0x80000;
 /**
@@ -127,10 +132,10 @@ const ATTRIBUTE_SIZES = new Map([
     [0x00020019, size=>size === 2],
 ]);
 
-/** dwCreationFlags, the one bit that changes what a create does here. */
+/** dwCreationFlags: a child that starts suspended. */
 const CREATE_SUSPENDED = 0x00000004;
-const DEBUG_PROCESS = 0x00000001;
-const DEBUG_ONLY_THIS_PROCESS = 0x00000002;
+/** A child that asks to leave the jobs its parent is in, where they allow it. */
+const CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
 const STARTF_USESTDHANDLES = 0x00000100;
@@ -212,6 +217,8 @@ const directoryOf = path=>path.slice(0, Math.max(
 /**
  * @typedef {Object} SpawnerHost
  * @property {any} kernel                        The kernel layer's API.
+ * @property {() => any} [debugObject]  The calling thread's debug object, made if it has
+ *           none: what a child started with DEBUG_PROCESS reports through.
  * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
  *           Whether a path names a file on the volume. Case is folded there.
  * @property {() => string} imagePath
@@ -459,10 +466,13 @@ export function createSpawner(host){
             made.handle = kernel.handles.open('process', made);
             made.threadHandle = kernel.handles.open('process-thread',
                 childThread(made, made.threadId));
-            // A child its parent debugs reports its creation and its exit to
-            // WaitForDebugEvent.
-            made.debugEvents = (flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) !== 0
-                ? ['create', 'exit'] : null;
+            // A child its parent debugs reports to it (`debug-events.js`).
+            made.debugged = debuggeeFor(flags, host.debugObject);
+            // DEBUG_ONLY_THIS_PROCESS sets its NoDebugInherit, which only
+            // ProcessDebugFlags tells, and which a detach leaves set.
+            made.noDebugInherit = made.debugged?.onlyThis === true;
+            // Whether it asked to break away from its parent's jobs.
+            made.breakaway = (flags & CREATE_BREAKAWAY_FROM_JOB) !== 0;
             // A child starts where Windows starts it: in the directory asked
             // for, else in its parent's current one -- which is where the
             // paths on its command line, and the libraries it loads by bare
@@ -502,6 +512,10 @@ export function createSpawner(host){
  *           that asked for it, so this is where the evidence has to be taken.
  * @property {() => string} [currentDirectory]
  *           The process's current directory, for the spawner this builds.
+ * @property {() => boolean} [breakawayRefused]  Whether a job this process is in
+ *           keeps its children: CREATE_BREAKAWAY_FROM_JOB is then refused.
+ * @property {(handles: number[]) => any[] | null} [jobsListed]  The jobs a
+ *           PROC_THREAD_ATTRIBUTE_JOB_LIST names, null when one names none.
  * @property {Spawner} [spawner]
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
@@ -527,6 +541,8 @@ export function createSpawner(host){
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
+ * @property {import('./process-memory.js').PageState} [pageState]  VirtualQuery's
+ *           answer for a page, which a copy between processes goes through.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose STARTUPINFO and
  *           PROCESS_INFORMATION hold eight-byte handles; absent, 4.
  */
@@ -559,32 +575,24 @@ export function createSpawnFunctions(host){
         }
     };
 
-    /**
-     * A call made in the child a handle names, where it runs
-     * (`cross-process.js`): ERROR_INVALID_HANDLE for a handle that names no
-     * child, ERROR_ACCESS_DENIED for one the run cannot reach.
-     *
-     * @param {number} handle @param {import('./cross-process.js').CrossCall} call
-     * @param {(number | null)[]} into
-     */
-    const inChild = (handle, call, into)=>{
-        const target = processOf(handle);
-        if (!target)
-        {
-            host.setLastError(ERROR_INVALID_HANDLE);
-            return 0;
-        }
-        const asked = host.currentThread && host.setLastErrorFor ? askChild({
-            askChild: host.askChild, writeMemory: host.writeMemory,
-            currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor,
-        }, target, call, into) : null;
-        if (asked === null)
-        {
-            host.setLastError(ERROR_ACCESS_DENIED);
-            return 0;
-        }
-        return asked;
-    };
+    /** The process a handle names, if it carries the right asked. */
+    const processTarget = createProcessTarget({ kernel,
+        processId: ()=>(host.processId ?? 0x1000) >>> 0 });
+
+    /** Reading and writing a process's memory, this one or a child's. */
+    const processMemory = createProcessMemory({
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        ...host.patchMemory ? { patchMemory: host.patchMemory } : {},
+        // Without VirtualQuery's answers every mapped page is taken as
+        // writable: a read of one that is not there still finds that out.
+        pageState: host.pageState ?? (()=>({ state: 0x1000, protect: 0x04 })),
+        processTarget,
+        setLastError: host.setLastError,
+        ...host.askChild ? { askChild: host.askChild } : {},
+        ...host.currentThread ? { currentThread: host.currentThread } : {},
+        ...host.setLastErrorFor ? { setLastErrorFor: host.setLastErrorFor } : {},
+    });
 
     /** @param {number} address */
     const readDword = address=>{
@@ -816,7 +824,17 @@ export function createSpawnFunctions(host){
      * @param {number} startup @param {number} flags
      * @returns {number[] | null}
      */
-    const handleList = (startup, flags)=>{
+    const handleList = (startup, flags)=>attributeHandles(startup, flags,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST);
+
+    /**
+     * The handles a STARTUPINFOEX's attribute list gives an attribute of
+     * handles (a handle list, a job list), null where it names none.
+     *
+     * @param {number} startup @param {number} flags @param {number} attribute
+     * @returns {number[] | null}
+     */
+    const attributeHandles = (startup, flags, attribute)=>{
         if (startup === 0 || (flags & EXTENDED_STARTUPINFO_PRESENT) === 0)
         {
             return null;
@@ -830,7 +848,7 @@ export function createSpawnFunctions(host){
         for (let at = 0; at < used; at++)
         {
             const entry = list + ATTRIBUTE_LIST_HEADER + at * ATTRIBUTE_ENTRY;
-            if (readDword(entry) === PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+            if (readDword(entry) === attribute)
             {
                 const value = readDword(entry + 8);
                 return Array.from({ length: readDword(entry + 4) >>> 2 },
@@ -838,6 +856,25 @@ export function createSpawnFunctions(host){
             }
         }
         return null;
+    };
+
+    /**
+     * Whether a path names a directory: a relative one from the current
+     * directory, as CreateProcess's lpCurrentDirectory is read.
+     *
+     * @param {string} path
+     */
+    const isDirectory = path=>{
+        const full = /^[a-z]:\\|^\\\\/i.test(path) ? path
+            : `${(host.currentDirectory?.() ?? 'C:\\').replace(/\\$/, '')}\\${path}`;
+        try
+        {
+            return host.stat?.(full)?.isDirectory === true;
+        }
+        catch (e){
+            void e;
+            return false;
+        }
     };
 
     /**
@@ -863,6 +900,28 @@ export function createSpawnFunctions(host){
             host.setLastError(refused);
             return 0;
         }
+        // A directory to start in that is not one is refused before anything
+        // is made, as Windows refuses it.
+        if (directory.trim() !== '' && !isDirectory(directory.trim()))
+        {
+            host.setLastError(ERROR_DIRECTORY);
+            return 0;
+        }
+        // A child may break away only from jobs that let it.
+        if ((flags & CREATE_BREAKAWAY_FROM_JOB) !== 0 && host.breakawayRefused?.())
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+        // The jobs it is to be made in: each must be a job (ERROR_INVALID_HANDLE).
+        const listedHandles = attributeHandles(startup >>> 0, flags,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST);
+        const jobList = listedHandles ? host.jobsListed?.(listedHandles) ?? null : [];
+        if (jobList === null)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
         const inheritedHandles = inherit && host.inheritedHandles
             ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [];
         const made = record(named ?? '', line, flags, directory, {
@@ -884,10 +943,25 @@ export function createSpawnFunctions(host){
             // them by: the pipes' ends, which every process of the run on this
             // thread holds alike. A child in a worker of its own takes none.
             inheritedHandles,
+            jobList,
         });
+        if (!made || made.completed)
+        {
+            // A child that never runs takes nothing it was handed.
+            dropUnclaimed(inheritedHandles);
+        }
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+        // A job of its list in another hierarchy refused it: it never was.
+        if (made.refused)
+        {
+            kernel.handles.close(made.handle);
+            kernel.handles.close(made.threadHandle);
+            kernel.processes.finish?.(made, 0);
+            host.setLastError(made.refused);
             return 0;
         }
         if ((information >>> 0) !== 0)
@@ -950,16 +1024,25 @@ export function createSpawnFunctions(host){
          * HANDLE OpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId)
          *
          * The processes there are: the running program, and the children it
-         * asked for. Any access is granted -- there is one user -- and an
-         * identifier that names nothing is the documented invalid parameter.
+         * asked for. The handle is granted the rights asked for -- there is one
+         * user, so nothing asked for is refused -- and an identifier that names
+         * nothing is the documented invalid parameter.
          * The program's own process comes back as the pseudo-handle every
          * other call here already understands as "this process".
          */
         OpenProcess: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, inherit, id])=>{
+            handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
+                // The handle carries the rights asked for, which the memory and
+                // thread calls through it check (`process-target.js`).
+                const access = grantedAccess('process', desired);
+                if ('error' in access)
+                {
+                    host.setLastError(access.error);
+                    return 0;
+                }
                 /** The handle, inheritable where bInheritHandle asked. @param {number} handle */
                 const kept = handle=>{
                     if (inherit !== 0)
@@ -979,7 +1062,7 @@ export function createSpawnFunctions(host){
                     // the pseudo-handle's object.
                     const self = kernel.processes.find?.(wanted)
                         ?? { kind: 'process', current: true, imagePath: host.imagePath?.() ?? '' };
-                    return kept(kernel.handles.open('process', self));
+                    return kept(kernel.handles.open('process', self, access.granted));
                 }
                 // A child, or any process of the run on this thread: a crash
                 // reporter opens the client that asked it for a dump.
@@ -990,7 +1073,7 @@ export function createSpawnFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return kept(kernel.handles.open('process', child));
+                return kept(kernel.handles.open('process', child, access.granted));
             },
         },
 
@@ -1038,7 +1121,6 @@ export function createSpawnFunctions(host){
          */
         UpdateProcThreadAttribute: {
             argBytes: 28,
-            sizes: [4],
             /** @param {number[]} args */
             handler: ([list, , attribute, value, size])=>{
                 const wanted = attribute >>> 0;
@@ -1136,119 +1218,7 @@ export function createSpawnFunctions(host){
             },
         },
 
-        /**
-         * BOOL WriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress,
-         *   LPCVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesWritten)
-         *
-         * Against the running process this writes memory. Against a child it
-         * cannot, because the child's image is not mapped -- so the write is
-         * kept as a patch and replayed at the address it names once the PE is
-         * there. That is what makes CREATE_SUSPENDED, a write, and ResumeThread
-         * work without a second address space ever existing.
-         *
-         * The bytes are copied out rather than kept as a view: the machine they
-         * came from is torn down before they are used.
-         */
-        WriteProcessMemory: {
-            argBytes: 20,
-            sizes: [3],
-            /** @param {number[]} args */
-            handler: ([handle, base, buffer, size, written])=>{
-                const count = size >>> 0;
-                const bytes = count === 0
-                    ? new Uint8Array(0)
-                    : host.readMemory(buffer >>> 0, count).slice();
-
-                if ((handle >>> 0) === CURRENT_PROCESS)
-                {
-                    if (!host.patchMemory)
-                    {
-                        host.writeMemory(base >>> 0, bytes);
-                    }
-                    else if (!host.patchMemory(base >>> 0, bytes))
-                    {
-                        host.setLastError(ERROR_NOACCESS);
-                        return 0;
-                    }
-                }
-                else
-                {
-                    // Written where the child runs, through its own protection.
-                    return inChild(handle, { call: 'WriteProcessMemory',
-                        args: [CURRENT_PROCESS, base >>> 0, { in: bytes }, count,
-                            (written >>> 0) === 0 ? 0 : { out: 4 }] },
-                    [null, null, null, null, written >>> 0]);
-                }
-
-                if ((written >>> 0) !== 0)
-                {
-                    writeDword(written >>> 0, count);
-                }
-                host.setLastError(ERROR_SUCCESS);
-                return 1;
-            },
-        },
-
-        /**
-         * BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress,
-         *   LPVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesRead)
-         *
-         * Against the running process this reads memory; against a child the
-         * same read is made in the child, where it runs. A range that leaves
-         * mapped memory is ERROR_PARTIAL_COPY, what Windows says of memory it
-         * cannot read.
-         */
-        ReadProcessMemory: {
-            argBytes: 20,
-            sizes: [3],
-            /** @param {number[]} args */
-            handler: ([handle, base, buffer, size, read])=>{
-                const count = size >>> 0;
-                const from = base >>> 0;
-                /** @type {Uint8Array | null} */
-                let bytes;
-                if ((handle >>> 0) === CURRENT_PROCESS)
-                {
-                    // A range that leaves mapped memory is ERROR_PARTIAL_COPY, not a
-                    // fault: a crash handler walks stacks through here, reading
-                    // wherever a frame pointer leads.
-                    try
-                    {
-                        bytes = count === 0 ? new Uint8Array(0)
-                            : host.readMemory(from, count).slice();
-                    }
-                    catch (e){
-                        void e;
-                        bytes = null;
-                    }
-                }
-                else
-                {
-                    return inChild(handle, { call: 'ReadProcessMemory',
-                        args: [CURRENT_PROCESS, from, (buffer >>> 0) === 0 ? 0 : { out: count },
-                            count, (read >>> 0) === 0 ? 0 : { out: 4 }] },
-                    [null, null, buffer >>> 0, null, read >>> 0]);
-                }
-                if (bytes === null)
-                {
-                    if ((read >>> 0) !== 0)
-                    {
-                        writeDword(read >>> 0, 0);
-                    }
-                    host.setLastError(ERROR_PARTIAL_COPY);
-                    return 0;
-                }
-                if (count > 0)
-                {
-                    host.writeMemory(buffer >>> 0, bytes);
-                }
-                if ((read >>> 0) !== 0)
-                {
-                    writeDword(read >>> 0, count);
-                }
-                return 1;
-            },
-        },
+        ...processMemory,
 
         /**
          * BOOL QueryFullProcessImageNameA/W(HANDLE hProcess, DWORD dwFlags,

@@ -5,10 +5,12 @@
  */
 
 import { TAKEN } from './named-objects.js';
-import { readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
-import { relocateImage } from '../../loader/internal/pe.js';
+import { imageKind, relocateImage } from '../../loader/internal/pe.js';
+import { copyOnWrite, sectionRights, viewProtection } from './view-rights.js';
+import { sectionProtection } from './image-protection.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -61,6 +63,8 @@ const WRITABLE_PAGES = [0x04, 0x08, 0x40, 0x80];
 /** The protections whose writes reach the file: the copy-on-write ones never do. */
 const FILE_WRITING_PAGES = [0x04, 0x40];
 const PAGE_SIZE = 0x1000;
+/** What an image's view is mapped with: executed, its writes its own copies. */
+const PAGE_EXECUTE_WRITECOPY = 0x80;
 
 /**
  * The SEC_* half: what a section is made as, and the attributes
@@ -82,20 +86,53 @@ const SECTION_INFORMATION_SIZES = [16, 48];
 /** GetCurrentProcess(): the one process a view is mapped into here. */
 const CURRENT_PROCESS = 0xffffffff;
 
-/** dwDesiredAccess for MapViewOfFile. */
+/** dwDesiredAccess for MapViewOfFile: a section's own rights, SECTION_* by another name. */
+const FILE_MAP_COPY = 0x0001;
 const FILE_MAP_WRITE = 0x0002;
 const FILE_MAP_READ = 0x0004;
+const FILE_MAP_EXECUTE = 0x0020;
 const FILE_MAP_ALL_ACCESS = 0xf001f;
+/**
+ * The rights a view asks of its section: FILE_MAP_COPY is SECTION_QUERY, which
+ * every one has, and SECTION_MAP_EXECUTE alone maps nothing executable -
+ * FILE_MAP_EXECUTE does - so neither is asked.
+ */
+const VIEW_RIGHTS = FILE_MAP_WRITE | FILE_MAP_READ | FILE_MAP_EXECUTE;
+
+/** A file handle's rights an executable section asks of it. */
+const FILE_EXECUTE = 0x0020;
+const GENERIC_EXECUTE = 0x20000000;
+const GENERIC_ALL = 0x10000000;
+
+/** The PAGE_* protections a section may be made with. */
+const SECTION_PAGES = [0x02, 0x04, 0x08, 0x20, 0x40, 0x80];
+
+/**
+ * The access a page protection maps a view with, NtMapViewOfSection's
+ * Win32Protect turned into MapViewOfFile's dwDesiredAccess.
+ *
+ * @param {number} page
+ */
+const accessFor = page=>{
+    const base = page & PAGE_MASK;
+    const execute = base >= 0x10 ? FILE_MAP_EXECUTE : 0;
+    return execute | ([0x04, 0x40].includes(base) ? FILE_MAP_WRITE | FILE_MAP_READ
+        : [0x02, 0x20].includes(base) ? FILE_MAP_READ
+            : [0x08, 0x80].includes(base) ? FILE_MAP_COPY : 0);
+};
 
 /**
  * A mapping object: the file it is over (null for the page file's), whether a
  * view of it can be written back, its size, and its SEC_* attributes.
  *
  * @typedef {{ node: any, writable: boolean, size: number, attributes: number,
- *     writesFile?: boolean,
- *     image?: { bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage } }}
+ *     writesFile?: boolean, protect?: number, maximum?: number,
+ *     image?: { bytes: Uint8Array, file: Uint8Array,
+ *         image: import('../../loader/internal/pe.js').PeImage } }}
  *     Section
  *     `writesFile`: its views' writes reach the file, as a copy-on-write one's do not.
+ *     `maximum`: an image section's size as it was made, which NtQuerySection answers;
+ *     its views are the whole image.
  *     `image`: a SEC_IMAGE section's file laid out as its image at its own base, and its
  *     headers: what every view shows, moved to where the view is.
  */
@@ -104,21 +141,19 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * A view of an image section: the image laid out at its own base, moved to
  * `address` - its fixups applied and its header's ImageBase made `address` -
  * as Windows' loader moves an image it cannot place at its base (one
- * mechanism with the loader's own images, `relocateImage`). Null when the
- * image has to be at its base and is not: it carries no relocations.
+ * mechanism with the loader's own images, `relocateImage`). An image that
+ * carries no relocations is mapped there as it lies, nothing fixed up, as
+ * Windows maps a section's view and answers STATUS_IMAGE_NOT_AT_BASE: the
+ * view is the program's to read, and only a loader would refuse to run it.
  *
  * @param {{ bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage }} laid
  * @param {number} address
- * @returns {Uint8Array | null}
+ * @returns {Uint8Array}
  */
 export function imageViewAt(laid, address){
-    if (address === laid.image.imageBase)
+    if (address === laid.image.imageBase || !laid.image.relocatable)
     {
         return laid.bytes.slice();
-    }
-    if (!laid.image.relocatable)
-    {
-        return null;
     }
     const bytes = laid.bytes.slice();
     relocateImage(bytes, laid.image, address);
@@ -127,8 +162,7 @@ export function imageViewAt(laid, address){
 
 /**
  * An image's sections as a view of it holds them, each with the protection
- * Windows maps it with: code read and executed, data written as the
- * process's own copy, the rest read-only.
+ * its characteristics give it, as a loaded image's (`sectionProtection`).
  *
  * @param {import('../../loader/internal/pe.js').PeImage} image
  * @returns {{ start: number, end: number, protect: number }[]}
@@ -139,8 +173,7 @@ export function imageSections(image){
         start: section.virtualAddress,
         end: section.virtualAddress + Math.ceil((section.virtualSize || section.rawSize)
             / alignment) * alignment,
-        protect: section.executable ? section.writable ? 0x80 : 0x20
-            : section.writable ? 0x08 : section.readable ? 0x02 : 0x01,
+        protect: sectionProtection(section.characteristics),
     }));
 }
 
@@ -181,9 +214,16 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *     process: number }} [sharedViews]
  *           The run's agreement between views of one page-file section, and
  *           this process's name in it (`shared-views.js`).
- * @property {Map<number, { length: number, writable: boolean,
- *     sections?: { start: number, end: number, protect: number }[] }>} [viewRegions]
- *           Every view of this process by its address, for VirtualQuery.
+ * @property {Map<number, import('./heap.js').ViewRegion>} [viewRegions]
+ *           Every view of this process by its address, for VirtualQuery and
+ *           VirtualProtect.
+ * @property {(address: number, length: number) =>
+ *     ({ take: (address: number, length: number) => number[] } | null)} [watchWrites]
+ *           The engine's watch over a range's writes (the memory layer's): a view
+ *           with copy-on-write pages is watched from its mapping, so their first
+ *           write is seen (`copies` in heap.js's ViewRegion).
+ * @property {(handle: number) => number | null} [handleAccess]  The rights a handle
+ *           was granted (a section's, FILE_MAP_*), which a view asks within.
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
@@ -198,6 +238,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {(address: number, bytes: number) => boolean} [allocateAt]
  *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
+ * @property {boolean} [machine64]  The machine runs x86-64 images: an image section
+ *           of one is taken, where a 32-bit Windows refuses it.
  * @property {4 | 8} [pointerSize]  The process's width, which a watched section's
  *           owner reads its fields by.
  * @property {{ open: (type: string, object: any) => number,
@@ -220,10 +262,128 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *           one: the file held on the section's terms, not its handle's.
  */
 
+/** SECTION_IMAGE_INFORMATION's ImageFlags. */
+const IMAGE_FLAGS = { comPlusNativeReady: 0x1, comPlusIlOnly: 0x2, dynamicallyRelocated: 0x4,
+    mappedFlat: 0x8, comPlusPrefer32bit: 0x20 };
+/** The .NET header's flags this reads. */
+const COMIMAGE_FLAGS = { ilOnly: 0x1, required32: 0x2, preferred32: 0x20000 };
+/** The COM descriptor's data directory: a .NET image's header. */
+const COM_DESCRIPTOR = 14;
+
+/**
+ * SECTION_IMAGE_INFORMATION of an image section, as NtQuerySection answers
+ * it (32-bit layout): what the loader and a process's creator read of the
+ * image before mapping it - its entry, stack, subsystem, versions,
+ * characteristics, machine, whether it holds code and how it is mapped -
+ * from the file's own headers.
+ *
+ * @param {{ bytes: Uint8Array, file: Uint8Array,
+ *     image: import('../../loader/internal/pe.js').PeImage }} laid
+ * @returns {Uint8Array}
+ */
+export function sectionImageInformation(laid){
+    const { file, image, bytes } = laid;
+    const header = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const coff = header.getUint32(0x3c, true) + 4;
+    const optional = coff + 20;
+    const u16 = (/** @type {number} */ at)=>(at + 2 <= file.length ? header.getUint16(at, true) : 0);
+    const u32 = (/** @type {number} */ at)=>(at + 4 <= file.length ? header.getUint32(at, true) : 0);
+    const wide = image.bits === 64;
+    const sizeOfCode = u32(optional + 4);
+    const flat = image.sectionAlignment % PAGE_SIZE !== 0;
+    const dllCharacteristics = u16(optional + 70);
+    // Truncated short of its directories, an optional header has no .NET one.
+    const com = image.directories[COM_DESCRIPTOR];
+    const cor = com && com.address !== 0 && com.size !== 0 ? com : null;
+    const corAt = cor && cor.size >= 72 && cor.address + 72 <= bytes.length ? cor.address : -1;
+    const corView = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const corFlags = corAt >= 0 ? corView.getUint32(corAt + 16, true) : 0;
+    const runtime = corAt >= 0
+        ? corView.getUint16(corAt + 4, true) * 0x10000 + corView.getUint16(corAt + 6, true) : 0;
+    const ilOnly = (corFlags & COMIMAGE_FLAGS.ilOnly) !== 0 && runtime >= 0x20005;
+    const code = sizeOfCode !== 0 || image.entryPointRva !== 0 || flat
+        || (image.sections.length === 1 && image.sections[0].executable);
+    const flags = (ilOnly && !wide && (corFlags & COMIMAGE_FLAGS.required32) === 0
+        ? IMAGE_FLAGS.comPlusNativeReady : 0)
+        | (ilOnly ? IMAGE_FLAGS.comPlusIlOnly : 0)
+        | (ilOnly && !wide && (corFlags & COMIMAGE_FLAGS.preferred32) !== 0
+            ? IMAGE_FLAGS.comPlusPrefer32bit : 0)
+        | ((dllCharacteristics & 0x40) !== 0 && code && !flat && !cor
+            ? IMAGE_FLAGS.dynamicallyRelocated : 0)
+        | (flat ? IMAGE_FLAGS.mappedFlat : 0);
+    const info = new Uint8Array(48);
+    const out = new DataView(info.buffer);
+    out.setUint32(0, (image.imageBase + image.entryPointRva) >>> 0, true);
+    out.setUint32(8, image.stackReserve >>> 0, true);
+    out.setUint32(12, image.stackCommit >>> 0, true);
+    out.setUint32(16, image.subsystem, true);
+    out.setUint16(20, u16(optional + 50), true); // MinorSubsystemVersion
+    out.setUint16(22, u16(optional + 48), true); // MajorSubsystemVersion
+    out.setUint16(24, u16(optional + 40), true); // MajorOperatingSystemVersion
+    out.setUint16(26, u16(optional + 42), true); // MinorOperatingSystemVersion
+    out.setUint16(28, u16(coff + 18), true); // ImageCharacteristics
+    out.setUint16(30, dllCharacteristics, true);
+    out.setUint16(32, u16(coff), true); // Machine
+    out.setUint8(34, code ? 1 : 0);
+    out.setUint8(35, flags);
+    out.setUint32(36, cor ? 1 : 0, true); // LoaderFlags
+    out.setUint32(40, file.length, true);
+    out.setUint32(44, u32(optional + 64), true); // CheckSum
+    return info;
+}
+
+/** The image machines a section takes, by the width of the image. */
+const IMAGE_MACHINES = { 32: 0x014c, 64: 0x8664 };
+
+/**
+ * What NtCreateSection(SEC_IMAGE) refuses a file with, by what its headers say
+ * it is (`imageKind`), as Windows answers each kind; null for a PE image of a
+ * machine this one runs, which the loader then lays out.
+ *
+ * @param {ReturnType<typeof imageKind>} kind
+ * @param {boolean} machine64  the machine runs x86-64 images
+ * @returns {number | null}
+ */
+export function imageRefusal(kind, machine64){
+    switch (kind.kind)
+    {
+        case 'not-mz':
+            return STATUS.INVALID_IMAGE_NOT_MZ;
+        case 'unreadable':
+            return STATUS.INVALID_IMAGE_PROTECT;
+        case 'ne':
+            // The NE header's target system: Windows 16-bit, and "Windows 386"
+            // (a VxD), are told apart from the rest.
+            return kind.system === 2 ? STATUS.INVALID_IMAGE_WIN_16
+                : kind.system === 5 ? STATUS.INVALID_IMAGE_PROTECT : STATUS.INVALID_IMAGE_NE_FORMAT;
+        default:
+            // A PE32+ one on a 32-bit Windows is refused for its width before
+            // its machine is read.
+            if (kind.bits === 64 && !machine64)
+            {
+                return STATUS.INVALID_IMAGE_WIN_64;
+            }
+            return kind.bits === null || kind.machine !== IMAGE_MACHINES[kind.bits]
+                ? STATUS.INVALID_IMAGE_FORMAT : null;
+    }
+}
+
 /**
  * @param {MappingHost} host
  */
 export function createMappingFunctions(host){
+    /**
+     * The watch a view's copy-on-write pages are written under (heap.js's
+     * `ViewRegion.copies`): begun at the mapping when the view has such pages,
+     * after its bytes are in, so only the program's writes are seen; else at
+     * the first VirtualProtect that gives one.
+     *
+     * @param {number} address @param {number} length @param {boolean} now
+     * @returns {import('./heap.js').ViewCopies}
+     */
+    const watchCopies = (address, length, now)=>({
+        watch: now ? host.watchWrites?.(address, length) ?? null : undefined,
+    });
     /**
      * Views handed out by MapViewOfFile, by the address the guest holds.
      *
@@ -316,6 +476,10 @@ export function createMappingFunctions(host){
             // would not fit in the address space it is mapped into.
             return { status: STATUS.SECTION_TOO_BIG };
         }
+        if (!SECTION_PAGES.includes(page))
+        {
+            return { status: STATUS.INVALID_PAGE_PROTECTION };
+        }
         const writable = WRITABLE_PAGES.includes(page);
         const asked = sizeLow >>> 0;
         if (!node)
@@ -325,7 +489,7 @@ export function createMappingFunctions(host){
             return (flags & SEC_IMAGE) !== 0 ? { status: STATUS.INVALID_FILE_FOR_SECTION }
                 : asked === 0 ? { status: STATUS.INVALID_PARAMETER }
                     : { node, writable, size: pageRound(asked),
-                        attributes: (committing || SEC_COMMIT) | caching };
+                        attributes: (committing || SEC_COMMIT) | caching, protect: page };
         }
         const length = host.files.size?.(node) ?? 0;
         if ((flags & SEC_IMAGE) !== 0)
@@ -335,13 +499,14 @@ export function createMappingFunctions(host){
                 return { status: STATUS.INVALID_FILE_FOR_SECTION };
             }
             return settle(host.files.read(node, 0, length), file=>{
-                if (file[0] !== 0x4d || file[1] !== 0x5a)
+                const refused = imageRefusal(imageKind(file), host.machine64 === true);
+                if (refused !== null)
                 {
-                    return { status: STATUS.INVALID_IMAGE_NOT_MZ };
+                    return { status: refused };
                 }
                 // Laid out by the loader, at the image's own base: each view
                 // is moved to where it lands (`imageViewAt`).
-                /** @type {{ bytes: Uint8Array, image: any }} */
+                /** @type {{ bytes: Uint8Array, file: Uint8Array, image: any }} */
                 let laid;
                 try
                 {
@@ -350,8 +515,15 @@ export function createMappingFunctions(host){
                 catch {
                     return { status: STATUS.INVALID_IMAGE_FORMAT };
                 }
+                // A maximum size is the section's own, its views still the
+                // whole image; one past the image is refused.
+                if (asked > laid.bytes.length)
+                {
+                    return { status: STATUS.SECTION_TOO_BIG };
+                }
                 return { node, writable: false, size: laid.bytes.length,
-                    attributes: SEC_FILE | SEC_IMAGE, image: laid };
+                    ...asked !== 0 ? { maximum: asked } : {},
+                    attributes: SEC_FILE | SEC_IMAGE, image: laid, protect: page };
             });
         }
         if (asked === 0 && length === 0)
@@ -366,7 +538,7 @@ export function createMappingFunctions(host){
         // A size of zero over a file means the file's own size, which is
         // how a program maps a file whole without asking first.
         return { node, writable, size: asked || length, attributes: SEC_FILE | caching,
-            writesFile: FILE_WRITING_PAGES.includes(page) };
+            writesFile: FILE_WRITING_PAGES.includes(page), protect: page };
     };
 
     /** @param {Section} section */
@@ -439,8 +611,15 @@ export function createMappingFunctions(host){
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
-            // A directory has no bytes to map.
-            if (opened?.directory)
+            // A directory has no bytes to map; a section asks no more of its
+            // file than its handle was opened for: writing for a read-write
+            // one, executing for an executable one.
+            const page = protect & PAGE_MASK;
+            const fileRights = opened ? host.handleAccess?.(file) ?? null : null;
+            if (opened?.directory || (opened && opened.write === false
+                    && FILE_WRITING_PAGES.includes(page))
+                || (fileRights !== null && [0x20, 0x40, 0x80].includes(page)
+                    && (fileRights & (FILE_EXECUTE | GENERIC_EXECUTE | GENERIC_ALL)) === 0))
             {
                 return fail(ERROR_ACCESS_DENIED);
             }
@@ -573,12 +752,10 @@ export function createMappingFunctions(host){
          * NTSTATUS NtOpenSection(PHANDLE SectionHandle, ACCESS_MASK,
          *   POBJECT_ATTRIBUTES ObjectAttributes)
          *
-         * A section made by name, as OpenFileMapping finds one: the object
-         * directory Win32 names live in (\BaseNamedObjects, or a session's)
-         * taken off, and the rest looked up as a Win32 call may have spelt it,
-         * bare or after Global\ or Local\. A name given relative to a
-         * directory handle is taken as one in that directory, the one a
-         * program opens for it. \Device\PhysicalMemory, which a hardware
+         * A section made by name, as OpenFileMapping finds one: the name is
+         * walked through the object namespace (`object-namespace.js`), and a
+         * Win32 name found looked up as a Win32 call may have spelt it, bare
+         * or after Global\ or Local\. \Device\PhysicalMemory, which a hardware
          * survey (Futuremark's SystemInfo) opens for the BIOS's tables, is
          * refused, as Windows has refused it to user mode since Server 2003
          * Service Pack 1.
@@ -592,18 +769,19 @@ export function createMappingFunctions(host){
                     return STATUS.ACCESS_VIOLATION;
                 }
                 const given = readObjectAttributes(host.readMemory, attributes);
-                if (given === null || given.name === null || given.name === '')
+                const walked = nameToWalk(given, true);
+                if ('status' in walked || given === null || walked.name === null)
                 {
-                    return STATUS.OBJECT_NAME_INVALID;
+                    return 'status' in walked ? walked.status : STATUS.INVALID_PARAMETER;
                 }
-                if (/^\\device\\physicalmemory$/i.test(given.name))
+                if (/^\\device\\physicalmemory$/i.test(walked.name))
                 {
                     return STATUS.ACCESS_DENIED;
                 }
-                const name = win32NameOf(given);
-                if (name === undefined)
+                const name = host.namedObjects.keyOf(given, 'mapping');
+                if (typeof name === 'number')
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return name;
                 }
                 for (const spelt of [name, `Global\\${name}`, `Local\\${name}`])
                 {
@@ -662,11 +840,11 @@ export function createMappingFunctions(host){
                     // BaseAddress, which only a based section has, Attributes, Size.
                     const fields = new DataView(info.buffer);
                     fields.setUint32(4, section.attributes >>> 0, true);
-                    fields.setUint32(8, section.size, true);
+                    fields.setUint32(8, section.maximum ?? section.size, true);
                 }
-                else
+                else if (section.image)
                 {
-                    host.divergence?.('NtQuerySection', 'image information is answered as zeros');
+                    info.set(sectionImageInformation(section.image));
                 }
                 host.writeMemory(buffer >>> 0, info);
                 writeDwordIf(returned >>> 0, size);
@@ -713,21 +891,19 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.INVALID_VIEW_SIZE;
                 }
-                const access = WRITABLE_PAGES.includes(page & PAGE_MASK) ? FILE_MAP_WRITE
-                    : FILE_MAP_READ;
-                return settle(table.MapViewOfFile.handler([handle, access, 0, offset, length]),
-                    /** @param {number} address */
-                    address=>{
-                        if (address === 0)
-                        {
-                            return section.image && !section.image.image.relocatable
-                                ? STATUS.CONFLICTING_ADDRESSES : STATUS.NO_MEMORY;
-                        }
-                        writeDword(base >>> 0, address);
-                        writeDword(sizeAt >>> 0, pageRound(length));
-                        return section.image && address !== section.image.image.imageBase
-                            ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
-                    });
+                return settle(table.MapViewOfFile.handler([handle, accessFor(page), 0, offset,
+                    length]),
+                /** @param {number} address */
+                address=>{
+                    if (address === 0)
+                    {
+                        return STATUS.NO_MEMORY;
+                    }
+                    writeDword(base >>> 0, address);
+                    writeDword(sizeAt >>> 0, pageRound(length));
+                    return section.image && address !== section.image.image.imageBase
+                        ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
+                });
             },
         },
 
@@ -784,6 +960,16 @@ export function createMappingFunctions(host){
                 if (!mapping)
                 {
                     return fail(ERROR_INVALID_HANDLE);
+                }
+                // A view asks for no more than its section's protection allows
+                // and its handle was granted; asking for nothing is reading.
+                const needs = ((access >>> 0) & VIEW_RIGHTS) || FILE_MAP_READ;
+                const granted = host.handleAccess?.(handle) ?? FILE_MAP_ALL_ACCESS;
+                const rights = sectionRights(mapping.protect ?? 0x04)
+                    & (granted | FILE_MAP_EXECUTE);
+                if ((needs & rights) !== needs)
+                {
+                    return fail(ERROR_ACCESS_DENIED);
                 }
                 const offset = offsetLow >>> 0;
                 const wanted = (length >>> 0) || Math.max(mapping.size - offset, 0);
@@ -856,9 +1042,17 @@ export function createMappingFunctions(host){
                         pointerSize: host.pointerSize ?? 4,
                     }) ?? null;
                     views.set(address, view);
-                    host.viewRegions?.set(address, { length: wanted, writable,
-                        ...mapping.image && offset === 0
-                            ? { sections: imageSections(mapping.image.image) } : {} });
+                    // An image's view is mapped PAGE_EXECUTE_WRITECOPY whatever
+                    // was asked, each section with its own protection within it.
+                    const image = mapping.image && offset === 0;
+                    const protect = image ? PAGE_EXECUTE_WRITECOPY : viewProtection(access >>> 0);
+                    const sections = image ? imageSections(mapping.image.image) : undefined;
+                    host.viewRegions?.set(address, { length: wanted, writable, protect,
+                        anonymous: !mapping.node, pages: new Map(),
+                        copies: watchCopies(address, wanted,
+                            sections ? sections.some(each=>copyOnWrite(each.protect))
+                                : copyOnWrite(protect)),
+                        ...sections ? { sections } : {} });
                     if (metrics)
                     {
                         metrics.views++;
@@ -877,14 +1071,8 @@ export function createMappingFunctions(host){
                 if (mapping.image)
                 {
                     // Held as a view of the file is, and given back at its unmap.
-                    // The image moved to where its view starts, or refused
-                    // there when it carries no fixups to move it with.
+                    // The image moved to where its view starts.
                     const image = imageViewAt(mapping.image, address - offset);
-                    if (!image)
-                    {
-                        host.release(address);
-                        return fail(ERROR_INVALID_ADDRESS);
-                    }
                     host.files.retain(mapping.node);
                     return deliver(image.subarray(offset, offset + wanted));
                 }

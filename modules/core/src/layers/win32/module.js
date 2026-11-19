@@ -11,12 +11,14 @@ import { createFiberLocalStorage } from './kernel32/fls.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
+import { DEBUG_EVENT, attachEvents, createDebuggerFunctions } from './kernel32/debug-events.js';
 import {
-    ALIGNMENT_64, GLOBAL_MEMORY, PAGE_STATE, TABLES, createHeapAllocator, createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, IMAGE_MAPPED, PAGE_STATE, TABLES,
+    createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
-import { SKIP_THREAD_ATTACH, blockLayouts } from './kernel32/teb.js';
+import { SKIP_THREAD_ATTACH, TEB, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -35,7 +37,9 @@ import {
     defaultEnvironment, machineArchitecture, sessionEnvironment,
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
-import { serveCall } from './kernel32/cross-process.js';
+import { DEBUG_ATTACH, DEBUG_BREAK, serveCall } from './kernel32/cross-process.js';
+import { VIRTUAL_MEMORY } from './kernel32/process-memory.js';
+import { CURRENT_PROCESS, createProcessTarget } from './kernel32/process-target.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions, imageBits } from './kernel32/system.js';
 import { createActivationContexts } from './kernel32/actctx.js';
@@ -61,7 +65,7 @@ import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
 import { createMailslots } from './kernel32/mailslots.js';
-import { createNamedPipes } from './kernel32/pipes.js';
+import { PIPE_CLIENT, createNamedPipes, dropUnclaimed } from './kernel32/pipes.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
 import { createFileTimeFunctions, msToFileTime } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
@@ -402,6 +406,8 @@ const d3dx10Libraries = (d3dx9, host)=>{
 const AVRT_TASK_HANDLE = 0x41565254;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
+/** What a call the process cannot make here answers. */
+const ERROR_NOT_SUPPORTED = 50;
 /** Every right a token has, which a service asks of the user's token for its programs. */
 const TOKEN_ALL_ACCESS = 0x000f01ff;
 
@@ -581,6 +587,35 @@ export function createWin32Module(){
             // 64-bit processes always do: a 32-bit process on it runs under
             // WOW64 (`roadmap/x64.md`).
             const machine64 = config?.machine === 'amd64' || pointerSize === 8;
+            /**
+             * This process's debugger while one hears it: from its start, or
+             * since one attached (`debug-events.js`); null otherwise.
+             *
+             * @returns {{ report: (report: any) => Promise<number> } | null}
+             */
+            const debuggerNow = ()=>(debuggerEar && (config?.debugger?.debugged?.() ?? true)
+                ? debuggerEar : null);
+            /**
+             * Every event goes to the debugger with the whole process stopped
+             * until it is continued, as Windows' debug object freezes a
+             * debuggee for each event it holds: the threads alive as it is
+             * reported are frozen once and thawed once by its answer, their
+             * suspend counts as they were (`freezeThread`).
+             * Events reported together - an attach's - hold the process until
+             * the last is continued, and a thread made meanwhile is stopped by
+             * its own CREATE_THREAD.
+             */
+            const debuggerEar = config?.debugger ? {
+                /** @param {any} report @returns {Promise<number>} */
+                report: report=>{
+                    const held = kernel.threads().filter((/** @type {any} */ thread)=>
+                        thread.state !== kernel.ThreadState?.TERMINATED);
+                    held.forEach((/** @type {any} */ thread)=>kernel.freezeThread(thread));
+                    return Promise.resolve(/** @type {any} */ (config.debugger).report(report))
+                        .finally(()=>held.forEach((/** @type {any} */ thread)=>
+                            kernel.thawThread(thread)));
+                },
+            } : null;
             // The thread and process blocks a handler reads, at that width.
             const blocks = blockLayouts(pointerSize);
 
@@ -613,7 +648,74 @@ export function createWin32Module(){
                 config?.threadBlock?.(thread);
                 // Its block made, the creator's active context goes on it.
                 activation.loaderApi.inherit(thread?.tebAddress ?? 0);
+                // Told to the debugger as it is made, without the creator
+                // waiting for the answer (`debug-events.js`).
+                debuggerNow()?.report({ code: DEBUG_EVENT.CREATE_THREAD,
+                    threadId: thread?.id >>> 0,
+                    start: (thread?.start ?? thread?.entry ?? 0) >>> 0 });
             };
+            /**
+             * A debugger's break into this process: a thread of its own that
+             * runs DbgUiRemoteBreakin, whose DbgBreakPoint the debugger hears
+             * from it and whose frame ends the thread when the debugger
+             * declines it (DebugBreakProcess, and the last of an attach). A
+             * 64-bit process's thread runs DbgBreakPoint itself.
+             *
+             * @returns {number}
+             */
+            const breakIn = ()=>{
+                const kernel32 = libraries['KERNEL32.dll'];
+                const at = modules.find('ntdll.dll')?.addressOf?.(pointerSize === 8
+                    ? 'DbgBreakPoint' : 'DbgUiRemoteBreakin') ?? 0;
+                const made = at === 0 ? 0
+                    : kernel32.CreateThread.handler([0, 0, at, 0, 0, 0]) >>> 0;
+                if (made === 0)
+                {
+                    kernel32.SetLastError.handler([ERROR_NOT_SUPPORTED]);
+                    return 0;
+                }
+                kernel32.CloseHandle.handler([made]);
+                return 1;
+            };
+            /**
+             * A debugger has attached to this process (DebugActiveProcess): it
+             * is told what the process already is (`attachEvents`), the process
+             * block says it is debugged, and it breaks in. Only a process its
+             * debugger hears - one run beside it - can be attached to.
+             *
+             * @returns {number}
+             */
+            const debugAttached = ()=>{
+                const kernel32 = libraries['KERNEL32.dll'];
+                const ear = debuggerNow();
+                const first = kernel.threads()[0];
+                if (!ear || !first)
+                {
+                    kernel32.SetLastError.handler([ERROR_NOT_SUPPORTED]);
+                    return 0;
+                }
+                const { teb, peb, pointer } = blockLayouts(pointerSize);
+                const block = new DataView(readMemory((first.tebAddress ?? 0) + teb.PEB, pointer)
+                    .slice().buffer).getUint32(0, true);
+                if (block !== 0)
+                {
+                    writeMemory(block + peb.BEING_DEBUGGED, Uint8Array.of(1));
+                }
+                const image = /** @type {any} */ (modules.find(null));
+                const listed = /** @type {any[]} */ (modules.list?.() ?? []);
+                for (const report of attachEvents({
+                    mainThreadId: (config?.mainThreadId ?? first.id) >>> 0,
+                    image: { base: image?.base >>> 0, start: (image?.entryPoint ?? 0) >>> 0 },
+                    ntdll: /** @type {any} */ (modules.find('ntdll.dll'))?.base >>> 0,
+                    libraries: listed.map(module=>module.base >>> 0),
+                    threads: kernel.threads().map((/** @type {any} */ thread)=>thread.id >>> 0),
+                }))
+                {
+                    ear.report(report);
+                }
+                return breakIn();
+            };
+
             /**
              * The string values of an environment key in the registry: the
              * machine's or the user's, as a session's block is built from them.
@@ -662,8 +764,9 @@ export function createWin32Module(){
             // Across a link the run's namespace is asked there, and the
             // objects here are stand-ins for the run's (`system-objects.js`).
             const runObjects = system?.objects
-                ? createRemoteNamedObjects({ objects: system.objects, kernel })
-                : createNamedObjects({ table: system?.namedObjects });
+                ? createRemoteNamedObjects({ objects: system.objects, kernel,
+                    handles: kernel.handles })
+                : createNamedObjects({ table: system?.namedObjects, handles: kernel.handles });
             leaveNames = ()=>runObjects.ended(object=>kernel.forsake?.(object));
             // The objects a running Steam client offers by name (its
             // SteamStart lock and section), made when a process first opens
@@ -708,8 +811,7 @@ export function createWin32Module(){
             };
             // This process's views of sections, by address: mapping.js keeps
             // them, VirtualQuery answers them as the regions they are.
-            /** @type {Map<number, { length: number, writable: boolean,
-             *     sections?: { start: number, end: number, protect: number }[] }>} */
+            /** @type {Map<number, import('./kernel32/heap.js').ViewRegion>} */
             const viewRegions = new Map();
             /** @param {number} at */
             const viewAt = at=>{
@@ -738,8 +840,10 @@ export function createWin32Module(){
                         return null;
                     }
                 },
-                open: (/** @type {string} */ type, /** @type {any} */ object)=>
-                    kernel.handles.open(type, object),
+                open: (/** @type {string} */ type, /** @type {any} */ object,
+                    /** @type {number | null} */ access = null)=>
+                    kernel.handles.open(type, object, access),
+                access: (/** @type {number} */ handle)=>kernel.handles.access(handle),
                 close: (/** @type {number} */ handle)=>kernel.handles.close(handle),
             };
             system?.processTables?.set(processId, table);
@@ -753,6 +857,18 @@ export function createWin32Module(){
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
+            /** @type {ReturnType<typeof createDebuggerFunctions> | null} */
+            let debuggerSide = null;
+            /**
+             * The jobs' ears: told of a child that exited and of a job's handle
+             * closed (`kernel32/process-policy.js`), once the jobs are made.
+             *
+             * @type {{ exited: (process: any, code: number) => void,
+             *     closed: (job: any) => void, started: (process: any) => void,
+             *     refusesBreakaway: () => boolean,
+             *     listed: (handles: number[]) => any[] | null } | null}
+             */
+            let jobEvents = null;
             /** Whether CreateProcessWithLogonW has said it checks no password. */
             let loggedOnSaid = false;
             /**
@@ -1004,10 +1120,12 @@ export function createWin32Module(){
 
             /** Everything a table needs from the kernel's handle table. */
             const handles = {
-                /** @param {string} type @param {any} object */
-                open: (type, object)=>kernel.handles.open(type, object),
+                /** @param {string} type @param {any} object @param {number | null} [access] */
+                open: (type, object, access)=>kernel.handles.open(type, object, access),
                 /** @param {number} handle @param {string} [type] */
                 resolve: (handle, type)=>kernel.handles.resolve(handle, type),
+                /** The rights a handle holds, null for every one. @param {number} handle */
+                access: handle=>kernel.handles.access?.(handle) ?? null,
                 /** @param {number} handle */
                 close: handle=>kernel.handles.close(handle),
                 /** @param {number} handle */
@@ -1227,9 +1345,10 @@ export function createWin32Module(){
              * endThread's rest, once the fibre-local values are called back.
              *
              * @param {any} thread @param {number} code @param {boolean} others
+             * @param {boolean} [heard]  its debugger has heard of its end
              * @returns {Promise<number> | null}
              */
-            const tellAndEnd = (thread, code, others)=>{
+            const tellAndEnd = (thread, code, others, heard = false)=>{
                 if (!others && exitCode === null)
                 {
                     // On this thread, which goes on standing while they are told.
@@ -1239,6 +1358,15 @@ export function createWin32Module(){
                         kernel.exitThread(thread, code, true);
                     }
                     return told;
+                }
+                // A debuggee's thread ending tells its debugger first and
+                // waits for the answer (`debug-events.js`).
+                const debugged = others && !heard ? debuggerNow()?.report({
+                    code: DEBUG_EVENT.EXIT_THREAD, threadId: thread.id >>> 0,
+                    exitCode: code >>> 0 }) : null;
+                if (debugged)
+                {
+                    return debugged.then(()=>tellAndEnd(thread, code, others, true) ?? 0);
                 }
                 const walk = others && threadCalls.pending() ? threadCalls.walk() : 0;
                 if (walk === 0)
@@ -1312,22 +1440,9 @@ export function createWin32Module(){
                 }
             };
 
-            /**
-             * The child a process handle names, for a call made in it; null
-             * for this process's pseudo-handle and for anything not a child.
-             *
-             * @param {number} handle
-             */
-            const childProcessOf = handle=>{
-                try
-                {
-                    return kernel.handles.resolve(handle >>> 0, 'process');
-                }
-                catch (e){
-                    void e;
-                    return null;
-                }
-            };
+            // The process a handle names, this one or a child, if the handle
+            // carries the right a call needs (`kernel32/process-target.js`).
+            const processTarget = createProcessTarget({ kernel, processId: ()=>processId });
 
             // Built before the tables because two of them need it: the completion
             // port a program waits on, and the file calls that owe it a packet when
@@ -1413,6 +1528,7 @@ export function createWin32Module(){
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
                 park: ()=>bridge.park(),
+                alertably: (alertable, wait, answer)=>apcs.waitWith(alertable, wait, answer),
                 table: system?.namedObjects ?? null,
                 // A process in a worker of its own holds stand-ins of the
                 // run's objects, never the objects a pipe's ends are.
@@ -1436,7 +1552,22 @@ export function createWin32Module(){
                         void e;
                     }
                 },
+                /** @param {number} handle */
+                resetEvent: handle=>{
+                    try
+                    {
+                        kernel.resetEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        // An OVERLAPPED whose hEvent names no event: the I/O
+                        // goes on, its completion sets nothing either.
+                        void e;
+                    }
+                },
                 queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                // CallNamedPipe's steps, each the export a program would call.
+                call: (name, args, thread)=>bridge.answering(thread,
+                    ()=>/** @type {any} */ (libraries['KERNEL32.dll'])[name].handler(args)),
                 divergence: config?.divergence,
             });
 
@@ -1450,7 +1581,7 @@ export function createWin32Module(){
                 if (inherited.type === 'pipe'
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
-                    pipes.adopted(inherited.handle, inherited.object);
+                    pipes.adopted(inherited.handle, inherited.object, inherited);
                 }
                 // An object inherited is inheritable again, as the parent's was.
                 else if (INHERITED_KINDS.has(inherited.type)
@@ -2306,8 +2437,19 @@ export function createWin32Module(){
                 dispatcherHandler: ()=>(dispatcherFrameTrap ||= bridge.register(
                     '<exception dispatcher frame>', { argBytes: 0, handler: ()=>1 })),
                 currentThread: ()=>kernel.currentThread(),
+                // Read when a fault asks: kernel32's table is built after this.
+                guardPages: {
+                    touch: address=>Boolean(/** @type {any} */ (libraries['KERNEL32.dll'])?.[
+                        GUARD_PAGES]?.touch(address)),
+                    commitGuard: page=>Boolean(/** @type {any} */ (libraries['KERNEL32.dll'])?.[
+                        GUARD_PAGES]?.commitGuard(page)),
+                },
                 /** @param {string} text */
                 trace: text=>trace(text),
+                // Its debugger, when its parent debugs it (`debug-events.js`).
+                ...config?.debugger ? { debugReport: (/** @type {any} */ report)=>
+                    /** @type {any} */ (debuggerEar).report(report), debugged: ()=>debuggerNow() !== null }
+                    : {},
                 // What Windows does once nothing handled an exception and the
                 // last-chance filter declined it: the process ends, with the
                 // exception's code as its exit code.
@@ -2916,6 +3058,7 @@ export function createWin32Module(){
             // it named, which needs the image found the same way in both.
             const spawner = createSpawner({
                 kernel,
+                debugObject: ()=>/** @type {any} */ (debuggerSide).connect(),
                 /** @param {string} path */
                 stat: path=>volume.stat(path),
                 // A child is recorded with a full path, because everything that
@@ -2928,7 +3071,11 @@ export function createWin32Module(){
                 // this process, because honouring one erases every log and ring the
                 // run that asked for it produced.
                 /** @param {any} request */
-                spawned: request=>config?.spawned?.(request),
+                spawned: request=>{
+                    // A child of a process in a job is in the job too.
+                    jobEvents?.started(request);
+                    config?.spawned?.(request);
+                },
                 currentDirectory: ()=>filesystem.currentDirectory(),
             });
 
@@ -3057,6 +3204,12 @@ export function createWin32Module(){
             /** Set once the process has begun to end, so that it ends only once. */
             let ending = false;
             /**
+             * Set once the process has begun to end - NtTerminateProcess with no
+             * handle, or ExitProcess - after which no thread is made in it
+             * (CreateThread's ERROR_ACCESS_DENIED, as Windows refuses one).
+             */
+            let terminating = false;
+            /**
              * ExitProcess, and the C runtime's exits that end in it: every other
              * thread ends, each image still attached is told DLL_PROCESS_DETACH
              * on this thread -- the last attached first, its TLS callbacks before
@@ -3084,9 +3237,8 @@ export function createWin32Module(){
              * @returns {Promise<number> | null}
              */
             const detachAndEnd = code=>{
-                /** @type {{ base: number, routines: number[] }[]} */
-                const attached = ending ? [] : (modules.processDetach?.() ?? []);
-                ending = true;
+                terminating = true;
+                const attached = shuttingDown();
                 if (attached.length === 0)
                 {
                     exitCode = code;
@@ -3101,20 +3253,59 @@ export function createWin32Module(){
                         kernel.exitThread(thread, code);
                     }
                 }
+                return tellDetach(attached, self).then(()=>{
+                    exitCode = code;
+                    processEnded();
+                    return 0;
+                });
+            };
+
+            /**
+             * The images still attached, the last attached first, taken once:
+             * from here the process is shutting down (RtlDllShutdownInProgress)
+             * and a later ExitProcess tells no image again.
+             *
+             * @returns {{ base: number, routines: number[] }[]}
+             */
+            const shuttingDown = ()=>{
+                const attached = ending ? [] : (modules.processDetach?.() ?? []);
+                ending = true;
+                return attached;
+            };
+
+            /**
+             * Tells each image DLL_PROCESS_DETACH on `thread`, in turn, with
+             * lpvReserved non-NULL as at a process's end.
+             *
+             * @param {{ base: number, routines: number[] }[]} attached @param {any} thread
+             * @returns {Promise<any>}
+             */
+            const tellDetach = (attached, thread)=>{
                 /** @type {Promise<any>} */
                 let told = Promise.resolve(0);
                 for (const image of attached)
                 {
                     told = told.then(()=>callEntryPoint({
                         routines: image.routines, base: image.base,
-                        reason: DLL_PROCESS_DETACH, reserved: 1, thread: self,
+                        reason: DLL_PROCESS_DETACH, reserved: 1, thread,
                     }));
                 }
-                return told.then(()=>{
-                    exitCode = code;
-                    processEnded();
-                    return 0;
-                });
+                return told;
+            };
+
+            /**
+             * LdrShutdownProcess: what ExitProcess does before it ends the
+             * process - each image still attached told DLL_PROCESS_DETACH on
+             * this thread, and the process shutting down from then on - with
+             * the process going on and its other threads left as they are, as
+             * the native call does; an image is never told twice.
+             */
+            const processShutdown = {
+                inProgress: ()=>ending,
+                begin: ()=>tellDetach(shuttingDown(), kernel.currentThread()),
+                terminate: ()=>{
+                    terminating = true;
+                },
             };
 
             // comctl32's image lists, drawn with gdi32's own calls: its exports,
@@ -3339,6 +3530,46 @@ export function createWin32Module(){
                 // A modal sheet's own loop, which user32 lends it.
                 modal: (hwnd, options)=>windowService.modalLoop(hwnd, options),
             });
+            // The debugger's side of debugging a child: the events a child
+            // started with DEBUG_PROCESS reports, each stopping its thread until
+            // continued (`debug-events.js`).
+            debuggerSide = createDebuggerFunctions({
+                kernel,
+                writeMemory,
+                setLastError: setError,
+                setLastErrorFor: setErrorOn,
+                currentThread: ()=>kernel.currentThread(),
+                park: (/** @type {any} */ thread)=>bridge.park(thread),
+                divergence: config?.divergence,
+                windows,
+                processId,
+                askChild,
+                debugged: ()=>debuggerNow() !== null,
+                breakIn,
+                terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
+                    config?.terminate?.(child, code) === true,
+                readMemory,
+                // DbgSsReserved[1] of the calling thread's block; a 64-bit
+                // thread's has no slot here yet, and keeps none.
+                threadDebugObject: {
+                    get: ()=>{
+                        const block = pointerSize === 8 ? 0
+                            : kernel.currentThread()?.tebAddress ?? 0;
+                        return block === 0 ? 0 : new DataView(readMemory(block + TEB.DEBUG_OBJECT,
+                            4).slice().buffer).getUint32(0, true);
+                    },
+                    set: (/** @type {number} */ handle)=>{
+                        const block = pointerSize === 8 ? 0
+                            : kernel.currentThread()?.tebAddress ?? 0;
+                        if (block !== 0)
+                        {
+                            writeMemory(block + TEB.DEBUG_OBJECT, Uint8Array.of(handle & 0xff,
+                                handle >>> 8 & 0xff, handle >>> 16 & 0xff, handle >>> 24 & 0xff));
+                        }
+                    },
+                },
+            });
+            endTasks.push(()=>debuggerSide?.debuggerEnded());
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
             // file calls and setupapi's alike. Every layer's, not only this
@@ -3383,6 +3614,7 @@ export function createWin32Module(){
                         // a stub and a build that never makes a thread needs none.
                         threadReturn: ()=>threadReturnAddress(),
                         threadStart: ()=>threadCalls.start(),
+                        terminating: ()=>terminating,
                         endThread,
                         processId,
                         parentProcessId: config?.parentProcessId,
@@ -3437,14 +3669,31 @@ export function createWin32Module(){
                         readCString,
                         readWideString,
                         say: text=>trace(text),
+                        beingDebugged: ()=>{
+                            const { teb, peb, pointer } = blockLayouts(pointerSize);
+                            const block = kernel.currentThread()?.tebAddress ?? 0;
+                            if (!block)
+                            {
+                                return false;
+                            }
+                            const at = new DataView(readMemory(block + teb.PEB, pointer).slice()
+                                .buffer).getUint32(0, true);
+                            return at !== 0 && readMemory(at + peb.BEING_DEBUGGED, 1)[0] !== 0;
+                        },
+                        // Told to its debugger too, when its parent debugs it.
+                        ...config?.debugger ? { report: (/** @type {any} */ report)=>
+                            /** @type {any} */ (debuggerEar).report({ ...report,
+                                threadId: kernel.currentThread()?.id >>> 0 }),
+                        debugged: ()=>debuggerNow() !== null } : {},
                     }),
+                    ...debuggerSide.functions,
                     ...createHeapFunctions({
                         pointerSize,
                         arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
                         reach: arenaReach,
                         guestHeap,
                         // A child's memory, reached where the child runs.
-                        childOf: childProcessOf,
+                        processTarget,
                         askChild,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
@@ -3562,6 +3811,8 @@ export function createWin32Module(){
                     ...createSyncFunctions({
                         pointerSize,
                         processId,
+                        debugged: ()=>debuggerNow() !== null,
+                        windows,
                         kernel,
                         namedObjects,
                         float: floatStates,
@@ -3591,6 +3842,34 @@ export function createWin32Module(){
                             .map(name=>[name, cpuRegisters.read(name)])),
                         setRegisters,
                         divergence: config?.divergence,
+                        // A job's processes ended as TerminateProcess ends one:
+                        // through a handle of the moment, or this process's own.
+                        // A job tells the completion port it was associated with.
+                        postCompletion: (port, packet)=>ports.postTo(port, packet),
+                        // The waits CancelSynchronousIo can cut short: a pipe's.
+                        cancelSynchronous: (/** @type {any} */ thread,
+                            /** @type {number | undefined} */ block)=>
+                            pipes.cancelSynchronous(thread, block),
+                        listenJobs: events=>{
+                            jobEvents = events;
+                        },
+                        terminateProcess: (process, code)=>{
+                            const terminate = /** @type {any} */ (libraries['KERNEL32.dll'])
+                                .TerminateProcess;
+                            if (process === null)
+                            {
+                                return terminate.handler([CURRENT_PROCESS, code]);
+                            }
+                            const handle = kernel.handles.open('process', process);
+                            try
+                            {
+                                return terminate.handler([handle, code]);
+                            }
+                            finally
+                            {
+                                kernel.handles.close(handle);
+                            }
+                        },
                     }),
                     ...conversionsInGuest(createLocaleFunctions({
                         readMemory, writeMemory, stringLength,
@@ -3649,6 +3928,7 @@ export function createWin32Module(){
                     ...createMappingFunctions({
                         readMemory,
                         pointerSize,
+                        machine64,
                         pipes,
                         divergence: config?.divergence,
                         writeMemory,
@@ -3657,6 +3937,11 @@ export function createWin32Module(){
                         setLastError: setError,
                         namedObjects,
                         viewRegions,
+                        /** @param {number} address @param {number} length */
+                        watchWrites: (address, length)=>
+                            memory.watchWrites?.(address, length) ?? null,
+                        handleAccess: (/** @type {number} */ handle)=>
+                            kernel.handles.access?.(handle) ?? null,
                         // Views of one page-file section agree at the edges of
                         // a turn, across the processes on this thread.
                         sharedViews: system?.sharedViews
@@ -3868,10 +4153,16 @@ export function createWin32Module(){
                         stat: path=>volume.stat(path),
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
+                        breakawayRefused: ()=>jobEvents?.refusesBreakaway() ?? false,
+                        jobsListed: listed=>jobEvents?.listed(listed) ?? null,
                         spawner,
                         pointerSize,
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
+                        // The pages as VirtualQuery answers them (heap.js), read
+                        // when asked: kernel32's table is still being built.
+                        pageState: address=>/** @type {any} */ (libraries['KERNEL32.dll'])[
+                            PAGE_STATE](address),
                         startup: ()=>config?.startup ?? null,
                         divergence: config?.divergence,
                         nativePath: nativePathOf,
@@ -3925,6 +4216,9 @@ export function createWin32Module(){
                             .find(([key])=>key.toUpperCase() === name.toUpperCase())?.[1],
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
+                        exportOf: modules.exportOf
+                            ? (module, name, ordinal)=>modules.exportOf(module, name, ordinal)
+                            : undefined,
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                         currentThread: ()=>kernel.currentThread(),
                         endThread,
@@ -3997,7 +4291,10 @@ export function createWin32Module(){
                         namedObjects,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
+                        callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                        debugObjects: { closed: object=>debuggerSide?.closed(object) },
+                        jobs: { closed: object=>jobEvents?.closed(object) },
                         ports: {
                             /** @param {number} overlapped */
                             offsetOf: overlapped=>ports.offsetOf(overlapped),
@@ -4007,6 +4304,8 @@ export function createWin32Module(){
                             closed: (handle, object)=>ports.closed(handle, object),
                             /** @param {number} file @param {number} port @param {number} key */
                             bind: (file, port, key)=>ports.bind(file, port, key),
+                            /** @param {number} file */
+                            bound: file=>ports.bound(file),
                         },
                     }),
                 },
@@ -5806,6 +6105,10 @@ export function createWin32Module(){
                         readMemory,
                         // Impersonation is the thread's, not the process's.
                         currentThread: ()=>kernel.currentThread(),
+                        // A pipe's client is the pipes' to know.
+                        /** @param {number} handle */
+                        pipeClient: handle=>/** @type {any} */ (
+                            libraries['KERNEL32.dll'])[PIPE_CLIENT]?.(handle) ?? 'none',
                         // A service's descriptor is the service manager's.
                         /** @param {number} handle @param {number} wanted */
                         serviceSecurity: (handle, wanted)=>/** @type {any} */ (
@@ -6460,8 +6763,13 @@ export function createWin32Module(){
                 kernel32: libraries['KERNEL32.dll'],
                 pool: threadPool.native,
                 dllNotifications: modules.dllNotifications,
+                processShutdown,
                 crt: libraries['msvcrt.dll'],
+                exportAddress: (/** @type {string} */ library, /** @type {string} */ name)=>
+                    /** @type {any} */ (modules.find(library))?.addressOf?.(name) ?? 0,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                processBlock: ()=>config?.processBlock?.() ?? 0,
+                imageInformation: ()=>config?.imageInformation?.() ?? null,
                 currentThread: ()=>kernel.currentThread(),
                 lastErrorOf,
                 arena,
@@ -6469,14 +6777,37 @@ export function createWin32Module(){
                 windows,
                 handleType: (/** @type {number} */ handle)=>kernel.handles.typeOf(handle),
                 handleAccess: (/** @type {number} */ handle)=>kernel.handles.access(handle),
+                openHandles: ()=>kernel.handles.list(),
+                processId,
+                processorName: config?.processorName,
                 // The name the run's namespace keeps for the object a handle opens.
                 namedObjectName: (/** @type {number} */ handle)=>
                     runObjects.nameOf(kernel.handles.resolve(handle)),
+                pipeName: (/** @type {number} */ handle)=>pipes.objectName(handle),
                 processOf: (/** @type {number} */ handle)=>
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),
                 askChild,
                 processes: runProcesses,
+                // Whether a debugger hears a process, by what its debugger
+                // records: this one's from the ear its parent keeps, a child's
+                // from this process's own record of it (`debug-events.js`).
+                debugState: (/** @type {any} */ child)=>(child ? {
+                    debugged: Boolean(child.debugged),
+                    object: child.debugged?.object ?? null,
+                    inherit: !child.noDebugInherit,
+                } : {
+                    debugged: debuggerNow() !== null,
+                    object: config?.debugger?.object?.() ?? null,
+                    inherit: !(config?.debugger?.noInherit?.() ?? false),
+                }),
+                openDebugObject: (/** @type {any} */ object)=>
+                    kernel.handles.open('debug-object', object),
+                // The program's path, and as the object manager names it.
+                imagePath: ()=>{
+                    const win32 = modules.imagePath();
+                    return { win32, native: nativePathOf(win32) ?? win32 };
+                },
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
                 processors,
@@ -6519,6 +6850,14 @@ export function createWin32Module(){
             // Windows keeps beside the zone rules in kernelbase: one entry.
             libraries['ADVAPI32.dll'].EnumDynamicTimeZoneInformation =
                 libraries['KERNEL32.dll'].EnumDynamicTimeZoneInformation;
+
+            // powrprof's CallNtPowerInformation is the system call under its
+            // own name: one entry, the same levels and statuses.
+            if (libraries['POWRPROF.dll']?.CallNtPowerInformation)
+            {
+                libraries['ntdll.dll'].NtPowerInformation =
+                    libraries['POWRPROF.dll'].CallNtPowerInformation;
+            }
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));
@@ -6866,6 +7205,15 @@ export function createWin32Module(){
                  */
                 heap: ()=>heap,
                 /**
+                 * The loader mapped and bound an image at `base`: kernel32
+                 * watches its copy-on-write pages from now on (A248).
+                 *
+                 * @param {number} base
+                 */
+                imageMapped: base=>{
+                    /** @type {any} */ (libraries['KERNEL32.dll'])?.[IMAGE_MAPPED]?.(base);
+                },
+                /**
                  * A block of the process heap, as HeapAlloc(GetProcessHeap())
                  * gives one: what a system library hands a program to free with
                  * HeapFree. Zero when there is no room.
@@ -7025,7 +7373,13 @@ export function createWin32Module(){
                 answerCall: (/** @type {any} */ call)=>kernel.outside(()=>serveCall(call, {
                     table: /** @type {any} */ ({ ...libraries['KERNEL32.dll'],
                         NtQueryInformationProcess:
-                            libraries['ntdll.dll']?.NtQueryInformationProcess }),
+                            libraries['ntdll.dll']?.NtQueryInformationProcess,
+                        NtQueryInformationThread:
+                            libraries['ntdll.dll']?.NtQueryInformationThread,
+                        [DEBUG_ATTACH]: { handler: debugAttached },
+                        [DEBUG_BREAK]: { handler: breakIn },
+                        .../** @type {any} */ (libraries['KERNEL32.dll'])?.[VIRTUAL_MEMORY]
+                            ?.served }),
                     allocate: bytes=>allocator.allocate(bytes),
                     free: address=>{
                         allocator.free(address);
@@ -7052,6 +7406,17 @@ export function createWin32Module(){
                 },
 
                 /**
+                 * An event a child this process debugs reported, answered with
+                 * the status its debugger continued it with (`debug-events.js`).
+                 *
+                 * @param {any} child
+                 * @param {import('./kernel32/debug-events.js').DebugReport} report
+                 * @returns {Promise<number>}
+                 */
+                debugEvent: (child, report)=>/** @type {any} */ (debuggerSide)
+                    .deliver(child, report),
+
+                /**
                  * A child run beside this process has exited: its record takes the
                  * exit code -- what GetExitCodeProcess and a later wait read --
                  * and every thread waiting on it wakes with its wait's answer.
@@ -7060,6 +7425,10 @@ export function createWin32Module(){
                  */
                 childExited(child, code){
                     kernel.processes.finish(child, code);
+                    // What CreateProcess held for it and it never took.
+                    dropUnclaimed(child.inheritedHandles);
+                    debuggerSide?.exited(child);
+                    jobEvents?.exited(child, code);
                     // A thread whose timed wait ran out has gone on, to
                     // whatever it waits on now.
                     const waiters = (child.waiters ?? []).filter(

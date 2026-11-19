@@ -913,6 +913,46 @@ test('a suspended thread keeps its state and gets no turn until resumed as often
     assert.equal(sched.resume(a), 0, 'resuming a thread nobody suspended changes nothing');
 });
 
+test('the work before the first slice runs once, as the first thread of the process starts,'
+    + ' whichever it is', ()=>{
+    // A process's loader state is put in place by its first thread to run: a
+    // suspended first thread leaves it to a thread made later, and nothing of
+    // it is there while no thread has run.
+    const { sched } = scheduler();
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.suspend(main);
+    /** @type {string[]} */
+    const done = [];
+    sched.beforeFirstSlice(()=>done.push(`before ${sched.current()?.name ?? 'none'}`));
+    assert.equal(done.length, 0, 'not while nothing runs');
+    assert.equal(sched.runOnce().ran, null, 'the only thread is suspended');
+    assert.equal(done.length, 0);
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'remote' });
+    assert.equal(sched.runOnce().ran.name, 'remote');
+    assert.deepEqual(done, ['before none'], 'once, ahead of the first thread to run');
+    sched.resume(main);
+    sched.runOnce();
+    sched.runOnce();
+    assert.equal(done.length, 1, 'never again');
+    sched.beforeFirstSlice(()=>done.push('late'));
+    assert.deepEqual(done.at(-1), 'late', 'asked after a thread ran, it runs at once');
+});
+
+test('a frozen thread gets no turn, and its suspend count is the one SuspendThread made', ()=>{
+    const { sched } = scheduler();
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    sched.freeze(a);
+    assert.equal(sched.runOnce().ran.name, 'b', 'frozen');
+    assert.equal(sched.suspend(a), 0, 'the freeze is not counted');
+    assert.equal(sched.resume(a), 1);
+    assert.equal(sched.resume(a), 0, 'nor taken away by a resume');
+    assert.equal(sched.runOnce().ran.name, 'b', 'still frozen');
+    sched.thaw(a);
+    assert.equal(sched.runOnce().ran.name, 'a');
+});
+
 test('the registers of the thread on this executor\'s processor are read off it, not off what it'
     + ' saved last', ()=>{
     // A .NET runtime's collector, on another executor, read a thread parked

@@ -49,6 +49,11 @@ const SEARCH_FLAGS = SEARCH_DLL_LOAD_DIR | SEARCH_APPLICATION_DIR | SEARCH_USER_
     | SEARCH_SYSTEM32 | SEARCH_DEFAULT_DIRS;
 /** Which a LOAD_LIBRARY_SEARCH_* search cannot be combined with. */
 const LOAD_WITH_ALTERED_SEARCH_PATH = 0x8;
+/**
+ * LoadLibraryEx's loads of a file for its data (AS_DATAFILE, AS_IMAGE_RESOURCE,
+ * AS_DATAFILE_EXCLUSIVE): a file of that name, never a module that is loaded.
+ */
+const LOAD_AS_DATA = 0x2 | 0x20 | 0x40;
 
 /** The flags SetDefaultDllDirectories takes: all of them but DLL_LOAD_DIR. */
 const DEFAULT_DLL_DIRECTORIES = SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32
@@ -135,6 +140,12 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  */
 
 /**
+ * An export's address, or the error GetProcAddress leaves for it.
+ *
+ * @typedef {{ address: number, module?: any } | { error: number }} ExportFound
+ */
+
+/**
  * @typedef {Object} ModulesHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -178,16 +189,31 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           Stops telling a library of the threads that start and end. A
  *           library with static thread-local storage goes on being told: its
  *           TLS callbacks build each thread's thread-local objects.
- * @property {() => { base: number, path: string }[]} [list]
+ * @property {() => { base: number, name: string, path?: string }[]} [list]
  *           Every module of the process, the image first: what psapi's
  *           EnumProcessModules hands out.
  * @property {(path: string) => string | null} [nativePath]  A path as the object
  *           manager names it (`\Device\HarddiskVolumeN\...`), null where it has none.
+ * @property {(module: ModuleRecord, name: string | null, ordinal: number | null)
+ *           => ExportFound | Promise<ExportFound>} [exportOf]
+ *           An export followed through its forwarders, a forwarder's target
+ *           loaded first; absent, a module answers only what it defines.
  * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
  *           Told what a program looked up at runtime and what it was given. A
  *           name we answer zero to is one the program then decides about, and
  *           what it decides is usually invisible from anywhere else.
  */
+
+/**
+ * An export a module defines itself, with no forwarder followed.
+ *
+ * @param {ModuleRecord} module @param {string | null} name @param {number | null} ordinal
+ * @returns {ExportFound}
+ */
+function definedExport(module, name, ordinal){
+    const address = name !== null ? module.addressOf(name) : module.addressOfOrdinal(ordinal ?? -1);
+    return address === null ? { error: ERROR_PROC_NOT_FOUND } : { address };
+}
 
 /**
  * @param {ModulesHost} host
@@ -208,7 +234,7 @@ export function createModuleFunctions(host){
      * there as a file (`withSystemLibraries`): a program comparing that path
      * against the system directory is right to find them equal.
      *
-     * @param {ModuleRecord} module
+     * @param {{ name: string, path?: string }} module
      */
     const fileNameOf = module=>module.path ?? `${host.libraryHome?.(module.name)
             ?? `C:${SEPARATOR}Windows${SEPARATOR}System32`}${SEPARATOR}${module.name}`;
@@ -228,11 +254,14 @@ export function createModuleFunctions(host){
      * this. A second decision function drifts from the first, and then the
      * answer about whether waiting is needed stops matching the waiting.
      *
-     * @param {string} name
+     * @param {string} asked
      * @param {number} [flags]  LoadLibraryEx's.
      * @returns {number | Promise<number>}
      */
-    const load = (name, flags = 0)=>{
+    const load = (asked, flags = 0)=>{
+        // A path's trailing spaces are not part of it: Windows drops them
+        // from a name as it makes it a path ("kernel32   " is kernel32.dll).
+        const name = asked.replace(/ +$/, '');
         /** @param {number} base @param {string} [tried] */
         const settle = (base, tried = name)=>{
             if (base === 0)
@@ -247,7 +276,11 @@ export function createModuleFunctions(host){
         {
             return settle(0);
         }
-        if ((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+        // The library's own folder is known only of a path from the root:
+        // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR with a name relative to anything
+        // is refused, as Windows refuses it.
+        if (((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+            || ((flags & SEARCH_DLL_LOAD_DIR) !== 0 && !/^([A-Za-z]:)?[\\/]/.test(name)))
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
@@ -307,9 +340,12 @@ export function createModuleFunctions(host){
             ? search | SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32 : search;
     };
 
-    /** The directories SetDllDirectory and AddDllDirectory named, in that order. */
-    const userSearched = ()=>/** @type {string[]} */ ([dllDirectory, ...userDirectories.values()]
-        .filter(directory=>directory !== null && directory !== ''));
+    /**
+     * The directories LOAD_LIBRARY_SEARCH_USER_DIRS looks in: AddDllDirectory's, the one
+     * added last first, then SetDllDirectory's (Wine's kernel32:module, test_LoadLibraryEx).
+     */
+    const userSearched = ()=>/** @type {string[]} */ ([...userDirectories.values()].reverse()
+        .concat(dllDirectory ?? '').filter(directory=>directory !== ''));
 
     /**
      * One look for a library by the name given.
@@ -326,7 +362,7 @@ export function createModuleFunctions(host){
         {
             const answer = search ? host.load(name, flags, search) : host.load(name, flags);
             return typeof answer === 'number' && answer === 0 && !search
-                ? host.find(name)?.base ?? 0 : answer;
+                && (flags & LOAD_AS_DATA) === 0 ? host.find(name)?.base ?? 0 : answer;
         }
         return host.find(name)?.base ?? 0;
     };
@@ -471,7 +507,9 @@ export function createModuleFunctions(host){
      *     lpFilename, DWORD nSize)
      *
      * The file mapped at an address, in the object manager's terms: here an
-     * image of the process, whose span its headers give (SizeOfImage). An
+     * image of the process, whose span its headers give (SizeOfImage), named
+     * as GetModuleFileName names it - one of the system's libraries under the
+     * folder it is found in. An
      * address no image covers has no file: ERROR_UNEXP_NET_ERR, as Windows
      * answers memory of its own (Wine's psapi test).
      * ponytail: images only; a view of a file a program mapped itself is
@@ -482,14 +520,20 @@ export function createModuleFunctions(host){
     const mappedFileName = wide=>({
         argBytes: 16,
         /** @param {number[]} args */
-        handler: ([, address, buffer, size])=>{
+        handler: ([process, address, buffer, size])=>{
+            // Another process's memory is not this one's to read.
+            if ((process >>> 0) !== 0xffffffff)
+            {
+                host.setLastError(ERROR_INVALID_HANDLE);
+                return 0;
+            }
             const at = address >>> 0;
             const read = (/** @type {number} */ where)=>new DataView(
                 host.readMemory?.(where, 4).slice().buffer ?? new ArrayBuffer(4))
                 .getUint32(0, true);
             const image = (host.list?.() ?? []).find(module=>at >= module.base
                 && at < module.base + read(module.base + read(module.base + 0x3c) + 24 + 56));
-            const path = image ? host.nativePath?.(image.path) ?? null : null;
+            const path = image ? host.nativePath?.(fileNameOf(image)) ?? null : null;
             if (path === null)
             {
                 host.setLastError(ERROR_UNEXP_NET_ERR);
@@ -506,6 +550,12 @@ export function createModuleFunctions(host){
         const text = dllDirectory ?? '';
         if (text.length + 1 > size || buffer === 0)
         {
+            // A buffer with room for anything is left an empty string, as
+            // Windows leaves it; one of no size is not touched.
+            if (size > 0 && buffer !== 0)
+            {
+                host.writeMemory(buffer, new Uint8Array(wide ? 2 : 1));
+            }
             return text.length + 1;
         }
         if (wide)
@@ -847,27 +897,36 @@ export function createModuleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, name])=>{
-                const module = host.byBase(handle >>> 0);
+                // No module is the program's own, as GetModuleHandle(NULL)
+                // answers it: what it does not export is a procedure not found.
+                const module = (handle >>> 0) === 0 ? host.find(null) : host.byBase(handle >>> 0);
                 if (!module)
                 {
-                    host.setLastError(ERROR_MOD_NOT_FOUND);
+                    host.setLastError((handle >>> 0) === 0 ? ERROR_PROC_NOT_FOUND
+                        : ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
 
-                const wanted = isOrdinal(name >>> 0)
-                    ? `#${name >>> 0}`
+                const ordinal = isOrdinal(name >>> 0) ? name >>> 0 : null;
+                const wanted = ordinal !== null ? `#${ordinal}`
                     : host.readCString(name >>> 0, WHOLE_NAME);
-                const address = isOrdinal(name >>> 0)
-                    ? module.addressOfOrdinal(name >>> 0)
-                    : module.addressOf(wanted);
-
-                host.resolved?.({ module: module.name, name: wanted, found: address ?? 0 });
-                if (address === null)
-                {
-                    host.setLastError(ERROR_PROC_NOT_FOUND);
-                    return 0;
-                }
-                return address;
+                /** @param {{ address: number } | { error: number }} found */
+                const answer = found=>{
+                    const address = 'address' in found ? found.address : 0;
+                    host.resolved?.({ module: module.name, name: wanted, found: address });
+                    if ('error' in found)
+                    {
+                        host.setLastError(found.error);
+                        return 0;
+                    }
+                    return address;
+                };
+                // Followed through the module's forwarders, a forwarder's
+                // target loaded first when it is not yet (`exportOf`).
+                const found = host.exportOf
+                    ? host.exportOf(module, ordinal === null ? wanted : null, ordinal)
+                    : definedExport(module, ordinal === null ? wanted : null, ordinal);
+                return found instanceof Promise ? found.then(answer) : answer(found);
             },
         },
 

@@ -2245,23 +2245,31 @@ XP machine that got 4.x first keeps 4.x's `mscoree.dll` the same way. Without a 
 volume, XP has no shim of the engine's, and a Framework's own `mscoree.dll` is never stood in front
 of. *2026-11-14.*
 
-**A248. A page reads back the protection it was given; only PAGE_NOACCESS is enforced.**
+**A248. A page reads back the protection it was given; only PAGE_NOACCESS and PAGE_GUARD are
+enforced.**
 `VirtualQuery` answers each page of a `VirtualAlloc` reservation with the protection its last
 commit or `VirtualProtect` gave it, its run split where that changes, and `AllocationProtect` the
 reservation's own; `VirtualProtect` hands back the page's real old protection, and refuses a range
 that reaches an uncommitted page (`ERROR_INVALID_ADDRESS`), a protection that is no single base
 one with at most `PAGE_GUARD`/`PAGE_NOCACHE`/`PAGE_WRITECOMBINE`, and copy-on-write, which private
 memory cannot have (`ERROR_INVALID_PARAMETER`), as Windows does (Wine's kernel32:virtual). A
-loaded image answers as Windows maps one: `MEM_IMAGE` from its base, allocated
+loaded image, and a view of a `SEC_IMAGE` section, answers as Windows maps one: `MEM_IMAGE` from its base, allocated
 `PAGE_EXECUTE_WRITECOPY`, its headers `PAGE_READONLY`, each section by its characteristics (a
 writable one copy-on-write unless shared), a page no section covers `PAGE_NOACCESS`, read from the
-image's own headers; `VirtualProtect` of its pages is kept and handed back. A copy-on-write page
-still reads `PAGE_WRITECOPY` after it is written, where Windows turns it `PAGE_READWRITE`: no write
-is seen page by page. What a
+image's own headers; `VirtualProtect` of its pages is kept and handed back, a section view's
+writable protection kept as its copy-on-write form. A view's copy-on-write page reads
+`PAGE_READWRITE` (`PAGE_EXECUTE_READWRITE`) once it is written, as on Windows: the view is
+watched from its first such page by the engine's page marks, which every store tests anyway, and
+the write is found where a protection is read; a loaded image's own pages the same way, watched
+from when the loader has mapped and bound it (its own writes before that are its making, as
+Windows' loader's are), in a 32-bit process. Where the engine cannot tell writes (no write
+watch), and on a 64-bit image, the page still reads its copy-on-write protection. What a
 program can tell apart only by faulting is not reproduced: a closed page faults where the processor
-can close it, but a write to `PAGE_READONLY` memory, a jump into `PAGE_READWRITE` memory or a
-touch of a `PAGE_GUARD` page goes on, since the translator keeps no per-page write or execute
-permission and a check on every store would cost every program its speed. A program that relies on
+can close it, and so does a `PAGE_GUARD` page until its first touch, which takes the guard away
+and is a stack's growth inside the thread's stack reservation and `STATUS_GUARD_PAGE_VIOLATION`
+elsewhere; but a write to `PAGE_READONLY` memory or a jump into `PAGE_READWRITE` memory goes on,
+since the translator keeps no per-page write or execute permission and a check on every store
+would cost every program its speed. A program that relies on
 one of those faults is the case that reopens this.
 *2026-11-14.*
 
@@ -2495,7 +2503,59 @@ therefore 1.5 GiB past a multiple of 4 GiB (`kernel32/drives.js`), so the wrappe
 not, is still room to install in. Revisit when a bottle carries a quota of its own to report.
 *2026-11-18.*
 
-**A271. Temporary: a device's guest routines built for x86-64 change RBX, RSI and RDI without
+**A271. The two BaseNamedObjects directories are one set of names.** On Windows a program's Win32
+names live in its session's `\Sessions\1\BaseNamedObjects` and `Global\` names in the shared
+`\BaseNamedObjects`, two directories with names of their own. The object namespace
+(`kernel32/object-namespace.js`) has both directories and the links between them (Global, Local,
+Session, `\Sessions\BNOLINKS`), but keeps the names of either under the name alone, as kernel32
+always kept Win32 names: an object made in one is found through the other, and kernel32's
+`Global\X`, `Local\X` and `Session\1\X` are the one name `X`. Every program here runs
+in the one interactive session, so a name a service in session 0 and a program in session 1 would
+each have to themselves does not arise. Revisit when a bottle runs a service in a session of its
+own. *2026-11-18.*
+
+**A272. A heap is not a reservation of its own: every heap's blocks come from the process's arena.**
+On Windows each heap is a reservation, 64 KiB with a page committed when it is made with no initial
+size, that grows by further segments of 1 MiB doubling to 16 MiB, and VirtualQuery and HeapWalk show
+that layout. Here every heap hands out blocks from the one arena the process's allocations share, its
+small blocks from slabs the guest takes and gives back without a crossing (`kernel32/guest-heap.js`),
+so a heap's own memory is its control block and its blocks. HeapWalk therefore answers the heap as a
+region (the control block, its committed size the blocks' total) and each busy block by address, with
+no free block or uncommitted range of the heap's own; VirtualQuery on a heap answers the arena's
+region. Wine's heap test measures segment sizes and walk entries against the Windows layout and
+fails on them. Revisit when a program is found reading a heap's segments, by VirtualQuery or by
+HeapWalk's free and uncommitted entries. *2026-11-18.*
+
+**A273. A pipe made with a buffer size of 0 holds 4096 bytes that way.**
+CreateNamedPipe's buffer sizes are advisory: Windows documents that it reserves the system
+default, the system minimum or the size asked rounded up, and does not say which of these a 0
+gets; CreatePipe documents 0 as the default size, and its test records 4096. A write waits until
+what is queued fits the size (`kernel32/pipes.js`), so the choice is observable: taken literally, a
+0 would hold every write until the reader takes it, and a parent that waits for its child to exit
+before reading a short message it wrote would wait for ever. So a 0 is the default, 4096, the size
+an anonymous pipe has; GetNamedPipeInfo still answers the 0 that was asked. Revisit when a
+measurement on Windows shows what a 0 holds. *2026-11-19.*
+
+**A274. Address space outside the process's arena answers MEM_RESERVE, never MEM_FREE.** On
+Windows any page no allocation holds is free and VirtualQuery answers MEM_FREE. Here a process's
+memory is one arena the engine reserves at its start, with the system libraries and the program's
+own image placed where the machine keeps them: a free page inside the arena answers MEM_FREE as on
+Windows, but a page outside it that no image or region holds, such as the page just after a loaded
+image beyond the arena's end, answers MEM_RESERVE, since nothing may be placed there
+(`kernel32/heap.js`, the query's last case). A program that asks for MEM_FREE before placing
+something at a fixed address there is told the place is taken where Windows says it is open (Wine's
+loader.c 945-950). Revisit if the engine can place memory outside the arena. *2026-11-19.*
+
+**A275. A symbolic link is set by FSCTL_SET_REPARSE_POINT without SeCreateSymbolicLinkPrivilege.**
+On Windows the I/O manager refuses IO_REPARSE_TAG_SYMLINK with STATUS_PRIVILEGE_NOT_HELD unless the
+caller's token holds the privilege enabled, which an administrator enables and an ordinary user does
+not have. The run's token does not carry it and LookupPrivilegeValue does not name it, so a program
+setting a link through the control would always be refused; here the control takes the link as an
+elevated caller's would (`kernel32/reparse.js`), and CreateSymbolicLink still answers
+ERROR_PRIVILEGE_NOT_HELD as before. Revisit when the token carries its privileges and the run
+says whether it is elevated. *2026-11-19.*
+
+**A276. Temporary: a device's guest routines built for x86-64 change RBX, RSI and RDI without
 unwind data.** A 64-bit program's frames are unwound by the function table of the image they run in
 (RUNTIME_FUNCTION and its UNWIND_INFO); code with no entry is taken for a leaf: its return address at
 RSP and every register the convention has a callee keep as the caller left it. Direct3D 9's routines
@@ -2507,7 +2567,7 @@ left them. Removed when the routines use only RAX, RCX, RDX and R8 to R11 at 64 
 for `rep movs`), or the code arena gives each an unwind entry that says where it keeps them.
 *2026-11-18, narrowed the same day: the routines no longer push.*
 
-**A272. A program's plain loads and stores keep no x86 order between executors on a host that
+**A277. A program's plain loads and stores keep no x86 order between executors on a host that
 reorders them (arm64).** x86 is TSO: one thread's stores are seen by another in the order made, and
 programs hand data over with plain movs - a spinlock let go with `mov [lock], 0`, a `volatile` flag
 after the data it guards. Wasm's plain accesses to shared memory have no such order, and an arm64
@@ -2522,7 +2582,7 @@ executors, never with one executor or on x86. kernel32/sleep-zero.itest.js hands
 movs and runs on one executor only on such a host.
 *2026-11-18, the owner's ruling.*
 
-**A273. A 64-bit handler's `size_t` / `SIZE_T` result is sign-extended into RAX.** Handlers answer
+**A278. A 64-bit handler's `size_t` / `SIZE_T` result is sign-extended into RAX.** Handlers answer
 in dwords, and the C runtime's sizes carry their errors as `(size_t)-1` and `(size_t)-2` (mbrtowc's
 INCOMPLETE, wcstombs' failure): only a sign-extension makes those the quadword a 64-bit caller
 compares against. So a size is no address to the bridge (`check-wide-arguments.mjs` refuses
@@ -2532,7 +2592,7 @@ handler answers a quadword. Pointer-sized integers (`ULONG_PTR`, `UINT_PTR`, `DW
 declared one.
 *2026-11-18.*
 
-**A274. A locked access across two aligned quadwords (a split lock), and `lock cmpxchg16b`, are
+**A279. A locked access across two aligned quadwords (a split lock), and `lock cmpxchg16b`, are
 made holding one lock word of the process, not as one atomic access.** A `lock`-prefixed
 read-modify-write or an `xchg` with memory is one wasm atomic on an address aligned to its width,
 and a compare-and-swap of the aligned quadword holding it where it lies across its own alignment

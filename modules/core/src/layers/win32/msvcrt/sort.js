@@ -21,6 +21,13 @@
 
 import { EINVAL } from './globals.js';
 
+/**
+ * The key qsort sorted as msvcrt.dll's own sort orders is carried under in
+ * the runtime's table: ntdll's qsort, whose equal elements land where
+ * Windows' put them (Wine's ntdll:string checks that order).
+ */
+export const WINDOWS_SORT = Symbol('windows sort');
+
 /** The longest run sorted by moving its largest element to the end. */
 const SHORT_RUN = 8;
 
@@ -215,6 +222,23 @@ export function createSortFunctions(host){
     };
 
     return {
+        /**
+         * void qsort(void *base, size_t num, size_t width,
+         *            int (*compare)(const void *, const void *))
+         *
+         * As qsort_s sorts, the comparator handed two elements; nothing
+         * sorted for no array, a width of zero or no comparator.
+         */
+        [WINDOWS_SORT]: cdecl(16, ([base, num, width, compare])=>{
+            if ((base >>> 0) === 0 || (width >>> 0) === 0 || (compare >>> 0) === 0)
+            {
+                return 0;
+            }
+            const thread = host.currentThread?.();
+            return sort(base >>> 0, num >>> 0, width >>> 0,
+                (left, right)=>ask(compare, [left >>> 0, right >>> 0], thread)).then(()=>0);
+        }),
+
         /**
          * void qsort_s(void *base, size_t num, size_t width,
          *              int (*compare)(void *context, const void *, const void *),

@@ -72,6 +72,8 @@ export const KNOWN = new Map([
     ['ntdll.dll!_allshl', 'guest code: EDX:EAX and CL, which no handler is passed'],
     ['ntdll.dll!_allshr', 'guest code: EDX:EAX and CL, which no handler is passed'],
     ['ntdll.dll!_aullshr', 'guest code: EDX:EAX and CL, which no handler is passed'],
+    ['ntdll.dll!RtlUshortByteSwap', 'guest code: fastcall, ECX, which no handler is passed'],
+    ['ntdll.dll!RtlUlongByteSwap', 'guest code: fastcall, ECX, which no handler is passed'],
     ['d3dx9_24.dll!D3DXMatrixDeterminant', 'guest code: answers on the x87 stack'],
     ['d3dx9_24.dll!D3DXFresnelTerm', 'guest code: answers on the x87 stack'],
     // A 32-bit runtime reads the x87's words as code, and its handlers are

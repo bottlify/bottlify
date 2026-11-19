@@ -26,6 +26,7 @@ import { lstrcpyCode, lstrcpyLongCode, lstrlenCode, lstrlenLongCode } from './ls
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
 import { askChild, isChildThread, threadArg } from './cross-process.js';
+import { accessibleSpan } from './process-memory.js';
 import { blockLayouts } from './teb.js';
 import { systemTimeToMs } from './filetime.js';
 import { formatMessageText } from './format-message.js';
@@ -95,11 +96,6 @@ const RELATION_PROCESSOR_PACKAGE = 3;
 const RELATION_GROUP = 4;
 /** RelationAll, which the extended form takes for every kind. */
 const RELATION_ALL = 0xffff;
-/** VirtualQuery's committed state and the protections a write goes through. */
-const MEM_COMMIT = 0x1000;
-const PAGE_GUARD = 0x100;
-/** PAGE_READWRITE, PAGE_WRITECOPY, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY. */
-const WRITABLE_PROTECTIONS = 0x04 | 0x08 | 0x40 | 0x80;
 /**
  * SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX's records as a 32-bit program lays
  * them out: Relationship and Size, then the kind's structure, each ending in
@@ -730,6 +726,46 @@ export function createSystemFunctions(host){
             void e;
             return false;
         }
+    };
+
+    /**
+     * Whether `length` bytes from `address` can be read - or, with `write`,
+     * written - by the pages' protection as VirtualQuery answers it and by
+     * the memory layer's regions. Zero bytes always can.
+     *
+     * @param {number} address @param {number} length @param {boolean} write
+     */
+    const accessible = (address, length, write)=>{
+        if (length === 0)
+        {
+            return true;
+        }
+        if (address === 0 || !readable(address, length))
+        {
+            return false;
+        }
+        if (host.pageState && accessibleSpan(host.pageState, address, length, write) < length)
+        {
+            return false;
+        }
+        if (!write || !host.regionAt)
+        {
+            return true;
+        }
+        for (let at = address; at < address + length;)
+        {
+            const region = host.regionAt(at);
+            if (!region)
+            {
+                return true;
+            }
+            if (region.access !== undefined && !region.access.includes('w'))
+            {
+                return false;
+            }
+            at = region.base + region.size;
+        }
+        return true;
     };
 
     /**
@@ -1553,67 +1589,34 @@ export function createSystemFunctions(host){
             handler: ([count])=>count >>> 0,
         },
 
-        /** BOOL IsBadReadPtr(const VOID *lp, UINT_PTR ucb) */
+        /**
+         * BOOL IsBadReadPtr(const VOID *lp, UINT_PTR ucb)
+         *
+         * Bad where a page of the range is, as VirtualQuery answers it, not
+         * committed, inaccessible or a guard page (`accessibleSpan`, the rule
+         * a copy between processes goes by), or not mapped at all. Nothing
+         * to read is never bad, whatever the pointer.
+         */
         IsBadReadPtr: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, length])=>
-                (pointer >>> 0) === 0 || !readable(pointer >>> 0, length >>> 0) ? 1 : 0,
+            handler: ([pointer, length])=>(accessible(pointer >>> 0, length >>> 0, false) ? 0 : 1),
         },
 
         /**
          * BOOL IsBadWritePtr(LPVOID lp, UINT_PTR ucb)
          *
-         * Bad where the range is unmapped, where a region the memory layer
-         * declares without write access covers any of it -- code Windows maps
-         * read-only, such as the return address a program's entry point finds
-         * on its stack -- or where a page of it is, as VirtualQuery answers
-         * it, not committed or committed without write access (an image's
-         * read-only section; a guard page, which the write would trip). Asked
-         * of the declared access rather than by probing with a write, which
-         * would change the guest's memory to find out.
+         * Bad as a read is, and where a page is not writable or a region the
+         * memory layer declares without write access covers any of it -- code
+         * Windows maps read-only, such as the return address a program's entry
+         * point finds on its stack. Asked of the declared access rather than
+         * by probing with a write, which would change the guest's memory to
+         * find out.
          */
         IsBadWritePtr: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, length])=>{
-                const at = pointer >>> 0;
-                const count = Math.max(length >>> 0, 1);
-                if (at === 0 || !readable(at, count))
-                {
-                    return 1;
-                }
-                if (host.pageState)
-                {
-                    for (let page = at - at % 0x1000; page < at + count; page += 0x1000)
-                    {
-                        const { state, protect } = host.pageState(page);
-                        if (state !== MEM_COMMIT || (protect & PAGE_GUARD) !== 0
-                            || (protect & WRITABLE_PROTECTIONS) === 0)
-                        {
-                            return 1;
-                        }
-                    }
-                }
-                if (!host.regionAt)
-                {
-                    return 0;
-                }
-                for (let address = at; address < at + count;)
-                {
-                    const region = host.regionAt(address);
-                    if (!region)
-                    {
-                        return 0;
-                    }
-                    if (region.access !== undefined && !region.access.includes('w'))
-                    {
-                        return 1;
-                    }
-                    address = region.base + region.size;
-                }
-                return 0;
-            },
+            handler: ([pointer, length])=>(accessible(pointer >>> 0, length >>> 0, true) ? 0 : 1),
         },
 
         /** BOOL IsBadCodePtr(FARPROC lpfn) */

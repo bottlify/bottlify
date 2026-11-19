@@ -9,11 +9,7 @@ import assert from 'node:assert/strict';
 import { createDebugFunctions } from './debug.js';
 
 const STATUS_SUCCESS = 0;
-const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_NOT_IMPLEMENTED = 0xc0000002;
-const STATUS_INVALID_HANDLE = 0xc0000008;
-const STATUS_ACCESS_DENIED = 0xc0000022;
-const STATUS_PORT_NOT_SET = 0xc0000353;
 const TEB = 0x2000;
 
 /** @param {{ teb?: number }} [options] */
@@ -121,23 +117,20 @@ test('the thread\'s debug object is kept in its thread block, NULL until set', (
         'with no thread block yet, kept all the same');
 });
 
-test('no debugger can attach: each call answers its status, said once', ()=>{
-    const { bytes, fns, diverged } = setup();
-    bytes.set([0xff, 0xff, 0xff, 0xff], 0x200);
-    assert.equal(fns.NtCreateDebugObject.handler([0x200, 0x1f000f, 0, 1]),
-        STATUS_NOT_IMPLEMENTED);
-    assert.deepEqual([...bytes.subarray(0x200, 0x204)], [0, 0, 0, 0], 'the handle left NULL');
+test('the native debug calls not made answer their status, each said once', ()=>{
+    const { fns, diverged } = setup();
+    // Made, set, attached through, waited on, continued and removed are
+    // kernel32's (debug-events.js).
+    for (const name of ['NtCreateDebugObject', 'NtDebugActiveProcess', 'NtRemoveProcessDebug',
+        'NtSetInformationDebugObject', 'NtWaitForDebugEvent', 'NtDebugContinue',
+        'DbgUiConvertStateChangeStructure'])
+    {
+        assert.equal(fns[name], undefined, name);
+    }
     /** @type {[string, number, number][]} */
     const expected = [
-        ['NtDebugActiveProcess', 8, STATUS_ACCESS_DENIED],
-        ['NtRemoveProcessDebug', 8, STATUS_PORT_NOT_SET],
-        ['NtDebugContinue', 12, STATUS_INVALID_HANDLE],
-        ['NtSetInformationDebugObject', 20, STATUS_INVALID_HANDLE],
-        ['NtWaitForDebugEvent', 16, STATUS_INVALID_HANDLE],
         ['NtSystemDebugControl', 24, STATUS_NOT_IMPLEMENTED],
         ['DbgUiIssueRemoteBreakin', 4, STATUS_NOT_IMPLEMENTED],
-        ['DbgUiConvertStateChangeStructure', 8, STATUS_UNSUCCESSFUL],
-        ['NtCreateDebugObject', 16, STATUS_NOT_IMPLEMENTED],
     ];
     for (const [name, argBytes, status] of expected)
     {

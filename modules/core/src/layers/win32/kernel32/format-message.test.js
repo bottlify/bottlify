@@ -114,3 +114,28 @@ test('a text longer than the room stops before the next argument is read', ()=>{
     assert.equal(formatted.error, ERROR_INSUFFICIENT_BUFFER);
     assert.equal(formatted.reads, 1);
 });
+
+test('a va_list read out of order: the arguments skipped are read at the insert\'s size', ()=>{
+    // Wine's rtlstr.c test_RtlFormatMessage, as 32-bit Windows answers it.
+    assert.equal(text('%1!#I64x! %2!x!', { args: [0x1234, 0x5678, 0xbeef] }),
+        '0x567800001234 beef');
+    assert.equal(text('%3!#I64x! %4!#I64x! %3!x! %1!x!', { args: [1, 2, 3, 4, 0x33334444,
+        0x11112222, 0x77778888, 0x55556666, 0xbeef] }),
+    '0x1111222233334444 0x5555666677778888 33334444 1');
+    assert.equal(text('%2!x! %1!I64x!', { args: [0x1234, 0x5678, 0xbeef] }), '5678 1234');
+    assert.equal(text('%2!*.*I64x! %1!u! %4!u! %2!u!', { args: [19, 17, 15, 13, 11, 9, 7] }),
+        '  000090000000b 19 7 15');
+});
+
+test('a specification is printf\'s: ll and h sizes, what follows the conversion, and none', ()=>{
+    assert.equal(text('%1!#llx!%2!#x!%1!#hx!', { args: [0x123456, 0x789abc] }),
+        '0x1234560x789abc0x3456', 'll is a long; h a short');
+    assert.equal(text('%1!Saa!', { args: [0x100] }), 'testaa');
+    assert.equal(text('ab%1!!cd', { args: [0x100] }), 'abcd');
+    assert.equal(text('%1!**u!', { args: [34] }), '*u');
+    assert.equal(text('%1!0.3+*u!', { args: [34] }), '+*u');
+    assert.equal(format('aa%1!***u!', { args: [34] }).error, 87, 'three stars');
+    assert.equal(text('abc%1!#.000000000000000000000000000x!', { args: [34] }), 'abc0x22');
+    assert.equal(format('abc%1!#.0000000000000000000000000000x!', { args: [34] }).error, 87,
+        'longer than thirty characters');
+});

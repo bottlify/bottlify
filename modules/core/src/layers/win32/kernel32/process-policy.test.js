@@ -41,12 +41,22 @@ function machine(given = {}){
     const thread = { tebAddress: 0x100, cpuMs: 2 };
     view.setUint32(0x104, 0x9000, true);
     view.setUint32(0x108, 0x8000, true);
+    /** @type {any} */
     const child = { id: 0x2a0 };
+    /** @type {any[]} */
+    const ended = [];
+    /** @type {[any, { transferred: number, key: number, overlapped: number }][]} */
+    const posted = [];
+    /** @type {any} */
+    let jobEvents = null;
     const childHandle = handles.open('process', child);
     const threadHandle = handles.open('thread', thread);
     const kernel = {
         handles,
         createEvent: (/** @type {any} */ options)=>({ kind: 'event', ...options }),
+        setEvent: (/** @type {any} */ event)=>{
+            event.signalled = true;
+        },
         processCpuMs: ()=>5,
         flushProcessWrites,
     };
@@ -73,14 +83,28 @@ function machine(given = {}){
             },
             processId: 0x100,
             namedObjects,
+            // Each process ended, in order: a child takes the code as its exit.
+            terminateProcess: (process, code)=>{
+                ended.push(process);
+                if (process)
+                {
+                    process.exitCode = code;
+                }
+                return 1;
+            },
             setRegisters,
             divergence,
             processors,
+            postCompletion: (port, packet)=>posted.push([port, packet]),
+            listen: events=>{
+                jobEvents = events;
+            },
         }));
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>(name === 'NtContinue'
         ? /** @type {any} */ (fns.RtlCaptureContext).natives.NtContinue : fns[name]).handler(args);
-    return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread };
+    return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread, child,
+        ended, posted, jobEvents: ()=>jobEvents };
 }
 
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
@@ -152,7 +176,7 @@ test('RtlCaptureStackBackTrace walks the frame chain within the thread\'s stack'
 });
 
 test('a job holds processes, keeps its limits and reads them back', ()=>{
-    const { view, call, errors, childHandle } = machine();
+    const { view, call, errors, childHandle, handles, child, ended } = machine();
     const job = call('CreateJobObjectW', 0, 0);
     assert.notEqual(job, 0);
     assert.equal(call('IsProcessInJob', CURRENT_PROCESS, 0, 0x2000), 1);
@@ -185,9 +209,21 @@ test('a job holds processes, keeps its limits and reads them back', ()=>{
 
     assert.equal(call('SetInformationJobObject', job, 99, 0x2100, 4), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
-    assert.equal(call('TerminateJobObject', job, 1), 1);
+    // Wine's process test_TerminateJobObject and test_WaitForJobObject.
+    const waitable = handles.resolve(job, 'job').waitable;
+    assert.equal(waitable.signalled, false, 'a job is not signalled while it runs');
+    assert.equal(call('TerminateJobObject', job, 123), 1);
+    assert.deepEqual(ended, [child, null], 'the child ended, this process last');
+    assert.equal(child.exitCode, 123);
+    assert.equal(waitable.signalled, true, 'signalled for good');
+    assert.equal(call('QueryInformationJobObject', job, 1, 0x2700, 48, 0), 1);
+    assert.deepEqual([36, 40].map(at=>view.getUint32(0x2700 + at, true)), [2, 1],
+        'two ever assigned, this process alone still running');
     assert.equal(call('AssignProcessToJobObject', job, childHandle), 0);
-    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED, 'a terminated job takes no more');
+    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED, 'a process that has ended joins nothing');
+    const another = handles.open('process', { id: 0x2b0 });
+    assert.equal(call('AssignProcessToJobObject', job, another), 1,
+        'a terminated job still takes a running process');
     assert.equal(call('AssignProcessToJobObject', 0x12340, childHandle), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });
@@ -256,9 +292,16 @@ test('the handle count, debugging, power and memory notifications', ()=>{
     assert.equal(call('GetProcessHandleCount', childHandle, 0x2000), 0);
     assert.equal(call('CheckRemoteDebuggerPresent', CURRENT_PROCESS, 0x2000), 1);
     assert.equal(view.getUint32(0x2000, true), 0);
-    assert.equal(call('DebugActiveProcess', 0x2a0), 0);
-    assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
-    assert.equal(call('DebugActiveProcess', 0), 0);
+    // Wine's debugger test_RemoteDebugger and test_debug_children.
+    const debugged = handles.open('process',
+        { id: 0x2c0, debugged: { events: [], current: null } });
+    assert.equal(call('CheckRemoteDebuggerPresent', debugged, 0x2000), 1);
+    assert.equal(view.getUint32(0x2000, true), 1, 'a child started with DEBUG_PROCESS');
+    view.setUint32(0x2000, 7, true);
+    assert.equal(call('CheckRemoteDebuggerPresent', 0, 0x2000), 0);
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'no handle is a bad parameter');
+    assert.equal(view.getUint32(0x2000, true), 7, 'and nothing is written');
+    assert.equal(call('CheckRemoteDebuggerPresent', CURRENT_PROCESS, 0), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
     assert.equal(call('CancelSynchronousIo', CURRENT_THREAD), 0);
     assert.equal(errors.at(-1), ERROR_NOT_FOUND);
@@ -373,4 +416,184 @@ test('a job made by name is the one OpenJobObject and NtOpenJobObject find', ()=
     view.setUint32(0x320c, 0x80, true);
     assert.equal(natives.NtCreateJobObject.handler([0x3400, 0x1f001f, 0x3200]) >>> 0, 0x40000000,
         'OBJ_OPENIF: STATUS_OBJECT_NAME_EXISTS');
+});
+
+test('a job tells its completion port of its processes, and ends them with its last handle', ()=>{
+    // Wine's process.c test_CompletionPort and test_KillOnJobClose.
+    const { view, call, errors, handles, childHandle, child, ended, posted, jobEvents } =
+        machine();
+    const [NEW_PROCESS, EXIT_PROCESS, ACTIVE_PROCESS_ZERO, ABNORMAL_EXIT] = [6, 7, 4, 8];
+    const job = call('CreateJobObjectW', 0, 0);
+    const port = { kind: 'iocp' };
+    const portHandle = handles.open('iocp', port);
+    const associate = (/** @type {number} */ key, /** @type {number} */ handle)=>{
+        view.setUint32(0x3000, key, true);
+        view.setUint32(0x3004, handle, true);
+        return call('SetInformationJobObject', job, 7, 0x3000, 8);
+    };
+    assert.equal(associate(0x55, 0), 1, 'no port: accepted, nothing changes');
+    assert.equal(call('AssignProcessToJobObject', job, childHandle), 1);
+    assert.equal(posted.length, 0, 'nobody to tell yet');
+    assert.equal(associate(0x55, childHandle), 0, 'a handle that is no port');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(associate(0x55, portHandle), 1);
+    assert.deepEqual(posted, [[port, { transferred: NEW_PROCESS, key: 0x55, overlapped: 0x2a0 }]],
+        'the port hears of the process the job already runs');
+    assert.equal(associate(0x55, portHandle), 0, 'one port, for good');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    const second = { id: 0x2b0 };
+    call('AssignProcessToJobObject', job, handles.open('process', second));
+    assert.deepEqual(posted.at(-1)?.[1], { transferred: NEW_PROCESS, key: 0x55,
+        overlapped: 0x2b0 });
+
+    child.exitCode = 0;
+    jobEvents().exited(child, 0);
+    assert.deepEqual(posted.at(-1)?.[1], { transferred: EXIT_PROCESS, key: 0x55,
+        overlapped: 0x2a0 });
+    /** @type {any} */ (second).exitCode = 0xc0000005;
+    jobEvents().exited(second, 0xc0000005);
+    assert.deepEqual(posted.slice(-2).map(([, packet])=>[packet.transferred, packet.overlapped]),
+        [[ABNORMAL_EXIT, 0x2b0], [ACTIVE_PROCESS_ZERO, 0]], 'an exception\'s end, then none left');
+    jobEvents().exited({ id: 0x999 }, 0);
+    assert.equal(posted.length, 5, 'a process no job holds tells nobody');
+
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: its processes end with its last handle.
+    const killing = call('CreateJobObjectW', 0, 0);
+    const third = { id: 0x2c0 };
+    call('AssignProcessToJobObject', killing, handles.open('process', third));
+    view.setUint32(0x3100 + 16, 0x2000, true);
+    assert.equal(call('SetInformationJobObject', killing, 9, 0x3100, 112), 1);
+    const duplicate = handles.open('job', handles.resolve(killing, 'job'));
+    const object = handles.resolve(killing, 'job');
+    handles.close(killing);
+    jobEvents().closed(object);
+    assert.deepEqual(ended, [], 'not while another handle holds it');
+    handles.close(duplicate);
+    jobEvents().closed(object);
+    assert.deepEqual(ended, [third]);
+    assert.equal(/** @type {any} */ (third).exitCode, 0);
+    const plain = handles.resolve(job, 'job');
+    handles.close(job);
+    jobEvents().closed(plain);
+    assert.deepEqual(ended, [third], 'a job without the limit ends nothing');
+});
+
+test('a child of a process in a job is in the job, unless the job lets it break away', ()=>{
+    // Wine's process.c test_jobInheritance, test_BreakawayOk and test_SilentBreakawayOk.
+    const { view, call, handles, posted, jobEvents } = machine();
+    const job = call('CreateJobObjectW', 0, 0);
+    assert.equal(call('AssignProcessToJobObject', job, CURRENT_PROCESS), 1);
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which = job)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    const child = { id: 0x300, breakaway: false };
+    jobEvents().started(child);
+    assert.equal(inJob(child), 1, 'it inherits the job');
+    assert.equal(jobEvents().refusesBreakaway(), true,
+        'without BREAKAWAY_OK, CREATE_BREAKAWAY_FROM_JOB is refused');
+    view.setUint32(0x3100 + 16, 0x800, true);
+    assert.equal(call('SetInformationJobObject', job, 9, 0x3100, 112), 1);
+    assert.equal(jobEvents().refusesBreakaway(), false);
+    const allowed = { id: 0x320, breakaway: true };
+    jobEvents().started(allowed);
+    assert.equal(inJob(allowed), 0, 'BREAKAWAY_OK: asked, it leaves');
+    const plain = { id: 0x330, breakaway: false };
+    jobEvents().started(plain);
+    assert.equal(inJob(plain), 1, 'BREAKAWAY_OK: not asked, it stays');
+    view.setUint32(0x3100 + 16, 0x1000, true);
+    call('SetInformationJobObject', job, 9, 0x3100, 112);
+    const silent = { id: 0x340, breakaway: false };
+    jobEvents().started(silent);
+    assert.equal(inJob(silent), 0, 'SILENT_BREAKAWAY_OK: it leaves without asking');
+    const outside = call('CreateJobObjectW', 0, 0);
+    assert.equal(inJob(child, outside), 0, 'a job this process is not in takes nothing');
+    assert.equal(posted.length, 0, 'no port, nobody told');
+});
+
+test('jobs nest: a job a process in a job is assigned to becomes its child, and a job of another'
+    + ' hierarchy refuses it', ()=>{
+    // Wine's process.c test_nested_jobs and test_nested_jobs_child.
+    const { view, call, handles, errors } = machine();
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    const process = (/** @type {any} */ one)=>handles.open('process', one);
+    const parent = call('CreateJobObjectW', 0, 0);
+    const job = call('CreateJobObjectW', 0, 0);
+    const other = call('CreateJobObjectW', 0, 0);
+    const first = { id: 0x500 };
+    const second = { id: 0x504 };
+    assert.equal(call('AssignProcessToJobObject', parent, process(first)), 1);
+    assert.equal(call('AssignProcessToJobObject', job, process(first)), 1,
+        'an empty job of no hierarchy nests under the process\'s job');
+    assert.equal(call('AssignProcessToJobObject', other, process(second)), 1);
+    assert.equal(call('AssignProcessToJobObject', other, process(first)), 0,
+        'a job with processes of its own does not nest');
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(call('AssignProcessToJobObject', job, process(second)), 0,
+        'the nested job is in another hierarchy than the second process\'s');
+    assert.equal(errors.at(-1), 5);
+    const third = { id: 0x508 };
+    assert.equal(call('AssignProcessToJobObject', job, process(third)), 1);
+    assert.deepEqual([inJob(third, job), inJob(third, parent)], [1, 1],
+        'a process in the inner job is in the outer one');
+});
+
+test('a child is made in the jobs its job list names, each nested under the one before, and refused'
+    + ' by one of another hierarchy', ()=>{
+    // Wine's process.c test_job_list_attribute.
+    const { view, call, handles, jobEvents, posted } = machine();
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    const parent = call('CreateJobObjectW', 0, 0);
+    call('AssignProcessToJobObject', parent, CURRENT_PROCESS);
+    const a = call('CreateJobObjectW', 0, 0);
+    const b = call('CreateJobObjectW', 0, 0);
+    assert.equal(jobEvents().listed([a, 0xdeadbeef]), null, 'a handle naming no job');
+    assert.equal(jobEvents().listed([0]), null, 'nor does NULL');
+    /** @type {any} */
+    const chained = { id: 0x600, breakaway: false, jobList: jobEvents().listed([a, b]) };
+    jobEvents().started(chained);
+    assert.equal(chained.refused, undefined);
+    assert.deepEqual([inJob(chained, parent), inJob(chained, a), inJob(chained, b)], [1, 1, 1]);
+    // b is nested in a now: after a job of no hierarchy, it is of another.
+    const fresh = call('CreateJobObjectW', 0, 0);
+    view.setUint32(0x3200, 1, true);
+    view.setUint32(0x3204, handles.open('iocp', { kind: 'iocp' }), true);
+    assert.equal(call('SetInformationJobObject', fresh, 7, 0x3200, 8), 1);
+    /** @type {any} */
+    const refused = { id: 0x610, breakaway: false, jobList: jobEvents().listed([fresh, b]) };
+    jobEvents().started(refused);
+    assert.equal(refused.refused, 5, 'ERROR_ACCESS_DENIED');
+    assert.deepEqual(posted.map(([, packet])=>packet.transferred), [6, 7, 4],
+        'the first job heard it come and go: NEW_PROCESS, EXIT_PROCESS, ACTIVE_PROCESS_ZERO');
+});
+
+test('a child breaks away from nested jobs from the innermost out, until one keeps it', ()=>{
+    // Wine's process.c test_BreakawayOk with nested jobs.
+    const { view, call, handles, jobEvents } = machine();
+    const outer = call('CreateJobObjectW', 0, 0);
+    const inner = call('CreateJobObjectW', 0, 0);
+    call('AssignProcessToJobObject', outer, CURRENT_PROCESS);
+    call('AssignProcessToJobObject', inner, CURRENT_PROCESS);
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    assert.equal(jobEvents().refusesBreakaway(), true, 'the innermost keeps its children');
+    view.setUint32(0x3100 + 16, 0x800, true);
+    call('SetInformationJobObject', inner, 9, 0x3100, 112);
+    assert.equal(jobEvents().refusesBreakaway(), false, 'the outer one is not asked');
+    const child = { id: 0x400, breakaway: true };
+    jobEvents().started(child);
+    assert.deepEqual([inJob(child, inner), inJob(child, outer)], [0, 1],
+        'out of the inner, kept by the outer');
+    call('SetInformationJobObject', outer, 9, 0x3100, 112);
+    const free = { id: 0x410, breakaway: true };
+    jobEvents().started(free);
+    assert.deepEqual([inJob(free, inner), inJob(free, outer)], [0, 0], 'out of both');
 });

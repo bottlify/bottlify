@@ -27,7 +27,7 @@ function fakeCpu(esp = 0){
     return {
         parkAddress: ()=>PARK,
         /** @param {any} state */
-        newContext: state=>({ ...state }),
+        newContext: state=>({ ...state, reg32: new Int32Array(8) }),
         /** @param {string} name */
         readReg32: name=>(name === 'esp' ? esp : 0),
     };
@@ -122,6 +122,24 @@ test('a thread begun in a routine of the loader finds its start routine above it
     assert.equal(thread.entry, 0x00402000, 'named by its own routine');
     assert.equal(memory.words.get(kernel.createThread({ entry: 0x00402000 }).stackTop + 8),
         undefined, 'nothing written there for a thread without one');
+});
+
+test('a new thread\'s context names its start routine and parameter, a first thread its entry'
+    + ' point and process block', async()=>{
+    // What GetThreadContext reads of a thread not yet run, as on Windows'
+    // i386: EAX the start routine, EBX its parameter. A debugger or a
+    // launcher that hollows its suspended child reads the entry point there.
+    const { kernel } = await makeKernel();
+    const loaderStarted = kernel.createThread({ entry: 0x00403000, parameter: 7,
+        start: 0x00402000 });
+    assert.equal(loaderStarted.context.reg32[0], 0x00402000, 'the start routine, not the loader');
+    assert.equal(loaderStarted.context.reg32[3], 7);
+    const plain = kernel.createThread({ entry: 0x00402000, parameter: 9 });
+    assert.deepEqual([plain.context.reg32[0], plain.context.reg32[3]], [0x00402000, 9]);
+    const first = kernel.createThread({ entry: 0x00405000, first: { entry: 0x00401000,
+        block: 0x7ffdf000 } });
+    assert.equal(first.context.reg32[0], 0x00401000, 'the image\'s entry point');
+    assert.equal(first.context.reg32[3] >>> 0, 0x7ffdf000, 'the process block');
 });
 
 test('a caller with nowhere better sends the thread to the park loop', async()=>{
@@ -683,6 +701,34 @@ test('a process is found by id in the run\'s directory, whichever process starte
     assert.equal(other.processes.find(0x9998), null);
 });
 
+test('a child that outlives the process that made it sets its exit when it ends, and the run lists'
+    + ' it', async()=>{
+    // A launcher starts a child suspended and exits; another process of the
+    // run finds the child, resumes it and waits for it to end.
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x5000 };
+    /** @param {any} module */
+    const machine = async module=>/** @type {any} */ (await module.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const launcherModule = createKernelModule();
+    const launcher = await machine(launcherModule);
+    const root = await machine(createKernelModule());
+    const child = launcher.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    assert.deepEqual(root.processes.run(), [child], 'the run lists it, whoever made it');
+    await launcherModule.dispose();
+    assert.equal(root.processes.find(child.id).exited.signalled, false);
+    launcher.processes.finish(child, 0);
+    assert.equal(child.exitCode, 0);
+    assert.equal(root.processes.find(child.id).exited.signalled, true,
+        'its exit is set though its maker is gone');
+});
+
 test('a gone process\'s record in the run\'s directory keeps its exit, not its memory', async()=>{
     const { setFlagsFromString } = await import('node:v8');
     const { runInNewContext } = await import('node:vm');
@@ -772,7 +818,12 @@ test('a gone process on this thread gives its names back, and a name another pro
         gone.ended();
         await gone.module.dispose();
     })();
-    assert.deepEqual([...table.keys()].sort(), ['Local\\Lock', 'Local\\Ready'],
+    // The object namespace's own directories and links are the run's, not a process's.
+    const names = ()=>[...table]
+        .filter(([, held])=>held.kind !== 'objdir' && held.kind !== 'symlink')
+        .map(([name])=>name);
+    // Local\X is kept under the key X, as a native call names it.
+    assert.deepEqual(names().sort(), ['Lock', 'Ready'],
         'a name only the gone process held is free again');
     assert.equal(waiter.waitResult, 0x80, 'the lock went to the waiter, abandoned');
     assert.ok(await letGo(memoryOfGone, gc), 'the gone machine\'s memory is nobody\'s');
@@ -780,7 +831,7 @@ test('a gone process on this thread gives its names back, and a name another pro
     staying.kernel.resetEvent(ready);
     assert.equal(staying.kernel.poll(ready, waiter), null, 'and works on as an object of the run');
     staying.ended();
-    assert.equal(table.size, 0, 'the last process gone, every name is free');
+    assert.deepEqual(names(), [], 'the last process gone, every name is free');
 });
 
 test('a process in a worker of its own finds a process of the run by id across the link: its'

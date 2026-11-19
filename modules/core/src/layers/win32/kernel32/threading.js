@@ -8,10 +8,11 @@ import { encodeAnsi } from './locale.js';
 import { FILE_OBJECT_KINDS, isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { askChild, childThread, threadEnd } from './cross-process.js';
-import { MODIFY_STATE, SYNCHRONIZE, allows, grantedAccess } from './access.js';
+import { MODIFY_STATE, SYNCHRONIZE, allows, duplicateAccess, grantedAccess } from './access.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { FILETIME_EPOCH_MS, dueInMs, readLargeInteger } from './due-time.js';
 import { createSyncNatives } from './sync-natives.js';
+import { createDirectoryNatives } from './object-directories.js';
 import { overlappedLayout } from '../common/overlapped.js';
 import { wholeAddress } from '../common/pointers.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
@@ -99,8 +100,9 @@ const STACK_SIZE_PARAM_IS_A_RESERVATION = 0x00010000;
 /** CreateThread's flag for a thread that waits for ResumeThread before it first runs. */
 const CREATE_SUSPENDED = 0x4;
 
-/** DuplicateHandle's one option that changes what it does. */
+/** DuplicateHandle's options: close the source, and give the copy the source's rights. */
 const DUPLICATE_CLOSE_SOURCE = 0x00000001;
+const DUPLICATE_SAME_ACCESS = 0x00000002;
 
 /**
  * @typedef {Object} ThreadingHost
@@ -122,6 +124,8 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {() => number} [threadStart]
  *           Where a new thread begins: the libraries told of it, then its start
  *           routine. Zero, or absent, and it begins in its start routine.
+ * @property {() => boolean} [terminating]  Whether the process has begun to end,
+ *           after which CreateThread makes no thread (ERROR_ACCESS_DENIED).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {(object: object, sd: number) => void} [recordObjectSecurity]
@@ -155,7 +159,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           module list.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(process: number) => ({ typeOf: (handle: number) => string | null,
- *     resolve: (handle: number) => any, open: (type: string, object: any) => number,
+ *     resolve: (handle: number) => any,
+ *     open: (type: string, object: any, access?: number | null) => number,
+ *     access?: (handle: number) => number | null,
  *     close: (handle: number) => any } | null)} [processTable]
  *     The handle table of another process of the run on this thread, by its
  *     id: where DuplicateHandle puts a duplicate for it, or takes one from it.
@@ -231,8 +237,6 @@ const HANDLE_FLAG_PROTECT_FROM_CLOSE = 0x2;
 const NORMAL_PRIORITY_BASE = 8;
 const ERROR_NO_MORE_FILES = 18;
 const ERROR_INSUFFICIENT_BUFFER = 122;
-/** What GetMappedFileName answers for memory no file backs. */
-const ERROR_UNEXP_NET_ERR = 59;
 /** CreateWaitableTimerEx's flags. */
 const CREATE_WAITABLE_TIMER_MANUAL_RESET = 0x1;
 const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
@@ -244,9 +248,20 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
  */
 
 /**
+ * Whether a thread is still an object of its process: running, or ended and
+ * held by a handle, as Windows keeps a thread's object - in its process's
+ * list, to be opened by id - until its last reference goes.
+ *
+ * @param {any} kernel @param {any} thread
+ */
+export const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
+    || kernel.handles?.holds?.(thread) === true;
+
+/**
  * The run's processes as a snapshot lists them: this one, its threads in the
  * order they were made (ids are taken in that order; the scheduler's own list
- * is rotated as threads take turns), then the children it started that are
+ * is rotated as threads take turns) while each is an object
+ * (`threadObjectLives`), then the children it started that are
  * still running, each with the first thread it was told of.
  *
  * @param {any} kernel
@@ -254,16 +269,21 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
  * @returns {import('../ntdll/query.js').SystemProcess[]}
  */
 export function listProcesses(kernel, self){
+    const own = kernel.processes?.all() ?? [];
+    // This process's children, then every other process of the run its
+    // directory holds: a grandchild is in a snapshot of the run as on Windows.
+    const others = (kernel.processes?.run?.() ?? []).filter((/** @type {any} */ record)=>
+        (record.id >>> 0) !== (self.id >>> 0) && !own.includes(record));
     return [
         { ...self, threads: (kernel.threads?.() ?? [])
-            .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
+            .filter((/** @type {any} */ thread)=>threadObjectLives(kernel, thread))
             .map((/** @type {any} */ thread)=>thread.id >>> 0)
             .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) },
-        ...(kernel.processes?.all() ?? [])
+        ...[...own, ...others]
             .filter((/** @type {any} */ child)=>!child.completed
                 && child.exitCode === kernel.processes.STILL_ACTIVE)
             .map((/** @type {any} */ child)=>({
-                id: child.id >>> 0, parent: self.id,
+                id: child.id >>> 0, parent: own.includes(child) ? self.id : child.parentId >>> 0,
                 path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
             })),
     ];
@@ -912,80 +932,6 @@ export function createThreadingFunctions(host){
     });
 
     /**
-     * The file an address of this process is mapped from, in the device's
-     * namespace: an image's path with its drive as the volume's device.
-     * The drives are numbered from C, the first hard drive's volume, as
-     * QueryDosDevice names them.
-     *
-     * @param {number} address
-     */
-    const mappedFileOf = address=>{
-        const module = (host.modules?.() ?? []).find(each=>each.path && each.size
-            && address >= each.base && address < each.base + each.size);
-        if (!module?.path || !/^[A-Za-z]:\\/.test(module.path))
-        {
-            return null;
-        }
-        const index = module.path.toUpperCase().charCodeAt(0) - 'C'.charCodeAt(0) + 1;
-        return `\\Device\\HarddiskVolume${Math.max(index, 1)}${module.path.slice(2)}`;
-    };
-
-    /**
-     * DWORD K32GetMappedFileNameA/W(HANDLE hProcess, LPVOID lpv, LPSTR/LPWSTR
-     *     lpFilename, DWORD nSize)
-     *
-     * The characters written, the terminator not counted; a name that does
-     * not fit is cut to the room and ERROR_INSUFFICIENT_BUFFER said. Memory
-     * that no file backs is ERROR_UNEXP_NET_ERR, as Windows answers a heap
-     * address; another process's memory is not this one's to read.
-     *
-     * @param {boolean} wide
-     */
-    const mappedFileName = wide=>({
-        argBytes: 16,
-        /** @param {number[]} args */
-        handler: ([process, address, buffer, size])=>{
-            if ((process >>> 0) !== CURRENT_PROCESS)
-            {
-                host.setLastError(ERROR_INVALID_HANDLE);
-                return 0;
-            }
-            const name = mappedFileOf(address >>> 0);
-            if (name === null)
-            {
-                host.setLastError(ERROR_UNEXP_NET_ERR);
-                return 0;
-            }
-            const room = size >>> 0;
-            if ((buffer >>> 0) === 0 || room === 0)
-            {
-                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-                return 0;
-            }
-            const written = name.slice(0, room - 1);
-            const bytes = new Uint8Array((written.length + 1) * (wide ? 2 : 1));
-            for (let at = 0; at < written.length; at++)
-            {
-                if (wide)
-                {
-                    bytes[at * 2] = written.charCodeAt(at) & 0xff;
-                    bytes[at * 2 + 1] = written.charCodeAt(at) >> 8;
-                }
-                else
-                {
-                    bytes[at] = written.charCodeAt(at) & 0xff;
-                }
-            }
-            host.writeMemory(buffer >>> 0, bytes);
-            if (written.length < name.length)
-            {
-                host.setLastError(ERROR_INSUFFICIENT_BUFFER);
-            }
-            return written.length;
-        },
-    });
-
-    /**
      * The kernel's table of handle words and its mutexes' and events' own
      * words (`wait-one.js`), placed once, on the first bind of a routine that
      * reads them; null where there is no guest memory to place them in.
@@ -1108,6 +1054,13 @@ export function createThreadingFunctions(host){
             addresses: [2, 3],
             /** @param {number[]} args */
             handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{
+                // A process that has begun to end takes no new thread, as
+                // Windows refuses one from NtTerminateProcess on.
+                if (host.terminating?.())
+                {
+                    host.setLastError(ERROR_ACCESS_DENIED);
+                    return 0;
+                }
                 // The size is the stack's commit unless the caller says it is
                 // the reserve; the kernel turns either into the reserve by the
                 // rules CreateThread documents.
@@ -1370,11 +1323,14 @@ export function createThreadingFunctions(host){
                         ? undefined
                         : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
                 }
+                // An object the kernel does not wait on itself - a job - is
+                // waited on as the event it carries.
+                const signal = target.waitable ?? target;
                 if (wait === 0)
                 {
-                    return kernel.poll(target, thread) ?? WAIT_TIMEOUT;
+                    return kernel.poll(signal, thread) ?? WAIT_TIMEOUT;
                 }
-                return settle(kernel.wait(target, thread, wait === INFINITE
+                return settle(kernel.wait(signal, thread, wait === INFINITE
                     ? undefined
                     : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
             },
@@ -1512,11 +1468,15 @@ export function createThreadingFunctions(host){
          * it is sent. The duplicate is then in that process's table, under a
          * number of its own. A process the run cannot reach (in a worker of
          * its own) is taken for this one.
+         *
+         * The copy carries the source's rights with DUPLICATE_SAME_ACCESS and
+         * what was asked without it - nothing at all for 0 (`duplicateAccess`).
          */
         DuplicateHandle: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([sourceProcess, source, targetProcess, target, , inherit, options])=>{
+            handler: ([sourceProcess, source, targetProcess, target, desired, inherit, options])=>{
+                const same = (options >>> 0 & DUPLICATE_SAME_ACCESS) !== 0;
                 /** The table a process handle names, or null for this process's own. */
                 const tableOf = (/** @type {number} */ process)=>{
                     const record = (process >>> 0) === CURRENT_PROCESS ? null
@@ -1535,8 +1495,16 @@ export function createThreadingFunctions(host){
                         host.setLastError(ERROR_INVALID_HANDLE);
                         return 0;
                     }
+                    const rights = duplicateAccess(foreignKind, desired,
+                        from.access?.(source >>> 0) ?? null, same);
+                    if ('error' in rights)
+                    {
+                        host.setLastError(rights.error);
+                        return 0;
+                    }
                     host.namedObjects.reference(foreign);
-                    const taken = (into ?? kernel.handles).open(foreignKind, foreign);
+                    const taken = (into ?? kernel.handles).open(foreignKind, foreign,
+                        rights.granted);
                     if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
                     {
                         from.close(source >>> 0);
@@ -1559,6 +1527,14 @@ export function createThreadingFunctions(host){
                         : ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                const rights = duplicateAccess(kind, desired,
+                    pseudo(source) ? null
+                        : kernel.handles.access?.(untagged(source >>> 0)) ?? null, same);
+                if ('error' in rights)
+                {
+                    host.setLastError(rights.error);
+                    return 0;
+                }
                 // A no-op on anything unnamed, and on a named object this is
                 // the reference CloseHandle will one day take back off -- a
                 // duplicate onto a mutex is a real handle onto it, the same
@@ -1576,7 +1552,7 @@ export function createThreadingFunctions(host){
                 {
                     held.retain();
                 }
-                const duplicate = (into ?? kernel.handles).open(kind, held);
+                const duplicate = (into ?? kernel.handles).open(kind, held, rights.granted);
                 if (!into)
                 {
                     handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
@@ -1793,8 +1769,6 @@ export function createThreadingFunctions(host){
          */
         CreateWaitableTimerExA: createWaitableTimerEx.ansi,
         CreateWaitableTimerExW: createWaitableTimerEx.wide,
-        K32GetMappedFileNameA: mappedFileName(false),
-        K32GetMappedFileNameW: mappedFileName(true),
 
         SetWaitableTimer: {
             argBytes: 24,
@@ -1934,7 +1908,8 @@ export function createThreadingFunctions(host){
         /**
          * HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
          *
-         * A new handle to a thread of this process that has not ended, or to
+         * A new handle to a thread of this process that is still an object -
+         * running, or ended and held (`threadObjectLives`) - or to
          * a thread of a child it started that it knows the id of -- the first,
          * or one it made there; any other id is refused.
          */
@@ -1944,7 +1919,7 @@ export function createThreadingFunctions(host){
             handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
                 const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
-                    (thread.id >>> 0) === wanted && thread.state !== 'terminated');
+                    (thread.id >>> 0) === wanted && threadObjectLives(kernel, thread));
                 if (own)
                 {
                     // The handle carries the rights asked for: a wait on it
@@ -1959,8 +1934,11 @@ export function createThreadingFunctions(host){
                     return inheritIf(kernel.handles.open('thread', own, access.granted),
                         inherit !== 0);
                 }
-                const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
-                    (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
+                // A child's thread, or one of any process of the run (a
+                // grandchild's first thread, found in a snapshot of the run).
+                const child = [...kernel.processes?.all() ?? [], ...kernel.processes?.run?.() ?? []]
+                    .find((/** @type {any} */ made)=>
+                        (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
                 if (child)
                 {
                     return kernel.handles.open('process-thread', childThread(child, wanted));
@@ -2196,14 +2174,17 @@ export function createThreadingFunctions(host){
     // on CreateEventW's entry, whose state they share (`sync-natives.js`).
     const natives = createSyncNatives({
         readMemory: host.readMemory, writeMemory: host.writeMemory, kernel, creates,
-        existing, reference: found=>host.namedObjects.reference(found), object,
+        existing, keyOf: (given, kind)=>host.namedObjects.keyOf(given, kind),
+        reference: found=>host.namedObjects.reference(found), object,
         currentThread: host.currentThread, park: host.park, queueApc: host.queueApc,
         divergence: host.divergence,
     });
 
     return {
         ...table,
-        CreateEventW: { ...table.CreateEventW, natives },
+        CreateEventW: { ...table.CreateEventW, natives: { ...natives,
+            ...createDirectoryNatives({ readMemory: host.readMemory,
+                writeMemory: host.writeMemory, kernel, namedObjects: host.namedObjects }) } },
         CreateRemoteThread: {
             argBytes: 28,
             /** @param {number[]} args */

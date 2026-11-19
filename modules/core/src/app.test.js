@@ -844,23 +844,45 @@ test('a library without relocations goes to its own base, and movable ones fill 
         ]);
     });
 
-test('a library without relocations whose base is taken is refused, not moved', async()=>{
-    // "If the base address is not available, the loader reports an error"
-    // (the PE format's IMAGE_FILE_RELOCS_STRIPPED): a library moved without
-    // relocations runs with every absolute address pointing at its old base.
-    const fixed = new Uint8Array(buildExe({
-        imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
-    }));
-    const executable = new Uint8Array(buildExe({
-        imports: { 'fixed.dll': ['Anything'] }, code: ()=>[0xc3],
-    }));
-    const { placed, emitted } = await mapBeside({ 'fixed.dll': fixed }, executable,
-        { base: 0x02000000, limit: 0x08000000 });
+test('a library whose relocations are stripped is refused where its base is taken, not moved',
+    async()=>{
+        // "If the base address is not available, the loader reports an error"
+        // (the PE format's IMAGE_FILE_RELOCS_STRIPPED): a library moved without
+        // relocations runs with every absolute address pointing at its old base.
+        const fixed = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const view = new DataView(fixed.buffer);
+        const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+        view.setUint16(characteristics, view.getUint16(characteristics, true) | 1, true);
+        const executable = new Uint8Array(buildExe({
+            imports: { 'fixed.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const { placed, emitted } = await mapBeside({ 'fixed.dll': fixed }, executable,
+            { base: 0x02000000, limit: 0x08000000 });
 
-    assert.deepEqual(placed, [], 'its base, 0x400000, is the program\'s');
-    assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
-        && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
-});
+        assert.deepEqual(placed, [], 'its base, 0x400000, is the program\'s');
+        assert.ok(emitted.some(([name, payload])=>name === 'libraries-missing'
+            && payload.names.includes('fixed.dll') && /no relocations/.test(payload.reason)));
+    });
+
+test('a library whose relocations are merely absent is moved as it lies where its base is taken',
+    async()=>{
+        // Windows' loader moves an image with no relocation directory and no
+        // IMAGE_FILE_RELOCS_STRIPPED, fixing nothing up (Wine's kernel32:loader
+        // loads 34 such libraries linked at one base).
+        const loose = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const executable = new Uint8Array(buildExe({
+            imports: { 'loose.dll': ['Anything'] }, code: ()=>[0xc3],
+        }));
+        const { placed } = await mapBeside({ 'loose.dll': loose }, executable,
+            { base: 0x02000000, limit: 0x08000000 });
+
+        assert.deepEqual(placed.map(one=>[one.name, one.base]), [['loose.dll', 0x02000000]],
+            'its base, 0x400000, is the program\'s: the first free one');
+    });
 
 test('a library that cannot move takes its base outside the modules\' space when it is given up',
     ()=>{

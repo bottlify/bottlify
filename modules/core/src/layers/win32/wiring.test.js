@@ -739,8 +739,11 @@ test('mmio opens a file by the handle kernel32 gave the program, and closes it w
         bytes.set([...'C:\\riff.bin\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
         const file = kernel32.CreateFileA.handler(
             [0x1000, GENERIC_READ_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]);
-        bytes.set(Array.from({ length: 64 }, (_, index)=>index), 0x2000);
-        assert.equal(kernel32.WriteFile.handler([file, 0x2000, 64, 0x1100, 0]), 1);
+        // Buffers in memory the process was given: a transfer probes its pages.
+        const pages = kernel32.VirtualAlloc.handler([0, 0x2000, 0x3000, 4]);
+        assert.notEqual(pages, 0);
+        bytes.set(Array.from({ length: 64 }, (_, index)=>index), pages);
+        assert.equal(kernel32.WriteFile.handler([file, pages, 64, 0x1100, 0]), 1);
         assert.equal(kernel32.SetFilePointer.handler([file, 16, 0, FILE_BEGIN]), 16);
 
         const info = 0x3000;
@@ -748,8 +751,8 @@ test('mmio opens a file by the handle kernel32 gave the program, and closes it w
         const handle = winmm.mmioOpenA.handler([0, info, 0]);
         assert.notEqual(handle, 0, `opened, error ${view.getUint32(info + 12, true)}`);
         assert.equal(winmm.mmioSeek.handler([handle, 0, 1]), 16);
-        assert.equal(winmm.mmioRead.handler([handle, 0x4000, 4]), 4);
-        assert.deepEqual([...bytes.subarray(0x4000, 0x4004)], [16, 17, 18, 19]);
+        assert.equal(winmm.mmioRead.handler([handle, pages + 0x1000, 4]), 4);
+        assert.deepEqual([...bytes.subarray(pages + 0x1000, pages + 0x1004)], [16, 17, 18, 19]);
         assert.equal(winmm.mmioClose.handler([handle, 0]), 0);
         assert.equal(handles.entries.has(file), false, 'CloseHandle closed the program\'s handle');
         await win32Module.dispose();

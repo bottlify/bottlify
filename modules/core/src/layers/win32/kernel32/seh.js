@@ -37,7 +37,9 @@
  *   handler run backwards. The context keeps the flags the fault had.
  */
 
+import { DBG_CONTINUE, DEBUG_EVENT } from './debug-events.js';
 import { privilegedAt, storeMachineStatus } from './machine-status.js';
+import { TEB } from './teb.js';
 import {
     CONTEXT_EXTENDED_REGISTERS, CONTEXT_FLOATING_POINT, floatGroupsOf, writeFloatGroups,
 } from './fpu-context.js';
@@ -150,6 +152,7 @@ export const STATUS = Object.freeze({
     ILLEGAL_INSTRUCTION: 0xc000001d,
     INTEGER_DIVIDE_BY_ZERO: 0xc0000094,
     PRIVILEGED_INSTRUCTION: 0xc0000096,
+    GUARD_PAGE_VIOLATION: 0x80000001,
     BREAKPOINT: 0x80000003,
     SINGLE_STEP: 0x80000004,
     FLOAT_DIVIDE_BY_ZERO: 0xc000008e,
@@ -198,6 +201,8 @@ const SILENT_SERVICES = new Set([1, 3, 4]);
  */
 const SCRATCH = RECORD.SIZE + CONTEXT.SIZE + 0x20;
 
+const PAGE_SIZE = 0x1000;
+
 /** How much of the stack above esp the last-chance trace shows, in bytes. */
 const STACK_TRACED = 0x1000;
 
@@ -238,9 +243,18 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  * @property {() => any} [currentThread]
  * @property {import('./fpu-context.js').FloatState | null} [float]  The processor's
  *           images of a thread's x87 and SSE state, which a context carries.
+ * @property {{ touch: (address: number) => boolean,
+ *     commitGuard: (page: number) => boolean }} [guardPages]  The reservations'
+ *           guard pages (heap.js `GUARD_PAGES`): a refused touch of one takes
+ *           its guard away, and a stack grows by committing its next one.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
+ * @property {(report: import('./debug-events.js').DebugReport) => Promise<number>}
+ *     [debugReport]  This process's debugger, when its parent debugs it: told of an
+ *     exception first and again once nothing handled it, answering how to go on.
+ * @property {() => boolean} [debugged]  Whether a debugger hears this process now:
+ *     from its start, or since one attached; absent, whenever `debugReport` is given.
  *           Ends the process for an exception nothing handled, with the
  *           exception's code as its exit code -- what Windows does once the
  *           last-chance filter has had its say.
@@ -275,6 +289,38 @@ export function createSeh(host){
 
     /** The last top-level filter a program installed. */
     let topLevelFilter = 0;
+
+    /**
+     * A refused touch of a guard page, as Windows answers it before any
+     * handler sees it: the page loses its guard; one inside the running
+     * thread's stack reservation (DeallocationStack to StackBase) becomes the
+     * stack's committed limit and the page below it the next guard page, and
+     * the touch runs again ('grown'), unless no page would be left between
+     * that guard and the reservation's bottom ('overflow',
+     * STATUS_STACK_OVERFLOW); anywhere else the touch is
+     * STATUS_GUARD_PAGE_VIOLATION ('guard'). Null for a page with no guard.
+     *
+     * @param {number} address
+     * @returns {'grown' | 'overflow' | 'guard' | null}
+     */
+    const guardTouched = address=>{
+        if (!host.guardPages?.touch(address))
+        {
+            return null;
+        }
+        const teb = host.teb() >>> 0;
+        const top = teb === 0 ? 0 : readU32(teb + TEB.STACK_BASE);
+        const bottom = teb === 0 ? 0 : readU32(teb + TEB.DEALLOCATION_STACK);
+        if (address < bottom || address >= top)
+        {
+            return 'guard';
+        }
+        const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        writeU32(teb + TEB.STACK_LIMIT, page);
+        const next = page - PAGE_SIZE;
+        return next >= bottom + PAGE_SIZE && host.guardPages.commitGuard(next)
+            ? 'grown' : 'overflow';
+    };
 
     /**
      * Writes an exception record where a handler will look for it.
@@ -637,13 +683,69 @@ export function createSeh(host){
         };
     };
 
+    /** Whether a debugger hears this process now. */
+    const debugging = ()=>Boolean(host.debugReport) && (host.debugged?.() ?? true);
+
+    /**
+     * Tells this process's debugger of an exception, the thread stopped until
+     * it answers: meanwhile the context the exception carries is the thread's
+     * (`debugStop`), which the debugger reads and may change. Null when no
+     * debugger debugs this process.
+     *
+     * A breakpoint the processor raised (`trap`, an int3's length) shows its
+     * debugger the thread past the instruction, as Windows' does - the
+     * address is the int3's, Eip the next - and goes on from there when
+     * continued; declined, the handlers see Eip at the int3 again.
+     *
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[],
+     *     trap?: number }} what
+     * @param {any} thread @param {number} context @param {boolean} firstChance
+     * @returns {Promise<number | null>}
+     */
+    const toDebugger = async(what, thread, context, firstChance)=>{
+        const report = host.debugReport;
+        if (!report || !debugging())
+        {
+            return null;
+        }
+        if (thread)
+        {
+            thread.debugStop = context;
+        }
+        const past = what.trap ?? 0;
+        if (past !== 0)
+        {
+            writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) + past);
+        }
+        try
+        {
+            const answer = await report({ code: DEBUG_EVENT.EXCEPTION,
+                threadId: (thread?.id ?? 0) >>> 0, exception: {
+                    code: what.code >>> 0, flags: what.flags ?? 0, address: what.address >>> 0,
+                    parameters: what.parameters ?? [], firstChance } });
+            if (past !== 0 && answer !== DBG_CONTINUE)
+            {
+                writeU32(context + CONTEXT.EIP, readU32(context + CONTEXT.EIP) - past);
+            }
+            return answer;
+        }
+        finally
+        {
+            if (thread)
+            {
+                thread.debugStop = null;
+            }
+        }
+    };
+
     /**
      * Walks the chain, calling every handler in order until one takes the
      * exception or the chain runs out.
      *
      * @param {{ code: number, flags?: number, address: number, parameters?: number[],
-     *     raisedFrom?: number, call?: string }} what  `raisedFrom` the return address of
-     *     RaiseException's caller, `call` the host function it was met in
+     *     raisedFrom?: number, call?: string, trap?: number }} what  `raisedFrom` the
+     *     return address of RaiseException's caller, `call` the host function it was
+     *     met in, `trap` an int3's length (`toDebugger`)
      * @param {Record<string, number>} [given]  The registers at the exception,
      *        when they are not the processor's right now -- a fault is
      *        reported from a stub that has already moved the stack and spent
@@ -675,6 +777,14 @@ export function createSeh(host){
 
         // The vectored handlers first, the whole process's, in their order,
         // each handed EXCEPTION_POINTERS below the record.
+        // A debuggee's debugger hears of it before any handler, and may
+        // take it: continued with DBG_CONTINUE, the thread goes on from the
+        // context as the debugger left it.
+        if (await toDebugger(what, asked, at.context, true) === DBG_CONTINUE)
+        {
+            return { handled: true, registers: continuation(at.context, flags, asked) };
+        }
+
         const pointers = (at.top - 8) >>> 0;
         writeU32(pointers, at.record);
         writeU32(pointers + 4, at.context);
@@ -896,7 +1006,17 @@ export function createSeh(host){
      * @returns {Promise<{ handled: boolean, registers?: Record<string, number> }>}
      */
     const lastChance = async(what, at)=>{
-        if (topLevelFilter !== 0)
+        // A debuggee's unhandled exception is its debugger's second chance,
+        // and the program's own filter is not asked, as Windows'
+        // UnhandledExceptionFilter declines when a debugger is attached.
+        if (debugging())
+        {
+            if (await toDebugger(what, at.asked, at.context, false) === DBG_CONTINUE)
+            {
+                return { handled: true, registers: continuation(at.context, at.flags, at.asked) };
+            }
+        }
+        else if (topLevelFilter !== 0)
         {
             const pointers = (at.top - 8) >>> 0;
             writeU32(pointers, at.record);
@@ -1040,8 +1160,17 @@ export function createSeh(host){
             {
                 return { handled: true, registers: { ...registers, eip: registers.eip + 1 >>> 0 } };
             }
+            const guarded = fault.vector === 14 && fault.address !== undefined
+                ? guardTouched(fault.address >>> 0) : null;
+            if (guarded === 'grown')
+            {
+                return { handled: true, registers };
+            }
             const code = privileged ? STATUS.PRIVILEGED_INSTRUCTION
-                : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (fault.vector)];
+                : guarded === 'overflow' ? STATUS.STACK_OVERFLOW
+                    : guarded === 'guard' ? STATUS.GUARD_PAGE_VIOLATION
+                        : VECTOR_TO_STATUS[/** @type {keyof typeof VECTOR_TO_STATUS} */ (
+                            fault.vector)];
             if (code === undefined)
             {
                 return { handled: false };
@@ -1050,20 +1179,24 @@ export function createSeh(host){
             // what address, because a handler is allowed to read them -- one
             // that commits the page it was refused and goes on reads both. A
             // protection fault has no address to give, and says so with -1.
-            const parameters = code === STATUS.ACCESS_VIOLATION
+            const parameters = fault.vector === 14 || code === STATUS.ACCESS_VIOLATION
                 ? [(fault.errorCode ?? 0) & 2 ? 1 : 0,
                     fault.vector === 13 ? 0xffffffff : (fault.address ?? 0) >>> 0]
                 : fault.vector === DEBUG_SERVICE
                     ? [registers.eax >>> 0, registers.ecx >>> 0, registers.edx >>> 0] : [];
-            const result = await dispatch({ code, address: registers.eip, parameters }, registers);
+            // An int3 the debugger continues goes on past it (`toDebugger`).
+            const trap = fault.vector === 3 ? 1 : 0;
+            const result = await dispatch({ code, address: registers.eip, parameters,
+                ...trap ? { trap } : {} }, registers);
             if (result.handled)
             {
                 return result;
             }
             // The last chance, as for a raise -- except that a program with no
             // filter of its own ends with the fault reported rather than with
-            // an exit code, since the report is the only account of it.
-            if (topLevelFilter === 0)
+            // an exit code, since the report is the only account of it; a
+            // debuggee's debugger has its second chance first.
+            if (topLevelFilter === 0 && !debugging())
             {
                 return { handled: false };
             }
@@ -1187,6 +1320,12 @@ export function createSeh(host){
              * last-chance handler is where it writes its own crash report, and
              * declining to run it is declining the only account of the failure
              * anybody gets.
+             *
+             * Under a debugger - the process has a debug port, whatever the
+             * process block's BeingDebugged says - the exception is the
+             * debugger's second chance: no filter runs and the answer is
+             * EXCEPTION_CONTINUE_SEARCH (Wine's kernel32 debugger.c
+             * test_unhandled_exception_filter).
              */
             UnhandledExceptionFilter: {
                 argBytes: 4,
@@ -1200,6 +1339,10 @@ export function createSeh(host){
                     }
                     catch (e){
                         host.trace?.(`last chance: not traced (${String(e)})`);
+                    }
+                    if (debugging())
+                    {
+                        return EXCEPTION_CONTINUE_SEARCH;
                     }
                     if (topLevelFilter === 0)
                     {

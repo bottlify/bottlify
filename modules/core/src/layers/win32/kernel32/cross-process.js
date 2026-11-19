@@ -50,11 +50,27 @@ const UNTOUCHED = 0x7fffbeef;
  * The calls a parent may make in its child. Anything else is refused: the
  * list is what the cross-process forms of kernel32 and ntdll are made of.
  */
+/**
+ * A debugger's two calls into the process it debugs, no export of either
+ * library's: it has attached (DebugActiveProcess), and it breaks in
+ * (DebugBreakProcess). Their names cannot be a program's.
+ */
+export const DEBUG_ATTACH = '<debug attach>';
+export const DEBUG_BREAK = '<debug break>';
+/**
+ * The native read and write of a child's memory (`process-memory.js`), made
+ * there over its own pages: no export either, which ntdll's
+ * NtReadVirtualMemory and NtWriteVirtualMemory and kernel32's pair become.
+ */
+export const VIRTUAL_READ = '<read virtual memory>';
+export const VIRTUAL_WRITE = '<write virtual memory>';
+
 export const CROSS_CALLS = new Set([
     'VirtualAlloc', 'VirtualFree', 'VirtualProtect', 'VirtualQuery',
-    'ReadProcessMemory', 'WriteProcessMemory',
+    VIRTUAL_READ, VIRTUAL_WRITE,
     'SuspendThread', 'ResumeThread', 'GetThreadContext', 'SetThreadContext',
-    'CreateThread', 'GetExitCodeThread', 'NtQueryInformationProcess',
+    'CreateThread', 'GetExitCodeThread', 'NtQueryInformationProcess', 'NtQueryInformationThread',
+    DEBUG_ATTACH, DEBUG_BREAK,
 ]);
 
 /**

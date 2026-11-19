@@ -42,12 +42,14 @@ import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
 import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
+import { DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
+import { sectionImageInformation } from './layers/win32/kernel32/mapping.js';
 import { STEAM_PATH, announceSteamClient } from './layers/win32/steamclient/functions.js';
 import { synthesiseProcessInit, synthesiseStartRefused, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
@@ -2320,6 +2322,45 @@ export function withLibraryExtension(name){
     return file.includes('.') ? name : `${name}.dll`;
 }
 
+/**
+ * An image's exports as its module hands them out: by name and by ordinal,
+ * the address of one the image defines, or the forwarder string ("LIB.Name",
+ * "LIB.#7") of one that names another library's export (PE/COFF 6.3.2), which
+ * `exportOf` follows.
+ *
+ * @param {{ name: string | number | null, ordinal: number, rva: number,
+ *     forwards: string | null }[]} exports
+ * @param {number} base
+ */
+function exportTables(exports, base){
+    /** @type {Map<string, number | string>} */
+    const byName = new Map();
+    /** @type {Map<number, number | string>} */
+    const byOrdinal = new Map();
+    for (const entry of exports)
+    {
+        const value = entry.forwards ?? base + entry.rva;
+        if (entry.name !== null)
+        {
+            byName.set(String(entry.name), value);
+        }
+        byOrdinal.set(entry.ordinal, value);
+    }
+    /** @param {number | string | undefined} value */
+    const address = value=>(typeof value === 'number' ? value : null);
+    /** @param {number | string | undefined} value */
+    const forward = value=>(typeof value === 'string' ? value : null);
+    return {
+        /** @param {string} exported */
+        addressOf: exported=>address(byName.get(exported)),
+        /** @param {number} ordinal */
+        addressOfOrdinal: ordinal=>address(byOrdinal.get(ordinal)),
+        /** @param {string | null} exported @param {number | null} ordinal */
+        forwardOf: (exported, ordinal)=>forward(exported !== null ? byName.get(exported)
+            : byOrdinal.get(ordinal ?? -1)),
+    };
+}
+
 /** RT_MANIFEST: an image's manifests, 1 a program's own and 2 a library's. */
 const RT_MANIFEST = 24;
 const ISOLATIONAWARE_MANIFEST = 2;
@@ -2628,6 +2669,8 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory, 
 const LIBRARY_ALIGN = 0x10000;
 
 /** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
+/** What int3 raises (winnt.h's EXCEPTION_BREAKPOINT, STATUS_BREAKPOINT). */
+const EXCEPTION_BREAKPOINT = 0x80000003;
 const LDR_DLL_NOTIFICATION_REASON_LOADED = 1;
 const LDR_DLL_NOTIFICATION_REASON_UNLOADED = 2;
 
@@ -2643,6 +2686,23 @@ const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
 /** LoadLibrary's error for a file that is no image for the process. */
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What an export forwarded to a library found nowhere, or to a name it lacks, answers. */
+const ERROR_MOD_NOT_FOUND = 126;
+const ERROR_PROC_NOT_FOUND = 127;
+/**
+ * How many forwarders an export is followed through: one more is the image's
+ * fault, ERROR_BAD_EXE_FORMAT, as a forwarder to itself is (Wine's loader
+ * test, test_export_forwarder_loop: 32 are followed, the 33rd refused).
+ */
+const FORWARD_HOPS = 32;
+/** LoadLibrary's error for a library whose initialisation failed or raised. */
+const ERROR_DLL_INIT_FAILED = 1114;
+/** A data file named by a path that is not there, as CreateFile answers it. */
+const ERROR_FILE_NOT_FOUND = 2;
+/** A file another holds open without sharing reading. */
+const ERROR_SHARING_VIOLATION = 32;
+/** An empty file, which no view can be made of. */
+const ERROR_FILE_INVALID = 1006;
 /** A page: a view of a file is mapped in whole ones. */
 const PAGE_SIZE = 0x1000;
 
@@ -2821,7 +2881,7 @@ export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
             sizeOfHeaders: 0,
             sections: [{ name: '.rsrc', virtualAddress: directory.address,
                 virtualSize: directory.size, rawSize: directory.size, rawOffset: 0,
-                readable: true, writable: false, executable: false }],
+                readable: true, writable: false, executable: false, characteristics: 0x40000040 }],
         }, RT_VERSION, 1);
         if (!found)
         {
@@ -3004,15 +3064,21 @@ export const WHOLE_READ_BYTES = HEAP_POOLS.blockCache / 4;
  * @param {any} blocks
  * @param {string} path
  * @param {number} [piece]  the most one read asks for
+ * @param {(code: string | undefined) => void} [refused]  Told why a file was
+ *     not opened (the volume's error code: SHARING_VIOLATION for one held open
+ *     for writing), for a caller that answers each reason apart.
  * @returns {Promise<Uint8Array | null>}
  */
-export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ_BYTES){
+export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ_BYTES,
+    refused = undefined)
+{
     let handle;
     try
     {
         handle = filesystem.open(path, { shareDelete: true });
     }
-    catch {
+    catch (e){
+        refused?.(/** @type {any} */ (e)?.code);
         return null;
     }
 
@@ -3060,13 +3126,16 @@ export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ
  * absolute address in it assumes that base -- and takes it when it lies in the
  * modules' space and nothing holds it, or when `claim` can give up that span
  * from elsewhere: a base such a library names is free memory of a new process
- * on Windows, whatever this layout has put there. Otherwise it is refused, as
- * the PE format says a loader refuses such an image, rather than mapped
- * somewhere its addresses do not describe. A library that can move and finds
+ * on Windows, whatever this layout has put there. Otherwise, with its
+ * relocations marked stripped (IMAGE_FILE_RELOCS_STRIPPED), it is refused, as
+ * the PE format says a loader refuses such an image; without that mark it is
+ * placed as a movable one is, nothing fixed up, as Windows' loader moves an
+ * image whose relocation directory is merely absent. A library that can move and finds
  * the modules' space full is put wherever `claim` finds room, as Windows puts
  * one in any free span.
  *
- * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number }} image
+ * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number,
+ *     relocsStripped?: boolean }} image
  * @param {{ next: number, floor: number, limit: number,
  *     holder: (base: number, size: number) => { base: number, size: number } | null,
  *     claim?: (base: number | null, size: number) => number }} space
@@ -3086,7 +3155,10 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
         {
             return { base };
         }
-        return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+        if (image.relocsStripped !== false)
+        {
+            return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+        }
     }
     // On a 64 KiB granule, as Windows maps every image: the CLR refuses a
     // native image that lies elsewhere.
@@ -3258,22 +3330,12 @@ export async function mapShippedLibraries(options){
         const record = loader.map(file, { base, name: region, bits });
         const { exports } = readExports(file, image);
 
-        const addresses = new Map(exports
-            .filter(entry=>entry.name !== null && entry.forwards === null)
-            .map(entry=>[String(entry.name), base + entry.rva]));
-        const ordinals = new Map(exports
-            .filter(entry=>entry.forwards === null)
-            .map(entry=>[entry.ordinal, base + entry.rva]));
-
         const held = {
             name,
             base,
             size: image.sizeOfImage,
             region,
-            /** @param {string} exported */
-            addressOf: exported=>addresses.get(exported) ?? null,
-            /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+            ...exportTables(exports, base),
             entryPoint: record.record.entryPoint,
             // Until it is bound (`buildApp`), and let go of then: the mapped
             // image and its file are in guest memory from there on.
@@ -4491,7 +4553,7 @@ async function openSession(deps){
  * @returns {{ blocks: any, eager: any[] }}
  */
 function sessionUnder(blocks, seeded){
-    const linked = new Set((seeded.links ?? []).filter(record=>!record.junction)
+    const linked = new Set((seeded.links ?? []).filter(record=>!record.junction && !record.reparse)
         .map(record=>foldName(record.owner)));
     /** @type {{ path: string, file: any }[]} */
     const lazy = [];
@@ -4783,6 +4845,9 @@ const TRACED_KEPT = 200;
  *     beside?: (request: any) => void,
  *     terminate?: (request: any, code: number) => boolean,
  *     askChild?: (request: any, call: any) => Promise<any> | null,
+ *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
+ *         .DebugReport) => Promise<number>, debugged?: () => boolean,
+ *         object?: () => any, noInherit?: () => boolean },
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
@@ -4812,6 +4877,12 @@ async function buildApp(options){
     // the last frame of the process it replaced stays on the canvas until this
     // one has something to show.
     const runPresenter = options.graphics?.presenter ?? null;
+    /**
+     * This process's debugger while one hears it: from its start, or since
+     * one attached (`debug-events.js`); null otherwise.
+     */
+    const debuggerNow = ()=>(options.debugger && (options.debugger.debugged?.() ?? true)
+        ? options.debugger : null);
 
     // The address space above the program: the system modules first, then the
     // libraries a game brought with it, and the heap above all of them with
@@ -5020,6 +5091,8 @@ async function buildApp(options){
     let loaderLock = 0;
     /** @type {any} */
     let mainModule = null;
+    /** Whether a debuggee's start is told: a library loaded after is told as it loads. */
+    let debugStarted = false;
 
     /**
      * Marks a module the process has loaded, with what it brings in, for
@@ -5037,6 +5110,14 @@ async function buildApp(options){
         }
         module.loaded = true;
         threadBlocks?.addModule(module);
+        // A library of the engine's loaded once the process runs is told to
+        // its debugger as it is marked, without waiting for the answer: the
+        // mark is made inside a lookup that cannot wait (`debug-events.js`).
+        if (debugStarted)
+        {
+            debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                threadId: kernel.currentThread()?.id >>> 0, base: module.base });
+        }
         for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
         {
             markLoaded(byName.get(imported) ?? null);
@@ -5082,6 +5163,22 @@ async function buildApp(options){
         }
         return (/[\\/]/.test(name) ? moduleAtPath(name) : null)
             ?? byName.get(moduleKeyOf(name)) ?? null;
+    };
+
+    /**
+     * Whether a file, not a directory, stands at a path on the volume.
+     *
+     * @param {string} path
+     */
+    const standsAt = path=>{
+        try
+        {
+            const entry = core.api('filesystem').stat(path);
+            return Boolean(entry && !entry.directory);
+        }
+        catch {
+            return false;
+        }
     };
 
     /**
@@ -5176,6 +5273,7 @@ async function buildApp(options){
      * slots from linear address zero and up.
      *
      * @type {{
+     *     peb: number,
      *     createThreadBlock: (thread: { id: number, stackBase: number,
      *         stackLimit: number,
      *         locals?: import('./layers/win32/kernel32/teb.js').ThreadLocal[] })
@@ -5190,6 +5288,8 @@ async function buildApp(options){
      * } | null}
      */
     let threadBlocks = null;
+    /** @type {(() => Uint8Array) | null} */
+    let imageInformation = null;
     /**
      * The callbacks LdrRegisterDllNotification registered, by their cookie, in
      * the order registered (`tellNotified`).
@@ -6043,6 +6143,12 @@ async function buildApp(options){
             // process's to keep.
             system: options.system,
             processId: options.processId,
+            // The process block, made once the image is placed: what a call
+            // its parent makes in it reads with no thread of its own running.
+            processBlock: ()=>threadBlocks?.peb ?? 0,
+            // SECTION_IMAGE_INFORMATION of the program's image, from its own
+            // headers and what is mapped of it now (ProcessImageInformation).
+            imageInformation: ()=>imageInformation?.() ?? null,
             standardFiles: options.standardFiles,
             // The handles a parent's CreateProcess handed down (pipe ends):
             // the ends themselves on this thread, stand-ins of them across.
@@ -6365,6 +6471,17 @@ async function buildApp(options){
                  */
                 load: (name, flags, search)=>loadLibraryAtRuntime(name, flags, undefined, 0,
                     search),
+                /**
+                 * GetProcAddress's answer: the export followed through its
+                 * forwarders (`exportOf`), a forwarder's target loaded as the
+                 * calling thread waits.
+                 *
+                 * @param {any} module @param {string | null} name
+                 * @param {number | null} ordinal
+                 */
+                exportOf: (module, name, ordinal)=>exportOf(module, name, ordinal,
+                    (library, from)=>loadLibraryAtRuntime(library, 0, kernel.currentThread(),
+                        from.base ?? 0)),
                 /** @param {string} name */
                 loadError: name=>loadErrors.get(withLibraryExtension(name).toLowerCase()
                     .replace(/\.dll$/, '')) ?? null,
@@ -6488,6 +6605,8 @@ async function buildApp(options){
             // child the run does not have.
             askChild: (/** @type {any} */ request, /** @type {any} */ call)=>
                 options.askChild?.(request, call) ?? null,
+            // Its parent's ear when the parent debugs it (`debug-events.js`).
+            debugger: options.debugger ?? null,
             /** @param {any} thread */
             threadBlock: thread=>{
                 if (!threadBlocks)
@@ -6812,6 +6931,33 @@ async function buildApp(options){
         });
         return { code, jumps, pointers: fn.pointers };
     };
+    /**
+     * An export the host answers: a trampoline jumping to its trap, or guest
+     * code placed at bind time where the function has any (`guest`; in a
+     * 64-bit process only where it places its x86-64 there, `guestLong`, and
+     * its host handler where the machine had no room for it).
+     *
+     * ntdll's system calls (Nt*, Zw*) are the trap's own bytes instead. On
+     * Windows each is a few position-independent instructions that enter the
+     * kernel, and a program may copy one elsewhere and call the copy - a
+     * protection does, to call the kernel past a hook on the original; a
+     * trampoline's relative jump, copied, lands nowhere. The trap's bytes
+     * carry its id and run wherever they are.
+     *
+     * @param {string} library @param {string} exported @param {any} fn
+     */
+    const trapExport = (library, exported, fn)=>{
+        const target = (fn.guest && (!long || fn.guestLong)
+            ? fn.guest({
+                /** @param {string} label @param {any} trap */
+                register: (label, trap)=>bridge.register(label, trap),
+            }) : 0)
+            || bridge.register(`${library}!${exported}`, fn);
+        const systemCall = !long && !fn.guest && library.toLowerCase() === 'ntdll.dll'
+            && /^(Nt|Zw)[A-Z]/.test(exported);
+        const own = systemCall ? cpu.stubAt(target) : null;
+        return own ? { code: own } : { target };
+    };
     // Each system module where the one before it ends, at the granularity
     // every image is placed at: the window they share is the room left for
     // the libraries a program brings, and a module is a few pages -- a
@@ -6958,17 +7104,7 @@ async function buildApp(options){
                 ? codeExport(long && fn.long ? longOf(fn) : fn, `${name}!${exported}`)
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
-                } : {
-                    // Guest code placed at bind time runs in a 64-bit process
-                    // too where it says it places its x86-64 there (`guestLong`).
-                    // One the machine's memory had no room for is its host handler.
-                    target: (fn.guest && (!long || fn.guestLong)
-                        ? fn.guest({
-                            /** @param {string} label @param {any} trap */
-                            register: (label, trap)=>bridge.register(label, trap),
-                        }) : 0)
-                        || bridge.register(`${name}!${exported}`, fn),
-                },
+                } : trapExport(name, exported, fn),
         }));
 
         // A table with a DllMain is a module with an entry point, run when a
@@ -7128,19 +7264,129 @@ async function buildApp(options){
      * @param {string} dll
      * @param {string | null} name
      * @param {number | null} ordinal
+     * @param {any} [holder]  The library loaded at run time that imports it.
      */
-    const resolveImport = (dll, name, ordinal)=>{
+    const resolveImport = (dll, name, ordinal, holder = null)=>{
         const module = moduleUnderContext(dll);
         if (!module)
         {
             return null;
         }
         markLoaded(module);
-        module.pinned = true;
-        const address = name !== null
-            ? module.addressOf(name)
+        // A library loaded at run time holds what it imports from, given
+        // back when it is unloaded, as Windows counts a dependency; the
+        // program's own imports, and an engine library, stay for the run.
+        if (holder && typeof module.references === 'number')
+        {
+            holdOn(holder, module);
+        }
+        else
+        {
+            module.pinned = true;
+        }
+        // A forwarded import's target is held by the library that forwards
+        // to it, pinned where that one is (`holdOn`).
+        const found = /** @type {{ address: number, module: any } | { error: number }} */ (
+            exportOf(module, name, ordinal, null));
+        return 'error' in found ? null : watched(dll, name, ordinal, found.address);
+    };
+
+    /**
+     * An export of a module, followed through its forwarders (PE/COFF 6.3.2):
+     * "LIB.Name" or "LIB.#7" is LIB's export of that name or ordinal, LIB
+     * loaded when it is not yet - by the module that forwards to it, which
+     * then holds it (`holdOn`): Windows' loader records the forwarder's
+     * target as the forwarding module's dependency, so a program that frees
+     * the target by name does not unload it while the forwarder stands.
+     *
+     * One resolver for GetProcAddress, LdrGetProcedureAddress and the import
+     * tables. The tables are bound where nothing can wait (`loader.bind`), so
+     * they pass no `load`: a target not loaded there is an import not found,
+     * and a library loaded at run time has its forwarded imports' targets
+     * loaded before it is bound (`loadForwardedImports`).
+     *
+     * @param {any} module
+     * @param {string | null} name
+     * @param {number | null} ordinal
+     * @param {((library: string, from: any) => number | Promise<number>) | null} load
+     * @param {number} [hops]
+     * @returns {{ address: number, module: any } | { error: number }
+     *     | Promise<{ address: number, module: any } | { error: number }>}
+     */
+    const exportOf = (module, name, ordinal, load, hops = 0)=>{
+        const address = name !== null ? module.addressOf(name)
             : ordinal === null ? null : module.addressOfOrdinal(ordinal);
-        return address === null ? null : watched(dll, name, ordinal, address);
+        if (address !== null)
+        {
+            return { address, module };
+        }
+        const forward = module.forwardOf?.(name, ordinal) ?? null;
+        if (forward === null)
+        {
+            return { error: ERROR_PROC_NOT_FOUND };
+        }
+        if (hops >= FORWARD_HOPS)
+        {
+            return { error: ERROR_BAD_EXE_FORMAT };
+        }
+        const dot = forward.lastIndexOf('.');
+        const library = withLibraryExtension(forward.slice(0, Math.max(dot, 0)));
+        const exported = forward.slice(dot + 1);
+        const byNumber = exported.startsWith('#');
+        /** @param {any} target */
+        const next = target=>{
+            holdOn(module, target);
+            return exportOf(target, byNumber ? null : exported,
+                byNumber ? Number(exported.slice(1)) >>> 0 : null, load, hops + 1);
+        };
+        const target = dot <= 0 ? null : findModule(library);
+        if (target)
+        {
+            markLoaded(target);
+            return next(target);
+        }
+        if (dot <= 0 || !load)
+        {
+            return { error: ERROR_MOD_NOT_FOUND };
+        }
+        return Promise.resolve(load(library, module)).then(got=>{
+            const loaded = got ? byBase.get(got >>> 0) : null;
+            if (!loaded)
+            {
+                return { error: ERROR_MOD_NOT_FOUND };
+            }
+            // The load's own reference is the forwarding module's hold.
+            holdingSet(module).add(loaded);
+            return next(loaded);
+        });
+    };
+
+    /** What a module holds loaded (`holdOn`). @param {any} holder @returns {Set<any>} */
+    const holdingSet = holder=>(holder.holds ??= new Set());
+
+    /**
+     * Records that `holder` keeps `held` loaded, taking a reference on it once:
+     * given back when `holder` is unloaded (`releaseLibrary`). A library of
+     * the engine's, or one pinned, needs no reference.
+     *
+     * @param {any} holder @param {any} held
+     */
+    const holdOn = (holder, held)=>{
+        if (holder === held || held.pinned || typeof held.references !== 'number')
+        {
+            return;
+        }
+        if (holder.pinned)
+        {
+            held.pinned = true;
+            return;
+        }
+        const holds = holdingSet(holder);
+        if (!holds.has(held))
+        {
+            holds.add(held);
+            held.references++;
+        }
     };
 
     /**
@@ -7375,8 +7621,10 @@ async function buildApp(options){
      * callbacks and then its DllMain of the detach, on the thread that asked
      * and with lpvReserved NULL, and unloads it -- its thread-local slot and
      * every thread's copy of its block are given back, a library read off the
-     * volume is unmapped and forgotten, one of ours stops being loaded. A
-     * library something imports is pinned and never unloaded.
+     * volume is unmapped and forgotten, one of ours stops being loaded, and
+     * what it held (its imports and forwarders' targets, `holdOn`) is given
+     * back after. A library the program itself imports is pinned and never
+     * unloaded.
      *
      * @param {any} held
      * @returns {number | Promise<number>}
@@ -7392,9 +7640,14 @@ async function buildApp(options){
             return 1;
         }
         const unload = ()=>{
-            const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held,
-                kernel.currentThread());
-            return told ? told.then(forget) : forget();
+            const thread = kernel.currentThread();
+            const told = tellNotified(LDR_DLL_NOTIFICATION_REASON_UNLOADED, held, thread);
+            // Its debugger hears of it before it is unmapped, the thread
+            // waiting for the answer.
+            const debugged = debuggerNow()?.report({ code: DEBUG_EVENT.UNLOAD_DLL,
+                threadId: thread?.id >>> 0, base: held.base });
+            const before = told && debugged ? told.then(()=>debugged) : told ?? debugged;
+            return before ? before.then(forget) : forget();
         };
         const forget = ()=>{
             const local = threadLocalImages.get(held.base);
@@ -7424,7 +7677,16 @@ async function buildApp(options){
                 held.attached = false;
             }
             events.emit('library-unloaded', { name: held.name, base: held.base });
-            return 1;
+            // Then what it held (`holdOn`), each given back its reference.
+            const holds = [...held.holds ?? []];
+            held.holds = undefined;
+            let after = /** @type {number | Promise<number>} */ (/** @type {unknown} */ (1));
+            for (const other of holds)
+            {
+                after = after instanceof Promise ? after.then(()=>releaseLibrary(other))
+                    : releaseLibrary(other);
+            }
+            return after instanceof Promise ? after.then(()=>1) : 1;
         };
         const routines = held.attached === false ? [] : [
             ...threadLocalImages.get(held.base)?.callbacks ?? [],
@@ -7623,7 +7885,13 @@ async function buildApp(options){
             if (wanted !== undefined)
             {
                 return (async()=>{
-                    const file = await readWholeFile(filesystem, blocks, wanted);
+                    const file = await readWholeFile(filesystem, blocks, wanted,
+                        undefined, code=>{
+                            if (code === 'SHARING_VIOLATION')
+                            {
+                                loadErrors.set(key, ERROR_SHARING_VIOLATION);
+                            }
+                        });
                     if (!file)
                     {
                         events.emit('library-missing', { name, path: wanted });
@@ -7685,12 +7953,6 @@ async function buildApp(options){
                         return 0;
                     }
                     const { exports } = readExports(file, image);
-                    const addresses = new Map(exports
-                        .filter(entry=>entry.name !== null && entry.forwards === null)
-                        .map(entry=>[String(entry.name), base + entry.rva]));
-                    const ordinals = new Map(exports
-                        .filter(entry=>entry.forwards === null)
-                        .map(entry=>[entry.ordinal, base + entry.rva]));
 
                     // Only a library's imports are resolved and its entry
                     // point run: a program loaded by name is mapped for what
@@ -7718,10 +7980,7 @@ async function buildApp(options){
                     }
                     const held = {
                         name, base, size: image.sizeOfImage, region,
-                        /** @param {string} exported */
-                        addressOf: exported=>addresses.get(exported) ?? null,
-                        /** @param {number} ordinal */
-                        addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+                        ...exportTables(exports, base),
                         entryPoint: mapped.record.entryPoint,
                         // As above: its resources are read where it lies.
                         fromFile: true,
@@ -7757,6 +8016,9 @@ async function buildApp(options){
                             + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
                     }
 
+                    /** The libraries loaded for it, given back if it is refused. @type {any[]} */
+                    const brought = [];
+
                     // Its own libraries first, then binding.
                     //
                     // The order is the whole of it. A library brought in by
@@ -7778,8 +8040,7 @@ async function buildApp(options){
                         // renderer).
                         /** @type {string[]} */
                         const absent = [];
-                        /** @type {any[]} */
-                        const brought = [];
+
                         for (const dependency of readImports(file, image))
                         {
                             if (findModule(dependency.dll) === null)
@@ -7793,7 +8054,13 @@ async function buildApp(options){
                                 }
                                 else
                                 {
-                                    brought.push(byBase.get(got));
+                                    // Its load's reference is this library's hold.
+                                    const dependencyHeld = byBase.get(got);
+                                    brought.push(dependencyHeld);
+                                    if (dependencyHeld && dependencyHeld !== held)
+                                    {
+                                        holdingSet(held).add(dependencyHeld);
+                                    }
                                 }
                             }
                         }
@@ -7819,7 +8086,27 @@ async function buildApp(options){
                             return refuse(`it imports ${absent.join(', ')}`);
                         }
 
-                        loader.bind(mapped, resolveImport, missingImport);
+                        // What its imports reach through a forwarder, loaded
+                        // before it is bound, as Windows' loader snaps a
+                        // forwarded import by loading the forwarder's target.
+                        for (const dependency of readImports(file, image))
+                        {
+                            const provider = moduleUnderContext(dependency.dll);
+                            for (const entry of provider ? dependency.entries : [])
+                            {
+                                const found = exportOf(provider, entry.name, entry.ordinal,
+                                    (library, from)=>loadLibraryAtRuntime(library, 0, asked,
+                                        from.base ?? 0));
+                                if (found instanceof Promise)
+                                {
+                                    await found;
+                                }
+                            }
+                        }
+                        loader.bind(mapped, (/** @type {string} */ dll,
+                            /** @type {string | null} */ imported,
+                            /** @type {number | null} */ ordinal)=>
+                            resolveImport(dll, imported, ordinal, held), missingImport);
                         // Both tables, and in this order: the delay-load pass
                         // adds to what the first one recorded rather than
                         // replacing it.
@@ -7851,9 +8138,15 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
+                    // Mapped and bound: its copy-on-write pages are the
+                    // program's to write from here on (A248).
+                    win32.imageMapped(base);
                     // The callbacks LdrRegisterDllNotification registered, after it
                     // is mapped and bound and before any of its code runs.
                     await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
+                    // And its debugger, when its parent debugs this process.
+                    await debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                        threadId: asked?.id >>> 0, base });
 
                     // Its TLS callbacks, then its DllMain, lpvReserved NULL as
                     // for any library loaded by name. On the thread that asked
@@ -7874,16 +8167,24 @@ async function buildApp(options){
                     const cookie = routines.length === 0 || !activation ? 0
                         : activation.activate(activation.moduleContext(base)
                             || redirected?.context || 0, teb);
+                    // Inside the loader's own frame, as Windows' loader calls
+                    // them: an exception one of them leaves fails the load and
+                    // never reaches the program's handlers, and a DllMain that
+                    // answers FALSE fails it too - told DLL_PROCESS_DETACH and
+                    // unloaded, as the DllMain contract says - with
+                    // ERROR_DLL_INIT_FAILED either way.
+                    /** @type {number | null} */
+                    let raised = null;
+                    /** @type {number} */
+                    let answer;
                     try
                     {
-                        for (const routine of routines)
-                        {
-                            await bridge.callGuest({
-                                entry: routine,
-                                args: [base, DLL_PROCESS_ATTACH, 0],
-                                thread: asked,
-                            });
-                        }
+                        answer = routines.length === 0 ? 1 : await win32.callEntryPoint({
+                            routines, base, reason: DLL_PROCESS_ATTACH, reserved: 0,
+                            thread: asked, raised: (/** @type {number} */ code)=>{
+                                raised = code;
+                            },
+                        });
                     }
                     finally
                     {
@@ -7892,6 +8193,30 @@ async function buildApp(options){
                     if (routines.length > 0)
                     {
                         attachOrder.push(held);
+                    }
+                    const entryRan = routines.at(-1) === held.entryPoint;
+                    if (raised !== null || (entryRan && answer === 0))
+                    {
+                        // An exception leaves nothing to detach: its DllMain
+                        // never answered.
+                        if (raised !== null)
+                        {
+                            Object.assign(held, { attached: false });
+                        }
+                        Object.assign(held, { references: 1 });
+                        await releaseLibrary(held);
+                        for (const other of brought)
+                        {
+                            if (other)
+                            {
+                                await releaseLibrary(other);
+                            }
+                        }
+                        loadErrors.set(key, ERROR_DLL_INIT_FAILED);
+                        events.emit('libraries-missing', { names: [name],
+                            reason: raised !== null ? `its initialisation raised 0x${
+                                (raised >>> 0).toString(16)}` : 'its DllMain answered FALSE' });
+                        return 0;
                     }
                     events.emit('library-loaded', { name, base });
                     return base;
@@ -7954,6 +8279,10 @@ async function buildApp(options){
         if (held.references === 0)
         {
             dataFiles.delete(handle);
+            if (held.hold)
+            {
+                filesystem.close(held.hold);
+            }
             if (held.region)
             {
                 memory.unregister(held.region);
@@ -7981,8 +8310,16 @@ async function buildApp(options){
      * @returns {number | Promise<number>}
      */
     const loadAsData = (name, flags, only = undefined)=>{
+        const key = name.toLowerCase().replace(/\.dll$/, '');
+        loadErrors.delete(key);
         const named = findModule(name);
-        const loaded = answersPath(name, named, only) ? named : null;
+        // A path is a file: one of ours answers it in the system directory,
+        // where Windows has it, or where a file of it stands.
+        const directory = name.slice(0,
+            Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
+        const loaded = answersPath(name, named, only)
+            && (!/[\\/]/.test(name) || named?.fromFile || standsAt(name)
+                || pathKey(directory) === pathKey(SYSTEM_LIBRARY_DIRECTORIES[0])) ? named : null;
         if (loaded && loaded.loaded !== false)
         {
             loaded.references = (loaded.references ?? 0) + 1;
@@ -8001,17 +8338,7 @@ async function buildApp(options){
             return handle;
         };
         const wanted = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-            filesystem.currentDirectory(), { only })
-            .find(candidate=>{
-                try
-                {
-                    const entry = filesystem.stat(candidate);
-                    return entry && !entry.directory;
-                }
-                catch {
-                    return false;
-                }
-            });
+            filesystem.currentDirectory(), { only }).find(standsAt);
         if (wanted === undefined)
         {
             // One of ours nothing has loaded: there is no file to view, and
@@ -8021,11 +8348,21 @@ async function buildApp(options){
                 return record({ name, base: loaded.base, image: null,
                     flat: false, region: null });
             }
+            // A path names its file, which CreateFile does not find.
+            if (/[\\/]/.test(name))
+            {
+                loadErrors.set(key, ERROR_FILE_NOT_FOUND);
+            }
             events.emit('library-missing', { name, path: 'as data' });
             return 0;
         }
         return (async()=>{
-            const file = await readWholeFile(filesystem, blocks, wanted);
+            const file = await readWholeFile(filesystem, blocks, wanted, undefined, code=>{
+                if (code === 'SHARING_VIOLATION')
+                {
+                    loadErrors.set(key, ERROR_SHARING_VIOLATION);
+                }
+            });
             let image;
             try
             {
@@ -8037,8 +8374,32 @@ async function buildApp(options){
             }
             if (!file || !image)
             {
+                // An empty file is no view; any other that is no image is
+                // refused as Windows refuses its format.
+                if (file)
+                {
+                    loadErrors.set(key, file.length === 0 ? ERROR_FILE_INVALID
+                        : ERROR_BAD_EXE_FORMAT);
+                }
                 events.emit('library-missing', { name, path: wanted, reason: 'not an image' });
                 return 0;
+            }
+            // LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE keeps writers off the file
+            // while it is loaded: an open of it, reading and sharing all but
+            // writing, held until its last FreeLibrary.
+            let hold = null;
+            if ((flags & LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE) !== 0)
+            {
+                try
+                {
+                    hold = filesystem.open(wanted, { read: true, shareRead: true,
+                        shareWrite: false, shareDelete: true });
+                }
+                catch (e){
+                    loadErrors.set(key, /** @type {any} */ (e)?.code === 'SHARING_VIOLATION'
+                        ? ERROR_SHARING_VIOLATION : ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
             }
             const bytes = layout === 1 ? file
                 : mapImage(file, image.imageBase, { wide: true }).bytes;
@@ -8047,6 +8408,10 @@ async function buildApp(options){
                 { next: nextLibraryBase, ...librarySpace });
             if ('refused' in place)
             {
+                if (hold)
+                {
+                    filesystem.close(hold);
+                }
                 events.emit('libraries-missing', { names: [name], reason: place.refused });
                 return 0;
             }
@@ -8061,7 +8426,7 @@ async function buildApp(options){
             // Its resources are read where it lies (`resourceLookup`): a flat
             // view is the file's own layout, as long as the file.
             return record({ name, base: place.base, image, flat: layout === 1,
-                fileSize: file.length, region, path: wanted });
+                fileSize: file.length, region, path: wanted, hold });
         })();
     };
 
@@ -8180,6 +8545,7 @@ async function buildApp(options){
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
         bits: processBits,
         ...long || programLoaded.moved ? { base: programLoaded.imageBase } : {} });
+    win32.imageMapped(image.base);
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -8191,8 +8557,10 @@ async function buildApp(options){
     // directory's head has changed since; one the image could not hold is no
     // exports at all, said once.
     const ownImage = parsePe(options.executable, { wide: true });
+    imageInformation = ()=>sectionImageInformation({ file: options.executable, image: ownImage,
+        bytes: memory.readBytes(image.base, ownImage.sizeOfImage) });
     const ownDirectory = ownImage.directories[DIR_EXPORT];
-    /** @type {{ head: string, byName: Map<string, number>, byOrdinal: Map<number, number> } | null} */
+    /** @type {({ head: string } & ReturnType<typeof exportTables>) | null} */
     let ownTable = null;
     let ownRefusal = '';
     const ownExports = ()=>{
@@ -8211,13 +8579,7 @@ async function buildApp(options){
                 ownRefusal = parsed.refused;
                 events.emit('exports-refused', { name: mainModule.path, reason: parsed.refused });
             }
-            const resolved = parsed.exports.filter(entry=>entry.forwards === null);
-            ownTable = {
-                head,
-                byName: new Map(resolved.filter(entry=>entry.name !== null)
-                    .map(entry=>[String(entry.name), image.base + entry.rva])),
-                byOrdinal: new Map(resolved.map(entry=>[entry.ordinal, image.base + entry.rva])),
-            };
+            ownTable = { head, ...exportTables(parsed.exports, image.base) };
         }
         return ownTable;
     };
@@ -8229,9 +8591,11 @@ async function buildApp(options){
         // and a loader stub that asks after its own module gave up there.
         size: ownImage.sizeOfImage,
         /** @param {string} exported */
-        addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
+        addressOf: exported=>ownExports()?.addressOf(exported) ?? null,
         /** @param {number} ordinal */
-        addressOfOrdinal: ordinal=>ownExports()?.byOrdinal.get(ordinal) ?? null,
+        addressOfOrdinal: ordinal=>ownExports()?.addressOfOrdinal(ordinal) ?? null,
+        /** @param {string | null} exported @param {number | null} ordinal */
+        forwardOf: (exported, ordinal)=>ownExports()?.forwardOf(exported, ordinal) ?? null,
         // A program reads its own resources where it lies mapped
         // (`resourceLookup`), as Windows reads them: no copy of its file.
         fromFile: true,
@@ -8253,6 +8617,7 @@ async function buildApp(options){
     {
         loader.bind(library.mapped, resolveImport, missingImport);
         loader.bindDelayed(library.mapped, resolveImport, missingImport);
+        win32.imageMapped(library.base);
         // Bound and written: the guest's copy is the image from here on, and
         // holding the file and the mapped image beside it was each library
         // twice over in the engine's heap for the life of the process.
@@ -8520,8 +8885,36 @@ async function buildApp(options){
     // A session is a logon: its first process runs the RunOnce pass before
     // anything of its own, as Explorer does before the desktop is the user's
     // (an installation leaves a library's registration there for it).
-    const prelude = options.parentProcessId
-        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0;
+    // A child its parent debugs reports its start before anything of it runs
+    // (`debug-events.js`), as Windows' loader does: the process, every library
+    // mapped with it, then the loader's breakpoint - an int3 of its own, not
+    // DbgBreakPoint - each waited on until the debugger continues it.
+    const debugStart = debuggerNow() && !long ? bridge.register('<debug start>', {
+        argBytes: 0,
+        handler: async()=>{
+            const report = /** @type {NonNullable<typeof options.debugger>} */ (
+                options.debugger).report;
+            const threadId = kernel.currentThread()?.id >>> 0;
+            await report({ code: DEBUG_EVENT.CREATE_PROCESS, threadId, base: image.base,
+                start: image.entryPoint });
+            for (const held of byBase.values())
+            {
+                if (held !== mainModule && held.loaded !== false)
+                {
+                    await report({ code: DEBUG_EVENT.LOAD_DLL, threadId, base: held.base });
+                }
+            }
+            const breakpoint = allocateFromHeap(1);
+            memory.writeBytes(breakpoint, new Uint8Array([0xcc]));
+            debugStarted = true;
+            await report({ code: DEBUG_EVENT.EXCEPTION, threadId, exception: {
+                code: EXCEPTION_BREAKPOINT, flags: 0, address: breakpoint, parameters: [0],
+                firstChance: true } });
+            return 0;
+        },
+    }) : 0;
+    const prelude = debugStart || (options.parentProcessId
+        ? 0 : findModule(PROGRAMS_LIBRARY)?.addressOf(RUN_ONCE_ROUTINE) ?? 0);
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
@@ -8619,6 +9012,12 @@ async function buildApp(options){
             } : held),
     });
     threadBlocks = process;
+    // What IsDebuggerPresent reads: a debuggee's process block says so.
+    if (debuggerNow())
+    {
+        memory.writeBytes(process.peb + blockLayouts(pointerSize).peb.BEING_DEBUGGED,
+            new Uint8Array([1]));
+    }
 
     // The page every NT process reads at 0x7FFE0000 without a call: the same
     // version as every other road, and the clocks GetTickCount answers with.
@@ -8691,6 +9090,47 @@ async function buildApp(options){
         });
     }
 
+    /**
+     * Takes back what the loader wrote into the process that Windows writes
+     * only once the process runs, and answers the work that puts it back.
+     * 32-bit only: a 64-bit process keeps it all from its creation.
+     *
+     * @returns {() => void}
+     */
+    const holdLoaderState = ()=>{
+        if (long)
+        {
+            return ()=>{};
+        }
+        const fields = blockLayouts(pointerSize).peb;
+        /** @type {[number, Uint8Array, Uint8Array][]} each place, as built, as held */
+        const held = [
+            [process.peb + fields.LDR, 4],
+            [process.peb + fields.PROCESS_HEAP, 4],
+            // CSDVersion's UNICODE_STRING: its lengths and its buffer.
+            [process.peb + fields.CSD_VERSION, 8],
+        ].map(([at, size])=>[at, memory.readBytes(at, size), new Uint8Array(size)]);
+        for (const { entries } of readImports(options.executable, ownImage))
+        {
+            for (const { iatRva } of entries)
+            {
+                const offset = rvaToFileOffset(ownImage, iatRva);
+                held.push([image.base + iatRva, memory.readBytes(image.base + iatRva, 4),
+                    options.executable.slice(offset, offset + 4)]);
+            }
+        }
+        for (const [at, , before] of held)
+        {
+            memory.writeBytes(at, before);
+        }
+        return ()=>{
+            for (const [at, built] of held)
+            {
+                memory.writeBytes(at, built);
+            }
+        };
+    };
+
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
     // Its id the one the parent was told, for a child.
@@ -8703,6 +9143,7 @@ async function buildApp(options){
         // A program whose entry point returns ends as one that called
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
+        first: { entry: image.entryPoint, block: process.peb },
     });
     // CREATE_SUSPENDED: the process is there, and nothing of it runs -- not
     // its libraries' initialisers either, which run on this thread -- until
@@ -8711,6 +9152,14 @@ async function buildApp(options){
     {
         kernel.suspendThread(mainThread);
     }
+    // What the loader leaves in a process is put there by its first thread to
+    // run, as Windows' loader initialises a process inside it (LdrInitializeThunk):
+    // a parent that reads a suspended child finds the program's import slots
+    // as its file has them and no module list, heap or service pack in its
+    // process block yet. The engine binds and builds all of it here, before
+    // the process runs; held back until its first slice, it is the same work
+    // in the same order, only seen when Windows would show it.
+    kernel.beforeFirstSlice(holdLoaderState());
     // Its thread-local blocks are the ones the startup stub hands TlsSetValue.
     holdBlock(mainThread, process.createThreadBlock({
         id: mainThread.id,
@@ -10188,6 +10637,17 @@ async function buildApp(options){
         childExited(/** @type {any} */ request, /** @type {number} */ code){
             win32.childExited(request, code);
         },
+
+        /**
+         * An event a child this process debugs reported, answered once the
+         * debugger continues it (`debug-events.js`).
+         *
+         * @param {any} request
+         * @param {import('./layers/win32/kernel32/debug-events.js').DebugReport} report
+         * @returns {Promise<number>}
+         */
+        debugEvent: (/** @type {any} */ request, /** @type {any} */ report)=>
+            win32.debugEvent(request, report),
 
         /**
          * Ends this process from outside, as its parent's TerminateProcess
@@ -13344,7 +13804,8 @@ export async function createApp(options){
         // plays into is this process's to lend, and to take back when the
         // run says the child has gone.
         const processesAcross = options.system?.processes;
-        if (processesAcross)
+        // A child it debugs stays beside it, where its events reach it.
+        if (processesAcross && !request.debugged)
         {
             const sound = shared ? lendSound(parent) : null;
             // Known before it is asked for: the run may ask for the position of
@@ -13436,6 +13897,13 @@ export async function createApp(options){
                         suspended: request.suspended === true,
                         startedBeside: true,
                         ...request.environment ? { environment: request.environment } : {},
+                        // Its parent's ear: heard while its parent debugs it, from
+                        // its start or since it attached (`debug-events.js`).
+                        debugger: { report: (/** @type {any} */ report)=>
+                            parent.debugEvent(request, report),
+                        debugged: ()=>Boolean(request.debugged),
+                        object: ()=>request.debugged?.object ?? null,
+                        noInherit: ()=>Boolean(request.noDebugInherit) },
                         audio: sound.options,
                     });
                     sound.announce(child);

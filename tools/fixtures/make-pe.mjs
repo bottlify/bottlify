@@ -161,9 +161,10 @@ export function assemble(parts){
  * @param {Object} options
  * @param {Record<string, string[]>} options.imports  Functions called, by DLL.
  * @param {Record<string, number[]>} [options.data]  Named blobs placed after the code.
- * @param {{ name: string, offset: number }[]} [options.exports]
+ * @param {{ name: string, offset?: number, forwards?: string }[]} [options.exports]
  *        Routines the image exports, by name and in order; ordinals count from 1.
- *        Each offset is into the code.
+ *        Each offset is into the code; one that `forwards` ("LIB.Name", "LIB.#2")
+ *        is a forwarder, its string inside the export directory (PE/COFF 6.3.2).
  * @param {number} [options.codeSize]  Bytes reserved for the code.
  * @param {number} [options.imageBase]  Where the image asks to be mapped. A
  *        library needs a base of its own: it has no relocations, so one that
@@ -283,6 +284,9 @@ export function buildExe(options){
     const exportTablesOffset = exportOffset + 40;
     /** @type {number[]} */
     const exportNameOffsets = [];
+    /** @type {number[]} */
+    const exportForwardOffsets = [];
+    let exportDllNameOffset = 0;
     if (exports.length > 0)
     {
         cursor = exportTablesOffset + exports.length * (4 + 4 + 2);
@@ -291,6 +295,12 @@ export function buildExe(options){
             exportNameOffsets.push(cursor);
             cursor += entry.name.length + 1;
         }
+        for (const entry of exports)
+        {
+            exportForwardOffsets.push(cursor);
+            cursor += entry.forwards === undefined ? 0 : entry.forwards.length + 1;
+        }
+        exportDllNameOffset = cursor;
         cursor += 'self.exe'.length + 1;
     }
     const exportSize = cursor - exportOffset;
@@ -431,17 +441,16 @@ export function buildExe(options){
         const addresses = exportTablesOffset;
         const names = addresses + exports.length * 4;
         const ordinals = names + exports.length * 4;
-        const dllName = exportNameOffsets[exportNameOffsets.length - 1]
-            + exports[exports.length - 1].name.length + 1;
+        const dllName = exportDllNameOffset;
         text.pad(exportOffset);
         // Flags, stamp, version, name, ordinal base, then the counts and tables.
         text.u32(0).u32(0).u16(0).u16(0).u32(rva(dllName)).u32(1)
             .u32(exports.length).u32(exports.length)
             .u32(rva(addresses)).u32(rva(names)).u32(rva(ordinals));
-        for (const entry of exports)
-        {
-            text.u32(rva(entry.offset));
-        }
+        exports.forEach((entry, index)=>{
+            text.u32(rva(entry.forwards === undefined ? entry.offset ?? 0
+                : exportForwardOffsets[index]));
+        });
         for (const offset of exportNameOffsets)
         {
             text.u32(rva(offset));
@@ -453,6 +462,13 @@ export function buildExe(options){
         for (const entry of exports)
         {
             text.ascii(entry.name).u8(0);
+        }
+        for (const entry of exports)
+        {
+            if (entry.forwards !== undefined)
+            {
+                text.ascii(entry.forwards).u8(0);
+            }
         }
         text.ascii('self.exe').u8(0);
     }

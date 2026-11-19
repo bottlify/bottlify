@@ -45,6 +45,10 @@
   ShellExecute opens `.txt`, `.log`, `.ini`, `.inf`, `.nfo` and `.diz` files in it; an address
   (`http`, `https`, `ftp`, `mailto`, a `.url` shortcut) becomes an `open-url` event for the page.
   Other documents have no handler (`SE_ERR_NOASSOC`).
+- `winver.exe` in `C:\WINDOWS\system32` is the engine's: it shows the shell's about box
+  (`ShellAboutW`, a modal message box with the Windows version; the icon a program passes is not
+  shown) and exits with 0 once it is closed. Nobody at the screen, the box is answered as a
+  message box is, and winver exits at once.
 - In `C:\WINDOWS\system32` the libraries the engine implements exist as files to a check by their
   exact name (GetFileAttributes, FindFirstFile); a wildcard search does not list them, and they
   cannot be opened.

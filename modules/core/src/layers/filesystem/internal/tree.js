@@ -78,9 +78,37 @@ export function inIndexOrder(entries){
  * @property {number} modified    Milliseconds since the epoch; when it was last written.
  * @property {boolean} hidden     The source records it as hidden.
  * @property {Body | null} body   For a file with more than one name: what its names share.
- * @property {string[] | null} junction  For a directory that is a junction (a
- *                                mount point): the directory on this drive it
- *                                stands for, whose contents are seen through it.
+ * @property {string[] | null} junction  For a reparse point that names a place
+ *                                on this drive (a mount point, a symbolic
+ *                                link): what it stands for - a directory's
+ *                                contents are seen through it.
+ * @property {ReparsePoint | null} reparse  The reparse point set on it, as set.
+ */
+
+/**
+ * A reparse point as FSCTL_SET_REPARSE_POINT left it: its tag and the whole
+ * buffer it was set with, which FSCTL_GET_REPARSE_POINT hands back as it
+ * was. A junction a session recorded before buffers were kept has none.
+ *
+ * @typedef {Object} ReparsePoint
+ * @property {number} tag
+ * @property {Uint8Array | null} data
+ */
+
+/**
+ * What a session carries beside the files themselves: a file's further
+ * names (`owner` and `names`), a junction (`junction`: `owner` the directory
+ * it stands for), or any other reparse point (`owner` and its only name
+ * itself, `target` what it stands for when it names a place here). A
+ * reparse point's buffer travels as base64; a junction recorded before
+ * buffers were kept has none, and reads back as a mount point.
+ *
+ * @typedef {Object} LinkRecord
+ * @property {string} owner
+ * @property {string[]} names
+ * @property {boolean} [junction]
+ * @property {{ tag: number, data?: string }} [reparse]
+ * @property {string} [target]
  */
 
 /**
@@ -108,6 +136,7 @@ export function inIndexOrder(entries){
  * @property {number} links  How many names the file has.
  * @property {string} identity  What the file is known by under any of its names.
  * @property {string | null} [junction]  For a junction, the directory it stands for.
+ * @property {number} [reparseTag]  The tag of the reparse point it is, 0 for none.
  */
 
 /**
@@ -117,6 +146,18 @@ export function inIndexOrder(entries){
  * the DOS calendar is the oldest date every convention can still express.
  */
 export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
+
+/** A mount point's tag: the reparse point every junction is. */
+export const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+
+/** @param {Uint8Array} bytes */
+const toBase64 = bytes=>btoa(String.fromCharCode(...bytes));
+/** @param {string} text */
+const fromBase64 = text=>Uint8Array.from(atob(text), character=>character.charCodeAt(0));
+
+/** A node's reparse tag: what it was set with, a junction recorded alone a mount point's. */
+const tagOf = (/** @type {Node} */ node)=>node.reparse?.tag
+    ?? (node.junction ? IO_REPARSE_TAG_MOUNT_POINT : 0);
 
 /** How many junctions a path may pass through before it is a loop. */
 const MAX_JUNCTIONS = 32;
@@ -144,6 +185,7 @@ function makeNode(parent, name){
         hidden: false,
         body: null,
         junction: null,
+        reparse: null,
     };
 }
 
@@ -161,7 +203,8 @@ const namesOf = node=>(node.body ? [...node.body.names] : [node]);
 
 /** What changes a drive: everything else of it only reads. */
 const CHANGES = /** @type {const} */ (['setModified', 'replace', 'write', 'truncate', 'createFile',
-    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'link', 'restoreLinks']);
+    'createDirectory', 'moveFile', 'removeFile', 'removeDirectory', 'link', 'setReparse',
+    'restoreLinks']);
 
 /**
  * @param {Object} options
@@ -592,6 +635,9 @@ export function createOverlay({
         target.inWritable = true;
         target.body = body;
         target.modified = node.modified;
+        // A reparse point is the file's, so every name of it is one.
+        target.reparse = node.reparse;
+        target.junction = node.junction;
         body.names.add(target);
         return target;
     };
@@ -667,6 +713,7 @@ export function createOverlay({
                     links: node.body?.names.size ?? 1,
                     identity: storePath(node),
                     junction: node.junction ? node.junction.join('\\') : null,
+                    reparseTag: tagOf(node),
                 }
                 : null;
         },
@@ -721,6 +768,7 @@ export function createOverlay({
                     links: child.body?.names.size ?? 1,
                     identity: storePath(child),
                     junction: child.junction ? child.junction.join('\\') : null,
+                    reparseTag: tagOf(child),
                 });
             }
             return inIndexOrder(entries);
@@ -1049,38 +1097,62 @@ export function createOverlay({
         },
 
         /**
-         * Makes the empty directory at `components` a junction standing for
-         * the directory at `target` on this drive - FSCTL_SET_REPARSE_POINT
-         * with a mount point - or, with `target` null, a directory again. A
-         * directory with anything in it is DIRECTORY_NOT_EMPTY; a junction is
-         * given another target as Windows replaces a mount point's.
+         * Sets the reparse point `point` on the file or directory at
+         * `components` - FSCTL_SET_REPARSE_POINT - or, with `point` null,
+         * takes its reparse point off. One that names a place on this drive
+         * (`target`: a mount point, a symbolic link) stands for it, a
+         * directory's contents seen through it; any other tag is kept for
+         * whoever reads it back. A directory with anything in it is
+         * DIRECTORY_NOT_EMPTY; a reparse point set again is replaced.
          *
-         * @param {string[]} components @param {string[] | null} target
+         * @param {string[]} components
+         * @param {{ tag: number, data: Uint8Array | null, target: string[] | null } | null} point
          */
-        setJunction(components, target){
+        setReparse(components, point){
             mustBeWritable(components);
             const node = mustFind(components);
-            if (!node.directory)
+            if (point === null)
             {
-                throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
-            }
-            if (target === null)
-            {
-                if (!node.junction)
+                if (!node.reparse && !node.junction)
                 {
                     throw fsError(ErrorCode.NOT_A_REPARSE_POINT,
-                        `"${node.path}" is not a junction`);
+                        `"${node.path}" is not a reparse point`);
                 }
-                node.junction = null;
+                for (const name of namesOf(node))
+                {
+                    name.reparse = null;
+                    name.junction = null;
+                }
                 changed(node.path, 'written');
                 return;
             }
-            if ([...node.children.values()].some(child=>!child.tombstone))
+            if (node.directory && [...node.children.values()].some(child=>!child.tombstone))
             {
                 throw fsError(ErrorCode.DIRECTORY_NOT_EMPTY, `"${node.path}" is not empty`);
             }
-            node.junction = [...target];
+            // The point is the file's: a file with several names is one under each.
+            const reparse = { tag: point.tag >>> 0, data: point.data ? point.data.slice() : null };
+            for (const name of namesOf(node))
+            {
+                name.reparse = reparse;
+                name.junction = point.target ? [...point.target] : null;
+            }
             changed(node.path, 'written');
+        },
+
+        /**
+         * The reparse point at `components` as it was set, null for none: a
+         * junction recorded without its buffer has a tag and no data.
+         *
+         * @param {string[]} components @returns {ReparsePoint | null}
+         */
+        reparseOf(components){
+            const node = find(components);
+            if (!node || (!node.reparse && !node.junction))
+            {
+                return null;
+            }
+            return node.reparse ?? { tag: IO_REPARSE_TAG_MOUNT_POINT, data: null };
         },
 
         /**
@@ -1098,12 +1170,12 @@ export function createOverlay({
          * kept under and its other names: what a session carries besides the
          * files themselves. Empty for a drive with no links.
          *
-         * @returns {{ owner: string, names: string[] }[]}
+         * @returns {LinkRecord[]}
          */
         links(){
             /** @type {Set<Body>} */
             const bodies = new Set();
-            /** @type {{ owner: string, names: string[], junction: true }[]} */
+            /** @type {LinkRecord[]} */
             const junctions = [];
             /** @param {Node} node */
             const walk = node=>{
@@ -1113,10 +1185,21 @@ export function createOverlay({
                     {
                         bodies.add(child.body);
                     }
-                    if (child.junction && !child.tombstone)
+                    const reparse = child.tombstone ? null : child.reparse;
+                    const data = !reparse ? {} : { reparse: { tag: reparse.tag,
+                        ...reparse.data ? { data: toBase64(reparse.data) } : {} } };
+                    // A directory standing for another is a junction record, as
+                    // sessions have always carried it; any other reparse point
+                    // is its own owner, its target beside it.
+                    if (child.junction && !child.tombstone && child.directory)
                     {
                         junctions.push({ owner: child.junction.join('\\'), names: [child.path],
-                            junction: true });
+                            junction: true, ...data });
+                    }
+                    else if (reparse)
+                    {
+                        junctions.push({ owner: child.path, names: [child.path], ...data,
+                            ...child.junction ? { target: child.junction.join('\\') } : {} });
                     }
                     if (child.directory)
                     {
@@ -1135,11 +1218,25 @@ export function createOverlay({
          * once the files themselves are on the drive. A name that a file
          * already holds is taken over: the session is what the program left.
          *
-         * @param {{ owner: string, names: string[], junction?: boolean }[]} records
+         * @param {LinkRecord[]} records
          */
         restoreLinks(records){
+            /** @param {LinkRecord} record @returns {ReparsePoint | null} */
+            const pointOf = record=>(record.reparse ? { tag: record.reparse.tag >>> 0,
+                data: record.reparse.data ? fromBase64(record.reparse.data) : null } : null);
             for (const record of records)
             {
+                if (record.reparse && !record.junction)
+                {
+                    const node = find(record.owner.split('\\').filter(part=>part.length > 0));
+                    if (node)
+                    {
+                        node.reparse = pointOf(record);
+                        node.junction = record.target
+                            ? record.target.split('\\').filter(part=>part.length > 0) : null;
+                    }
+                    continue;
+                }
                 if (record.junction)
                 {
                     for (const path of record.names)
@@ -1157,6 +1254,7 @@ export function createOverlay({
                         {
                             node.junction = record.owner.split('\\')
                                 .filter(part=>part.length > 0);
+                            node.reparse = pointOf(record);
                         }
                     }
                     continue;

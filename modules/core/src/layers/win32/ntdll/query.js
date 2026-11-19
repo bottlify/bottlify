@@ -26,7 +26,6 @@ import { STATUS } from './status.js';
 import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
 import { RTL_THREAD_ERROR_MODES } from '../kernel32/error-mode.js';
-import { highestUserAddress, pointerWidth } from '../common/pointers.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -47,11 +46,7 @@ const OSVERSIONINFO = Object.freeze({
 /** szCSDVersion's room, in characters. */
 const CSD_VERSION_CHARACTERS = 128;
 
-/**
- * SYSTEM_BASIC_INFORMATION as a program of each width declares it: the user
- * addresses and the affinity mask are ULONG_PTR, so a 64-bit one's are
- * quadwords from 0x20 and its structure is 0x40 bytes.
- */
+/** SYSTEM_BASIC_INFORMATION as a 32-bit program declares it. */
 const SYSTEM_BASIC = Object.freeze({
     RESERVED: 0x00,
     TIMER_RESOLUTION: 0x04,
@@ -65,14 +60,6 @@ const SYSTEM_BASIC = Object.freeze({
     ACTIVE_PROCESSORS: 0x24,
     PROCESSOR_COUNT: 0x28,
     SIZE: 0x2c,
-});
-const SYSTEM_BASIC_64 = Object.freeze({
-    ...SYSTEM_BASIC,
-    MINIMUM_USER_ADDRESS: 0x20,
-    MAXIMUM_USER_ADDRESS: 0x28,
-    ACTIVE_PROCESSORS: 0x30,
-    PROCESSOR_COUNT: 0x38,
-    SIZE: 0x40,
 });
 
 /** PROCESS_BASIC_INFORMATION, likewise. */
@@ -91,6 +78,25 @@ const SYSTEM_BASIC_INFORMATION = 0;
 /** SystemBasicInformation, SystemEmulationBasicInformation, SystemNativeBasicInformation. */
 const BASIC_CLASSES = new Set([SYSTEM_BASIC_INFORMATION, 62, 114]);
 const SYSTEM_PROCESS_INFORMATION = 5;
+/**
+ * The handles open in the system, as a 32-bit process reads them:
+ * SYSTEM_HANDLE_INFORMATION (a ULONG count, then 16-byte entries: owner's id,
+ * object type, flags, the handle's value in a USHORT, the object, the granted
+ * access) and SYSTEM_HANDLE_INFORMATION_EX (two pointer-wide words, then
+ * 28-byte entries: object, owner, value, access, a back-trace index, the type
+ * index, attributes and a reserved word).
+ */
+const SYSTEM_HANDLE_INFORMATION = 16;
+const SYSTEM_EXTENDED_HANDLE_INFORMATION = 64;
+const HANDLE_ENTRY = Object.freeze({ HEADER: 4, SIZE: 16 });
+const HANDLE_ENTRY_EX = Object.freeze({ HEADER: 8, SIZE: 28 });
+/**
+ * Where an object's address is said to be: the system's half of the address
+ * space, eight bytes apart, as a kernel pool's are. Nothing in the process can
+ * reach one; a program compares them to tell whether two handles name one
+ * object.
+ */
+const OBJECT_ADDRESS_BASE = 0x80800000;
 /** The class NtSetSystemInformation takes here, and its structure's size on 32-bit Windows. */
 const SYSTEM_FILECACHE_INFORMATION = 21;
 const SYSTEM_FILECACHE_SIZE = 36;
@@ -122,7 +128,21 @@ const THREAD_STATE_RUNNING = 2;
 const THREAD_STATE_WAITING = 5;
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
+/** A handle to the debug object that debugs a process; its NoDebugInherit, inverted. */
+const PROCESS_DEBUG_OBJECT_HANDLE = 30;
+const PROCESS_DEBUG_FLAGS = 31;
+/** A process has no debug port: no debugger hears it. */
+const STATUS_PORT_NOT_SET = 0xc0000353;
+/** The debug classes, each a ULONG or a HANDLE: answered from the debugger's record. */
+const DEBUG_CLASSES = new Set([PROCESS_DEBUG_PORT, PROCESS_DEBUG_OBJECT_HANDLE,
+    PROCESS_DEBUG_FLAGS]);
 const PROCESS_EXECUTE_FLAGS = 0x22;
+/** The image's path, a UNICODE_STRING and the characters after it: native, Win32. */
+const PROCESS_IMAGE_FILE_NAME = 27;
+/** SECTION_IMAGE_INFORMATION of the process's own image. */
+const PROCESS_IMAGE_INFORMATION = 37;
+const SECTION_IMAGE_INFORMATION_SIZE = 48;
+const PROCESS_IMAGE_FILE_NAME_WIN32 = 43;
 
 /**
  * The process's execute flags: data runs as code, and that cannot be changed.
@@ -228,6 +248,17 @@ const KERNEL_TYPE_OF = Object.freeze({
 });
 
 /**
+ * A type's index, as ObjectTypesInformation numbers it: from two, a type the
+ * list does not carry after the last of them.
+ *
+ * @param {string} name
+ */
+function typeIndexOf(name){
+    const index = OBJECT_TYPE_NAMES.indexOf(name);
+    return (index < 0 ? OBJECT_TYPE_NAMES.length : index) + 2;
+}
+
+/**
  * OBJECT_TYPE_INFORMATION for one type at a guest address, its name after it.
  *
  * @param {string} name @param {number} at
@@ -239,8 +270,7 @@ function objectType(name, at){
     view.setUint16(OBJECT_TYPE.NAME_LENGTH, name.length * 2, true);
     view.setUint16(OBJECT_TYPE.NAME_MAXIMUM, (name.length + 1) * 2, true);
     view.setUint32(OBJECT_TYPE.NAME_BUFFER, (at + OBJECT_TYPE.SIZE) >>> 0, true);
-    const index = OBJECT_TYPE_NAMES.indexOf(name);
-    struct[OBJECT_TYPE.TYPE_INDEX] = (index < 0 ? OBJECT_TYPE_NAMES.length : index) + 2;
+    struct[OBJECT_TYPE.TYPE_INDEX] = typeIndexOf(name);
     for (let i = 0; i < name.length; i++)
     {
         view.setUint16(OBJECT_TYPE.SIZE + i * 2, name.charCodeAt(i), true);
@@ -257,6 +287,29 @@ const CURRENT_PROCESS = 0xffffffff;
 const STATUS_INVALID_PARAMETER_1 = 0xc00000ef;
 /** The most modules a walk of the loader's list visits: more than any process loads. */
 const MAX_MODULES = 0x10000;
+
+/**
+ * The entries of PEB->Ldr's load-order list, first to last: every walk of
+ * the loader's list goes through this one, bounded by what a process can
+ * hold, so a list a program broke into a loop is not walked for ever.
+ *
+ * @param {(address: number) => number} readU32
+ * @param {number} peb  the process block, zero for none yet
+ * @param {{ peb: { LDR: number }, ldr: { IN_LOAD_ORDER_MODULE_LIST: number },
+ *     entry: { IN_LOAD_ORDER_LINKS: number } }} layout  `blockLayouts`'s
+ */
+export function* loadOrder(readU32, peb, layout){
+    if (peb === 0)
+    {
+        return;
+    }
+    const head = readU32(peb + layout.peb.LDR) + layout.ldr.IN_LOAD_ORDER_MODULE_LIST;
+    for (let link = readU32(head), seen = 0; link !== head && link !== 0 && seen < MAX_MODULES;
+        link = readU32(link), seen++)
+    {
+        yield link - layout.entry.IN_LOAD_ORDER_LINKS;
+    }
+}
 /** The most a child is asked to write back for one query: no class is larger. */
 const MAX_ASKED = 0x10000;
 const CURRENT_THREAD = 0xfffffffe;
@@ -265,6 +318,7 @@ const CURRENT_THREAD = 0xfffffffe;
 const PAGE_SIZE = 0x1000;
 const ALLOCATION_GRANULARITY = 0x10000;
 const MINIMUM_USER_ADDRESS = 0x00010000;
+const MAXIMUM_USER_ADDRESS = 0x7ffeffff;
 
 /**
  * The clock tick, in hundreds of nanoseconds. Nothing here interrupts on a
@@ -281,16 +335,21 @@ const NORMAL_BASE_PRIORITY = 8;
  * @typedef {Object} QueryHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {() => number} teb  The running thread's block, which is the only
- *           route to the process block a program would take itself.
+ * @property {() => number} teb  The running thread's block, the route to the
+ *           process block a program would take itself.
+ * @property {() => number} [processBlock]  The process block, where no thread runs:
+ *           a call a parent makes in its child (`cross-process.js`) runs between
+ *           the child's turns, a suspended child's first thread never having run.
  * @property {{ base: number, size: number }} arena  The memory the process has.
  * @property {import('../kernel32/versions.js').WindowsVersion} [version]
  *           The machine's Windows, for the two fields the process block does
  *           not hold: the suite and the product type, which Windows keeps in
  *           the page the kernel shares with every process. Absent, the default.
- * @property {(handle: number) => string | null} [objectName]  The name a handle's
- *           object has in the object namespace (a file's under
- *           `\Device\HarddiskVolume1`), or null for one nothing keeps a name for
+ * @property {(handle: number) => string | null | { status: number }} [objectName]  The
+ *           name a handle's object has in the object namespace (a file's under
+ *           `\Device\HarddiskVolume1`), null for one nothing keeps a name for, or
+ *           the status of an object whose name cannot be spelled (a pipe made with
+ *           none: STATUS_OBJECT_PATH_INVALID)
  * @property {(handle: number) => string | null} [handleType]  What a handle
  *           names, or null when it names nothing. Without it NtQueryObject
  *           answers every handle as invalid.
@@ -298,6 +357,9 @@ const NORMAL_BASE_PRIORITY = 8;
  *           handle was granted, null for every right (the handle table's
  *           `access`). Without it every handle has every right.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => { win32: string, native: string }} [imagePath]  The program's
+ *           path, and as the object manager names it: ProcessImageFileName's
+ *           answers. Without it those classes are unknown.
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
  *           is an unknown class.
@@ -310,9 +372,25 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {(record: any, call: import('../kernel32/cross-process.js').CrossCall)
  *     => Promise<import('../kernel32/cross-process.js').CrossAnswer | null> | null} [askChild]
  *           A call made in a child, answered there.
+ * @property {() => OpenHandle[]} [openHandles]  The handles this process holds,
+ *           what SystemHandleInformation lists; without it the class is unknown.
+ * @property {number} [processId]  This process's id, the owner of its handles.
+ * @property {() => Uint8Array | null} [imageInformation]  SECTION_IMAGE_INFORMATION
+ *           of the program's image (`mapping.js` sectionImageInformation), null
+ *           before it is placed.
+ * @property {(child: any) => DebugState} [debugState]  Whether a debugger hears
+ *           a process, through which debug object, and whether a process it
+ *           starts is debugged with it (NoDebugInherit clear): this process's
+ *           for null, else a child's, from its debugger's record of it.
+ * @property {(object: any) => number} [openDebugObject]  A handle to a debug
+ *           object, opened in this process.
  * @property {Record<number, SystemClass>} [systemClasses]  More classes of
  *           NtQuerySystemInformation, answered by the family whose state they
  *           read (the clock's and the zone's in time.js).
+ */
+
+/**
+ * @typedef {{ debugged: boolean, object: any, inherit: boolean }} DebugState
  */
 
 /**
@@ -321,12 +399,60 @@ const NORMAL_BASE_PRIORITY = 8;
  * (`exact`) or given as much as fits (`partial`) - a structure Windows copies
  * a prefix of.
  *
- * @typedef {{ read: () => Uint8Array, exact?: boolean, partial?: boolean }} SystemClass
+ * @typedef {{ read: () => Uint8Array, exact?: boolean, partial?: boolean, head?: number }}
+ *     SystemClass  `head`: the bytes a buffer short of the whole is given, as Windows 7
+ *     answers a short one (SYSTEM_CACHE_INFORMATION's three ULONGs); shorter than that,
+ *     the head's length is the one told.
  */
 
 /**
  * @typedef {{ id: number, parent: number, path: string, threads: number[] }} SystemProcess
  */
+
+/**
+ * @typedef {{ handle: number, type: string, object: any, access: number | null }} OpenHandle
+ */
+
+/**
+ * The SYSTEM_HANDLE_INFORMATION (`extended` false) or
+ * SYSTEM_HANDLE_INFORMATION_EX table of a process's handles that name kernel
+ * objects: a find handle, an icon or a hook is none on Windows and is not
+ * listed. `addressOf` gives each object the address it is said to be at.
+ *
+ * @param {OpenHandle[]} handles @param {number} owner
+ * @param {(object: any) => number} addressOf @param {boolean} extended
+ * @returns {Uint8Array}
+ */
+export function systemHandleInformation(handles, owner, addressOf, extended){
+    const listed = handles.filter(each=>KERNEL_TYPE_OF[each.type] !== undefined);
+    const { HEADER, SIZE } = extended ? HANDLE_ENTRY_EX : HANDLE_ENTRY;
+    const bytes = new Uint8Array(HEADER + listed.length * SIZE);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, listed.length, true);
+    listed.forEach((each, index)=>{
+        const at = HEADER + index * SIZE;
+        const type = typeIndexOf(KERNEL_TYPE_OF[each.type]);
+        const access = (each.access ?? ALL_ACCESS) >>> 0;
+        const object = addressOf(each.object) >>> 0;
+        if (extended)
+        {
+            view.setUint32(at, object, true);
+            view.setUint32(at + 4, owner >>> 0, true);
+            view.setUint32(at + 8, each.handle >>> 0, true);
+            view.setUint32(at + 12, access, true);
+            view.setUint16(at + 18, type, true);
+        }
+        else
+        {
+            view.setUint32(at, owner >>> 0, true);
+            bytes[at + 4] = type;
+            view.setUint16(at + 6, each.handle & 0xffff, true);
+            view.setUint32(at + 8, object, true);
+            view.setUint32(at + 12, access, true);
+        }
+    });
+    return bytes;
+}
 
 /**
  * The SYSTEM_PROCESS_INFORMATION chain for these processes, behind the idle
@@ -392,8 +518,27 @@ export function systemProcessInformation(processes, base){
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
     const processors = host.processors ?? createProcessors();
-    const { pointer: pointerBytes, teb: TEB, peb: PEB, ldr: LDR, entry: ENTRY }
-        = blockLayouts(host.pointerSize);
+    const layout = blockLayouts(host.pointerSize);
+    const { pointer: pointerBytes, teb: TEB, peb: PEB, entry: ENTRY } = layout;
+
+    /** The address each object is said to be at, given as it is first asked. */
+    const objectAddresses = new WeakMap();
+    let nextObjectAddress = OBJECT_ADDRESS_BASE;
+    /** @param {any} object */
+    const addressOf = object=>{
+        if (object === null || (typeof object !== 'object' && typeof object !== 'function'))
+        {
+            return 0;
+        }
+        let address = objectAddresses.get(object);
+        if (address === undefined)
+        {
+            address = nextObjectAddress;
+            nextObjectAddress += 8;
+            objectAddresses.set(object, address);
+        }
+        return address;
+    };
 
     /** @param {number} at */
     const readU32 = at=>{
@@ -412,22 +557,17 @@ export function createQueryFunctions(host){
     };
 
     /**
-     * OBJECT_NAME_INFORMATION: a UNICODE_STRING and the name after it,
-     * terminated; an object with no name has an empty string and no buffer.
+     * A UNICODE_STRING and its characters after it, terminated, as a name is
+     * answered (OBJECT_NAME_INFORMATION, ProcessImageFileName): an empty one
+     * has no buffer; a buffer too short for both is refused with the size it
+     * needs.
      *
-     * @param {number} handle @param {number} buffer @param {number} length
+     * @param {string} text @param {number} buffer @param {number} length
      * @param {number} returnLength
      */
-    const objectNameOf = (handle, buffer, length, returnLength)=>{
-        const name = host.objectName?.(handle) ?? null;
-        if (name === null)
-        {
-            host.divergence?.('NtQueryObject', `the name of a ${host.handleType?.(handle)}`
-                + ' handle is not kept: none answered');
-        }
+    const writeName = (text, buffer, length, returnLength)=>{
         const wide = host.pointerSize === 8;
         const head = wide ? 16 : 8;
-        const text = name ?? '';
         const size = head + (text.length > 0 ? (text.length + 1) * 2 : 0);
         writeU32If(returnLength, size);
         if (length < size || buffer === 0)
@@ -450,8 +590,34 @@ export function createQueryFunctions(host){
         return STATUS.SUCCESS;
     };
 
+    /**
+     * OBJECT_NAME_INFORMATION: the object's name, an empty one where nothing
+     * keeps it.
+     *
+     * @param {number} handle @param {number} buffer @param {number} length
+     * @param {number} returnLength
+     */
+    const objectNameOf = (handle, buffer, length, returnLength)=>{
+        const name = host.objectName?.(handle) ?? null;
+        if (name !== null && typeof name === 'object')
+        {
+            return name.status;
+        }
+        if (name === null)
+        {
+            host.divergence?.('NtQueryObject', `the name of a ${host.handleType?.(handle)}`
+                + ' handle is not kept: none answered');
+        }
+        return writeName(name ?? '', buffer, length, returnLength);
+    };
+
     /** @returns {number} the process block, or zero when there is none yet */
     const peb = ()=>{
+        const block = host.processBlock?.() ?? 0;
+        if (block !== 0)
+        {
+            return block >>> 0;
+        }
         const teb = host.teb() >>> 0;
         return teb === 0 ? 0 : readU32(teb + TEB.PEB);
     };
@@ -489,6 +655,62 @@ export function createQueryFunctions(host){
             });
         }
         return recorded(child, wanted, buffer, length, returned);
+    };
+
+    /**
+     * A debug class of a process (`DEBUG_CLASSES`), answered as the kernel
+     * answers it, from the record its debugger keeps (`debugState`) - this
+     * process's own for null - and never from what would suit a program that
+     * asks: ProcessDebugPort is -1 while a debugger hears the process, else 0;
+     * ProcessDebugObjectHandle a new handle to its debug object, else 0 and
+     * STATUS_PORT_NOT_SET; ProcessDebugFlags 1 unless the process was started
+     * with DEBUG_ONLY_THIS_PROCESS or attached to, which a detach does not
+     * undo. The kernel probes before anything (Wine's ntdll info.c
+     * test_query_process_debug_port, _object_handle, _flags): a misaligned
+     * buffer is STATUS_DATATYPE_MISALIGNMENT, one it cannot reach, or a
+     * return length it cannot, STATUS_ACCESS_VIOLATION; then the length,
+     * which must be a ULONG's.
+     *
+     * @param {any} child @param {number} wanted
+     * @param {number} buffer @param {number} length @param {number} returned
+     */
+    const debugInformation = (child, wanted, buffer, length, returned)=>{
+        if (length > 0 && buffer % 4 !== 0)
+        {
+            return STATUS.DATATYPE_MISALIGNMENT;
+        }
+        // A probe changes nothing: what is there is written back.
+        if (length > 0)
+        {
+            host.writeMemory(buffer, host.readMemory(buffer, length));
+        }
+        if (returned !== 0)
+        {
+            host.writeMemory(returned, host.readMemory(returned, 4));
+        }
+        if (length !== 4)
+        {
+            return STATUS.INFO_LENGTH_MISMATCH;
+        }
+        const state = /** @type {NonNullable<QueryHost['debugState']>} */ (host.debugState)(child);
+        writeU32If(returned, 4);
+        if (wanted === PROCESS_DEBUG_PORT)
+        {
+            writeU32If(buffer, state.debugged ? 0xffffffff : 0);
+            return STATUS.SUCCESS;
+        }
+        if (wanted === PROCESS_DEBUG_FLAGS)
+        {
+            writeU32If(buffer, state.inherit ? 1 : 0);
+            return STATUS.SUCCESS;
+        }
+        if (!state.debugged || !state.object || !host.openDebugObject)
+        {
+            writeU32If(buffer, 0);
+            return STATUS_PORT_NOT_SET;
+        }
+        writeU32If(buffer, host.openDebugObject(state.object));
+        return STATUS.SUCCESS;
     };
 
     /**
@@ -564,14 +786,9 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const head = readU32(block + PEB.LDR) + LDR.IN_LOAD_ORDER_MODULE_LIST;
                 const wanted = address >>> 0;
-                // Bounded by what a process can hold, so a list a program broke
-                // into a loop is not walked for ever.
-                for (let link = readU32(head), seen = 0; link !== head && link !== 0
-                    && seen < MAX_MODULES; link = readU32(link), seen++)
+                for (const entry of loadOrder(readU32, block, layout))
                 {
-                    const entry = link - ENTRY.IN_LOAD_ORDER_LINKS;
                     const base = readU32(entry + ENTRY.DLL_BASE);
                     if (wanted >= base && wanted - base < readU32(entry + ENTRY.SIZE_OF_IMAGE))
                     {
@@ -700,6 +917,12 @@ export function createQueryFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoClass, buffer, length, returnLength])=>{
+                // The kernel probes the buffer for a ULONG's alignment before it
+                // reads the class: a misaligned one is refused, nothing written.
+                if ((length >>> 0) !== 0 && (buffer & 3) !== 0)
+                {
+                    return STATUS.DATATYPE_MISALIGNMENT;
+                }
                 if ((infoClass >>> 0) === SYSTEM_PROCESS_INFORMATION && host.processes)
                 {
                     // What the Toolhelp snapshot is built on. A process walker
@@ -714,11 +937,33 @@ export function createQueryFunctions(host){
                     host.writeMemory(buffer >>> 0, chain);
                     return STATUS.SUCCESS;
                 }
+                const extended = (infoClass >>> 0) === SYSTEM_EXTENDED_HANDLE_INFORMATION;
+                if ((extended || (infoClass >>> 0) === SYSTEM_HANDLE_INFORMATION)
+                    && host.openHandles && pointerBytes === 4)
+                {
+                    // Every handle at once, its length told when it does not
+                    // fit: a caller allocates what it was told and asks again.
+                    const table = systemHandleInformation(host.openHandles(),
+                        host.processId ?? 0, addressOf, extended);
+                    writeU32If(returnLength >>> 0, table.length);
+                    if ((length >>> 0) < table.length)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    if ((buffer >>> 0) === 0)
+                    {
+                        return STATUS.ACCESS_VIOLATION;
+                    }
+                    host.writeMemory(buffer >>> 0, table);
+                    return STATUS.SUCCESS;
+                }
                 const other = host.systemClasses?.[infoClass >>> 0];
                 if (other)
                 {
-                    const bytes = other.read();
+                    const whole = other.read();
                     const given = length >>> 0;
+                    const short = other.head !== undefined && given < whole.length;
+                    const bytes = short ? whole.subarray(0, other.head) : whole;
                     const fits = other.partial ? given <= bytes.length
                         : other.exact ? given === bytes.length : given >= bytes.length;
                     if (!fits)
@@ -746,38 +991,37 @@ export function createQueryFunctions(host){
                 }
                 // The basic structure is asked for at its exact size; one the
                 // right size with nowhere to go is the kernel's probe failing.
-                const basic = host.pointerSize === 8 ? SYSTEM_BASIC_64 : SYSTEM_BASIC;
-                if ((length >>> 0) !== basic.SIZE)
+                if ((length >>> 0) !== SYSTEM_BASIC.SIZE)
                 {
-                    writeU32If(returnLength >>> 0, basic.SIZE);
+                    writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
                 if ((buffer >>> 0) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeU32If(returnLength >>> 0, basic.SIZE);
+                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
 
-                const struct = new Uint8Array(basic.SIZE);
+                const struct = new Uint8Array(SYSTEM_BASIC.SIZE);
                 const view = new DataView(struct.buffer);
-                view.setUint32(basic.TIMER_RESOLUTION, TIMER_RESOLUTION, true);
-                view.setUint32(basic.PAGE_SIZE, PAGE_SIZE, true);
+                view.setUint32(SYSTEM_BASIC.TIMER_RESOLUTION, TIMER_RESOLUTION, true);
+                view.setUint32(SYSTEM_BASIC.PAGE_SIZE, PAGE_SIZE, true);
                 // What the process actually has, not a figure chosen to look
                 // generous: a program sizes a cache from this, and one told about
                 // memory that is not there allocates until it fails.
                 const pages = Math.floor(host.arena.size / PAGE_SIZE);
-                view.setUint32(basic.PHYSICAL_PAGES, pages, true);
-                view.setUint32(basic.LOWEST_PHYSICAL_PAGE, pages === 0 ? 0 : 1, true);
-                view.setUint32(basic.HIGHEST_PHYSICAL_PAGE, pages, true);
-                view.setUint32(basic.ALLOCATION_GRANULARITY,
+                view.setUint32(SYSTEM_BASIC.PHYSICAL_PAGES, pages, true);
+                view.setUint32(SYSTEM_BASIC.LOWEST_PHYSICAL_PAGE, pages === 0 ? 0 : 1, true);
+                view.setUint32(SYSTEM_BASIC.HIGHEST_PHYSICAL_PAGE, pages, true);
+                view.setUint32(SYSTEM_BASIC.ALLOCATION_GRANULARITY,
                     ALLOCATION_GRANULARITY, true);
-                const pointer = pointerWidth(host.pointerSize === 8 ? 8 : 4);
-                pointer.set(view, basic.MINIMUM_USER_ADDRESS, MINIMUM_USER_ADDRESS);
-                pointer.set(view, basic.MAXIMUM_USER_ADDRESS,
-                    highestUserAddress(host.arena.base + host.arena.size));
+                view.setUint32(SYSTEM_BASIC.MINIMUM_USER_ADDRESS,
+                    MINIMUM_USER_ADDRESS, true);
+                view.setUint32(SYSTEM_BASIC.MAXIMUM_USER_ADDRESS,
+                    MAXIMUM_USER_ADDRESS, true);
                 // The machine's processors, whatever the process is narrowed to.
-                pointer.set(view, basic.ACTIVE_PROCESSORS, processors.systemMask());
-                view.setUint8(basic.PROCESSOR_COUNT, processors.count());
+                view.setUint32(SYSTEM_BASIC.ACTIVE_PROCESSORS, processors.systemMask(), true);
+                view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, processors.count());
                 host.writeMemory(buffer >>> 0, struct);
                 return STATUS.SUCCESS;
             },
@@ -827,8 +1071,30 @@ export function createQueryFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, infoClass, buffer, length, returnLength])=>{
                 const wanted = infoClass >>> 0;
+                // No handle names no process. Windows checks the class, then a
+                // fixed-size class's length, then the handle (Wine's info.c
+                // 1860, 2115, test_query_process_image_file_name).
+                if ((handle >>> 0) === 0)
+                {
+                    const fixed = new Map([[PROCESS_BASIC_INFORMATION, PROCESS_BASIC.SIZE],
+                        [PROCESS_DEBUG_PORT, 4], [PROCESS_DEBUG_OBJECT_HANDLE, 4],
+                        [PROCESS_DEBUG_FLAGS, 4], [PROCESS_EXECUTE_FLAGS, 4]]);
+                    const named = wanted === PROCESS_IMAGE_FILE_NAME
+                        || wanted === PROCESS_IMAGE_FILE_NAME_WIN32;
+                    if (!fixed.has(wanted) && !named)
+                    {
+                        return STATUS.INVALID_INFO_CLASS;
+                    }
+                    return (length >>> 0) < (fixed.get(wanted) ?? 0)
+                        ? STATUS.INFO_LENGTH_MISMATCH : STATUS.INVALID_HANDLE;
+                }
                 const child = (handle >>> 0) === CURRENT_PROCESS ? null
                     : host.processOf?.(handle >>> 0) ?? null;
+                if (DEBUG_CLASSES.has(wanted) && host.debugState)
+                {
+                    return debugInformation(child && !child.current ? child : null, wanted,
+                        buffer >>> 0, length >>> 0, returnLength >>> 0);
+                }
                 if (child && !child.current)
                 {
                     return childInformation(child, wanted, buffer >>> 0, length >>> 0,
@@ -851,8 +1117,10 @@ export function createQueryFunctions(host){
                     view.setUint32(PROCESS_BASIC.PEB_BASE_ADDRESS, peb(), true);
                     view.setUint32(PROCESS_BASIC.AFFINITY_MASK, processors.processMask(), true);
                     view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
-                    view.setUint32(PROCESS_BASIC.PROCESS_ID,
-                        teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID), true);
+                    // The process's own, whichever thread runs or none: a call
+                    // its parent makes in it runs between its threads' turns.
+                    view.setUint32(PROCESS_BASIC.PROCESS_ID, host.processId
+                        ?? (teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID)), true);
                     // The process list names this process first, with the
                     // process that started it; 0 where none did.
                     view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID,
@@ -862,6 +1130,8 @@ export function createQueryFunctions(host){
                 }
                 if (wanted === PROCESS_DEBUG_PORT || wanted === PROCESS_EXECUTE_FLAGS)
                 {
+                    // Without the debugger's record no debugger is known: the
+                    // port is none, as it is for a process nothing debugs.
                     writeU32If(returnLength >>> 0, 4);
                     if ((length >>> 0) < 4 || buffer === 0)
                     {
@@ -872,6 +1142,25 @@ export function createQueryFunctions(host){
                     // differently under one, and it would find none.
                     writeU32If(buffer >>> 0, wanted === PROCESS_EXECUTE_FLAGS ? EXECUTE_FLAGS : 0);
                     return STATUS.SUCCESS;
+                }
+                const information = wanted === PROCESS_IMAGE_INFORMATION
+                    && (host.pointerSize ?? 4) === 4 ? host.imageInformation?.() ?? null : null;
+                if (information)
+                {
+                    if ((length >>> 0) !== SECTION_IMAGE_INFORMATION_SIZE)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    host.writeMemory(buffer >>> 0, information);
+                    writeU32If(returnLength >>> 0, SECTION_IMAGE_INFORMATION_SIZE);
+                    return STATUS.SUCCESS;
+                }
+                if ((wanted === PROCESS_IMAGE_FILE_NAME || wanted === PROCESS_IMAGE_FILE_NAME_WIN32)
+                    && host.imagePath && (host.pointerSize ?? 4) === 4)
+                {
+                    const paths = host.imagePath();
+                    return writeName(wanted === PROCESS_IMAGE_FILE_NAME ? paths.native
+                        : paths.win32, buffer >>> 0, length >>> 0, returnLength >>> 0);
                 }
                 return STATUS.INVALID_INFO_CLASS;
             },
@@ -1019,40 +1308,15 @@ export function createQueryFunctions(host){
         /**
          * NTSTATUS NtOpenThread(PHANDLE Thread, ACCESS_MASK Access,
          *                       POBJECT_ATTRIBUTES Attributes, PCLIENT_ID Client)
-         * PRTL_DEBUG_INFORMATION RtlCreateQueryDebugBuffer(ULONG Size, BOOLEAN EventPair)
-         * NTSTATUS RtlDestroyQueryDebugBuffer(PRTL_DEBUG_INFORMATION Buffer)
-         * NTSTATUS RtlQueryProcessDebugInformation(ULONG Pid, ULONG Flags,
-         *                                          PRTL_DEBUG_INFORMATION Buffer)
          *
          * What a crash reporter or a debugger front end asks for. No thread
-         * is opened by id and no process snapshot is kept, so each is refused
-         * as an unsupported request and says so; the program that asked for a
-         * diagnostic goes on without it.
+         * is opened by id, so it is refused as an unsupported request and
+         * says so; the program that asked for a diagnostic goes on without it.
          */
         NtOpenThread: {
             argBytes: 16,
             handler: ()=>{
                 host.divergence?.('NtOpenThread', 'a thread cannot be opened by id; refused');
-                return STATUS.NOT_IMPLEMENTED;
-            },
-        },
-        RtlCreateQueryDebugBuffer: {
-            returns: 'pointer',
-            argBytes: 8,
-            handler: ()=>{
-                host.divergence?.('RtlCreateQueryDebugBuffer', 'no debug buffer; NULL answered');
-                return 0;
-            },
-        },
-        RtlDestroyQueryDebugBuffer: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([buffer])=>(buffer === 0 ? STATUS.INVALID_PARAMETER : STATUS.SUCCESS),
-        },
-        RtlQueryProcessDebugInformation: {
-            argBytes: 12,
-            handler: ()=>{
-                host.divergence?.('RtlQueryProcessDebugInformation', 'refused');
                 return STATUS.NOT_IMPLEMENTED;
             },
         },

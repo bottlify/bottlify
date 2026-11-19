@@ -217,12 +217,12 @@ test('two threads spinning on a zero sleep for a token hand it alike with the gu
     + ' SleepEx and the host\'s, on one executor and on three', { timeout: 300_000 }, async t=>{
     // The token is handed with plain movs, which x86 keeps in order (TSO). A host that reorders
     // plain stores to shared memory (arm64) keeps no such order between executors, by decision
-    // A272: there the test runs on one executor only.
+    // A277: there the test runs on one executor only.
     const ordered = process.arch === 'x64' || process.arch === 'ia32';
     if (!ordered)
     {
         t.diagnostic(`three executors not run on ${process.arch}: a plain-mov handoff needs TSO`
-            + ' (A272)');
+            + ' (A277)');
     }
     for (const cores of ordered ? [1, 3] : [1])
     {

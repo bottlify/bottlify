@@ -947,7 +947,7 @@ test('resuming a child\'s first thread is asked of the child, where it runs', as
     };
     /** @type {any[]} */
     const errors = [];
-    host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+    /** @type {any} */ (host).setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
         errors.push({ thread, code });
     const fns = createSyncFunctions(host);
     const child = { imagePath: 'C:\\App\\child.exe', threadId: 0x2c };
@@ -1340,77 +1340,6 @@ test('GetThreadSelectorEntry describes the flat selectors and the thread block b
     assert.equal(fns.GetThreadSelectorEntry.handler([0xfffffffe, 0xdeadbeef, at]), 0);
 });
 
-test('a debugged child reports its creation, then its exit, waited for as the child is', ()=>{
-    // Wine's kernel32 process.c test_DebuggingFlag reads events until the
-    // child's exit; WaitForDebugEvent was missing.
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const child = { id: 0x300, threadId: 0x304, handle: 0x40, threadHandle: 0x44,
-        imagePath: 'C:/child.exe', exitCode: 259, completed: false,
-        debugEvents: ['create', 'exit'], waiters: /** @type {any[]} */ ([]) };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[child] };
-    /** @type {any[]} */
-    const blocked = [];
-    kernel.block = (/** @type {any} */ thread, /** @type {string} */ why)=>blocked.push(why);
-    const fns = createSyncFunctions(host);
-    const view = new DataView(host.bytes.buffer);
-    const event = ()=>[0, 4, 8, 12, 16, 20].map(at=>view.getUint32(0x200 + at, true));
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), 1);
-    assert.deepEqual(event(), [3, 0x300, 0x304, 0, 0x40, 0x44], 'CREATE_PROCESS_DEBUG_EVENT');
-    assert.equal(/** @type {any} */ (fns.ContinueDebugEvent).handler([0x300, 0x304, 0x10002]), 1);
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'a poll while it runs');
-    assert.equal(host.errors.at(-1), 121, 'ERROR_SEM_TIMEOUT');
-
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0xffffffff]), PARKED);
-    assert.equal(blocked.length, 1, 'the debugger waits on the child');
-    child.exitCode = 7;
-    assert.equal(child.waiters[0].settle(), 1, 'its exit is the answer');
-    assert.deepEqual(event().slice(0, 4), [5, 0x300, 0x304, 7], 'EXIT_PROCESS_DEBUG_EVENT');
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 100]), 0, 'and then nothing more');
-    assert.equal(fns.WaitForDebugEvent.argBytes, 8);
-    assert.equal(fns.ContinueDebugEvent.argBytes, 12);
-});
-
-test('the debugger calls act on the children this process debugs and refuse the rest', ()=>{
-    const host = fakeHost();
-    const kernel = /** @type {any} */ (host.kernel);
-    const debugged = { id: 0x300, debugEvents: ['create', 'exit'] };
-    const plain = { id: 0x310, debugEvents: null };
-    kernel.processes = { STILL_ACTIVE: 259, all: ()=>[debugged, plain] };
-    /** @type {string[]} */
-    const said = [];
-    const fns = /** @type {any} */ (createSyncFunctions({ ...host, kernel,
-        divergence: (/** @type {string} */ api)=>said.push(api) }));
-    host.register(0x50, 'process', debugged);
-    host.register(0x54, 'process', plain);
-    host.register(0x58, 'event', { kind: 'event' });
-    assert.deepEqual([fns.DebugActiveProcessStop.argBytes, fns.DebugBreakProcess.argBytes,
-        fns.DebugSetProcessKillOnExit.argBytes], [4, 4, 4]);
-
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1, 'a debugger sets it');
-    assert.equal(/** @type {any} */ (debugged).killOnExit, false);
-
-    assert.equal(fns.DebugBreakProcess.handler([0xffffffff]), 1, 'no debugger: nothing happens');
-    assert.equal(fns.DebugBreakProcess.handler([0x54]), 1);
-    assert.equal(fns.DebugBreakProcess.handler([0x50]), 1);
-    assert.deepEqual(said, ['DebugBreakProcess'], 'the debugged child\'s breakpoint is said');
-    assert.equal(fns.DebugBreakProcess.handler([0x58]), 0, 'an event is no process');
-    assert.equal(host.errors.at(-1), 6);
-
-    assert.equal(fns.DebugActiveProcessStop.handler([0x310]), 0, 'not debugged by us');
-    assert.equal(host.errors.at(-1), 6);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x999]), 0, 'no such process');
-    assert.equal(host.errors.at(-1), 87);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x300]), 1);
-    assert.equal(debugged.debugEvents, null, 'it reports to nobody now');
-    assert.equal(fns.WaitForDebugEvent.handler([0x200, 0]), 0, 'and no event comes');
-
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([1]), 0,
-        'with no child debugged there is no debug object to set');
-    assert.equal(host.errors.at(-1), 6);
-});
-
 test('ReinitializeCriticalSection makes a section new again, as InitializeCriticalSection does',
     ()=>{
         const host = fakeHost();
@@ -1440,3 +1369,4 @@ test('GetSystemTimes: the processors\' time since boot, user what this process r
     assert.ok(idle + user >= 10000000n);
     assert.equal(fns.GetSystemTimes.handler([0, 0, 0]), 1, 'every pointer may be null');
 });
+

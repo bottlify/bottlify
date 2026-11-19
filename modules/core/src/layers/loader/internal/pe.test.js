@@ -147,13 +147,95 @@ test('a file no image can be laid out of is refused as a bad image, not a fault'
     assert.throws(()=>mapImage(patched, 0x400000), { code: 'BAD_EXE_FORMAT' });
 });
 
-test('an image without relocations refuses to move', ()=>{
-    const image = parsePe(file);
-    assert.equal(image.relocatable, false,
-        'the fixture has no .reloc, like many pre-2000 binaries');
-    assert.throws(()=>applyRelocations(new Uint8Array(image.sizeOfImage), image, 0x1000), /no relocation directory/);
-    assert.throws(()=>buildImage(file, { resolveImport: ()=>0, base: 0x800000 }), /carries no relocations/);
+/**
+ * The fixture with optional header fields set: `fields` maps an offset in the
+ * optional header to the value written there, four bytes wide (two for
+ * SizeOfOptionalHeader, given as offset -4, the COFF field before it).
+ *
+ * @param {Record<number, number>} fields
+ */
+function withOptional(fields){
+    const patched = file.slice();
+    const view = new DataView(patched.buffer);
+    const optional = view.getUint32(0x3c, true) + 24;
+    for (const [offset, value] of Object.entries(fields).map(([at, v])=>[Number(at), v]))
+    {
+        if (offset === -4)
+        {
+            view.setUint16(optional - 4, value, true);
+        }
+        else
+        {
+            view.setUint32(optional + offset, value, true);
+        }
+    }
+    return patched;
+}
+
+test('an image whose headers describe no mapping is refused as Windows refuses it', ()=>{
+    // Wine's kernel32:loader cases: no optional header, a SizeOfImage of zero,
+    // a file alignment coarser than the section alignment, a section past the
+    // image's end - each ERROR_BAD_EXE_FORMAT from LoadLibrary.
+    const size = parsePe(file).sizeOfImage;
+    for (const [what, fields] of /** @type {[string, Record<number, number>][]} */ ([
+        ['no optional header', { [-4]: 0 }],
+        ['a SizeOfImage of zero', { 56: 0 }],
+        ['a file alignment past the section alignment', { 32: 0x200, 36: 0x1000 }],
+        ['a section past the end', { 56: size - 0x1000 }],
+    ]))
+    {
+        assert.throws(()=>mapImage(withOptional(fields), 0x400000), { code: 'BAD_EXE_FORMAT' },
+            what);
+    }
 });
+
+test('an image is mapped in whole pages, and one aligned below a page is mapped flat', ()=>{
+    // SizeOfImage rounds up to the page: an image whose size ends inside its
+    // headers still has its header page, and nothing reads past the mapping.
+    const image = parsePe(file);
+    const short = mapImage(withOptional({ 56: image.sizeOfImage - 0x10 }), 0x400000);
+    assert.equal(short.bytes.length, image.sizeOfImage);
+
+    // Aligned below a page: the file as it is, each byte at its own offset,
+    // headers and sections alike.
+    const small = withOptional({ 32: 0x200, 36: 0x200, 60: 0 });
+    const flat = mapImage(small, 0x400000);
+    const first = Math.min(parsePe(small).sections[0].virtualAddress, small.length);
+    assert.deepEqual([...flat.bytes.subarray(0, first)], [...small.subarray(0, first)],
+        'the headers though SizeOfHeaders says none');
+});
+
+test('an optional header cut short has no data directory past its end', ()=>{
+    // SizeOfOptionalHeader up to CheckSum: NumberOfRvaAndSizes and the bytes
+    // after it are the file's, but no directory is the image's.
+    const cut = parsePe(withOptional({ [-4]: 64 }));
+    assert.equal(cut.directories.length, 0);
+    assert.equal(cut.optionalHeaderSize, 64);
+    assert.equal(parsePe(file).directories.length, 16);
+});
+
+test('an image whose relocations are stripped refuses to move; one without them moves as it lies',
+    ()=>{
+        const stripped = new Uint8Array(file);
+        const view = new DataView(stripped.buffer, stripped.byteOffset, stripped.byteLength);
+        const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+        view.setUint16(characteristics, view.getUint16(characteristics, true) | 1, true);
+        const fixed = parsePe(stripped);
+        assert.equal(fixed.relocatable, false,
+            'the fixture has no .reloc, like many pre-2000 binaries');
+        assert.equal(fixed.relocsStripped, true);
+        assert.throws(()=>applyRelocations(new Uint8Array(fixed.sizeOfImage), fixed, 0x1000),
+            /no relocation directory/);
+        assert.throws(()=>buildImage(stripped, { resolveImport: ()=>0, base: 0x800000 }),
+            /carries no relocations/);
+
+        // IMAGE_FILE_RELOCS_STRIPPED clear: Windows' loader moves it, nothing fixed up.
+        const loose = parsePe(file);
+        assert.equal(loose.relocatable, false);
+        assert.equal(loose.relocsStripped, false);
+        assert.equal(applyRelocations(new Uint8Array(loose.sizeOfImage), loose, 0x1000), 0);
+        assert.equal(buildImage(file, { resolveImport: ()=>0, base: 0x800000 }).base, 0x800000);
+    });
 
 /**
  * The fixture made a library of resources alone: a DLL with no entry point, no section that

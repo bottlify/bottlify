@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { nativeNameOf, win32NameOf } from './object-attributes.js';
+import { nativeNameOf, readObjectAttributes } from './object-attributes.js';
+import { createNamedObjects } from './named-objects.js';
 
 test('a Win32 name lives in its session\'s object directory, or the global one', ()=>{
     // MSDN "Kernel object namespaces": Global\ is \BaseNamedObjects, Local\ and
@@ -17,19 +18,32 @@ test('a Win32 name lives in its session\'s object directory, or the global one',
 });
 
 test('the native path and the Win32 name are each other\'s way back', ()=>{
+    const { keyOf } = createNamedObjects();
     for (const name of ['wine_test', 'Some Mutex'])
     {
         const native = nativeNameOf(name, 1);
-        assert.equal(win32NameOf({ root: 0, name: native, attributes: 0, security: 0 }), name);
+        const given = { root: 0, name: native, attributes: 0, security: 0, invalid: 0 };
+        assert.equal(keyOf(given, 'event'), name);
     }
 });
 
-test('the object directory is found as it is spelt, or in any case with OBJ_CASE_INSENSITIVE', ()=>{
-    const given = (/** @type {string} */ name, attributes = 0)=>({ root: 0, name, attributes,
-        security: 0 });
-    assert.equal(win32NameOf(given('\\BaseNamedObjects\\Test')), 'Test');
-    assert.equal(win32NameOf(given('\\BASENamedObjects\\test')), undefined,
-        'no such directory, spelt so');
-    assert.equal(win32NameOf(given('\\BASENamedObjects\\test', 0x40)), 'test');
-    assert.equal(win32NameOf(given('\\sessions\\1\\basenamedobjects\\x', 0x40)), 'x');
+test('an empty name with no buffer is read as empty, its buffer never touched', ()=>{
+    const memory = new Uint8Array(0x100);
+    const view = new DataView(memory.buffer);
+    view.setUint32(0x10, 24, true);
+    // ObjectName: a UNICODE_STRING of length 0 whose Buffer is NULL.
+    view.setUint32(0x18, 0x40, true);
+    /** @type {number[]} */
+    const reads = [];
+    const read = readObjectAttributes((at, length)=>{
+        reads.push(at);
+        if (at === 0)
+        {
+            throw new Error('read at NULL');
+        }
+        return memory.slice(at, at + length);
+    }, 0x10);
+    assert.equal(read?.name, '');
+    assert.equal(read?.invalid, 0);
+    assert.ok(!reads.includes(0), 'nothing read through the NULL buffer');
 });

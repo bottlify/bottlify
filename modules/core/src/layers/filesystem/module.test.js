@@ -83,7 +83,7 @@ test('a junction\'s files are exported under its name for a reader that keeps no
         fs.write(handle, bytes('lib'));
         fs.close(handle);
         fs.createDirectory('C:\\Gac');
-        fs.setJunction('C:\\Gac', 'C:\\SxS\\Lib');
+        fs.setReparse('C:\\Gac', { tag: 0xa0000003, data: null, target: 'C:\\SxS\\Lib' });
 
         const paths = (/** @type {any} */ files)=>files.map((/** @type {any} */ one)=>one.path)
             .sort();

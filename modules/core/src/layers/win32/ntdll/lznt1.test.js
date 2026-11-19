@@ -81,3 +81,25 @@ test('the Rtl calls: formats, room, fragments', ()=>{
     assert.equal(fns.RtlDecompressBuffer.handler([2, OUT, 0x100, PACKED, 6, FINAL]), 0xc0000242,
         'a copy before anything was written');
 });
+
+test('a stream needs a whole first chunk, and a fragment reads chunks as 4096 bytes', ()=>{
+    const BAD = { bad: true };
+    assert.deepEqual(decompress(new Uint8Array(0), 100), BAD, 'no chunk at all');
+    assert.deepEqual(decompress(Uint8Array.of(0x01), 100), BAD, 'half a header');
+    assert.deepEqual(decompress(Uint8Array.of(0x07, 0x30, 0x57), 0), BAD,
+        'an incomplete first chunk, even with no room');
+    assert.deepEqual(decompress(Uint8Array.of(0x00, 0xb0, 0x02, 0x00, 0xb0), 0),
+        { bytes: new Uint8Array(0) }, 'no room: the chunks after the first are not read');
+
+    const stored = Uint8Array.of(0x03, 0x30, ...text('Wine'));
+    assert.deepEqual(decompress(stored, 100), { bytes: text('Wine') }, 'a short stored chunk');
+    assert.deepEqual(decompress(stored, 100, 0, true), BAD,
+        'a fragment refuses a stored chunk shorter than 4096');
+    const packed = Uint8Array.of(0x04, 0xb0, 0x00, ...text('Wine'));
+    assert.deepEqual(decompress(packed, 100, 1, true), { bytes: text('ine') });
+    assert.deepEqual(decompress(packed, 100, 4095, true), { bytes: new Uint8Array(1) },
+        'past the data: the rest of the chunk, zeros');
+    assert.deepEqual(decompress(packed, 100, 4096, true), { bytes: new Uint8Array(0) });
+    assert.deepEqual(decompress(Uint8Array.of(...packed, 0x08, 0xb0), 100, 4096, true), BAD,
+        'a chunk passed over must still be whole');
+});

@@ -10,6 +10,7 @@ import {
     createSpawner, createSpawnFunctions, isRedistributableInstaller, writeThroughProtection,
 } from './spawn.js';
 import { createProcessTable } from '../../kernel/internal/processes.js';
+import { VIRTUAL_READ, VIRTUAL_WRITE } from './cross-process.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -25,8 +26,11 @@ const WINEXEC_SUCCESS = 33;
  * @param {string} [options.imagePath]
  * @param {string} [options.cwd]  The current directory a relative name is taken
  *        against, as the volume takes it.
+ * @param {string[]} [options.directories]  Full paths that are directories.
  */
-function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\' } = {}){
+function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\',
+    directories = [] } = {})
+{
     const bytes = new Uint8Array(0x2000);
     /** @type {number[]} */
     const errors = [];
@@ -36,6 +40,7 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
     const handles = new Map();
     let nextHandle = 0x40;
     const present = new Set(files.map(path=>path.toLowerCase()));
+    const folders = new Set(directories.map(path=>path.toLowerCase()));
 
     /** @param {string} path */
     const qualify = path=>(/^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}${path}`);
@@ -66,6 +71,8 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
                     }
                     return held.object;
                 },
+                /** @param {number} handle */
+                close: handle=>handles.delete(handle),
             },
         },
         /** @param {number} address @param {number} length */
@@ -100,7 +107,8 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
         /** @param {string} path */
         stat: path=>(present.has(qualify(path).toLowerCase())
             ? { exists: true, isDirectory: false }
-            : null),
+            : folders.has(qualify(path).toLowerCase()) ? { exists: true, isDirectory: true }
+                : null),
         resolve: qualify,
         imagePath: ()=>imagePath,
         /** @param {any} request */
@@ -566,10 +574,11 @@ function askingHost(answer){
 
 test('a write into a child is made in the child, and its answer comes back to the caller',
     async()=>{
-        // A launcher hollowing its child: the bytes cross, the call is the
-        // child's own WriteProcessMemory on itself, through its protection.
-        const { host, asked, caller, errorsFor } = askingHost(()=>({ result: 1, error: 0,
-            outs: [null, null, null, null, new Uint8Array([3, 0, 0, 0])] }));
+        // A launcher hollowing its child: the bytes cross, the write is made
+        // in the child over its own pages, made writable there where they
+        // only execute (`process-memory.js`).
+        const { host, asked, caller, errorsFor } = askingHost(()=>({ result: 0, error: null,
+            outs: [null, null, null, null, null, new Uint8Array([3, 0, 0, 0])] }));
         const fns = createSpawnFunctions(host);
         fns.CreateProcessA.handler(
             [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
@@ -581,12 +590,13 @@ test('a write into a child is made in the child, and its answer comes back to th
         host.bytes[0x400] = 0xff;
         assert.equal(await written, 1);
         assert.equal(asked[0].record, child);
-        assert.deepEqual(asked[0].call.call, 'WriteProcessMemory');
-        const [process, base, data, size, out] = asked[0].call.args;
-        assert.deepEqual([process, base, [...data.in], size, out],
-            [CURRENT_PROCESS, 0x401000, [0x90, 0xcc, 0x90], 3, { out: 4 }]);
+        assert.deepEqual(asked[0].call.call, VIRTUAL_WRITE);
+        const [base, data, have, size, lift, out] = asked[0].call.args;
+        assert.deepEqual([base, [...data.in], have, size, lift, out],
+            [0x401000, [0x90, 0xcc, 0x90], 3, 3, 1, { out: 4 }]);
         assert.equal(host.view.getUint32(0x500, true), 3, 'the count the child wrote');
-        assert.deepEqual(errorsFor, [[caller, 0]], 'the error set on the thread that asked');
+        assert.deepEqual(errorsFor, [], 'nothing set on the thread that asked');
+        void caller;
     });
 
 test('a child the run cannot reach is refused, and a handle that is none is invalid', ()=>{
@@ -644,9 +654,12 @@ test('a write into this process goes through code that only executes, and puts i
 
     const host = fakeHost();
     /** @type {any} */ (host).patchMemory = (/** @type {number} */ address)=>address === 0x600;
+    // The page at 0x0 is committed and writable, the one at 0x1000 not there.
+    /** @type {any} */ (host).pageState = (/** @type {number} */ page)=>(page === 0
+        ? { state: 0x1000, protect: 0x04, end: 0x1000 } : { state: 0x10000, protect: 0 });
     const fns = createSpawnFunctions(host);
     assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x600, 0x400, 4, 0]), 1);
-    assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x900, 0x400, 4, 0]), 0);
+    assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x1900, 0x400, 4, 0]), 0);
     assert.equal(host.errors.at(-1), 998, 'ERROR_NOACCESS');
 });
 
@@ -794,8 +807,8 @@ test('an ordinary child is still held pending for the replacement', ()=>{
 });
 
 test('ReadProcessMemory reads this process, and a child\'s memory in the child', async()=>{
-    const { host, asked } = askingHost(call=>({ result: 1, error: 0, outs: [null, null,
-        new Uint8Array([0x22, 0x33]).subarray(0, call.args[2].out), null,
+    const { host, asked } = askingHost(call=>({ result: 0, error: null, outs: [null,
+        new Uint8Array([0x22, 0x33]).subarray(0, call.args[1].out), null,
         new Uint8Array([2, 0, 0, 0])] }));
     const fns = createSpawnFunctions(host);
     host.bytes.set([5, 6, 7, 8], 0x400);
@@ -808,7 +821,8 @@ test('ReadProcessMemory reads this process, and a child\'s memory in the child',
     const child = host.kernel.processes.all()[0];
     assert.equal(await fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]),
         1);
-    assert.deepEqual(asked[0].call.args, [CURRENT_PROCESS, 0x401001, { out: 2 }, 2, { out: 4 }]);
+    assert.deepEqual(asked[0].call, { call: VIRTUAL_READ,
+        args: [0x401001, { out: 2 }, 2, { out: 4 }] });
     assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33]);
     assert.equal(host.view.getUint32(0x700, true), 2);
     assert.equal(fns.ReadProcessMemory.argBytes, 20);
@@ -877,6 +891,47 @@ test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', (
         [0, putAnsi(host, 0x100, 'dxinfo.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
     assert.equal(host.requests.at(-1).standardHandles, undefined,
         'bInheritHandles FALSE: nothing is inherited, the console stays');
+});
+
+test('a job list names the jobs a child is made in: a handle of no job, or a job that refuses it,'
+    + ' fails CreateProcess', ()=>{
+    // Wine's kernel32 process.c test_job_list_attribute.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    const jobA = { kind: 'job' };
+    host.jobsListed = (/** @type {number[]} */ handles)=>(handles.every(one=>one === 0x40)
+        ? handles.map(()=>jobA) : null);
+    const spawned = host.spawned;
+    let refuse = false;
+    host.spawned = (/** @type {any} */ request)=>{
+        spawned(request);
+        // As the jobs refuse it (`process-policy.js`): it never runs.
+        if (refuse)
+        {
+            request.refused = 5;
+            request.completed = true;
+        }
+    };
+    const fns = createSpawnFunctions(host);
+    const startup = 0x400;
+    const LIST = 0x600;
+    const JOBS = 0x700;
+    host.view.setUint32(startup + 68, LIST, true);
+    host.view.setUint32(0x7f0, 0x100, true);
+    assert.equal(fns.InitializeProcThreadAttributeList.handler([LIST, 1, 0, 0x7f0]), 1);
+    host.view.setUint32(JOBS, 0x44, true);
+    fns.UpdateProcThreadAttribute.handler([LIST, 0, 0x2000d, JOBS, 4, 0, 0]);
+    const create = ()=>fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0x80000, 0, 0, startup, 0]);
+    const made = host.requests.length;
+    assert.equal(create(), 0, 'a handle that names no job');
+    assert.equal(host.errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(host.requests.length, made, 'and nothing is made');
+    host.view.setUint32(JOBS, 0x40, true);
+    assert.equal(create(), 1);
+    assert.deepEqual(host.requests.at(-1).jobList, [jobA], 'the jobs go with the child');
+    refuse = true;
+    assert.equal(create(), 0, 'a job of another hierarchy refuses it');
+    assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
 });
 
 test('this process and its children are in the interactive session, and no other id is', ()=>{
@@ -977,7 +1032,7 @@ test('a file the volume has wins over the program the engine provides, and start
     });
 
 test('CreateProcess\'s current directory is where a system program starts', ()=>{
-    const host = fakeHost({ cwd: 'C:\\App\\' });
+    const host = fakeHost({ cwd: 'C:\\App\\', directories: ['C:\\Libraries', 'C:\\App\\Other'] });
     const fns = createSpawnFunctions({ ...host, currentDirectory: ()=>'C:\\App' });
     const line = putAnsi(host, 0x100, 'regsvr32 /s x.dll');
     const directory = putAnsi(host, 0x200, 'C:\\Libraries');
@@ -989,6 +1044,33 @@ test('CreateProcess\'s current directory is where a system program starts', ()=>
     assert.equal(/** @type {any} */ (host.kernel.processes.all()[1]).startDirectory,
         'C:\\App\\Other',
         'a relative one taken against the parent\'s');
+    // Wine's process test_Directory: a directory that is not one is refused.
+    const nowhere = putAnsi(host, 0x700, 'non\\existent\\directory');
+    assert.equal(fns.CreateProcessA.handler([0, line, 0, 0, 0, 0, 0, nowhere, 0, 0x300]), 0);
+    assert.equal(host.errors.at(-1), 267, 'ERROR_DIRECTORY');
+    assert.equal(host.kernel.processes.all().length, 2, 'and nothing is made');
+});
+
+test('a child may break away only from the jobs that let it', ()=>{
+    // Wine's process test_BreakawayOk: CREATE_BREAKAWAY_FROM_JOB from a job
+    // that allows no breaking away is refused.
+    const CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+    let refused = true;
+    const host = fakeHost({});
+    const fns = createSpawnFunctions({ ...host, breakawayRefused: ()=>refused });
+    const line = putAnsi(host, 0x100, 'regsvr32 /s x.dll');
+    const create = (/** @type {number} */ flags)=>fns.CreateProcessA.handler(
+        [0, line, 0, 0, 0, flags, 0, 0, 0, 0x300]);
+    assert.equal(create(CREATE_BREAKAWAY_FROM_JOB), 0);
+    assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(host.kernel.processes.all().length, 0, 'nothing is made');
+    assert.equal(create(0), 1, 'a child that stays is made');
+    const kept = /** @type {any} */ (host.kernel.processes.all()[0]);
+    assert.equal(kept.breakaway, false);
+    refused = false;
+    assert.equal(create(CREATE_BREAKAWAY_FROM_JOB), 1);
+    assert.equal(/** @type {any} */ (host.kernel.processes.all()[1]).breakaway, true,
+        'its record says it asked, for its parent\'s jobs to let it go');
 });
 
 test('an unquoted image name with a space reaches the child quoted, as CreateProcess quotes it',

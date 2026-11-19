@@ -269,6 +269,21 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
             });
         },
 
+        /**
+         * The bytes of the stub at `address`, which run as well wherever they
+         * are copied: null where no stub taken so far lives, or where the stub
+         * forwards (`forwardTo`'s jump is relative to its own slot). A system
+         * call's export is these bytes themselves (`app.js`).
+         *
+         * @param {number} address
+         * @returns {Uint8Array | null}
+         */
+        stubAt(address){
+            const id = ((address >>> 0) - base) / STUB_SIZE;
+            return Number.isInteger(id) && id > 0 && id < entries.length
+                && !entries[id].forwardTo ? this.stub(id) : null;
+        },
+
         /** How many slots have been taken, park loop included. */
         get count(){
             return entries.length;

@@ -32,7 +32,7 @@
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 import { dueInMs, readLargeInteger } from './due-time.js';
-import { readObjectAttributes, win32NameOf } from './object-attributes.js';
+import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { TAKEN } from './named-objects.js';
 
 /** Codes this surface reports. */
@@ -667,17 +667,22 @@ export function createIoCompletionPorts(host){
      * The Win32 name an OBJECT_ATTRIBUTES gives a port, null for none, or the
      * status a path outside the Win32 directory answers.
      *
-     * @param {number} attributes
+     * @param {number} attributes @param {boolean} [opening]
      * @returns {string | null | number}
      */
-    const portName = attributes=>{
+    const portName = (attributes, opening = false)=>{
         const given = readObjectAttributes(host.readMemory, attributes,
             host.pointerSize === 8 ? 8 : 4);
-        if (given === null || given.name === null || given.name === '')
+        const walked = nameToWalk(given, opening);
+        if ('status' in walked)
+        {
+            return walked.status;
+        }
+        if (given === null || walked.name === null)
         {
             return null;
         }
-        return win32NameOf(given) ?? STATUS.OBJECT_PATH_NOT_FOUND;
+        return host.namedObjects?.keyOf(given, 'iocp') ?? STATUS.OBJECT_PATH_NOT_FOUND;
     };
 
     /**
@@ -730,14 +735,14 @@ export function createIoCompletionPorts(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                const named = portName(attributes);
+                const named = portName(attributes, true);
                 if (typeof named === 'number')
                 {
                     return named;
                 }
                 if (named === null)
                 {
-                    return STATUS.OBJECT_NAME_INVALID;
+                    return STATUS.INVALID_PARAMETER;
                 }
                 const found = host.namedObjects?.existing(named, 'iocp');
                 if (found === TAKEN)
@@ -877,6 +882,14 @@ export function createIoCompletionPorts(host){
         table,
 
         /**
+         * A packet posted to a port object, as PostQueuedCompletionStatus
+         * posts one: what a job tells the port it was associated with.
+         *
+         * @param {any} port @param {CompletionPacket} packet
+         */
+        postTo: (port, packet)=>post(port, packet),
+
+        /**
          * Where an overlapped operation was asked to start.
          *
          * Windows reads the position out of the OVERLAPPED rather than from the
@@ -981,6 +994,14 @@ export function createIoCompletionPorts(host){
             associations.set(file >>> 0, { port: null, key: 0, sink });
             return true;
         },
+
+        /**
+         * Whether a handle's completions go to a port: a request on such a
+         * file cannot also ask for an APC, its completion being the port's.
+         *
+         * @param {number} file
+         */
+        bound: file=>Boolean(associations.get(file >>> 0)?.port),
 
         /**
          * Binds a file handle to a port under a key: what CreateIoCompletionPort

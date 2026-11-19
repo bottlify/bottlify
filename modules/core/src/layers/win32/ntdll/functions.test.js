@@ -95,6 +95,27 @@ function fakeHost({ registers = true } = {}){
     };
 }
 
+test('the default locales are kernel32\'s, the flag a BOOLEAN, and setting another is said', ()=>{
+    const host = fakeHost();
+    /** @type {string[]} */
+    const said = [];
+    const fns = createNtdllFunctions({ ...host,
+        kernel32: { ...host.kernel32,
+            GetUserDefaultLCID: { argBytes: 0, handler: ()=>0x0409 },
+            GetSystemDefaultLCID: { argBytes: 0, handler: ()=>0x0419 } },
+        divergence: (/** @type {string} */ api)=>void said.push(api) });
+    const view = new DataView(host.bytes.buffer);
+    const OUT = 0x200;
+    assert.equal(fns.NtQueryDefaultLocale.handler([1, OUT]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x0409, 'the user\'s');
+    assert.equal(fns.NtQueryDefaultLocale.handler([0x100, OUT]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x0419, 'the system\'s: only the low byte counts');
+    assert.equal(fns.NtSetDefaultLocale.handler([1, 0x0409]), STATUS.SUCCESS);
+    assert.deepEqual(said, [], 'the default set again is nothing to say');
+    assert.equal(fns.NtSetDefaultLocale.handler([1, 0x0809]), STATUS.SUCCESS);
+    assert.deepEqual(said, ['NtSetDefaultLocale'], 'another is not installed');
+});
+
 test('NtQueryObject names a kernel object under its session\'s object directory', ()=>{
     // om.c: an event made as "wine_test" is \Sessions\1\BaseNamedObjects\wine_test,
     // one made with no name has an empty name, not a refusal.
@@ -176,6 +197,38 @@ test('the kernel debugger is absent and the system range starts at 2 GiB', ()=>{
     assert.equal(new DataView(host.bytes.buffer).getUint32(0x100, true), 0x80000000);
     assert.equal(fns.NtQuerySystemInformation.handler([50, 0, 4, 0x110]),
         STATUS.ACCESS_VIOLATION, 'nowhere to put it');
+});
+
+test('SystemFileCacheInformation is whole, or its three ULONGs to a buffer short of it', ()=>{
+    // Wine's info.c test_query_cache: Windows 7 gives a short buffer the head.
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    for (const [given, answer, told] of [[128, STATUS.SUCCESS, 36], [36, STATUS.SUCCESS, 36],
+        [35, STATUS.SUCCESS, 12], [12, STATUS.SUCCESS, 12], [11, STATUS.INFO_LENGTH_MISMATCH, 12]])
+    {
+        view.setUint32(0x110, 0xdeadbeef, true);
+        assert.equal(fns.NtQuerySystemInformation.handler([21, 0x100, given, 0x110]), answer,
+            `${given} bytes`);
+        assert.equal(view.getUint32(0x110, true), told, `${given} bytes told`);
+    }
+});
+
+test('SystemProcessorBrandString is CPUID\'s 48 bytes and a terminator', ()=>{
+    const host = fakeHost();
+    const fns = createNtdllFunctions({ ...host, processorName: 'Test CPU @ 1.00GHz' });
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x180, 0xdeadbeef, true);
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x100, 48, 0x180]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(view.getUint32(0x180, true), 49);
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x100, 64, 0x180]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(0x180, true), 49);
+    assert.equal(String.fromCharCode(...host.bytes.subarray(0x100, 0x112)), 'Test CPU @ 1.00GHz');
+    assert.deepEqual([...host.bytes.subarray(0x112, 0x131)], new Array(31).fill(0),
+        'padded with NULs to 48 and terminated');
+    assert.equal(fns.NtQuerySystemInformation.handler([105, 0x101, 64, 0x180]),
+        STATUS.DATATYPE_MISALIGNMENT);
 });
 
 test('unwinding is the walk kernel32 already drives', ()=>{
@@ -486,14 +539,15 @@ test('the debugging calls are in the table, and the process calls only over kern
 
     const more = /** @type {Record<string, any>} */ (host.kernel32);
     for (const name of ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
-        'SizeofResource'])
+        'SizeofResource', 'OpenThread', 'GetProcessId', 'GetThreadId'])
     {
         more[name] = { argBytes: 4, handler: ()=>0 };
     }
     const full = /** @type {Record<string, any>} */ (createNtdllFunctions(host));
     for (const name of ['NtResumeThread', 'ZwResumeThread', 'NtOpenProcess', 'ZwOpenProcess',
         'RtlFindMessage', 'RtlCreateProcessParameters', 'RtlDestroyProcessParameters',
-        'RtlCreateUserProcess', 'NtCreateUserProcess', 'ZwCreateUserProcess'])
+        'RtlCreateUserProcess', 'NtCreateUserProcess', 'ZwCreateUserProcess', 'NtGetNextProcess',
+        'NtGetNextThread'])
     {
         assert.equal(typeof full[name]?.handler, 'function', name);
     }

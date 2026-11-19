@@ -139,3 +139,16 @@ test('the table defaults to the capacity the module reserves for it', ()=>{
     }
     assert.throws(()=>table.register('one too many', 0), /stub table is full/);
 });
+
+test('a stub\'s bytes are given by its address, except where they cannot run elsewhere', ()=>{
+    const base = 0x100000;
+    const table = createThunkTable({ base, port: PORT });
+    const close = table.register('ntdll.dll!NtClose', 4);
+    const watched = table.register('KERNEL32.dll!Sleep', 4, { forwardTo: 0x401000 });
+    assert.deepEqual(table.stubAt(close.address), table.stub(close.id),
+        'the stub, which carries its id and pops its own arguments');
+    assert.equal(table.stubAt(watched.address), null, 'a forwarding stub\'s jump is relative');
+    assert.equal(table.stubAt(base), null, 'the park loop is no stub');
+    assert.equal(table.stubAt(close.address + 1), null, 'inside a slot is no stub');
+    assert.equal(table.stubAt(base + 100 * STUB_SIZE), null, 'nor is a slot not yet taken');
+});

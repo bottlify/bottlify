@@ -20,6 +20,8 @@
  * is gone.
  */
 
+import { claimInherited } from './layers/win32/kernel32/pipes.js';
+
 /** What a call on a number no end of the child's is answers: STATUS_INVALID_HANDLE. */
 const STATUS_INVALID_HANDLE = 0xc0000008;
 
@@ -30,11 +32,16 @@ const STATUS_INVALID_HANDLE = 0xc0000008;
 export function pipeHandlers(inherited){
     /** @type {Map<number, import('./layers/win32/kernel32/pipes.js').EndAcross>} */
     const ends = new Map();
-    for (const { handle, type, object } of inherited ?? [])
+    for (const entry of inherited ?? [])
     {
+        const { handle, type, object } = entry;
         if (type === 'pipe' && typeof object?.across === 'function' && !ends.has(handle >>> 0))
         {
-            object.retain();
+            // The handle its parent's CreateProcess held for it, or one more.
+            if (!claimInherited(entry))
+            {
+                object.retain();
+            }
             ends.set(handle >>> 0, object.across());
         }
     }

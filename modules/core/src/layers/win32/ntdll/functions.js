@@ -28,9 +28,11 @@
 
 import { createCountedStringFunctions } from './strings.js';
 import { HEAP_USER_INFO } from '../kernel32/heap.js';
-import { createQueryFunctions } from './query.js';
+import { createQueryFunctions, loadOrder } from './query.js';
+import { createDebugBufferFunctions } from './debug-buffer.js';
 import { createImageFunctions } from './image.js';
 import { createIntegerFunctions } from './integer.js';
+import { createByteSwapFunctions } from './byte-swap.js';
 import { createBitmapFunctions } from './bitmap.js';
 import { createWaitFunctions } from './waits.js';
 import { createPathFunctions } from './paths.js';
@@ -52,10 +54,12 @@ import { HANDLE_ENTRIES, createHandleNatives } from './handles.js';
 import { createDebugFunctions } from './debug.js';
 import { createProcessFunctions } from './process.js';
 import { STATUS, toDosError } from './status.js';
+import { probed } from './probe.js';
 import { nativeNameOf } from '../kernel32/object-attributes.js';
-import { INTERACTIVE_SESSION } from '../kernel32/teb.js';
+import { blockLayouts, INTERACTIVE_SESSION } from '../kernel32/teb.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
+import { PROCESSOR_NAME } from '../kernel32/processor.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -95,12 +99,17 @@ const CRT_EXPORTS = [
 const IMAGE_DOS_SIGNATURE = 0x5a4d;
 /** NtQuerySystemInformation's classes answered here, past query.js's own. */
 const SYSTEM_KERNEL_DEBUGGER_INFORMATION = 35;
+/** SYSTEM_CACHE_INFORMATION, which NtSetSystemInformation sizes too. */
+const SYSTEM_FILECACHE_INFORMATION = 21;
 const SYSTEM_RANGE_START_INFORMATION = 50;
 const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX = 107;
 const SYSTEM_CPU_INFORMATION = 1;
 /** The emulated view of it, the same structure in a process of the machine's width. */
 const SYSTEM_EMULATION_PROCESSOR_INFORMATION = 63;
 const SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION = 8;
+/** The processor's name as CPUID's leaves 0x80000002 to 4 spell it: 48 bytes and a NUL. */
+const SYSTEM_PROCESSOR_BRAND_STRING = 105;
+const BRAND_STRING_BYTES = 48;
 /**
  * SYSTEM_CPU_INFORMATION's ProcessorFeatureBits (the kernel's KF_ flags) for
  * the IsProcessorFeaturePresent features that have one.
@@ -191,8 +200,14 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           answered as statuses.
  * @property {import('./loader.js').LoaderHost['notifications']} [dllNotifications]  The
  *           loader's LdrRegisterDllNotification callbacks.
+ * @property {import('./loader.js').LoaderHost['shutdown']} [processShutdown]  The
+ *           process's shutdown: whether it began, and LdrShutdownProcess's beginning.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
+ * @property {(library: string, name: string) => number} [exportAddress]  Where a
+ *           system library's export was placed, 0 for none.
  * @property {() => number} teb  The running thread's block.
+ * @property {() => number} [processBlock]  The process block, whichever thread runs
+ *           or none: a call its parent makes in it runs between its threads' turns.
  * @property {() => any} [currentThread]
  * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
  *           answered by another process leaves after its thread stopped running.
@@ -203,14 +218,28 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  *           The machine's Windows, for what RtlGetVersion cannot read from the
  *           process block. Absent, the default.
+ * @property {() => { win32: string, native: string }} [imagePath]  The program's
+ *           path, and as the object manager names it (`\\Device\\HarddiskVolume1\\...`).
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
  * @property {(handle: number) => number | null} [handleAccess]
+ * @property {() => import('./query.js').OpenHandle[]} [openHandles]
+ *           The handles this process holds, what SystemHandleInformation lists.
+ * @property {number} [processId]  This process's id.
+ * @property {() => Uint8Array | null} [imageInformation]  SECTION_IMAGE_INFORMATION of
+ *           the program's image, for ProcessImageInformation.
+ * @property {string} [processorName]  CPUID's brand string, what
+ *           SystemProcessorBrandString answers.
  * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
  *     a kernel object was made or opened by, null for one made with none.
+ * @property {(handle: number) => string | null | undefined} [pipeName]  A pipe end's
+ *     name under the pipe device (`\Device\NamedPipe\name`), null for a pipe made
+ *     with no name, undefined for a handle that is no pipe end.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
  * @property {import('./query.js').QueryHost['askChild']} [askChild]
+ * @property {import('./query.js').QueryHost['debugState']} [debugState]
+ * @property {import('./query.js').QueryHost['openDebugObject']} [openDebugObject]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {Record<string | symbol, any>} [advapi32]
  *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
@@ -238,7 +267,7 @@ const alias = (table, names)=>Object.fromEntries(
  * them -- a host that assembled no processes -- leaves those unexported.
  */
 const PROCESS_ENTRIES = ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
-    'SizeofResource'];
+    'SizeofResource', 'OpenThread', 'GetProcessId', 'GetThreadId'];
 
 /** Where a thread block keeps its process's block. */
 const TEB_PEB = 0x30;
@@ -339,41 +368,6 @@ function createUserInfoFunctions(kernel32, writeMemory){
                 return 1;
             },
         },
-    };
-}
-
-/** @param {unknown} error */
-const unreachable = error=>/** @type {{ code?: string }} */ (error)?.code === 'GUEST_ACCESS';
-
-/**
- * A native call's handler, a guest pointer it could not reach answered as the
- * kernel answers it: STATUS_ACCESS_VIOLATION, the call returning.
- *
- * @param {Function} handler
- * @returns {Function}
- */
-function probed(handler){
-    return (/** @type {any[]} */ ...args)=>{
-        try
-        {
-            const answer = handler(...args);
-            return typeof answer?.then === 'function'
-                ? answer.catch((/** @type {unknown} */ error)=>{
-                    if (unreachable(error))
-                    {
-                        return STATUS.ACCESS_VIOLATION;
-                    }
-                    throw error;
-                })
-                : answer;
-        }
-        catch (e){
-            if (unreachable(e))
-            {
-                return STATUS.ACCESS_VIOLATION;
-            }
-            throw e;
-        }
     };
 }
 
@@ -534,7 +528,8 @@ export function createNtdllFunctions(host){
             writeMemory: host.writeMemory, teb: host.teb }),
         ...alias(crt, Object.fromEntries(CRT_EXPORTS.map(name=>[name, name]))),
         // Where ntdll's own runtime answers otherwise than msvcrt (`crt.js`).
-        ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory }),
+        ...createNtdllCrt({ readMemory: host.readMemory, writeMemory: host.writeMemory,
+            crt }),
 
         ...createCountedStringFunctions({
             readMemory: host.readMemory,
@@ -578,7 +573,7 @@ export function createNtdllFunctions(host){
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
             ? createLoaderFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate, free,
-                notifications: host.dllNotifications })
+                notifications: host.dllNotifications, shutdown: host.processShutdown })
             : {}),
 
         ...(['GetEnvironmentStringsW', 'SetEnvironmentVariableW'].every(name=>kernel32[name])
@@ -586,10 +581,52 @@ export function createNtdllFunctions(host){
                 writeMemory: host.writeMemory, kernel32, allocate, free })
             : {}),
 
+        ...(host.processId !== undefined && kernel32.GetProcessHeaps
+            ? createDebugBufferFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                allocate,
+                free,
+                processId: host.processId,
+                otherProcess: id=>(host.processes?.() ?? []).some(process=>process.id === id),
+                modules: ()=>{
+                    const layout = blockLayouts(host.pointerSize);
+                    const word = (/** @type {number} */ at)=>readU32(host.readMemory(at, 4));
+                    const teb = host.teb() >>> 0;
+                    const peb = teb === 0 ? 0 : word(teb + layout.teb.PEB);
+                    return [...loadOrder(word, peb, layout)].map(entry=>{
+                        const name = entry + layout.entry.FULL_DLL_NAME;
+                        const units = (word(name) & 0xffff) >>> 1;
+                        return {
+                            base: word(entry + layout.entry.DLL_BASE),
+                            size: word(entry + layout.entry.SIZE_OF_IMAGE),
+                            path: units === 0 ? ''
+                                : host.readWideString(word(name + 4), units * 2),
+                        };
+                    });
+                },
+                heaps: ()=>{
+                    const count = kernel32.GetProcessHeaps.handler([0, 0]) >>> 0;
+                    const list = allocate(count * 4);
+                    if (list === 0)
+                    {
+                        return [];
+                    }
+                    kernel32.GetProcessHeaps.handler([count, list]);
+                    const bytes = host.readMemory(list, count * 4);
+                    free(list);
+                    return Array.from({ length: count }, (_, at)=>readU32(bytes.subarray(at * 4)));
+                },
+                pointerSize: host.pointerSize,
+                divergence: host.divergence,
+            })
+            : {}),
+
         ...createQueryFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             teb: host.teb,
+            ...host.processBlock ? { processBlock: host.processBlock } : {},
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,
@@ -605,6 +642,16 @@ export function createNtdllFunctions(host){
                 {
                     const name = host.namedObjectName(handle);
                     return name === null ? '' : nativeNameOf(name, INTERACTIVE_SESSION);
+                }
+                // A pipe's name is under its device; one made with none has
+                // no name to spell.
+                if (type === 'pipe' && host.pipeName)
+                {
+                    const name = host.pipeName(handle);
+                    if (name !== undefined)
+                    {
+                        return name === null ? { status: STATUS.OBJECT_PATH_INVALID } : name;
+                    }
                 }
                 if ((type !== 'file' && type !== 'directory')
                     || !kernel32.GetFinalPathNameByHandleW)
@@ -631,15 +678,38 @@ export function createNtdllFunctions(host){
             },
             processOf: host.processOf,
             askChild: host.askChild,
+            debugState: host.debugState,
+            openDebugObject: host.openDebugObject,
             divergence: host.divergence,
             processes: host.processes,
+            imagePath: host.imagePath,
             processors: host.processors,
+            openHandles: host.openHandles,
+            processId: host.processId,
+            ...host.imageInformation ? { imageInformation: host.imageInformation } : {},
             systemClasses: {
                 ...time.systemClasses,
                 // SYSTEM_KERNEL_DEBUGGER_INFORMATION: no kernel debugger, none
                 // present - the machine is not being debugged.
                 [SYSTEM_KERNEL_DEBUGGER_INFORMATION]: { read: ()=>Uint8Array.of(0, 1) },
                 ...processorClasses(),
+                // SYSTEM_CACHE_INFORMATION: the system file cache's sizes and
+                // working set. The engine keeps no cache of its own, so every
+                // figure is zero; a buffer short of the whole is given its
+                // first three ULONGs, as Windows 7 gives them. Its 32-bit
+                // layout only.
+                .../** @type {Record<number, import('./query.js').SystemClass>} */ (
+                    host.pointerSize === 8 ? {} : { [SYSTEM_FILECACHE_INFORMATION]: { head: 12,
+                        read: ()=>new Uint8Array(36) } }),
+                [SYSTEM_PROCESSOR_BRAND_STRING]: { read: ()=>{
+                    const name = host.processorName ?? PROCESSOR_NAME;
+                    const bytes = new Uint8Array(BRAND_STRING_BYTES + 1);
+                    for (let i = 0; i < Math.min(name.length, BRAND_STRING_BYTES); i++)
+                    {
+                        bytes[i] = name.charCodeAt(i) & 0x7f;
+                    }
+                    return bytes;
+                } },
                 // SYSTEM_RANGE_START_INFORMATION: where the system's half of
                 // the address space begins, a pointer wide.
                 [SYSTEM_RANGE_START_INFORMATION]: { exact: true,
@@ -652,6 +722,11 @@ export function createNtdllFunctions(host){
 
         ...(host.setRegisters
             ? createIntegerFunctions({ setRegisters: host.setRegisters })
+            : {}),
+
+        // A 64-bit ntdll has no byte swaps to export: its compiler inlines them.
+        ...(host.setRegisters && host.pointerSize !== 8
+            ? createByteSwapFunctions({ setRegisters: host.setRegisters })
             : {}),
 
         ...(['WaitForSingleObjectEx', 'WaitForMultipleObjectsEx', 'SleepEx', 'GetLastError',
@@ -670,7 +745,8 @@ export function createNtdllFunctions(host){
         ...(MEMORY_ENTRIES.every(name=>kernel32[name])
             ? createMemoryFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate, pointerSize: host.pointerSize,
-                currentThread: host.currentThread, lastErrorOf: host.lastErrorOf })
+                currentThread: host.currentThread, lastErrorOf: host.lastErrorOf,
+                ...host.divergence ? { divergence: host.divergence } : {} })
             : {}),
 
         ...(/** @type {any} */ (kernel32)[HEAP_USER_INFO]
@@ -686,6 +762,7 @@ export function createNtdllFunctions(host){
             allocate,
             free,
             ...host.divergence ? { divergence: host.divergence } : {},
+            breakPoint: ()=>host.exportAddress?.('ntdll.dll', 'DbgBreakPoint') ?? 0,
         }),
 
         ...(PROCESS_ENTRIES.every(name=>kernel32[name])
@@ -698,6 +775,7 @@ export function createNtdllFunctions(host){
                 free,
                 processes: host.processes,
                 native: name=>natives[name],
+                ...host.processShutdown ? { terminate: host.processShutdown.terminate } : {},
                 ...host.pointerSize ? { pointerSize: host.pointerSize } : {},
                 ...host.divergence ? { divergence: host.divergence } : {},
             })
@@ -739,6 +817,48 @@ export function createNtdllFunctions(host){
                             return STATUS.ACCESS_VIOLATION;
                         }
                         kernel32.GetSystemTimeAsFileTime.handler([out >>> 0]);
+                        return STATUS.SUCCESS;
+                    },
+                },
+            }
+            : {}),
+
+        /**
+         * NTSTATUS NtQueryDefaultLocale(BOOLEAN UserProfile, PLCID DefaultLocaleId)
+         * NTSTATUS NtSetDefaultLocale(BOOLEAN UserProfile, LCID DefaultLocaleId)
+         *
+         * The user's or the system's default locale, as GetUserDefaultLCID and
+         * GetSystemDefaultLCID answer them. The flag is a BOOLEAN, its low
+         * byte: a caller that leaves garbage above it still asks for the
+         * system's. One locale is installed, so setting another is said and
+         * the default stays.
+         */
+        ...(kernel32.GetUserDefaultLCID && kernel32.GetSystemDefaultLCID
+            ? {
+                NtQueryDefaultLocale: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([user, out])=>{
+                        const lcid = ((user & 0xff) !== 0 ? kernel32.GetUserDefaultLCID
+                            : kernel32.GetSystemDefaultLCID).handler([]);
+                        host.writeMemory(out >>> 0, Uint8Array.of(lcid & 0xff, lcid >>> 8 & 0xff,
+                            lcid >>> 16 & 0xff, lcid >>> 24 & 0xff));
+                        return STATUS.SUCCESS;
+                    },
+                },
+                NtSetDefaultLocale: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([user, lcid])=>{
+                        const which = (user & 0xff) !== 0 ? 'user' : 'system';
+                        const current = ((user & 0xff) !== 0 ? kernel32.GetUserDefaultLCID
+                            : kernel32.GetSystemDefaultLCID).handler([]);
+                        if ((lcid >>> 0) !== current >>> 0)
+                        {
+                            host.divergence?.('NtSetDefaultLocale', `the ${which} default `
+                                + `0x${(lcid >>> 0).toString(16)} is not installed; `
+                                + `0x${(current >>> 0).toString(16)} stays`);
+                        }
                         return STATUS.SUCCESS;
                     },
                 },
@@ -806,7 +926,8 @@ export function createNtdllFunctions(host){
          *
          * CloseHandle answered as a status: one handle table, so whatever the
          * handle names -- a file NtCreateFile opened, an event, a thread -- it
-         * closes the same way.
+         * closes the same way, and a handle it does not hold is
+         * STATUS_INVALID_HANDLE.
          */
         ...(kernel32.CloseHandle
             ? {
@@ -815,7 +936,7 @@ export function createNtdllFunctions(host){
                     /** @param {number[]} args */
                     handler: ([handle])=>registry?.close(handle >>> 0)
                         ?? (kernel32.CloseHandle.handler([handle]) !== 0
-                            ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND),
+                            ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
                 },
             }
             : {}),
@@ -1148,7 +1269,8 @@ export function createNtdllFunctions(host){
     // where the same pointer handed to a user-mode Rtl function faults.
     // An entry another library's table owns (a kernel32 entry ntdll exports
     // under its own name, advapi32's registry and token calls) is that table's
-    // own and stays the same entry. The native calls kernel32's tables carry
+    // own and stays the same entry; the registry's and the token calls are
+    // probed where they are made (`probe.js`). The native calls kernel32's tables carry
     // (NtReadFile, NtWriteFile, the APC calls) are ntdll's alone, and probed
     // as every other one is: NtWriteFile of a NULL buffer answers
     // STATUS_ACCESS_VIOLATION, as Wine's ntdll:file asks.

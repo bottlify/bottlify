@@ -417,6 +417,16 @@ test('CreateThread makes a thread and does not switch to it', ()=>{
     assert.deepEqual(parked, [], 'the creating thread keeps running');
 });
 
+test('a process that has begun to end makes no thread: ERROR_ACCESS_DENIED', ()=>{
+    // Wine's kernel32:loader (child phase 0): after NtTerminateProcess with
+    // no handle, CreateThread fails with ERROR_ACCESS_DENIED.
+    const { kernel, fns, host, errors } = setup();
+    host.terminating = ()=>true;
+    assert.equal(fns.CreateThread.handler([0, 0x10000, 0x401000, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 5);
+    assert.equal(kernel.state.created.length, 0, 'nothing made');
+});
+
 test('CreateThread begins the thread where the libraries are told of it, its routine above', ()=>{
     const { kernel, fns, host } = setup();
     host.threadStart = ()=>0x9000;
@@ -1259,7 +1269,7 @@ test('a wait on a pseudo-handle is a wait on the running object, which is not si
 
     // A timeout on a duplicate of the running thread expires while it runs.
     assert.equal(
-        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 0]), 1);
+        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 2]), 1);
     const duplicate = writtenU32(written, 0x300);
     assert.equal(fns.WaitForSingleObject.handler([duplicate, 100]), PARKED);
     kernel.advance(100);
@@ -1534,6 +1544,42 @@ test('the run\'s processes list a process\'s threads in the order they were made
     ]);
 });
 
+test('a snapshot lists every process of the run, a grandchild with the child that made it as its'
+    + ' parent', ()=>{
+    // Wine's process.c test_Startup's nested child: a child starts one
+    // suspended and exits; its parent finds it in a snapshot and resumes it.
+    const child = { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 };
+    const grandchild = { id: 0x308, threadId: 0x30c, imagePath: 'C:\\App\\child.exe',
+        exitCode: 259, parentId: 0x300 };
+    const kernel = {
+        threads: ()=>[{ id: 0x10, state: 'running' }],
+        processes: { STILL_ACTIVE: 259, all: ()=>[child],
+            run: ()=>[{ id: 0x2a4, exitCode: 259 }, child, grandchild] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe' }), [
+        { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe', threads: [0x10] },
+        { id: 0x300, parent: 0x2a4, path: 'C:\\App\\child.exe', threads: [0x304] },
+        { id: 0x308, parent: 0x300, path: 'C:\\App\\child.exe', threads: [0x30c] },
+    ]);
+});
+
+test('an ended thread stays in its process\'s list, and opens by id, while a handle holds it', ()=>{
+    // Wine's ntdll om.c test_get_next_thread: the thread waited for to its
+    // end is still found through the handle its creator keeps.
+    const ended = { id: 0x1c, state: 'terminated' };
+    let held = true;
+    const kernel = {
+        threads: ()=>[{ id: 0x10, state: 'running' }, ended],
+        handles: { holds: (/** @type {any} */ object)=>held && object === ended },
+        processes: { STILL_ACTIVE: 259, all: ()=>[] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
+        [0x10, 0x1c]);
+    held = false;
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
+        [0x10], 'its last handle gone, so is it');
+});
+
 test("OpenThread opens a live thread or a child's first, and refuses any other", ()=>{
     // Wine's kernel32 process.c test_Toolhelp opens the thread the walk found.
     const { fns, host, errors } = setup();
@@ -1691,28 +1737,6 @@ test('CreateWaitableTimerEx takes the manual reset as a flag and refuses others'
     assert.equal(fns.CreateWaitableTimerExW.argBytes, 16);
 });
 
-test('GetMappedFileName names an image in its volume\'s device, and nothing else', ()=>{
-    const { host, fns, written, errors } = setup();
-    host.modules = ()=>[
-        { name: 'app.exe', base: 0x400000, size: 0x10000, path: 'C:\\Games\\app.exe' },
-        { name: 'lib.dll', base: 0x10000000, size: 0x8000, path: 'D:\\lib.dll' },
-    ];
-    const again = createThreadingFunctions(host);
-    const name = '\\Device\\HarddiskVolume1\\Games\\app.exe';
-    assert.equal(again.K32GetMappedFileNameW.handler([0xffffffff, 0x401234, 0x3000, 260]),
-        name.length);
-    const wide = /** @type {Uint8Array} */ (written.get(0x3000));
-    assert.equal(String.fromCharCode(...new Uint16Array(wide.slice().buffer)), `${name}\0`);
-    assert.equal(again.K32GetMappedFileNameA.handler([0xffffffff, 0x10000010, 0x3000, 260]),
-        '\\Device\\HarddiskVolume2\\lib.dll'.length);
-    assert.equal(again.K32GetMappedFileNameA.handler([0xffffffff, 0x401234, 0x3000, 8]), 7);
-    assert.equal(errors.at(-1), 122, 'cut to the room');
-    assert.equal(again.K32GetMappedFileNameW.handler([0xffffffff, 0x20000000, 0x3000, 260]), 0);
-    assert.equal(errors.at(-1), 59, 'ERROR_UNEXP_NET_ERR: no file backs it');
-    assert.equal(fns.K32GetMappedFileNameW.handler([0x44, 0x401234, 0x3000, 260]), 0);
-    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
-});
-
 test('CompareObjectHandles says whether two handles name one object', ()=>{
     const { fns, written } = setup();
     const event = fns.CreateEventA.handler([0, 1, 0, 0]);
@@ -1747,4 +1771,26 @@ test('ReleaseSemaphore places the code of the process\'s width: x86-64 in a 64-b
         assert.deepEqual([...memory.subarray(at, at + host - 1)], [...code.subarray(0, host - 1)],
             `${pointerSize * 8}-bit: the code its width builds`);
     }
+});
+
+test('a duplicate carries the rights asked for, none for 0, the source\'s with SAME_ACCESS', ()=>{
+    // DuplicateHandle's dwDesiredAccess is ignored only with
+    // DUPLICATE_SAME_ACCESS; 0 without it is a handle with no rights (Wine's
+    // kernel32 virtual.c: MapViewOfFile through such a duplicate is refused).
+    const { fns, kernel, written } = setup();
+    const event = fns.CreateEventA.handler([0, 1, 0, 0]);
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x300, 0, 0, 0]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x300)), 0);
+    assert.equal(fns.DuplicateHandle.handler(
+        [0xffffffff, event, 0xffffffff, 0x304, 0x80000000, 0, 0]), 1);
+    const read = writtenU32(written, 0x304);
+    assert.equal(kernel.handles.access(read), 0x20001, 'GENERIC_READ: READ_CONTROL | QUERY_STATE');
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, read, 0xffffffff, 0x308, 0, 0, 2]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x308)), 0x20001,
+        'DUPLICATE_SAME_ACCESS: the source\'s rights, the asked ignored');
+    assert.equal(fns.DuplicateHandle.handler([0xffffffff, event, 0xffffffff, 0x30c, 0, 0, 2]), 1);
+    assert.equal(kernel.handles.access(writtenU32(written, 0x30c)), null,
+        'a handle with every right duplicates with every right');
+    assert.equal(fns.SetEvent.handler([writtenU32(written, 0x300)]), 0,
+        'no EVENT_MODIFY_STATE on the duplicate with none');
 });

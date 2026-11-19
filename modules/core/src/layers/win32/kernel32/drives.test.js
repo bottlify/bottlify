@@ -573,6 +573,10 @@ test('a volume is described the same by its handle, natively and by its root', (
         {
             return opened;
         }
+        if (handle === 0x48 && kind === 'pipe')
+        {
+            return { side: 'server' };
+        }
         throw new Error('no such handle');
     } };
     const { fns, bytes, errors } = setup(['C', 'D'], { D: { kind: 'cdrom', label: 'DISC',
@@ -621,6 +625,12 @@ test('a volume is described the same by its handle, natively and by its root', (
     assert.equal(dword(bytes, 0x400), 7, 'FILE_DEVICE_DISK');
     assert.equal(query.handler([0x44, 0x300, 0x400, 50, 2]) >>> 0, 0xc0000003);
     assert.equal(query.handler([0x45, 0x300, 0x400, 50, 1]) >>> 0, 0xc0000008);
+    // A pipe is on the pipe device, which keeps nothing a volume does.
+    assert.equal(query.handler([0x48, 0x300, 0x400, 8, 4]), 0);
+    assert.deepEqual([dword(bytes, 0x400), dword(bytes, 0x404)], [0x11, 0],
+        'FILE_DEVICE_NAMED_PIPE');
+    assert.equal(dword(bytes, 0x304), 8);
+    assert.equal(query.handler([0x48, 0x300, 0x400, 50, 1]) >>> 0, 0xc0000003);
 
     opened.path = 'D:\\SETUP.EXE';
     assert.equal(query.handler([0x44, 0x300, 0x400, 8, 4]), 0);
