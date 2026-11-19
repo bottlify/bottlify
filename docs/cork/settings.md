@@ -114,6 +114,7 @@ default is the product's.
 | `checkedAfter` | 4 | Failed x87 shape tests before a region is formed again without one. |
 | `hashSlots` | 2^20 | Slots of the entry hash (12 bytes each). |
 | `yieldChunk` | 2^24 | `createMachine` alone (cork's machine for its tests): the instructions translated code runs at a time. |
+| `lowBlock` | `true` | The core's host: over a wide window whose code block is past 4 GiB, the block below it translated by a runtime of its own (`twoBlockRuntime`); false leaves its code to the interpreter tier. |
 | `sliceMs` | 8 | How long an interpreting slice may take. |
 | `wasmInterpreterAfter` | 8192 | Work the JavaScript interpreter does before the wasm tier takes over. |
 | `clock` | `host` | The clock the cork host and the translator decide by. `virtual`: the instructions the guest retired, a million a millisecond, for a slice's length, the time-stamp counter and a page's rewrites, the translation done on the engine thread. The same program then translates and runs the same code on any machine however busy it is; the time it took is the machine's alone. For stands, not the product. |

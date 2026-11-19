@@ -68,6 +68,17 @@ export const MADE = 5;
 export const RARE = 6;
 
 /**
+ * The vector of an untranslated exit to a target in another 4 GiB block of a
+ * wide window (`wideLayout`), the instruction done - a return, a jump or a
+ * call from the image's code into the system's below 4 GiB, or back: `FAR`
+ * plus the target's high half, which the region's RIP (its low half, the
+ * block's high one) cannot say: the last vector, so any of an untranslated
+ * exit from `FAR` on is one. The runtime puts it back into RIP, and the host
+ * enters the other block's runtime there.
+ */
+export const FAR = 8;
+
+/**
  * Whether an instruction that only reads is left untested, its address wrapped
  * into RAM (`wrapIntoRam`): not under `precise`, nor `checkReads`, where a page
  * the program cannot read faults.

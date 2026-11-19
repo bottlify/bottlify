@@ -267,7 +267,7 @@ export const WRAP_SLACK = 2 * PAGE;
  *     the RAM the memory holds now, less one, as it grows;
  *     `window`: long mode's address space, 4 GiB (the default), 8 or 16 GiB
  *     (`wideLayout`); `codeBase`: a wide window's 4 GiB block its code lies in
- *     (`wideLayout`), 0 by default
+ *     (`wideLayout`), 0 by default; `tablesAt` there places a second block's tables
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
@@ -311,7 +311,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         }
         return window === WINDOW
             ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors)
-            : wideLayout(window, ramSize, hashSlots, codeBase);
+            : wideLayout(window, ramSize, hashSlots, codeBase, tablesAt);
     }
     const fields = {
         bits: /** @type {32} */ (32),
@@ -455,11 +455,17 @@ export const WIDE_WINDOWS = Object.freeze([2 ** 33, 2 ** 34]);
  * address leaves the translated code -- RIP written back, a return address,
  * a RIP-relative operand -- and comes out of a target that enters it.
  *
+ * A process translates two such blocks, each with a runtime of its own:
+ * the image's, and the one below 4 GiB, where the system's libraries, the
+ * heap and a JIT's pages lie (`codeBase` 0). Each keeps its own tables, the
+ * second's past the first's (`tablesAt`); the page flags, code granules and
+ * stale span are the window's, one for both.
+ *
  * @param {number} window @param {number} ramSize @param {number} hashSlots
- * @param {number} codeBase
+ * @param {number} codeBase @param {number} [tablesAt]
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function wideLayout(window, ramSize, hashSlots, codeBase){
+function wideLayout(window, ramSize, hashSlots, codeBase, tablesAt){
     if (!(ramSize > 0 && ramSize <= window - 4096 && ramSize % 4096 === 0))
     {
         throw new RangeError(`cork: ${ramSize} bytes of RAM in a window of ${window}`);
@@ -467,8 +473,8 @@ function wideLayout(window, ramSize, hashSlots, codeBase){
     /** @type {Record<string, any>} */
     const fields = { ...longLayout(LOW_STATE, 0, 4096, hashSlots), ramSize, window,
         ramMemory: 1, pageFlags: PAGE, codeRanges: PAGE + window / 4096,
-        staleSpan: PAGE + window / 4096 * 3, tables: PAGE * 2 + window / 4096 * 3,
-        ...codeBase === 0 ? {} : { codeBase } };
+        staleSpan: PAGE + window / 4096 * 3,
+        tables: tablesAt ?? PAGE * 2 + window / 4096 * 3, codeBase };
     delete fields.id;
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }

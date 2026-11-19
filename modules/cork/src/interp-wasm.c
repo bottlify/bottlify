@@ -323,9 +323,21 @@ void configureWide(u32 windowPages, u32 codeBlock)
     window = (u64)windowPages << 12;
     codeBase = (u64)codeBlock << 32;
 }
+/* The block below 4 GiB, where the system's libraries, the heap and a JIT's
+ * pages lie, has a runtime and an entry hash of its own beside the image's
+ * when the image lies past it (`configureLowHash`): its code is counted and
+ * entered as the image's is, through its own hash. */
+static u8 *lowHash;
+__attribute__((export_name("configureLowHash")))
+void configureLowHash(u32 at)
+{
+    lowHash = (u8 *)at;
+}
 #define WINDOW window
 #define BEYOND(a) ((a) >= WINDOW)
-#define IN_CODE(a) ((((a) - codeBase) >> 32) == 0)
+#define IN_LOW(a) (lowHash != 0 && ((a) >> 32) == 0)
+#define IN_CODE(a) (((((a) - codeBase) >> 32) == 0) || IN_LOW(a))
+#define HASH_OF(a) (IN_LOW(a) ? lowHash : hash)
 /* Where a store into translated code landed, for the host: its low half the
  * exit's value, the high one beside it. */
 static u32 exitHigh;
@@ -336,6 +348,7 @@ __attribute__((export_name("exitHigh"))) u32 getExitHigh(void) { return exitHigh
 /* Whether a quadword is no address of the window, and whether it is one of code. */
 #define BEYOND(a) (((a) >> 32) != 0)
 #define IN_CODE(a) (((a) >> 32) == 0)
+#define HASH_OF(a) hash
 #define EXIT_AT(a) do { exitValue = (a); } while (0)
 #endif
 
@@ -4176,9 +4189,10 @@ static u32 runInteger(u32 budget)
                     goto done;
                 }
                 u32 slot = (to * 0x9e3779b1u) >> hashShift;
+                u8 *table = HASH_OF(target);
                 for (;;)
                 {
-                    u32 key = *(u32 *)(hash + slot * 12);
+                    u32 key = *(u32 *)(table + slot * 12);
                     if (key == 0) break;
                     if (key == to)
                     {

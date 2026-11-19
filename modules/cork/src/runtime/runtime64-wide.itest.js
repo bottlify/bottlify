@@ -194,3 +194,48 @@ test('a stack across a 4 GiB line of the window: each push and pop at its whole 
             }
         }
     }));
+
+/**
+ * Code in the image's block calling code it wrote below 4 GiB, which calls back:
+ * `call rdx`, `ret`, `jmp [rsp+8]` and `call r9` across the line, then a byte of the low
+ * routine rewritten after it ran translated, on a page of its own (GNU as):
+ *
+ *         copy routine..routine_end to [rbx+0x1000]; lea rdx, [rbx+0x1000]
+ *     1:  call rdx; add [rbx], rax; inc esi; cmp esi, 40; jb 1b
+ *         mov byte [rbx+0x1001], 9; call rdx; add [rbx+8], rax
+ *         lea rax, [rip+fresh]; mov [rbx+0x40], rax; jmp [rbx+0x40]   (no entry yet: the tier's,
+ *  fresh: call rdx; add [rbx+32], rax          from translated code, stops below 4 GiB)
+ *         lea r9, [rip+back]; lea rdx, [rbx+0x1008]; xor esi, esi
+ *     2:  call rdx; add [rbx+16], rax; inc esi; cmp esi, 30; jb 2b
+ *         push routine3; push after; jmp [rsp+8]
+ *  after: add rsp, 8; add [rbx+24], rax; jmp done
+ *   back: mov eax, 100; add eax, esi; ret
+ * routine: mov eax, 3; add eax, esi; ret     routine2: call r9; add eax, 5; ret
+ * routine3: mov eax, 77; ret
+ */
+const CROSS = '31f6488dbb001000004c8d058b000000b915000000418a00880749ffc048ffc7ffc975f1488d93001000'
+    + '00ffd2480103ffc683fe2872f4c6830110000009ffd248014308488d050700000048894340ff6340ffd2'
+    + '480143204c8d0d34000000488d930810000031f6ffd248014310ffc683fe1e72f3488d930f1000005248'
+    + '8d050500000050ff6424084883c40848014318eb1db86400000001f0c3b80300000001f0c341ffd183c0'
+    + '05c3b84d000000c3';
+
+test('code past 4 GiB and code below it, each block translated by its own runtime: calls,'
+    + ' returns and jumps across, and a rewrite of the low code, as interpreted', ifRoom(()=>{
+    const cases = CORPUS.cases.slice(0, 6).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `across ${i}`, code: CROSS }));
+    // The tier run cold too (`tierHot`): from a miss of translated code in one block it
+    // runs on into the other, and stops at an entry there, which is the other's runtime's.
+    for (const [tiered, tierHot] of /** @type {const} */ ([[false, 1], [true, 1], [true, 255]]))
+    {
+        for (const budget of [7, 100000])
+        {
+            const { failures, exits, stats } = compare(cases, { budget, tiered, tierHot,
+                window: 2 ** 33, codeHigh: 2 ** 32, lowBlock: true });
+            assert.deepEqual(failures.slice(0, 20), [],
+                `tiered ${tiered} (${tierHot}), budget ${budget}`);
+            assert.equal(exits, cases.length);
+            // The routines below 4 GiB ran translated, not stepped one by one.
+            assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
+        }
+    }
+}));
