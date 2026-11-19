@@ -3598,9 +3598,11 @@ export function createHeapFunctions(host){
                 const image = block?.owner === VIRTUAL ? null : imageAt(first);
                 if (image)
                 {
-                    // An image's pages keep what they are given, read back
-                    // and handed back as the old protection; the range stays
-                    // inside the image.
+                    // An image's pages keep what they are given, a writable
+                    // protection as its copy-on-write form as a view of an
+                    // image's are (`imageWriteCopy`), read back and handed
+                    // back as the old protection; the range stays inside the
+                    // image.
                     const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
                     if (end > image.base + image.layout.size || !imageProtection(protect >>> 0))
                     {
@@ -3614,7 +3616,7 @@ export function createHeapFunctions(host){
                         { stamp: imageStamp(image.base), pages: changed });
                     for (let page = first; page < end; page += PAGE_SIZE)
                     {
-                        changed.set(page, protect >>> 0);
+                        changed.set(page, imageWriteCopy(protect >>> 0));
                     }
                     return 1;
                 }

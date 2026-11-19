@@ -1247,7 +1247,9 @@ test('a loaded image answers each section\'s protection, and keeps what VirtualP
     ()=>{
         // Wine's kernel32:loader: headers read-only, code PAGE_EXECUTE_READ,
         // data copy-on-write, a page no section covers closed; the whole
-        // allocated PAGE_EXECUTE_WRITECOPY as MEM_IMAGE.
+        // allocated PAGE_EXECUTE_WRITECOPY as MEM_IMAGE; a writable protection
+        // given is its copy-on-write form (test_section_access's table:
+        // PAGE_EXECUTE_READWRITE reads back PAGE_EXECUTE_WRITECOPY).
         const base = 0x400000;
         const headers = imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
             [0x3000, 0x1800, 0xc0000040]]);
@@ -1273,9 +1275,11 @@ test('a loaded image answers each section\'s protection, and keeps what VirtualP
 
         assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x40, buffer + 0x40]), 1);
         assert.equal(view.getUint32(buffer + 0x40, true), 0x20, 'the section\'s, handed back');
-        assert.deepEqual(query(base + 0x1000).slice(3, 5), [0x1000, 0x40]);
+        assert.deepEqual(query(base + 0x1000).slice(3, 5), [0x1000, 0x80]);
         assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x20, buffer + 0x40]), 1);
-        assert.equal(view.getUint32(buffer + 0x40, true), 0x40, 'what it was given');
+        assert.equal(view.getUint32(buffer + 0x40, true), 0x80, 'what it was given, a copy');
+        assert.equal(fns.VirtualProtect.handler([base + 0x1000, 0x10, 0x04, buffer + 0x40]), 1);
+        assert.deepEqual(query(base + 0x1000).slice(3, 5), [0x1000, 0x08]);
         assert.equal(fns.VirtualProtect.handler([base + 0x4000, 0x2000, 0x04, buffer + 0x40]),
             0, 'past the image\'s end');
     });
