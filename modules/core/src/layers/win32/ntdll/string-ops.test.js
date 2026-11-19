@@ -134,3 +134,45 @@ test('an ANSI character becomes its WCHAR and the pointer moves past it', ()=>{
     assert.equal(call('RtlAnsiCharToUnicodeChar', OUT), 0x20ac, 'the euro sign of page 1252');
     assert.equal(view.getUint32(OUT, true), TEXT + 1);
 });
+
+test('RtlFormatMessage: what an overflow and a fault leave, and the va_list used up', ()=>{
+    const { view, call } = machine();
+    const MESSAGE = 0x100;
+    const LIST = 0x300;
+    const ARGS = 0x310;
+    const BUFFER = 0x400;
+    const SIZE = 0x480;
+    const ARGUMENT = 0x500;
+    const BUFFER_OVERFLOW = 0x80000005;
+    const INVALID_PARAMETER = 0xc000000d;
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>{
+        [...text, '\0'].forEach((c, i)=>view.setUint16(at + i * 2, c.charCodeAt(0), true));
+    };
+    /** @param {number} length */
+    const read = length=>Array.from({ length },
+        (_, i)=>String.fromCharCode(view.getUint16(BUFFER + i * 2, true))).join('');
+    /** @param {string} message @param {number} size @param {number[]} args */
+    const format = (message, size, args)=>{
+        put(MESSAGE, message);
+        put(BUFFER, 'xxxxxxxxxx');
+        view.setUint32(LIST, ARGS, true);
+        args.forEach((value, i)=>view.setUint32(ARGS + i * 4, value, true));
+        view.setUint32(SIZE, 0xdeadbeef, true);
+        return call('RtlFormatMessage', MESSAGE, 0, 0, 0, 0, LIST, BUFFER, size, SIZE);
+    };
+    put(ARGUMENT, 'test');
+    assert.equal(format('testing', 8, []), BUFFER_OVERFLOW);
+    assert.equal(read(10), 'testxxxxxx', 'the message\'s own characters, unterminated');
+    assert.equal(view.getUint32(SIZE, true), 0xdeadbeef);
+    assert.equal(format('%1', 8, [ARGUMENT]), BUFFER_OVERFLOW);
+    assert.equal(read(10), 'tes\0xxxxxx', 'an insert cut, terminated');
+    assert.equal(format('ab%n', 6, []), BUFFER_OVERFLOW);
+    assert.equal(read(10), 'abxxxxxxxx', 'an escape that does not fit, not at all');
+    assert.equal(format('%1!u! %2!u', 20, [34]), INVALID_PARAMETER);
+    assert.equal(read(10), '34 xxxxxxx', 'what came before the fault stays');
+
+    assert.equal(format('%1!s! %2!s!', 1, [ARGUMENT, ARGUMENT]), BUFFER_OVERFLOW);
+    assert.equal(read(10), 'xxxxxxxxxx', 'no room for any of it');
+    assert.equal(view.getUint32(LIST, true), ARGS + 4, 'the first argument was read');
+});
