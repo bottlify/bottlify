@@ -38,7 +38,6 @@ import { createResourceUpdates } from './resource-update.js';
 import { readToTerminator } from '../common/scan-windows.js';
 import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 import { mountPointsOf, onVolume } from './drives.js';
-import { accessibleSpan } from './process-memory.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
 import { isPipeName } from './pipes.js';
@@ -631,8 +630,6 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
- * @property {import('./process-memory.js').PageState} [pageState]  VirtualQuery's answer
- *           for a page (heap.js PAGE_STATE): what ReadFile and WriteFile probe a buffer by.
  * @property {(entry: number, args: number[], thread: any) => Promise<number>} [callGuest]
  *           Calls guest code on a thread and answers what it returned: CopyFileEx's
  *           progress routine.
@@ -1950,27 +1947,6 @@ export function createFileFunctions(host){
         }
         return renamePath(source, target, true);
     });
-
-    /**
-     * Whether a transfer's buffer is there for it: every byte of the count
-     * readable for a write, writable for a read, as the kernel probes it
-     * before anything moves - a count nothing would have filled included.
-     * A null buffer with a count is not; nothing to move always is.
-     *
-     * @param {number} buffer @param {number} length @param {boolean} intoGuest
-     */
-    const bufferThere = (buffer, length, intoGuest)=>{
-        if (length === 0)
-        {
-            return true;
-        }
-        if (buffer === 0)
-        {
-            return false;
-        }
-        return !host.pageState
-            || accessibleSpan(host.pageState, buffer, length, intoGuest) >= length;
-    };
 
     /**
      * Moves a file's end to `at`: 0, or the error that refuses it. A file a
@@ -3820,13 +3796,13 @@ export function createFileFunctions(host){
             {
                 return STATUS_ACCESS_DENIED;
             }
-            // The kernel probes the buffer before the transfer: one not there
-            // for the whole count is refused whether or not anything would
-            // have moved (a read at the end of the file included), the status
-            // block and the event untouched - a read as the access violation
-            // it is, a write as STATUS_INVALID_USER_BUFFER, the answer the
-            // conformance tests find for a write from nowhere.
-            if (!bufferThere(buffer >>> 0, length >>> 0, !writing))
+            // The kernel probes the buffer before the transfer: none for a
+            // count is refused whether or not anything would have moved (a
+            // read at the end of the file included), the status block and the
+            // event untouched - a read as the access violation it is, a write
+            // as STATUS_INVALID_USER_BUFFER, the answer the conformance tests
+            // find for a write from nowhere.
+            if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
             {
                 return writing ? STATUS_INVALID_USER_BUFFER : STATUS_ACCESS_VIOLATION;
             }
@@ -5190,7 +5166,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if (!bufferThere(buffer >>> 0, length >>> 0, true))
+                if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
                 {
                     writeDwordIf(read >>> 0, 0);
                     return fail(ERROR_NOACCESS);
@@ -5286,7 +5262,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if (!bufferThere(buffer >>> 0, count, false))
+                if ((buffer >>> 0) === 0 && count !== 0)
                 {
                     writeDwordIf(written >>> 0, 0);
                     return fail(ERROR_INVALID_USER_BUFFER);

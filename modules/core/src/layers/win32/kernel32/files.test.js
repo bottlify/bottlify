@@ -643,39 +643,6 @@ test('a write from a null buffer is refused, a zero-length one is not', ()=>{
     assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 0, 'nothing consumed');
 });
 
-test('a transfer whose buffer is not all there for its count moves nothing', ()=>{
-    // Wine's file.c test_read_write: the kernel probes the whole count, a
-    // read past the file's end included, before anything moves.
-    const PAGE_READWRITE = 0x04;
-    const PAGE_READONLY = 0x02;
-    const PAGE_NOACCESS = 0x01;
-    const MEM_COMMIT = 0x1000;
-    /** @type {Map<number, number>} the pages' protections; others read-write */
-    const protections = new Map();
-    const { memory, files, error, fns, open } = setup({
-        /** @param {number} page */
-        pageState: page=>({ state: MEM_COMMIT, protect: protections.get(page) ?? PAGE_READWRITE,
-            end: page + 0x1000 }),
-    });
-    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
-    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
-    protections.set(0x1000, PAGE_NOACCESS);
-    memory.putDword(OUT_COUNT, 0xdeadbeef);
-    assert.equal(fns.WriteFile.handler([handle, 0x800, 0x1000, OUT_COUNT, 0]), 0,
-        'its second half is not readable');
-    assert.equal(error.code, 1784, 'ERROR_INVALID_USER_BUFFER');
-    assert.equal(memory.dword(OUT_COUNT), 0);
-    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abcd', 'nothing written');
-
-    protections.set(0x1000, PAGE_READONLY);
-    assert.equal(fns.ReadFile.handler([handle, 0x800, 0x1000, OUT_COUNT, 0]), 0,
-        'read-only, for a read of four bytes into a count of 4096');
-    assert.equal(error.code, 998, 'ERROR_NOACCESS');
-    assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 0, 'nothing consumed');
-    assert.equal(fns.WriteFile.handler([handle, 0x800, 0x1000, OUT_COUNT, 0]), 1,
-        'a read-only buffer is one to write from');
-});
-
 test('a file opened for reading refuses a write, and the other way round', ()=>{
     const { files, error, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');
