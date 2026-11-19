@@ -461,6 +461,12 @@ const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
 const FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x40;
+/** NtSetInformationFile's hard link classes (FILE_LINK_INFORMATION and its Ex form). */
+const FILE_LINK_INFORMATION = 11;
+const FILE_LINK_INFORMATION_EX = 72;
+/** FILE_LINK_INFORMATION_EX's flags: replace what is there, a read-only one too. */
+const FILE_LINK_REPLACE_IF_EXISTS = 0x1;
+const FILE_LINK_IGNORE_READONLY_ATTRIBUTE = 0x40;
 /** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
@@ -4138,6 +4144,9 @@ export function createFileFunctions(host){
          * mailslot's read timeout, which are this call's own. A rename's name
          * is a native one, relative to the record's root directory or in
          * `\??\`. A class nothing keeps is refused, and the refusal said.
+         *
+         * FileLinkInformation (and its Ex form) gives the file one more name
+         * (`linkError`), its record laid out as a rename's.
          */
         NtSetInformationFile: {
             argBytes: 20,
@@ -4188,6 +4197,17 @@ export function createFileFunctions(host){
                     return settled(block >>> 0, held !== null && held !== 'pipe'
                         && !FILE_OBJECT_KINDS.has(held) ? STATUS_OBJECT_TYPE_MISMATCH
                         : STATUS_INVALID_HANDLE, 0);
+                }
+                if ((kind >>> 0) === FILE_LINK_INFORMATION
+                    || (kind >>> 0) === FILE_LINK_INFORMATION_EX)
+                {
+                    if ((length >>> 0) < 16)
+                    {
+                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    const record = host.readMemory(from >>> 0, length >>> 0).slice();
+                    return settled(block >>> 0, linkError(open, record,
+                        (kind >>> 0) === FILE_LINK_INFORMATION_EX), 0);
                 }
                 const type = NATIVE_SET_CLASSES.get(kind >>> 0);
                 const own = (kind >>> 0) === FILE_POSITION_SET || (kind >>> 0) === FILE_MODE_SET
@@ -4685,6 +4705,83 @@ export function createFileFunctions(host){
                 // FileIoPriorityHintInfo: a hint with nothing to prioritise.
                 return 0;
         }
+    };
+
+    /**
+     * A hard link asked through an open file: FILE_LINK_INFORMATION's
+     * replace flag (or the Ex form's flags), root directory and name, the
+     * name a native one as a rename's. A folder has no other names
+     * (STATUS_FILE_IS_A_DIRECTORY). A name that is taken is a collision
+     * unless replacing was asked; then a folder or an open file there is
+     * refused (STATUS_ACCESS_DENIED), as is a read-only file the call did
+     * not say to ignore, and anything else gives its name up - the new name
+     * spelt as asked. The file's own name is already its link.
+     *
+     * @param {{ file: any, kind: string }} open  the handle's file
+     * @param {Uint8Array} record @param {boolean} extended  the Ex form
+     * @returns {number}  the status
+     */
+    const linkError = (open, record, extended)=>{
+        const view = new DataView(record.buffer);
+        const flags = extended ? view.getUint32(0, true)
+            : record[0] !== 0 ? FILE_LINK_REPLACE_IF_EXISTS : 0;
+        const root = view.getUint32(4, true);
+        const nameBytes = view.getUint32(8, true);
+        if (nameBytes === 0 || 12 + nameBytes > record.length)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let asked = '';
+        for (let at = 12; at + 1 < 12 + nameBytes; at += 2)
+        {
+            asked += String.fromCharCode(record[at] | record[at + 1] << 8);
+        }
+        const { file } = open;
+        if (open.kind === 'directory' || file.directory)
+        {
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+        const resolved = root === 0 && !asked.includes(SEPARATOR)
+            ? { path: renameTarget(file.path, asked) } : resolveNative(root, asked);
+        if (!resolved.path)
+        {
+            return resolved.status ?? STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+        const path = resolved.path;
+        const present = files.stat(path);
+        if (present?.exists)
+        {
+            if ((flags & FILE_LINK_REPLACE_IF_EXISTS) === 0)
+            {
+                return STATUS_OBJECT_NAME_COLLISION;
+            }
+            // Its own name, perhaps spelt otherwise: the link it is takes the
+            // spelling asked.
+            if (path.toLowerCase() === String(file.path).toLowerCase())
+            {
+                if (path !== file.path && files.rename(file.path, path, { held: true }))
+                {
+                    follow(file.path, path);
+                }
+                return STATUS_SUCCESS;
+            }
+            if (present.isDirectory || files.isOpen?.(path)
+                || (readOnlyFile(present) && (flags & FILE_LINK_IGNORE_READONLY_ATTRIBUTE) === 0)
+                || !files.remove(path))
+            {
+                return STATUS_ACCESS_DENIED;
+            }
+        }
+        if (!files.link)
+        {
+            host.divergence?.('NtSetInformationFile',
+                `the volume keeps no links; ${path} not linked`);
+            return STATUS_INVALID_DEVICE_REQUEST;
+        }
+        const refused = files.link(path, file.path);
+        return refused === null ? STATUS_SUCCESS
+            : NATIVE_FAILURES[LINK_ERRORS[/** @type {keyof typeof LINK_ERRORS} */ (refused)]
+                ?? ERROR_ACCESS_DENIED] ?? STATUS_ACCESS_DENIED;
     };
 
     /**

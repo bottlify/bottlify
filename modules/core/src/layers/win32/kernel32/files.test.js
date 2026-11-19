@@ -2847,6 +2847,51 @@ test('a watch made with no room loses every change and says so', ()=>{
     assert.equal(memory.dword(ov), 0x10c, 'the first call\'s room is the watch\'s');
 });
 
+test('FileLinkInformation gives an open file one more name, a taken one only when replacing',
+    ()=>{
+        const { memory, files, fns, open } = setup();
+        const anyFiles = /** @type {any} */ (files);
+        anyFiles.link = (/** @type {string} */ name, /** @type {string} */ existing)=>{
+            files.put(name, files.text(existing) ?? '');
+            return null;
+        };
+        const view = new DataView(memory.bytes.buffer);
+        const native = /** @type {any} */ (fns.CreateFileW).natives.NtSetInformationFile;
+        const LINK = 11;
+        const LINK_EX = 72;
+        /** @param {number} handle @param {string} name @param {number} flags @param {number} kind */
+        const link = (handle, name, flags, kind = LINK)=>{
+            memory.bytes.fill(0, 0x800, 0x880);
+            view.setUint32(0x800, flags, true);
+            view.setUint32(0x808, name.length * 2, true);
+            putWide(memory, 0x80c, name);
+            view.setUint32(0x300, 0xdeadbeef, true);
+            return native.handler([handle, 0x300, 0x800, 12 + name.length * 2, kind]) >>> 0;
+        };
+        files.put('C:\\GAME\\a.tmp', 'abc');
+        files.put('C:\\GAME\\taken.tmp', 'old');
+        const file = open('C:\\GAME\\a.tmp', OPEN_EXISTING, GENERIC_WRITE);
+        assert.equal(link(file, 'b.tmp', 0), 0, 'no DELETE needed');
+        assert.equal(memory.dword(0x300), 0, 'the block says so');
+        assert.equal(files.text('C:\\GAME\\b.tmp'), 'abc');
+        assert.equal(files.text('C:\\GAME\\a.tmp'), 'abc', 'the first name stays');
+        assert.equal(link(file, 'taken.tmp', 0), 0xc0000035, 'STATUS_OBJECT_NAME_COLLISION');
+        assert.equal(link(file, 'taken.tmp', 1), 0);
+        assert.equal(files.text('C:\\GAME\\taken.tmp'), 'abc', 'replaced');
+        assert.equal(link(file, 'a.tmp', 0), 0xc0000035, 'its own name is taken');
+        assert.equal(link(file, 'a.tmp', 1), 0, 'and is its link already');
+
+        files.put('C:\\GAME\\ro.tmp', 'ro');
+        files.setAttributes('C:\\GAME\\ro.tmp', 0x1);
+        assert.equal(link(file, 'ro.tmp', 0x1, LINK_EX), 0xc0000022, 'a read-only one kept');
+        assert.equal(link(file, 'ro.tmp', 0x41, LINK_EX), 0, 'unless ignored');
+
+        const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        const folder = fns.CreateFileA.handler([memory.putString(NAME, 'C:\\GAME') ?? NAME,
+            GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0]) >>> 0;
+        assert.equal(link(folder, 'c.tmp', 0), 0xc00000ba, 'STATUS_FILE_IS_A_DIRECTORY');
+    });
+
 test('CreateHardLink links through the volume and answers its refusals as Windows does', ()=>{
     /** @type {string[]} */
     const said = [];
