@@ -836,10 +836,6 @@ export function createDebuggerFunctions(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([id])=>{
-                    // Windows connects the thread to its debug object first
-                    // (DbgUiConnectToDbg), so a refused attach still leaves
-                    // one to wait on (Wine's loader.c test_ExitProcess).
-                    const object = connect();
                     if ((id >>> 0) !== 0 && (id >>> 0) === (host.processId ?? 0) >>> 0)
                     {
                         host.setLastError?.(ERROR_ACCESS_DENIED);
@@ -851,7 +847,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    return attach(child, object);
+                    return attach(child, connect());
                 },
             },
 

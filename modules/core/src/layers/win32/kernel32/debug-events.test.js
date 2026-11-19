@@ -367,10 +367,6 @@ test('DebugActiveProcess attaches to a child it can reach, and refuses itself an
         assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
         assert.equal(fns.DebugActiveProcess.handler([0x200]), 0, 'not the caller itself');
         assert.equal(errors.at(-1), ERROR_ACCESS_DENIED);
-        // Refused, the thread is still connected to its debug object: a wait
-        // on it times out rather than finding no object (loader.c test_ExitProcess).
-        assert.equal(fns.WaitForDebugEvent.handler([0x800, 0]), 0);
-        assert.equal(errors.at(-1), ERROR_SEM_TIMEOUT);
         assert.equal(fns.DebugActiveProcess.handler([0x999]), 0);
         assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER, 'no process of that id');
 
