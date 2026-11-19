@@ -267,16 +267,21 @@ export const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
  * @returns {import('../ntdll/query.js').SystemProcess[]}
  */
 export function listProcesses(kernel, self){
+    const own = kernel.processes?.all() ?? [];
+    // This process's children, then every other process of the run its
+    // directory holds: a grandchild is in a snapshot of the run as on Windows.
+    const others = (kernel.processes?.run?.() ?? []).filter((/** @type {any} */ record)=>
+        (record.id >>> 0) !== (self.id >>> 0) && !own.includes(record));
     return [
         { ...self, threads: (kernel.threads?.() ?? [])
             .filter((/** @type {any} */ thread)=>threadObjectLives(kernel, thread))
             .map((/** @type {any} */ thread)=>thread.id >>> 0)
             .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) },
-        ...(kernel.processes?.all() ?? [])
+        ...[...own, ...others]
             .filter((/** @type {any} */ child)=>!child.completed
                 && child.exitCode === kernel.processes.STILL_ACTIVE)
             .map((/** @type {any} */ child)=>({
-                id: child.id >>> 0, parent: self.id,
+                id: child.id >>> 0, parent: own.includes(child) ? self.id : child.parentId >>> 0,
                 path: String(child.imagePath ?? ''), threads: [child.threadId >>> 0],
             })),
     ];
@@ -1919,8 +1924,11 @@ export function createThreadingFunctions(host){
                     return inheritIf(kernel.handles.open('thread', own, access.granted),
                         inherit !== 0);
                 }
-                const child = (kernel.processes?.all() ?? []).find((/** @type {any} */ made)=>
-                    (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
+                // A child's thread, or one of any process of the run (a
+                // grandchild's first thread, found in a snapshot of the run).
+                const child = [...kernel.processes?.all() ?? [], ...kernel.processes?.run?.() ?? []]
+                    .find((/** @type {any} */ made)=>
+                        (made.threadId >>> 0) === wanted || made.threads?.has(wanted));
                 if (child)
                 {
                     return kernel.handles.open('process-thread', childThread(child, wanted));

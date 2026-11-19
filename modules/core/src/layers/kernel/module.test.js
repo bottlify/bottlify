@@ -701,6 +701,34 @@ test('a process is found by id in the run\'s directory, whichever process starte
     assert.equal(other.processes.find(0x9998), null);
 });
 
+test('a child that outlives the process that made it sets its exit when it ends, and the run lists'
+    + ' it', async()=>{
+    // A launcher starts a child suspended and exits; another process of the
+    // run finds the child, resumes it and waits for it to end.
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x5000 };
+    /** @param {any} module */
+    const machine = async module=>/** @type {any} */ (await module.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const launcherModule = createKernelModule();
+    const launcher = await machine(launcherModule);
+    const root = await machine(createKernelModule());
+    const child = launcher.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    assert.deepEqual(root.processes.run(), [child], 'the run lists it, whoever made it');
+    await launcherModule.dispose();
+    assert.equal(root.processes.find(child.id).exited.signalled, false);
+    launcher.processes.finish(child, 0);
+    assert.equal(child.exitCode, 0);
+    assert.equal(root.processes.find(child.id).exited.signalled, true,
+        'its exit is set though its maker is gone');
+});
+
 test('a gone process\'s record in the run\'s directory keeps its exit, not its memory', async()=>{
     const { setFlagsFromString } = await import('node:v8');
     const { runInNewContext } = await import('node:vm');

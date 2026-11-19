@@ -1296,6 +1296,17 @@ export function createKernelModule(){
                             (/** @type {any} */ record)=>record.id === id)
                             ?? config?.processDirectory?.get(id) ?? acrossProcess(id);
                     },
+                    /**
+                     * Every process of the run this thread's directory holds,
+                     * whoever started it: a grandchild a child made is listed
+                     * where a snapshot of the run is taken, as on Windows,
+                     * where every process sees every other. Empty without a
+                     * directory.
+                     *
+                     * @returns {any[]}
+                     */
+                    run: ()=>live() && config?.processDirectory
+                        ? [...config.processDirectory.values()] : [],
                     pending: ()=>live() ? state.processes.pending() : null,
                     all: ()=>live() ? state.processes.all() : [],
                     /** @param {any} record */
@@ -1316,10 +1327,18 @@ export function createKernelModule(){
                     finish: (record, code)=>{
                         record.exitCode = code >>> 0;
                         record.completed = true;
-                        if (live() && record.exited)
+                        if (!record.exited)
                         {
-                            state.sync.setEvent(record.exited);
+                            return;
                         }
+                        // A child that outlived the process that made it (a
+                        // grandchild its parent left suspended and the root
+                        // resumed) ends after this machine is gone: its exit
+                        // is the event `settleRecords` left, set where it
+                        // stands, and whoever waits on it is woken by its own
+                        // scheduler.
+                        (live() && state.sync.owns(record.exited) ? state.sync : SETTLED_EVENTS)
+                            .setEvent(record.exited);
                     },
                 },
 
@@ -1372,6 +1391,19 @@ export function createKernelModule(){
         },
     };
 }
+
+/**
+ * Where an event `settleRecords` left is set: no machine's, and nothing waits
+ * on this table itself - every thread waiting on such an event is woken by its
+ * own scheduler (`sync.js`).
+ */
+const SETTLED_EVENTS = createSyncObjects({ scheduler: {
+    block(){
+        throw new Error('settled events: a wait here is a thread\'s own, never a block');
+    },
+    wake(){},
+    onTimeout(){},
+} });
 
 /**
  * A process's records stay in the run's directory after it is gone - another

@@ -1542,6 +1542,25 @@ test('the run\'s processes list a process\'s threads in the order they were made
     ]);
 });
 
+test('a snapshot lists every process of the run, a grandchild with the child that made it as its'
+    + ' parent', ()=>{
+    // Wine's process.c test_Startup's nested child: a child starts one
+    // suspended and exits; its parent finds it in a snapshot and resumes it.
+    const child = { id: 0x300, threadId: 0x304, imagePath: 'C:\\App\\child.exe', exitCode: 259 };
+    const grandchild = { id: 0x308, threadId: 0x30c, imagePath: 'C:\\App\\child.exe',
+        exitCode: 259, parentId: 0x300 };
+    const kernel = {
+        threads: ()=>[{ id: 0x10, state: 'running' }],
+        processes: { STILL_ACTIVE: 259, all: ()=>[child],
+            run: ()=>[{ id: 0x2a4, exitCode: 259 }, child, grandchild] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe' }), [
+        { id: 0x2a4, parent: 0, path: 'C:\\App\\a.exe', threads: [0x10] },
+        { id: 0x300, parent: 0x2a4, path: 'C:\\App\\child.exe', threads: [0x304] },
+        { id: 0x308, parent: 0x300, path: 'C:\\App\\child.exe', threads: [0x30c] },
+    ]);
+});
+
 test('an ended thread stays in its process\'s list, and opens by id, while a handle holds it', ()=>{
     // Wine's ntdll om.c test_get_next_thread: the thread waited for to its
     // end is still found through the handle its creator keeps.
