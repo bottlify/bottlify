@@ -17,7 +17,7 @@
  * A module record as the table needs it: the rest is the caller's.
  *
  * @typedef {{ name: string, base: number, size?: number, path?: string,
- *     fromFile?: boolean, loaded?: boolean }} ModuleRecord
+ *     fromFile?: boolean, loaded?: boolean, place?: () => void }} ModuleRecord
  */
 
 /**
@@ -181,9 +181,9 @@ export function createModuleTable({ keyOf, placesNamed, importsOf, onLoaded }){
         /**
          * Marks a module the process has loaded, with what it brings in, for
          * everything that answers only about loaded modules: GetModuleHandle
-         * and PEB->Ldr. A module synthesised at the start is there to be
-         * bound to whenever it is asked for, but it is loaded only once
-         * something imports it or loads it.
+         * and PEB->Ldr. A module synthesised at the start has its span and
+         * addresses from then on, but its bytes are written (`place`) and it
+         * is loaded only once something imports it or loads it.
          *
          * @param {M | null} module
          */
@@ -192,6 +192,7 @@ export function createModuleTable({ keyOf, placesNamed, importsOf, onLoaded }){
             {
                 return;
             }
+            module.place?.();
             module.loaded = true;
             onLoaded?.(module);
             for (const imported of importsOf?.(module) ?? [])

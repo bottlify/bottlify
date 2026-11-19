@@ -98,6 +98,78 @@ test('the system modules take their own images\' room in the module window, and 
             `${(span / 2 ** 20).toFixed(2)} MiB is past a quarter of the window`);
     });
 
+test('a process writes only the system modules something loads: the rest keep their span unwritten',
+    { timeout: 60000 }, async t=>{
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            codeSize: 0x10,
+            code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const app = await createApp({ executable });
+        t.after(()=>app.dispose());
+        const memory = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'memory');
+        let written = 0;
+        let held = 0;
+        /** @type {string[]} */
+        const placed = [];
+        for (const line of /** @type {string[]} */ (memory?.metrics?.layout ?? []))
+        {
+            const [, name, , size] = /^(.*) 0x([0-9a-f]+)\+0x([0-9a-f]+) \S+$/.exec(line) ?? [];
+            if (name?.endsWith(' (not placed)'))
+            {
+                held += parseInt(size, 16);
+            }
+            else if (/\.(dll|asi)( \.data)?$/i.test(name ?? ''))
+            {
+                written += parseInt(size, 16);
+                placed.push(name);
+            }
+        }
+        t.diagnostic(`written ${(written / 2 ** 20).toFixed(2)} MiB (${placed.join(', ')}),`
+            + ` held unwritten ${(held / 2 ** 20).toFixed(2)} MiB`);
+        assert.ok(placed.includes('KERNEL32.dll') && placed.includes('ntdll.dll'),
+            'what the program imports, and what is always loaded');
+        assert.ok(!placed.includes('D3D9.dll') && !placed.includes('USER32.dll'),
+            'nothing the program never asked for');
+        // Every module written at once was 12.9 MiB.
+        assert.ok(written < 2 ** 20, `${(written / 2 ** 20).toFixed(2)} MiB written`);
+    });
+
+test('a system module has the same base whatever order a process loads them in',
+    { timeout: 120000 }, async t=>{
+        /** @param {string[]} order */
+        const basesAfter = async order=>{
+            const executable = buildExe({
+                imports: Object.fromEntries(order.map(dll=>[dll,
+                    { 'KERNEL32.dll': ['ExitProcess'], 'USER32.dll': ['GetDesktopWindow'],
+                        'D3D9.dll': ['Direct3DCreate9'], 'MSVCRT.dll': ['strlen'] }[dll] ?? []])),
+                codeSize: 0x10,
+                code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+            });
+            const app = await createApp({ executable });
+            t.after(()=>app.dispose());
+            return Object.fromEntries(['KERNEL32.dll', 'USER32.dll', 'D3D9.dll', 'MSVCRT.dll']
+                .map(dll=>[dll, app.modules?.find?.(dll)?.base ?? baseOf(app, dll)]));
+        };
+        const first = await basesAfter(['KERNEL32.dll', 'D3D9.dll', 'USER32.dll', 'MSVCRT.dll']);
+        const second = await basesAfter(['MSVCRT.dll', 'USER32.dll', 'KERNEL32.dll', 'D3D9.dll']);
+        assert.deepEqual(second, first);
+    });
+
+/** A module's base as the memory layout names it. @param {any} app @param {string} dll */
+function baseOf(app, dll){
+    const memory = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'memory');
+    for (const line of /** @type {string[]} */ (memory?.metrics?.layout ?? []))
+    {
+        const [, name, base] = /^(.*) 0x([0-9a-f]+)\+0x([0-9a-f]+) \S+$/.exec(line) ?? [];
+        if (name === dll || name === `${dll} (not placed)`)
+        {
+            return parseInt(base, 16);
+        }
+    }
+    return null;
+}
+
 /**
  * The program: the handles, exports and file names of d3dx9_30 and d3dx9_43,
  * which it imports, and of d3dx9_36, which it loads and frees; a matrix

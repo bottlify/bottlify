@@ -6522,6 +6522,7 @@ async function buildApp(options){
                  */
                 systemImage: name=>{
                     const module = modules.named(moduleKeyOf(name));
+                    module?.place?.();
                     return module && !module.fromFile ? imageInMemory(/** @type {any} */ (memory), module) : null;
                 },
             },
@@ -6834,10 +6835,9 @@ async function buildApp(options){
         win32.heap().allocateAt(SHARED_USER_DATA, 0x20000,
             { owner: 'kuser', reserving: true, held: true });
     }
-    // Every system module exists in guest memory before the program's first
-    // instruction, not when something first asks for it. An address taken early
-    // has to be the address that works later (§13.3), and a module conjured on
-    // demand cannot promise that.
+    // Every system module has its span and its addresses before the program's
+    // first instruction: an address taken early has to be the address that
+    // works later (§13.3). Its bytes are written when something first loads it.
     const ordinalsOf = {
         ...(win32.ordinals ? win32.ordinals() : {}),
         ...(audio.ordinals?.() ?? {}),
@@ -6968,6 +6968,12 @@ async function buildApp(options){
         clientFiles: options.win32?.steam?.clientFiles,
         reportDivergence: (api, detail)=>reportDivergence(api, detail),
         release: record=>releaseLibrary(record),
+        // A module's bytes go into the process's memory when something first
+        // imports or loads it: its span and its addresses are fixed now, in
+        // the same order for every process, so an address taken before it is
+        // loaded is the one that works after, and a translation of code that
+        // calls it is the same in every process.
+        later: true,
     });
     const { leftOutAt64 } = systemModules;
     builtLibraries = allLibraries;

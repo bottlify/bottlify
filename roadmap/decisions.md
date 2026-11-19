@@ -2606,3 +2606,16 @@ another width on part of the same bytes at the same instant, which hardware's bu
 out; no program was found to mix the two on one address. The wasm interpreter tier leaves every
 locked instruction of a process on several executors to the JavaScript one.
 *2026-11-19.*
+
+**A280. A system module's bytes are written when it is first loaded, at a span fixed at the start.**
+Windows maps a DLL when something loads it; every one of ours was written into every process at
+the start (12.9 MiB of 157 modules, for a program that imports kernel32 alone), and a setup that
+runs dozens of processes paid that each time. Now each module's span, its export addresses and
+its trap stubs are laid out at the start, in the same order in every process, and its bytes are
+written when it is first marked loaded or first hands out an address (`addressOf`): an address
+taken early is the one that works later (the reason everything was written at once), and code
+translated in one process calls the same addresses in the next. Laid out on demand instead, the
+bases would follow each program's load order: a warm translation store measured on wine-d3d9's
+device test kept 286 of its regions with every module moved 64 KiB, against 357 in place, its
+misses 97 against 8. Until written a module's span is a reserved region nothing else is given.
+*2026-11-19.*

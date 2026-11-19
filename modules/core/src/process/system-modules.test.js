@@ -30,12 +30,14 @@ function setup({ long = false, ordinalsOf = {} } = {}){
                 const at = new Map(request.exports.map((/** @type {any} */ entry,
                     /** @type {number} */ index)=>[entry.name, request.base + 0x1000 + index * 16]));
                 return {
-                    size: 0x1000 + request.exports.length * 16 + (request.name === 'big.dll' ? 0x20000 : 0),
+                    size: 0x1000 + request.exports.length * 16
+                        + (request.name === 'big.dll' ? 0x20000 : 0),
                     addressOf: (/** @type {string} */ name)=>at.get(name),
                     ordinalOf: (/** @type {string} */ name)=>request.exports
                         .find((/** @type {any} */ entry)=>entry.name === name)?.ordinal
                         ?? [...at.keys()].indexOf(name) + 1,
                     entryPoint: request.entryPoint ? request.base + 0x800 : 0,
+                    place: ()=>{},
                 };
             },
         },

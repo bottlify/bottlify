@@ -5,10 +5,13 @@ how many bytes of arguments to take off the stack, and its calling convention (s
 stated). For example, `AddAtomA: { argBytes: 4, handler: ([p]) => add(p) }` in
 [`core/src/layers/win32/kernel32/atoms.js`](../../modules/core/src/layers/win32/kernel32/atoms.js).
 
-When a process starts, the loader builds real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
-from these tables (PE32+, AMD64, in a 64-bit process) and places them in the program's memory. To the program they are ordinary DLLs,
-with headers, an export table and code. So the address `GetProcAddress` returns is the one the import
-was bound to.
+When a process starts, the loader lays out real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
+from these tables (PE32+, AMD64, in a 64-bit process): each module's span and every export's address
+are fixed then, in the same order in every process, and its bytes are written into the program's
+memory when something first loads it or is first handed one of its addresses
+([`process/system-modules.js`](../../modules/core/src/process/system-modules.js), decision A280).
+To the program they are ordinary DLLs, with headers, an export table and code. So the address
+`GetProcAddress` returns is the one the import was bound to.
 
 One table can be two libraries. comctl32 is system32's 5.82 to a program without Common Controls 6
 in its manifest and version 6 to one with it, as on Windows: the same controls, two modules

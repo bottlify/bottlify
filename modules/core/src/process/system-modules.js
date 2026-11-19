@@ -33,6 +33,8 @@ import { imagePlacementOf, installedHeaders } from '../layers/loader/internal/sy
  * @property {Record<string, Uint8Array>} [clientFiles]  the Steam client's files, by name
  * @property {(api: string, detail: string) => void} reportDivergence
  * @property {(record: any) => number | Promise<number>} release  a module let go of
+ * @property {boolean} [later]  each module's bytes written when it is first loaded
+ *     (`place`), its span and addresses fixed now; else at once
  */
 
 /**
@@ -182,6 +184,7 @@ export function createSystemModules(host){
         const placed = loader.synthesise({
             name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
             region, headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
+            later: host.later ?? false,
         });
         const end = base + Math.ceil(placed.size / host.align) * host.align;
         if (base === next)
@@ -215,20 +218,33 @@ export function createSystemModules(host){
             }
         }
 
+        /** @param {number | null | undefined} address */
+        const handOut = address=>{
+            if (address == null)
+            {
+                return null;
+            }
+            placed.place();
+            return address;
+        };
         const record = {
             name,
             base,
             size: placed.size,
+            // An address handed out is one the guest may run or read: the
+            // module's bytes are there from the moment any is.
             /** @param {string} exported */
-            addressOf: exported=>addresses.get(exported) ?? null,
+            addressOf: exported=>handOut(addresses.get(exported)),
             /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+            addressOfOrdinal: ordinal=>handOut(ordinals.get(ordinal)),
             entryPoint: placed.entryPoint,
             // Not until a program asks for it: a synthesised module exists
             // from the first instruction, but its entry point is a promise
             // to whoever loads it, and runs on that caller's thread.
             attached: false,
             loaded: false,
+            /** Writes its bytes into guest memory, where its span is held; once. */
+            place: placed.place,
             /** @returns {number | Promise<number>} */
             release: ()=>host.release(record),
         };
