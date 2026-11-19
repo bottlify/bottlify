@@ -15,7 +15,11 @@ const TEXT = 0x200;
 const OUT = 0x300;
 
 /** Guest memory, a bump heap, and a kernel32 loader knowing one module. */
-function machine(){
+/**
+ * @param {Record<string, any>} [also]  kernel32 calls beside the ones here, or
+ *     in place of them
+ */
+function machine(also = {}){
     const bytes = new Uint8Array(0x30000);
     const view = new DataView(bytes.buffer);
     // Above 64 KiB: GetProcAddress takes a pointer below it for an ordinal.
@@ -77,6 +81,7 @@ function machine(){
         GetLastError: { handler: ()=>lastError },
         SetDllDirectoryW: { handler: ()=>1 },
         GetDllDirectoryW: { handler: ()=>1 },
+        ...also,
     };
     const table = createLoaderFunctions({
         readMemory: (address, length)=>bytes.slice(address, address + length),
@@ -115,7 +120,11 @@ function machine(){
     };
     /** @param {string} name @param {number[]} args */
     const call = (name, ...args)=>table[name].handler(args);
-    return { view, call, counted, asked, loads, wideAt, registered };
+    /** @param {number} code */
+    const failWith = code=>{
+        lastError = code;
+    };
+    return { view, call, counted, asked, loads, wideAt, registered, failWith };
 }
 
 test('a loaded module by its name, its count left alone; one not loaded is not found', ()=>{
@@ -161,6 +170,68 @@ test('a search path is the directories looked in alone; low bit set, it is searc
     await call('LdrLoadDll', PATH, 0, NAME, OUT);
     assert.deepEqual(loads.splice(0), ['C:\\Full\\x.dll'], 'a full path is not searched for');
 });
+
+test('a library found and refused ends the search: its section\'s status, or its failed start',
+    async()=>{
+        // Wine's kernel32:loader (test_image_mapping): LdrLoadDll maps what it
+        // finds; a file NtCreateSection(SEC_IMAGE) refuses ends the search
+        // with that status, one whose DllMain fails with
+        // STATUS_DLL_INIT_FAILED, and one a section takes but the load still
+        // refuses is passed over for the next directory.
+        const STATUS_INVALID_IMAGE_NOT_MZ = 0xc000012f;
+        /** @type {Map<string, number>} */
+        const files = new Map();
+        /** @type {number[]} */
+        const closed = [];
+        let opened = '';
+        /** @type {(code: number) => void} */
+        let failWith = ()=>{};
+        let wideAt = (/** @type {number} */ at)=>String(at);
+        const one = machine({
+            LoadLibraryW: { handler: (/** @type {number[]} */ [name])=>{
+                const text = wideAt(name);
+                if (text === 'C:\\One\\x.dll' && files.get(text) === -1)
+                {
+                    failWith(1114);
+                }
+                else
+                {
+                    failWith(126);
+                }
+                return text === 'D:\\Two\\x.dll' ? 0x20000000 : 0;
+            } },
+            CreateFileW: { handler: (/** @type {number[]} */ [name])=>{
+                opened = wideAt(name);
+                return files.has(opened) ? 0x44 : 0xffffffff;
+            } },
+            CloseHandle: { handler: (/** @type {number[]} */ [handle])=>closed.push(handle) },
+            CreateFileMappingW: { handler: ()=>0, natives: { NtCreateSection: {
+                handler: ()=>Math.max(files.get(opened) ?? 0, 0) } } },
+        });
+        ({ failWith, wideAt } = one);
+        const { view, call, counted } = one;
+        const PATH = 0x400;
+        const path = 'C:\\One;D:\\Two';
+        for (let i = 0; i < path.length; i++)
+        {
+            view.setUint16(PATH + i * 2, path.charCodeAt(i), true);
+        }
+        counted('x.dll');
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.SUCCESS,
+            'none there: the next directory');
+        files.set('C:\\One\\x.dll', 0);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.SUCCESS,
+            'a section takes it, the load does not: the next directory');
+        assert.deepEqual(closed.splice(0), [0, 0x44], 'the section and the file closed');
+        files.set('C:\\One\\x.dll', STATUS_INVALID_IMAGE_NOT_MZ);
+        view.setUint32(OUT, 0xdeadbeef, true);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS_INVALID_IMAGE_NOT_MZ);
+        assert.equal(view.getUint32(OUT, true), 0xdeadbeef);
+        assert.deepEqual(closed.splice(0), [0x44], 'the file closed');
+        files.set('C:\\One\\x.dll', -1);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), 0xc0000142,
+            'STATUS_DLL_INIT_FAILED');
+    });
 
 test('LdrGetDllPath answers the search\'s directories in a block RtlReleasePath gives back', ()=>{
     const { view, call, wideAt } = machine();
