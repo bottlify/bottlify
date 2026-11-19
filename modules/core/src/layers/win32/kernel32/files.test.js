@@ -4081,7 +4081,7 @@ test('an overlapped transfer done at once skips the port as the handle says, and
     /** @type {any[][]} */
     const done = [];
     let skipping = false;
-    const { memory, files, fns, open, error } = setup({
+    const { files, fns, open, error } = setup({
         ports: {
             offsetOf: ()=>0,
             /**

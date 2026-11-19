@@ -3478,9 +3478,9 @@ export function createFileFunctions(host){
     const finishOverlapped = (handle, file, count, pointer, pastEnd = false)=>{
         const pending = file.overlapped === true
             && (modeOf(file) & FILE_NO_INTERMEDIATE_BUFFERING) !== 0;
+        const skipsPort = !pending && (host.pipes?.skipsPortOnSuccess?.(handle >>> 0) ?? false);
         host.ports?.completed(handle >>> 0, count, pointer,
-            pending && pastEnd ? STATUS_END_OF_FILE : 0, {
-            port: !pending && (host.pipes?.skipsPortOnSuccess?.(handle >>> 0) ?? false) });
+            pending && pastEnd ? STATUS_END_OF_FILE : 0, { port: skipsPort });
         return pending ? fail(ERROR_IO_PENDING) : 1;
     };
 
