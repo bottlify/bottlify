@@ -2317,6 +2317,45 @@ export function withLibraryExtension(name){
     return file.includes('.') ? name : `${name}.dll`;
 }
 
+/**
+ * An image's exports as its module hands them out: by name and by ordinal,
+ * the address of one the image defines, or the forwarder string ("LIB.Name",
+ * "LIB.#7") of one that names another library's export (PE/COFF 6.3.2), which
+ * `exportOf` follows.
+ *
+ * @param {{ name: string | number | null, ordinal: number, rva: number,
+ *     forwards: string | null }[]} exports
+ * @param {number} base
+ */
+function exportTables(exports, base){
+    /** @type {Map<string, number | string>} */
+    const byName = new Map();
+    /** @type {Map<number, number | string>} */
+    const byOrdinal = new Map();
+    for (const entry of exports)
+    {
+        const value = entry.forwards ?? base + entry.rva;
+        if (entry.name !== null)
+        {
+            byName.set(String(entry.name), value);
+        }
+        byOrdinal.set(entry.ordinal, value);
+    }
+    /** @param {number | string | undefined} value */
+    const address = value=>(typeof value === 'number' ? value : null);
+    /** @param {number | string | undefined} value */
+    const forward = value=>(typeof value === 'string' ? value : null);
+    return {
+        /** @param {string} exported */
+        addressOf: exported=>address(byName.get(exported)),
+        /** @param {number} ordinal */
+        addressOfOrdinal: ordinal=>address(byOrdinal.get(ordinal)),
+        /** @param {string | null} exported @param {number | null} ordinal */
+        forwardOf: (exported, ordinal)=>forward(exported !== null ? byName.get(exported)
+            : byOrdinal.get(ordinal ?? -1)),
+    };
+}
+
 /** RT_MANIFEST: an image's manifests, 1 a program's own and 2 a library's. */
 const RT_MANIFEST = 24;
 const ISOLATIONAWARE_MANIFEST = 2;
@@ -2642,6 +2681,15 @@ const LOAD_AS_DATA = LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE
 /** LoadLibrary's error for a file that is no image for the process. */
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What an export forwarded to a library found nowhere, or to a name it lacks, answers. */
+const ERROR_MOD_NOT_FOUND = 126;
+const ERROR_PROC_NOT_FOUND = 127;
+/**
+ * How many forwarders an export is followed through: one more is the image's
+ * fault, ERROR_BAD_EXE_FORMAT, as a forwarder to itself is (Wine's loader
+ * test, test_export_forwarder_loop: 32 are followed, the 33rd refused).
+ */
+const FORWARD_HOPS = 32;
 /** LoadLibrary's error for a library whose initialisation failed or raised. */
 const ERROR_DLL_INIT_FAILED = 1114;
 /** A data file named by a path that is not there, as CreateFile answers it. */
@@ -3277,22 +3325,12 @@ export async function mapShippedLibraries(options){
         const record = loader.map(file, { base, name: region, bits });
         const { exports } = readExports(file, image);
 
-        const addresses = new Map(exports
-            .filter(entry=>entry.name !== null && entry.forwards === null)
-            .map(entry=>[String(entry.name), base + entry.rva]));
-        const ordinals = new Map(exports
-            .filter(entry=>entry.forwards === null)
-            .map(entry=>[entry.ordinal, base + entry.rva]));
-
         const held = {
             name,
             base,
             size: image.sizeOfImage,
             region,
-            /** @param {string} exported */
-            addressOf: exported=>addresses.get(exported) ?? null,
-            /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+            ...exportTables(exports, base),
             entryPoint: record.record.entryPoint,
             // Until it is bound (`buildApp`), and let go of then: the mapped
             // image and its file are in guest memory from there on.
@@ -6414,6 +6452,17 @@ async function buildApp(options){
                  */
                 load: (name, flags, search)=>loadLibraryAtRuntime(name, flags, undefined, 0,
                     search),
+                /**
+                 * GetProcAddress's answer: the export followed through its
+                 * forwarders (`exportOf`), a forwarder's target loaded as the
+                 * calling thread waits.
+                 *
+                 * @param {any} module @param {string | null} name
+                 * @param {number | null} ordinal
+                 */
+                exportOf: (module, name, ordinal)=>exportOf(module, name, ordinal,
+                    (library, from)=>loadLibraryAtRuntime(library, 0, kernel.currentThread(),
+                        from.base ?? 0)),
                 /** @param {string} name */
                 loadError: name=>loadErrors.get(withLibraryExtension(name).toLowerCase()
                     .replace(/\.dll$/, '')) ?? null,
@@ -7188,10 +7237,106 @@ async function buildApp(options){
         }
         markLoaded(module);
         module.pinned = true;
-        const address = name !== null
-            ? module.addressOf(name)
+        // Bound, a forwarded import pins where it leads as well: pinned
+        // modules hold what they forward to (`holdOn`).
+        const found = /** @type {{ address: number, module: any } | { error: number }} */ (
+            exportOf(module, name, ordinal, null));
+        return 'error' in found ? null : watched(dll, name, ordinal, found.address);
+    };
+
+    /**
+     * An export of a module, followed through its forwarders (PE/COFF 6.3.2):
+     * "LIB.Name" or "LIB.#7" is LIB's export of that name or ordinal, LIB
+     * loaded when it is not yet - by the module that forwards to it, which
+     * then holds it (`holdOn`): Windows' loader records the forwarder's
+     * target as the forwarding module's dependency, so a program that frees
+     * the target by name does not unload it while the forwarder stands.
+     *
+     * One resolver for GetProcAddress, LdrGetProcedureAddress and the import
+     * tables. The tables are bound where nothing can wait (`loader.bind`), so
+     * they pass no `load`: a target not loaded there is an import not found,
+     * and a library loaded at run time has its forwarded imports' targets
+     * loaded before it is bound (`loadForwardedImports`).
+     *
+     * @param {any} module
+     * @param {string | null} name
+     * @param {number | null} ordinal
+     * @param {((library: string, from: any) => number | Promise<number>) | null} load
+     * @param {number} [hops]
+     * @returns {{ address: number, module: any } | { error: number }
+     *     | Promise<{ address: number, module: any } | { error: number }>}
+     */
+    const exportOf = (module, name, ordinal, load, hops = 0)=>{
+        const address = name !== null ? module.addressOf(name)
             : ordinal === null ? null : module.addressOfOrdinal(ordinal);
-        return address === null ? null : watched(dll, name, ordinal, address);
+        if (address !== null)
+        {
+            return { address, module };
+        }
+        const forward = module.forwardOf?.(name, ordinal) ?? null;
+        if (forward === null)
+        {
+            return { error: ERROR_PROC_NOT_FOUND };
+        }
+        if (hops >= FORWARD_HOPS)
+        {
+            return { error: ERROR_BAD_EXE_FORMAT };
+        }
+        const dot = forward.lastIndexOf('.');
+        const library = withLibraryExtension(forward.slice(0, Math.max(dot, 0)));
+        const exported = forward.slice(dot + 1);
+        const byNumber = exported.startsWith('#');
+        /** @param {any} target */
+        const next = target=>{
+            holdOn(module, target);
+            return exportOf(target, byNumber ? null : exported,
+                byNumber ? Number(exported.slice(1)) >>> 0 : null, load, hops + 1);
+        };
+        const target = dot <= 0 ? null : findModule(library);
+        if (target)
+        {
+            markLoaded(target);
+            return next(target);
+        }
+        if (dot <= 0 || !load)
+        {
+            return { error: ERROR_MOD_NOT_FOUND };
+        }
+        return Promise.resolve(load(library, module)).then(got=>{
+            const loaded = got ? byBase.get(got >>> 0) : null;
+            if (!loaded)
+            {
+                return { error: ERROR_MOD_NOT_FOUND };
+            }
+            // The load's own reference is the forwarding module's hold.
+            (module.holds ??= new Set()).add(loaded);
+            return next(loaded);
+        });
+    };
+
+    /**
+     * Records that `holder` keeps `held` loaded, taking a reference on it once:
+     * given back when `holder` is unloaded (`releaseLibrary`). A library of
+     * the engine's, or one pinned, needs no reference.
+     *
+     * @param {any} holder @param {any} held
+     */
+    const holdOn = (holder, held)=>{
+        if (holder === held || held.pinned || typeof held.references !== 'number')
+        {
+            return;
+        }
+        if (holder.pinned)
+        {
+            held.pinned = true;
+            return;
+        }
+        const holds = (holder.holds ??= new Set());
+        if (!holds.has(held))
+        {
+            holds.add(held);
+            held.references++;
+        }
     };
 
     /**
@@ -7486,7 +7631,16 @@ async function buildApp(options){
                 held.attached = false;
             }
             events.emit('library-unloaded', { name: held.name, base: held.base });
-            return 1;
+            // Then what it held (`holdOn`), each given back its reference.
+            const holds = [...held.holds ?? []];
+            held.holds = undefined;
+            let after = /** @type {number | Promise<number>} */ (/** @type {unknown} */ (1));
+            for (const other of holds)
+            {
+                after = after instanceof Promise ? after.then(()=>releaseLibrary(other))
+                    : releaseLibrary(other);
+            }
+            return after instanceof Promise ? after.then(()=>1) : 1;
         };
         const routines = held.attached === false ? [] : [
             ...threadLocalImages.get(held.base)?.callbacks ?? [],
@@ -7753,12 +7907,6 @@ async function buildApp(options){
                         return 0;
                     }
                     const { exports } = readExports(file, image);
-                    const addresses = new Map(exports
-                        .filter(entry=>entry.name !== null && entry.forwards === null)
-                        .map(entry=>[String(entry.name), base + entry.rva]));
-                    const ordinals = new Map(exports
-                        .filter(entry=>entry.forwards === null)
-                        .map(entry=>[entry.ordinal, base + entry.rva]));
 
                     // Only a library's imports are resolved and its entry
                     // point run: a program loaded by name is mapped for what
@@ -7786,10 +7934,7 @@ async function buildApp(options){
                     }
                     const held = {
                         name, base, size: image.sizeOfImage, region,
-                        /** @param {string} exported */
-                        addressOf: exported=>addresses.get(exported) ?? null,
-                        /** @param {number} ordinal */
-                        addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+                        ...exportTables(exports, base),
                         entryPoint: mapped.record.entryPoint,
                         // As above: its resources are read where it lies.
                         fromFile: true,
@@ -7889,6 +8034,23 @@ async function buildApp(options){
                             return refuse(`it imports ${absent.join(', ')}`);
                         }
 
+                        // What its imports reach through a forwarder, loaded
+                        // before it is bound, as Windows' loader snaps a
+                        // forwarded import by loading the forwarder's target.
+                        for (const dependency of readImports(file, image))
+                        {
+                            const provider = moduleUnderContext(dependency.dll);
+                            for (const entry of provider ? dependency.entries : [])
+                            {
+                                const found = exportOf(provider, entry.name, entry.ordinal,
+                                    (library, from)=>loadLibraryAtRuntime(library, 0, asked,
+                                        from.base ?? 0));
+                                if (found instanceof Promise)
+                                {
+                                    await found;
+                                }
+                            }
+                        }
                         loader.bind(mapped, resolveImport, missingImport);
                         // Both tables, and in this order: the delay-load pass
                         // adds to what the first one recorded rather than
@@ -8312,7 +8474,7 @@ async function buildApp(options){
     // exports at all, said once.
     const ownImage = parsePe(options.executable, { wide: true });
     const ownDirectory = ownImage.directories[DIR_EXPORT];
-    /** @type {{ head: string, byName: Map<string, number>, byOrdinal: Map<number, number> } | null} */
+    /** @type {({ head: string } & ReturnType<typeof exportTables>) | null} */
     let ownTable = null;
     let ownRefusal = '';
     const ownExports = ()=>{
@@ -8331,13 +8493,7 @@ async function buildApp(options){
                 ownRefusal = parsed.refused;
                 events.emit('exports-refused', { name: mainModule.path, reason: parsed.refused });
             }
-            const resolved = parsed.exports.filter(entry=>entry.forwards === null);
-            ownTable = {
-                head,
-                byName: new Map(resolved.filter(entry=>entry.name !== null)
-                    .map(entry=>[String(entry.name), image.base + entry.rva])),
-                byOrdinal: new Map(resolved.map(entry=>[entry.ordinal, image.base + entry.rva])),
-            };
+            ownTable = { head, ...exportTables(parsed.exports, image.base) };
         }
         return ownTable;
     };
@@ -8349,9 +8505,11 @@ async function buildApp(options){
         // and a loader stub that asks after its own module gave up there.
         size: ownImage.sizeOfImage,
         /** @param {string} exported */
-        addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
+        addressOf: exported=>ownExports()?.addressOf(exported) ?? null,
         /** @param {number} ordinal */
-        addressOfOrdinal: ordinal=>ownExports()?.byOrdinal.get(ordinal) ?? null,
+        addressOfOrdinal: ordinal=>ownExports()?.addressOfOrdinal(ordinal) ?? null,
+        /** @param {string | null} exported @param {number | null} ordinal */
+        forwardOf: (exported, ordinal)=>ownExports()?.forwardOf(exported, ordinal) ?? null,
         // A program reads its own resources where it lies mapped
         // (`resourceLookup`), as Windows reads them: no copy of its file.
         fromFile: true,

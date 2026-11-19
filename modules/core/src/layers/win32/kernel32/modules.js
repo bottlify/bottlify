@@ -140,6 +140,12 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  */
 
 /**
+ * An export's address, or the error GetProcAddress leaves for it.
+ *
+ * @typedef {{ address: number, module?: any } | { error: number }} ExportFound
+ */
+
+/**
  * @typedef {Object} ModulesHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -188,11 +194,26 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           EnumProcessModules hands out.
  * @property {(path: string) => string | null} [nativePath]  A path as the object
  *           manager names it (`\Device\HarddiskVolumeN\...`), null where it has none.
+ * @property {(module: ModuleRecord, name: string | null, ordinal: number | null)
+ *           => ExportFound | Promise<ExportFound>} [exportOf]
+ *           An export followed through its forwarders, a forwarder's target
+ *           loaded first; absent, a module answers only what it defines.
  * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
  *           Told what a program looked up at runtime and what it was given. A
  *           name we answer zero to is one the program then decides about, and
  *           what it decides is usually invisible from anywhere else.
  */
+
+/**
+ * An export a module defines itself, with no forwarder followed.
+ *
+ * @param {ModuleRecord} module @param {string | null} name @param {number | null} ordinal
+ * @returns {ExportFound}
+ */
+function definedExport(module, name, ordinal){
+    const address = name !== null ? module.addressOf(name) : module.addressOfOrdinal(ordinal ?? -1);
+    return address === null ? { error: ERROR_PROC_NOT_FOUND } : { address };
+}
 
 /**
  * @param {ModulesHost} host
@@ -882,20 +903,26 @@ export function createModuleFunctions(host){
                     return 0;
                 }
 
-                const wanted = isOrdinal(name >>> 0)
-                    ? `#${name >>> 0}`
+                const ordinal = isOrdinal(name >>> 0) ? name >>> 0 : null;
+                const wanted = ordinal !== null ? `#${ordinal}`
                     : host.readCString(name >>> 0, WHOLE_NAME);
-                const address = isOrdinal(name >>> 0)
-                    ? module.addressOfOrdinal(name >>> 0)
-                    : module.addressOf(wanted);
-
-                host.resolved?.({ module: module.name, name: wanted, found: address ?? 0 });
-                if (address === null)
-                {
-                    host.setLastError(ERROR_PROC_NOT_FOUND);
-                    return 0;
-                }
-                return address;
+                /** @param {{ address: number } | { error: number }} found */
+                const answer = found=>{
+                    const address = 'address' in found ? found.address : 0;
+                    host.resolved?.({ module: module.name, name: wanted, found: address });
+                    if ('error' in found)
+                    {
+                        host.setLastError(found.error);
+                        return 0;
+                    }
+                    return address;
+                };
+                // Followed through the module's forwarders, a forwarder's
+                // target loaded first when it is not yet (`exportOf`).
+                const found = host.exportOf
+                    ? host.exportOf(module, ordinal === null ? wanted : null, ordinal)
+                    : definedExport(module, ordinal === null ? wanted : null, ordinal);
+                return found instanceof Promise ? found.then(answer) : answer(found);
             },
         },
 

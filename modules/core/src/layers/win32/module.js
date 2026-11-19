@@ -4179,6 +4179,9 @@ export function createWin32Module(){
                             .find(([key])=>key.toUpperCase() === name.toUpperCase())?.[1],
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
+                        exportOf: modules.exportOf
+                            ? (module, name, ordinal)=>modules.exportOf(module, name, ordinal)
+                            : undefined,
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                         currentThread: ()=>kernel.currentThread(),
                         endThread,

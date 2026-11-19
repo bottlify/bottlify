@@ -42,7 +42,7 @@
  * mutual references.
  */
 
-import { parsePe, readImports } from './pe.js';
+import { parsePe, readExports, readImports } from './pe.js';
 import { readDelayImports } from './delayload.js';
 
 /**
@@ -115,9 +115,61 @@ export async function planDependencies(options){
             ...readDelayImports(file, image).map(table=>({ ...table, delayed: true }))];
     };
 
-    /** @param {Uint8Array} file */
-    const visit = async file=>{
-        for (const { dll: name, entries, delayed } of importsOf(file))
+    /**
+     * The libraries a library's forwarders lead to, for the imports taken
+     * from it that are forwarded: what Windows' loader loads to snap such an
+     * import ("LIB.Name", "LIB.#7"), so they are planned before it.
+     *
+     * @param {Uint8Array} file
+     * @param {import('./pe.js').ImportEntry[]} wanted
+     * @param {boolean} delayed
+     * @returns {{ dll: string, entries: import('./pe.js').ImportEntry[], delayed: boolean }[]}
+     */
+    const forwardsOf = (file, wanted, delayed)=>{
+        let exports;
+        try
+        {
+            exports = readExports(file, parsePe(file, { wide: true })).exports;
+        }
+        catch {
+            return [];
+        }
+        const forwarders = exports.filter(each=>each.forwards !== null);
+        if (forwarders.length === 0)
+        {
+            return [];
+        }
+        const byName = new Map(forwarders.filter(each=>each.name !== null)
+            .map(each=>[String(each.name), each.forwards]));
+        const byOrdinal = new Map(forwarders.map(each=>[each.ordinal, each.forwards]));
+        /** @type {Map<string, import('./pe.js').ImportEntry[]>} */
+        const targets = new Map();
+        for (const asked of wanted)
+        {
+            const forward = (asked.name !== null ? byName.get(asked.name)
+                : byOrdinal.get(asked.ordinal ?? -1)) ?? null;
+            const dot = forward === null ? -1 : forward.lastIndexOf('.');
+            if (forward === null || dot <= 0)
+            {
+                continue;
+            }
+            const exported = forward.slice(dot + 1);
+            const dll = `${forward.slice(0, dot)}.dll`;
+            const list = targets.get(dll) ?? [];
+            list.push(exported.startsWith('#')
+                ? { name: null, ordinal: Number(exported.slice(1)) >>> 0, iatRva: 0 }
+                : { name: exported, ordinal: null, iatRva: 0 });
+            targets.set(dll, list);
+        }
+        return [...targets].map(([dll, entries])=>({ dll, entries, delayed }));
+    };
+
+    /**
+     * @param {{ dll: string, entries: import('./pe.js').ImportEntry[],
+     *     delayed: boolean }[]} imports
+     */
+    const visit = async imports=>{
+        for (const { dll: name, entries, delayed } of imports)
         {
             const key = name.toLowerCase();
             if (seen.has(key) || isKnownDll(name))
@@ -144,11 +196,11 @@ export async function planDependencies(options){
                 }
                 continue;
             }
-            await visit(bytes);
+            await visit([...forwardsOf(bytes, entries, delayed), ...importsOf(bytes)]);
             order.push({ name, file: bytes });
         }
     };
 
-    await visit(entry);
+    await visit(importsOf(entry));
     return { order, missing, absent };
 }
