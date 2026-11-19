@@ -8,8 +8,9 @@
  * Libraries a program imports that its setup need not have put in the bottle,
  * answered by the engine: Visual C++ 2008's runtime (MSVCR90, MSVCP90), as on
  * a Windows the redistributable was installed on, and the ones Windows ships -
- * the OLE dialogs (OLEDLG), which every MFC program imports. A program
- * importing them loads, and its calls are answered through the import.
+ * the OLE dialogs (OLEDLG), which every MFC program imports, and Visual C++
+ * 6's C++ library (MSVCP60). A program importing them loads, and its calls
+ * are answered through the import.
  *
  * Each program exits with what its checks found: 0, or the number of the
  * first that failed, unless said otherwise.
@@ -90,4 +91,44 @@ function buildOledlgExe(){
 
 test('a program importing the OLE dialogs runs, a dialog answered Cancel (2)', async()=>{
     assert.equal(await exitCodeOf(buildOledlgExe()), 2);
+});
+
+/**
+ * Visual C++ 6's library, which Windows carries itself: a std::string made
+ * from text, a copy of it that shares the text, "!" appended to the copy.
+ * The program exits with ten times the first string's length plus the
+ * second's: 56 when the copy's change left the first string as it was.
+ */
+function buildVc6Exe(){
+    const allocator = 'ABV?$allocator@D@1@';
+    const ctor = `??0${STRING}QAE@PBD${allocator}@Z`;
+    const copy = `??0${STRING}QAE@ABV01@@Z`;
+    const append = `?append@${STRING}QAEAAV12@PBD@Z`;
+    const text = `?c_str@${STRING}QBEPBDXZ`;
+    const dtor = `??1${STRING}QAE@XZ`;
+    /** @param {number} string @param {(name: string) => number} iat */
+    const lengthOf = (string, iat)=>[0xb9, ...u32(string), 0xff, 0x15, ...u32(iat(text)),
+        0x50, 0xff, 0x15, ...u32(iat('strlen')), 0x83, 0xc4, 0x04];
+    return buildExe({
+        imports: { 'msvcrt.dll': ['strlen'], 'MSVCP60.dll': [ctor, copy, append, text, dtor],
+            'KERNEL32.dll': ['ExitProcess'] },
+        data: { hello: [...new TextEncoder().encode('hello'), 0], bang: [0x21, 0],
+            first: new Array(16).fill(0), second: new Array(16).fill(0) },
+        codeSize: 0x100,
+        code: ({ iat, at })=>[
+            0x6a, 0x00, 0x68, ...u32(at('hello')), 0xb9, ...u32(at('first')),
+            0xff, 0x15, ...u32(iat(ctor)),
+            0x68, ...u32(at('first')), 0xb9, ...u32(at('second')), 0xff, 0x15, ...u32(iat(copy)),
+            0x68, ...u32(at('bang')), 0xb9, ...u32(at('second')), 0xff, 0x15, ...u32(iat(append)),
+            ...lengthOf(at('first'), iat), 0x6b, 0xf0, 0x0a,      // imul esi, eax, 10
+            ...lengthOf(at('second'), iat), 0x01, 0xc6,           // add esi, eax
+            0xb9, ...u32(at('first')), 0xff, 0x15, ...u32(iat(dtor)),
+            0xb9, ...u32(at('second')), 0xff, 0x15, ...u32(iat(dtor)),
+            0x56, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
+
+test('a program importing Visual C++ 6\'s C++ library, none in the bottle, runs on ours', async()=>{
+    assert.equal(await exitCodeOf(buildVc6Exe()), 56);
 });

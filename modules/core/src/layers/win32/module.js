@@ -74,6 +74,7 @@ import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
+import { createMsvcp60Functions } from './msvcrt/msvcp60.js';
 import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
 import { addSecondNames, MSVCRT_SECOND_NAMES } from './msvcrt/second-names.js';
 import { UNIVERSAL_CXX } from './msvcrt/classes.js';
@@ -6890,6 +6891,12 @@ export function createWin32Module(){
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
             libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],
                 { readMemory, writeMemory, fillMemory });
+            // Visual C++ 6's C++ library, which Windows itself carries: its
+            // strings are shared by count, as that compiler's headers inline.
+            libraries['MSVCP60.dll'] = createMsvcp60Functions(libraries['msvcrt.dll'], {
+                readMemory, writeMemory,
+                addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
+            });
 
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already

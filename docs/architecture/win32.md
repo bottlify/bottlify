@@ -192,7 +192,10 @@ flowchart TD
 - **Ours when the bottle has no copy:** the other runtimes the engine has a table for - Visual
   C++ 2008's `MSVCR90.dll` and `MSVCP90.dll`, 2003's `MSVCR71.dll` and `MSVCP71.dll` - and the
   libraries Windows ships that a setup never installs, among them `OLEDLG.dll`, which every MFC
-  program imports: its dialogs are not shown and answer Cancel, each said as a loss.
+  program imports: its dialogs are not shown and answer Cancel, each said as a loss; and Visual
+  C++ 6's `MSVCP60.dll`, whose `std::string` and `std::wstring` keep that compiler's layout and
+  share their text by count, as its headers inline; a position past the end or a string too long
+  throws out_of_range or length_error into the program, as the library does.
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers
