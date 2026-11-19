@@ -1688,6 +1688,52 @@ test('a written copy-on-write page is the process\'s own, read-write', ()=>{
     assert.equal(data.getUint32(0x100 + MBI.Protect, true), 0x08);
 });
 
+test('VirtualQuery of a copy-on-write view looks at the writes of the run it answers, not the'
+    + ' view', ()=>{
+    // A 4096-page copy-on-write view, one page written: a query of it takes
+    // the marks of its own page and the next, and one past the written page
+    // takes only around it, so a look costs what its answer covers.
+    const PAGES = 4096;
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number} */
+    let looked = 0;
+    /** @type {any} */
+    const view = { base: 0x1000000, length: PAGES * PAGE_SIZE, writable: false, protect: 0x08,
+        pages: new Map(), copies: { watch: {
+            take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                looked += Math.ceil(bytes / PAGE_SIZE);
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            },
+        } } };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: ()=>{},
+        viewAt: (/** @type {number} */ at)=>(at >= view.base && at < view.base + view.length
+            ? view : null),
+        pageAccess: ()=>true,
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        looked = 0;
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>data.getUint32(0x100 + field, true));
+    };
+    const written = (view.base >>> 12) + 10;
+    marks.add(written);
+    assert.deepEqual(query(written * PAGE_SIZE), [PAGE_SIZE, 0x04], 'its own copy');
+    assert.ok(looked <= 2, `${looked} pages looked at for a run of one`);
+    assert.deepEqual(query(view.base), [10 * PAGE_SIZE, 0x08]);
+    assert.ok(looked <= 2 * 10 + 1, `${looked} pages looked at for a run of ten`);
+    assert.deepEqual(query((written + 1) * PAGE_SIZE), [(PAGES - 11) * PAGE_SIZE, 0x08],
+        'the rest of the view, still copy-on-write');
+});
+
 test('an image\'s view answers its sections and takes any protection, writes as copies', ()=>{
     // Wine's kernel32:virtual (test_mapping, SEC_IMAGE): the view's
     // AllocationProtect is PAGE_EXECUTE_WRITECOPY and its type MEM_IMAGE,
