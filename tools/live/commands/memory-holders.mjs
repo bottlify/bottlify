@@ -180,24 +180,47 @@ const EDGE_NAME = meta.edge_fields.indexOf('name_or_index');
 const EDGE_TO = meta.edge_fields.indexOf('to_node');
 const count = nodes.length / nodeFields;
 
-// One retainer a node: the first edge to it that is not weak, its holder and
-// the edge (`retainedVia`, the edge's own index, so its name is read when a
-// path is printed). A path through it may loop; printing stops where it does.
+// One retainer a node, on its shortest path from the snapshot's root (node 0,
+// the GC roots under it): a breadth-first walk over the edges that are not
+// weak, as DevTools' retainers view orders them. `retainedVia` is the edge's
+// own index, so its name is read when a path is printed. A node no strong
+// path reaches keeps -1 and its path ends there.
 const retainedBy = new Int32Array(count).fill(-1);
 const retainedVia = new Int32Array(count).fill(-1);
 const WEAK = edgeTypes.indexOf('weak');
-for (let node = 0, edge = 0; node < count; node++)
+// A WeakMap's value reached through its table ("part of key ... -> value ...
+// pair") is held only while its key is: walked as a strong edge it makes every
+// value of a module-level WeakMap look held by the module, whoever holds the key.
+const INTERNAL = edgeTypes.indexOf('internal');
+/** @param {number} edge */
+const ephemeron = edge=>edges[edge + EDGE_TYPE] === INTERNAL
+    && String(strings[edges[edge + EDGE_NAME]]).includes('part of key');
+const firstEdge = new Uint32Array(count + 1);
+for (let node = 0; node < count; node++)
 {
-    const end = edge + nodes[node * nodeFields + EDGES] * edgeFields;
-    for (; edge < end; edge += edgeFields)
+    firstEdge[node + 1] = firstEdge[node] + nodes[node * nodeFields + EDGES] * edgeFields;
+}
+{
+    const queue = new Int32Array(count);
+    let head = 0;
+    let tail = 0;
+    queue[tail++] = 0;
+    retainedBy[0] = 0;
+    while (head < tail)
     {
-        const to = edges[edge + EDGE_TO] / nodeFields;
-        if (edges[edge + EDGE_TYPE] !== WEAK && retainedBy[to] < 0)
+        const node = queue[head++];
+        for (let edge = firstEdge[node]; edge < firstEdge[node + 1]; edge += edgeFields)
         {
-            retainedBy[to] = node;
-            retainedVia[to] = edge;
+            const to = edges[edge + EDGE_TO] / nodeFields;
+            if (edges[edge + EDGE_TYPE] !== WEAK && retainedBy[to] < 0 && !ephemeron(edge))
+            {
+                retainedBy[to] = node;
+                retainedVia[to] = edge;
+                queue[tail++] = to;
+            }
         }
     }
+    retainedBy[0] = -1;
 }
 /** @param {number} edge */
 const edgeName = edge=>{
@@ -212,7 +235,7 @@ const label = node=>`${nodeTypes[nodes[node * nodeFields + TYPE]]}:`
 const pathOf = node=>{
     const steps = [];
     const seen = new Set();
-    for (let depth = 0; depth < 14; depth++)
+    for (let depth = 0; depth < Number(process.env.HOLDERS_DEPTH ?? 14); depth++)
     {
         const holder = retainedBy[node];
         if (holder < 0 || seen.has(holder))
