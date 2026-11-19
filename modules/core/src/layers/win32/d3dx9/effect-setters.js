@@ -30,7 +30,7 @@
  */
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
-/** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
+/** @typedef {import('../msvcrt/guest-code.js').f32bits} f32bits */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
 /** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
@@ -271,10 +271,10 @@ export function SetVectorArray({ u32, setU32, callStd, host, pointerBytes }, sel
  * HRESULT SetFloat(D3DXHANDLE hParameter, FLOAT f): a float scalar.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {ptr} self @param {u32} h @param {f32} f
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {f32bits} f
  * @returns {u32}
  */
-export function SetFloat({ u32, setU32, callStd, host, pointerBytes, floatBits }, self, h, f){
+export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, h, f){
     const block = u32(self + pointerBytes);
     if (block === 0 || u32(block) !== 0)
     {
@@ -295,7 +295,7 @@ export function SetFloat({ u32, setU32, callStd, host, pointerBytes, floatBits }
     {
         return host();
     }
-    setU32(u32(p + 24), floatBits(f));
+    setU32(u32(p + 24), f);
     const clock = u32(block + 12);
     const now = u32(clock);
     setU32(u32(p + 28), now);

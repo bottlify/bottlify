@@ -289,7 +289,7 @@ export function equivalence(compiled, sources, model, long){
             ? BigInt(words[next++] >>> 0) | BigInt(words[next++] >>> 0) << 32n
             : type === 'ptr' ? BigInt((words[next++] ?? 0) >>> 0)
                 : argumentOf(words[next++] ?? 0, i)));
-        const floats = fn.params.map(type=>type === 'f64' || type === 'f32');
+        const floats = fn.params.map(type=>type === 'f64' || type === 'f32' || type === 'f32bits');
         const before = m.read(DATA, span);
         const { entry, xmm, slots, halted } = callLong(m, CODE_64, { args, floats,
             returnTo: HALT, mxcsr: input.mxcsr });
@@ -311,12 +311,13 @@ export function equivalence(compiled, sources, model, long){
             // of its place, which the trap reads it from.
             const places = fn.params.slice(0, 4);
             const owed = [...['rcx', 'rdx', 'r8', 'r9'].slice(0, places.length)
-                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'), ...KEPT_64];
+                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'
+                    && places[i] !== 'f32bits'), ...KEPT_64];
             assert.deepEqual(Object.fromEntries(owed.map(reg=>[reg, m.reg(reg)])),
                 Object.fromEntries(owed.map(reg=>[reg, entry[reg]])),
                 `${handed}: the argument registers and the kept ones as the call left them`);
             places.forEach((type, i)=>{
-                if (type === 'f64' || type === 'f32')
+                if (type === 'f64' || type === 'f32' || type === 'f32bits')
                 {
                     const size = type === 'f64' ? 8 : 4;
                     assert.deepEqual(Array.from(m.xmm(i).slice(0, size)),
@@ -344,7 +345,7 @@ export function equivalence(compiled, sources, model, long){
             // an integer's low half, a double's two dwords and a float's one
             // out of the XMM register of its place among the first four.
             const trapWords = fn.params.flatMap((type, i)=>{
-                const bits = i < 4 && (type === 'f64' || type === 'f32')
+                const bits = i < 4 && (type === 'f64' || type === 'f32' || type === 'f32bits')
                     ? new DataView(xmm[i].buffer, xmm[i].byteOffset).getBigUint64(0, true)
                     : BigInt(args[i] ?? 0n);
                 return type === 'f64' || type === 'i64'

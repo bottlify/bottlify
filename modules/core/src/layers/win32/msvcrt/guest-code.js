@@ -123,6 +123,10 @@ const FLOAT_BIT_HELPERS = {
 /** @typedef {number} ptr  A pointer: a u32 in the i386, the whole of RAX at 64 bits. */
 /** @typedef {number} f64  A double: two stack slots, or ST0 as a result. */
 /** @typedef {number} f32  A float: one stack slot, or ST0 as a result. */
+/**
+ * @typedef {number} f32bits  A float taken as its dword: a stack slot in the
+ *     i386, the XMM register of its place read bit for bit at 64 bits.
+ */
 /** @typedef {number} x87  A double the caller left on the x87 stack, which the callee pops. */
 /**
  * @typedef {bigint | number} i64  A 64-bit integer: two stack slots or one
@@ -135,7 +139,7 @@ const FLOAT_BIT_HELPERS = {
  *
  * @typedef {Object} CompiledGuestCode
  * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
- * @property {readonly ('i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'x87' | 'i64')[]} params
+ * @property {readonly ('i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'f32bits' | 'x87' | 'i64')[]} params
  * @property {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
@@ -445,6 +449,11 @@ export function guestExport(compiled, fallback){
         if (type === 'f64' || type === 'f32')
         {
             floats[word] = type;
+        }
+        if (type === 'f32bits')
+        {
+            // A float the handler takes as its dword, out of the same register.
+            floats[word] = 'f32';
         }
         if (type === 'i64')
         {

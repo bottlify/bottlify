@@ -247,7 +247,7 @@ import {
  *   float holds exactly
  */
 
-/** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'x87' | 'i64'} ParamType */
+/** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'f32bits' | 'x87' | 'i64'} ParamType */
 /** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
 
 /**
@@ -408,7 +408,7 @@ const TABLE_KINDS = /** @type {const} */ ([
     ['Int16Array', 2, true], ['Uint32Array', 4, false], ['Int32Array', 4, true],
 ]);
 
-const PARAM_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'x87', 'i64']);
+const PARAM_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'f32bits', 'x87', 'i64']);
 const RETURN_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'i64', 'void']);
 
 /** Rounding control for Math.floor, Math.ceil and Math.trunc, in the control word's high byte. */
@@ -517,6 +517,13 @@ const isTyped = type=>type === 'i32' || type === 'u32' || type === 'nat';
 
 /** A double or a float. @param {string} type */
 const isFloat = type=>type === 'f64' || type === 'f32';
+/**
+ * Whether x86-64 passes a parameter in the XMM register of its place: a
+ * double, a float, and a float taken as its bits.
+ *
+ * @param {string} type
+ */
+const inXmm = type=>isFloat(type) || type === 'f32bits';
 
 /** The load of a table's entry: `mov`, or `movzx`/`movsx` of its width. @param {TableInfo} table */
 const tableOp = table=>(table.size === 4 ? [0x8b]
@@ -1142,8 +1149,8 @@ class FunctionCompiler {
             const type = declared.get(param.name);
             if (type === undefined || !PARAM_TYPES.has(type))
             {
-                this.fail(param, `@param {i32 | u32 | ptr | f64 | f32 | x87 | i64} ${param.name} `
-                    + 'is wanted');
+                this.fail(param, `@param {i32 | u32 | ptr | f64 | f32 | f32bits | x87 | i64} `
+                    + `${param.name} is wanted`);
             }
             if (this.long && type === 'x87')
             {
@@ -1179,7 +1186,8 @@ class FunctionCompiler {
             const pointer = type === 'ptr';
             /** @type {Variable} */
             const v = { name: param.name,
-                type: /** @type {'i32' | 'u32' | 'f64' | 'f32' | 'i64'} */ (pointer ? 'u32' : type),
+                type: /** @type {'i32' | 'u32' | 'f64' | 'f32' | 'i64'} */ (pointer
+                    || type === 'f32bits' ? 'u32' : type),
                 disp: stack, mutable: type !== 'i64', key: param, ...pointer ? { pointer } : {} };
             // An i64 stays in its slots (two in the i386, a quadword at 64
             // bits), read by its halves where it lies.
@@ -1409,12 +1417,12 @@ class FunctionCompiler {
         // its slot: movsd, or movss, a float's.
         for (let i = 0; i < inRegisterArguments; i++)
         {
-            if (isFloat(types[i]))
+            if (isFloat(types[i]) || types[i] === 'f32bits' && (this.hostUsed || !byIndex.has(i)))
             {
                 out.emit(types[i] === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x11,
                     ...memory(i, { base: ESP, disp: 8 + 8 * i }));
             }
-            else if (this.hostUsed || !byIndex.has(i))
+            else if (types[i] !== 'f32bits' && (this.hostUsed || !byIndex.has(i)))
             {
                 out.emit(...storeQuad(ARGUMENTS_64[i], 8 + 8 * i));       // mov [rsp+8+8i], arg
             }
@@ -1440,7 +1448,7 @@ class FunctionCompiler {
         const moves = [];
         for (const [i, v] of byIndex)
         {
-            if (i < ARGUMENTS_64.length)
+            if (i < ARGUMENTS_64.length && types[i] !== 'f32bits')
             {
                 moves.push({ from: ARGUMENTS_64[i], to: /** @type {number} */ (v.reg),
                     quad: v.pointer === true });
@@ -1454,6 +1462,15 @@ class FunctionCompiler {
             }
         }
         out.emit(...parallelMove(moves));
+        for (const [i, v] of byIndex)
+        {
+            if (i < ARGUMENTS_64.length && types[i] === 'f32bits')
+            {
+                // movd reg, xmm: a float's bits out of the XMM register of its place.
+                const reg = /** @type {number} */ (v.reg);
+                out.emit(0x66, ...reg >= 8 ? [0x41] : [], 0x0f, 0x7e, 0xc0 | i << 3 | reg & 7);
+            }
+        }
         if (this.locals > 0)
         {
             out.emit(...moveStack64(-this.locals));
@@ -1530,7 +1547,7 @@ class FunctionCompiler {
             // bridge's `floats`), and answers it in.
             for (let i = 0; i < inRegisterArguments; i++)
             {
-                out.emit(...isFloat(types[i])
+                out.emit(...inXmm(types[i])
                     ? [types[i] === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x10,
                         ...memory(i, { base: ESP, disp: 8 + 8 * i })]     // movsd/movss xmm, [slot]
                     : loadQuad(ARGUMENTS_64[i], 8 + 8 * i));              // mov arg, [rsp+8+8i]

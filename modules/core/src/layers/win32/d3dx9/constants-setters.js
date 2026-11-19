@@ -29,7 +29,7 @@
  */
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
-/** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
+/** @typedef {import('../msvcrt/guest-code.js').f32bits} f32bits */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
 /** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
@@ -243,10 +243,10 @@ export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, de
  * the first lane of one register.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {f32} f
+ * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {f32bits} f
  * @returns {u32}
  */
-export function SetFloat({ u32, setU32, callStd, host, pointerBytes, floatBits }, self, device, h, f){
+export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, device, h, f){
     const block = u32(self + pointerBytes);
     if (block === 0 || device === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
@@ -269,7 +269,7 @@ export function SetFloat({ u32, setU32, callStd, host, pointerBytes, floatBits }
     {
         setU32(out + lane * 4, 0);
     }
-    setU32(out, floatBits(f));
+    setU32(out, f);
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
     return callStd(u32(u32(device) + slot * pointerBytes), device, u32(h + INDEX), out, 1) >>> 0;
 }

@@ -452,8 +452,7 @@ test('the vtables are in the header\'s order, each slot popping its own argument
     assert.deepEqual(latest.poolInterface.methods, []);
 });
 
-test('each width places its own setters\' code; a 64-bit process commits, and sets a float or'
-    + ' a value, on the host', ()=>{
+test('each width places its own setters\' code; a 64-bit process commits on the host', ()=>{
     /** @param {4 | 8} pointerSize */
     const methodsAt = pointerSize=>{
         const memory = new Uint8Array(1 << 16);
@@ -474,7 +473,7 @@ test('each width places its own setters\' code; a 64-bit process commits, and se
         return { memory, named: (/** @type {string} */ name)=>methods.find(m=>m.name === name) };
     };
     const SETTERS = ['SetMatrix', 'SetVector', 'SetInt', 'SetBool', 'SetTexture',
-        'SetFloatArray', 'SetMatrixPointerArray'];
+        'SetFloatArray', 'SetMatrixPointerArray', 'SetFloat', 'SetValue'];
     for (const [pointerSize, compiled] of /** @type {const} */ ([[4, SETTERS_32],
         [8, SETTERS_64]]))
     {
@@ -488,8 +487,7 @@ test('each width places its own setters\' code; a 64-bit process commits, and se
             assert.deepEqual([...memory.subarray(at, at + host - 1)],
                 [...code.subarray(0, host - 1)], `${name} at ${pointerSize}: its code`);
         }
-        const narrow = pointerSize === 8 ? ['SetFloat', 'SetValue', 'CommitChanges', 'BeginPass']
-            : [];
+        const narrow = pointerSize === 8 ? ['CommitChanges', 'BeginPass'] : [];
         for (const name of narrow)
         {
             assert.equal(named(name).guest, undefined, `${name} at 8: the trap`);
