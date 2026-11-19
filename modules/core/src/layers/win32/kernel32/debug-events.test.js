@@ -224,6 +224,26 @@ test('DebugActiveProcessStop lets the debuggee go; DebugSetProcessKillOnExit nee
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
 });
 
+test('a debugger that ends takes its debuggees with it, and lets go those told not to', async()=>{
+    const STATUS_DEBUGGER_INACTIVE = 0xc0000354;
+    const taken = child();
+    const kept = { ...child(), id: 0x320 };
+    /** @type {[number, number][]} */
+    const ended = [];
+    const { side, fns } = debuggerOf([taken, kept], {
+        terminateChild: (/** @type {any} */ who, /** @type {number} */ code)=>
+            ended.push([who.id, code]) > 0,
+    });
+    assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1);
+    // DebugSetProcessKillOnExit sets every debuggee's; the taken one is set back.
+    /** @type {any} */ (taken.debugged).killOnExit = true;
+    const waiting = side.deliver(kept, { code: DEBUG_EVENT.LOAD_DLL, threadId: 0x324 });
+    side.debuggerEnded();
+    assert.deepEqual(ended, [[0x300, STATUS_DEBUGGER_INACTIVE]]);
+    assert.equal(await waiting, DBG_CONTINUE, 'what the one let go reported is continued');
+    assert.deepEqual([taken.debugged, kept.debugged], [null, null]);
+});
+
 test('a debugger\'s SetThreadContext replaces only the groups the record names', ()=>{
     const into = new Uint8Array(0x2cc).fill(0x11);
     const given = new Uint8Array(0x2cc).fill(0x22);

@@ -585,8 +585,27 @@ export function createWin32Module(){
              *
              * @returns {{ report: (report: any) => Promise<number> } | null}
              */
-            const debuggerNow = ()=>(config?.debugger && (config.debugger.debugged?.() ?? true)
-                ? config.debugger : null);
+            const debuggerNow = ()=>(debuggerEar && (config?.debugger?.debugged?.() ?? true)
+                ? debuggerEar : null);
+            /**
+             * Every event goes to the debugger with the whole process stopped
+             * until it is continued, as Windows' debug object freezes a
+             * debuggee for each event it holds: the threads alive as it is
+             * reported are suspended once and resumed once by its answer.
+             * Events reported together - an attach's - hold the process until
+             * the last is continued, and a thread made meanwhile is stopped by
+             * its own CREATE_THREAD.
+             */
+            const debuggerEar = config?.debugger ? {
+                /** @param {any} report @returns {Promise<number>} */
+                report: report=>{
+                    const held = kernel.threads().filter((/** @type {any} */ thread)=>
+                        kernel.suspendThread(thread) !== null);
+                    return Promise.resolve(/** @type {any} */ (config.debugger).report(report))
+                        .finally(()=>held.forEach((/** @type {any} */ thread)=>
+                            kernel.resumeThread(thread)));
+                },
+            } : null;
             // The thread and process blocks a handler reads, at that width.
             const blocks = blockLayouts(pointerSize);
 
@@ -2391,7 +2410,8 @@ export function createWin32Module(){
                 trace: text=>trace(text),
                 // Its debugger, when its parent debugs it (`debug-events.js`).
                 ...config?.debugger ? { debugReport: (/** @type {any} */ report)=>
-                    config.debugger.report(report), debugged: ()=>debuggerNow() !== null } : {},
+                    /** @type {any} */ (debuggerEar).report(report), debugged: ()=>debuggerNow() !== null }
+                    : {},
                 // What Windows does once nothing handled an exception and the
                 // last-chance filter declined it: the process ends, with the
                 // exception's code as its exit code.
@@ -3444,7 +3464,10 @@ export function createWin32Module(){
                 askChild,
                 debugged: ()=>debuggerNow() !== null,
                 breakIn,
+                terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
+                    config?.terminate?.(child, code) === true,
             });
+            endTasks.push(()=>debuggerSide?.debuggerEnded());
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
             // file calls and setupapi's alike. Every layer's, not only this
@@ -3556,7 +3579,7 @@ export function createWin32Module(){
                         },
                         // Told to its debugger too, when its parent debugs it.
                         ...config?.debugger ? { report: (/** @type {any} */ report)=>
-                            config.debugger.report({ ...report,
+                            /** @type {any} */ (debuggerEar).report({ ...report,
                                 threadId: kernel.currentThread()?.id >>> 0 }),
                         debugged: ()=>debuggerNow() !== null } : {},
                     }),

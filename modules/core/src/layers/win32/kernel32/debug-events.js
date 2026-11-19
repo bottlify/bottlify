@@ -55,6 +55,8 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SEM_TIMEOUT = 121;
+/** The code a debuggee ends with when its debugger ends and takes it along. */
+const STATUS_DEBUGGER_INACTIVE = 0xc0000354;
 
 /**
  * An event as a debuggee reports it: values only, since it may come from
@@ -168,6 +170,8 @@ export function mergeContextGroups(into, given){
  * @property {() => boolean} [debugged]  Whether a debugger hears this process now.
  * @property {() => number} [breakIn]  This process breaks into its own debugger:
  *           a thread of its own runs DbgBreakPoint.
+ * @property {(child: any, code: number) => boolean} [terminateChild]  Ends a child
+ *           where it runs, as TerminateProcess does.
  */
 
 /**
@@ -344,6 +348,29 @@ export function createDebuggerFunctions(host){
                     child.debugged = null;
                 } });
                 serve();
+            }
+        },
+
+        /**
+         * This process, a debugger, has ended: each debuggee set to end with
+         * it (DebugSetProcessKillOnExit, TRUE unless told otherwise) is
+         * ended with STATUS_DEBUGGER_INACTIVE, and every other is let go, its events continued, as
+         * DebugActiveProcessStop lets one go.
+         */
+        debuggerEnded(){
+            for (const child of debuggees())
+            {
+                const { current, events, killOnExit } = child.debugged;
+                child.debugged = null;
+                for (const each of [...current ? [current] : [], ...events])
+                {
+                    each.answer(DBG_CONTINUE);
+                }
+                if (killOnExit && !host.terminateChild?.(child, STATUS_DEBUGGER_INACTIVE))
+                {
+                    host.divergence?.('ExitProcess',
+                        `debuggee ${child.id} could not be ended with its debugger, and goes on`);
+                }
             }
         },
 
@@ -543,8 +570,8 @@ export function createDebuggerFunctions(host){
              *
              * Whether the debuggees end when their debugger does. A caller
              * debugging none has no debug object to set it on and is refused
-             * as such. Kept on each; a debuggee here ends with its debugger
-             * either way, as a child running beside its parent does.
+             * as such. Kept on each, and read when this process ends
+             * (`debuggerEnded`).
              */
             DebugSetProcessKillOnExit: {
                 argBytes: 4,
