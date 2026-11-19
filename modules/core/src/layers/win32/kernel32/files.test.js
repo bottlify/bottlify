@@ -2464,6 +2464,59 @@ test('CopyFileW and CopyFileEx copy as CopyFileA does, and a success clears the 
     assert.equal(error.code, ERROR_REQUEST_ABORTED);
 });
 
+test('CopyFileEx tells its progress routine the stream and each chunk, and stops as it says',
+    async()=>{
+        /** @type {number[][]} */
+        const calls = [];
+        /** @type {number[]} */
+        let answers = [];
+        const { files, error, fns, memory } = setup({
+            currentThread: ()=>'caller',
+            /** @param {number} entry @param {number[]} args @param {any} thread */
+            callGuest: async(entry, args, thread)=>{
+                assert.equal(entry, 0x7000);
+                assert.equal(thread, 'caller', 'on the copying thread');
+                calls.push(args);
+                return answers.shift() ?? 0;
+            },
+        });
+        files.put('C:\\GAME\\A.TXT', 'abc');
+        putWide(memory, NAME, 'C:\\GAME\\A.TXT');
+        putWide(memory, NAME2, 'C:\\GAME\\B.TXT');
+        const copy = ()=>fns.CopyFileExW.handler([NAME, NAME2, 0x7000, 0x55, 0, 0]);
+
+        assert.equal(await copy(), 1);
+        assert.equal(files.text('C:\\GAME\\B.TXT'), 'abc');
+        // total, transferred, stream size, stream transferred (each two
+        // dwords), the stream, the reason, the two handles, the data.
+        assert.deepEqual(calls.map(args=>[args[2], args[9], args[12]]),
+            [[0, 1, 0x55], [3, 0, 0x55]],
+            'CALLBACK_STREAM_SWITCH with nothing copied, then CALLBACK_CHUNK_FINISHED at 3');
+        assert.deepEqual(calls[0].slice(0, 2), [3, 0], 'the size');
+        assert.equal(calls[0][8], 1, 'the first stream');
+        assert.notEqual(calls[0][10], 0, 'the source\'s handle');
+        assert.notEqual(calls[0][11], 0, 'the destination\'s handle');
+
+        calls.length = 0;
+        answers = [1];
+        error.code = 0;
+        assert.equal(await copy(), 0, 'PROGRESS_CANCEL');
+        assert.equal(error.code, ERROR_REQUEST_ABORTED);
+        assert.equal(files.stat('C:\\GAME\\B.TXT')?.exists ?? false, false,
+            'a cancelled copy deletes its destination');
+        assert.equal(calls.length, 1);
+
+        answers = [0, 2];
+        assert.equal(await copy(), 0, 'PROGRESS_STOP after the chunk');
+        assert.equal(error.code, ERROR_REQUEST_ABORTED);
+        assert.equal(files.text('C:\\GAME\\B.TXT'), 'abc', 'a stopped copy keeps what it wrote');
+
+        calls.length = 0;
+        answers = [3];
+        assert.equal(await copy(), 1, 'PROGRESS_QUIET');
+        assert.equal(calls.length, 1, 'and is not called again');
+    });
+
 test('_lopen with OF_WRITE alone opens for writing only', ()=>{
     const { files, error, fns, at, memory } = setup();
     files.put('C:\\GAME\\W.TXT', 'text');

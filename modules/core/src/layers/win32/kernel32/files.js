@@ -293,6 +293,12 @@ const MOVEFILE_DELAY_UNTIL_REBOOT = 0x0004;
 const COPY_CHUNK = 1 << 20;
 /** CopyFileEx's flag for CopyFile's bFailIfExists. */
 const COPY_FILE_FAIL_IF_EXISTS = 0x1;
+/** Why CopyFileEx's progress routine is called, and what it answers. */
+const CALLBACK_CHUNK_FINISHED = 0;
+const CALLBACK_STREAM_SWITCH = 1;
+const PROGRESS_CANCEL = 1;
+const PROGRESS_STOP = 2;
+const PROGRESS_QUIET = 3;
 
 /**
  * The machine's scratch directory: what TMP and TEMP name in the environment
@@ -594,6 +600,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
+ * @property {(entry: number, args: number[], thread: any) => Promise<number>} [callGuest]
+ *           Calls guest code on a thread and answers what it returned: CopyFileEx's
+ *           progress routine.
  *           Whose call this is, for an answer that arrives after the thread has
  *           been parked -- by then the running thread is somebody else.
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
@@ -1909,10 +1918,19 @@ export function createFileFunctions(host){
      * as a copy on Windows does; a file copied onto itself is the destination
      * open colliding with the source's, a sharing violation.
      *
+     * CopyFileEx's progress routine (`progress.routine`) is told the stream
+     * starts (CALLBACK_STREAM_SWITCH) and each chunk written after it
+     * (CALLBACK_CHUNK_FINISHED) until it answers PROGRESS_QUIET, and is handed
+     * the source's and the destination's handles. PROGRESS_CANCEL ends the
+     * copy and deletes the destination where the copy holds its deletion,
+     * PROGRESS_STOP ends it keeping what was written, both with
+     * ERROR_REQUEST_ABORTED, as does the cancel flag found set before a chunk.
+     *
      * @param {string} source @param {string} destination @param {boolean} failIfExists
+     * @param {{ routine: number, data: number, cancel: number }} [progress]
      * @returns {number | Promise<number>}
      */
-    const copyPath = (source, destination, failIfExists)=>{
+    const copyPath = (source, destination, failIfExists, progress)=>{
         if (source === '' || destination === '')
         {
             return fail(ERROR_PATH_NOT_FOUND);
@@ -1941,15 +1959,25 @@ export function createFileFunctions(host){
                 : files.stat(path)?.exists ? ERROR_ACCESS_DENIED : missing(path));
         // The source is read sharing everything; the destination written
         // sharing reading and writing, but not its deletion -- a holder of
-        // DELETE keeps it -- and settled before it is emptied.
+        // DELETE keeps it -- and settled before it is emptied. It is asked
+        // with DELETE, which a cancelled copy deletes it by, and without it
+        // when another open refuses its deletion: that copy goes on, and a
+        // cancel leaves the file where it is.
         const input = files.open(source, { read: true, shareRead: true, shareWrite: true,
             shareDelete: true });
         if (!input)
         {
             return fail(refusal(source));
         }
-        const output = files.open(destination, { read: false, write: true, create: true,
-            shareRead: true, shareWrite: true });
+        const destinationOpen = { read: false, write: true, create: true,
+            shareRead: true, shareWrite: true, shareDelete: false };
+        let deletable = true;
+        let output = files.open(destination, { ...destinationOpen, delete: true });
+        if (!output && files.openRefusal?.() === 'SHARING_VIOLATION')
+        {
+            deletable = false;
+            output = files.open(destination, destinationOpen);
+        }
         if (!output)
         {
             files.close(input);
@@ -1982,10 +2010,29 @@ export function createFileFunctions(host){
                 host.setLastError(code);
             }
         };
-        /** @param {boolean} parked */
-        const finish = parked=>{
+        // The routine is handed the two opens as handles, closed with the copy.
+        const routine = (progress?.routine ?? 0) >>> 0;
+        const handles = routine === 0 || !host.callGuest ? null : {
+            source: host.handles.open('file',
+                { path: source, node: input, read: true, write: false, position: 0 },
+                FILE_GENERIC_READ),
+            destination: host.handles.open('file',
+                { path: destination, node: output, read: false, write: true, position: 0 },
+                FILE_GENERIC_WRITE | (deletable ? DELETE : 0)),
+        };
+        const closeBoth = ()=>{
+            if (handles)
+            {
+                release(handles.source);
+                release(handles.destination);
+                return;
+            }
             files.close(input);
             files.close(output);
+        };
+        /** @param {boolean} parked */
+        const finish = parked=>{
+            closeBoth();
             files.setAttributes?.(destination, entry.attributes ?? null);
             if (entry.modified)
             {
@@ -1994,6 +2041,63 @@ export function createFileFunctions(host){
             answer(ERROR_SUCCESS, parked);
             return 1;
         };
+        /** @param {boolean} discard @param {boolean} parked */
+        const abort = (discard, parked)=>{
+            closeBoth();
+            if (discard && deletable)
+            {
+                files.remove(destination);
+            }
+            answer(ERROR_REQUEST_ABORTED, parked);
+            return 0;
+        };
+        let quiet = handles === null;
+        /** @param {number} value  a LARGE_INTEGER by value: its low and its high dword */
+        const large = value=>[value >>> 0, Math.floor(value / 0x100000000) >>> 0];
+        /**
+         * What the cancel flag or the routine says of the copy so far: null
+         * to go on.
+         *
+         * @param {number} done @param {number} reason
+         * @returns {null | 'cancel' | 'stop' | Promise<null | 'cancel' | 'stop'>}
+         */
+        const told = (done, reason)=>{
+            const cancel = (progress?.cancel ?? 0) >>> 0;
+            if (cancel !== 0 && readDword(cancel) !== 0)
+            {
+                return 'cancel';
+            }
+            if (quiet || !handles || !host.callGuest)
+            {
+                return null;
+            }
+            return host.callGuest(routine, [...large(entry.size), ...large(done),
+                ...large(entry.size), ...large(done), 1, reason, handles.source,
+                handles.destination, (progress?.data ?? 0) >>> 0], owner).then(said=>{
+                const word = said >>> 0;
+                quiet ||= word === PROGRESS_QUIET;
+                return word === PROGRESS_CANCEL ? 'cancel' : word === PROGRESS_STOP ? 'stop'
+                    : null;
+            });
+        };
+        /**
+         * Goes on from `from`, or ends the copy as `said` says.
+         *
+         * @param {null | 'cancel' | 'stop' | Promise<null | 'cancel' | 'stop'>} said
+         * @param {number} from @param {boolean} parked
+         * @returns {number | Promise<number>}
+         */
+        const after = (said, from, parked)=>{
+            if (said instanceof Promise)
+            {
+                return said.then(answered=>after(answered, from, true));
+            }
+            if (said !== null)
+            {
+                return abort(said === 'cancel', parked);
+            }
+            return copyFrom(from, parked);
+        };
         /**
          * @param {number} from @param {boolean} parked
          * @returns {number | Promise<number>}
@@ -2001,43 +2105,37 @@ export function createFileFunctions(host){
         const copyFrom = (from, parked)=>{
             for (let at = from; at < entry.size; at += COPY_CHUNK)
             {
+                const end = Math.min(at + COPY_CHUNK, entry.size);
                 const chunk = files.read(input, at, COPY_CHUNK);
                 if (typeof (/** @type {any} */ (chunk))?.then === 'function')
                 {
                     return /** @type {Promise<Uint8Array>} */ (chunk).then(bytes=>{
                         files.write(output, at, bytes);
-                        return copyFrom(at + COPY_CHUNK, true);
+                        return after(told(end, CALLBACK_CHUNK_FINISHED), at + COPY_CHUNK, true);
                     }, ()=>{
-                        files.close(input);
-                        files.close(output);
+                        closeBoth();
                         answer(ERROR_IO_DEVICE, true);
                         return 0;
                     });
                 }
                 files.write(output, at, /** @type {Uint8Array} */ (chunk));
+                const said = told(end, CALLBACK_CHUNK_FINISHED);
+                if (said !== null)
+                {
+                    return after(said, at + COPY_CHUNK, parked);
+                }
             }
             return finish(parked);
         };
-        return copyFrom(0, false);
+        return after(told(0, CALLBACK_STREAM_SWITCH), 0, false);
     };
 
     const copyFile = bothForms(12, ([from, to, failIfExists], text)=>
         copyPath(text.path(from), text.path(to), failIfExists !== 0));
 
-    /**
-     * The progress routine is not called: a copy here is one step with
-     * nothing to report between its start and its end, and a caller that
-     * would have cancelled from the routine sees the copy complete. The
-     * cancel flag is read once, before anything is written.
-     */
-    const copyFileEx = bothForms(24, ([from, to, , , cancel, flags], text)=>{
-        if ((cancel >>> 0) !== 0 && readDword(cancel >>> 0) !== 0)
-        {
-            return fail(ERROR_REQUEST_ABORTED);
-        }
-        return copyPath(text.path(from), text.path(to),
-            ((flags >>> 0) & COPY_FILE_FAIL_IF_EXISTS) !== 0);
-    });
+    const copyFileEx = bothForms(24, ([from, to, routine, data, cancel, flags], text)=>
+        copyPath(text.path(from), text.path(to),
+            ((flags >>> 0) & COPY_FILE_FAIL_IF_EXISTS) !== 0, { routine, data, cancel }));
 
     /** @param {number[]} args @param {TextForm} text */
     const searchPathBody = ([pathList, fileName, extension, size, buffer, filePart], text)=>{
