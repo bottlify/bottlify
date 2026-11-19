@@ -81,7 +81,13 @@
   ends its processes. A child of a process in a job is in the job too, unless the job lets it
   break away (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`, or `JOB_OBJECT_LIMIT_BREAKAWAY_OK` and a
   `CREATE_BREAKAWAY_FROM_JOB` child), and `CREATE_BREAKAWAY_FROM_JOB` from a job that allows
-  neither is refused (`ERROR_ACCESS_DENIED`). The job's other limits are kept and read back, not
+  neither is refused (`ERROR_ACCESS_DENIED`). Jobs nest: a job of no hierarchy and no process
+  of its own that a process in a job is assigned to becomes its innermost job's child, a process
+  in a job is in every job above it, and a job of another hierarchy refuses it
+  (`ERROR_ACCESS_DENIED`). `PROC_THREAD_ATTRIBUTE_JOB_LIST` makes a child in the jobs it names,
+  each nested under the one before; a handle that names no job fails `CreateProcess`
+  (`ERROR_INVALID_HANDLE`), a job of another hierarchy refuses the child (`ERROR_ACCESS_DENIED`)
+  after the jobs before it heard it come and go. The job's other limits are kept and read back, not
   enforced, and this
   process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.

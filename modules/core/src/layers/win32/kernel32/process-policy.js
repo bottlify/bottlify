@@ -196,7 +196,8 @@ const HANDLE_PROBE = 1 << 20;
  *     => void} [postCompletion]  A packet posted to a completion port object.
  * @property {(events: { exited: (process: any, code: number) => void,
  *     closed: (job: any) => void, started: (process: any) => void,
- *     refusesBreakaway: () => boolean }) => void} [listen]
+ *     refusesBreakaway: () => boolean,
+ *     listed: (handles: number[]) => any[] | null }) => void} [listen]
  *     Where a job is told of a process of this one's that has exited, of a job's
  *     handle closed, and of a child this one started, and asked whether a child
  *     may break away.
@@ -341,12 +342,24 @@ export function createProcessPolicyFunctions(host){
      *
      * @typedef {{ kind: 'job', name: string | null, processes: Set<any>, terminated: boolean,
      *     total: number, waitable: any, extended: Uint8Array, kept: Map<number, Uint8Array>,
-     *     port: { object: any, key: number } | null }} Job
+     *     port: { object: any, key: number } | null, parent: Job | null }} Job
      */
-    /** @param {number} handle @returns {Job | null} */
-    const jobOf = handle=>host.objectOf(handle >>> 0, 'job');
-    /** Every job made, a closed one let go when it is next looked through. @type {Set<Job>} */
+    /** Every job made or reached, a closed one let go when it is next looked through. @type {Set<Job>} */
     const jobs = new Set();
+    /**
+     * The job a handle names; one this process reached by name, duplication or
+     * inheritance is among its jobs from then, as one it made.
+     *
+     * @param {number} handle @returns {Job | null}
+     */
+    const jobOf = handle=>{
+        const job = host.objectOf(handle >>> 0, 'job');
+        if (job)
+        {
+            jobs.add(job);
+        }
+        return job;
+    };
     /** When this process joined each job it is in: a later one is nested in the earlier. */
     const selfJoined = /** @type {Map<Job, number>} */ (new Map());
     let joins = 0;
@@ -373,6 +386,84 @@ export function createProcessPolicyFunctions(host){
         }
         return job.processes.has(process);
     });
+
+    /**
+     * Jobs nest (Windows 8 on): a job a process is assigned to while it is in
+     * another becomes that one's child, and a process in a job is in each job
+     * above it. A job's depth is how many jobs are above it.
+     *
+     * @param {Job} job
+     */
+    const depth = job=>{
+        let count = 0;
+        for (let above = job.parent; above; above = above.parent)
+        {
+            count++;
+        }
+        return count;
+    };
+
+    /** The jobs holding a process, the innermost - the deepest - first. @param {any} process */
+    const chainOf = process=>jobsHolding(process).sort((a, b)=>depth(b) - depth(a)
+        || (selfJoined.get(b) ?? 0) - (selfJoined.get(a) ?? 0));
+
+    /** @param {Job} job @param {Job} above whether `above` is `job` or a job over it */
+    const under = (job, above)=>{
+        for (let at = /** @type {Job | null} */ (job); at; at = at.parent)
+        {
+            if (at === above)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * A process joins a job and every job above it it is not in yet, each
+     * hearing of it as a new process.
+     *
+     * @param {Job} job @param {any} process
+     */
+    const join = (job, process)=>{
+        for (let at = /** @type {Job | null} */ (job); at && !at.processes.has(process); at = at.parent)
+        {
+            at.processes.add(process);
+            at.total++;
+            tell(at, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+            if (process === SELF)
+            {
+                selfJoined.set(at, ++joins);
+            }
+        }
+    };
+
+    /**
+     * AssignProcessToJobObject's rule for a process already in a job: a job
+     * below the process's innermost one takes it; a job of no hierarchy and
+     * no process of its own becomes the innermost one's child and takes it;
+     * any other is refused (ERROR_ACCESS_DENIED), the process being in another
+     * hierarchy. True when the process is in the job after it.
+     *
+     * @param {Job} job @param {any} process
+     */
+    const nestInto = (job, process)=>{
+        if (job.processes.has(process))
+        {
+            return true;
+        }
+        const innermost = chainOf(process)[0];
+        if (innermost && !(job.parent && under(job.parent, innermost)))
+        {
+            if (job.parent || job.total > 0)
+            {
+                return false;
+            }
+            job.parent = innermost;
+        }
+        join(job, process);
+        return true;
+    };
 
     /**
      * The name a Create/OpenJobObject string gives, null for none.
@@ -418,7 +509,8 @@ export function createProcessPolicyFunctions(host){
         const job = found ?? { kind: 'job', name, processes: new Set(), terminated: false,
             total: 0, waitable: kernel.createEvent({ manualReset: true, signalled: false,
                 name: name ?? 'job' }),
-            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map(), port: null };
+            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map(), port: null,
+            parent: null };
         jobs.add(job);
         host.namedObjects?.remember(name, 'job', job, found !== null, ()=>{});
         return { handle: kernel.handles.open('job', job), reused: found !== null };
@@ -557,9 +649,8 @@ export function createProcessPolicyFunctions(host){
      */
     const letsGo = (job, asked)=>(limitFlags(job) & JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) !== 0
         || asked && (limitFlags(job) & JOB_OBJECT_LIMIT_BREAKAWAY_OK) !== 0;
-    /** The jobs this process is in, the one it joined last - the innermost - first. */
-    const nesting = ()=>jobsHolding(SELF).sort((a, b)=>(selfJoined.get(b) ?? 0)
-        - (selfJoined.get(a) ?? 0));
+    /** The jobs this process is in, the innermost first. */
+    const nesting = ()=>chainOf(SELF);
     host.listen?.({
         // CREATE_BREAKAWAY_FROM_JOB is refused while the innermost job this
         // process is in keeps its children.
@@ -580,10 +671,42 @@ export function createProcessPolicyFunctions(host){
             }
             for (const job of holding.slice(kept))
             {
-                job.processes.add(process);
-                job.total++;
-                tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+                join(job, process);
             }
+            // Then each job PROC_THREAD_ATTRIBUTE_JOB_LIST names, in turn, each
+            // nesting under the one before it. One that is in another
+            // hierarchy refuses the child, which was never; the jobs it had
+            // joined hear it come and go.
+            for (const job of process.jobList ?? [])
+            {
+                if (!nestInto(job, process))
+                {
+                    process.refused = ERROR_ACCESS_DENIED;
+                    process.completed = true;
+                    process.exitCode = 0;
+                    for (const holder of jobsHolding(process))
+                    {
+                        tell(holder, JOB_OBJECT_MSG.EXIT_PROCESS, idOf(process));
+                        if (![...holder.processes].some(running))
+                        {
+                            tell(holder, JOB_OBJECT_MSG.ACTIVE_PROCESS_ZERO, 0);
+                        }
+                    }
+                    return;
+                }
+            }
+        },
+
+        /**
+         * The jobs a PROC_THREAD_ATTRIBUTE_JOB_LIST names, null when one of
+         * them names no job (CreateProcess's ERROR_INVALID_HANDLE).
+         *
+         * @param {number[]} handles
+         * @returns {Job[] | null}
+         */
+        listed(handles){
+            const found = handles.map(jobOf);
+            return found.every(Boolean) ? /** @type {Job[]} */ (found) : null;
         },
 
         exited(process, code){
@@ -923,17 +1046,9 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if (!job.processes.has(process))
-                {
-                    job.processes.add(process);
-                    job.total++;
-                    tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
-                    if (process === SELF)
-                    {
-                        selfJoined.set(job, ++joins);
-                    }
-                }
-                return 1;
+                // In a job already, the process is in a hierarchy: the job
+                // nests under its innermost one, or is refused.
+                return nestInto(job, process) ? 1 : fail(ERROR_ACCESS_DENIED);
             },
         },
 

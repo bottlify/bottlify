@@ -858,7 +858,8 @@ export function createWin32Module(){
              *
              * @type {{ exited: (process: any, code: number) => void,
              *     closed: (job: any) => void, started: (process: any) => void,
-             *     refusesBreakaway: () => boolean } | null}
+             *     refusesBreakaway: () => boolean,
+             *     listed: (handles: number[]) => any[] | null } | null}
              */
             let jobEvents = null;
             /** Whether CreateProcessWithLogonW has said it checks no password. */
@@ -4151,6 +4152,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
                         breakawayRefused: ()=>jobEvents?.refusesBreakaway() ?? false,
+                        jobsListed: listed=>jobEvents?.listed(listed) ?? null,
                         spawner,
                         pointerSize,
                         patchMemory: (address, bytes)=>
