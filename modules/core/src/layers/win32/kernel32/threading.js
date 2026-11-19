@@ -1532,8 +1532,12 @@ export function createThreadingFunctions(host){
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
+                // A handle protected from close is not closed by
+                // DUPLICATE_CLOSE_SOURCE either: both stay, as on Windows.
                 const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
-                    && !pseudo(source);
+                    && !pseudo(source)
+                    && ((handleFlags.get(untagged(source >>> 0)) ?? 0)
+                        & HANDLE_FLAG_PROTECT_FROM_CLOSE) === 0;
                 // Into another process, an open file is that process's own open
                 // of it, which its table makes (`adoptFile`); here, one more hold.
                 if (held.node && (kind === 'mapping' || (kind === 'file' && !into))
@@ -1547,7 +1551,13 @@ export function createThreadingFunctions(host){
                 {
                     held.retain();
                 }
-                const duplicate = (into ?? kernel.handles).open(kind, held, rights.granted);
+                // Within the process, a duplicate that closes its source takes
+                // the source's slot, the first free one, as Windows hands it.
+                const reused = closesSource && !into && Boolean(kernel.handles.adopt)
+                    && kernel.handles.close(source >>> 0) !== null
+                    && kernel.handles.adopt(source >>> 0, kind, held, rights.granted);
+                const duplicate = reused ? source >>> 0
+                    : (into ?? kernel.handles).open(kind, held, rights.granted);
                 // A file the other process could not open as its own.
                 if (duplicate === 0)
                 {
@@ -1565,7 +1575,7 @@ export function createThreadingFunctions(host){
                 ]));
                 // A pseudo-handle cannot be closed: duplicating one and closing
                 // the source leaves both usable, as it does on Windows.
-                if (closesSource)
+                if (closesSource && !reused)
                 {
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);

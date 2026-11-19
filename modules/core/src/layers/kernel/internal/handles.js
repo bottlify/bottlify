@@ -104,6 +104,12 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
             {
                 return false;
             }
+            // A number closed before is free no longer.
+            const freed = free.indexOf(handle);
+            if (freed >= 0)
+            {
+                free.splice(freed, 1);
+            }
             entries.set(handle, { type, object, access });
             opened++;
             watch?.opened(handle, type, object, access);

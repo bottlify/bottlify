@@ -290,6 +290,18 @@ function fakeKernel(){
                 }
                 return entry.object;
             },
+            /**
+             * @param {number} handle @param {string} type @param {any} object
+             * @param {number | null} [access]
+             */
+            adopt(handle, type, object, access = null){
+                if (handles.has(handle))
+                {
+                    return false;
+                }
+                handles.set(handle, { type, object, access });
+                return true;
+            },
             /** @param {number} handle */
             typeOf: handle=>handles.get(handle)?.type ?? null,
             /** @param {number} handle */
@@ -1228,6 +1240,26 @@ test('DuplicateHandle accepts the pseudo-handles wherever a handle is taken', ()
         fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x308, 0, 0, 1]), 1);
     assert.ok(writtenU32(written, 0x308) > 0);
 });
+
+test('DuplicateHandle that closes its source takes the source\'s number, unless it is protected',
+    ()=>{
+        // Wine's process.c test_DuplicateHandle: the duplicate is f again.
+        const { fns, kernel, written } = setup();
+        const event = kernel.handles.open('event', { kind: 'event', signalled: false });
+        assert.equal(fns.DuplicateHandle.handler(
+            [0xffffffff, event, 0xffffffff, 0x300, 0, 1, 3]), 1);
+        assert.equal(writtenU32(written, 0x300), event, 'the same number');
+        assert.equal(kernel.handles.typeOf(event), 'event');
+        const flags = 0x310;
+        assert.equal(fns.GetHandleInformation.handler([event, flags]), 1);
+        assert.equal(writtenU32(written, flags), 1, 'HANDLE_FLAG_INHERIT, as asked');
+
+        assert.equal(fns.SetHandleInformation.handler([event, 2, 2]), 1);
+        assert.equal(fns.DuplicateHandle.handler(
+            [0xffffffff, event, 0xffffffff, 0x304, 0, 1, 3]), 1);
+        assert.notEqual(writtenU32(written, 0x304), event, 'protected from close: both stay');
+        assert.equal(kernel.handles.typeOf(event), 'event');
+    });
 
 test('DuplicateHandle puts a duplicate into another process of the run, and takes one out', ()=>{
     // A server hands its client the event it signals: the duplicate is in
