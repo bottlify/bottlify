@@ -778,8 +778,14 @@ export function createProcessPolicyFunctions(host){
                 writeDword(block >>> 0, 0);
                 const status = (host.cancelSynchronous?.(thread, request >>> 0) ?? 0) > 0
                     ? STATUS.SUCCESS : STATUS.NOT_FOUND;
+                // Status and Information, each a pointer wide.
                 writeDword(block >>> 0, status);
                 writeDword((block >>> 0) + 4, 0);
+                if (wide)
+                {
+                    writeDword((block >>> 0) + 8, 0);
+                    writeDword((block >>> 0) + 12, 0);
+                }
                 return status;
             },
         },
