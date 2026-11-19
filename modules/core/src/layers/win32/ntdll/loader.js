@@ -73,6 +73,13 @@ export const LOADER_ENTRIES = ['GetModuleHandleExW', 'LoadLibraryW', 'LoadLibrar
  * @property {{ register: (callback: number, context: number) => number,
  *     unregister: (cookie: number) => boolean }} [notifications]  The loader's
  *     LdrRegisterDllNotification callbacks; absent, the two calls are not exported.
+ * @property {{ inProgress: () => boolean, begin: () => Promise<any>,
+ *     terminate: () => void }} [shutdown]
+ *     The process's shutdown: whether it has begun (ExitProcess or
+ *     LdrShutdownProcess), and its beginning, every image still attached told
+ *     DLL_PROCESS_DETACH; and NtTerminateProcess's mark that it is ending
+ *     (process.js). Absent, the process is never shutting down and
+ *     LdrShutdownProcess is not exported.
  */
 
 /**
@@ -80,7 +87,7 @@ export const LOADER_ENTRIES = ['GetModuleHandleExW', 'LoadLibraryW', 'LoadLibrar
  * @returns {Record<string, { argBytes: number, handler: Function }>}
  */
 export function createLoaderFunctions({
-    readMemory, writeMemory, kernel32, allocate, free, notifications,
+    readMemory, writeMemory, kernel32, allocate, free, notifications, shutdown,
 })
 {
     /** How many times the loader lock was taken: each a cookie of its own. */
@@ -570,7 +577,24 @@ export function createLoaderFunctions({
             },
         },
 
-        /** BOOLEAN RtlDllShutdownInProgress(void): the process is not ending while it runs. */
-        RtlDllShutdownInProgress: { argBytes: 0, handler: ()=>0 },
+        /**
+         * BOOLEAN RtlDllShutdownInProgress(void): TRUE once the process has
+         * begun to shut down - inside ExitProcess's DLL_PROCESS_DETACH calls,
+         * and after LdrShutdownProcess.
+         */
+        RtlDllShutdownInProgress: { argBytes: 0, handler: ()=>(shutdown?.inProgress() ? 1 : 0) },
+
+        ...shutdown ? {
+            /**
+             * NTSTATUS LdrShutdownProcess(void): every image still attached
+             * is told DLL_PROCESS_DETACH, the last attached first, with
+             * lpvReserved non-NULL, on this thread; the process is shutting
+             * down from then on and goes on running.
+             */
+            LdrShutdownProcess: {
+                argBytes: 0,
+                handler: ()=>shutdown.begin().then(()=>STATUS.SUCCESS),
+            },
+        } : {},
     };
 }

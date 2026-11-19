@@ -415,6 +415,16 @@ test('CreateThread makes a thread and does not switch to it', ()=>{
     assert.deepEqual(parked, [], 'the creating thread keeps running');
 });
 
+test('a process that has begun to end makes no thread: ERROR_ACCESS_DENIED', ()=>{
+    // Wine's kernel32:loader (child phase 0): after NtTerminateProcess with
+    // no handle, CreateThread fails with ERROR_ACCESS_DENIED.
+    const { kernel, fns, host, errors } = setup();
+    host.terminating = ()=>true;
+    assert.equal(fns.CreateThread.handler([0, 0x10000, 0x401000, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 5);
+    assert.equal(kernel.state.created.length, 0, 'nothing made');
+});
+
 test('CreateThread begins the thread where the libraries are told of it, its routine above', ()=>{
     const { kernel, fns, host } = setup();
     host.threadStart = ()=>0x9000;

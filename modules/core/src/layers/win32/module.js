@@ -3170,6 +3170,12 @@ export function createWin32Module(){
             /** Set once the process has begun to end, so that it ends only once. */
             let ending = false;
             /**
+             * Set once the process has begun to end - NtTerminateProcess with no
+             * handle, or ExitProcess - after which no thread is made in it
+             * (CreateThread's ERROR_ACCESS_DENIED, as Windows refuses one).
+             */
+            let terminating = false;
+            /**
              * ExitProcess, and the C runtime's exits that end in it: every other
              * thread ends, each image still attached is told DLL_PROCESS_DETACH
              * on this thread -- the last attached first, its TLS callbacks before
@@ -3197,9 +3203,8 @@ export function createWin32Module(){
              * @returns {Promise<number> | null}
              */
             const detachAndEnd = code=>{
-                /** @type {{ base: number, routines: number[] }[]} */
-                const attached = ending ? [] : (modules.processDetach?.() ?? []);
-                ending = true;
+                terminating = true;
+                const attached = shuttingDown();
                 if (attached.length === 0)
                 {
                     exitCode = code;
@@ -3214,20 +3219,59 @@ export function createWin32Module(){
                         kernel.exitThread(thread, code);
                     }
                 }
+                return tellDetach(attached, self).then(()=>{
+                    exitCode = code;
+                    processEnded();
+                    return 0;
+                });
+            };
+
+            /**
+             * The images still attached, the last attached first, taken once:
+             * from here the process is shutting down (RtlDllShutdownInProgress)
+             * and a later ExitProcess tells no image again.
+             *
+             * @returns {{ base: number, routines: number[] }[]}
+             */
+            const shuttingDown = ()=>{
+                const attached = ending ? [] : (modules.processDetach?.() ?? []);
+                ending = true;
+                return attached;
+            };
+
+            /**
+             * Tells each image DLL_PROCESS_DETACH on `thread`, in turn, with
+             * lpvReserved non-NULL as at a process's end.
+             *
+             * @param {{ base: number, routines: number[] }[]} attached @param {any} thread
+             * @returns {Promise<any>}
+             */
+            const tellDetach = (attached, thread)=>{
                 /** @type {Promise<any>} */
                 let told = Promise.resolve(0);
                 for (const image of attached)
                 {
                     told = told.then(()=>callEntryPoint({
                         routines: image.routines, base: image.base,
-                        reason: DLL_PROCESS_DETACH, reserved: 1, thread: self,
+                        reason: DLL_PROCESS_DETACH, reserved: 1, thread,
                     }));
                 }
-                return told.then(()=>{
-                    exitCode = code;
-                    processEnded();
-                    return 0;
-                });
+                return told;
+            };
+
+            /**
+             * LdrShutdownProcess: what ExitProcess does before it ends the
+             * process - each image still attached told DLL_PROCESS_DETACH on
+             * this thread, and the process shutting down from then on - with
+             * the process going on and its other threads left as they are, as
+             * the native call does; an image is never told twice.
+             */
+            const processShutdown = {
+                inProgress: ()=>ending,
+                begin: ()=>tellDetach(shuttingDown(), kernel.currentThread()),
+                terminate: ()=>{
+                    terminating = true;
+                },
             };
 
             // comctl32's image lists, drawn with gdi32's own calls: its exports,
@@ -3543,6 +3587,7 @@ export function createWin32Module(){
                         // a stub and a build that never makes a thread needs none.
                         threadReturn: ()=>threadReturnAddress(),
                         threadStart: ()=>threadCalls.start(),
+                        terminating: ()=>terminating,
                         endThread,
                         processId,
                         parentProcessId: config?.parentProcessId,
@@ -3861,6 +3906,9 @@ export function createWin32Module(){
                         setLastError: setError,
                         namedObjects,
                         viewRegions,
+                        /** @param {number} address @param {number} length */
+                        watchWrites: (address, length)=>
+                            memory.watchWrites?.(address, length) ?? null,
                         handleAccess: (/** @type {number} */ handle)=>
                             kernel.handles.access?.(handle) ?? null,
                         // Views of one page-file section agree at the edges of
@@ -6643,6 +6691,7 @@ export function createWin32Module(){
                 kernel32: libraries['KERNEL32.dll'],
                 pool: threadPool.native,
                 dllNotifications: modules.dllNotifications,
+                processShutdown,
                 crt: libraries['msvcrt.dll'],
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 currentThread: ()=>kernel.currentThread(),

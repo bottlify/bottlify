@@ -69,6 +69,10 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {number} stackCommit
  * @property {boolean} relocatable     Whether it may be placed away from its base: it carries
  *                                     relocations, needs none (x86-64), or holds no address.
+ * @property {boolean} [relocsStripped]  IMAGE_FILE_RELOCS_STRIPPED: it may never be moved. An
+ *                                     image without relocations and without this flag is
+ *                                     moved, nothing fixed up, when its base is taken, as
+ *                                     Windows' loader moves one (`placeLibrary`).
  * @property {boolean} [dynamicBase]   Linked for ASLR (DYNAMIC_BASE).
  * @property {boolean} library         A DLL, as against a program: only a DLL's imports
  *                                     are resolved and its entry point run when one is
@@ -250,6 +254,7 @@ function parseHeaders(bytes, wide){
             || bits === 64 && (characteristics & IMAGE_FILE_RELOCS_STRIPPED) === 0
             || holdsNoAddress(characteristics, view.getUint32(optional + 16, true), sections,
                 directories),
+        relocsStripped: (characteristics & IMAGE_FILE_RELOCS_STRIPPED) !== 0,
         library: (characteristics & IMAGE_FILE_DLL) !== 0,
         largeAddressAware: (characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE) !== 0,
         // IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE: linked to be placed anywhere (ASLR), which
@@ -549,9 +554,12 @@ export function applyRelocations(mapped, image, delta){
         return 0;
     }
     const directory = image.directories[DIR_BASERELOC];
-    // Movable with no directory: an x86-64 image that needs no fixup, or one
-    // that holds no absolute address at all (`holdsNoAddress`).
-    if ((!directory || directory.size === 0) && image.relocatable)
+    // Movable with no directory: an x86-64 image that needs no fixup, one
+    // that holds no absolute address at all (`holdsNoAddress`), or one whose
+    // relocations are not marked stripped, which Windows' loader moves as it
+    // lies.
+    if ((!directory || directory.size === 0)
+        && (image.relocatable || image.relocsStripped === false))
     {
         return 0;
     }

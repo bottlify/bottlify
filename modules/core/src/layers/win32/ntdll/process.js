@@ -151,6 +151,9 @@ const DOS_DEVICES = '\\??\\';
  *           NtQueryInformationThread, which names its block).
  * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => void} [terminate]  Marks the process as ending, which
+ *           NtTerminateProcess with no handle begins: no thread is made in it
+ *           from then on.
  */
 
 /** @param {string} text @returns {Uint8Array} UTF-16, unterminated. */
@@ -734,6 +737,7 @@ export function createProcessFunctions(host){
                     return quietly('TerminateProcess', [CURRENT_PROCESS, ending]).result;
                 }
                 ending = code >>> 0;
+                host.terminate?.();
                 const caller = quietly('GetCurrentThreadId', []).result >>> 0;
                 for (const id of host.processes?.()[0]?.threads ?? [])
                 {

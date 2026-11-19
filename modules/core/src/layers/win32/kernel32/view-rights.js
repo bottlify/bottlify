@@ -103,3 +103,29 @@ export function imageWriteCopy(page){
     const copied = base === 0x04 ? 0x08 : base === 0x40 ? 0x80 : base;
     return (page & ~PAGE_MASK) | copied;
 }
+
+/**
+ * Whether `page` is copy-on-write: PAGE_WRITECOPY or PAGE_EXECUTE_WRITECOPY,
+ * whose first write gives the process a page of its own.
+ *
+ * @param {number} page  PAGE_*
+ * @returns {boolean}
+ */
+export function copyOnWrite(page){
+    const base = page & PAGE_MASK;
+    return base === 0x08 || base === 0x80;
+}
+
+/**
+ * The protection a copy-on-write page has once it is written: the copy is
+ * the process's own, read-write (or executable read-write), as VirtualQuery
+ * then answers on Windows; any other protection is left as it is.
+ *
+ * @param {number} page  PAGE_*
+ * @returns {number}
+ */
+export function writtenCopy(page){
+    const base = page & PAGE_MASK;
+    const written = base === 0x08 ? 0x04 : base === 0x80 ? 0x40 : base;
+    return (page & ~PAGE_MASK) | written;
+}

@@ -2257,9 +2257,11 @@ loaded image, and a view of a `SEC_IMAGE` section, answers as Windows maps one: 
 `PAGE_EXECUTE_WRITECOPY`, its headers `PAGE_READONLY`, each section by its characteristics (a
 writable one copy-on-write unless shared), a page no section covers `PAGE_NOACCESS`, read from the
 image's own headers; `VirtualProtect` of its pages is kept and handed back, a section view's
-writable protection kept as its copy-on-write form. A copy-on-write page
-still reads `PAGE_WRITECOPY` after it is written, where Windows turns it `PAGE_READWRITE`: no write
-is seen page by page. What a
+writable protection kept as its copy-on-write form. A view's copy-on-write page reads
+`PAGE_READWRITE` (`PAGE_EXECUTE_READWRITE`) once it is written, as on Windows: the view is
+watched from its first such page by the engine's page marks, which every store tests anyway, and
+the write is found where a protection is read; where the engine cannot tell writes (no write
+watch), and on a loaded image's own pages, the page still reads its copy-on-write protection. What a
 program can tell apart only by faulting is not reproduced: a closed page faults where the processor
 can close it, and so does a `PAGE_GUARD` page until its first touch, which takes the guard away
 and is a stack's growth inside the thread's stack reservation and `STATUS_GUARD_PAGE_VIOLATION`

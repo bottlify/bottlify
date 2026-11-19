@@ -3073,13 +3073,16 @@ export async function readWholeFile(filesystem, blocks, path, piece = WHOLE_READ
  * absolute address in it assumes that base -- and takes it when it lies in the
  * modules' space and nothing holds it, or when `claim` can give up that span
  * from elsewhere: a base such a library names is free memory of a new process
- * on Windows, whatever this layout has put there. Otherwise it is refused, as
- * the PE format says a loader refuses such an image, rather than mapped
- * somewhere its addresses do not describe. A library that can move and finds
+ * on Windows, whatever this layout has put there. Otherwise, with its
+ * relocations marked stripped (IMAGE_FILE_RELOCS_STRIPPED), it is refused, as
+ * the PE format says a loader refuses such an image; without that mark it is
+ * placed as a movable one is, nothing fixed up, as Windows' loader moves an
+ * image whose relocation directory is merely absent. A library that can move and finds
  * the modules' space full is put wherever `claim` finds room, as Windows puts
  * one in any free span.
  *
- * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number }} image
+ * @param {{ relocatable: boolean, imageBase: number, sizeOfImage: number,
+ *     relocsStripped?: boolean }} image
  * @param {{ next: number, floor: number, limit: number,
  *     holder: (base: number, size: number) => { base: number, size: number } | null,
  *     claim?: (base: number | null, size: number) => number }} space
@@ -3099,7 +3102,10 @@ export function placeLibrary(image, { next, floor, limit, holder, claim }){
         {
             return { base };
         }
-        return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+        if (image.relocsStripped !== false)
+        {
+            return { refused: `no relocations, and 0x${base.toString(16)} is not free` };
+        }
     }
     // On a 64 KiB granule, as Windows maps every image: the CLR refuses a
     // native image that lies elsewhere.

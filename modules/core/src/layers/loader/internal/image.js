@@ -120,7 +120,9 @@ function layOut(file, base, { wide = false, bits } = {}){
     const image = parsePe(file, { wide, bits });
     const loadBase = base ?? image.imageBase;
 
-    if (loadBase !== image.imageBase && !image.relocatable)
+    // One whose relocations are merely absent is moved as it lies
+    // (`applyRelocations`); only one marked stripped must stay at its base.
+    if (loadBase !== image.imageBase && !image.relocatable && image.relocsStripped !== false)
     {
         throw new Error(
             `image must load at 0x${image.imageBase.toString(16)}: it carries no relocations`,

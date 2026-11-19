@@ -145,12 +145,20 @@ test('a library that cannot move has its base again once it is unloaded, in the 
         // the lower edge (4) and the upper (8), the second loaded at the base
         // (16), the first loaded there again (32).
         const BASE = 0x10000000;
-        const fixed = ()=>buildExe({
-            dll: true,
-            imageBase: BASE,
-            imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
-            code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00], // mov eax, TRUE; ret 12
-        });
+        // Relocations stripped (IMAGE_FILE_RELOCS_STRIPPED): one merely without
+        // them would be moved as it lies.
+        const fixed = ()=>{
+            const file = buildExe({
+                dll: true,
+                imageBase: BASE,
+                imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
+                code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00], // mov eax, TRUE; ret 12
+            });
+            const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+            const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+            view.setUint16(characteristics, view.getUint16(characteristics, true) | 1, true);
+            return file;
+        };
         const first = fixed();
         const header = new DataView(first.buffer, first.byteOffset, first.byteLength);
         const end = BASE + header.getUint32(header.getUint32(0x3c, true) + 24 + 56, true);
