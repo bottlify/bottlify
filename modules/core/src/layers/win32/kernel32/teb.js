@@ -45,6 +45,14 @@ export const TEB = Object.freeze({
     LAST_ERROR: 0x34,
     /** ActivationContextStackPointer: the thread's (a fiber's own) stack of contexts. */
     ACTIVATION_STACK: 0x1a8,
+    /** RealClientId: the process and thread ids again, as the kernel made them. */
+    REAL_CLIENT_ID: 0x6b4,
+    /**
+     * StaticUnicodeString: a UNICODE_STRING over StaticUnicodeBuffer, the
+     * 261 characters after it that ntdll builds names in.
+     */
+    STATIC_UNICODE_STRING: 0xbf8,
+    STATIC_UNICODE_BUFFER: 0xc00,
     /**
      * DeallocationStack: the bottom of the stack's reservation, below the
      * committed StackLimit on Windows; GetCurrentThreadStackLimits' low end.
@@ -79,6 +87,12 @@ export const SKIP_THREAD_ATTACH = 0x0008;
  */
 export const NO_FIBER = 0x1e00;
 
+/** The critical section time-out the process block names, in days. */
+const CRITICAL_SECTION_DAYS = 30n;
+
+/** StaticUnicodeBuffer's size in bytes: 261 characters, its MaximumLength. */
+const STATIC_UNICODE_BYTES = 261 * 2;
+
 /**
  * The session every process here runs in: the interactive user's, the one
  * WTSGetActiveConsoleSessionId names. Its number is in the process block, in
@@ -97,6 +111,8 @@ export const PEB = Object.freeze({
     PROCESS_PARAMETERS: 0x10,
     PROCESS_HEAP: 0x18,
     NUMBER_OF_PROCESSORS: 0x64,
+    /** CriticalSectionTimeout: how long a critical section waits before it is reported. */
+    CRITICAL_SECTION_TIMEOUT: 0x70,
     OS_MAJOR_VERSION: 0xa4,
     OS_MINOR_VERSION: 0xa8,
     OS_BUILD_NUMBER: 0xac,
@@ -423,6 +439,15 @@ export function createProcessBlocks(options){
     write(peb + pebFields.NUMBER_OF_PROCESSORS, options.processors ?? 1);
     // Read straight from the block by code naming its session's objects.
     write(peb + pebFields.SESSION_ID, INTERACTIVE_SESSION);
+    // Thirty days in 100-nanosecond units, relative (negative), as the
+    // session manager's default sets it; the i386 block only, the x64 one
+    // keeping its field zero.
+    if (pointer === 4)
+    {
+        const timeout = -CRITICAL_SECTION_DAYS * 24n * 3600n * 10_000_000n;
+        write(peb + PEB.CRITICAL_SECTION_TIMEOUT, Number(BigInt.asUintN(32, timeout)));
+        write(peb + PEB.CRITICAL_SECTION_TIMEOUT + 4, Number(BigInt.asUintN(32, timeout >> 32n)));
+    }
 
     // Strings are laid out after the parameter block, in the same allocation.
     let strings = params + paramsFields.SIZE;
@@ -766,6 +791,15 @@ export function createProcessBlocks(options){
             writePointer(teb + tebFields.THREAD_ID, id);
             writePointer(teb + tebFields.TLS_POINTER, tls);
             writePointer(teb + tebFields.PEB, peb);
+            // The i386 block's names as Windows makes them before the thread
+            // runs; the x64 block keeps these fields zero.
+            if (pointer === 4)
+            {
+                write(teb + TEB.REAL_CLIENT_ID, processId);
+                write(teb + TEB.REAL_CLIENT_ID + 4, id);
+                write(teb + TEB.STATIC_UNICODE_STRING, STATIC_UNICODE_BYTES << 16);
+                write(teb + TEB.STATIC_UNICODE_STRING + 4, teb + TEB.STATIC_UNICODE_BUFFER);
+            }
 
             threadHeld.set(teb, { tls, blocks: [teb, tls], locals: copies });
             return { teb, tls };

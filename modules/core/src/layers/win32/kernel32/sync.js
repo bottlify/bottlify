@@ -91,6 +91,8 @@ const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SIGNAL_REFUSED = 156;
 /** A thread that has ended cannot be suspended. */
 const ERROR_ACCESS_DENIED = 5;
+/** NTSTATUS of a native call on a child that cannot be asked. */
+const STATUS_ACCESS_DENIED = 0xc0000022;
 /** What GetThreadContext answers for a thread that has ended. */
 const ERROR_GEN_FAILURE = 31;
 /** What GetThreadSelectorEntry answers for a selector it holds nothing for. */
@@ -730,6 +732,33 @@ export function createSyncFunctions(host){
         return asked;
     };
 
+    /**
+     * A native call on a thread of a child, made where the child runs: its
+     * NTSTATUS, STATUS_ACCESS_DENIED for a child the run cannot ask; null
+     * for a handle that names no child's thread.
+     *
+     * @param {number} handle @param {string} name
+     * @param {import('./cross-process.js').CrossArg[]} rest @param {(number | null)[]} into
+     * @returns {number | Promise<number> | null}
+     */
+    const onChildNative = (handle, name, rest, into)=>{
+        /** @type {import('./cross-process.js').ChildThread | null} */
+        const child = (handle >>> 0) === CURRENT_THREAD ? null : object(handle, 'process-thread');
+        if (!child)
+        {
+            return null;
+        }
+        const asked = host.setLastErrorFor ? askChild({ askChild: host.askChild,
+            writeMemory: host.writeMemory, currentThread: host.currentThread,
+            setLastErrorFor: host.setLastErrorFor }, child.process,
+        { call: name, args: [threadArg(child), ...rest] }, [null, ...into],
+        // A child gone, or one that refused the call, answers no buffers:
+        // refused, never a success of 0.
+        (answer, result)=>(answer.outs.every(bytes=>!bytes) ? STATUS_ACCESS_DENIED : result))
+            : null;
+        return asked ?? STATUS_ACCESS_DENIED;
+    };
+
     /** @param {number} handle */
     const threadOf = handle=>(handle >>> 0) === CURRENT_THREAD
         ? host.currentThread()
@@ -814,6 +843,7 @@ export function createSyncFunctions(host){
             setLastError: host.setLastError,
             allocate: host.allocate,
             divergence: host.divergence,
+            onChildThread: onChildNative,
             threadTimes: (handle, at)=>{
                 const thread = threadOf(handle);
                 writeTimes([at, at + 8, at + 16, at + 24],

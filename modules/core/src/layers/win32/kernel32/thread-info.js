@@ -100,6 +100,10 @@ const errorOf = status=>(status === STATUS_INVALID_HANDLE ? ERROR_INVALID_HANDLE
  * @property {(handle: number, at: number) => void} threadTimes
  *           GetThreadTimes' four FILETIMEs for a thread, written in a row at `at`.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(handle: number, call: string, rest: import('./cross-process.js').CrossArg[],
+ *     into: (number | null)[]) => number | Promise<number> | null} [onChildThread]
+ *           A native call on a thread of a child, made in the child where the
+ *           thread is (`cross-process.js`); null for a handle that names none.
  */
 
 /**
@@ -258,17 +262,25 @@ export function createThreadInfoFunctions(host){
      * @param {number[]} args
      */
     const query = ([handle, infoClass, at, length, returned])=>{
+        // The limited right reads the classes anyone may read; the others
+        // need THREAD_QUERY_INFORMATION - on this handle, whosever the thread.
+        const granted = (handle >>> 0) === CURRENT_THREAD ? null
+            : kernel.handles.access?.(handle >>> 0) ?? null;
+        const right = LIMITED_CLASSES.has(infoClass >>> 0)
+            ? THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION;
         const thread = threadOf(handle);
         if (!thread)
         {
-            return STATUS_INVALID_HANDLE;
+            // A thread of a child is asked where it runs: its block, its ids,
+            // its times are the child's.
+            const child = !allows(granted, right) ? null : host.onChildThread?.(handle,
+                'NtQueryInformationThread', [infoClass >>> 0, { out: length >>> 0 },
+                    length >>> 0, (returned >>> 0) === 0 ? 0 : { out: 4 }],
+                [null, at >>> 0, null, (returned >>> 0) === 0 ? null : returned >>> 0]);
+            return child ?? (granted !== null && !allows(granted, right)
+                ? STATUS_ACCESS_DENIED : STATUS_INVALID_HANDLE);
         }
-        // The limited right reads the classes anyone may read; the others
-        // need THREAD_QUERY_INFORMATION.
-        const granted = (handle >>> 0) === CURRENT_THREAD ? null
-            : kernel.handles.access?.(handle >>> 0) ?? null;
-        if (!allows(granted, LIMITED_CLASSES.has(infoClass >>> 0)
-            ? THREAD_QUERY_LIMITED_INFORMATION : THREAD_QUERY_INFORMATION))
+        if (!allows(granted, right))
         {
             return STATUS_ACCESS_DENIED;
         }

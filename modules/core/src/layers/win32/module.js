@@ -7342,6 +7342,8 @@ export function createWin32Module(){
                     table: /** @type {any} */ ({ ...libraries['KERNEL32.dll'],
                         NtQueryInformationProcess:
                             libraries['ntdll.dll']?.NtQueryInformationProcess,
+                        NtQueryInformationThread:
+                            libraries['ntdll.dll']?.NtQueryInformationThread,
                         [DEBUG_ATTACH]: { handler: debugAttached },
                         [DEBUG_BREAK]: { handler: breakIn },
                         .../** @type {any} */ (libraries['KERNEL32.dll'])?.[VIRTUAL_MEMORY]
