@@ -75,6 +75,20 @@ const JOB = Object.freeze({
 });
 /** JOBOBJECT_BASIC_LIMIT_INFORMATION: two LARGE_INTEGERs, then seven words, padded to 8. */
 const BASIC_LIMIT_BYTES = 48;
+/** Its LimitFlags, and the one limit kept to: the job's processes end with its last handle. */
+const LIMIT_FLAGS = 16;
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+/**
+ * The messages a job posts to its completion port (winnt.h's JOB_OBJECT_MSG_*),
+ * each as the packet's byte count, with the job's key as the completion key
+ * and the process id as the OVERLAPPED pointer.
+ */
+const JOB_OBJECT_MSG = Object.freeze({
+    ACTIVE_PROCESS_ZERO: 4,
+    NEW_PROCESS: 6,
+    EXIT_PROCESS: 7,
+    ABNORMAL_EXIT_PROCESS: 8,
+});
 /** The basic limits, IO_COUNTERS, then four SIZE_Ts. */
 const EXTENDED_LIMIT_BYTES = BASIC_LIMIT_BYTES + 48 + 16;
 /**
@@ -171,6 +185,11 @@ const HANDLE_PROBE = 1 << 20;
  * @property {(values: Record<string, number>) => void} [setRegisters]  The running
  *           thread's registers, EIP and ESP among them: where it goes on from.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(port: any, packet: { transferred: number, key: number, overlapped: number })
+ *     => void} [postCompletion]  A packet posted to a completion port object.
+ * @property {(events: { exited: (process: any, code: number) => void,
+ *     closed: (job: any) => void }) => void} [listen]  Where a job is told of a process
+ *     of this one's that has exited, and of a job's handle closed.
  */
 
 /** @param {ProcessPolicyHost} host */
@@ -311,7 +330,8 @@ export function createProcessPolicyFunctions(host){
      * them and never reset, as Windows' job object is.
      *
      * @typedef {{ kind: 'job', name: string | null, processes: Set<any>, terminated: boolean,
-     *     total: number, waitable: any, extended: Uint8Array, kept: Map<number, Uint8Array> }} Job
+     *     total: number, waitable: any, extended: Uint8Array, kept: Map<number, Uint8Array>,
+     *     port: { object: any, key: number } | null }} Job
      */
     /** @param {number} handle @returns {Job | null} */
     const jobOf = handle=>host.objectOf(handle >>> 0, 'job');
@@ -385,7 +405,7 @@ export function createProcessPolicyFunctions(host){
         const job = found ?? { kind: 'job', name, processes: new Set(), terminated: false,
             total: 0, waitable: kernel.createEvent({ manualReset: true, signalled: false,
                 name: name ?? 'job' }),
-            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map() };
+            extended: new Uint8Array(EXTENDED_LIMIT_BYTES), kept: new Map(), port: null };
         jobs.add(job);
         host.namedObjects?.remember(name, 'job', job, found !== null, ()=>{});
         return { handle: kernel.handles.open('job', job), reused: found !== null };
@@ -461,9 +481,96 @@ export function createProcessPolicyFunctions(host){
         }
     };
 
+    /** @param {any} process @returns {number} its id, this one's as its own */
+    const idOf = process=>(process === SELF ? host.processId ?? 0 : process.id ?? 0) >>> 0;
+
     /** The ids of the processes a job holds that run, this one's as its own. @param {Job} job */
-    const jobProcessIds = job=>[...job.processes].filter(running).map(process=>(process === SELF
-        ? host.processId ?? 0 : process.id ?? 0) >>> 0);
+    const jobProcessIds = job=>[...job.processes].filter(running).map(idOf);
+
+    /**
+     * Posts a job's message to the completion port it was associated with,
+     * if any: the message as the byte count, the job's key, the id.
+     *
+     * @param {Job} job @param {number} message @param {number} id
+     */
+    const tell = (job, message, id)=>{
+        if (job.port)
+        {
+            host.postCompletion?.(job.port.object, { transferred: message,
+                key: job.port.key, overlapped: id >>> 0 });
+        }
+    };
+
+    /**
+     * JobObjectAssociateCompletionPortInformation: a job takes one port, for
+     * good - a second is a bad parameter, as is a handle that names no port;
+     * no port at all is accepted and changes nothing, as from Windows 8. The
+     * port hears at once of each process the job already runs.
+     *
+     * @param {Job} job @param {Uint8Array} given  JOBOBJECT_ASSOCIATE_COMPLETION_PORT
+     */
+    const associatePort = (job, given)=>{
+        const view = new DataView(given.slice().buffer);
+        const key = view.getUint32(0, true);
+        const handle = view.getUint32(4, true);
+        if (handle === 0)
+        {
+            return 1;
+        }
+        const object = job.port ? null : host.objectOf(handle, 'iocp');
+        if (!object)
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        job.port = { object, key };
+        job.kept.set(JOB.ASSOCIATE_COMPLETION_PORT, given.slice());
+        for (const process of [...job.processes].filter(running))
+        {
+            tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
+        }
+        return 1;
+    };
+
+    // A process of this one's has exited: each job holding it tells its port,
+    // and that its last running process has gone. A code with an error's
+    // severity, an exception's, is an abnormal end.
+    host.listen?.({
+        exited(process, code){
+            for (const job of jobsHolding(process))
+            {
+                tell(job, (code >>> 30) === 3 ? JOB_OBJECT_MSG.ABNORMAL_EXIT_PROCESS
+                    : JOB_OBJECT_MSG.EXIT_PROCESS, idOf(process));
+                if (![...job.processes].some(running))
+                {
+                    tell(job, JOB_OBJECT_MSG.ACTIVE_PROCESS_ZERO, 0);
+                }
+            }
+        },
+
+        // With a job's last handle, a job set to kill on close ends every
+        // process it runs, this one last (TerminateJobObject's order).
+        closed(job){
+            if (kernel.handles.holds(job))
+            {
+                return;
+            }
+            jobs.delete(job);
+            const flags = new DataView(job.extended.buffer).getUint32(LIMIT_FLAGS, true);
+            if ((flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) === 0)
+            {
+                return;
+            }
+            const ending = [...job.processes].filter(running);
+            for (const process of ending.filter(each=>each !== SELF))
+            {
+                host.terminateProcess?.(process, 0);
+            }
+            if (ending.includes(SELF))
+            {
+                host.terminateProcess?.(null, 0);
+            }
+        },
+    });
 
     /**
      * The native calls over the same jobs, which ntdll publishes: a job one
@@ -736,6 +843,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     job.processes.add(process);
                     job.total++;
+                    tell(job, JOB_OBJECT_MSG.NEW_PROCESS, idOf(process));
                 }
                 return 1;
             },
@@ -778,8 +886,10 @@ export function createProcessPolicyFunctions(host){
          * BOOL SetInformationJobObject(HANDLE hJob, JOBOBJECTINFOCLASS,
          *     LPVOID lpJobObjectInformation, DWORD cbJobObjectInformationLength)
          *
-         * The limits are kept and read back; none is enforced, there being
-         * one address space and no processor time to ration.
+         * The limits are kept and read back; of them only
+         * JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE is kept to, there being one
+         * address space and no processor time to ration. A completion port
+         * associated hears the job's messages (`associatePort`).
          */
         SetInformationJobObject: {
             argBytes: 16,
@@ -798,6 +908,10 @@ export function createProcessPolicyFunctions(host){
                 if ((length >>> 0) !== record.length)
                 {
                     return fail(ERROR_BAD_LENGTH);
+                }
+                if ((type >>> 0) === JOB.ASSOCIATE_COMPLETION_PORT)
+                {
+                    return associatePort(job, host.readMemory(from >>> 0, record.length));
                 }
                 record.set(host.readMemory(from >>> 0, record.length));
                 return 1;

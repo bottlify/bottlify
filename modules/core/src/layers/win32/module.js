@@ -848,6 +848,14 @@ export function createWin32Module(){
             let libraries = {};
             /** @type {ReturnType<typeof createDebuggerFunctions> | null} */
             let debuggerSide = null;
+            /**
+             * The jobs' ears: told of a child that exited and of a job's handle
+             * closed (`kernel32/process-policy.js`), once the jobs are made.
+             *
+             * @type {{ exited: (process: any, code: number) => void,
+             *     closed: (job: any) => void } | null}
+             */
+            let jobEvents = null;
             /** Whether CreateProcessWithLogonW has said it checks no password. */
             let loggedOnSaid = false;
             /**
@@ -3764,6 +3772,11 @@ export function createWin32Module(){
                         divergence: config?.divergence,
                         // A job's processes ended as TerminateProcess ends one:
                         // through a handle of the moment, or this process's own.
+                        // A job tells the completion port it was associated with.
+                        postCompletion: (port, packet)=>ports.postTo(port, packet),
+                        listenJobs: events=>{
+                            jobEvents = events;
+                        },
                         terminateProcess: (process, code)=>{
                             const terminate = /** @type {any} */ (libraries['KERNEL32.dll'])
                                 .TerminateProcess;
@@ -4192,6 +4205,7 @@ export function createWin32Module(){
                         setLastErrorFor: setErrorOn,
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         debugObjects: { closed: object=>debuggerSide?.closed(object) },
+                        jobs: { closed: object=>jobEvents?.closed(object) },
                         ports: {
                             /** @param {number} overlapped */
                             offsetOf: overlapped=>ports.offsetOf(overlapped),
@@ -7254,6 +7268,7 @@ export function createWin32Module(){
                 childExited(child, code){
                     kernel.processes.finish(child, code);
                     debuggerSide?.exited(child);
+                    jobEvents?.exited(child, code);
                     // A thread whose timed wait ran out has gone on, to
                     // whatever it waits on now.
                     const waiters = (child.waiters ?? []).filter(

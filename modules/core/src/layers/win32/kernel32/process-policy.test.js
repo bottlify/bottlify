@@ -45,6 +45,10 @@ function machine(given = {}){
     const child = { id: 0x2a0 };
     /** @type {any[]} */
     const ended = [];
+    /** @type {[any, { transferred: number, key: number, overlapped: number }][]} */
+    const posted = [];
+    /** @type {any} */
+    let jobEvents = null;
     const childHandle = handles.open('process', child);
     const threadHandle = handles.open('thread', thread);
     const kernel = {
@@ -91,12 +95,16 @@ function machine(given = {}){
             setRegisters,
             divergence,
             processors,
+            postCompletion: (port, packet)=>posted.push([port, packet]),
+            listen: events=>{
+                jobEvents = events;
+            },
         }));
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>(name === 'NtContinue'
         ? /** @type {any} */ (fns.RtlCaptureContext).natives.NtContinue : fns[name]).handler(args);
     return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread, child,
-        ended };
+        ended, posted, jobEvents: ()=>jobEvents };
 }
 
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
@@ -408,4 +416,64 @@ test('a job made by name is the one OpenJobObject and NtOpenJobObject find', ()=
     view.setUint32(0x320c, 0x80, true);
     assert.equal(natives.NtCreateJobObject.handler([0x3400, 0x1f001f, 0x3200]) >>> 0, 0x40000000,
         'OBJ_OPENIF: STATUS_OBJECT_NAME_EXISTS');
+});
+
+test('a job tells its completion port of its processes, and ends them with its last handle', ()=>{
+    // Wine's process.c test_CompletionPort and test_KillOnJobClose.
+    const { view, call, errors, handles, childHandle, child, ended, posted, jobEvents } =
+        machine();
+    const [NEW_PROCESS, EXIT_PROCESS, ACTIVE_PROCESS_ZERO, ABNORMAL_EXIT] = [6, 7, 4, 8];
+    const job = call('CreateJobObjectW', 0, 0);
+    const port = { kind: 'iocp' };
+    const portHandle = handles.open('iocp', port);
+    const associate = (/** @type {number} */ key, /** @type {number} */ handle)=>{
+        view.setUint32(0x3000, key, true);
+        view.setUint32(0x3004, handle, true);
+        return call('SetInformationJobObject', job, 7, 0x3000, 8);
+    };
+    assert.equal(associate(0x55, 0), 1, 'no port: accepted, nothing changes');
+    assert.equal(call('AssignProcessToJobObject', job, childHandle), 1);
+    assert.equal(posted.length, 0, 'nobody to tell yet');
+    assert.equal(associate(0x55, childHandle), 0, 'a handle that is no port');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    assert.equal(associate(0x55, portHandle), 1);
+    assert.deepEqual(posted, [[port, { transferred: NEW_PROCESS, key: 0x55, overlapped: 0x2a0 }]],
+        'the port hears of the process the job already runs');
+    assert.equal(associate(0x55, portHandle), 0, 'one port, for good');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+    const second = { id: 0x2b0 };
+    call('AssignProcessToJobObject', job, handles.open('process', second));
+    assert.deepEqual(posted.at(-1)?.[1], { transferred: NEW_PROCESS, key: 0x55,
+        overlapped: 0x2b0 });
+
+    child.exitCode = 0;
+    jobEvents().exited(child, 0);
+    assert.deepEqual(posted.at(-1)?.[1], { transferred: EXIT_PROCESS, key: 0x55,
+        overlapped: 0x2a0 });
+    /** @type {any} */ (second).exitCode = 0xc0000005;
+    jobEvents().exited(second, 0xc0000005);
+    assert.deepEqual(posted.slice(-2).map(([, packet])=>[packet.transferred, packet.overlapped]),
+        [[ABNORMAL_EXIT, 0x2b0], [ACTIVE_PROCESS_ZERO, 0]], 'an exception\'s end, then none left');
+    jobEvents().exited({ id: 0x999 }, 0);
+    assert.equal(posted.length, 5, 'a process no job holds tells nobody');
+
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: its processes end with its last handle.
+    const killing = call('CreateJobObjectW', 0, 0);
+    const third = { id: 0x2c0 };
+    call('AssignProcessToJobObject', killing, handles.open('process', third));
+    view.setUint32(0x3100 + 16, 0x2000, true);
+    assert.equal(call('SetInformationJobObject', killing, 9, 0x3100, 112), 1);
+    const duplicate = handles.open('job', handles.resolve(killing, 'job'));
+    const object = handles.resolve(killing, 'job');
+    handles.close(killing);
+    jobEvents().closed(object);
+    assert.deepEqual(ended, [], 'not while another handle holds it');
+    handles.close(duplicate);
+    jobEvents().closed(object);
+    assert.deepEqual(ended, [third]);
+    assert.equal(/** @type {any} */ (third).exitCode, 0);
+    const plain = handles.resolve(job, 'job');
+    handles.close(job);
+    jobEvents().closed(plain);
+    assert.deepEqual(ended, [third], 'a job without the limit ends nothing');
 });
