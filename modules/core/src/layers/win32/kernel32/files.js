@@ -295,6 +295,12 @@ const MOVEFILE_DELAY_UNTIL_REBOOT = 0x0004;
 const COPY_CHUNK = 1 << 20;
 /** CopyFileEx's flag for CopyFile's bFailIfExists. */
 const COPY_FILE_FAIL_IF_EXISTS = 0x1;
+/** Why CopyFileEx's progress routine is called, and what it answers. */
+const CALLBACK_CHUNK_FINISHED = 0;
+const CALLBACK_STREAM_SWITCH = 1;
+const PROGRESS_CANCEL = 1;
+const PROGRESS_STOP = 2;
+const PROGRESS_QUIET = 3;
 
 /**
  * The machine's scratch directory: what TMP and TEMP name in the environment
@@ -626,6 +632,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
+ * @property {(entry: number, args: number[], thread: any) => Promise<number>} [callGuest]
+ *           Calls guest code on a thread and answers what it returned: CopyFileEx's
+ *           progress routine.
  *           Whose call this is, for an answer that arrives after the thread has
  *           been parked -- by then the running thread is somebody else.
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
@@ -1943,6 +1952,73 @@ export function createFileFunctions(host){
     });
 
     /**
+     * Moves a file's end to `at`: 0, or the error that refuses it. A file a
+     * section or a view maps can grow and cannot be cut shorter, which would
+     * take pages from under the mapping (ERROR_USER_MAPPED_FILE).
+     *
+     * @param {{ node: any, path: string }} file @param {number} at
+     */
+    const endAt = (file, at)=>{
+        if (files.mappedAs?.(file.path) && at < (files.stat(file.path)?.size ?? 0))
+        {
+            return ERROR_USER_MAPPED_FILE;
+        }
+        files.truncate(file.node, at);
+        return 0;
+    };
+
+    /**
+     * What OpenFile does with a style: OF_EXIST answers whether the file is
+     * there, OF_DELETE deletes it, anything else opens it through the volume
+     * as CreateFile's opens are. A path that does not fit the OFSTRUCT's 128
+     * characters is refused before anything is asked of the volume.
+     *
+     * @param {string} path @param {number} flags
+     * @returns {number | { error: number }} the answer, or why there is none
+     */
+    const openFileStyle = (path, flags)=>{
+        if (path.length >= OFSTRUCT_PATH_MAX)
+        {
+            return { error: ERROR_FILENAME_EXCED_RANGE };
+        }
+        const entry = files.stat(path);
+        const exists = Boolean(entry && entry.exists);
+        if ((flags & OF_EXIST) !== 0)
+        {
+            return exists ? 1 : { error: missing(path) };
+        }
+        if ((flags & OF_DELETE) !== 0)
+        {
+            if (!exists)
+            {
+                return { error: missing(path) };
+            }
+            if (readOnlyFile(entry))
+            {
+                return { error: ERROR_ACCESS_DENIED };
+            }
+            return files.remove(path) ? 1 : { error: denied(path) };
+        }
+        const write = (flags & (OF_WRITE | OF_READWRITE)) !== 0;
+        const create = (flags & OF_CREATE) !== 0;
+        if (!exists && !create)
+        {
+            return { error: missing(path) };
+        }
+        if ((write || create) && readOnlyFile(entry))
+        {
+            return { error: ERROR_ACCESS_DENIED };
+        }
+        const node = files.open(path, { read: !write, write, create, truncate: create });
+        if (!node)
+        {
+            return { error: denied(path) };
+        }
+        host.setLastError(ERROR_SUCCESS);
+        return host.handles.open('file', { path, node, read: !write, write, position: 0 });
+    };
+
+    /**
      * The copy every spelling shares. Copied through the ordinary read and
      * write path rather than by asking the filesystem for a copy, because a
      * copy that is not a read followed by a write is a second implementation
@@ -1950,10 +2026,19 @@ export function createFileFunctions(host){
      * as a copy on Windows does; a file copied onto itself is the destination
      * open colliding with the source's, a sharing violation.
      *
+     * CopyFileEx's progress routine (`progress.routine`) is told the stream
+     * starts (CALLBACK_STREAM_SWITCH) and each chunk written after it
+     * (CALLBACK_CHUNK_FINISHED) until it answers PROGRESS_QUIET, and is handed
+     * the source's and the destination's handles. PROGRESS_CANCEL ends the
+     * copy and deletes the destination where the copy holds its deletion,
+     * PROGRESS_STOP ends it keeping what was written, both with
+     * ERROR_REQUEST_ABORTED, as does the cancel flag found set before a chunk.
+     *
      * @param {string} named @param {string} destinationNamed @param {boolean} failIfExists
+     * @param {{ routine: number, data: number, cancel: number }} [progress]
      * @returns {number | Promise<number>}
      */
-    const copyPath = (named, destinationNamed, failIfExists)=>{
+    const copyPath = (named, destinationNamed, failIfExists, progress)=>{
         if (named === '' || destinationNamed === '')
         {
             return fail(ERROR_PATH_NOT_FOUND);
@@ -2002,15 +2087,25 @@ export function createFileFunctions(host){
                 : files.stat(path)?.exists ? ERROR_ACCESS_DENIED : missing(path));
         // The source is read sharing everything; the destination written
         // sharing reading and writing, but not its deletion -- a holder of
-        // DELETE keeps it -- and settled before it is emptied.
+        // DELETE keeps it -- and settled before it is emptied. It is asked
+        // with DELETE, which a cancelled copy deletes it by, and without it
+        // when another open refuses its deletion: that copy goes on, and a
+        // cancel leaves the file where it is.
         const input = files.open(source, { read: true, shareRead: true, shareWrite: true,
             shareDelete: true });
         if (!input)
         {
             return fail(refusal(source));
         }
-        const output = files.open(destination, { read: false, write: true, create: true,
-            shareRead: true, shareWrite: true });
+        const destinationOpen = { read: false, write: true, create: true,
+            shareRead: true, shareWrite: true, shareDelete: false };
+        let deletable = true;
+        let output = files.open(destination, { ...destinationOpen, delete: true });
+        if (!output && files.openRefusal?.() === 'SHARING_VIOLATION')
+        {
+            deletable = false;
+            output = files.open(destination, destinationOpen);
+        }
         if (!output)
         {
             files.close(input);
@@ -2043,10 +2138,29 @@ export function createFileFunctions(host){
                 host.setLastError(code);
             }
         };
-        /** @param {boolean} parked */
-        const finish = parked=>{
+        // The routine is handed the two opens as handles, closed with the copy.
+        const routine = (progress?.routine ?? 0) >>> 0;
+        const handles = routine === 0 || !host.callGuest ? null : {
+            source: host.handles.open('file',
+                { path: source, node: input, read: true, write: false, position: 0 },
+                FILE_GENERIC_READ),
+            destination: host.handles.open('file',
+                { path: destination, node: output, read: false, write: true, position: 0 },
+                FILE_GENERIC_WRITE | (deletable ? DELETE : 0)),
+        };
+        const closeBoth = ()=>{
+            if (handles)
+            {
+                release(handles.source);
+                release(handles.destination);
+                return;
+            }
             files.close(input);
             files.close(output);
+        };
+        /** @param {boolean} parked */
+        const finish = parked=>{
+            closeBoth();
             files.setAttributes?.(destination, entry.attributes ?? null);
             if (entry.modified)
             {
@@ -2055,6 +2169,63 @@ export function createFileFunctions(host){
             answer(ERROR_SUCCESS, parked);
             return 1;
         };
+        /** @param {boolean} discard @param {boolean} parked */
+        const abort = (discard, parked)=>{
+            closeBoth();
+            if (discard && deletable)
+            {
+                files.remove(destination);
+            }
+            answer(ERROR_REQUEST_ABORTED, parked);
+            return 0;
+        };
+        let quiet = handles === null;
+        /** @param {number} value  a LARGE_INTEGER by value: its low and its high dword */
+        const large = value=>[value >>> 0, Math.floor(value / 0x100000000) >>> 0];
+        /**
+         * What the cancel flag or the routine says of the copy so far: null
+         * to go on.
+         *
+         * @param {number} done @param {number} reason
+         * @returns {null | 'cancel' | 'stop' | Promise<null | 'cancel' | 'stop'>}
+         */
+        const told = (done, reason)=>{
+            const cancel = (progress?.cancel ?? 0) >>> 0;
+            if (cancel !== 0 && readDword(cancel) !== 0)
+            {
+                return 'cancel';
+            }
+            if (quiet || !handles || !host.callGuest)
+            {
+                return null;
+            }
+            return host.callGuest(routine, [...large(entry.size), ...large(done),
+                ...large(entry.size), ...large(done), 1, reason, handles.source,
+                handles.destination, (progress?.data ?? 0) >>> 0], owner).then(said=>{
+                const word = said >>> 0;
+                quiet ||= word === PROGRESS_QUIET;
+                return word === PROGRESS_CANCEL ? 'cancel' : word === PROGRESS_STOP ? 'stop'
+                    : null;
+            });
+        };
+        /**
+         * Goes on from `from`, or ends the copy as `said` says.
+         *
+         * @param {null | 'cancel' | 'stop' | Promise<null | 'cancel' | 'stop'>} said
+         * @param {number} from @param {boolean} parked
+         * @returns {number | Promise<number>}
+         */
+        const after = (said, from, parked)=>{
+            if (said instanceof Promise)
+            {
+                return said.then(answered=>after(answered, from, true));
+            }
+            if (said !== null)
+            {
+                return abort(said === 'cancel', parked);
+            }
+            return copyFrom(from, parked);
+        };
         /**
          * @param {number} from @param {boolean} parked
          * @returns {number | Promise<number>}
@@ -2062,43 +2233,37 @@ export function createFileFunctions(host){
         const copyFrom = (from, parked)=>{
             for (let at = from; at < entry.size; at += COPY_CHUNK)
             {
+                const end = Math.min(at + COPY_CHUNK, entry.size);
                 const chunk = files.read(input, at, COPY_CHUNK);
                 if (typeof (/** @type {any} */ (chunk))?.then === 'function')
                 {
                     return /** @type {Promise<Uint8Array>} */ (chunk).then(bytes=>{
                         files.write(output, at, bytes);
-                        return copyFrom(at + COPY_CHUNK, true);
+                        return after(told(end, CALLBACK_CHUNK_FINISHED), at + COPY_CHUNK, true);
                     }, ()=>{
-                        files.close(input);
-                        files.close(output);
+                        closeBoth();
                         answer(ERROR_IO_DEVICE, true);
                         return 0;
                     });
                 }
                 files.write(output, at, /** @type {Uint8Array} */ (chunk));
+                const said = told(end, CALLBACK_CHUNK_FINISHED);
+                if (said !== null)
+                {
+                    return after(said, at + COPY_CHUNK, parked);
+                }
             }
             return finish(parked);
         };
-        return copyFrom(0, false);
+        return after(told(0, CALLBACK_STREAM_SWITCH), 0, false);
     };
 
     const copyFile = bothForms(12, ([from, to, failIfExists], text)=>
         copyPath(text.path(from), text.path(to), failIfExists !== 0));
 
-    /**
-     * The progress routine is not called: a copy here is one step with
-     * nothing to report between its start and its end, and a caller that
-     * would have cancelled from the routine sees the copy complete. The
-     * cancel flag is read once, before anything is written.
-     */
-    const copyFileEx = bothForms(24, ([from, to, , , cancel, flags], text)=>{
-        if ((cancel >>> 0) !== 0 && readDword(cancel >>> 0) !== 0)
-        {
-            return fail(ERROR_REQUEST_ABORTED);
-        }
-        return copyPath(text.path(from), text.path(to),
-            ((flags >>> 0) & COPY_FILE_FAIL_IF_EXISTS) !== 0);
-    });
+    const copyFileEx = bothForms(24, ([from, to, routine, data, cancel, flags], text)=>
+        copyPath(text.path(from), text.path(to),
+            ((flags >>> 0) & COPY_FILE_FAIL_IF_EXISTS) !== 0, { routine, data, cancel }));
 
     /** @param {number[]} args @param {TextForm} text */
     const searchPathBody = ([pathList, fileName, extension, size, buffer, filePart], text)=>{
@@ -4754,7 +4919,7 @@ export function createFileFunctions(host){
                 // past its end is not part of it.
                 if (type === FILE_INFO.END_OF_FILE || at < current)
                 {
-                    files.truncate(file.node, at);
+                    return endAt(file, at);
                 }
                 return 0;
             }
@@ -5062,6 +5227,12 @@ export function createFileFunctions(host){
                 if (path === null)
                 {
                     return fail(ERROR_INVALID_HANDLE, INVALID_HANDLE_VALUE);
+                }
+                // Flags only: a file's attributes are its own, set when it was
+                // made, and ReOpenFile refuses any (the low word) asked of it.
+                if (((flags >>> 0) & 0xffff) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
                 }
                 const opened = openPath(path, { access: access >>> 0, share: share >>> 0,
                     disposition: OPEN_EXISTING, flags: flags >>> 0 });
@@ -5565,8 +5736,8 @@ export function createFileFunctions(host){
                 }
                 // The current position is the new end -- that is the whole
                 // function; it takes no size of its own.
-                files.truncate(file.node, file.position);
-                return 1;
+                const refused = endAt(file, file.position);
+                return refused === 0 ? 1 : fail(refused);
             },
         },
 
@@ -5871,58 +6042,42 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([name, reopen, style])=>{
                 const path = pathArgument(name);
-                const entry = files.stat(path);
-                const flags = style >>> 0;
-                const exists = Boolean(entry && entry.exists);
-
-                if (reopen !== 0)
-                {
-                    // OFSTRUCT: cBytes, fFixedDisk, nErrCode, two reserved
-                    // words, then the path as eight-bit text. A caller reads the
-                    // path back out of it, so it is filled even on failure.
-                    const data = new Uint8Array(OFSTRUCT_SIZE);
-                    data[0] = OFSTRUCT_SIZE;
-                    data[1] = 1;
-                    data.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
-                    host.writeMemory(reopen >>> 0, data);
-                }
-
-                if ((flags & OF_EXIST) !== 0)
-                {
-                    return exists ? 1 : fail(missing(path), HFILE_ERROR);
-                }
-                if ((flags & OF_DELETE) !== 0)
-                {
-                    if (!exists)
+                // OFSTRUCT: cBytes, fFixedDisk, nErrCode, two reserved words,
+                // then the path as eight-bit text. An open fills it all; a
+                // refusal says only its error and, where it fits, the path,
+                // the rest left as the caller had it.
+                /** @param {number} code */
+                const tell = code=>{
+                    if ((reopen >>> 0) === 0)
                     {
-                        return fail(missing(path), HFILE_ERROR);
+                        return;
                     }
-                    if (readOnlyFile(entry))
+                    const fits = path.length < OFSTRUCT_PATH_MAX;
+                    if (code === ERROR_SUCCESS)
                     {
-                        return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                        const data = new Uint8Array(OFSTRUCT_SIZE);
+                        data[0] = OFSTRUCT_SIZE;
+                        data[1] = 1;
+                        data.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
+                        host.writeMemory(reopen >>> 0, data);
+                        return;
                     }
-                    return files.remove(path) ? 1 : fail(denied(path), HFILE_ERROR);
-                }
-
-                const write = (flags & (OF_WRITE | OF_READWRITE)) !== 0;
-                const create = (flags & OF_CREATE) !== 0;
-                if (!exists && !create)
+                    host.writeMemory((reopen >>> 0) + 2,
+                        Uint8Array.of(code & 0xff, code >>> 8 & 0xff));
+                    if (fits)
+                    {
+                        host.writeMemory((reopen >>> 0) + OFSTRUCT_PATH,
+                            Uint8Array.from([...encodeAnsi(path), 0]));
+                    }
+                };
+                const answer = openFileStyle(path, style >>> 0);
+                if (typeof answer === 'object')
                 {
-                    return fail(missing(path), HFILE_ERROR);
+                    tell(answer.error);
+                    return fail(answer.error, HFILE_ERROR);
                 }
-                if ((write || create) && readOnlyFile(entry))
-                {
-                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
-                }
-                const node = files.open(path,
-                    { read: !write, write, create, truncate: create });
-                if (!node)
-                {
-                    return fail(denied(path), HFILE_ERROR);
-                }
-                host.setLastError(ERROR_SUCCESS);
-                return host.handles.open('file',
-                    { path, node, read: !write, write, position: 0 });
+                tell(ERROR_SUCCESS);
+                return answer;
             },
         },
 

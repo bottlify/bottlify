@@ -817,6 +817,21 @@ export function createKernelModule(){
                 suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
 
                 /**
+                 * Runs `work` once, before the first slice any of the process's
+                 * threads gets, on the scheduler's turn that gives it: what a
+                 * process's loader leaves in it is there from its first
+                 * instruction and not before. At once when a thread already ran.
+                 *
+                 * @param {() => void} work
+                 */
+                beforeFirstSlice: work=>{
+                    if (live())
+                    {
+                        state.scheduler.beforeFirstSlice(work);
+                    }
+                },
+
+                /**
                  * Stops a thread as a suspension does without counting in its
                  * suspend count (`scheduler.freeze`): a debuggee's freeze.
                  *

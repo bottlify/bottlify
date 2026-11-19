@@ -2536,14 +2536,15 @@ before reading a short message it wrote would wait for ever. So a 0 is the defau
 an anonymous pipe has; GetNamedPipeInfo still answers the 0 that was asked. Revisit when a
 measurement on Windows shows what a 0 holds. *2026-11-19.*
 
-**A274. A page of the arena nothing holds answers MEM_RESERVE, never MEM_FREE.** On
-Windows the page after a loaded image, or any page no allocation holds, is free and VirtualQuery
-answers MEM_FREE. Here a process's memory is one arena the engine reserves at its start, and every
-address in it that no allocation, view or image holds is still the arena's, so VirtualQuery answers
-it as reserved.
-A program that asks for MEM_FREE before placing something at a fixed address is told the place is
-taken where Windows says it is open (Wine's loader.c 945-950). Revisit if the arena's unused pages can
-be answered as free without a second map of what the arena lends. *2026-11-19.*
+**A274. Address space outside the process's arena answers MEM_RESERVE, never MEM_FREE.** On
+Windows any page no allocation holds is free and VirtualQuery answers MEM_FREE. Here a process's
+memory is one arena the engine reserves at its start, with the system libraries and the program's
+own image placed where the machine keeps them: a free page inside the arena answers MEM_FREE as on
+Windows, but a page outside it that no image or region holds, such as the page just after a loaded
+image beyond the arena's end, answers MEM_RESERVE, since nothing may be placed there
+(`kernel32/heap.js`, the query's last case). A program that asks for MEM_FREE before placing
+something at a fixed address there is told the place is taken where Windows says it is open (Wine's
+loader.c 945-950). Revisit if the engine can place memory outside the arena. *2026-11-19.*
 
 **A275. A symbolic link is set by FSCTL_SET_REPARSE_POINT without SeCreateSymbolicLinkPrivilege.**
 On Windows the I/O manager refuses IO_REPARSE_TAG_SYMLINK with STATUS_PRIVILEGE_NOT_HELD unless the

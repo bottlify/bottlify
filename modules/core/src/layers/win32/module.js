@@ -4287,6 +4287,7 @@ export function createWin32Module(){
                         namedObjects,
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
+                        callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         debugObjects: { closed: object=>debuggerSide?.closed(object) },
                         jobs: { closed: object=>jobEvents?.closed(object) },
