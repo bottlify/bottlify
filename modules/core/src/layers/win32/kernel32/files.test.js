@@ -643,6 +643,39 @@ test('a write from a null buffer is refused, a zero-length one is not', ()=>{
     assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 0, 'nothing consumed');
 });
 
+test('a transfer whose buffer is not all there for its count moves nothing', ()=>{
+    // Wine's file.c test_read_write: the kernel probes the whole count, a
+    // read past the file's end included, before anything moves.
+    const PAGE_READWRITE = 0x04;
+    const PAGE_READONLY = 0x02;
+    const PAGE_NOACCESS = 0x01;
+    const MEM_COMMIT = 0x1000;
+    /** @type {Map<number, number>} the pages' protections; others read-write */
+    const protections = new Map();
+    const { memory, files, error, fns, open } = setup({
+        /** @param {number} page */
+        pageState: page=>({ state: MEM_COMMIT, protect: protections.get(page) ?? PAGE_READWRITE,
+            end: page + 0x1000 }),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    protections.set(0x1000, PAGE_NOACCESS);
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+    assert.equal(fns.WriteFile.handler([handle, 0x800, 0x1000, OUT_COUNT, 0]), 0,
+        'its second half is not readable');
+    assert.equal(error.code, 1784, 'ERROR_INVALID_USER_BUFFER');
+    assert.equal(memory.dword(OUT_COUNT), 0);
+    assert.equal(files.text('C:\\GAME\\SAVE.DAT'), 'abcd', 'nothing written');
+
+    protections.set(0x1000, PAGE_READONLY);
+    assert.equal(fns.ReadFile.handler([handle, 0x800, 0x1000, OUT_COUNT, 0]), 0,
+        'read-only, for a read of four bytes into a count of 4096');
+    assert.equal(error.code, 998, 'ERROR_NOACCESS');
+    assert.equal(fns.SetFilePointer.handler([handle, 0, 0, FILE_CURRENT]), 0, 'nothing consumed');
+    assert.equal(fns.WriteFile.handler([handle, 0x800, 0x1000, OUT_COUNT, 0]), 1,
+        'a read-only buffer is one to write from');
+});
+
 test('a file opened for reading refuses a write, and the other way round', ()=>{
     const { files, error, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');
@@ -3404,6 +3437,34 @@ test('CancelIoEx finds nothing left to cancel on a file', ()=>{
     assert.equal(error.code, ERROR_INVALID_HANDLE);
 });
 
+test('OpenFile fills its OFSTRUCT on an open, and on a refusal says only the error', ()=>{
+    // Wine's file.c test_OpenFile: cBytes is left as the caller had it, and
+    // a name past the structure's 128 characters is refused untouched.
+    const { memory, files, error, fns, at } = setup();
+    files.put('C:\\GAME\\HERE.TXT', 'x');
+    const OFS = 0x600;
+    memory.bytes.fill(0xa5, OFS, OFS + 136);
+    assert.equal(fns.OpenFile.handler([at(NAME, 'C:\\GAME\\HERE.TXT'), OFS, 0x4000]), 1,
+        'OF_EXIST');
+    assert.equal(memory.bytes[OFS], 136, 'cBytes');
+    assert.equal(memory.bytes[OFS + 2] | memory.bytes[OFS + 3] << 8, 0, 'nErrCode');
+    assert.equal(memory.readCString(OFS + 8, 128), 'C:\\GAME\\HERE.TXT');
+
+    memory.bytes.fill(0xa5, OFS, OFS + 136);
+    assert.equal(fns.OpenFile.handler([at(NAME, 'C:\\GAME\\GONE.TXT'), OFS, 0x4000]) >>> 0,
+        0xffffffff);
+    assert.equal(error.code, 2, 'ERROR_FILE_NOT_FOUND');
+    assert.equal(memory.bytes[OFS], 0xa5, 'cBytes as it was');
+    assert.equal(memory.bytes[OFS + 2] | memory.bytes[OFS + 3] << 8, 2, 'nErrCode the error');
+
+    memory.bytes.fill(0xa5, OFS, OFS + 136);
+    assert.equal(fns.OpenFile.handler([at(NAME, `C:\\GAME\\${'+'.repeat(130)}`), OFS, 0x4000])
+        >>> 0, 0xffffffff);
+    assert.equal(error.code, 206, 'ERROR_FILENAME_EXCED_RANGE');
+    assert.equal(memory.bytes[OFS + 2], 206);
+    assert.equal(memory.bytes[OFS + 8], 0xa5, 'the path left as it was');
+});
+
 test('ReOpenFile opens the same file again as a handle of its own', ()=>{
     const { fns, open, error } = setup();
     const file = open('C:\\GAME\\SAVE.DAT', CREATE_ALWAYS);
@@ -3415,6 +3476,21 @@ test('ReOpenFile opens the same file again as a handle of its own', ()=>{
         '\\\\?\\C:\\GAME\\SAVE.DAT'.length, 'to the same file');
     assert.equal(fns.ReOpenFile.handler([0x7770, 0x80000000, 3, 0]) >>> 0, 0xffffffff);
     assert.equal(error.code, ERROR_INVALID_HANDLE);
+    // FILE_ATTRIBUTE_NORMAL: an attribute, which only the file's making sets.
+    assert.equal(fns.ReOpenFile.handler([file, 0x80000000, 3, 0x80]) >>> 0, 0xffffffff);
+    assert.equal(error.code, 87, 'ERROR_INVALID_PARAMETER');
+});
+
+test('a file a section maps grows and is not cut shorter', ()=>{
+    const { files, fns, open, error } = setup();
+    const file = open('C:\\GAME\\MAPPED.DAT', CREATE_ALWAYS);
+    /** @type {any} */ (files).mappedAs = ()=>'data';
+    assert.equal(fns.SetFilePointer.handler([file, 8, 0, 0]), 8);
+    assert.equal(fns.SetEndOfFile.handler([file]), 1, 'longer');
+    assert.equal(fns.SetFilePointer.handler([file, 6, 0, 0]), 6);
+    assert.equal(fns.SetEndOfFile.handler([file]), 0, 'shorter');
+    assert.equal(error.code, 1224, 'ERROR_USER_MAPPED_FILE');
+    assert.equal(fns.GetFileSize.handler([file, 0]), 8);
 });
 
 test('GetFinalPathNameByHandle names the file in the namespace asked for', ()=>{

@@ -4288,6 +4288,12 @@ export function createWin32Module(){
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
                         callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                        // The pages as VirtualQuery answers them, read when a
+                        // transfer probes its buffer: kernel32's table is built
+                        // after this.
+                        /** @param {number} address */
+                        pageState: address=>/** @type {any} */ (libraries['KERNEL32.dll'])[
+                            PAGE_STATE](address),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         debugObjects: { closed: object=>debuggerSide?.closed(object) },
                         jobs: { closed: object=>jobEvents?.closed(object) },

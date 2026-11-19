@@ -1019,6 +1019,10 @@ test('a pipe end answers its information classes, and FilePipeInformation is set
         { status: STATUS_ACCESS_DENIED }, 'no FILE_READ_ATTRIBUTES');
     assert.ok(bytes.pipes.information(bare.handle, FILE_NAME_INFORMATION) instanceof Uint8Array,
         'the name needs no right');
+    bytes.view.setUint32(BUFFER, 0, true);
+    assert.equal(bytes.fns.SetNamedPipeHandleState.handler([bare.handle, BUFFER, 0, 0]), 0,
+        'the Win32 set needs FILE_WRITE_ATTRIBUTES as the native one does');
+    assert.equal(bytes.error(), 5, 'ERROR_ACCESS_DENIED');
     const allowed = bytes.handles.get(reader);
     assert.ok(allowed && (allowed.access ?? 0xffffffff) & FILE_WRITE_ATTRIBUTES);
     bytes.view.setUint32(BUFFER, 1, true);

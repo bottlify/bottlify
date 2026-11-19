@@ -2540,7 +2540,9 @@ export function createNamedPipes(host){
          *   LPDWORD lpMaxCollectionCount, LPDWORD lpCollectDataTimeout)
          *
          * The read mode and the wait mode; message reading of a byte pipe is
-         * refused. The collection values are a remote client's and taken.
+         * refused, and so is a handle without FILE_WRITE_ATTRIBUTES, as the
+         * native set refuses it. The collection values are a remote client's
+         * and taken.
          */
         SetNamedPipeHandleState: {
             argBytes: 16,
@@ -2554,6 +2556,10 @@ export function createNamedPipes(host){
                 if ((modePointer >>> 0) === 0)
                 {
                     return 1;
+                }
+                if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_WRITE_ATTRIBUTES))
+                {
+                    return fail(ERROR_ACCESS_DENIED);
                 }
                 const mode = readDword(modePointer);
                 if ((mode & ~PIPE_STATE_MASK) !== 0

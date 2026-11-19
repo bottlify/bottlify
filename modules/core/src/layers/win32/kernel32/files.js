@@ -38,6 +38,7 @@ import { createResourceUpdates } from './resource-update.js';
 import { readToTerminator } from '../common/scan-windows.js';
 import { overlappedLayout, overlappedPosition, overlappedResult } from '../common/overlapped.js';
 import { mountPointsOf, onVolume } from './drives.js';
+import { accessibleSpan } from './process-memory.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
 import { isPipeName, pipeNameOf } from './pipes.js';
@@ -600,6 +601,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              list?: () => { handle: number, type: string, object: any }[] }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
+ * @property {import('./process-memory.js').PageState} [pageState]  VirtualQuery's answer
+ *           for a page (heap.js PAGE_STATE): what ReadFile and WriteFile probe a buffer by.
  * @property {(entry: number, args: number[], thread: any) => Promise<number>} [callGuest]
  *           Calls guest code on a thread and answers what it returned: CopyFileEx's
  *           progress routine.
@@ -1909,6 +1912,94 @@ export function createFileFunctions(host){
         }
         return renamePath(source, target, true);
     });
+
+    /**
+     * Whether a transfer's buffer is there for it: every byte of the count
+     * readable for a write, writable for a read, as the kernel probes it
+     * before anything moves - a count nothing would have filled included.
+     * A null buffer with a count is not; nothing to move always is.
+     *
+     * @param {number} buffer @param {number} length @param {boolean} intoGuest
+     */
+    const bufferThere = (buffer, length, intoGuest)=>{
+        if (length === 0)
+        {
+            return true;
+        }
+        if (buffer === 0)
+        {
+            return false;
+        }
+        return !host.pageState
+            || accessibleSpan(host.pageState, buffer, length, intoGuest) >= length;
+    };
+
+    /**
+     * Moves a file's end to `at`: 0, or the error that refuses it. A file a
+     * section or a view maps can grow and cannot be cut shorter, which would
+     * take pages from under the mapping (ERROR_USER_MAPPED_FILE).
+     *
+     * @param {{ node: any, path: string }} file @param {number} at
+     */
+    const endAt = (file, at)=>{
+        if (files.mappedAs?.(file.path) && at < (files.stat(file.path)?.size ?? 0))
+        {
+            return ERROR_USER_MAPPED_FILE;
+        }
+        files.truncate(file.node, at);
+        return 0;
+    };
+
+    /**
+     * What OpenFile does with a style: OF_EXIST answers whether the file is
+     * there, OF_DELETE deletes it, anything else opens it through the volume
+     * as CreateFile's opens are. A path that does not fit the OFSTRUCT's 128
+     * characters is refused before anything is asked of the volume.
+     *
+     * @param {string} path @param {number} flags
+     * @returns {number | { error: number }} the answer, or why there is none
+     */
+    const openFileStyle = (path, flags)=>{
+        if (path.length >= OFSTRUCT_PATH_MAX)
+        {
+            return { error: ERROR_FILENAME_EXCED_RANGE };
+        }
+        const entry = files.stat(path);
+        const exists = Boolean(entry && entry.exists);
+        if ((flags & OF_EXIST) !== 0)
+        {
+            return exists ? 1 : { error: missing(path) };
+        }
+        if ((flags & OF_DELETE) !== 0)
+        {
+            if (!exists)
+            {
+                return { error: missing(path) };
+            }
+            if (readOnlyFile(entry))
+            {
+                return { error: ERROR_ACCESS_DENIED };
+            }
+            return files.remove(path) ? 1 : { error: denied(path) };
+        }
+        const write = (flags & (OF_WRITE | OF_READWRITE)) !== 0;
+        const create = (flags & OF_CREATE) !== 0;
+        if (!exists && !create)
+        {
+            return { error: missing(path) };
+        }
+        if ((write || create) && readOnlyFile(entry))
+        {
+            return { error: ERROR_ACCESS_DENIED };
+        }
+        const node = files.open(path, { read: !write, write, create, truncate: create });
+        if (!node)
+        {
+            return { error: denied(path) };
+        }
+        host.setLastError(ERROR_SUCCESS);
+        return host.handles.open('file', { path, node, read: !write, write, position: 0 });
+    };
 
     /**
      * The copy every spelling shares. Copied through the ordinary read and
@@ -3690,13 +3781,13 @@ export function createFileFunctions(host){
             {
                 return STATUS_ACCESS_DENIED;
             }
-            // The kernel probes the buffer before the transfer: none for a
-            // count is refused whether or not anything would have moved (a
-            // read at the end of the file included), the status block and the
-            // event untouched - a read as the access violation it is, a write
-            // as STATUS_INVALID_USER_BUFFER, the answer the conformance tests
-            // find for a write from nowhere.
-            if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+            // The kernel probes the buffer before the transfer: one not there
+            // for the whole count is refused whether or not anything would
+            // have moved (a read at the end of the file included), the status
+            // block and the event untouched - a read as the access violation
+            // it is, a write as STATUS_INVALID_USER_BUFFER, the answer the
+            // conformance tests find for a write from nowhere.
+            if (!bufferThere(buffer >>> 0, length >>> 0, !writing))
             {
                 return writing ? STATUS_INVALID_USER_BUFFER : STATUS_ACCESS_VIOLATION;
             }
@@ -4656,7 +4747,7 @@ export function createFileFunctions(host){
                 // past its end is not part of it.
                 if (type === FILE_INFO.END_OF_FILE || at < current)
                 {
-                    files.truncate(file.node, at);
+                    return endAt(file, at);
                 }
                 return 0;
             }
@@ -4878,6 +4969,12 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE, INVALID_HANDLE_VALUE);
                 }
+                // Flags only: a file's attributes are its own, set when it was
+                // made, and ReOpenFile refuses any (the low word) asked of it.
+                if (((flags >>> 0) & 0xffff) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+                }
                 const opened = openPath(path, { access: access >>> 0, share: share >>> 0,
                     disposition: OPEN_EXISTING, flags: flags >>> 0 });
                 if ('error' in opened)
@@ -4948,7 +5045,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+                if (!bufferThere(buffer >>> 0, length >>> 0, true))
                 {
                     writeDwordIf(read >>> 0, 0);
                     return fail(ERROR_NOACCESS);
@@ -5044,7 +5141,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if ((buffer >>> 0) === 0 && count !== 0)
+                if (!bufferThere(buffer >>> 0, count, false))
                 {
                     writeDwordIf(written >>> 0, 0);
                     return fail(ERROR_INVALID_USER_BUFFER);
@@ -5380,8 +5477,8 @@ export function createFileFunctions(host){
                 }
                 // The current position is the new end -- that is the whole
                 // function; it takes no size of its own.
-                files.truncate(file.node, file.position);
-                return 1;
+                const refused = endAt(file, file.position);
+                return refused === 0 ? 1 : fail(refused);
             },
         },
 
@@ -5686,58 +5783,42 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([name, reopen, style])=>{
                 const path = pathArgument(name);
-                const entry = files.stat(path);
-                const flags = style >>> 0;
-                const exists = Boolean(entry && entry.exists);
-
-                if (reopen !== 0)
-                {
-                    // OFSTRUCT: cBytes, fFixedDisk, nErrCode, two reserved
-                    // words, then the path as eight-bit text. A caller reads the
-                    // path back out of it, so it is filled even on failure.
-                    const data = new Uint8Array(OFSTRUCT_SIZE);
-                    data[0] = OFSTRUCT_SIZE;
-                    data[1] = 1;
-                    data.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
-                    host.writeMemory(reopen >>> 0, data);
-                }
-
-                if ((flags & OF_EXIST) !== 0)
-                {
-                    return exists ? 1 : fail(missing(path), HFILE_ERROR);
-                }
-                if ((flags & OF_DELETE) !== 0)
-                {
-                    if (!exists)
+                // OFSTRUCT: cBytes, fFixedDisk, nErrCode, two reserved words,
+                // then the path as eight-bit text. An open fills it all; a
+                // refusal says only its error and, where it fits, the path,
+                // the rest left as the caller had it.
+                /** @param {number} code */
+                const tell = code=>{
+                    if ((reopen >>> 0) === 0)
                     {
-                        return fail(missing(path), HFILE_ERROR);
+                        return;
                     }
-                    if (readOnlyFile(entry))
+                    const fits = path.length < OFSTRUCT_PATH_MAX;
+                    if (code === ERROR_SUCCESS)
                     {
-                        return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                        const data = new Uint8Array(OFSTRUCT_SIZE);
+                        data[0] = OFSTRUCT_SIZE;
+                        data[1] = 1;
+                        data.set(encodeAnsi(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
+                        host.writeMemory(reopen >>> 0, data);
+                        return;
                     }
-                    return files.remove(path) ? 1 : fail(denied(path), HFILE_ERROR);
-                }
-
-                const write = (flags & (OF_WRITE | OF_READWRITE)) !== 0;
-                const create = (flags & OF_CREATE) !== 0;
-                if (!exists && !create)
+                    host.writeMemory((reopen >>> 0) + 2,
+                        Uint8Array.of(code & 0xff, code >>> 8 & 0xff));
+                    if (fits)
+                    {
+                        host.writeMemory((reopen >>> 0) + OFSTRUCT_PATH,
+                            Uint8Array.from([...encodeAnsi(path), 0]));
+                    }
+                };
+                const answer = openFileStyle(path, style >>> 0);
+                if (typeof answer === 'object')
                 {
-                    return fail(missing(path), HFILE_ERROR);
+                    tell(answer.error);
+                    return fail(answer.error, HFILE_ERROR);
                 }
-                if ((write || create) && readOnlyFile(entry))
-                {
-                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
-                }
-                const node = files.open(path,
-                    { read: !write, write, create, truncate: create });
-                if (!node)
-                {
-                    return fail(denied(path), HFILE_ERROR);
-                }
-                host.setLastError(ERROR_SUCCESS);
-                return host.handles.open('file',
-                    { path, node, read: !write, write, position: 0 });
+                tell(ERROR_SUCCESS);
+                return answer;
             },
         },
 
