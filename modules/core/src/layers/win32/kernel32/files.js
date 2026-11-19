@@ -460,6 +460,7 @@ const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 /** The name goes as the handle that asked closes, other opens or not. */
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
+const FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x40;
 /** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
@@ -529,8 +530,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => boolean} remove
  * @property {(path: string, modified: number) => boolean} [setModified]
  * @property {(path: string) => boolean} mkdir
- * @property {(from: string, to: string) => boolean} rename
- * @property {(from: string, to: string) => boolean | Promise<boolean>} [renameOrFetch]
+ * @property {(from: string, to: string, options?: { held?: boolean }) => boolean} rename
+ *     `held`: through a handle that holds the file for deletion, so its other opens
+ *     are not asked again
+ * @property {(from: string, to: string, options?: { held?: boolean }) =>
+ *     boolean | Promise<boolean>} [renameOrFetch]
  *           rename, waiting for the blocks a move off a bundle copies.
  * @property {(path: string, pattern: string) => DirectoryEntry[]} list
  * @property {() => string} currentDirectory
@@ -1594,9 +1598,15 @@ export function createFileFunctions(host){
      * share: the Win32 error it ends in, 0 when it moved.
      *
      * @param {string} source @param {string} destination @param {boolean} replace
+     * @param {{ held?: boolean, readOnlyReplaced?: boolean }} [how]  `held`: through
+     *     a handle that holds the file for deletion; `readOnlyReplaced`: a read-only
+     *     file at the destination is replaced as any other
+     *     (FILE_RENAME_IGNORE_READONLY_ATTRIBUTE)
      * @returns {number | Promise<number>}
      */
-    const moveError = (source, destination, replace)=>{
+    const moveError = (source, destination, replace,
+        { held = false, readOnlyReplaced = false } = {})=>
+    {
         const moving = files.stat(source);
         if (!moving?.exists)
         {
@@ -1610,7 +1620,7 @@ export function createFileFunctions(host){
         // spelling may change.
         if (source.toLowerCase() === destination.toLowerCase())
         {
-            return files.rename(source, destination) ? 0 : denied(source);
+            return files.rename(source, destination, { held }) ? 0 : denied(source);
         }
         const present = files.stat(destination);
         if (present?.exists && !replace)
@@ -1626,8 +1636,10 @@ export function createFileFunctions(host){
             return ERROR_PATH_NOT_FOUND;
         }
         // A file is renamed as it is deleted: an open that does not share
-        // deletion keeps its name.
-        if (files.removalRefused?.(source) === 'SHARING_VIOLATION')
+        // deletion keeps its name - unless the rename is through a handle
+        // that holds it for deletion, against which every other open was
+        // admitted already.
+        if (!held && files.removalRefused?.(source) === 'SHARING_VIOLATION')
         {
             return ERROR_SHARING_VIOLATION;
         }
@@ -1638,7 +1650,7 @@ export function createFileFunctions(host){
             {
                 return ERROR_ACCESS_DENIED;
             }
-            if (readOnlyFile(present) || !files.remove(destination))
+            if ((readOnlyFile(present) && !readOnlyReplaced) || !files.remove(destination))
             {
                 return denied(destination);
             }
@@ -1646,8 +1658,8 @@ export function createFileFunctions(host){
         // A move off a disc has to delete what it moved, so the disc refuses
         // it as surely as a move onto one.
         // A move off the bundle may have to wait for the blocks it copies.
-        const moved = files.renameOrFetch ? files.renameOrFetch(source, destination)
-            : files.rename(source, destination);
+        const moved = files.renameOrFetch ? files.renameOrFetch(source, destination, { held })
+            : files.rename(source, destination, { held });
         /** @param {boolean} done */
         const answer = done=>{
             if (!done)
@@ -2769,7 +2781,9 @@ export function createFileFunctions(host){
         }
         if (root !== 0)
         {
-            const directory = object(root, 'directory');
+            // A folder CreateFile opened is a file object of a folder.
+            const opened = object(root, 'file');
+            const directory = object(root, 'directory') ?? (opened?.directory ? opened : null);
             if (!directory)
             {
                 return { status: STATUS_INVALID_HANDLE };
@@ -4646,7 +4660,17 @@ export function createFileFunctions(host){
                 {
                     return ERROR_PATH_NOT_FOUND;
                 }
-                const moved = moveError(file.path, destination, replace);
+                // A rename is the file's deletion from its name: the handle
+                // must hold it for deletion, and then holds it against every
+                // other open already.
+                if (!allows(host.handles.access?.(handle >>> 0) ?? null, DELETE))
+                {
+                    return ERROR_ACCESS_DENIED;
+                }
+                const moved = moveError(file.path, destination, replace, { held: true,
+                    readOnlyReplaced: type === FILE_INFO.RENAME_EX
+                        && (view.getUint32(0, true) & FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE)
+                            !== 0 });
                 /** @param {number} code */
                 const settle = code=>{
                     if (code === 0)

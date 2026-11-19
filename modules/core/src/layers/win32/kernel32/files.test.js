@@ -3448,6 +3448,59 @@ test('SetFileInformationByHandle renames, deletes on close and moves the end', (
     assert.equal(files.stat('C:\\GAME\\c.dat')?.attributes, 0x2);
 });
 
+test('a rename through a handle needs DELETE and holds the file against its other opens',
+    ()=>{
+        const { memory, files, fns, open, error } = setup();
+        const view = new DataView(memory.bytes.buffer);
+        /** @param {string} name @param {number} flags */
+        const renameInfo = (name, flags)=>{
+            memory.bytes.fill(0, 0x800, 0x880);
+            view.setUint32(0x800, flags, true);
+            view.setUint32(0x808, name.length * 2, true);
+            putWide(memory, 0x80c, name);
+            return 12 + name.length * 2;
+        };
+        files.put('C:\\GAME\\a.tmp', 'abc');
+        // An open that shares nothing, its own deletion asked: the file
+        // system would refuse anyone else, never the handle that holds it.
+        Object.assign(files, { removalRefused: ()=>'SHARING_VIOLATION' });
+        const holder = open('C:\\GAME\\a.tmp', OPEN_EXISTING, GENERIC_WRITE | DELETE);
+        assert.equal(fns.SetFileInformationByHandle.handler([holder, 3, 0x800,
+            renameInfo('b.tmp', 0)]), 1);
+        assert.equal(files.text('C:\\GAME\\b.tmp'), 'abc');
+
+        const writer = open('C:\\GAME\\b.tmp', OPEN_EXISTING, GENERIC_WRITE);
+        assert.equal(fns.SetFileInformationByHandle.handler([writer, 3, 0x800,
+            renameInfo('c.tmp', 0)]), 0);
+        assert.equal(error.code, 5, 'no DELETE: ERROR_ACCESS_DENIED');
+        Object.assign(files, { removalRefused: ()=>null });
+
+        // FileRenameInformationEx: a read-only file at the name is replaced
+        // only when the call ignores the attribute.
+        files.put('C:\\GAME\\ro.tmp', 'old');
+        files.setAttributes('C:\\GAME\\ro.tmp', 0x1);
+        const native = /** @type {any} */ (fns.CreateFileW).natives.NtSetInformationFile;
+        const RENAME_EX = 65;
+        const REPLACE = 0x1;
+        const IGNORE_READONLY = 0x40;
+        const length = renameInfo('ro.tmp', REPLACE);
+        assert.equal(native.handler([holder, 0x300, 0x800, length, RENAME_EX]) >>> 0,
+            0xc0000022, 'STATUS_ACCESS_DENIED');
+        renameInfo('ro.tmp', REPLACE | IGNORE_READONLY);
+        assert.equal(native.handler([holder, 0x300, 0x800, length, RENAME_EX]), 0);
+        assert.equal(files.text('C:\\GAME\\ro.tmp'), 'abc');
+
+        // A name relative to a folder CreateFile opened (a file object of a folder).
+        const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        const folder = fns.CreateFileA.handler([memory.putString(NAME, 'C:\\GAME') ?? NAME, 0, 0,
+            0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0]) >>> 0;
+        const RENAME = 10;
+        const relative = renameInfo('d.tmp', 0);
+        view.setUint32(0x804, folder, true);
+        assert.equal(native.handler([holder, 0x300, 0x800, relative, RENAME]), 0);
+        assert.equal(files.text('C:\\GAME\\d.tmp'), 'abc');
+    });
+
 test('GetBinaryType tells programs apart by their headers, and refuses a library', async()=>{
     const { memory, files, fns, error } = setup();
     /** @param {number} characteristics @param {number} magic */

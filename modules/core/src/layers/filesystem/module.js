@@ -1166,10 +1166,16 @@ export function createFilesystemModule(){
                  * keeps it from coming back from the source. A file moved to
                  * another drive is a copy followed by a delete.
                  *
+                 * A file renamed through a handle that holds it for deletion
+                 * (`held`) is not asked again whether its opens let it go:
+                 * every other open was admitted against that handle's right to
+                 * delete it, as Windows renames through a file object.
+                 *
                  * @param {string} from
                  * @param {string} to
+                 * @param {{ held?: boolean }} [options]
                  */
-                rename(from, to){
+                rename(from, to, { held = false } = {}){
                     if (!live())
                     {
                         return;
@@ -1195,15 +1201,15 @@ export function createFilesystemModule(){
                         {
                             step++;
                         }
-                        this.rename(from, `${to}.~${step}`);
-                        this.rename(`${to}.~${step}`, to);
+                        this.rename(from, `${to}.~${step}`, { held });
+                        this.rename(`${to}.~${step}`, to, { held });
                         return;
                     }
                     if (this.stat(to))
                     {
                         throw fsError(ErrorCode.ALREADY_EXISTS, `${to} already exists`);
                     }
-                    if (!entry.directory)
+                    if (!entry.directory && !held)
                     {
                         state.files.mayRemove(locate(from).key, from);
                     }
