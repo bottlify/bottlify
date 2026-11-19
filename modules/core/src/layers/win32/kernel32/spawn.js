@@ -533,6 +533,8 @@ export function createSpawner(host){
  * @property {(only: number[] | null) => { handle: number, type: string, object: any }[]}
  *     [inheritedHandles]  The handles a child started with bInheritHandles takes:
  *     every inheritable one, or of those the ones a handle list names.
+ * @property {(which: number) => number} [standardHandle]  What this process's
+ *     GetStdHandle answers for STD_INPUT_HANDLE, STD_OUTPUT_HANDLE or STD_ERROR_HANDLE.
  * @property {(handle: number) => void} [inheritable]  Marks a handle inheritable, as
  *     OpenProcess's bInheritHandle asks.
  * @property {() => Record<string, string>} [environment]
@@ -789,17 +791,22 @@ export function createSpawnFunctions(host){
         };
     };
 
+    /** GetStdHandle's numbers for the three standard handles. */
+    const STANDARD_HANDLES = { input: -10, output: -11, error: -12 };
     /**
-     * The pipe ends a STARTUPINFO hands the child as its standard handles,
-     * when it hands any and the child inherits them: the child's
-     * GetStdHandle answers those numbers, and what it writes to its output
-     * is the parent's to read. A file is `standardFiles`'s.
+     * The standard handles the child starts with, of those it inherits: the
+     * ones a STARTUPINFO hands it with STARTF_USESTDHANDLES, or else this
+     * process's own (GetStdHandle), as Windows hands a child its parent's
+     * standard handles when none are named. The child's GetStdHandle answers
+     * those numbers, and what it writes to its output is the parent's to read.
      *
      * @param {number} startup @param {{ handle: number }[]} inherited
      * @returns {{ input?: number, output?: number, error?: number } | undefined}
      */
     const standardPipes = (startup, inherited)=>{
-        if (startup === 0 || (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) === 0)
+        const named = startup !== 0
+            && (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) !== 0;
+        if (!named && !host.standardHandle)
         {
             return undefined;
         }
@@ -808,7 +815,9 @@ export function createSpawnFunctions(host){
         const out = {};
         for (const which of /** @type {const} */ (['input', 'output', 'error']))
         {
-            const handle = readDword(startup + STARTUP_[which]) >>> 0;
+            const handle = named ? readDword(startup + STARTUP_[which]) >>> 0
+                : /** @type {(which: number) => number} */ (host.standardHandle)(
+                    STANDARD_HANDLES[which]) >>> 0;
             if (held.has(handle))
             {
                 out[which] = handle;

@@ -8998,7 +8998,11 @@ async function buildApp(options){
         // is entitled to the arguments its parent gave it.
         commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
         currentDirectory: filesystem.currentDirectory(),
-        standardHandles: { input: 0, output: 0, error: 0 },
+        // The standard handles its parent handed it, which RTL_USER_PROCESS_
+        // PARAMETERS carries as GetStdHandle answers them; none otherwise.
+        standardHandles: { input: options.standardHandles?.input ?? 0,
+            output: options.standardHandles?.output ?? 0,
+            error: options.standardHandles?.error ?? 0 },
         // Every module loaded by the time the first instruction runs: the
         // system libraries it imports and theirs, everything the program
         // shipped, and the program's own image -- PEB->Ldr walked before a

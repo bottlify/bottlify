@@ -1666,6 +1666,8 @@ export function createWin32Module(){
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
                     pipes.adopted(inherited.handle, inherited.object, inherited);
+                    // Inheritable again, as GetHandleInformation reads it.
+                    handleFlags.set(inherited.handle, 1);
                 }
                 // The parent's open file, under its number and rights: the
                 // reference its CreateProcess took is this handle's.
@@ -4260,6 +4262,8 @@ export function createWin32Module(){
                         inheritedHandles: only=>[...pipes.inherited(only),
                             ...inheritedObjects(only)],
                         inheritable: handle=>void handleFlags.set(handle, 1),
+                        standardHandle: which=>/** @type {any} */ (libraries['KERNEL32.dll'])
+                            .GetStdHandle.handler([which]),
                         kernel,
                         processId,
                         readMemory,

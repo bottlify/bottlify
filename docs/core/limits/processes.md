@@ -139,7 +139,9 @@
   child opens the file as its own on the terms the parent's open agreed, sharing the parent's file
   pointer, and the file stays open until the last of their handles closes, as it does for a file
   `DuplicateHandle` puts into another process of the run; a child in a worker of its own
-  inherits only pipe ends. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
+  inherits only pipe ends. A child's standard handles are the ones its STARTUPINFO names with
+  `STARTF_USESTDHANDLES`, or else its parent's own, of those it inherits; a console child that
+  inherits nothing is not handed its parent's standard handles, as Windows hands them. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails

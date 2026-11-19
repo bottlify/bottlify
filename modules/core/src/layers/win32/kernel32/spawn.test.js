@@ -893,6 +893,20 @@ test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', (
         'bInheritHandles FALSE: nothing is inherited, the console stays');
 });
 
+test('without STARTF_USESTDHANDLES a child takes its parent\'s standard handles it inherits', ()=>{
+    // Wine's process.c test_StdHandleInheritance: a parent that redirects its
+    // own output (SetStdHandle) and starts a child inheriting handles hands
+    // the child that output.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    host.inheritedHandles = ()=>[{ handle: 0x8c, type: 'file', object: {} }];
+    host.standardHandle = (/** @type {number} */ which)=>(which === -11 ? 0x8c : 0x90);
+    const fns = createSpawnFunctions(host);
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'child.exe'), 0, 0, 1, 0, 0, 0, 0, 0]), 1);
+    assert.deepEqual(pending(host).standardHandles, { output: 0x8c },
+        'its output, inherited; its input and error, not inherited, are not its');
+});
+
 test('a job list names the jobs a child is made in: a handle of no job, or a job that refuses it,'
     + ' fails CreateProcess', ()=>{
     // Wine's kernel32 process.c test_job_list_attribute.

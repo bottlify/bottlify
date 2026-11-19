@@ -339,8 +339,16 @@ test('a process no parent started has a startup record of its size and nothing e
     const view = new DataView(host.bytes.buffer);
     assert.equal(view.getUint32(0x300, true), STARTUPINFOA_SIZE);
     assert.equal(view.getUint32(0x300 + 44, true), 0, 'dwFlags');
-    assert.deepEqual([...host.bytes.slice(0x304, 0x300 + STARTUPINFOA_SIZE)],
-        new Array(STARTUPINFOA_SIZE - 4).fill(0));
+    assert.deepEqual([...host.bytes.slice(0x304, 0x300 + 56)], new Array(52).fill(0));
+    // No STARTF_USESTDHANDLES: the ANSI form answers INVALID_HANDLE_VALUE for
+    // each standard handle, the wide form leaves the caller's fields alone.
+    assert.deepEqual([56, 60, 64].map(at=>view.getUint32(0x300 + at, true)),
+        [0xffffffff, 0xffffffff, 0xffffffff]);
+    host.bytes.fill(0x5a, 0x300, 0x300 + STARTUPINFOA_SIZE);
+    fns.GetStartupInfoW.handler([0x300]);
+    assert.deepEqual([56, 60, 64].map(at=>view.getUint32(0x300 + at, true)),
+        [0x5a5a5a5a, 0x5a5a5a5a, 0x5a5a5a5a]);
+    assert.equal(view.getUint32(0x300 + 44, true), 0, 'the rest written');
 });
 
 test('the system directory is inside the windows one, as a program assumes', ()=>{
