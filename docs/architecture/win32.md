@@ -205,6 +205,9 @@ flowchart TD
   A library with no relocation directory goes to its own base; where that is taken it is
   refused if its relocations are marked stripped (`IMAGE_FILE_RELOCS_STRIPPED`), and otherwise
   moved as it lies, nothing fixed up, as Windows' loader moves one (`app.js` `placeLibrary`).
+  Once mapped and bound, an image's copy-on-write pages are watched by the engine's page marks:
+  the first write to one makes it the process's own, `PAGE_READWRITE`, as `VirtualQuery` then
+  answers on Windows (`win32.imageMapped`, decisions.md A248; 32-bit).
   A `DllMain` (or TLS callback) that raises on `DLL_PROCESS_ATTACH` is ended by the loader's
   own frame, and one that answers FALSE is told `DLL_PROCESS_DETACH`: either way the library is
   unloaded and `LoadLibrary` fails with `ERROR_DLL_INIT_FAILED`. A library file is read sharing

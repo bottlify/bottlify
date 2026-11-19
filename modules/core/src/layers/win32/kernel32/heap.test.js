@@ -9,7 +9,7 @@ import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    GUARD_PAGES, TABLES, arenaRegion, createAddressIndex, createHeapAllocator,
+    GUARD_PAGES, IMAGE_MAPPED, TABLES, arenaRegion, createAddressIndex, createHeapAllocator,
     createHeapFunctions,
 } from './heap.js';
 
@@ -1313,6 +1313,63 @@ test('an image loaded again where one was answers its own sections, not the prot
     const second = load(0x20000020);
     assert.equal(second, first, 'the same base');
     assert.equal(protection(second + 0x1000), 0x10, 'its own section, PAGE_EXECUTE');
+});
+
+test('a loaded image\'s copy-on-write page written after its mapping is the process\'s own,'
+    + ' read-write', ()=>{
+    // Wine's kernel32:loader (test_section_access): a write to a writable
+    // section of a loaded DLL turns its page from PAGE_WRITECOPY to
+    // PAGE_READWRITE, that page only; the loader's own writes before the
+    // image is mapped are its making.
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const watched = [];
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            watched.push([from, length]);
+            marks.clear();
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        },
+    };
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    const buffer = allocator.allocate(0x100);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>view.getUint32(buffer + field, true));
+    };
+    const base = allocator.allocate(0x5000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(base, imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
+        [0x2000, 0x3000, 0xc0000040]]));
+    marks.add((base + 0x2000) >>> 12);
+    /** @type {any} */ (fns)[IMAGE_MAPPED](base);
+    assert.deepEqual(watched, [[base, 0x5000]], 'watched from its mapping');
+    assert.deepEqual(query(base + 0x2000), [0x3000, 0x08], 'the loader\'s writes are no copy');
+
+    marks.add((base + 0x3000) >>> 12);
+    assert.deepEqual(query(base + 0x2000), [0x1000, 0x08]);
+    assert.deepEqual(query(base + 0x3000), [0x1000, 0x04], 'written: its own copy');
+    assert.deepEqual(query(base + 0x4000), [0x1000, 0x08]);
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, 1, 0x08, buffer + 0x40]), 1);
+    assert.equal(view.getUint32(buffer + 0x40, true), 0x04, 'the old protection, the copy\'s');
+    assert.deepEqual(query(base + 0x3000), [0x1000, 0x04], 'a copy stays read-write');
+    assert.deepEqual(query(base + 0x1000), [0x1000, 0x20], 'code is no copy');
+
+    // An image with nothing copy-on-write is not watched.
+    const plain = allocator.allocate(0x2000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(plain, imageHeaders(0x2000, [[0x1000, 0x1000, 0x60000020]]));
+    /** @type {any} */ (fns)[IMAGE_MAPPED](plain);
+    assert.equal(watched.length, 1);
 });
 
 test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reaching the image there',

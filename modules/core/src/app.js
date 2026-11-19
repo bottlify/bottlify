@@ -8125,6 +8125,9 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
+                    // Mapped and bound: its copy-on-write pages are the
+                    // program's to write from here on (A248).
+                    win32.imageMapped(base);
                     // The callbacks LdrRegisterDllNotification registered, after it
                     // is mapped and bound and before any of its code runs.
                     await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
@@ -8504,6 +8507,7 @@ async function buildApp(options){
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
         bits: processBits,
         ...long || programLoaded.moved ? { base: programLoaded.imageBase } : {} });
+    win32.imageMapped(image.base);
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -8573,6 +8577,7 @@ async function buildApp(options){
     {
         loader.bind(library.mapped, resolveImport, missingImport);
         loader.bindDelayed(library.mapped, resolveImport, missingImport);
+        win32.imageMapped(library.base);
         // Bound and written: the guest's copy is the image from here on, and
         // holding the file and the mapped image beside it was each library
         // twice over in the engine's heap for the life of the process.

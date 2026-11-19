@@ -13,8 +13,8 @@ import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { DEBUG_EVENT, attachEvents, createDebuggerFunctions } from './kernel32/debug-events.js';
 import {
-    ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, PAGE_STATE, TABLES, createHeapAllocator,
-    createHeapFunctions,
+    ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, IMAGE_MAPPED, PAGE_STATE, TABLES,
+    createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
@@ -7127,6 +7127,15 @@ export function createWin32Module(){
                  * allocators hand out the same address.
                  */
                 heap: ()=>heap,
+                /**
+                 * The loader mapped and bound an image at `base`: kernel32
+                 * watches its copy-on-write pages from now on (A248).
+                 *
+                 * @param {number} base
+                 */
+                imageMapped: base=>{
+                    /** @type {any} */ (libraries['KERNEL32.dll'])?.[IMAGE_MAPPED]?.(base);
+                },
                 /**
                  * A block of the process heap, as HeapAlloc(GetProcessHeap())
                  * gives one: what a system library hands a program to free with
