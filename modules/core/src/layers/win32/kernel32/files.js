@@ -30,6 +30,7 @@
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { FILE_OBJECT_KINDS } from './handle-tags.js';
+import { FILE_IMPLIED, allows, mappedAccess } from './access.js';
 import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
@@ -525,8 +526,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Signals the event NtReadFile or NtWriteFile is given, when it completes.
  * @property {() => string[]} [drives]  the drive letters, for the mount manager
  * @property {(letter: string) => any} [volume]  a drive's volume, its `kind` read
- * @property {{ open: (type: string, object: any) => number,
+ * @property {{ open: (type: string, object: any, access?: number | null) => number,
  *              resolve: (handle: number, type?: string) => any,
+ *              access?: (handle: number) => number | null,
  *              close: (handle: number) => any,
  *              typeOf?: (handle: number) => string | undefined,
  *              holds?: (object: any) => boolean,
@@ -1077,6 +1079,22 @@ export function createFileFunctions(host){
             void e;
             return null;
         }
+    };
+
+    /**
+     * Whether a file handle may read its data, or write it: its open may,
+     * and the handle was granted the right - a duplicate may hold fewer
+     * rights than the open it shares (`access.js`, the file kind).
+     *
+     * @param {number} handle @param {{ read?: boolean, write?: boolean }} file
+     */
+    const reads = (handle, file)=>Boolean(file.read)
+        && allows(host.handles.access?.(handle >>> 0) ?? null, FILE_READ_DATA);
+    /** @param {number} handle @param {{ read?: boolean, write?: boolean }} file */
+    const writes = (handle, file)=>{
+        const granted = host.handles.access?.(handle >>> 0) ?? null;
+        return Boolean(file.write)
+            && (granted === null || (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0);
     };
 
     /** @param {number} handle  whether it is the null device's */
@@ -2383,10 +2401,11 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {number} [implied]  rights the handle is granted beside those asked
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
      */
-    const openPath = (path, request)=>{
-        const result = openPathOnce(path, request);
+    const openPath = (path, request, implied = 0)=>{
+        const result = openPathOnce(path, request, implied);
         if ('error' in result)
         {
             host.openRefused?.({ path, error: result.error, ...request });
@@ -2398,9 +2417,10 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {number} implied
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
      */
-    const openPathOnce = (path, { access, share, disposition, flags })=>{
+    const openPathOnce = (path, { access, share, disposition, flags }, implied)=>{
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
@@ -2440,7 +2460,8 @@ export function createFileFunctions(host){
             const handle = host.handles.open('file',
                 { path, node: null, directory: true, read: false, write: false, position: 0,
                     // A folder watched through a completion port is opened so.
-                    ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} });
+                    ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} },
+                mappedAccess('file', rights | implied));
             return { handle, existed: true };
         }
         if (exists && disposition === CREATE_NEW)
@@ -2507,7 +2528,7 @@ export function createFileFunctions(host){
             path, node, read, write, writeAttributes, position: 0,
             ...deleteOnClose ? { deleteOnClose } : {},
             ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
-        });
+        }, mappedAccess('file', rights | implied));
         return { handle, existed: exists };
     };
 
@@ -2562,7 +2583,10 @@ export function createFileFunctions(host){
         {
             return fail(refusal, INVALID_HANDLE_VALUE);
         }
-        const opened = openPath(text.path(name), { access, share, disposition, flags });
+        // CreateFile asks, beside what it was asked, to wait on the handle and
+        // to read the file's attributes, as Windows' does.
+        const opened = openPath(text.path(name), { access, share, disposition, flags },
+            FILE_IMPLIED);
         if ('error' in opened)
         {
             return fail(opened.error, INVALID_HANDLE_VALUE);
@@ -3325,7 +3349,7 @@ export function createFileFunctions(host){
             {
                 return STATUS_INVALID_HANDLE;
             }
-            if (writing ? !file.write : !file.read)
+            if (writing ? !writes(handle, file) : !reads(handle, file))
             {
                 return STATUS_ACCESS_DENIED;
             }
@@ -3649,7 +3673,8 @@ export function createFileFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                return report(block >>> 0, file.write ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, 0);
+                return report(block >>> 0, writes(handle, file) ? STATUS_SUCCESS
+                    : STATUS_ACCESS_DENIED, 0);
             },
         },
 
@@ -4440,7 +4465,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4536,7 +4561,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4607,7 +4632,7 @@ export function createFileFunctions(host){
                 {
                     return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4639,7 +4664,7 @@ export function createFileFunctions(host){
                 {
                     return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4694,7 +4719,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4764,7 +4789,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4870,7 +4895,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -5324,7 +5349,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
@@ -5350,7 +5375,7 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, buffer, count])=>{
                 const file = object(handle, 'file');
-                if (!file || !file.write)
+                if (!file || !writes(handle, file))
                 {
                     return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
                 }

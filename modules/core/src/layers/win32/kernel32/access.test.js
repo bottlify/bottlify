@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SYNCHRONIZE, allows, duplicateAccess, grantedAccess } from './access.js';
+import { SYNCHRONIZE, allows, duplicateAccess, grantedAccess, mappedAccess } from './access.js';
 
 test('a mutex opened by name refuses no rights and rights it does not have', ()=>{
     // Wine's kernel32 sync.c test_mutex: OpenMutex of each single bit, and
@@ -66,4 +66,40 @@ test('a section\'s generic rights are its FILE_MAP_* rights; a duplicate may ask
         'whatever the kind');
     assert.deepEqual(duplicateAccess('mapping', 0x0004, null, false), { granted: 0x0004 });
     assert.deepEqual(duplicateAccess('mapping', 0x0004, 0x0006, true), { granted: 0x0006 });
+});
+
+test('a file\'s duplicate cannot be granted a right its source lacks; generic rights map to'
+    + ' FILE_GENERIC_*', ()=>{
+    const GENERIC_READ = 0x80000000;
+    const GENERIC_WRITE = 0x40000000;
+    const FILE_READ_DATA = 0x1;
+    const FILE_WRITE_DATA = 0x2;
+    const FILE_APPEND_DATA = 0x4;
+    const implied = SYNCHRONIZE | 0x80;
+    assert.equal(mappedAccess('file', GENERIC_READ), 0x120089, 'FILE_GENERIC_READ');
+    assert.equal(mappedAccess('file', GENERIC_WRITE), 0x120116, 'FILE_GENERIC_WRITE');
+    assert.equal(mappedAccess('file', 0), 0, 'an open may ask for nothing');
+    // Wine's test_file_access: each open, each duplicate of it.
+    const opens = [GENERIC_READ | GENERIC_WRITE, GENERIC_WRITE, GENERIC_READ,
+        FILE_READ_DATA | FILE_WRITE_DATA, FILE_WRITE_DATA, FILE_READ_DATA, FILE_APPEND_DATA,
+        FILE_READ_DATA | FILE_APPEND_DATA, FILE_WRITE_DATA | FILE_APPEND_DATA, 0];
+    for (const open of opens)
+    {
+        const source = mappedAccess('file', (open | implied) >>> 0);
+        for (const asked of opens)
+        {
+            const mappedAsked = /** @type {number} */ (mappedAccess('file', asked));
+            const mappedOpen = /** @type {number} */ (mappedAccess('file', open));
+            const fits = (mappedOpen & mappedAsked) === mappedAsked;
+            const got = duplicateAccess('file', asked, source, false);
+            assert.deepEqual('error' in got, !fits,
+                `${open.toString(16)} => ${asked.toString(16)}`);
+            if (!fits)
+            {
+                assert.deepEqual(got, { error: 5 });
+            }
+        }
+    }
+    assert.deepEqual(duplicateAccess('event', 0x1f0003, 0x00100000, false), { granted: null },
+        'an event\'s duplicate is not bounded by its source');
 });

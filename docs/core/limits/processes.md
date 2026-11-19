@@ -66,8 +66,11 @@
   carries the rights asked for when it is made as well. A process opened by id (`OpenProcess`)
   carries the rights asked for: its memory calls need `PROCESS_VM_OPERATION`, `PROCESS_VM_READ`,
   `PROCESS_VM_WRITE` or `PROCESS_QUERY_INFORMATION` as on Windows, and a handle it opens to its own
-  id is this process to them. Other handles a process creates, and every
-  other kind, have every right. A job and a completion port made by name share the one namespace
+  id is this process to them. A file opened by `CreateFile` or `NtCreateFile` carries what was
+  asked, generic rights mapped to `FILE_GENERIC_*`: reads need `FILE_READ_DATA`, writes
+  `FILE_WRITE_DATA` or `FILE_APPEND_DATA`, and its duplicate cannot be granted a right it lacks
+  (`ERROR_ACCESS_DENIED`). Other handles a process creates, and every other kind, have every
+  right. A job and a completion port made by name share the one namespace
   of named objects. `TerminateJobObject` ends every process of the job with its code, as
   `TerminateProcess` does, and leaves the job signalled for good; a process that has ended joins
   no job, and a job's accounting counts the processes ever assigned and those still running. A
