@@ -46,7 +46,7 @@ import { fullPathName } from '../ntdll/paths.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import {
     FSCTL_DELETE_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT,
-    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, reparseRequest,
+    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, namesDirectory, reparseRequest,
 } from './reparse.js';
 
 /** Codes this surface reports through the last-error slot. */
@@ -1217,8 +1217,14 @@ export function createFileFunctions(host){
             {
                 return { error: ERROR_FILE_NOT_FOUND };
             }
+            const link = tag === IO_REPARSE_TAG_SYMLINK ? files.reparseOf?.(at) : null;
             at = `${path.slice(0, 2)}${SEPARATOR}${here.junction}`;
             here = files.stat(at);
+            // A link naming a directory (a separator last) reaches no file.
+            if (link && namesDirectory(link.data) && here?.exists && !here.isDirectory)
+            {
+                return { error: ERROR_INVALID_NAME };
+            }
         }
         return { error: ERROR_CANT_RESOLVE_FILENAME };
     };

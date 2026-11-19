@@ -8,8 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     FSCTL_DELETE_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT,
-    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, mountPointBuffer, reparseRequest,
-    reparseTarget,
+    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, mountPointBuffer, namesDirectory,
+    reparseRequest, reparseTarget,
 } from './reparse.js';
 
 const STATUS_SUCCESS = 0;
@@ -169,4 +169,10 @@ test('a link names a DOS path, a relative one beside it, a device nothing here',
     // A junction kept without its buffer reads back as the mount point it is.
     const kept = mountPointBuffer('C:\\T\\DIR');
     assert.equal(reparseTarget(IO_REPARSE_TAG_MOUNT_POINT, kept, at), 'C:\\T\\DIR');
+});
+
+test('a link names a directory when its substitute name ends in a separator', ()=>{
+    assert.equal(namesDirectory(linkBuffer(IO_REPARSE_TAG_SYMLINK, 'testreparse_file\\', 1)), true);
+    assert.equal(namesDirectory(linkBuffer(IO_REPARSE_TAG_SYMLINK, 'testreparse_file', 1)), false);
+    assert.equal(namesDirectory(null), false);
 });
