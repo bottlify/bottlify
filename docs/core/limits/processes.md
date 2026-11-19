@@ -129,8 +129,12 @@
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails
   (`ERROR_INVALID_HANDLE`, said as a divergence); so does a `ReadFileEx` or `WriteFileEx` on one,
-  which works on a pipe of the engine's thread. Writes are never held back by a full buffer, and
-  `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on nothing.
+  which works on a pipe of the engine's thread. A write waits, as on Windows, until what is
+  queued up to its end fits the buffer the pipe was made with (the server's output size one way,
+  its input size the other) and `FlushFileBuffers` until the reader has taken everything; a write
+  from a process in a worker of its own is the exception and finishes at once, said as a
+  divergence. `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on
+  nothing.
   `ImpersonateNamedPipeClient` takes on the client once the server has read from it, as the
   process's own account at SecurityImpersonation: every process is the one user, and a client's
   security quality of service and impersonated token are not carried.

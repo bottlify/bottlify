@@ -476,7 +476,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     native?: boolean, overlapped?: number,
  *     io?: { event: number, apc: number, context: number }) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean, overlapped?: number) => any,
+ *     native?: boolean, overlapped?: number, routine?: number,
+ *     io?: { event: number, apc: number, context: number }) => any,
  *     readEx?: (handle: number, buffer: number, length: number, overlapped: number,
  *     routine: number) => any,
  *     writeEx?: (handle: number, buffer: number, length: number, overlapped: number,
@@ -3308,7 +3309,7 @@ export function createFileFunctions(host){
                 // finishes the call through these, as Windows does.
                 const io = { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 };
                 const answer = writing
-                    ? stream.write(handle, buffer, length, block, true)
+                    ? stream.write(handle, buffer, length, block, true, 0, 0, io)
                     : stream.read(handle, buffer, length, block, true, 0, io);
                 if (answer === STATUS_PENDING && (event >>> 0) !== 0)
                 {
@@ -3466,13 +3467,19 @@ export function createFileFunctions(host){
          * NTSTATUS NtFsControlFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID,
          *   PIO_STATUS_BLOCK, ULONG FsControlCode, PVOID, ULONG, PVOID, ULONG)
          *
-         * The volume answers no file-system control: reparse points,
-         * compression and the rest are the requests of a volume it is not.
+         * A pipe end answers its own (`pipes.control`: FSCTL_PIPE_PEEK). The
+         * volume answers no file-system control: reparse points, compression
+         * and the rest are the requests of a volume it is not.
          */
         NtFsControlFile: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([handle, , , , block, code])=>{
+            handler: ([handle, , , , block, code, , , output, room])=>{
+                const piped = host.pipes?.control(handle, code, output, room);
+                if (piped)
+                {
+                    return settled(block >>> 0, piped.status, piped.information);
+                }
                 if (!object(handle, 'file'))
                 {
                     return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
@@ -4877,15 +4884,16 @@ export function createFileFunctions(host){
         /**
          * BOOL FlushFileBuffers(HANDLE)
          *
-         * Nothing between the guest and the filesystem is buffered, so there is
-         * nothing to push. Validating the handle is the only observable part,
-         * and a program that flushes an invalid one wants to hear about it.
+         * Nothing between the guest and the filesystem is buffered, so a file
+         * has nothing to push; a pipe end waits for its reader to take what it
+         * wrote (`pipes.flush`). Validating the handle is the rest, and a
+         * program that flushes an invalid one wants to hear about it.
          */
         FlushFileBuffers: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(object(handle, 'file') || host.pipes?.isPipe(handle)
-                ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>host.pipes?.flush(handle)
+                ?? (object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE)),
         },
 
         /**

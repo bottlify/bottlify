@@ -2523,3 +2523,13 @@ no free block or uncommitted range of the heap's own; VirtualQuery on a heap ans
 region. Wine's heap test measures segment sizes and walk entries against the Windows layout and
 fails on them. Revisit when a program is found reading a heap's segments, by VirtualQuery or by
 HeapWalk's free and uncommitted entries. *2026-11-18.*
+
+**A273. A pipe made with a buffer size of 0 holds 4096 bytes that way.**
+CreateNamedPipe's buffer sizes are advisory: Windows documents that it reserves the system
+default, the system minimum or the size asked rounded up, and does not say which of these a 0
+gets; CreatePipe documents 0 as the default size, and its test records 4096. A write waits until
+what is queued fits the size (`kernel32/pipes.js`), so the choice is observable: taken literally, a
+0 would hold every write until the reader takes it, and a parent that waits for its child to exit
+before reading a short message it wrote would wait for ever. So a 0 is the default, 4096, the size
+an anonymous pipe has; GetNamedPipeInfo still answers the 0 that was asked. Revisit when a
+measurement on Windows shows what a 0 holds. *2026-11-19.*
