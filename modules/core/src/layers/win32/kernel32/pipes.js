@@ -387,6 +387,7 @@ export function pipeStandIn(id, described){
  * @property {number} length
  * @property {number} out  the count's address
  * @property {boolean} [native]  NtReadFile's: `out` is the IO_STATUS_BLOCK
+ * @property {NativeAsync} [io]  a synchronous native call's event, APC and context
  * @property {NativeAsync} [async]  NtReadFile's on an end opened for overlapped I/O:
  *     answered STATUS_PENDING, it finishes through its block, event, APC and port
  * @property {number} [statusAt]  the OVERLAPPED a call on a handle opened
@@ -720,6 +721,28 @@ export function createNamedPipes(host){
     };
 
     /**
+     * Whether an asynchronous operation was given an event of its own: a
+     * native call's Event, an OVERLAPPED's hEvent. A synchronous one signals
+     * the handle whatever it was given.
+     *
+     * @param {Op} op
+     */
+    const ownEvent = op=>{
+        if (op.async)
+        {
+            return op.async.event !== 0;
+        }
+        const overlapped = op.overlapped;
+        if (overlapped === 0)
+        {
+            return false;
+        }
+        const theirs = overlappedLayout(op.ctx.host.pointerSize);
+        const word = op.ctx.host.readMemory((overlapped + theirs.event) >>> 0, 4);
+        return ((word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) & ~1) !== 0;
+    };
+
+    /**
      * Finishes an operation where its process asked it, and wakes that process's
      * thread when it was parked.
      *
@@ -727,7 +750,10 @@ export function createNamedPipes(host){
      */
     const finish = (op, status, count)=>{
         const owner = op.ctx.host;
-        if (op.end?.signal)
+        // The end's handle is signalled by an operation that had no event of
+        // its own to signal, as a file object is when its request completes;
+        // one with an event leaves the handle as the request's start left it.
+        if (op.end?.signal && !ownEvent(op))
         {
             owner.kernel.setEvent?.(op.end.signal);
         }
@@ -766,7 +792,22 @@ export function createNamedPipes(host){
         {
             owner.writeMemory(op.out, dwordBytes(status));
             owner.writeMemory(op.out + 4, dwordBytes(count));
+            // The thread is woken with the answer first: the APC queued
+            // after must wait for its next alertable wait, not end this one.
             owner.kernel.wake(op.thread, status);
+            // A synchronous native call that waited still signals its event
+            // and queues its APC once it reached the pipe.
+            if (op.io && status !== STATUS_CANCELLED && (status >>> 30) !== 3)
+            {
+                if (op.io.event !== 0)
+                {
+                    owner.setEvent?.(op.io.event);
+                }
+                if (op.io.apc !== 0)
+                {
+                    owner.queueApc?.(op.thread, op.io.apc, [op.io.context, op.out, 0]);
+                }
+            }
             return;
         }
         if (op.out !== 0)
@@ -1060,7 +1101,8 @@ export function createNamedPipes(host){
         /** @type {Op} */
         const op = { kind: 'connect', ctx, thread: host.currentThread(), handle,
             overlapped, buffer: 0, length: 0, out: block, end,
-            ...native ? { native } : {}, ...async ? { async } : {} };
+            ...native ? { native } : {}, ...async ? { async } : {},
+            ...native && io && !async ? { io } : {} };
         instance.connects.push(op);
         if (end.signal)
         {
@@ -1542,6 +1584,7 @@ export function createNamedPipes(host){
             overlapped: waits ? 0 : overlapped >>> 0, buffer: buffer >>> 0,
             length: length >>> 0, out: out >>> 0, native, end,
             ...waits ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {},
+            ...native && io && !async ? { io } : {},
             ...routine !== 0 ? { routine } : {} };
         end.readers.push(op);
         if (end.signal)
@@ -1652,6 +1695,7 @@ export function createNamedPipes(host){
                 overlapped: parks ? 0 : overlapped >>> 0, buffer: buffer >>> 0, length: count,
                 out: out >>> 0, native, end,
                 ...parks ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {},
+                ...native && io && !async ? { io } : {},
                 ...routine !== 0 ? { routine } : {} };
             entryOf.op = op;
             peer.waiting++;
@@ -1887,9 +1931,11 @@ export function createNamedPipes(host){
     };
 
     /**
-     * CancelIo and CancelIoEx: what waits on a pipe handle of this process --
+     * CancelIo and CancelIoEx: what waits on a pipe end of this process --
      * all of it, the calling thread's alone, or the one OVERLAPPED -- ends
-     * cancelled. The count, or null for a handle that is no pipe end.
+     * cancelled, through whichever handle onto the end it was asked: I/O
+     * belongs to the file object, not to a handle's number. The count, or
+     * null for a handle that is no pipe end.
      *
      * NtCancelIoFileEx names the one by its IO_STATUS_BLOCK (`block`): an
      * OVERLAPPED is one, a native call's is where it was asked.
@@ -1905,7 +1951,7 @@ export function createNamedPipes(host){
             const standIn = standInOf(handle);
             return standIn ? /** @type {PipesAcross} */ (host.across).cancel(standIn.id) : null;
         }
-        return abort(end, op=>op.ctx === ctx && op.handle === (handle >>> 0)
+        return abort(end, op=>op.ctx === ctx
             && (which.overlapped === undefined || op.overlapped === which.overlapped)
             && (which.block === undefined || op.overlapped === which.block
                 || op.statusAt === which.block || (op.native === true && op.out === which.block))
@@ -1987,6 +2033,43 @@ export function createNamedPipes(host){
         peer.drains.push(op);
         kernel.block(op.thread, 'pipe flush');
         return host.park();
+    };
+
+    /**
+     * NtFlushBuffersFile on a pipe end: it waits, on an overlapped end too,
+     * until the other end has read everything this one wrote; done at once
+     * when there is nothing to wait for, a server end in any state included.
+     * A client the server cut off is STATUS_PIPE_DISCONNECTED. The status
+     * block is written either way it ends. A status, the park, or null for a
+     * handle that is no pipe end.
+     *
+     * @param {number} handle @param {number} block
+     * @returns {number | { parked: any } | null}
+     */
+    const flushNative = (handle, block)=>{
+        const end = endOf(handle);
+        if (!end)
+        {
+            return null;
+        }
+        if (end.side === 'client' && (end.cut || end.instance.state === 'disconnected'))
+        {
+            return STATUS_PIPE_DISCONNECTED;
+        }
+        const peer = peerOf(end);
+        if (!end.canWrite || !peer || peer.closed || peer.inbox.length === 0
+            || blocked(end, true) !== null)
+        {
+            host.writeMemory(block >>> 0, dwordBytes(STATUS.SUCCESS));
+            host.writeMemory((block >>> 0) + 4, dwordBytes(0));
+            return STATUS.SUCCESS;
+        }
+        /** @type {Op} */
+        const op = { kind: 'flush', ctx, thread: host.currentThread(), handle: handle >>> 0,
+            overlapped: 0, buffer: 0, length: 0, out: block >>> 0, end, native: true };
+        peer.drains.push(op);
+        kernel.block(op.thread, 'pipe flush');
+        return { parked: host.park() };
     };
 
     /**
@@ -2618,6 +2701,7 @@ export function createNamedPipes(host){
         read,
         write,
         flush,
+        flushNative,
         cancelSynchronous,
         /**
          * ReadFileEx's way in: the answer, or null for a handle that is no pipe end.
@@ -2817,7 +2901,8 @@ export function createNamedPipes(host){
             {
                 host.writeMemory((output >>> 0) + PEEK_HEAD, seen.bytes);
             }
-            const whole = end.instance.pipe.messages ? seen.length : seen.total;
+            // Only a message cut short overflows: a byte pipe's peek takes what fits.
+            const whole = end.instance.pipe.messages ? seen.length : seen.bytes.length;
             return { status: seen.bytes.length < whole ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS,
                 information: PEEK_HEAD + seen.bytes.length };
         },

@@ -2244,6 +2244,46 @@ test('NtCreateFile opens a pipe\'s client end by its native name, with the right
         'STATUS_INVALID_HANDLE');
 });
 
+test('a native request on a pipe end clears its event first, and one done at once with a'
+    + ' warning signals it and queues its APC', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    /** @type {any[]} */
+    const queued = [];
+    /** @type {{ handles: any }} */
+    const held = { handles: null };
+    const { fns, handles } = setup({
+        resetEvent: (/** @type {number} */ event)=>said.push(`reset ${event}`),
+        setEvent: (/** @type {number} */ event)=>said.push(`set ${event}`),
+        currentThread: ()=>'main',
+        queueApc: (/** @type {any[]} */ ...args)=>queued.push(args),
+        streams: [{
+            /** @param {number} handle */
+            read: handle=>(held.handles.typeOf(handle) === 'pipe' ? 0x80000005 : null),
+            write: ()=>null,
+        }],
+        pipes: {
+            isPipe: (/** @type {number} */ handle)=>held.handles.typeOf(handle) === 'pipe',
+            control: ()=>({ status: 0, information: 16 }),
+            flushNative: ()=>0,
+            information: ()=>null,
+            setInformation: ()=>null,
+        },
+    });
+    held.handles = handles;
+    const pipe = handles.open('pipe', {});
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    assert.equal(natives.NtReadFile.handler([pipe, 0x44, 0x401000, 5, 0x300, 0x400, 2, 0, 0])
+        >>> 0, 0x80000005, 'STATUS_BUFFER_OVERFLOW: part of a message');
+    assert.deepEqual(said, ['reset 68', 'set 68'], 'cleared as made, set as done');
+    assert.deepEqual(queued.at(-1), ['main', 0x401000, [5, 0x300, 0]]);
+    said.length = 0;
+    assert.equal(natives.NtFsControlFile.handler([pipe, 0x44, 0, 0, 0x300, 0x11400c, 0, 0,
+        0x400, 32]), 0);
+    assert.deepEqual(said, ['reset 68', 'set 68'], 'a peek done at once says so too');
+    assert.equal(natives.NtFlushBuffersFile.handler([pipe, 0x300]), 0, 'the pipe flushes it');
+});
+
 test('NtCreateFile names what is missing, and takes only object names', ()=>{
     const { fns, memory, files } = setup();
     const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;

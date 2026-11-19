@@ -636,6 +636,63 @@ test('a wait on an end\'s handle is a wait on its pending operations, as on a fi
     assert.equal(p.pipes.waitable(0x9999), null);
 });
 
+test('an operation with an event of its own leaves the handle unsignalled; a cancel through'
+    + ' another handle onto the end ends it', ()=>{
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+    const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+    const signal = p.pipes.waitable(server);
+    p.view.setUint32(OVERLAPPED + 16, 0x88, true);
+    assert.equal(p.read(server, 10, OVERLAPPED), 0);
+    assert.equal(signal.signalled, false, 'pending');
+    p.write(client, 'x');
+    assert.equal(signal.signalled, false, 'done, but the OVERLAPPED had its event to set');
+    assert.ok(p.events.includes(0x88));
+
+    // A second handle onto the server end: I/O is the end's, not the number's.
+    const other = p.handles.size + 0x1000;
+    p.handles.set(other, { type: 'pipe', object: p.handles.get(server)?.object, access: null });
+    const BLOCK = COUNT + 0x40;
+    const io = { event: 0, apc: 0x401000, context: 7 };
+    assert.equal(p.pipes.read(server, BUFFER, 10, BLOCK, true, 0, io), STATUS_PENDING);
+    assert.equal(p.pipes.cancel(other, {}), 1, 'cancelled through the other handle');
+    assert.deepEqual([p.u32(BLOCK), p.u32(BLOCK + 4)], [STATUS_CANCELLED, 0]);
+    assert.deepEqual(p.apcs.at(-1)?.args, [7, BLOCK, 0], 'its APC queued');
+});
+
+test('NtFlushBuffersFile waits for the reader to take everything; a cut client is refused, a'
+    + ' server with nothing to wait for is done', ()=>{
+    const STATUS_PIPE_DISCONNECTED = 0xc00000b0;
+    const BLOCK = COUNT + 0x40;
+    const p = processOn(new Map());
+    const server = p.server();
+    assert.equal(p.pipes.flushNative(server, BLOCK), 0, 'listening: nothing to flush');
+    const client = p.client();
+    p.write(client, 'abc');
+    assert.deepEqual(p.pipes.flushNative(client, BLOCK), { parked: 'parked' });
+    assert.equal(p.read(server, 3), 1);
+    assert.deepEqual([p.u32(BLOCK), p.u32(BLOCK + 4)], [0, 0], 'read: the flush is done');
+    assert.deepEqual(p.woken.at(-1)?.result, 0);
+    assert.equal(p.fns.DisconnectNamedPipe.handler([server]), 1);
+    assert.equal(p.pipes.flushNative(client, BLOCK), STATUS_PIPE_DISCONNECTED);
+    assert.equal(p.pipes.flushNative(server, BLOCK), 0, 'the server end is done');
+    assert.equal(p.pipes.flushNative(0x9999, BLOCK), null);
+});
+
+test('a synchronous native read that waited signals its event and queues its APC after waking',
+    ()=>{
+        const p = processOn(new Map());
+        const server = p.server(PIPE_ACCESS_DUPLEX);
+        const client = p.client();
+        const BLOCK = COUNT + 0x40;
+        const io = { event: 0x77, apc: 0x401000, context: 9 };
+        assert.equal(p.pipes.read(server, BUFFER, 10, BLOCK, true, 0, io), 'parked');
+        assert.equal(p.write(client, 'hi'), 1);
+        assert.deepEqual(p.woken.at(-1), { thread: 'p1:main', result: 0 });
+        assert.ok(p.events.includes(0x77));
+        assert.deepEqual(p.apcs.at(-1)?.args, [9, BLOCK, 0]);
+    });
+
 test('describe says of each handle what is at the other end, and when it is gone', ()=>{
     const p = processOn(new Map());
     const server = p.server();
@@ -1219,7 +1276,8 @@ test('a peek sees a message pipe\'s front message whatever the end reads in; FSC
         assert.deepEqual([p.u32(PEEK), p.u32(PEEK + 4), p.u32(PEEK + 8), p.u32(PEEK + 12)],
             [3, 35, messages ? 2 : 0, messages ? 20 : 0]);
         assert.deepEqual(p.pipes.control(client, 0x11400c, PEEK, 16 + 1),
-            { status: STATUS_BUFFER_OVERFLOW, information: 17 });
+            { status: messages ? STATUS_BUFFER_OVERFLOW : 0, information: 17 },
+            'a message cut short overflows; a byte pipe\'s peek takes what fits');
         assert.deepEqual(p.pipes.control(client, 0x11400c, PEEK, 15),
             { status: 0xc0000023, information: 0 },
             'no room for the head: STATUS_BUFFER_TOO_SMALL');

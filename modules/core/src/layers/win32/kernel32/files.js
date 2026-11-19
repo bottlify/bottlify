@@ -3389,7 +3389,10 @@ export function createFileFunctions(host){
         /** @param {number[]} args */
         handler: ([handle, event, apc, context, block, buffer, length, offset])=>{
             const status = (/** @type {number} */ answer)=>{
-                if (answer === STATUS_SUCCESS || answer === STATUS_END_OF_FILE)
+                // Done, with its data or a warning (part of a message), or at
+                // the end of the file: the event and the APC say so.
+                if (answer !== STATUS_PENDING && ((answer >>> 30) !== 3
+                    || answer === STATUS_END_OF_FILE))
                 {
                     if ((event >>> 0) !== 0)
                     {
@@ -3403,6 +3406,13 @@ export function createFileFunctions(host){
                 }
                 return answer;
             };
+            // A request on a pipe end clears its event as it is made, whatever
+            // then becomes of it: what the event says afterwards is this
+            // request's (a read refused as the pipe broken leaves it clear).
+            if ((event >>> 0) !== 0 && heldKind(handle) === 'pipe')
+            {
+                host.resetEvent?.(event >>> 0);
+            }
             for (const stream of streams)
             {
                 // A handle opened for overlapped I/O does not wait: the stream
@@ -3636,6 +3646,20 @@ export function createFileFunctions(host){
                     {
                         return STATUS_PENDING;
                     }
+                    // A request done at once that reached the pipe - a success
+                    // or a warning - signals its event and queues its APC.
+                    if ((piped.status >>> 30) !== 3)
+                    {
+                        if ((event >>> 0) !== 0)
+                        {
+                            host.setEvent?.(event >>> 0);
+                        }
+                        if ((apc >>> 0) !== 0)
+                        {
+                            host.queueApc?.(host.currentThread?.() ?? null, apc >>> 0,
+                                [context >>> 0, block >>> 0, 0]);
+                        }
+                    }
                     return settled(block >>> 0, piped.status, piped.information);
                 }
                 if (!object(handle, 'file'))
@@ -3813,6 +3837,12 @@ export function createFileFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, block])=>{
+                // A pipe end waits until its reader has taken what it wrote.
+                const piped = host.pipes?.flushNative?.(handle >>> 0, block >>> 0) ?? null;
+                if (piped !== null)
+                {
+                    return typeof piped === 'number' ? piped : piped.parked;
+                }
                 const file = object(handle, 'file');
                 if (!file)
                 {
