@@ -41,17 +41,21 @@
  * known one that no longer differs - the list only shrinks.
  *
  *     node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90000000] [--only RE]
+ *         [--trace] [--known FILE] [--write-known]
  *
  * `--list` prints every difference, known or not; `--high` moves the second
  * window (past 4 GiB once a 64-bit process's addresses reach there: the
  * memory accessors here take any number below 2^53); `--only` calls just the
  * functions whose `library!function` matches the expression, and checks the
- * known list for those alone.
+ * known list for those alone; `--trace` names each call on stderr before it is
+ * made, so a run that stops in a handler says which. `--known` names the list
+ * a run is held to (`wide-addresses-high.json` for the window at 0x140000000)
+ * and `--write-known` writes it from what the run found.
  */
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { isMain } from '../lib/common.mjs';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
@@ -84,8 +88,8 @@ const ENDS = /^(ExitProcess|ExitThread|FatalAppExit[AW]|FatalExit|FreeLibraryAnd
  *
  * @returns {Set<string>}
  */
-export function known(){
-    return new Set(Object.keys(JSON.parse(readFileSync(KNOWN_FILE, 'utf8')).known));
+export function known(file = KNOWN_FILE){
+    return new Set(Object.keys(JSON.parse(readFileSync(file, 'utf8')).known));
 }
 
 /**
@@ -108,13 +112,13 @@ function argumentBytes(){
 }
 
 /**
- * A win32 layer of a 64-bit process over one window at `base`; `generation`
- * builds it again, fresh, once the two have parted.
+ * A win32 layer of a 64-bit process over one window at `base`, made of the
+ * modules loaded for that base: made again once the two have parted.
  *
- * @param {number} base @param {number} [generation]
+ * @param {number} base
  */
-async function layerAt(base, generation = 0){
-    const query = `?at=${base}${generation > 0 ? `&generation=${generation}` : ''}`;
+async function layerAt(base){
+    const query = `?at=${base}`;
     /** @param {string} path */
     const load = path=>import(`${pathToFileURL(join(LAYERS, path)).href}${query}`);
     const { createMemoryModule } = await load('memory/module.js');
@@ -489,7 +493,9 @@ function nextBlock(layer){
             return null;
         }
         kernel?.LocalFree?.handler?.([at]);
-        return (at >>> 0) - layer.base;
+        // A handler answers a dword: the block's place in the window by the base's
+        // own low half, so a window past 4 GiB compares as one below it.
+        return ((at >>> 0) - layer.base % 2 ** 32 + 2 ** 32) % 2 ** 32;
     }
     catch {
         return null;
@@ -564,6 +570,11 @@ export async function compare(low, high, only = null, rebuild = null){
                     parted.push(last);
                 }
                 last = `${library}!${name} with ${label}`;
+                if (TRACE)
+                {
+                    // The call a run stops in is the last line said.
+                    process.stderr.write(`${last}\n`);
+                }
                 // Each window as it was: a handler writes through what it is handed.
                 lo.window.set(pristine.subarray(0, ARENA.offset));
                 hi.window.set(pristine.subarray(0, ARENA.offset));
@@ -612,24 +623,50 @@ export async function compare(low, high, only = null, rebuild = null){
     return { handlers, calls, differences, unmeasured, parted, low: lo, high: hi };
 }
 
+/** `--trace`: each call named before it is made, for a run that never comes back. */
+const TRACE = process.argv.includes('--trace');
+
 async function main(){
-    const at = process.argv.indexOf('--high');
-    const highBase = at > 0 ? Number(process.argv[at + 1]) : HIGH;
-    const onlyAt = process.argv.indexOf('--only');
-    const only = onlyAt > 0 ? new RegExp(process.argv[onlyAt + 1]) : null;
-    let generation = 0;
+    const option = (/** @type {string} */ name)=>{
+        const at = process.argv.indexOf(name);
+        return at > 0 ? process.argv[at + 1] : undefined;
+    };
+    const highBase = Number(option('--high') ?? HIGH);
+    const only = option('--only') === undefined ? null : new RegExp(String(option('--only')));
+    const knownFile = option('--known') ?? KNOWN_FILE;
+    /** @type {{ handlers: number, calls: number, differences: { key: string, label: string,
+     *     detail: string }[], unmeasured: Set<string>, parted: string[] }} */
+    let found;
     const result = await compare(await layerAt(LOW), await layerAt(highBase), only,
         async(low, high)=>{
+            // Made again of the same modules: a layer keeps its state in what
+            // `create` answers, and modules loaded anew for each were never let go -
+            // past 4 GiB, where half the calls part the arenas, the run died of them.
             await low.dispose();
             await high.dispose();
-            generation++;
-            return { low: await layerAt(LOW, generation),
-                high: await layerAt(highBase, generation) };
+            return { low: await layerAt(LOW), high: await layerAt(highBase) };
         });
-    const { handlers, calls, differences, unmeasured, parted } = result;
     await result.low.dispose();
     await result.high.dispose();
-    const list = known();
+    found = result;
+    const { handlers, calls, differences, unmeasured, parted } = found;
+    if (process.argv.includes('--write-known'))
+    {
+        /** @type {Record<string, string>} */
+        const entries = {};
+        for (const d of differences)
+        {
+            entries[d.key] ??= `${d.label}: ${d.detail}`.slice(0, 160);
+        }
+        writeFileSync(knownFile, `${JSON.stringify({
+            about: `What differs today between a 64-bit process's handlers at 0x${
+                LOW.toString(16)} and 0x${highBase.toString(16)} (check-wide-addresses.mjs).`
+                + ' Only shrinks: fix, then take the line off.',
+            known: Object.fromEntries(Object.entries(entries).sort(([a], [b])=>
+                (a < b ? -1 : a > b ? 1 : 0))),
+        }, null, 1)}\n`);
+    }
+    const list = known(knownFile);
     const differing = new Set(differences.map(d=>d.key));
     if (process.argv.includes('--list'))
     {
@@ -646,7 +683,7 @@ async function main(){
     }
     for (const key of stale)
     {
-        console.error(`${key} no longer differs: take it off tools/checks/wide-addresses-known.json`);
+        console.error(`${key} no longer differs: take it off ${knownFile}`);
     }
     console.log(`wide addresses: ${handlers} handlers, ${calls} calls at 0x${LOW.toString(16)} and`
         + ` 0x${highBase.toString(16)}, ${new Set(fresh.map(d=>d.key)).size} new differences,`
