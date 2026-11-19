@@ -288,6 +288,15 @@ test('QueryFullProcessImageName answers this process\'s image and a child\'s', (
     assert.equal(ask('QueryFullProcessImageNameA', [child, 0, 0x400], 260), 1);
     assert.equal(ansi(), 'C:\\App\\child.exe');
     assert.equal(fns.QueryFullProcessImageNameW.argBytes, 16);
+
+    // A handle OpenProcess gave for this process's own id is this process
+    // (the rights it carries are process-target.js's to check), whatever the
+    // run's record of it carries: the image is the one this process runs.
+    /** @type {any} */ (host.kernel.processes).find = (/** @type {number} */ id)=>
+        (id === 0x1000 ? { id, kind: 'process' } : undefined);
+    const self = fns.OpenProcess.handler([0x1000, 0, 0x1000]);
+    assert.equal(ask('QueryFullProcessImageNameA', [self, 0, 0x400], 260), 1);
+    assert.equal(ansi(), own);
 });
 
 test('GetProcessImageFileName answers the image by its volume\'s device', ()=>{
@@ -967,6 +976,37 @@ test('a job list names the jobs a child is made in: a handle of no job, or a job
     refuse = true;
     assert.equal(create(), 0, 'a job of another hierarchy refuses it');
     assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+});
+
+test('a parent named in the attribute list is the child\'s parent, and a handle of no process'
+    + ' fails CreateProcess', ()=>{
+    // Wine's kernel32 process.c test_parent_process_attribute.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    const fns = createSpawnFunctions(host);
+    const startup = 0x400;
+    const LIST = 0x600;
+    const PARENT = 0x700;
+    host.view.setUint32(startup + 68, LIST, true);
+    host.view.setUint32(0x7f0, 0x100, true);
+    assert.equal(fns.InitializeProcThreadAttributeList.handler([LIST, 1, 0, 0x7f0]), 1);
+    assert.equal(fns.UpdateProcThreadAttribute.handler([LIST, 0, 0x20000, PARENT, 4, 0, 0]), 1);
+    const create = ()=>fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0x80000, 0, 0, startup, 0]);
+    const made = host.requests.length;
+    for (const handle of [0xdeadbeef, 0])
+    {
+        host.view.setUint32(PARENT, handle, true);
+        assert.equal(create(), 0, `a parent handle of ${handle}`);
+        assert.equal(host.errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    }
+    assert.equal(host.requests.length, made, 'and nothing is made');
+    host.view.setUint32(PARENT, CURRENT_PROCESS, true);
+    assert.equal(create(), 1, 'this process, as its own parent');
+    assert.equal(host.requests.at(-1).parentId, host.processId ?? 0);
+    const other = host.kernel.processes.create({ imagePath: 'C:/App/other.exe', commandLine: '' });
+    host.view.setUint32(PARENT, host.kernel.handles.open('process', other), true);
+    assert.equal(create(), 1, 'another process');
+    assert.equal(host.requests.at(-1).parentId, other.id, 'is its parent');
 });
 
 test('this process and its children are in the interactive session, and no other id is', ()=>{

@@ -89,7 +89,10 @@
   (`ERROR_ACCESS_DENIED`). `PROC_THREAD_ATTRIBUTE_JOB_LIST` makes a child in the jobs it names,
   each nested under the one before; a handle that names no job fails `CreateProcess`
   (`ERROR_INVALID_HANDLE`), a job of another hierarchy refuses the child (`ERROR_ACCESS_DENIED`)
-  after the jobs before it heard it come and go. The job's other limits are kept and read back, not
+  after the jobs before it heard it come and go. `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` makes the
+  process it names the child's parent (its id is the one the child reads); a handle that names no
+  process fails `CreateProcess` (`ERROR_INVALID_HANDLE`), and a child made with another process as
+  its parent inherits none of that process's handles (said once). The job's other limits are kept and read back, not
   enforced, and this
   process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
