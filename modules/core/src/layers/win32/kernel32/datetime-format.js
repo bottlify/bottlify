@@ -114,46 +114,106 @@ function parse(picture, letters){
 const pad = (value, width)=>String(value).padStart(width, '0');
 
 /**
+ * A date field written out: `near` says whether the nearest date field on
+ * either side is the day's number, which a month written in full declines for.
+ *
+ * @param {string} letter @param {number} count @param {When} when
+ * @param {CalendarNames} names @param {boolean} near
+ */
+function dateField(letter, count, when, names, near){
+    switch (letter)
+    {
+        case 'd':
+            return count === 1 ? String(when.day) : count === 2 ? pad(when.day, 2)
+                : count === 3 ? names.shortDays[when.weekday] : names.days[when.weekday];
+        case 'M':
+            if (count >= 4)
+            {
+                return names.genitive !== null && near
+                    ? names.genitive[when.month - 1] : names.months[when.month - 1];
+            }
+            return count === 1 ? String(when.month) : count === 2 ? pad(when.month, 2)
+                : names.shortMonths[when.month - 1];
+        case 'y':
+            return count === 1 ? String(when.year % 100) : count === 2 ? pad(when.year % 100, 2)
+                : pad(when.year, 4);
+        default:
+            return names.era;
+    }
+}
+
+/**
+ * A time field written out, the hour in twelve unless `force24`.
+ *
+ * @param {string} letter @param {number} count @param {When} when
+ * @param {CalendarNames} names @param {boolean} force24
+ */
+function timeField(letter, count, when, names, force24){
+    const width = Math.min(count, 2);
+    const twelve = when.hour % 12 === 0 ? 12 : when.hour % 12;
+    const marker = when.hour < 12 ? names.am : names.pm;
+    switch (letter)
+    {
+        case 'h':
+            return pad(force24 ? when.hour : twelve, width);
+        case 'H':
+            return pad(when.hour, width);
+        case 'm':
+            return pad(when.minute, width);
+        case 's':
+            return pad(when.second, width);
+        default:
+            return width === 1 ? marker.slice(0, 1) : marker;
+    }
+}
+
+/**
+ * Whether each date field's nearest date field before or after it is the
+ * day's number.
+ *
+ * @param {Item[]} items
+ * @returns {Map<Item, boolean>}
+ */
+function nearDays(items){
+    const fields = items.filter(item=>'letter' in item && 'dMyg'.includes(item.letter));
+    return new Map(fields.map((item, at)=>[item, [fields[at - 1], fields[at + 1]]
+        .some(field=>field !== undefined && 'letter' in field && field.letter === 'd'
+            && field.count <= 2)]));
+}
+
+/**
  * A date picture, rendered.
  *
  * @param {string} picture @param {When} when @param {CalendarNames} names
  */
 export function renderDate(picture, when, names){
     const items = parse(picture, 'dMyg');
-    /** @type {Item[]} */
-    const fields = items.filter(item=>'letter' in item);
-    /** Whether the nearest date field on either side of the item is the day's number. */
-    const nearDay = (/** @type {Item} */ item)=>{
-        const at = fields.indexOf(item);
-        return [fields[at - 1], fields[at + 1]].some(field=>field !== undefined
-            && 'letter' in field && field.letter === 'd' && field.count <= 2);
-    };
+    const near = nearDays(items);
+    return items.map(item=>('text' in item ? item.text
+        : dateField(item.letter, item.count, when, names, near.get(item) === true))).join('');
+}
+
+/**
+ * A picture of date and time fields at once, as a date and time picker's
+ * format is: its pieces in order, each field with its letter and run.
+ *
+ * @param {string} picture @param {When} when @param {CalendarNames} names
+ * @returns {{ text: string, letter?: string, count?: number }[]}
+ */
+export function dateTimePieces(picture, when, names){
+    const items = parse(picture, 'dMyghHmst');
+    const near = nearDays(items);
     return items.map(item=>{
         if ('text' in item)
         {
-            return item.text;
+            return { text: item.text };
         }
         const { letter, count } = item;
-        switch (letter)
-        {
-            case 'd':
-                return count === 1 ? String(when.day) : count === 2 ? pad(when.day, 2)
-                    : count === 3 ? names.shortDays[when.weekday] : names.days[when.weekday];
-            case 'M':
-                if (count >= 4)
-                {
-                    return names.genitive !== null && nearDay(item)
-                        ? names.genitive[when.month - 1] : names.months[when.month - 1];
-                }
-                return count === 1 ? String(when.month) : count === 2 ? pad(when.month, 2)
-                    : names.shortMonths[when.month - 1];
-            case 'y':
-                return count === 1 ? String(when.year % 100) : count === 2 ? pad(when.year % 100, 2)
-                    : pad(when.year, 4);
-            default:
-                return names.era;
-        }
-    }).join('');
+        const text = 'dMyg'.includes(letter)
+            ? dateField(letter, count, when, names, near.get(item) === true)
+            : timeField(letter, count, when, names, false);
+        return { text, letter, count };
+    });
 }
 
 /**
@@ -187,31 +247,12 @@ export function renderTime(picture, when, names, flags){
             out[at + 1] = space === -1 ? null : next.text.slice(space);
         }
     });
-    const twelve = when.hour % 12 === 0 ? 12 : when.hour % 12;
     const force24 = (flags & TIME_FORCE24HOURFORMAT) !== 0;
-    const marker = when.hour < 12 ? names.am : names.pm;
     return items.map((item, at)=>{
         if ('text' in item)
         {
             return out[at] ?? '';
         }
-        if (dropped(item))
-        {
-            return '';
-        }
-        const width = Math.min(item.count, 2);
-        switch (item.letter)
-        {
-            case 'h':
-                return pad(force24 ? when.hour : twelve, width);
-            case 'H':
-                return pad(when.hour, width);
-            case 'm':
-                return pad(when.minute, width);
-            case 's':
-                return pad(when.second, width);
-            default:
-                return width === 1 ? marker.slice(0, 1) : marker;
-        }
+        return dropped(item) ? '' : timeField(item.letter, item.count, when, names, force24);
     }).join('');
 }
