@@ -369,6 +369,8 @@ export function expandRow(row, width, bitCount, palette, out, rowAt = 0, outAt =
  *        A frame reached the canvas, the first or after a resize.
  * @param {(record: any) => void} [options.onPresented]
  *        Every canvas copy, for the host's own history of them.
+ * @param {{ tick: (at: number) => void }} [options.frameClock]
+ *        Ticked at every canvas copy (`host/frame-clock.js`), for a page's fps meter.
  * @param {(payload: any) => void} [options.onPresentFailed]
  * @param {(frame: any) => void} [options.presentTo]
  *        Where a frame goes in a build with no canvas: the caller's own sink,
@@ -399,6 +401,7 @@ export function createPresenter(options = {}){
     const canvas = options.canvas ?? screen?.canvas ?? null;
     const onFrame = options.onFrame ?? (()=>{});
     const onPresented = options.onPresented ?? null;
+    const frameClock = options.frameClock ?? null;
     const onPresentFailed = options.onPresentFailed ?? (()=>{});
     const now = options.now ?? (()=>performance.now());
     // A caller that has no canvas to configure but does have somewhere to put a
@@ -832,6 +835,7 @@ export function createPresenter(options = {}){
             }
             queue.submit([encoder.finish()]);
             counters.shown++;
+            frameClock?.tick(now());
             const label = surface === texture ? uploadedLabel : (surface.label ?? 'surface');
             shownBy[label] = (shownBy[label] ?? 0) + 1;
             if (recorded)

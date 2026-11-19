@@ -12068,6 +12068,7 @@ export async function createApp(options){
             onFrame: options.device.onFrame,
             onPresented: options.device.onPresented,
             onPresentFailed: options.device.onPresentFailed,
+            frameClock: options.device.frameClock,
             // The run's windows, by which the screen is composed of every
             // process's picture while more than one has a window showing.
             windows: ()=>{
