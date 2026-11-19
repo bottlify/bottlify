@@ -744,6 +744,8 @@ class Dispatcher {
         // Indexed by trap id: the cpu hands them out in sequence from zero.
         /** @type {(Entry | undefined)[]} */
         this.functions = [];
+        /** Spans named by asking (`placedSpan`). @type {{ base: number, size: number, nameAt: (address: number) => string | null }[]} */
+        this.spans = [];
         /**
          * Functions registered and not yet called, by id: their records are
          * made at their first call (`entry`).
@@ -2012,7 +2014,31 @@ class Dispatcher {
      * @returns {string | null}
      */
     symbolize(address){
-        return this.byAddress.get(address >>> 0) ?? null;
+        const at = address >>> 0;
+        const named = this.byAddress.get(at);
+        if (named !== undefined)
+        {
+            return named;
+        }
+        for (const span of this.spans)
+        {
+            if (at >= span.base && at < span.base + span.size)
+            {
+                return span.nameAt(at);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Names the addresses of a span by asking it, as they are asked for: a
+     * module's exports, named only if a report ever stands on one.
+     *
+     * @param {number} base @param {number} size
+     * @param {(address: number) => string | null} nameAt
+     */
+    placedSpan(base, size, nameAt){
+        this.spans.push({ base: base >>> 0, size, nameAt });
     }
 
     /**

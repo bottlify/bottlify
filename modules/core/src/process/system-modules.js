@@ -18,7 +18,7 @@ import { imagePlacementOf, installedHeaders } from '../layers/loader/internal/sy
 /**
  * @typedef {Object} SystemModulesHost
  * @property {any} loader          the loader layer's api (`synthesise`)
- * @property {any} bridge          the bridge layer's api (`register`, `label`)
+ * @property {any} bridge          the bridge layer's api (`register`, `labelSpan`)
  * @property {any} cpu             the cpu layer's api (`stubAt`)
  * @property {(address: number, length: number) => void} atomicCode
  *     the kernel's: code that runs unbroken
@@ -201,20 +201,20 @@ export function createSystemModules(host){
         // An export's address is its trampoline inside the module, and that is
         // what both the import table and GetProcAddress hand out -- so a program
         // comparing the two finds them equal, as it does on Windows.
-        const addresses = new Map(exports.map(entry=>[entry.name, placed.addressOf(entry.name)]));
-        const ordinals = new Map([...addresses]
-            .map(([exported, address])=>[placed.ordinalOf(exported), address]));
-        for (const [exported, address] of addresses)
-        {
-            bridge.label(Number(address), `${name}!${exported}`);
-        }
+        /** @type {Map<number, string> | null} */
+        let names = null;
+        bridge.labelSpan(base, placed.size, (/** @type {number} */ address)=>{
+            names ??= new Map(/** @type {[string, number][]} */ (placed.entries())
+                .map(([exported, at])=>[at, `${name}!${exported}`]));
+            return names.get(address) ?? null;
+        });
         // An export whose code writes what another thread's entry into the
         // host reads, and never waits, runs unbroken (the kernel's atomicCode).
         for (const entry of exports)
         {
             if (table[entry.name]?.unbroken && 'code' in entry)
             {
-                host.atomicCode(Number(addresses.get(entry.name)), entry.code.length);
+                host.atomicCode(Number(placed.addressOf(entry.name)), entry.code.length);
             }
         }
 
@@ -234,9 +234,9 @@ export function createSystemModules(host){
             // An address handed out is one the guest may run or read: the
             // module's bytes are there from the moment any is.
             /** @param {string} exported */
-            addressOf: exported=>handOut(addresses.get(exported)),
+            addressOf: exported=>handOut(placed.addressOf(exported)),
             /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>handOut(ordinals.get(ordinal)),
+            addressOfOrdinal: ordinal=>handOut(placed.addressOfOrdinal(ordinal)),
             entryPoint: placed.entryPoint,
             // Not until a program asks for it: a synthesised module exists
             // from the first instruction, but its entry point is a promise

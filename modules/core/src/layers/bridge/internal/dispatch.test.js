@@ -2263,3 +2263,17 @@ test('a function is checked when it is registered and its record made at its fir
     assert.equal(made?.calls, 1, 'made, and counting');
     assert.equal(dispatcher.diagnostics().implemented, 1);
 });
+
+test('an address in a span named by asking is named when a report asks, and only then', ()=>{
+    const { dispatcher } = longMachine({});
+    let asked = 0;
+    dispatcher.placedSpan(0x10000, 0x1000,
+        address=>(asked++, address === 0x10010 ? 'X!One' : null));
+    dispatcher.placed(0x20000, 'Y!Two');
+    assert.equal(asked, 0);
+    assert.equal(dispatcher.symbolize(0x10010), 'X!One');
+    assert.equal(dispatcher.symbolize(0x10020), null);
+    assert.equal(dispatcher.symbolize(0x20000), 'Y!Two');
+    assert.equal(dispatcher.symbolize(0x11000), null, 'past the span');
+    assert.equal(asked, 2);
+});

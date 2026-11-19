@@ -126,6 +126,8 @@ const encoder = new TextEncoder();
  *   the module exports no variable and is one read-only section.
  * @property {(name: string) => number | null} addressOf  Guest address of the trampoline.
  * @property {(name: string) => number | null} ordinalOf
+ * @property {(ordinal: number) => number | null} addressOfOrdinal
+ * @property {() => [string, number][]} entries  Every export's name and address.
  */
 
 /**
@@ -321,11 +323,21 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
  * @param {Map<string, { address: number, ordinal: number }>} table
  */
 function lookupsOf(table){
+    /** @type {Map<number, number> | null} */
+    let byOrdinal = null;
     return {
         /** @param {string} exported */
         addressOf: exported=>table.get(exported)?.address ?? null,
         /** @param {string} exported */
         ordinalOf: exported=>table.get(exported)?.ordinal ?? null,
+        /** An export's address by its number, indexed at the first ask. @param {number} ordinal */
+        addressOfOrdinal: ordinal=>{
+            byOrdinal ??= new Map([...table.values()].map(entry=>[entry.ordinal, entry.address]));
+            return byOrdinal.get(ordinal) ?? null;
+        },
+        /** Every export's name and address. */
+        /** @returns {[string, number][]} */
+        entries: ()=>[...table].map(([name, entry])=>[name, entry.address]),
     };
 }
 

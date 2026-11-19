@@ -1220,6 +1220,20 @@ export function createBridgeModule(){
                     }
                 },
 
+                /**
+                 * Names a span's addresses as a report asks for them, rather than
+                 * one by one ahead of time: a module's thousands of exports.
+                 *
+                 * @param {number} base @param {number} size
+                 * @param {(address: number) => string | null} nameAt
+                 */
+                labelSpan: (base, size, nameAt)=>{
+                    if (live())
+                    {
+                        state.dispatcher.placedSpan(base, size, nameAt);
+                    }
+                },
+
                 /** @param {number} id */
                 dispatch: id=>{
                     if (live())

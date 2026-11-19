@@ -38,6 +38,12 @@ function setup({ long = false, ordinalsOf = {} } = {}){
                         ?? [...at.keys()].indexOf(name) + 1,
                     entryPoint: request.entryPoint ? request.base + 0x800 : 0,
                     place: ()=>{},
+                    addressOfOrdinal: (/** @type {number} */ ordinal)=>{
+                        const entry = request.exports.find((/** @type {any} */ one,
+                            /** @type {number} */ index)=>(one.ordinal ?? index + 1) === ordinal);
+                        return entry ? at.get(entry.name) : null;
+                    },
+                    entries: ()=>[...at],
                 };
             },
         },
@@ -46,7 +52,7 @@ function setup({ long = false, ordinalsOf = {} } = {}){
                 registered.push(label);
                 return 0x100000 + registered.length * 16;
             },
-            label: ()=>{},
+            labelSpan: ()=>{},
         },
         cpu: { stubAt: ()=>null },
         atomicCode: (address, length)=>void atomic.push([address, length]),

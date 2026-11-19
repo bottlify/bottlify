@@ -321,6 +321,8 @@ export function createLoaderModule(){
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
                  *   ordinalOf: (name: string) => number | null,
+                 *   addressOfOrdinal: (ordinal: number) => number | null,
+                 *   entries: () => [string, number][],
                  *   placed: () => boolean, place: () => void }}
                  */
                 synthesise(options){
@@ -392,6 +394,8 @@ export function createLoaderModule(){
                         entryPoint: entryAddress,
                         addressOf: module.addressOf,
                         ordinalOf: module.ordinalOf,
+                        addressOfOrdinal: module.addressOfOrdinal,
+                        entries: module.entries,
                         /** Whether its bytes are in guest memory. */
                         placed: ()=>placed,
                         /** Writes its bytes where its span was held; nothing once it has. */
