@@ -5280,6 +5280,7 @@ async function buildApp(options){
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
      *     removeModule: (base: number) => void,
      *     entryOf: (base: number) => number,
+     *     hasThreadLocals: (base: number) => void,
      * } | null}
      */
     let threadBlocks = null;
@@ -8123,6 +8124,10 @@ async function buildApp(options){
                             return refuse('no thread-local slot, or no room for every'
                                 + ' thread\'s copy of its block');
                         }
+                        if (directory)
+                        {
+                            threadBlocks?.hasThreadLocals(base);
+                        }
                     }
                     // Before DllMain: a sidecar entry for this library patches
                     // its code, which must happen before any of it has run
@@ -9014,6 +9019,13 @@ async function buildApp(options){
             } : held),
     });
     threadBlocks = process;
+    for (const held of withTls)
+    {
+        if (held.tls)
+        {
+            process.hasThreadLocals(held.base);
+        }
+    }
     // What IsDebuggerPresent reads: a debuggee's process block says so.
     if (debuggerNow())
     {
