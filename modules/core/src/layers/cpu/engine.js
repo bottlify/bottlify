@@ -339,6 +339,9 @@ export function engineContractProblem(engineModule, url){
  * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [charge]
  *     Where the host bounds what its runtimes hold together (the tab's memory): each
  *     module held is taken by its wasm bytes and given back as it is let go.
+ * @property {((bytes: number) => void) | null} [letGo]  Told the wasm bytes of each module
+ *     the runtime lets go, so the host can bring forward the collection that frees its
+ *     compiled code (`gc-nudge.js` `releasedCode`).
  * @property {number} [sharedModuleBytes]  Wasm bytes of compiled batch modules kept for every
  *     runtime handed the same `store`: a process the run starts again instantiates the modules
  *     an earlier one compiled, without compiling them (0: none kept). Default 256 MiB.

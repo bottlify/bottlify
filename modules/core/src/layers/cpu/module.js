@@ -6,7 +6,7 @@
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { openMemoryBudget } from './internal/memory-budget.js';
-import { gcNudgeOf, startGcNudge } from './internal/gc-nudge.js';
+import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
@@ -1871,6 +1871,9 @@ export function createCpuModule(){
                     gcNudges: instance.nudge?.made() ?? null,
                     // Those the browser would not make, near its limit.
                     gcNudgesRefused: instance.nudge?.refused() ?? null,
+                    // Collections brought forward on this thread for translated
+                    // code let go (`releasedCode`), every process's on it together.
+                    codeNudges: codeNudgesMade(),
                     // The machine's memory every process takes its memory from, as
                     // the run holds it now, and the grows refused this process; null
                     // where the run has none (`machineMemory`).
@@ -1980,6 +1983,9 @@ export function createCpuModule(){
                 {
                     await current.cork.flush();
                 }
+                // The process's code goes with it: this thread's full collection
+                // is brought forward as for code its translator let go.
+                releasedCode(current.cork?.counters?.()?.heldBytes ?? 0);
                 if (current.host)
                 {
                     current.host.stop();

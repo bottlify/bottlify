@@ -29,6 +29,7 @@
 
 import { guestByLength, openCharge, openMemoryBudget } from './memory-budget.js';
 import { exceptionName, hostFault } from './faults.js';
+import { releasedCode } from './gc-nudge.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
 import { createPorts } from './ports.js';
 
@@ -1102,6 +1103,8 @@ export function createCorkHost(config){
             // The tables are zero as the runtime starts: a memory just made, or
             // one zeroed where they lie (`reused`, `makeRoomFor`).
             tablesZeroed: true,
+            // Code it lets go brings this thread's full collection forward.
+            letGo: releasedCode,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(translationCharge === null ? {} : { charge: translationCharge }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
