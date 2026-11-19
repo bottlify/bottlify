@@ -457,6 +457,8 @@ export function pipeStandIn(id, described){
  * @typedef {Object} Waiter
  * @property {Context} ctx
  * @property {any} thread
+ * @property {number} [block]  FSCTL_PIPE_WAIT's IO_STATUS_BLOCK: a native wait
+ *           ends with a status written there and woken with it.
  */
 
 /**
@@ -517,6 +519,17 @@ export function createNamedPipes(host){
         {
             writeDword(address, value);
         }
+    };
+    /**
+     * A native wait for an instance has ended: its status block says how,
+     * in the memory of the process that waited.
+     *
+     * @param {Waiter} waiter @param {number} status
+     */
+    const nativeWaitEnded = (waiter, status)=>{
+        const owner = waiter.ctx.host;
+        owner.writeMemory(/** @type {number} */ (waiter.block), dwordBytes(status));
+        owner.writeMemory(/** @type {number} */ (waiter.block) + 4, dwordBytes(0));
     };
     /** @param {number} address */
     const readDword = address=>{
@@ -612,15 +625,28 @@ export function createNamedPipes(host){
     const inheritsBy = attributes=>(attributes >>> 0) !== 0
         && readDword((attributes >>> 0) + 8) !== 0;
 
+    /**
+     * The pipes this process's threads wait on for an instance, by name: a
+     * pipe another process made is in no table of this one.
+     *
+     * @type {Set<Pipe>}
+     */
+    const waitedOn = new Set();
     kernel.onTimeout?.((/** @type {any} */ thread)=>{
-        // A WaitNamedPipe that ran out has stopped waiting.
-        for (const held of table.values())
+        // A wait for an instance that ran out has stopped waiting.
+        for (const pipe of waitedOn)
         {
-            if (held?.kind === 'pipe')
+            for (const waiter of pipe.waiters)
             {
-                /** @type {Pipe} */
-                const pipe = held.object;
-                pipe.waiters = pipe.waiters.filter(waiter=>waiter.thread !== thread);
+                if (waiter.thread === thread && waiter.block)
+                {
+                    nativeWaitEnded(waiter, STATUS.IO_TIMEOUT);
+                }
+            }
+            pipe.waiters = pipe.waiters.filter(waiter=>waiter.thread !== thread);
+            if (!pipe.waiters.some(waiter=>waiter.ctx.host === host))
+            {
+                waitedOn.delete(pipe);
             }
         }
     });
@@ -1108,6 +1134,12 @@ export function createNamedPipes(host){
     const listening = pipe=>{
         for (const waiter of pipe.waiters.splice(0))
         {
+            if (waiter.block)
+            {
+                nativeWaitEnded(waiter, STATUS.SUCCESS);
+                waiter.ctx.host.kernel.wake(waiter.thread, STATUS.SUCCESS);
+                continue;
+            }
             waiter.ctx.host.setLastErrorFor(waiter.thread, ERROR_SUCCESS);
             waiter.ctx.host.kernel.wake(waiter.thread, 1);
         }
@@ -2324,6 +2356,7 @@ export function createNamedPipes(host){
         if (!tell)
         {
             pipe.waiters.push({ ctx, thread });
+            waitedOn.add(pipe);
             kernel.block(thread, `pipe ${pipe.name}`, wait === NMPWAIT_WAIT_FOREVER
                 ? undefined : { deadline: kernel.clock.virtualTime() + wait, result: 0 });
             return host.park();
@@ -2801,8 +2834,8 @@ export function createNamedPipes(host){
             information: answer === STATUS.PENDING ? 0 : readDword(block + 4) };
     };
 
-    /** Whether a wait through the device that would have waited was said to answer at once. */
-    let deviceWaitSaid = false;
+    /** Whether a wait through the device with an absolute time-out was said. */
+    let absoluteWaitSaid = false;
     /**
      * A control asked of the pipe device rather than an end. FSCTL_PIPE_WAIT
      * waits for an instance of a pipe named under the root - none by that
@@ -2812,10 +2845,10 @@ export function createNamedPipes(host){
      * controls meant for an end answer as `DEVICE_CONTROLS` says.
      *
      * @param {'device' | 'root'} device @param {number} code
-     * @param {number} input @param {number} inLength
-     * @returns {{ status: number, information: number }}
+     * @param {number} input @param {number} inLength @param {number} block  the IO_STATUS_BLOCK
+     * @returns {{ status: number, information: number } | { parked: any }}
      */
-    const deviceControl = (device, code, input, inLength)=>{
+    const deviceControl = (device, code, input, inLength, block)=>{
         /** @param {number} status */
         const answer = status=>({ status, information: 0 });
         if (code !== FSCTL_PIPE_WAIT)
@@ -2860,14 +2893,33 @@ export function createNamedPipes(host){
         {
             return answer(STATUS.SUCCESS);
         }
+        // No time-out given is the pipe's default; one given is relative when
+        // negative (hundreds of nanoseconds), absolute when positive.
         const timed = head.getUint8(12) !== 0;
-        if ((!timed || head.getBigInt64(0, true) !== 0n) && !deviceWaitSaid)
+        const given = head.getBigInt64(0, true);
+        if (timed && given > 0n)
         {
-            deviceWaitSaid = true;
-            host.divergence?.('NtFsControlFile', 'FSCTL_PIPE_WAIT on the pipe device '
-                + 'does not wait for an instance to listen: STATUS_IO_TIMEOUT at once');
+            if (!absoluteWaitSaid)
+            {
+                absoluteWaitSaid = true;
+                host.divergence?.('NtFsControlFile', 'FSCTL_PIPE_WAIT with an absolute '
+                    + 'time-out is answered as one already past');
+            }
+            return answer(STATUS.IO_TIMEOUT);
         }
-        return answer(STATUS.IO_TIMEOUT);
+        const wait = !timed ? pipe.timeout : Number(-given / 10000n);
+        if (wait === 0 || (block >>> 0) === 0)
+        {
+            return answer(STATUS.IO_TIMEOUT);
+        }
+        // The thread waits until an instance listens or the time runs out,
+        // and the wait's status is written to its block either way.
+        const thread = host.currentThread();
+        pipe.waiters.push({ ctx, thread, block: block >>> 0 });
+        waitedOn.add(pipe);
+        kernel.block(thread, `pipe ${pipe.name}`,
+            { deadline: kernel.clock.virtualTime() + wait, result: STATUS.IO_TIMEOUT });
+        return { parked: host.park() };
     };
 
     /** Whether a create relative to a directory handle was said to be refused. */
@@ -3279,7 +3331,7 @@ export function createNamedPipes(host){
             const device = deviceOf(handle);
             if (device)
             {
-                return deviceControl(device, code >>> 0, input >>> 0, inLength >>> 0);
+                return deviceControl(device, code >>> 0, input >>> 0, inLength >>> 0, block >>> 0);
             }
             const end = endOf(handle);
             if (!end)

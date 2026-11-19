@@ -140,9 +140,9 @@
   divergence. `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on
   nothing. The pipe device opens by its own names (`\Device\NamedPipe` and its root
   `\Device\NamedPipe\`): pipes are made under the root, one made there with no name is a pipe
-  only its server's handle opens, and `FSCTL_PIPE_WAIT` through the root answers at once - a
-  wait that would have waited for an instance to listen is `STATUS_IO_TIMEOUT`, said as a
-  divergence.
+  only its server's handle opens, and `FSCTL_PIPE_WAIT` through the root waits for an instance
+  to listen, its thread waiting whatever the handle's mode; a wait given an absolute time-out
+  answers `STATUS_IO_TIMEOUT` at once, said as a divergence.
   `ImpersonateNamedPipeClient` takes on the client once the server has read from it, as the
   process's own account at SecurityImpersonation: every process is the one user, and a client's
   security quality of service and impersonated token are not carried.

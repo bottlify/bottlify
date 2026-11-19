@@ -1009,7 +1009,29 @@ test('the pipe device: itself, and its root under which pipes are named and wait
     assert.equal(wait(device, 'nonexistent_pipe'), STATUS.ILLEGAL_FUNCTION);
     assert.equal(wait(root, 'nonexistent_pipe'), STATUS.NAME_NOT_FOUND);
     assert.equal(wait(root, 'test3\\pipe'), STATUS.IO_TIMEOUT, 'none listens, no time to wait');
+
+    // With time to wait it waits, its block written however it ends.
+    const BLOCK = 0x9f0;
+    /** @param {bigint} timeout @param {boolean} timed */
+    const waitFor = (timeout, timed)=>{
+        p.view.setBigInt64(WAIT, timeout, true);
+        p.view.setUint32(WAIT + 8, 20, true);
+        p.view.setUint8(WAIT + 12, timed ? 1 : 0);
+        p.putWide(WAIT + 14, 'test3\\pipe');
+        p.view.setUint32(BLOCK, 0xdeadbeef, true);
+        return /** @type {any} */ (p.pipes.control(root, 0x110018, 0, 0, BLOCK, undefined, WAIT,
+            34));
+    };
+    const parked = waitFor(-10_000_000n, true);
+    assert.equal(parked.parked, 'parked', 'a second to wait: the thread waits');
+    assert.deepEqual(p.blocked.at(-1)?.timed, { deadline: 1000, result: STATUS.IO_TIMEOUT });
+    p.timeouts.forEach(handler=>handler(p.blocked.at(-1)?.thread));
+    assert.equal(p.u32(BLOCK) >>> 0, STATUS.IO_TIMEOUT, 'ran out: said in its block');
+
+    assert.equal(waitFor(0n, false).parked, 'parked', 'no time-out given: the pipe\'s own');
     assert.equal(make(root, 'test3\\pipe', FILE_OPEN).status, STATUS.SUCCESS);
+    assert.equal(p.woken.at(-1)?.result, STATUS.SUCCESS, 'an instance listening wakes it');
+    assert.equal(p.u32(BLOCK), STATUS.SUCCESS);
     assert.equal(wait(root, 'TEST3\\PIPE'), STATUS.SUCCESS, 'an instance listens, in any case');
 });
 
