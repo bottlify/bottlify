@@ -17,7 +17,9 @@ event, an error. Neither stops the program.
   the file system's and the registry's redirection.
   A 64-bit image linked past 4 GiB with no relocations needs a 64-bit WebAssembly memory
   (memory64) of 8 GiB: a browser without one (Safari, iOS) refuses the program at its start,
-  naming that.
+  naming that. Such a process is given about 3.7 GiB, all of it below 4 GiB, and only its
+  image's code is translated: the system libraries' own code and pages it makes executable
+  itself are interpreted, some twenty times dearer an instruction.
   A structured exception there passes no `_set_se_translator` translator. The exports that are
   i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
   `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is

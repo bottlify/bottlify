@@ -11,7 +11,9 @@
  * layout nearly whole, one of 8 GiB is 4 GiB and not an error, and under a
  * machine's memory (`machineMemory`, `memory-budget.js`) a commit past it is
  * refused, a null and not a fault, the run never holding more than the machine
- * has - in the 4 GiB layout and over a wide window alike. A wide window is
+ * has - in the 4 GiB layout and over a wide window alike. Over a wide window
+ * too the program's blocks lie below 4 GiB, and that space is its nearly whole.
+ * A wide window is
  * 8 GiB long whatever the program takes of it: it is counted by what the
  * program was given even where a guest's memory counts by its length.
  */
@@ -93,6 +95,17 @@ for (const megabytes of [4096, 8192])
             assert.ok(pages * STEP >= 3 * GiB && pages * STEP < 4 * GiB, `${pages} blocks`);
         });
 }
+
+test('a 64-bit process over a wide window is given the space below 4 GiB nearly whole',
+    { timeout: 300000 }, async()=>{
+        const { code, pages, lines } = await run({ memorySize: 8 * GiB }, true);
+        // Every block below 4 GiB still: what the system's calls are handed lies there.
+        right(lines);
+        assert.equal(code, 0);
+        // All but the libraries, the stacks, the image's low dword span and the
+        // top the system keeps.
+        assert.ok(pages * STEP >= 3.5 * GiB && pages * STEP < 4 * GiB, `${pages} blocks`);
+    });
 
 /** A machine with room for less than the program asks: 1.5 GiB. */
 const MACHINE = 1536 * MiB;

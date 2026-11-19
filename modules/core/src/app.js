@@ -4927,8 +4927,10 @@ async function buildApp(options){
         executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
     // Past 2 GiB the RAM is all of wasm's 4 GiB, which only a memory that grows
     // holds -- its tables inside the guest's space, not past it: 2 GiB otherwise.
-    // A wide window's space below is the whole 2 GiB every address it gives out lies in:
-    // its RAM is the window, and the image's low dword span is cut from that heap.
+    // A wide window's space below is laid out as a 2 GiB one - its libraries and stacks
+    // where any process has them - and its heap reaches on to 4 GiB (`HEAP_SIZE`): its
+    // RAM is the window, and the image's low dword span is cut from that heap. Nothing
+    // is handed out past 4 GiB (`roadmap/x64.md`).
     // More than 4 GiB asked for is 4 GiB: what a process's own space holds here.
     const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
         : Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE, 2 ** 32);
@@ -4958,7 +4960,8 @@ async function buildApp(options){
     // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB on a
     // 64-bit Windows, where the RAM reaches them; any other stays below, where it
     // may keep a pointer's sign, and so does every program on a 32-bit one.
-    const HEAP_SIZE = memorySize > 2 ** 31 && mainImage.largeAddressAware
+    const HEAP_SIZE = (memorySize > 2 ** 31 || programLoaded.wide !== undefined)
+        && mainImage.largeAddressAware
         && (long || options.machine === 'amd64')
         && options.heapSize === undefined
         ? LARGE_ADDRESS_TOP - HEAP_BASE : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
@@ -9048,10 +9051,10 @@ async function buildApp(options){
             + ` the shared page is kept at 0x${sharedAt.toString(16)}`);
     }
     const version = windowsVersion(options.windows);
-    // Inside the heap's span the page is no region of its own; at the top of a
-    // memory grown whole, past the heap's end, it is one, as in a fixed memory.
+    // Inside the heap's span (a memory that grows, a wide window's heap to 4 GiB) the
+    // page is no region of its own; past the heap's end it is one.
     /** @param {number} at */
-    const ownsPlace = at=>!growing || memory.find(at) === undefined;
+    const ownsPlace = at=>memory.find(at) === undefined;
     let sharedOwn = ownsPlace(sharedAt);
     let sharedData = createSharedUserData({ memory, version, at: sharedAt,
         ownRegion: sharedOwn });
