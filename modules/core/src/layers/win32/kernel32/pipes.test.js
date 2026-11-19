@@ -76,6 +76,8 @@ function processOn(table, id = 1, extra = {}){
     const woken = [];
     /** @type {((thread: any) => void)[]} */
     const timeouts = [];
+    /** @type {{ timer: any, due: number, fired: () => void }[]} */
+    const timers = [];
     /** @type {number[]} */
     const events = [];
     /** @type {number[]} */
@@ -98,6 +100,21 @@ function processOn(table, id = 1, extra = {}){
             onTimeout: (/** @type {(thread: any) => void} */ handler)=>timeouts.push(handler),
             clock: { virtualTime: ()=>now },
             createEvent: (/** @type {any} */ options)=>({ ...options }),
+            createTimer: ()=>({}),
+            armTimer: (/** @type {any} */ timer, /** @type {number} */ due,
+                /** @type {number} */ period, /** @type {() => void} */ fired)=>
+            {
+                void period;
+                timers.push({ timer, due, fired });
+                return true;
+            },
+            cancelTimer: (/** @type {any} */ timer)=>{
+                const at = timers.findIndex(one=>one.timer === timer);
+                if (at !== -1)
+                {
+                    timers.splice(at, 1);
+                }
+            },
             setEvent: (/** @type {any} */ event)=>{
                 event.signalled = true;
             },
@@ -189,8 +206,8 @@ function processOn(table, id = 1, extra = {}){
     };
     const u32 = (/** @type {number} */ at)=>view.getUint32(at, true);
     return {
-        pipes, fns, bytes, view, u32, putString, putWide, blocked, woken, timeouts, events, resets,
-        packets, bound, handles, apcs,
+        pipes, fns, bytes, view, u32, putString, putWide, blocked, woken, timeouts, timers, events,
+        resets, packets, bound, handles, apcs,
         error: ()=>lastError.get(current),
         errorOf: (/** @type {any} */ thread)=>lastError.get(thread),
         /** @param {string} thread */
@@ -732,73 +749,119 @@ test('a handle opened without FILE_FLAG_OVERLAPPED reads as a synchronous call, 
     });
 
 /**
- * CallNamedPipe over scripted steps: what each export it is made of answers.
- *
- * @param {Record<string, number[]>} answers  each step's answers, in turn
+ * A process whose CallNamedPipe makes its steps on this module: the client
+ * end opened by name, the read mode set, the end closed - each step named, on
+ * the caller's thread, as the export a program would call.
  */
-function calling(answers){
-    const bytes = new Uint8Array(0x1000);
-    /** @type {[string, number[]][]} */
+function calling(){
+    /** @type {string[]} */
     const steps = [];
-    /** @type {Map<any, number>} */
-    const errors = new Map();
-    const pipes = createNamedPipes(/** @type {any} */ ({
-        kernel: {}, handles: {},
-        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.slice(at, at + length),
-        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
-            bytes.set(data, at),
-        setLastError: (/** @type {number} */ code)=>errors.set('caller', code),
-        setLastErrorFor: (/** @type {any} */ thread, /** @type {number} */ code)=>
-            errors.set(thread, code),
-        currentThread: ()=>'caller',
+    let error = 0;
+    /** @type {any} */
+    let p = null;
+    p = processOn(new Map(), 1, {
         call: async(/** @type {string} */ name, /** @type {number[]} */ args,
             /** @type {any} */ thread)=>
         {
-            assert.equal(thread, 'caller', 'every step on the caller\'s thread');
-            steps.push([name, args]);
-            return answers[name]?.shift() ?? 1;
+            assert.equal(thread, 'p1:main', 'every step on the caller\'s thread');
+            steps.push(name);
+            switch (name)
+            {
+                case 'CreateFileA': {
+                    const opened = p.pipes.open(NAME, args[1], 0);
+                    error = 'handle' in opened ? 0 : opened.error;
+                    if ('handle' in opened)
+                    {
+                        return opened.handle;
+                    }
+                    return 0xffffffff;
+                }
+                case 'GetLastError':
+                // The open's own refusal, else what the module left the thread.
+                    return error || (p.errorOf(thread) ?? 0);
+                case 'LocalAlloc':
+                    return 0x900;
+                case 'LocalFree':
+                    return 0;
+                case 'CloseHandle':
+                    p.pipes.closed(args[0], p.handles.get(args[0])?.object);
+                    return 1;
+                default:
+                    return p.fns[name].handler(args);
+            }
         },
-    }));
-    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
-        /** @type {unknown} */ (pipes.functions));
-    return { fns, steps, bytes, error: ()=>errors.get('caller') };
+    });
+    p.putString(NAME_AT, NAME);
+    return { p, steps };
 }
 
-test('CallNamedPipe opens, sets message reads, transacts and closes, as a program would',
+/** A turn for the steps CallNamedPipe awaits. */
+const turn = ()=>new Promise(resolve=>setImmediate(resolve));
+
+test('CallNamedPipe writes its message and waits for the answer, then closes, never parked',
     async()=>{
-        const { fns, steps, bytes } = calling({ CreateFileA: [0x44], LocalAlloc: [0x800] });
-        assert.equal(await fns.CallNamedPipeA.handler(
-            [NAME_AT, BUFFER, 4, BUFFER + 8, 4, COUNT, 500]), 1);
-        assert.deepEqual(steps.map(([name])=>name), ['CreateFileA', 'LocalAlloc',
-            'SetNamedPipeHandleState', 'TransactNamedPipe', 'LocalFree', 'CloseHandle']);
-        assert.deepEqual(steps[0][1], [NAME_AT, RW, 0, 0, 3, 0, 0]);
-        assert.deepEqual(steps[2][1], [0x44, 0x800, 0, 0]);
-        assert.equal(new DataView(bytes.buffer).getUint32(0x800, true), PIPE_READMODE_MESSAGE);
-        assert.deepEqual(steps[3][1], [0x44, BUFFER, 4, BUFFER + 8, 4, COUNT, 0],
-            'never overlapped');
+        // A thread waiting on a host call is no thread a step may park: the
+        // transaction's read that waits answers the call when it ends.
+        const { p, steps } = calling();
+        const server = p.server(PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+        p.bytes.set([1, 2, 3, 4], BUFFER + 0x100);
+        const answered = p.fns.CallNamedPipeA.handler(
+            [NAME_AT, BUFFER + 0x100, 4, BUFFER + 0x200, 4, COUNT, 500]);
+        await turn();
+        assert.deepEqual(steps, ['CreateFileA', 'LocalAlloc', 'SetNamedPipeHandleState']);
+        assert.equal(p.read(server, 4), 1, 'the server reads the message');
+        assert.deepEqual([...p.bytes.subarray(BUFFER, BUFFER + 4)], [1, 2, 3, 4]);
+        assert.equal(p.write(server, 'wxyz'), 1);
+        assert.equal(await answered, 1);
+        assert.equal(p.u32(COUNT), 4);
+        assert.equal(String.fromCharCode(...p.bytes.subarray(BUFFER + 0x200, BUFFER + 0x204)),
+            'wxyz');
+        assert.deepEqual(steps.slice(3), ['LocalFree', 'CloseHandle']);
+        assert.equal(p.blocked.length, 0, 'never parked');
+        assert.equal(p.woken.length, 0, 'nothing wakes a thread the call holds');
     });
 
-test('CallNamedPipe waits for a busy pipe, and a failed step ends it with that step\'s error',
+test('CallNamedPipe waits for a busy pipe until an instance listens, or its time-out',
     async()=>{
-        const busy = calling({ CreateFileW: [0xffffffff, 0x48], GetLastError: [ERROR_PIPE_BUSY],
-            LocalAlloc: [0x800] });
-        assert.equal(await busy.fns.CallNamedPipeW.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 1);
-        assert.deepEqual(busy.steps.slice(0, 4).map(([name, args])=>[name, args[0]]), [
-            ['CreateFileW', NAME_AT], ['GetLastError', undefined], ['WaitNamedPipeW', NAME_AT],
-            ['CreateFileW', NAME_AT]]);
+        const { p, steps } = calling();
+        const server = p.server(PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+        p.client();
+        const late = p.fns.CallNamedPipeA.handler([NAME_AT, BUFFER, 1, BUFFER + 8, 4, COUNT, 50]);
+        await turn();
+        assert.deepEqual(steps, ['CreateFileA', 'GetLastError']);
+        assert.equal(p.timers.at(-1)?.due, 50, 'its own time-out, on the guest\'s clock');
+        /** @type {any} */ (p.timers.at(-1)).fired();
+        assert.equal(await late, 0, 'no instance listened in time');
+        assert.equal(p.errorOf('p1:main'), ERROR_SEM_TIMEOUT);
 
-        const gone = calling({ CreateFileA: [0xffffffff], GetLastError: [ERROR_FILE_NOT_FOUND] });
-        assert.equal(await gone.fns.CallNamedPipeA.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 0);
-        assert.deepEqual(gone.steps.map(([name])=>name), ['CreateFileA', 'GetLastError'],
-            'no pipe: nothing to wait for or close');
+        const listens = p.fns.CallNamedPipeA.handler([NAME_AT, BUFFER, 1, BUFFER + 8, 4, COUNT,
+            50]);
+        await turn();
+        p.fns.DisconnectNamedPipe.handler([server]);
+        p.fns.ConnectNamedPipe.handler([server, OVERLAPPED]);
+        await turn();
+        assert.equal(p.timers.length, 1, 'the second time-out disarmed once an instance listened');
+        assert.equal(p.read(server, 1), 1, 'the message came once the client got in');
+        assert.equal(p.write(server, 'a'), 1);
+        assert.equal(await listens, 1);
+        assert.equal(p.blocked.length, 0, 'never parked');
+    });
 
-        // An answer longer than the buffer: the transact's error, after the close.
-        const long = calling({ CreateFileA: [0x44], LocalAlloc: [0x800], TransactNamedPipe: [0],
-            GetLastError: [ERROR_MORE_DATA] });
-        assert.equal(await long.fns.CallNamedPipeA.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 0);
-        assert.deepEqual(long.steps.slice(-2).map(([name])=>name), ['LocalFree', 'CloseHandle']);
-        assert.equal(long.error(), ERROR_MORE_DATA);
+test('a CallNamedPipe step that fails ends it with that step\'s error, the end closed',
+    async()=>{
+        const { p, steps } = calling();
+        assert.equal(await p.fns.CallNamedPipeA.handler([NAME_AT, 0, 0, 0, 0, COUNT, 0]), 0);
+        assert.deepEqual(steps, ['CreateFileA', 'GetLastError'], 'no pipe: nothing to close');
+        const server = p.server(PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+        steps.length = 0;
+        // An answer longer than the buffer: the transaction's error, after the close.
+        const long = p.fns.CallNamedPipeA.handler([NAME_AT, BUFFER, 1, BUFFER + 8, 2, COUNT, 0]);
+        await turn();
+        assert.equal(p.read(server, 1), 1);
+        assert.equal(p.write(server, 'abc'), 1);
+        assert.equal(await long, 0);
+        assert.deepEqual(steps.slice(-2), ['LocalFree', 'CloseHandle']);
+        assert.equal(p.errorOf('p1:main'), ERROR_MORE_DATA);
     });
 
 test('NtCreateNamedPipeFile makes the instance CreateNamedPipe makes, by its native name', ()=>{

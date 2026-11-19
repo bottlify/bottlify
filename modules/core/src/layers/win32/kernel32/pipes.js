@@ -430,6 +430,25 @@ export function createNamedPipes(host){
     /** @type {Context} */
     const ctx = { host, modes: new Map() };
     /**
+     * The context of a wait a host call makes on its thread's behalf while
+     * that thread is already waiting on the call (CallNamedPipe's): what would
+     * wake the thread answers `tell` instead, since a thread waiting on a
+     * host call is no thread a pipe may park or wake.
+     *
+     * @param {(result: number) => void} tell
+     * @returns {Context}
+     */
+    const settling = tell=>({ modes: ctx.modes, host: Object.create(host, {
+        kernel: { value: Object.create(kernel, {
+            wake: { value: (/** @type {any} */ thread, /** @type {number} */ result)=>{
+                void thread;
+                tell(result >>> 0);
+            } },
+        }) },
+    }) });
+    /** What startRead answers a read made with `tell` that waits. */
+    const WAITING = Symbol('waiting');
+    /**
      * Whether each of this process's pipe handles is inherited by the children
      * it starts: what the security attributes said, then SetHandleInformation.
      *
@@ -1495,8 +1514,14 @@ export function createNamedPipes(host){
      * @param {number} out @param {number} overlapped @param {boolean} native
      * @param {NativeAsync} [io]  NtReadFile's event, APC and context
      * @param {number} [routine]  ReadFileEx's completion routine
+     * @param {(result: number) => void} [tell]  for a read a host call makes
+     *     on its waiting thread's behalf: told the answer of one that waits,
+     *     which answers WAITING (`settling`)
+     * @returns {number | typeof WAITING}
      */
-    const startRead = (end, handle, buffer, length, out, overlapped, native, io, routine = 0)=>{
+    const startRead = (end, handle, buffer, length, out, overlapped, native, io, routine = 0,
+        tell = undefined)=>
+    {
         // A native read on an end opened for overlapped I/O does not wait.
         const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
             ? io : undefined;
@@ -1580,7 +1605,8 @@ export function createNamedPipes(host){
         const waits = overlapped !== 0 && !native && routine === 0
             && /** @type {any} */ (end).overlapped !== true;
         /** @type {Op} */
-        const op = { kind: 'read', ctx, thread: host.currentThread(), handle,
+        const op = { kind: 'read', ctx: tell ? settling(tell) : ctx,
+            thread: host.currentThread(), handle,
             overlapped: waits ? 0 : overlapped >>> 0, buffer: buffer >>> 0,
             length: length >>> 0, out: out >>> 0, native, end,
             ...waits ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {},
@@ -1605,6 +1631,10 @@ export function createNamedPipes(host){
         {
             overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
             return native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
+        }
+        if (tell)
+        {
+            return WAITING;
         }
         kernel.block(op.thread, 'pipe read');
         return host.park();
@@ -1874,8 +1904,10 @@ export function createNamedPipes(host){
         }
         if (end)
         {
-            return startRead(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
-                native, io, routine >>> 0);
+            // An answer or a park, never WAITING: that answers a read made with `tell`.
+            return /** @type {number | ReturnType<PipeHost['park']>} */ (startRead(end,
+                handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0, native, io,
+                routine >>> 0));
         }
         if (routine !== 0)
         {
@@ -2133,9 +2165,11 @@ export function createNamedPipes(host){
             let handle = await openPipe();
             if (handle === INVALID_HANDLE_VALUE)
             {
+                // The waits are made here, not by the exports: this thread
+                // already waits on this call, and only a call's own thread
+                // in flight may be parked.
                 if (await step('GetLastError', []) !== ERROR_PIPE_BUSY
-                    || await step(wide ? 'WaitNamedPipeW' : 'WaitNamedPipeA',
-                        [name, timeout >>> 0]) === 0)
+                    || await settled(tell=>waitForInstance(name, timeout, wide, tell)) === 0)
                 {
                     return 0;
                 }
@@ -2152,8 +2186,8 @@ export function createNamedPipes(host){
             }
             const ok = mode !== 0
                 && await step('SetNamedPipeHandleState', [handle, mode, 0, 0]) !== 0
-                && await step('TransactNamedPipe',
-                    [handle, input, inputSize, output, outputSize, count, 0]) !== 0;
+                && await settled(tell=>transact(
+                    [handle, input, inputSize, output, outputSize, count, 0], tell)) !== 0;
             const error = ok ? 0 : await step('GetLastError', []);
             if (mode !== 0)
             {
@@ -2170,37 +2204,129 @@ export function createNamedPipes(host){
     });
 
     /** @param {boolean} wide */
-    const waitNamedPipe = wide=>({
-        argBytes: 8,
-        /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [pointer, timeout])=>{
-            const name = nameAt(pointer, wide);
-            if (name === null || !isPipeName(name))
-            {
-                return fail(ERROR_INVALID_NAME);
-            }
-            const pipe = pipeAt(keyOf(name));
-            if (!pipe)
-            {
-                return fail(ERROR_FILE_NOT_FOUND);
-            }
-            if ([...pipe.instances].some(one=>one.state === 'listening'))
-            {
-                return 1;
-            }
-            const wait = (timeout >>> 0) === NMPWAIT_USE_DEFAULT_WAIT ? pipe.timeout
-                : timeout >>> 0;
-            if (wait !== NMPWAIT_WAIT_FOREVER && wait === 0)
-            {
-                return fail(ERROR_SEM_TIMEOUT);
-            }
-            const thread = host.currentThread();
-            host.setLastError(ERROR_SEM_TIMEOUT);
+    /**
+     * WaitNamedPipe's work: TRUE at once for a pipe with an instance
+     * listening, else the thread waits for one until the time-out
+     * (ERROR_SEM_TIMEOUT) - parked, or with `tell` told the answer, for a
+     * host call waiting on its thread's behalf (`settling`).
+     *
+     * @param {number} pointer @param {number} timeout @param {boolean} wide
+     * @param {(result: number) => void} [tell]
+     * @returns {number | typeof WAITING}
+     */
+    const waitForInstance = (pointer, timeout, wide, tell)=>{
+        const name = nameAt(pointer, wide);
+        if (name === null || !isPipeName(name))
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
+        const pipe = pipeAt(keyOf(name));
+        if (!pipe)
+        {
+            return fail(ERROR_FILE_NOT_FOUND);
+        }
+        if ([...pipe.instances].some(one=>one.state === 'listening'))
+        {
+            return 1;
+        }
+        const wait = (timeout >>> 0) === NMPWAIT_USE_DEFAULT_WAIT ? pipe.timeout
+            : timeout >>> 0;
+        if (wait !== NMPWAIT_WAIT_FOREVER && wait === 0)
+        {
+            return fail(ERROR_SEM_TIMEOUT);
+        }
+        const thread = host.currentThread();
+        host.setLastError(ERROR_SEM_TIMEOUT);
+        if (!tell)
+        {
             pipe.waiters.push({ ctx, thread });
             kernel.block(thread, `pipe ${pipe.name}`, wait === NMPWAIT_WAIT_FOREVER
                 ? undefined : { deadline: kernel.clock.virtualTime() + wait, result: 0 });
             return host.park();
-        },
+        }
+        // The time-out is a timer of the guest's clock, which the waiter
+        // that came first disarms.
+        const timer = wait === NMPWAIT_WAIT_FOREVER ? null : kernel.createTimer({});
+        const waiter = { ctx: settling(result=>{
+            if (timer)
+            {
+                kernel.cancelTimer(timer);
+            }
+            tell(result);
+        }), thread };
+        pipe.waiters.push(waiter);
+        if (timer)
+        {
+            kernel.armTimer(timer, kernel.clock.virtualTime() + wait, 0, ()=>{
+                const at = pipe.waiters.indexOf(waiter);
+                if (at !== -1)
+                {
+                    pipe.waiters.splice(at, 1);
+                    tell(0);
+                }
+            });
+        }
+        return WAITING;
+    };
+
+    /**
+     * TransactNamedPipe's work: a message written, then the answer read, on a
+     * message pipe read as one. Its write never waits for room; an answer
+     * already waiting unread refuses the transaction, ERROR_PIPE_BUSY, before
+     * anything is written. A read that waits parks the thread, or with
+     * `tell` tells it the answer (`settling`).
+     *
+     * @param {number[]} args @param {(result: number) => void} [tell]
+     * @returns {number | typeof WAITING}
+     */
+    const transact = ([handle, input, inputSize, output, outputSize, count, overlapped],
+        tell = undefined)=>
+    {
+        const end = endOf(handle);
+        if (!end)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (!end.instance.pipe.messages || !end.readMessages)
+        {
+            return fail(ERROR_BAD_PIPE);
+        }
+        if (end.inbox.length > 0)
+        {
+            return fail(ERROR_PIPE_BUSY);
+        }
+        begin(overlapped);
+        const wrote = startWrite(end, handle >>> 0, input, inputSize, 0, 0, false, 0,
+            { whole: true });
+        if (wrote !== 1)
+        {
+            return 0;
+        }
+        return startRead(end, handle >>> 0, output, outputSize, count >>> 0,
+            overlapped >>> 0, false, undefined, 0, tell);
+    };
+
+    /**
+     * A wait a host call makes on its thread's behalf, as a promise: what the
+     * call answers at once, or what the wait is told.
+     *
+     * @param {(tell: (result: number) => void) => number | typeof WAITING} start
+     * @returns {Promise<number>}
+     */
+    const settled = start=>new Promise(resolve=>{
+        const now = start(resolve);
+        if (now !== WAITING)
+        {
+            resolve(/** @type {number} */ (now) >>> 0);
+        }
+    });
+
+    /** @param {boolean} wide */
+    const waitNamedPipe = wide=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: (/** @type {number[]} */ [pointer, timeout])=>
+            waitForInstance(pointer, timeout, wide),
     });
 
     /** @param {boolean} wide */
@@ -2375,30 +2501,7 @@ export function createNamedPipes(host){
         TransactNamedPipe: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([handle, input, inputSize, output, outputSize, count, overlapped])=>{
-                const end = endOf(handle);
-                if (!end)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if (!end.instance.pipe.messages || !end.readMessages)
-                {
-                    return fail(ERROR_BAD_PIPE);
-                }
-                if (end.inbox.length > 0)
-                {
-                    return fail(ERROR_PIPE_BUSY);
-                }
-                begin(overlapped);
-                const wrote = startWrite(end, handle >>> 0, input, inputSize, 0, 0, false, 0,
-                    { whole: true });
-                if (wrote !== 1)
-                {
-                    return 0;
-                }
-                return startRead(end, handle >>> 0, output, outputSize, count >>> 0,
-                    overlapped >>> 0, false);
-            },
+            handler: (/** @type {number[]} */ args)=>transact(args),
         },
 
         /**
