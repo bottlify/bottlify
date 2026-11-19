@@ -410,8 +410,8 @@ const POINTER_LOAD = 'ptr';
 const POINTER_STORE = 'setPtr';
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES), POINTER_LOAD,
-    POINTER_STORE, 'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
-    ...FLOAT_BITS, ...INT64_PARTS, POINTER_BYTES]);
+    POINTER_STORE, 'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange',
+    ...X87_WORDS, ...FLOAT_BITS, ...INT64_PARTS, POINTER_BYTES]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -2107,6 +2107,17 @@ class FunctionCompiler {
         for (const statement of list)
         {
             this.statement(statement);
+            // What follows an `if` on a constant whose way returns is never
+            // run: `if (pointerBytes === 8) { ... return ...; }` and then the
+            // i386's way, which may use what the x86-64 has none of.
+            const known = statement.type === 'IfStatement' ? this.foldTest(statement.test)
+                : undefined;
+            const taken = known === undefined ? null
+                : known ? statement.consequent : statement.alternate;
+            if (taken && ends(taken))
+            {
+                break;
+            }
         }
     }
 
@@ -4939,7 +4950,7 @@ class FunctionCompiler {
         return isPointerExpression(node, name=>{
             const v = this.lookupLocal(name);
             return v !== undefined && !('constant' in v) && v.pointer === true;
-        }, name=>this.answersPointer(name));
+        }, (/** @type {string} */ name)=>this.answersPointer(name));
     }
 
     /**
@@ -5318,7 +5329,7 @@ class FunctionCompiler {
         };
         /** @param {any} node */
         const isPointer = node=>isPointerExpression(node, named,
-            name=>this.answersPointer(name));
+            (/** @type {string} */ name)=>this.answersPointer(name));
         for (const param of this.node.params)
         {
             if (param.type === 'Identifier')
@@ -5443,13 +5454,12 @@ class FunctionCompiler {
                             + '32 bits are u32() of the same address');
                     }
                     // How many of the arguments, from the first, are addresses.
-                    const addresses = helper && name === POINTER_STORE ? 2
-                        : helper && name === 'compareExchange' ? 1
-                        : helper && (Object.hasOwn(LOADS, name) || name === POINTER_LOAD
-                        || Object.hasOwn(STORES, name) || name === 'fill') ? 1
-                        : helper && (name === 'copyUp' || name === 'copyDown') ? 2
-                            : helper && (name === 'call' || name === 'callStd')
-                                || this.scope.guests.has(name) ? Infinity : 0;
+                    const addresses = !helper ? this.scope.guests.has(name) ? Infinity : 0
+                        : name === POINTER_STORE || name === 'copyUp' || name === 'copyDown' ? 2
+                            : name === 'call' || name === 'callStd' ? Infinity
+                                : Object.hasOwn(LOADS, name) || Object.hasOwn(STORES, name)
+                                    || name === POINTER_LOAD || name === 'fill'
+                                    || name === 'compareExchange' ? 1 : 0;
                     /** @type {any[]} */ (node.arguments).forEach((argument, i)=>{
                         visit(argument, i < addresses ? 'pointer' : 'value');
                     });
@@ -6172,14 +6182,17 @@ class FunctionCompiler {
 
 /**
  * Whether an expression is a pointer: a pointer variable, or one with an
- * integer added to it or taken from it. The difference of two pointers is an
- * integer, and their sum nothing.
+ * integer added to it or taken from it; a pointer loaded by `ptr()`, the call
+ * of a function that answers one, and one of two pointers chosen by `?:`.
+ * The difference of two pointers is an integer, and their sum nothing.
  *
  * @param {any} node @param {(name: string) => boolean} named  Whether a name
  *     is a pointer variable where the expression stands.
+ * @param {(name: string) => boolean} [answers]  Whether a name is a function
+ *     of the module that answers a pointer.
  * @returns {boolean}
  */
-function isPointerExpression(node, named, answers = ()=>false){
+function isPointerExpression(node, named, answers = NO_NAME){
     if (node.type === 'Identifier')
     {
         return named(node.name);
@@ -6203,6 +6216,9 @@ function isPointerExpression(node, named, answers = ()=>false){
     const right = isPointerExpression(node.right, named, answers);
     return node.operator === '+' ? left !== right : left && !right;
 }
+
+/** No name: a function of no module. @type {(name: string) => boolean} */
+const NO_NAME = ()=>false;
 
 /** Whether a node is `ptr(address)`, the load of a pointer. @param {any} node */
 function isPointerLoad(node){

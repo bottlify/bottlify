@@ -55,6 +55,7 @@ export const LONG = new Map([
     ['layers/win32/kernel32/semaphore-guest.js', {}],
     ['layers/win32/d3dx9/constants-setters.js', {}],
     ['layers/win32/d3dx9/effect-setters.js', {}],
+    ['layers/win32/d3dx9/effect-commit.js', {}],
     ['layers/win32/d3dx9/inguest.js', {}],
     ['layers/win32/d3dx9/inguest-matrix.js', {}],
     ['layers/win32/d3dx9/inguest-vector.js', {}],

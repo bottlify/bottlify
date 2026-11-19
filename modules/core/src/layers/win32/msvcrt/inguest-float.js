@@ -169,7 +169,8 @@ const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
  * @returns {u32}
  */
 export function _control87({ controlWord, setControlWord, mxcsr, setMxcsr, pointerBytes },
-    newControl, mask){
+    newControl, mask)
+{
     if (pointerBytes === 8)
     {
         const sse = mxcsr();
@@ -179,15 +180,12 @@ export function _control87({ controlWord, setControlWord, mxcsr, setMxcsr, point
         setMxcsr(kept);
         return readBackSse(kept) >>> 0;
     }
-    else
-    {
-        const word = controlWord();
-        const changed = mask & CHANGEABLE;
-        const wanted = readBack(word) & ~changed | newControl & changed;
-        const loaded = word & RESERVED | loadable(wanted);
-        setControlWord(loaded);
-        return readBack(loaded) >>> 0;
-    }
+    const word = controlWord();
+    const changed = mask & CHANGEABLE;
+    const wanted = readBack(word) & ~changed | newControl & changed;
+    const loaded = word & RESERVED | loadable(wanted);
+    setControlWord(loaded);
+    return readBack(loaded) >>> 0;
 }
 
 /**
@@ -199,7 +197,8 @@ export function _control87({ controlWord, setControlWord, mxcsr, setMxcsr, point
  * @returns {u32}
  */
 export function _controlfp({ controlWord, setControlWord, mxcsr, setMxcsr, pointerBytes },
-    newControl, mask){
+    newControl, mask)
+{
     if (pointerBytes === 8)
     {
         const sse = mxcsr();
@@ -209,15 +208,12 @@ export function _controlfp({ controlWord, setControlWord, mxcsr, setMxcsr, point
         setMxcsr(kept);
         return readBackSse(kept) >>> 0;
     }
-    else
-    {
-        const word = controlWord();
-        const changed = mask & CHANGEABLE & ~EM_DENORMAL;
-        const wanted = readBack(word) & ~changed | newControl & changed;
-        const loaded = word & RESERVED | loadable(wanted);
-        setControlWord(loaded);
-        return readBack(loaded) >>> 0;
-    }
+    const word = controlWord();
+    const changed = mask & CHANGEABLE & ~EM_DENORMAL;
+    const wanted = readBack(word) & ~changed | newControl & changed;
+    const loaded = word & RESERVED | loadable(wanted);
+    setControlWord(loaded);
+    return readBack(loaded) >>> 0;
 }
 
 /**
@@ -230,7 +226,8 @@ export function _controlfp({ controlWord, setControlWord, mxcsr, setMxcsr, point
  * @returns {u32}
  */
 export function _controlfp_s({ controlWord, setControlWord, setU32, mxcsr, setMxcsr,
-    pointerBytes }, current, newControl, mask){
+    pointerBytes }, current, newControl, mask)
+{
     if (pointerBytes === 8)
     {
         const sse = mxcsr();
@@ -244,19 +241,16 @@ export function _controlfp_s({ controlWord, setControlWord, setU32, mxcsr, setMx
         }
         return 0;
     }
-    else
+    const word = controlWord();
+    const changed = mask & CHANGEABLE & ~EM_DENORMAL;
+    const wanted = readBack(word) & ~changed | newControl & changed;
+    const loaded = word & RESERVED | loadable(wanted);
+    setControlWord(loaded);
+    if (current !== 0)
     {
-        const word = controlWord();
-        const changed = mask & CHANGEABLE & ~EM_DENORMAL;
-        const wanted = readBack(word) & ~changed | newControl & changed;
-        const loaded = word & RESERVED | loadable(wanted);
-        setControlWord(loaded);
-        if (current !== 0)
-        {
-            setU32(current, readBack(loaded) >>> 0);
-        }
-        return 0;
+        setU32(current, readBack(loaded) >>> 0);
     }
+    return 0;
 }
 
 /**
@@ -273,10 +267,7 @@ export function _statusfp({ statusWord, mxcsr, pointerBytes }){
     {
         return EXCEPTIONS[mxcsr() & 0x3f] >>> 0;
     }
-    else
-    {
-        return EXCEPTIONS[(statusWord() | mxcsr()) & 0x3f] >>> 0;
-    }
+    return EXCEPTIONS[(statusWord() | mxcsr()) & 0x3f] >>> 0;
 }
 
 /**
@@ -294,13 +285,10 @@ export function _clearfp({ statusWord, clearExceptions, mxcsr, setMxcsr, pointer
         setMxcsr(sse & ~0x3f);
         return EXCEPTIONS[sse & 0x3f] >>> 0;
     }
-    else
-    {
-        const flags = EXCEPTIONS[(statusWord() | sse) & 0x3f];
-        clearExceptions();
-        setMxcsr(sse & ~0x3f);
-        return flags >>> 0;
-    }
+    const flags = EXCEPTIONS[(statusWord() | sse) & 0x3f];
+    clearExceptions();
+    setMxcsr(sse & ~0x3f);
+    return flags >>> 0;
 }
 
 /**

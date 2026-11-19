@@ -21,10 +21,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPILED } from './effect-commit.x86.js';
+import { COMPILED as LONG } from './effect-commit.x64.js';
 import * as sources from './effect-commit.js';
 import { CALLBACK, DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 
-const { same } = equivalence(COMPILED, sources);
+// The i386 over its own layout; the x86-64 over a 64-bit process's, below.
+const { same } = equivalence(COMPILED, sources, undefined, {});
+const { sameAt64 } = equivalence(COMPILED, sources, undefined, /** @type {any} */ (LONG));
 
 const SELF = DATA;
 const BLOCK = DATA + 0x10;
@@ -44,6 +47,8 @@ const TECHNIQUE = DATA + 0x1c0;
 const TECHNIQUES = DATA + 0x1e0;
 const BLOCK_VTABLE = DATA + 0x200;
 const OUT = DATA + 0x220;
+/** Past a state block's vtable of quadwords. */
+const OUT_64 = DATA + 0x240;
 /** Eight expressions' cells (`CELL`), a program they may share, and its registers. */
 const CELLS = DATA + 0xc00;
 const PROGRAM = DATA + 0xc80;
@@ -131,6 +136,21 @@ const SETTERS = [
     ...slot([0x8b, 0x44, 0x24, 0x04, ...fold, 0x31, 0xc0, 0xc2, 0x04, 0x00]),
 ];
 
+/** The same fold in x86-64: mov r10d, CHECKSUM; rol dword [r10], 7; add [r10], eax. */
+const fold64 = [0x41, 0xba, ...le(CHECKSUM), 0x41, 0xc1, 0x02, 0x07, 0x41, 0x01, 0x02];
+/** EAX = 1 when the second argument's (EDX's) low three bits are all set, else 0. */
+const answerOf64 = [0x89, 0xd0, 0x83, 0xe0, 0x07, 0x83, 0xf8, 0x07, 0x0f, 0x94, 0xc0, 0x0f, 0xb6,
+    0xc0];
+/** The same five as the x64 convention calls them: RCX, RDX, R8 and R9. */
+const SETTERS_64 = [
+    ...slot([0x89, 0xd0, 0x44, 0x31, 0xc0, ...fold64, ...answerOf64, 0xc3]),
+    ...slot([0x89, 0xd0, 0x44, 0x31, 0xc0, 0x44, 0x31, 0xc8, ...fold64, ...answerOf64, 0xc3]),
+    ...slot([0x41, 0x8b, 0x00, 0x41, 0x03, 0x40, 0x04, 0x31, 0xd0, 0x44, 0x31, 0xc8, ...fold64,
+        0x31, 0xc0, 0xc3]),
+    ...slot([0x89, 0xd0, ...fold64, ...answerOf64, 0xc3]),
+    ...slot([0x89, 0xc8, ...fold64, 0x31, 0xc0, 0xc3]),
+];
+
 /**
  * The setters' JavaScript stand-in, over the case's memory.
  *
@@ -158,8 +178,10 @@ const HANDED = { host: ()=>0x8876086c };
  * A commit table at random, with everything it names.
  *
  * @param {() => number} next
+ * @param {4 | 8} [pointer]  The process's pointer: where the interface keeps its
+ *     block, and a vtable's slot.
  */
-function layout(next){
+function layout(next, pointer = 4){
     const bytes = new Uint8Array(0x1100);
     const view = new DataView(bytes.buffer);
     const put = (/** @type {number} */ at, /** @type {number} */ value)=>
@@ -168,7 +190,7 @@ function layout(next){
         view.setFloat32(at - DATA, value, true);
     const putDouble = (/** @type {number} */ at, /** @type {number} */ value)=>
         view.setFloat64(at - DATA, value, true);
-    put(SELF + 4, next() % 20 === 0 ? 0 : BLOCK);
+    put(SELF + pointer, next() % 20 === 0 ? 0 : BLOCK);
     put(BLOCK + 12, CLOCK);
     put(BLOCK + 16, next() % 15 === 0 ? 0 : TABLE);
     // The pass begun, the passes (each a table, standing for one, and a number), Walk.
@@ -187,8 +209,8 @@ function layout(next){
         put(TECHNIQUE + 4 + 4 * k, next() % 3 === 0 ? 0 : STATE_BLOCK);
     }
     put(STATE_BLOCK, BLOCK_VTABLE);
-    put(BLOCK_VTABLE + 16, CALLBACK + 0xc0);
-    put(BLOCK_VTABLE + 20, CALLBACK + 0xc0);
+    put(BLOCK_VTABLE + 4 * pointer, CALLBACK + 0xc0);
+    put(BLOCK_VTABLE + 5 * pointer, CALLBACK + 0xc0);
     const techniques = next() % 4;
     put(TECHNIQUES, techniques);
     for (let i = 0; i < techniques; i++)
@@ -209,10 +231,10 @@ function layout(next){
     put(APPLIED, applied);
     put(DEVICE, VTABLE);
     // Slot 2 the setter of three, 3 of four, 4 the constants', 5 the setter of two.
-    put(VTABLE + 8, CALLBACK);
-    put(VTABLE + 12, CALLBACK + 0x30);
-    put(VTABLE + 16, CALLBACK + 0x60);
-    put(VTABLE + 20, CALLBACK + 0x90);
+    put(VTABLE + 2 * pointer, CALLBACK);
+    put(VTABLE + 3 * pointer, CALLBACK + 0x30);
+    put(VTABLE + 4 * pointer, CALLBACK + 0x60);
+    put(VTABLE + 5 * pointer, CALLBACK + 0x90);
     for (let i = 0; i < 16; i++)
     {
         // Versions before and after the pass's date.
@@ -341,4 +363,57 @@ test('CommitChanges, BeginPass, EndPass, Begin, End, SetTechnique and GetTechniq
         same(name, { stack, memory }, { ...HANDED, callback: SETTERS, call: setter });
     }
     assert.ok(true);
+});
+
+test('at 64 bits the same methods, Walk and Evaluate answer, call and date as their JavaScript:'
+    + ' the block a quadword into the interface, a vtable\'s slots eight bytes, no control word',
+()=>{
+    const double = { ...HANDED, callback64: SETTERS_64, call: setter };
+    const next = random(64);
+    /** The calls the x86-64 answered itself, by method. @type {Record<string, number>} */
+    const taken = {};
+    for (let round = 0; round < 2100; round++)
+    {
+        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, layout(next, 8)]]);
+        const index = next() % 6 === 0 ? next() : next() % 4;
+        const handle = next() % 5 === 0 ? next() : 0x5000 + 16 * (next() % 4);
+        const [name, stack] = /** @type {[string, number[]]} */ ([['CommitChanges', [SELF]],
+            ['BeginPass', [SELF, index]], ['EndPass', [SELF]],
+            ['Begin', [SELF, next() % 4 === 0 ? 0 : OUT_64, next() % 8]], ['End', [SELF]],
+            ['SetTechnique', [SELF, next() % 9 === 0 ? 0 : handle]],
+            ['GetTechnique', [SELF, index]]][round % 7]);
+        taken[name] = (taken[name] ?? 0) + (sameAt64(name, { stack, memory }, double).handedOver
+            ? 0 : 1);
+        if (round % 3 === 0)
+        {
+            sameAt64('Walk', { stack: [BLOCK, TABLE, next() % 2], memory }, double);
+        }
+    }
+    for (const name of ['CommitChanges', 'BeginPass', 'EndPass', 'Begin', 'End', 'SetTechnique',
+        'GetTechnique'])
+    {
+        assert.ok(taken[name] > 10 && taken[name] < 300, `${name} took ${taken[name]} of 300`);
+    }
+    for (let round = 0; round < 1500; round++)
+    {
+        const bytes = new Uint8Array(0x1100);
+        const view = new DataView(bytes.buffer);
+        const put = (/** @type {number} */ at, /** @type {number} */ value)=>
+            view.setUint32(at - DATA, value >>> 0, true);
+        program(put, (at, value)=>view.setFloat64(at - DATA, value, true), next);
+        for (let w = 0; w < 64; w++)
+        {
+            if (next() % 2 === 0)
+            {
+                view.setFloat32(WORDS - DATA + 4 * w, randomDouble(next), true);
+            }
+            else
+            {
+                put(WORDS + 4 * w, next() % 3 === 0 ? next() % 5 : next());
+            }
+        }
+        put(CELLS + 8, PROGRAM);
+        put(CLOCK, 1000 + next() % 100);
+        sameAt64('Evaluate', { stack: [CELLS, CLOCK], memory: [[DATA, bytes]] }, HANDED);
+    }
 });

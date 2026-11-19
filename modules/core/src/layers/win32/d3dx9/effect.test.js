@@ -1891,7 +1891,7 @@ test('SetTechnique and GetTechnique in the guest answer as the host\'s, and Begi
     g.view.setUint32(self + 4, effect.guestState(), true);
     const HOST = Symbol('host');
     const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST };
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, pointerBytes: 4 };
     const guestCode = /** @type {any} */ (commitSource);
     for (const index of [0, 1, 2, 0xffffffff])
     {
@@ -2284,6 +2284,7 @@ async function commitGate(managed, source, names, setOf, least = { commits: 400,
             === g.u32(effectB.guestState() + EFFECT_BLOCK.WALK)
             ? /** @type {any} */ (commitSource).Walk(helpers, ...args) : callNow(fn, args)),
         host: ()=>HOST,
+        pointerBytes: 4,
     };
     /**
      * A method on both effects -- on B through its guest code where it has

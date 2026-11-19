@@ -2551,7 +2551,14 @@ export function createEffects(host, helpers, options = {}){
         if (walkAt < 0)
         {
             const code = /** @type {Uint8Array} */ (/** @type {any} */ (COMMIT_IN_GUEST).Walk.code);
-            // A 64-bit process commits on the host: no Walk to call.
+            // A 64-bit process commits on the host: no Walk to call. The
+            // methods' x86-64 is built and held to their JavaScript
+            // (effect-commit.x64.js, effect-commit.test.js); it is bound once
+            // the gate against the host's commit runs over a 64-bit layout
+            // too, with a table refused there for SetNPatchMode (its FLOAT
+            // travels in XMM1, which Walk's integer call does not fill) and
+            // for a state manager, the one address in a table the program
+            // chose, which may lie past 4 GiB.
             walkAt = host.heap && !long ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (walkAt !== 0)
             {

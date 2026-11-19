@@ -123,50 +123,47 @@ export function __RTDynamicCast({ u8, u32, i32, ptr, pointerBytes }, object, del
         }
         return 0;
     }
-    else
+    const subobject = (object - delta) >>> 0;
+    const locator = u32((u32(subobject) - pointerBytes) >>> 0);
+    const complete = (subobject - i32(locator + LOCATOR_OFFSET)) >>> 0;
+    const hierarchy = u32(locator + LOCATOR_HIERARCHY);
+    const count = u32(hierarchy + HIERARCHY_COUNT);
+    const bases = u32(hierarchy + HIERARCHY_BASES);
+    for (/** @type {u32} */ let index = 0; index < count; index++)
     {
-        const subobject = (object - delta) >>> 0;
-        const locator = u32((u32(subobject) - pointerBytes) >>> 0);
-        const complete = (subobject - i32(locator + LOCATOR_OFFSET)) >>> 0;
-        const hierarchy = u32(locator + LOCATOR_HIERARCHY);
-        const count = u32(hierarchy + HIERARCHY_COUNT);
-        const bases = u32(hierarchy + HIERARCHY_BASES);
-        for (/** @type {u32} */ let index = 0; index < count; index++)
+        const descriptor = u32(bases + index * 4);
+        const type = u32(descriptor);
+        // The same address, or the same name up to its end or to the limit.
+        /** @type {i32} */
+        let differs = 0;
+        if (type !== to)
         {
-            const descriptor = u32(bases + index * 4);
-            const type = u32(descriptor);
-            // The same address, or the same name up to its end or to the limit.
-            /** @type {i32} */
-            let differs = 0;
-            if (type !== to)
+            for (/** @type {u32} */ let at = 0; at < NAME_LIMIT; at++)
             {
-                for (/** @type {u32} */ let at = 0; at < NAME_LIMIT; at++)
+                const a = u8(type + TYPE_NAME + at);
+                if (a !== u8(to + TYPE_NAME + at))
                 {
-                    const a = u8(type + TYPE_NAME + at);
-                    if (a !== u8(to + TYPE_NAME + at))
-                    {
-                        differs = 1;
-                        break;
-                    }
-                    if (a === 0)
-                    {
-                        break;
-                    }
+                    differs = 1;
+                    break;
                 }
-            }
-            if (differs === 0)
-            {
-                const mdisp = i32(descriptor + BASE_MDISP);
-                const pdisp = i32(descriptor + BASE_PDISP);
-                if (pdisp < 0)
+                if (a === 0)
                 {
-                    return (complete + mdisp) >>> 0;
+                    break;
                 }
-                const table = u32((complete + pdisp) >>> 0);
-                return (complete + mdisp + pdisp + i32((table + i32(descriptor + BASE_VDISP))
-                    >>> 0)) >>> 0;
             }
         }
-        return 0;
+        if (differs === 0)
+        {
+            const mdisp = i32(descriptor + BASE_MDISP);
+            const pdisp = i32(descriptor + BASE_PDISP);
+            if (pdisp < 0)
+            {
+                return (complete + mdisp) >>> 0;
+            }
+            const table = u32((complete + pdisp) >>> 0);
+            return (complete + mdisp + pdisp + i32((table + i32(descriptor + BASE_VDISP))
+                >>> 0)) >>> 0;
+        }
     }
+    return 0;
 }

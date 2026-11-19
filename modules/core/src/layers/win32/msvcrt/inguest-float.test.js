@@ -214,7 +214,7 @@ function abstractSse(word){
 test('a 64-bit process\'s control and status calls are MXCSR\'s: masks, rounding and the '
     + 'denormal bits, the flags kept, no precision', ()=>{
     const next = random(53);
-    const words = [0x1f80, 0x0000, 0x7f80, 0x3f80, 0x5f80, 0x9fc0, 0x1fc0, 0x9f80, 0x1fbf,
+    const registers = [0x1f80, 0x0000, 0x7f80, 0x3f80, 0x5f80, 0x9fc0, 0x1fc0, 0x9f80, 0x1fbf,
         0xffff, 0x0a15];
     /** @type {[number, number][]} newControl, mask */
     const asked = [[0, 0], [0x300, 0x300], [0x100, 0x300], [0, 0x8001f], [0x8001f, 0x8001f],
@@ -226,7 +226,7 @@ test('a 64-bit process\'s control and status calls are MXCSR\'s: masks, rounding
         asked.push([next(), next()]);
     }
     const OUT = 0x20100;
-    for (const mxcsr of words)
+    for (const mxcsr of registers)
     {
         for (const [wanted, mask] of asked)
         {

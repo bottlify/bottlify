@@ -74,12 +74,13 @@ test('compiled code is read as its entry reaches it: a table after the code is n
         ...table,
     ]);
     assert.deepEqual(reachedLeafFaults(handing, 0, 6), []);
-    assert.ok(reachedLeafFaults(handing, 0).length > 0, 'followed, an unbound jump reads the table');
+    assert.ok(reachedLeafFaults(handing, 0).length > 0,
+        'followed, an unbound jump reads the table');
 });
 
 test('every function the build marks a leaf is one, and the rest are counted', async()=>{
-    const { leaves, faults, others } = await compiledLeaves();
-    assert.deepEqual(faults, []);
+    const { leaves, faults: found, others } = await compiledLeaves();
+    assert.deepEqual(found, []);
     assert.ok(leaves > 50, `${leaves} leaves`);
     assert.ok(others.size > 5, 'the functions that call or keep registers are named by module');
 });

@@ -113,17 +113,17 @@ test('past 4 GiB a cast follows the object\'s pointers whole: the vtable, the lo
     // 4 GiB below, another object's bytes: a pointer cut to its low half reads these.
     m.write(HIGH - HIGH_64, Array.from(graph.image, byte=>byte ^ 0xa5));
     /** @param {number[]} args */
-    const cast = args=>{
+    const castAt = args=>{
         const { halted } = callLong(m, CODE_64, { args: [...args, 0].map(BigInt),
             returnTo: HALT });
         assert.ok(halted && m.rip() === HALT + 1, 'the cast returns');
         return Number(m.reg('rax'));
     };
-    assert.equal(cast([object, 0, types.derived, types.base]), object);
-    assert.equal(cast([object, 0, types.derived, types.second]), object + 8);
-    assert.equal(cast([second, 0, types.second, types.base]), second - 8);
-    assert.equal(cast([graph.complete + 4, 4, types.derived, types.second]), graph.complete + 8);
-    assert.equal(cast([object, 0, types.derived, types.virtual]), graph.complete + 16 + 24);
-    assert.equal(cast([object, 0, types.derived, types.stranger]), 0);
-    assert.equal(cast([object, 0, types.derived, types.longOther]), object + 4);
+    assert.equal(castAt([object, 0, types.derived, types.base]), object);
+    assert.equal(castAt([object, 0, types.derived, types.second]), object + 8);
+    assert.equal(castAt([second, 0, types.second, types.base]), second - 8);
+    assert.equal(castAt([graph.complete + 4, 4, types.derived, types.second]), graph.complete + 8);
+    assert.equal(castAt([object, 0, types.derived, types.virtual]), graph.complete + 16 + 24);
+    assert.equal(castAt([object, 0, types.derived, types.stranger]), 0);
+    assert.equal(castAt([object, 0, types.derived, types.longOther]), object + 4);
 });

@@ -406,6 +406,9 @@ const HELD_ELSEWHERE = Object.freeze({
         + 'd3dx9/inguest-quaternion.test.js',
     'layers/graphics/glu/inguest.js': 'matrices and points without NaN: '
         + 'graphics/glu/inguest.test.js',
+    // An effect's block, its passes' tables and the cells they date.
+    'layers/win32/d3dx9/effect-commit.js': 'a commit table laid out: '
+        + 'd3dx9/effect-commit.test.js',
 });
 
 test('each function\'s x86-64 answers as its JavaScript, on inputs of every shape', async()=>{
