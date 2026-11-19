@@ -59,11 +59,12 @@ const STATE = 0x700;
  * One process: its memory, handles, kernel and port, over the run's table.
  *
  * @param {Map<string, any>} table @param {number} [id]
+ * @param {Partial<import('./pipes.js').PipeHost>} [extra]  more of the host
  */
-function processOn(table, id = 1){
+function processOn(table, id = 1, extra = {}){
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
-    /** @type {Map<number, { type: string, object: any }>} */
+    /** @type {Map<number, { type: string, object: any, access?: number | null }>} */
     const handles = new Map();
     let next = 0x100;
     let now = 0;
@@ -105,11 +106,12 @@ function processOn(table, id = 1){
             },
         },
         handles: {
-            open: (type, object)=>{
+            open: (type, object, access = null)=>{
                 next += 4;
-                handles.set(next, { type, object });
+                handles.set(next, { type, object, access });
                 return next;
             },
+            access: handle=>handles.get(handle)?.access ?? null,
             resolve: (handle, type)=>{
                 const entry = handles.get(handle);
                 if (!entry || (type && entry.type !== type))
@@ -171,6 +173,7 @@ function processOn(table, id = 1){
         setEvent: (/** @type {number} */ event)=>events.push(event),
         resetEvent: (/** @type {number} */ event)=>resets.push(event),
         queueApc: (thread, routine, args)=>apcs.push({ thread, routine, args }),
+        ...extra,
     });
     const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
         /** @type {unknown} */ (pipes.functions));
@@ -794,6 +797,122 @@ test('NtCreateNamedPipeFile makes the instance CreateNamedPipe makes, by its nat
     assert.ok('handle' in opened, 'CreateFile finds it by the Win32 name');
 });
 
+test('NtCreateNamedPipeFile: the sharing is the direction, the access the server\'s rights', ()=>{
+    const STATUS_INVALID_PARAMETER = 0xc000000d;
+    const FILE_CREATE = 2;
+    const FILE_SHARE_READ = 1;
+    const FILE_SHARE_WRITE = 2;
+    const FILE_READ_ATTRIBUTES = 0x80;
+    const SYNCHRONIZE = 0x00100000;
+    const OUT = 0x800;
+    const ATTRIBUTES = 0x820;
+    const STRING = 0x840;
+    const TEXT = 0x880;
+    const p = processOn(new Map());
+    const create = /** @type {any} */ (p.fns.CreateNamedPipeW).natives.NtCreateNamedPipeFile;
+    const name = '\\??\\pipe\\winetestpipe';
+    p.putWide(TEXT, name);
+    p.view.setUint16(STRING, name.length * 2, true);
+    p.view.setUint32(STRING + 4, TEXT, true);
+    p.view.setUint32(ATTRIBUTES, 24, true);
+    p.view.setUint32(ATTRIBUTES + 8, STRING, true);
+    /** @param {number} access @param {number} share */
+    const make = (access, share)=>create.handler([OUT, access, ATTRIBUTES, 0, share,
+        FILE_CREATE, 0, 0, 0, 0, 1, 500, 500, 0]) >>> 0;
+
+    assert.equal(make(FILE_READ_ATTRIBUTES, 0), STATUS_INVALID_PARAMETER,
+        'no sharing: no way for bytes to go');
+    // Clients may read: an outbound pipe, made by a server asking no data rights.
+    assert.equal(make(FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ), 0);
+    const server = p.u32(OUT);
+    assert.equal(p.handles.get(server)?.access, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        'the server handle holds what it asked, mapped');
+    assert.equal(p.client(GENERIC_WRITE), -5, 'a client may not write an outbound pipe');
+    assert.ok(p.client(GENERIC_READ) > 0);
+    p.fns.CloseHandle?.handler([server]);
+
+    const inbound = processOn(new Map());
+    const inboundCreate = /** @type {any} */ (inbound.fns.CreateNamedPipeW).natives
+        .NtCreateNamedPipeFile;
+    inbound.putWide(TEXT, name);
+    inbound.view.setUint16(STRING, name.length * 2, true);
+    inbound.view.setUint32(STRING + 4, TEXT, true);
+    inbound.view.setUint32(ATTRIBUTES, 24, true);
+    inbound.view.setUint32(ATTRIBUTES + 8, STRING, true);
+    assert.equal(inboundCreate.handler([OUT, GENERIC_READ, ATTRIBUTES, 0, FILE_SHARE_WRITE,
+        FILE_CREATE, 0, 0, 0, 0, 1, 500, 500, 0]) >>> 0, 0);
+    assert.equal(inbound.client(GENERIC_READ), -5, 'a client may not read an inbound pipe');
+    assert.ok(inbound.client(GENERIC_WRITE) > 0);
+});
+
+test('a pipe end answers its information classes, and FilePipeInformation is set', ()=>{
+    const STATUS_ACCESS_DENIED = 0xc0000022;
+    const STATUS_INVALID_PARAMETER = 0xc000000d;
+    const STATUS_PIPE_DISCONNECTED = 0xc00000b0;
+    const FILE_NAME_INFORMATION = 9;
+    const FILE_PIPE_INFORMATION = 23;
+    const FILE_PIPE_LOCAL_INFORMATION = 24;
+    const FILE_READ_ATTRIBUTES = 0x80;
+    const FILE_WRITE_ATTRIBUTES = 0x100;
+    const p = processOn(new Map());
+    // CreateNamedPipe's server end: outbound and inbound, so GENERIC_READ and _WRITE.
+    const server = p.fns.CreateNamedPipeA.handler([p.putString(NAME_AT, NAME),
+        PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE, 1, 200, 100, 0, 0]) >>> 0;
+    /** @param {Uint8Array | { status: number } | null} got */
+    const words = got=>{
+        assert.ok(got instanceof Uint8Array);
+        const view = new DataView(got.buffer);
+        return Array.from({ length: got.length / 4 }, (_, at)=>view.getUint32(at * 4, true));
+    };
+    // Type, configuration, instances, current, inbound quota, readable,
+    // outbound quota, room to write, state (listening), the server end.
+    assert.deepEqual(words(p.pipes.information(server, FILE_PIPE_LOCAL_INFORMATION)),
+        [1, 2, 1, 1, 100, 0, 200, 200, 2, 1]);
+    const client = p.client(RW);
+    p.write(client, 'abc');
+    assert.deepEqual(words(p.pipes.information(client, FILE_PIPE_LOCAL_INFORMATION)),
+        [1, 2, 1, 1, 100, 0, 200, 97, 3, 0], 'connected; the client\'s write takes room');
+    assert.deepEqual(words(p.pipes.information(server, FILE_PIPE_LOCAL_INFORMATION)).slice(5, 6),
+        [3], 'the server may read it');
+    const name = /** @type {Uint8Array} */ (p.pipes.information(client, FILE_NAME_INFORMATION));
+    assert.equal(new DataView(name.buffer).getUint32(0, true), '\\winetestpipe'.length * 2);
+    assert.equal(String.fromCharCode(...new Uint16Array(name.buffer.slice(4))), '\\winetestpipe');
+
+    // FILE_PIPE_INFORMATION: read mode, completion mode.
+    p.view.setUint32(BUFFER, 1, true);
+    p.view.setUint32(BUFFER + 4, 1, true);
+    assert.equal(p.pipes.setInformation(client, FILE_PIPE_INFORMATION, BUFFER, 8), 0);
+    assert.deepEqual(words(p.pipes.information(client, FILE_PIPE_INFORMATION)), [1, 1]);
+    p.view.setUint32(BUFFER, 2, true);
+    assert.equal(p.pipes.setInformation(client, FILE_PIPE_INFORMATION, BUFFER, 8),
+        STATUS_INVALID_PARAMETER, 'a mode past 1');
+
+    // An end without the attribute rights is refused them; a byte pipe reads no messages.
+    const bytes = processOn(new Map());
+    const reader = bytes.fns.CreateNamedPipeA.handler([bytes.putString(NAME_AT, NAME),
+        PIPE_ACCESS_DUPLEX, 0, 1, 0, 0, 0, 0]) >>> 0;
+    const bare = bytes.pipes.open(NAME, 0x00100000, 0);
+    assert.ok('handle' in bare);
+    assert.deepEqual(bytes.pipes.information(bare.handle, FILE_PIPE_LOCAL_INFORMATION),
+        { status: STATUS_ACCESS_DENIED }, 'no FILE_READ_ATTRIBUTES');
+    assert.ok(bytes.pipes.information(bare.handle, FILE_NAME_INFORMATION) instanceof Uint8Array,
+        'the name needs no right');
+    const allowed = bytes.handles.get(reader);
+    assert.ok(allowed && (allowed.access ?? 0xffffffff) & FILE_WRITE_ATTRIBUTES);
+    bytes.view.setUint32(BUFFER, 1, true);
+    bytes.view.setUint32(BUFFER + 4, 0, true);
+    assert.equal(bytes.pipes.setInformation(reader, FILE_PIPE_INFORMATION, BUFFER, 8),
+        STATUS_INVALID_PARAMETER, 'message reading of a byte pipe');
+    assert.equal(bytes.fns.DisconnectNamedPipe.handler([reader]), 1);
+    assert.equal(bytes.fns.ConnectNamedPipe.handler([reader, 0]), 'parked');
+    const asked = bytes.pipes.open(NAME, FILE_READ_ATTRIBUTES, 0);
+    assert.ok('handle' in asked);
+    assert.equal(bytes.fns.DisconnectNamedPipe.handler([reader]), 1);
+    assert.deepEqual(bytes.pipes.information(asked.handle, FILE_PIPE_INFORMATION),
+        { status: STATUS_PIPE_DISCONNECTED }, 'a client cut off');
+    assert.equal(bytes.pipes.information(0x7777, FILE_PIPE_INFORMATION), null, 'no pipe end');
+});
+
 test('an OVERLAPPED\'s event is reset as each operation on it begins', ()=>{
     // One manual-reset event for a connect, a read and a write (Wine's
     // serverThreadMain3): the wait after the read found it still set by the
@@ -1144,6 +1263,43 @@ test('FSCTL_PIPE_LISTEN is ConnectNamedPipe, native: pending on an overlapped en
         { status: 0, information: 0 });
     assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_DISCONNECT, 0, 0, IOSB, io),
         { status: 0xc00000b0, information: 0 }, 'cut off already: STATUS_PIPE_DISCONNECTED');
+});
+
+test('a listen on an alerting synchronous end is cancelled by a routine queued to the thread;'
+    + ' a client end may not listen', ()=>{
+    const STATUS_ILLEGAL_FUNCTION = 0xc00000af;
+    const FILE_CREATE = 2;
+    const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+    const FILE_READ_ATTRIBUTES = 0x80;
+    const IOSB = 0x2b00;
+    const ATTRIBUTES = 0x820;
+    const STRING = 0x840;
+    const TEXT = 0x880;
+    let pending = true;
+    const p = processOn(new Map(), 1, {
+        // A routine already queued: it runs, and the wait is answered at once.
+        alertably: (alertable, wait, answer)=>(alertable && pending ? answer() : wait()),
+    });
+    const create = /** @type {any} */ (p.fns.CreateNamedPipeW).natives.NtCreateNamedPipeFile;
+    const name = '\\??\\pipe\\winetestpipe';
+    p.putWide(TEXT, name);
+    p.view.setUint16(STRING, name.length * 2, true);
+    p.view.setUint32(STRING + 4, TEXT, true);
+    p.view.setUint32(ATTRIBUTES, 24, true);
+    p.view.setUint32(ATTRIBUTES + 8, STRING, true);
+    assert.equal(create.handler([0x800, FILE_READ_ATTRIBUTES, ATTRIBUTES, 0, 3, FILE_CREATE,
+        FILE_SYNCHRONOUS_IO_ALERT, 0, 0, 0, 1, 500, 500, 0]) >>> 0, 0);
+    const server = p.u32(0x800);
+    p.view.setUint32(IOSB, 0x55555555, true);
+    assert.deepEqual(p.pipes.control(server, 0x110008, 0, 0, IOSB, undefined),
+        { status: STATUS_CANCELLED, information: 0 });
+    assert.equal(p.u32(IOSB), 0x55555555, 'the block is left alone');
+    pending = false;
+    assert.deepEqual(p.pipes.control(server, 0x110008, 0, 0, IOSB, undefined),
+        { parked: 'parked' }, 'with nothing queued it waits');
+    const client = p.client();
+    assert.deepEqual(p.pipes.control(client, 0x110008, 0, 0, IOSB, undefined),
+        { status: STATUS_ILLEGAL_FUNCTION, information: 0 });
 });
 
 test('a synchronous listen parks; CancelSynchronousIo by its block ends it cancelled', ()=>{

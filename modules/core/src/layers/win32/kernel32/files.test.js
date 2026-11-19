@@ -2209,6 +2209,41 @@ test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only 
     assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
 });
 
+test('NtCreateFile opens a pipe\'s client end by its native name, with the rights asked', ()=>{
+    /** @type {[string, number, number][]} */
+    const opens = [];
+    const { fns, memory, handles } = setup({ pipes: {
+        /** @param {string} name @param {number} access @param {number} flags */
+        open: (name, access, flags)=>{
+            opens.push([name, access, flags]);
+            return name.endsWith('busy') ? { error: 231 }
+                : { handle: handles.open('pipe', {}, access) };
+        },
+        isPipe: ()=>false,
+    } });
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    const SYNCHRONIZE = 0x00100000;
+    /** @param {string} name @param {number} options */
+    const open = (name, options)=>native.handler([NT_HANDLE, SYNCHRONIZE,
+        objectAttributes(memory, name), NT_STATUS, 0, 0, 3, FILE_OPEN, options, 0, 0]) >>> 0;
+    assert.equal(open('\\??\\pipe\\game', 0x20), 0);
+    assert.deepEqual(opens.at(-1), ['\\\\.\\pipe\\game', SYNCHRONIZE, 0],
+        'a synchronous end, asked nothing more');
+    assert.equal(open('\\Device\\NamedPipe\\game', 0), 0);
+    assert.equal(opens.at(-1)?.[2], 0x40000000, 'no synchronous option: overlapped');
+    assert.equal(open('\\??\\pipe\\busy', 0), 0xc00000ac, 'STATUS_PIPE_NOT_AVAILABLE');
+
+    // FileAccessInformation is the handle's rights; a process handle is the wrong object.
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
+    assert.equal(open('\\??\\pipe\\game', 0x20), 0);
+    assert.equal(query.handler([memory.dword(NT_HANDLE), 0x300, 0x400, 4, 8]), 0);
+    assert.equal(memory.dword(0x400), SYNCHRONIZE);
+    assert.equal(query.handler([0xffffffff, 0x300, 0x400, 8, 23]) >>> 0, 0xc0000024,
+        'STATUS_OBJECT_TYPE_MISMATCH');
+    assert.equal(query.handler([0x7770, 0x300, 0x400, 8, 23]) >>> 0, 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+});
+
 test('NtCreateFile names what is missing, and takes only object names', ()=>{
     const { fns, memory, files } = setup();
     const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;

@@ -48,6 +48,11 @@ export const THREAD_QUERY_LIMITED_INFORMATION = 0x0800;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_PRIVILEGE_NOT_HELD = 1314;
 
+/** A file object's rights: a file's, a directory's, a pipe end's. */
+const FILE_RIGHTS = { own: 0x01ff, read: READ_CONTROL | SYNCHRONIZE | 0x0089,
+    write: READ_CONTROL | SYNCHRONIZE | 0x0116, execute: READ_CONTROL | SYNCHRONIZE | 0x00a0,
+    bounded: true };
+
 /**
  * Each kind's own rights, and what its generic rights stand for (winnt.h's
  * MUTANT_*, EVENT_*, SEMAPHORE_*, TIMER_*, KEYEDEVENT_*, THREAD_*, FILE_* and the objects'
@@ -94,9 +99,9 @@ const KINDS = {
     // WRITE_ATTRIBUTES, WRITE_EA; _EXECUTE EXECUTE and READ_ATTRIBUTES - each
     // with SYNCHRONIZE. A file object's rights are what it was opened with:
     // a duplicate asking more is refused (Wine's kernel32:file test_file_access).
-    file: { own: 0x01ff, read: READ_CONTROL | SYNCHRONIZE | 0x0089,
-        write: READ_CONTROL | SYNCHRONIZE | 0x0116, execute: READ_CONTROL | SYNCHRONIZE | 0x00a0,
-        bounded: true },
+    file: FILE_RIGHTS,
+    // A pipe end is a file object of the pipe file system, with a file's rights.
+    pipe: FILE_RIGHTS,
 };
 
 /**

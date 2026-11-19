@@ -43,6 +43,7 @@ import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { OBJ_INHERIT, readObjectAttributes } from './object-attributes.js';
 import { readLargeInteger } from './due-time.js';
 import { INTERACTIVE_SESSION } from './teb.js';
+import { allows, mappedAccess } from './access.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -97,12 +98,22 @@ const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
 const FILE_READ_DATA = 0x1;
 const FILE_WRITE_DATA = 0x2;
+const FILE_READ_ATTRIBUTES = 0x80;
+const FILE_WRITE_ATTRIBUTES = 0x100;
+const SYNCHRONIZE = 0x00100000;
+/** The open mode's security rights, WRITE_DAC, WRITE_OWNER and ACCESS_SYSTEM_SECURITY. */
+const OPEN_MODE_RIGHTS = 0x010c0000;
+/** NtCreateNamedPipeFile's ShareAccess: what a client may open the pipe for. */
+const FILE_SHARE_READ = 0x1;
+const FILE_SHARE_WRITE = 0x2;
 /** NtCreateNamedPipeFile's dispositions and the option that makes an end synchronous. */
 const FILE_OPEN = 1;
 const FILE_CREATE = 2;
 const FILE_OPEN_IF = 3;
 /** FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT. */
 const FILE_SYNCHRONOUS_IO = 0x30;
+/** The synchronous option whose waits a queued routine ends. */
+const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
 /** IO_STATUS_BLOCK.Information of a create that made its object. */
 const FILE_CREATED = 2;
 
@@ -128,9 +139,16 @@ const FSCTL_PIPE_PEEK = 0x11400c;
 const FSCTL_PIPE_LISTEN = 0x110008;
 const FSCTL_PIPE_DISCONNECT = 0x110004;
 const PEEK_HEAD = 16;
-/** FILE_PIPE_PEEK_BUFFER.NamedPipeState: both ends there, or the other gone. */
+/** A pipe's state as FILE_PIPE_PEEK_BUFFER and FILE_PIPE_LOCAL_INFORMATION say it. */
+const FILE_PIPE_DISCONNECTED_STATE = 1;
+const FILE_PIPE_LISTENING_STATE = 2;
 const FILE_PIPE_CONNECTED_STATE = 3;
 const FILE_PIPE_CLOSING_STATE = 4;
+
+/** The FILE_INFORMATION_CLASS values a pipe end answers itself. */
+const FILE_NAME_INFORMATION = 9;
+const FILE_PIPE_INFORMATION = 23;
+const FILE_PIPE_LOCAL_INFORMATION = 24;
 
 /** Where a pipe's names begin, in the namespace's own spelling. */
 const PREFIXES = ['\\\\.\\pipe\\', '\\\\?\\pipe\\'];
@@ -160,15 +178,32 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
     name.toLowerCase().startsWith(prefix) && name.length > prefix.length);
 
 /**
+ * A pipe's name in the object namespace - `\??\pipe\` (or `\DosDevices\`,
+ * `\GLOBAL??\`) or the device's own `\Device\NamedPipe\`, in any case - in
+ * the Win32 spelling, `\\.\pipe\`; null for a name that is no pipe's, an
+ * empty rest of it included.
+ *
+ * @param {string} name
+ * @returns {string | null}
+ */
+export const pipeNameOf = name=>{
+    const named = /^\\(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe\\|^\\Device\\NamedPipe\\/i
+        .exec(name);
+    return named && name.length > named[0].length
+        ? `\\\\.\\pipe\\${name.slice(named[0].length)}` : null;
+};
+
+/**
  * What a process gives the pipes to finish its operations with.
  *
  * @typedef {Object} PipeHost
  * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED is
  *     laid out wider (`overlappedLayout`); absent, 4.
  * @property {any} kernel  block, wake, onTimeout, clock
- * @property {{ open: (type: string, object: any) => number,
+ * @property {{ open: (type: string, object: any, access?: number | null) => number,
  *     resolve: (handle: number, type?: string) => any,
- *     typeOf?: (handle: number) => string | null }} handles
+ *     typeOf?: (handle: number) => string | null,
+ *     access?: (handle: number) => number | null }} handles
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -193,6 +228,9 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  *     [posted]  a native call's packet to the handle's port, its ApcContext the value
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(alertable: boolean, wait: () => any, answer: () => number) => any} [alertably]
+ *     a wait made alertable: routines queued to the thread run first and end it at
+ *     once, one queued while it waits ends it; `answer` is then the call's answer
  * @property {PipesAcross | null} [across]  where the ends a process in a worker of
  *     its own was started with are served (`EndAcross`), by their numbers
  */
@@ -1037,6 +1075,34 @@ export function createNamedPipes(host){
     };
 
     /**
+     * A synchronous native wait on an end opened FILE_SYNCHRONOUS_IO_ALERT,
+     * made alertable: a routine queued to the thread, before or while it
+     * waits, runs, and the request it waited for is cancelled
+     * (STATUS_CANCELLED) without touching its status block. Any other wait,
+     * or with nothing to make it alertable, is made as it is.
+     *
+     * @param {End} end @param {() => any} wait  the wait, which may park
+     * @param {(op: Op) => boolean} mine  the op the wait queued
+     */
+    const alertableWait = (end, wait, mine)=>{
+        if (!(/** @type {any} */ (end).alerts) || !host.alertably)
+        {
+            return wait();
+        }
+        return host.alertably(true, wait, ()=>{
+            for (const one of [end, peerOf(end)])
+            {
+                if (one)
+                {
+                    one.readers = one.readers.filter(op=>!mine(op));
+                }
+            }
+            end.instance.connects = end.instance.connects.filter(op=>!mine(op));
+            return STATUS_CANCELLED;
+        });
+    };
+
+    /**
      * A server end cuts its client off, as DisconnectNamedPipe and
      * FSCTL_PIPE_DISCONNECT ask: the client's handle stays and every call on
      * it says the pipe is not connected, what was unread either way is
@@ -1192,7 +1258,9 @@ export function createNamedPipes(host){
      * @param {{ direction: number, messages: boolean, readMessages: boolean,
      *     nowait: boolean, overlapped: boolean, maxInstances: number, outSize: number,
      *     inSize: number, timeoutMs: number, disposition: 'create' | 'open' | 'either',
-     *     inherit: boolean }} asked
+     *     inherit: boolean, access: number, alerts?: boolean }} asked  `access`: what
+     *     the server handle was asked for, its rights (`access.js`, the pipe kind);
+     *     `alerts`: FILE_SYNCHRONOUS_IO_ALERT, a queued routine ends its waits
      * @returns {{ handle: number } | { error: number }}  a Win32 error
      */
     const makeInstance = (name, asked)=>{
@@ -1251,9 +1319,11 @@ export function createNamedPipes(host){
         instance.server.readMessages = asked.readMessages;
         instance.server.nowait = asked.nowait;
         /** @type {any} */ (instance.server).overlapped = asked.overlapped;
+        /** @type {any} */ (instance.server).alerts = asked.alerts === true;
         /** @type {any} */ (instance.server).serverProcess = host.processId ?? 0;
         pipe.instances.add(instance);
-        const handle = host.handles.open('pipe', instance.server);
+        const handle = host.handles.open('pipe', instance.server,
+            mappedAccess('pipe', asked.access));
         inheritable.set(handle, asked.inherit);
         listening(pipe);
         return { handle };
@@ -1283,6 +1353,12 @@ export function createNamedPipes(host){
             outSize: outSize >>> 0, inSize: inSize >>> 0, timeoutMs: timeout >>> 0,
             disposition: (mode & FILE_FLAG_FIRST_PIPE_INSTANCE) !== 0 ? 'create' : 'either',
             inherit: inheritsBy(attributes),
+            // The server end may do what its direction lets it, as CreateNamedPipe
+            // asks the native create: reading inbound, writing (the attributes
+            // with it) outbound, and the security rights the open mode names.
+            access: ((mode & PIPE_ACCESS_INBOUND) !== 0 ? GENERIC_READ : 0)
+                | ((mode & PIPE_ACCESS_OUTBOUND) !== 0 ? GENERIC_WRITE : 0) | SYNCHRONIZE
+                | (mode & OPEN_MODE_RIGHTS),
         });
         if ('error' in made)
         {
@@ -1329,7 +1405,7 @@ export function createNamedPipes(host){
         instance.state = 'connected';
         instance.heard = false;
         instance.clientProcess = host.processId ?? 0;
-        const handle = host.handles.open('pipe', client);
+        const handle = host.handles.open('pipe', client, mappedAccess('pipe', asked));
         inheritable.set(handle, inheritsBy(attributes));
         connected(instance);
         return { handle };
@@ -2411,17 +2487,19 @@ export function createNamedPipes(host){
          *
          * The server instance CreateNamedPipe makes, by the pipe's name in the
          * object namespace (`\??\pipe\` or the device's own `\Device\NamedPipe\`,
-         * in any case, as the pipe file system compares names). What the server
-         * end may do is the access asked for: reading makes it inbound, writing
-         * outbound. FILE_CREATE asks for the first instance, FILE_OPEN for one
-         * of a pipe already there, FILE_OPEN_IF for either; an instance without
-         * FILE_SYNCHRONOUS_IO_* is overlapped. The handle is written as 0 when
-         * the call fails, as Windows 7 and later write it.
+         * in any case, as the pipe file system compares names). Which way bytes
+         * go is the sharing a client is let open it with: FILE_SHARE_READ makes
+         * it outbound, FILE_SHARE_WRITE inbound, none of them is refused; the
+         * access asked for is the server handle's rights. FILE_CREATE asks for
+         * the first instance, FILE_OPEN for one of a pipe already there,
+         * FILE_OPEN_IF for either; an instance without FILE_SYNCHRONOUS_IO_* is
+         * overlapped. The handle is written as 0 when the call fails, as
+         * Windows 7 and later write it.
          */
         NtCreateNamedPipeFile: {
             argBytes: 56,
             /** @param {number[]} args */
-            handler: ([out, access, attributes, status, , disposition, options, type,
+            handler: ([out, access, attributes, status, share, disposition, options, type,
                 readMode, completion, maxInstances, inbound, outbound, timeout])=>{
                 // The handle's place is written before anything is made: a call
                 // that cannot answer makes no instance.
@@ -2442,20 +2520,21 @@ export function createNamedPipes(host){
                     }
                     return STATUS.OBJECT_PATH_NOT_FOUND;
                 }
-                const named = /^\\(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe\\|^\\Device\\NamedPipe\\/i
-                    .exec(given.name);
-                if (!named)
+                const pipeName = pipeNameOf(given.name);
+                if (pipeName === null)
                 {
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    return /^\\(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe\\$|^\\Device\\NamedPipe\\$/i
+                        .test(given.name) ? STATUS.OBJECT_NAME_INVALID
+                        : STATUS.OBJECT_PATH_NOT_FOUND;
                 }
-                const rest = given.name.slice(named[0].length);
-                if (rest === '')
+                // Which way bytes go is what clients may share the pipe for:
+                // reading makes it outbound, writing inbound. The server
+                // handle's access is its rights only.
+                const sharing = share >>> 0;
+                if (sharing === 0 || (sharing & ~(FILE_SHARE_READ | FILE_SHARE_WRITE)) !== 0)
                 {
-                    return STATUS.OBJECT_NAME_INVALID;
+                    return STATUS.INVALID_PARAMETER;
                 }
-                const wanted = access >>> 0;
-                const reads = (wanted & (GENERIC_READ | FILE_READ_DATA)) !== 0;
-                const writes = (wanted & (GENERIC_WRITE | FILE_WRITE_DATA)) !== 0;
                 /** @type {Record<number, 'open' | 'create' | 'either'>} */
                 const dispositions = { [FILE_OPEN]: 'open', [FILE_CREATE]: 'create',
                     [FILE_OPEN_IF]: 'either' };
@@ -2467,13 +2546,14 @@ export function createNamedPipes(host){
                 const count = maxInstances >>> 0;
                 const due = (timeout >>> 0) === 0 ? 0n
                     : readLargeInteger(host.readMemory, timeout >>> 0);
-                const made = makeInstance(`\\\\.\\pipe\\${rest}`, {
-                    direction: (reads ? PIPE_ACCESS_INBOUND : 0)
-                        | (writes ? PIPE_ACCESS_OUTBOUND : 0),
+                const made = makeInstance(pipeName, {
+                    direction: ((sharing & FILE_SHARE_WRITE) !== 0 ? PIPE_ACCESS_INBOUND : 0)
+                        | ((sharing & FILE_SHARE_READ) !== 0 ? PIPE_ACCESS_OUTBOUND : 0),
                     messages: (type >>> 0) !== 0,
                     readMessages: (readMode >>> 0) !== 0,
                     nowait: (completion >>> 0) !== 0,
                     overlapped: ((options >>> 0) & FILE_SYNCHRONOUS_IO) === 0,
+                    alerts: ((options >>> 0) & FILE_SYNCHRONOUS_IO_ALERT) !== 0,
                     // Unlimited is -1 here and PIPE_UNLIMITED_INSTANCES to
                     // Win32, the count GetNamedPipeInfo answers.
                     maxInstances: count === 0xffffffff ? PIPE_UNLIMITED_INSTANCES : count,
@@ -2481,6 +2561,7 @@ export function createNamedPipes(host){
                     timeoutMs: due < 0n ? Math.round(Number(-due) / 10000) : 0,
                     disposition: asked,
                     inherit: (given.attributes & OBJ_INHERIT) !== 0,
+                    access: access >>> 0,
                 });
                 if ('error' in made)
                 {
@@ -2693,14 +2774,16 @@ export function createNamedPipes(host){
             {
                 if (end.side !== 'server')
                 {
-                    return { status: STATUS.INVALID_PARAMETER, information: 0 };
+                    return { status: STATUS.ILLEGAL_FUNCTION, information: 0 };
                 }
                 if ((block >>> 0) === 0)
                 {
                     return { status: STATUS.ACCESS_VIOLATION, information: 0 };
                 }
+                const thread = host.currentThread();
                 const answer = (code >>> 0) === FSCTL_PIPE_DISCONNECT ? disconnect(end)
-                    : listen(end, handle >>> 0, { block: block >>> 0, io });
+                    : alertableWait(end, ()=>listen(end, handle >>> 0, { block: block >>> 0, io }),
+                        op=>op.thread === thread && op.kind === 'connect');
                 return typeof answer === 'number' ? { status: answer, information: 0 }
                     : { parked: answer };
             }
@@ -2737,6 +2820,119 @@ export function createNamedPipes(host){
             const whole = end.instance.pipe.messages ? seen.length : seen.total;
             return { status: seen.bytes.length < whole ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS,
                 information: PEEK_HEAD + seen.bytes.length };
+        },
+
+        /**
+         * NtQueryInformationFile's classes of a pipe end: FilePipeInformation
+         * (the end's read and completion modes), FilePipeLocalInformation (the
+         * pipe's kind, direction, instances and quotas, the bytes the end may
+         * read and the room its writes have, its state, which end it is) and
+         * FileNameInformation (the pipe's name on its device). The first two
+         * need FILE_READ_ATTRIBUTES on the handle, and a client the server cut
+         * off has neither (STATUS_PIPE_DISCONNECTED). Null for a handle that
+         * is no pipe end, or a class a pipe end does not answer itself.
+         *
+         * @param {number} handle @param {number} kind
+         * @returns {Uint8Array | { status: number } | null}
+         */
+        information(handle, kind){
+            const end = endOf(handle);
+            if (!end || ![FILE_NAME_INFORMATION, FILE_PIPE_INFORMATION,
+                FILE_PIPE_LOCAL_INFORMATION].includes(kind >>> 0))
+            {
+                return null;
+            }
+            const { instance } = end;
+            const { pipe } = instance;
+            if ((kind >>> 0) === FILE_NAME_INFORMATION)
+            {
+                if (end.side === 'client' && (end.cut || instance.state === 'disconnected'))
+                {
+                    return { status: STATUS_PIPE_DISCONNECTED };
+                }
+                const prefix = PREFIXES.find(one=>pipe.name.toLowerCase().startsWith(one))
+                    ?? PREFIXES[0];
+                const name = `\\${pipe.name.slice(prefix.length)}`;
+                const bytes = new Uint8Array(4 + name.length * 2);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, name.length * 2, true);
+                [...name].forEach((ch, at)=>view.setUint16(4 + at * 2, ch.charCodeAt(0), true));
+                return bytes;
+            }
+            if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_READ_ATTRIBUTES))
+            {
+                return { status: STATUS.ACCESS_DENIED };
+            }
+            if (end.side === 'client' && (end.cut || instance.state === 'disconnected'))
+            {
+                return { status: STATUS_PIPE_DISCONNECTED };
+            }
+            if ((kind >>> 0) === FILE_PIPE_INFORMATION)
+            {
+                return Uint8Array.of(...dwordBytes(end.readMessages ? 1 : 0),
+                    ...dwordBytes(end.nowait ? 1 : 0));
+            }
+            const peer = peerOf(end);
+            const state = end.cut || instance.state === 'disconnected'
+                ? FILE_PIPE_DISCONNECTED_STATE
+                : instance.state === 'listening' ? FILE_PIPE_LISTENING_STATE
+                    : peer && !peer.closed ? FILE_PIPE_CONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
+            // What the end writes queues at the other end, up to that end's quota.
+            const quota = end.side === 'server' ? pipe.outSize : pipe.inSize;
+            const queued = peer ? available(peer) : 0;
+            const inbound = (pipe.openMode & PIPE_ACCESS_INBOUND) !== 0;
+            const outbound = (pipe.openMode & PIPE_ACCESS_OUTBOUND) !== 0;
+            return Uint8Array.of(...[
+                pipe.messages ? 1 : 0,
+                inbound && outbound ? 2 : outbound ? 1 : 0,
+                pipe.maxInstances === PIPE_UNLIMITED_INSTANCES ? 0xffffffff : pipe.maxInstances,
+                pipe.instances.size,
+                pipe.inSize,
+                available(end),
+                pipe.outSize,
+                Math.max(0, quota - queued),
+                state,
+                end.side === 'server' ? 1 : 0,
+            ].flatMap(value=>[...dwordBytes(value)]));
+        },
+
+        /**
+         * NtSetInformationFile's FilePipeInformation of a pipe end: its read
+         * mode (message reading of a byte pipe is refused) and its completion
+         * mode, each 0 or 1. The handle needs FILE_WRITE_ATTRIBUTES. Null for
+         * a handle that is no pipe end or another class; else the status.
+         *
+         * @param {number} handle @param {number} kind @param {number} from
+         * @param {number} length
+         * @returns {number | null}
+         */
+        setInformation(handle, kind, from, length){
+            const end = endOf(handle);
+            if (!end || (kind >>> 0) !== FILE_PIPE_INFORMATION)
+            {
+                return null;
+            }
+            if ((length >>> 0) < 8)
+            {
+                return STATUS.INFO_LENGTH_MISMATCH;
+            }
+            if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_WRITE_ATTRIBUTES))
+            {
+                return STATUS.ACCESS_DENIED;
+            }
+            if (end.side === 'client' && (end.cut || end.instance.state === 'disconnected'))
+            {
+                return STATUS_PIPE_DISCONNECTED;
+            }
+            const readMode = readDword(from >>> 0);
+            const completion = readDword((from >>> 0) + 4);
+            if (readMode > 1 || completion > 1 || (readMode === 1 && !end.instance.pipe.messages))
+            {
+                return STATUS.INVALID_PARAMETER;
+            }
+            end.readMessages = readMode === 1;
+            end.nowait = completion === 1;
+            return STATUS.SUCCESS;
         },
 
         /**

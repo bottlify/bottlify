@@ -30,7 +30,7 @@
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { FILE_OBJECT_KINDS } from './handle-tags.js';
-import { FILE_IMPLIED, allows, mappedAccess } from './access.js';
+import { FILE_IMPLIED, SYNCHRONIZE, allows, mappedAccess } from './access.js';
 import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
@@ -40,7 +40,7 @@ import { overlappedLayout, overlappedPosition, overlappedResult } from '../commo
 import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
-import { isPipeName } from './pipes.js';
+import { isPipeName, pipeNameOf } from './pipes.js';
 import { isNameInExpression, win32Expression } from './name-expression.js';
 import { fullPathName } from '../ntdll/paths.js';
 
@@ -189,6 +189,14 @@ const ALL_INFORMATION_FIXED = 100;
 /** FILE_GENERIC_READ and FILE_GENERIC_WRITE, what an open for each is granted. */
 const FILE_GENERIC_READ = 0x120089;
 const FILE_GENERIC_WRITE = 0x120116;
+/** Every right a file object has, and the one CreateFile always asks beside the caller's. */
+const FILE_ALL_ACCESS = 0x1f01ff;
+const FILE_READ_ATTRIBUTES = 0x80;
+const ERROR_PIPE_BUSY = 231;
+/** A pipe no instance of which listens: ERROR_PIPE_BUSY. */
+const STATUS_PIPE_NOT_AVAILABLE = 0xc00000ac;
+/** GetCurrentThread's pseudo-handle; GetCurrentProcess's is the one above it. */
+const CURRENT_THREAD_HANDLE = 0xfffffffe;
 const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
 const STATUS_INVALID_HANDLE = 0xc0000008;
@@ -2560,7 +2568,10 @@ export function createFileFunctions(host){
         // A pipe's name opens a client end of an instance that listens.
         if (name !== 0 && host.pipes && isPipeName(text.raw(name)))
         {
-            const client = host.pipes.open(text.raw(name), access, flags, attributes);
+            // CreateFile asks the native open for the attributes and a wait
+            // on the handle beside what the caller asked, as for any file.
+            const client = host.pipes.open(text.raw(name),
+                (access | SYNCHRONIZE | FILE_READ_ATTRIBUTES) >>> 0, flags, attributes);
             if ('error' in client)
             {
                 return fail(client.error, INVALID_HANDLE_VALUE);
@@ -2619,11 +2630,24 @@ export function createFileFunctions(host){
      * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
      */
     const nativeName = attributes=>{
+        const given = givenName(attributes);
+        return given === null ? { status: STATUS_OBJECT_NAME_INVALID }
+            : resolveNative(given.root, given.name);
+    };
+
+    /**
+     * The root directory handle and the name an OBJECT_ATTRIBUTES gives, as
+     * written; null for no name at all.
+     *
+     * @param {number} attributes
+     * @returns {{ root: number, name: string } | null}
+     */
+    const givenName = attributes=>{
         const root = readDword(attributes + 4);
         const string = readDword(attributes + 8);
         if (string === 0)
         {
-            return { status: STATUS_OBJECT_NAME_INVALID };
+            return null;
         }
         const descriptor = host.readMemory(string, 8);
         const length = descriptor[0] | (descriptor[1] << 8);
@@ -2635,7 +2659,7 @@ export function createFileFunctions(host){
         {
             name += String.fromCharCode(raw[at] | (raw[at + 1] << 8));
         }
-        return resolveNative(root, name);
+        return { root, name };
     };
 
     /**
@@ -2689,6 +2713,8 @@ export function createFileFunctions(host){
         [ERROR_DIR_NOT_EMPTY]: STATUS_DIRECTORY_NOT_EMPTY,
         [ERROR_INVALID_NAME]: STATUS_OBJECT_NAME_INVALID,
         [ERROR_BAD_LENGTH]: STATUS_INFO_LENGTH_MISMATCH,
+        // A pipe none of whose instances listens.
+        [ERROR_PIPE_BUSY]: STATUS_PIPE_NOT_AVAILABLE,
     };
 
     /**
@@ -2723,6 +2749,30 @@ export function createFileFunctions(host){
      */
     const ntCreateFile = ([out, access, attributes, status, , givenAttributes, share,
         disposition, options])=>{
+        // A pipe's name opens a client end, with the rights asked and no more.
+        const given = givenName(attributes >>> 0);
+        const pipeName = given && given.root === 0 && host.pipes ? pipeNameOf(given.name) : null;
+        if (pipeName !== null && host.pipes)
+        {
+            if ((disposition >>> 0) !== FILE_OPEN && (disposition >>> 0) !== FILE_OPEN_IF)
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            const client = host.pipes.open(pipeName, access >>> 0,
+                ((options >>> 0) & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) === 0
+                    ? FILE_FLAG_OVERLAPPED : 0);
+            if ('error' in client)
+            {
+                return NATIVE_FAILURES[client.error] ?? STATUS_UNSUCCESSFUL;
+            }
+            writeDword(out >>> 0, client.handle);
+            if ((status >>> 0) !== 0)
+            {
+                writeDword(status >>> 0, STATUS_SUCCESS);
+                writeDword((status >>> 0) + 4, FILE_OPENED);
+            }
+            return STATUS_SUCCESS;
+        }
         const named = nativeName(attributes >>> 0);
         if ('status' in named)
         {
@@ -2989,15 +3039,38 @@ export function createFileFunctions(host){
         : report(block, status, information));
 
     /**
+     * The rights a file object's handle was granted, as FileAccessInformation
+     * answers them: every right (FILE_ALL_ACCESS) for a handle granted all.
+     *
+     * @param {number} handle
+     */
+    const rightsOf = handle=>(host.handles.access?.(handle >>> 0) ?? FILE_ALL_ACCESS) >>> 0;
+
+    /** @param {number} value */
+    const dwordOf = value=>new Uint8Array(new Uint32Array([value >>> 0]).buffer);
+
+    /**
+     * What kind of object a handle names, the current process's and thread's
+     * pseudo-handles included: a file call given one of those is refused as
+     * the wrong type of object, not as no handle at all.
+     *
+     * @param {number} handle
+     * @returns {string | null}
+     */
+    const heldKind = handle=>((handle >>> 0) >= CURRENT_THREAD_HANDLE ? 'process'
+        : host.handles.typeOf?.(handle >>> 0) ?? null);
+
+    /**
      * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
      * lays it out; null for a class this keeps nothing for. The volume keeps
      * one time per file, the last write, and every time answers with it, as
      * GetFileTime's do.
      *
      * @param {any} file @param {number} kind
+     * @param {number} [handle]  the handle asked through: FileAccessInformation is its rights
      * @returns {Uint8Array | null}
      */
-    const informationOf = (file, kind)=>{
+    const informationOf = (file, kind, handle = 0)=>{
         const entry = files.stat(file.path);
         const size = file.directory ? 0n : BigInt(entry?.size ?? 0);
         // Whole clusters, as FileStandardInfo by handle counts them.
@@ -3021,7 +3094,8 @@ export function createFileFunctions(host){
         const mode = (file.overlapped ? 0 : FILE_SYNCHRONOUS_IO_NONALERT)
             | (file.sequential ? FILE_SEQUENTIAL_ONLY : 0)
             | (file.deleteOnClose ? FILE_DELETE_ON_CLOSE : 0);
-        const access = (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
+        const access = handle !== 0 ? rightsOf(handle)
+            : (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
         // A file's number on its volume, GetFileInformationByHandle's: the
         // same for the same file under any of its names, which is what
         // comparing two handles asks.
@@ -3069,7 +3143,7 @@ export function createFileFunctions(host){
                     FILE_INTERNAL_INFORMATION, FILE_EA_INFORMATION, FILE_ACCESS_INFORMATION,
                     FILE_POSITION_INFORMATION, FILE_MODE_INFORMATION, FILE_ALIGNMENT_INFORMATION,
                     FILE_NAME_INFORMATION].map(part=>/** @type {Uint8Array} */ (
-                    informationOf(file, part)));
+                    informationOf(file, part, handle)));
                 const all = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
                 parts.reduce((at, part)=>{
                     all.set(part, at);
@@ -3544,6 +3618,12 @@ export function createFileFunctions(host){
             argBytes: 40,
             /** @param {number[]} args */
             handler: ([handle, event, apc, context, block, code, , , output, room])=>{
+                // The request's event is cleared as it is made, whether it
+                // then finishes, waits or is refused.
+                if ((event >>> 0) !== 0 && host.pipes?.isPipe(handle))
+                {
+                    host.resetEvent?.(event >>> 0);
+                }
                 const piped = host.pipes?.control(handle, code, output, room, block,
                     { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 });
                 if (piped)
@@ -3554,10 +3634,6 @@ export function createFileFunctions(host){
                     }
                     if (piped.status === STATUS_PENDING)
                     {
-                        if ((event >>> 0) !== 0)
-                        {
-                            host.resetEvent?.(event >>> 0);
-                        }
                         return STATUS_PENDING;
                     }
                     return settled(block >>> 0, piped.status, piped.information);
@@ -3613,13 +3689,24 @@ export function createFileFunctions(host){
                     writeDword(out >>> 0, host.pipes.completionModes.of(handle));
                     return report(block >>> 0, STATUS_SUCCESS, 4);
                 }
-                const slot = host.mailslots?.information(handle, kind >>> 0) ?? null;
+                const held = heldKind(handle);
+                const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held ?? '');
+                // A pipe end answers its own classes, then what any file object does.
+                const piped = host.pipes?.information?.(handle >>> 0, kind >>> 0) ?? null;
+                if (piped !== null && !(piped instanceof Uint8Array))
+                {
+                    return report(block >>> 0, piped.status, 0);
+                }
+                const slot = piped ?? (fileObject && (kind >>> 0) === FILE_ACCESS_INFORMATION
+                    ? dwordOf(rightsOf(handle))
+                    : host.mailslots?.information(handle, kind >>> 0) ?? null);
                 const file = slot === null ? object(handle, 'file') : null;
                 if (slot === null && !file)
                 {
-                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                    return report(block >>> 0, held !== null && !fileObject
+                        ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_INVALID_HANDLE, 0);
                 }
-                const known = slot ?? informationOf(file, kind >>> 0);
+                const known = slot ?? informationOf(file, kind >>> 0, handle >>> 0);
                 const data = known === 'unknown class' ? null : known;
                 if (data === null)
                 {
@@ -3812,8 +3899,9 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, block, from, length, kind])=>{
-                const slot = host.mailslots?.setInformation?.(handle >>> 0, kind >>> 0,
-                    from >>> 0, length >>> 0) ?? null;
+                const slot = host.pipes?.setInformation?.(handle >>> 0, kind >>> 0,
+                    from >>> 0, length >>> 0) ?? host.mailslots?.setInformation?.(handle >>> 0,
+                    kind >>> 0, from >>> 0, length >>> 0) ?? null;
                 if (slot !== null)
                 {
                     return settled(block >>> 0, slot, 0);
@@ -3852,7 +3940,10 @@ export function createFileFunctions(host){
                 const open = fileOrDirectory(handle);
                 if (!open)
                 {
-                    return settled(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                    const held = heldKind(handle);
+                    return settled(block >>> 0, held !== null && held !== 'pipe'
+                        && !FILE_OBJECT_KINDS.has(held) ? STATUS_OBJECT_TYPE_MISMATCH
+                        : STATUS_INVALID_HANDLE, 0);
                 }
                 const type = NATIVE_SET_CLASSES.get(kind >>> 0);
                 const own = (kind >>> 0) === FILE_POSITION_SET || (kind >>> 0) === FILE_MODE_SET
