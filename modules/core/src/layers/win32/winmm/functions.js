@@ -503,13 +503,14 @@ const utf16 = text=>{
 
 /**
  * Which ordinal is which export, for a program that links WINMM.dll by number.
- * Ordinal 2 is PlaySound, the name the call had before the A and W forms:
- * the same address GetProcAddress gives for that name.
+ * Windows exports PlaySoundA a second time as ordinal 2, with no name. On
+ * Windows the name PlaySound is that same function at the same address; here
+ * it is a second export of the same handler, so the two addresses differ.
  *
  * @type {Readonly<Record<number, string>>}
  */
 export const WINMM_ORDINALS = Object.freeze({
-    2: 'PlaySound',
+    2: 'PlaySoundA',
 });
 
 /**
