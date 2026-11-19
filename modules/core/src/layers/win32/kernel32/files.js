@@ -631,6 +631,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {{ closed: (object: any) => void }} [jobs]  Told of a job's handle closed.
  * @property {{ closed: (object: any) => void }} [debugObjects]  Told of a debug object's
  *           handle closed: with its last, its debuggees go as it says.
+ * @property {(handle: number) => void} [inheritable]  A handle a child started with
+ *           bInheritHandles takes.
  * @property {ReturnType<typeof import('./pipes.js').createNamedPipes>} [pipes]
  *           Named pipes: CreateFile opens a client end by a pipe's name, a closed
  *           end is told, CancelIo and CancelIoEx cancel what waits on one.
@@ -2845,13 +2847,18 @@ export function createFileFunctions(host){
         // Executing a file reads it, as far as sharing is concerned; whether
         // ReadFile may is this handle's own `read`.
         const executes = (rights & (GENERIC_EXECUTE | FILE_EXECUTE)) !== 0;
-        const node = files.open(path, {
-            read: read || executes, write, ...mode,
+        // The terms the open agreed, which a handle handed to another process
+        // opens the file on there (`inherited`), checked against no one.
+        const terms = {
+            read: read || executes, write,
             shareRead: ((share >>> 0) & FILE_SHARE_READ) !== 0,
             shareWrite: ((share >>> 0) & FILE_SHARE_WRITE) !== 0,
             delete: deleteOnClose || (rights & (DELETE | GENERIC_ALL)) !== 0,
             shareDelete: ((share >>> 0) & FILE_SHARE_DELETE) !== 0,
-        });
+        };
+        const node = files.open(path, { read: terms.read, write, ...mode,
+            shareRead: terms.shareRead, shareWrite: terms.shareWrite,
+            delete: terms.delete, shareDelete: terms.shareDelete });
         if (!node)
         {
             // Another open's terms refuse this one's, as CreateFile says it.
@@ -2876,7 +2883,7 @@ export function createFileFunctions(host){
             & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_ATTRIBUTES)) !== 0;
         // FILE_FLAG_DELETE_ON_CLOSE asks for DELETE with it, as CreateFile does.
         const handle = host.handles.open('file', {
-            path, node, read, write, writeAttributes, position: 0,
+            path, node, read, write, writeAttributes, position: 0, terms,
             mode: kept ?? modeOfFlags(flags),
             ...deleteOnClose ? { deleteOnClose } : {},
             ...overlapped ? { overlapped } : {},
@@ -5335,6 +5342,26 @@ export function createFileFunctions(host){
         return 1;
     };
 
+    /**
+     * An open whose SECURITY_ATTRIBUTES (the fourth argument) asks for an
+     * inheritable handle: a file opened so is a child's when the child is
+     * started with bInheritHandles, as an installer hands its child a log as
+     * its output. A pipe end keeps its own flag, the pipes' own.
+     *
+     * @param {{ argBytes: number, handler: (args: number[]) => any }} open
+     */
+    const inheritable = open=>({ ...open, handler: (/** @type {number[]} */ args)=>{
+        const handle = open.handler(args) >>> 0;
+        const attributes = args[3] >>> 0;
+        if (handle !== INVALID_HANDLE_VALUE && handle !== 0 && attributes !== 0
+            && host.handles.typeOf?.(handle) === 'file'
+            && readDword(attributes + 8) !== 0)
+        {
+            host.inheritable?.(handle);
+        }
+        return handle;
+    } });
+
     const table = {
         /**
          * HANDLE CreateFile(LPCSTR, DWORD dwDesiredAccess, DWORD dwShareMode,
@@ -5343,8 +5370,8 @@ export function createFileFunctions(host){
          *
          * One body, both spellings.
          */
-        CreateFileA: createFile.ansi,
-        CreateFileW: { ...createFile.wide, natives },
+        CreateFileA: inheritable(createFile.ansi),
+        CreateFileW: { ...inheritable(createFile.wide), natives },
 
         /**
          * HANDLE CreateFile2(LPCWSTR, DWORD dwDesiredAccess, DWORD dwShareMode,

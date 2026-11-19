@@ -135,7 +135,10 @@
   pipes, overlapped reads and connects completed through their event and completion port, and a
   pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's
   number. A child on the engine's thread inherits its parent's inheritable events, mutexes,
-  semaphores, waitable timers, processes and threads the same way; a child in a worker of its own
+  semaphores, waitable timers, processes and threads the same way, and its open files: the
+  child opens the file as its own on the terms the parent's open agreed, sharing the parent's file
+  pointer, and the file stays open until the last of their handles closes, as it does for a file
+  `DuplicateHandle` puts into another process of the run; a child in a worker of its own
   inherits only pipe ends. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its

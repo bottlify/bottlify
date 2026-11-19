@@ -833,11 +833,24 @@ export function createWin32Module(){
                         return null;
                     }
                 },
+                // An open file comes here as this process's own open of it
+                // (`adoptFile`), sharing the other's file pointer.
                 open: (/** @type {string} */ type, /** @type {any} */ object,
                     /** @type {number | null} */ access = null)=>
-                    kernel.handles.open(type, object, access),
+                {
+                    const mine = type === 'file' ? adoptFile(object) : object;
+                    return mine ? kernel.handles.open(type, mine, access) : 0;
+                },
                 access: (/** @type {number} */ handle)=>kernel.handles.access(handle),
-                close: (/** @type {number} */ handle)=>kernel.handles.close(handle),
+                close: (/** @type {number} */ handle)=>{
+                    const type = kernel.handles.typeOf(handle);
+                    const closed = kernel.handles.close(handle);
+                    if (type === 'file' && closed?.node)
+                    {
+                        volume.close(closed.node);
+                    }
+                    return closed;
+                },
             };
             system?.processTables?.set(processId, table);
             // Only its own: a later process may have been given the same id.
@@ -1168,6 +1181,32 @@ export function createWin32Module(){
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
+            /**
+             * Another process's open file, as this process's own open of it:
+             * the same file on the terms that open agreed, admitted without
+             * checking them again (the volume's `inherited`), its file pointer
+             * the other's, as one file object's handles share it on Windows.
+             * Null when the file cannot be opened here.
+             *
+             * @param {any} open  the other process's handle object
+             * @returns {any}
+             */
+            const adoptFile = open=>{
+                const node = open?.terms && typeof open.path === 'string'
+                    ? volume.open(open.path, { ...open.terms, inherited: true }) : null;
+                if (!node)
+                {
+                    return null;
+                }
+                const mine = Object.create(open);
+                mine.node = node;
+                Object.defineProperty(mine, 'position', { enumerable: true,
+                    get: ()=>open.position,
+                    set: (/** @type {number} */ at)=>{
+                        open.position = at;
+                    } });
+                return mine;
+            };
             // A child whose parent handed it files for its output and error
             // writes there, at the position it shares with the parent's handle,
             // rather than to the console.
@@ -1523,9 +1562,44 @@ export function createWin32Module(){
             const inheritedObjects = only=>[...handleFlags].flatMap(([handle, flags])=>{
                 const type = (flags & 1) !== 0 && (only === null || only.includes(handle))
                     ? kernel.handles.typeOf(handle) : null;
+                if (type === 'file')
+                {
+                    return [inheritedFile(handle)];
+                }
                 return type !== null && INHERITED_KINDS.has(type)
                     ? [{ handle, type, object: kernel.handles.resolve(handle) }] : [];
             });
+            /**
+             * An open file a child inherits: Windows duplicates the handle into
+             * the child at CreateProcess, so a parent that closes its own at
+             * once leaves the file open. A hold is taken here and kept until the
+             * child has the file open as its own (`adoptFile`), or never starts
+             * (`dropUnclaimed`), as a pipe end's is.
+             *
+             * @param {number} handle
+             * @returns {import('./kernel32/pipes.js').InheritedEnd & { access: number | null }}
+             */
+            const inheritedFile = handle=>{
+                const open = kernel.handles.resolve(handle);
+                if (open?.node)
+                {
+                    volume.retain(open.node);
+                }
+                /** @type {import('./kernel32/pipes.js').InheritedEnd & { access: number | null }} */
+                const entry = { handle, type: 'file', object: open,
+                    access: kernel.handles.access?.(handle) ?? null, held: true,
+                    drop(){
+                        if (entry.held)
+                        {
+                            entry.held = false;
+                            if (open?.node)
+                            {
+                                volume.close(open.node);
+                            }
+                        }
+                    } };
+                return entry;
+            };
             const pipes = createNamedPipes({
                 pointerSize,
                 kernel,
@@ -1592,6 +1666,23 @@ export function createWin32Module(){
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
                     pipes.adopted(inherited.handle, inherited.object, inherited);
+                }
+                // The parent's open file, under its number and rights: the
+                // reference its CreateProcess took is this handle's.
+                else if (inherited.type === 'file')
+                {
+                    const mine = adoptFile(inherited.object);
+                    if (mine && kernel.handles.adopt(inherited.handle, 'file', mine,
+                        inherited.access ?? null))
+                    {
+                        handleFlags.set(inherited.handle, 1);
+                    }
+                    else if (mine)
+                    {
+                        volume.close(mine.node);
+                    }
+                    // The hold its parent's CreateProcess kept until now.
+                    /** @type {any} */ (inherited).drop?.();
                 }
                 // An object inherited is inheritable again, as the parent's was.
                 else if (INHERITED_KINDS.has(inherited.type)
@@ -3653,6 +3744,8 @@ export function createWin32Module(){
                         isSocket: handle=>sockets.isValid(handle),
                         /** @param {any} node */
                         retainNode: node=>volume.retain(node),
+                        /** @param {any} node */
+                        closeNode: node=>volume.close(node),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -4255,6 +4348,7 @@ export function createWin32Module(){
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
                         pointerSize,
+                        inheritable: handle=>void handleFlags.set(handle, 1),
                         divergence: config?.divergence,
                         // Asked when called: the table is assembled by then.
                         environmentVariable: name=>Object.entries(/** @type {any} */ (

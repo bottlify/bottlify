@@ -169,6 +169,8 @@ const DUPLICATE_SAME_ACCESS = 0x00000002;
  *           Whether winsock holds a socket by this number, which the handle
  *           flags are kept for as for a kernel object's.
  * @property {(node: any) => void} [retainNode]
+ * @property {(node: any) => void} [closeNode]  gives a hold back, closing the node
+ *           with the last
  *           One more hold on an open file's node, given back when the handle
  *           that holds it is closed: what a duplicate of a file or mapping
  *           handle takes, so closing its source leaves the file open.
@@ -1532,7 +1534,10 @@ export function createThreadingFunctions(host){
                 host.namedObjects.reference(held);
                 const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
                     && !pseudo(source);
-                if (held.node && (kind === 'file' || kind === 'mapping') && !closesSource)
+                // Into another process, an open file is that process's own open
+                // of it, which its table makes (`adoptFile`); here, one more hold.
+                if (held.node && (kind === 'mapping' || (kind === 'file' && !into))
+                    && !closesSource)
                 {
                     host.retainNode?.(held.node);
                 }
@@ -1543,6 +1548,12 @@ export function createThreadingFunctions(host){
                     held.retain();
                 }
                 const duplicate = (into ?? kernel.handles).open(kind, held, rights.granted);
+                // A file the other process could not open as its own.
+                if (duplicate === 0)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
                 if (!into)
                 {
                     handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
@@ -1558,6 +1569,12 @@ export function createThreadingFunctions(host){
                 {
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);
+                    // The other process opened the file as its own: this
+                    // process's hold goes with its handle.
+                    if (into && kind === 'file' && held.node)
+                    {
+                        host.closeNode?.(held.node);
+                    }
                 }
                 return 1;
             },

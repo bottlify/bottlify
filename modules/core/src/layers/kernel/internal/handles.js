@@ -91,20 +91,22 @@ export function createHandleTable({ limit = 0x40000000, watch } = {}){
         /**
          * Files an object under a handle number chosen elsewhere: a handle a
          * child inherits has its parent's number, which the parent told it on
-         * its command line. Refused for a number taken or not a handle's.
+         * its command line, and the rights its parent's handle was granted.
+         * Refused for a number taken or not a handle's.
          *
          * @param {number} handle @param {string} type @param {any} object
+         * @param {number | null} [access]  null for all of them
          * @returns {boolean}
          */
-        adopt(handle, type, object){
+        adopt(handle, type, object, access = null){
             if (entries.has(handle) || handle < FIRST_HANDLE || handle % HANDLE_STRIDE !== 0
                 || handle > limit)
             {
                 return false;
             }
-            entries.set(handle, { type, object, access: null });
+            entries.set(handle, { type, object, access });
             opened++;
-            watch?.opened(handle, type, object, null);
+            watch?.opened(handle, type, object, access);
             return true;
         },
 
