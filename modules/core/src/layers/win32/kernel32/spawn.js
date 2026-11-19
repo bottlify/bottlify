@@ -42,6 +42,7 @@ import { debuggeeFor } from './debug-events.js';
 import { grantedAccess } from './access.js';
 import { createProcessTarget } from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
+import { dropUnclaimed } from './pipes.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -920,6 +921,11 @@ export function createSpawnFunctions(host){
             // thread holds alike. A child in a worker of its own takes none.
             inheritedHandles,
         });
+        if (!made || made.completed)
+        {
+            // A child that never runs takes nothing it was handed.
+            dropUnclaimed(inheritedHandles);
+        }
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);

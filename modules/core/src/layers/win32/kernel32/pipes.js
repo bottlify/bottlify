@@ -310,6 +310,49 @@ const DEVICE_CONTROLS = new Map([
  */
 
 /**
+ * A pipe end a child inherits, as its parent's CreateProcess took it: the
+ * child's handle is held from then (`held`) until the child claims it or is
+ * found never to start, whichever comes first.
+ *
+ * @typedef {Object} InheritedEnd
+ * @property {number} handle  its number, the same in the child as the parent
+ * @property {string} type
+ * @property {any} object     the end
+ * @property {boolean} held   the child's handle is still the one taken for it
+ * @property {() => void} drop  gives the held handle back
+ */
+
+/**
+ * The child takes the handle its parent's CreateProcess held for it: true when
+ * there was one to take, and then nothing more is retained for it.
+ *
+ * @param {Partial<InheritedEnd> | undefined} entry
+ * @returns {boolean}
+ */
+export function claimInherited(entry){
+    if (entry?.held)
+    {
+        entry.held = false;
+        return true;
+    }
+    return false;
+}
+
+/**
+ * The handles held for a child that it never claimed - it did not start, or
+ * started where it took none - are given back, so the pipe closes with the
+ * parent's last handle as it would have.
+ *
+ * @param {Partial<InheritedEnd>[] | undefined} entries
+ */
+export function dropUnclaimed(entries){
+    for (const entry of entries ?? [])
+    {
+        entry.drop?.();
+    }
+}
+
+/**
  * The stand-in of an end served across a link, as `EndAcross.describe`
  * described it; no handle holds it until one is adopted onto it.
  *
@@ -3518,15 +3561,38 @@ export function createNamedPipes(host){
          * This process's pipe handles a child it starts inherits: the
          * inheritable ones, or of those the ones the attribute list names.
          *
+         * Windows duplicates them into the child as CreateProcess returns, so
+         * a parent that closes its own copy of the child's end at once (the
+         * usual way to hand a child its stdin) leaves the pipe open. The
+         * child's handle is taken here, held until the child claims it
+         * (`claimInherited`) or never starts (`dropUnclaimed`).
+         *
          * @param {number[] | null} only
-         * @returns {{ handle: number, type: string, object: any }[]}
+         * @returns {InheritedEnd[]}
          */
         inherited(only){
             return [...inheritable].filter(([handle, on])=>on
                 && (only === null || only.includes(handle)))
                 .flatMap(([handle])=>{
                     const end = endOf(handle);
-                    return end && !end.closed ? [{ handle, type: 'pipe', object: end }] : [];
+                    if (!end || end.closed)
+                    {
+                        return [];
+                    }
+                    end.retain();
+                    /** @type {InheritedEnd} */
+                    const entry = { handle, type: 'pipe', object: end, held: true,
+                        drop(){
+                            if (entry.held)
+                            {
+                                entry.held = false;
+                                if (--end.refs <= 0 && !end.closed)
+                                {
+                                    closeEnd(end);
+                                }
+                            }
+                        } };
+                    return [entry];
                 });
         },
 
@@ -3574,9 +3640,13 @@ export function createNamedPipes(host){
          * more handle onto it, under the parent's number.
          *
          * @param {number} handle @param {any} end
+         * @param {Partial<InheritedEnd>} [entry]  what the parent's CreateProcess held
          */
-        adopted(handle, end){
-            end.retain();
+        adopted(handle, end, entry){
+            if (!claimInherited(entry))
+            {
+                end.retain();
+            }
             inheritable.set(handle >>> 0, true);
         },
 
