@@ -22,6 +22,9 @@ import * as sources from './inguest-float.js';
 import { doubleWords, equivalence, random } from
     '../../../../scripts/guest-code/equivalence.mjs';
 import { loadModel } from '../../../../scripts/guest-code/model.mjs';
+import { CODE_64, KEPT_64, callLong, longMachine } from
+    '../../../../scripts/guest-code/long.mjs';
+import { guestEntry, halvesEntry } from './guest-code.js';
 
 const SOURCE = new URL('./inguest-float.js', import.meta.url);
 const model = await loadModel(await readFile(SOURCE, 'utf8'), {
@@ -221,6 +224,35 @@ test('_isnan, _finite and _fpclass read the bits of every kind of double', ()=>{
                     : negative ? 0x8 : 0x100;
         assert.equal(kind, expected, `_fpclass of 0x${high.toString(16)}:${low.toString(16)}`);
     }
+});
+
+test('_fpclass for a 64-bit caller reads the double out of XMM0: every kind, a signalling NaN'
+    + ' as its bits say', ()=>{
+    const RETURN = 0x0f00;
+    const m = longMachine();
+    m.write(RETURN, [0xf4]);
+    const entry = halvesEntry(guestEntry(sources._fpclass, COMPILED._fpclass, {}));
+    m.write(CODE_64, /** @type {NonNullable<typeof entry.long>} */ (entry.long)());
+    const next = random(47);
+    const seen = new Set();
+    for (let i = 0; i < 600; i++)
+    {
+        const [low, high] = doubleBits(next);
+        const bits = BigInt(high >>> 0) << 32n | BigInt(low >>> 0);
+        // The integer registers hold a pattern: the double is in XMM0 alone.
+        const call = callLong(m, CODE_64, { args: [bits], floats: [true], returnTo: RETURN });
+        const what = `_fpclass of 0x${bits.toString(16)}`;
+        assert.equal(m.rip(), RETURN + 1, `${what} returns`);
+        assert.equal(m.reg('rsp'), call.entry.rsp + 8n, `${what}: RSP past the return address`);
+        for (const name of KEPT_64)
+        {
+            assert.equal(m.reg(name), call.entry[name], `${what}: ${name} kept`);
+        }
+        const expected = sources._fpclass(low, high | 0);
+        assert.equal(m.reg('rax'), BigInt(expected), what);
+        seen.add(expected);
+    }
+    assert.equal(seen.size, 10, 'every class met');
 });
 
 test('_copysign, _chgsign, _logb and _nextafter', ()=>{

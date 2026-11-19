@@ -34,7 +34,7 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createClassFunctions } from './classes.js';
-import { guestEntry, guestExport, variadicEntry } from './guest-code.js';
+import { guestEntry, guestExport, halvesEntry, variadicEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestFloat from './inguest-float.js';
@@ -794,14 +794,15 @@ export function createMsvcrtFunctions(host){
          * guest (`inguest-float.js`) that reads them as integers: no FPU, so
          * they are here rather than with the maths. A 64-bit caller passes the
          * double in XMM0: _isnan and _finite read it there too; _fpclass, whose
-         * code takes the double as its two halves, is the handler's at 64 bits.
+         * code takes the double as its two halves, after the instructions that
+         * make XMM0 the two (`halvesEntry`).
          */
         _isnan: { ...guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
             floats: DOUBLE_HALVES },
         _finite: { ...guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
             floats: DOUBLE_HALVES },
-        _fpclass: { ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
-            floats: DOUBLE_HALVES },
+        _fpclass: halvesEntry({ ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+            floats: DOUBLE_HALVES }),
 
         /**
          * unsigned int _control87(unsigned int newControl, unsigned int mask),

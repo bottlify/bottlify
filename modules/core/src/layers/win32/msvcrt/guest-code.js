@@ -753,6 +753,49 @@ export function xmmEntry(form, own){
         } };
 }
 
+/**
+ * A function of one double whose code reads it as its two halves, integers
+ * (`_fpclass`: a signalling NaN is a NaN its bits say, which a double held on
+ * the way would quiet), for a 64-bit caller, who passes the double in XMM0:
+ * the halves put where the x86-64 code reads its two arguments, by three
+ * instructions before it.
+ *
+ *     movq rcx, xmm0         ; the low half, read as ECX
+ *     mov rdx, rcx
+ *     shr rdx, 32            ; the high half
+ *   form:                    ; the code of (low, high)
+ *
+ * Nothing of the stack moves and no register a caller keeps changes: a leaf
+ * still, where its form is one.
+ *
+ * @template {{ long?: (builder?: CodeBuilder) => Uint8Array }} T
+ * @param {T} form  The export as `guestEntry` made it, its `long` the code of (low, high).
+ * @returns {T}
+ */
+export function halvesEntry(form){
+    const { long } = form;
+    if (long === undefined)
+    {
+        throw new Error('guest code: a function of a double\'s halves has no x86-64 code');
+    }
+    const head = [
+        0x66, 0x48, 0x0f, 0x7e, 0xc1,       // movq rcx, xmm0
+        0x48, 0x89, 0xca,                   // mov rdx, rcx
+        0x48, 0xc1, 0xea, 0x20,             // shr rdx, 32
+    ];
+    return { ...form,
+        long: (/** @type {CodeBuilder | undefined} */ builder)=>{
+            const shifted = builder && { register: builder.register,
+                jump: (/** @type {number} */ at, /** @type {number} */ target)=>
+                    builder.jump(at + head.length, target) };
+            const body = long(shifted);
+            const bytes = new Uint8Array(head.length + body.length);
+            bytes.set(head);
+            bytes.set(body, head.length);
+            return bytes;
+        } };
+}
+
 /** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */
 const MOV_EAX = 0xb8;
 
