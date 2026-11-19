@@ -95,6 +95,27 @@ function fakeHost({ registers = true } = {}){
     };
 }
 
+test('the default locales are kernel32\'s, the flag a BOOLEAN, and setting another is said', ()=>{
+    const host = fakeHost();
+    /** @type {string[]} */
+    const said = [];
+    const fns = createNtdllFunctions({ ...host,
+        kernel32: { ...host.kernel32,
+            GetUserDefaultLCID: { argBytes: 0, handler: ()=>0x0409 },
+            GetSystemDefaultLCID: { argBytes: 0, handler: ()=>0x0419 } },
+        divergence: (/** @type {string} */ api)=>void said.push(api) });
+    const view = new DataView(host.bytes.buffer);
+    const OUT = 0x200;
+    assert.equal(fns.NtQueryDefaultLocale.handler([1, OUT]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x0409, 'the user\'s');
+    assert.equal(fns.NtQueryDefaultLocale.handler([0x100, OUT]), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x0419, 'the system\'s: only the low byte counts');
+    assert.equal(fns.NtSetDefaultLocale.handler([1, 0x0409]), STATUS.SUCCESS);
+    assert.deepEqual(said, [], 'the default set again is nothing to say');
+    assert.equal(fns.NtSetDefaultLocale.handler([1, 0x0809]), STATUS.SUCCESS);
+    assert.deepEqual(said, ['NtSetDefaultLocale'], 'another is not installed');
+});
+
 test('NtQueryObject names a kernel object under its session\'s object directory', ()=>{
     // om.c: an event made as "wine_test" is \Sessions\1\BaseNamedObjects\wine_test,
     // one made with no name has an empty name, not a refusal.

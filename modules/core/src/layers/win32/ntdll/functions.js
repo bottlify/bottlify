@@ -214,6 +214,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  *           The machine's Windows, for what RtlGetVersion cannot read from the
  *           process block. Absent, the default.
+ * @property {() => { win32: string, native: string }} [imagePath]  The program's
+ *           path, and as the object manager names it (`\\Device\\HarddiskVolume1\\...`).
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
@@ -653,6 +655,7 @@ export function createNtdllFunctions(host){
             askChild: host.askChild,
             divergence: host.divergence,
             processes: host.processes,
+            imagePath: host.imagePath,
             processors: host.processors,
             openHandles: host.openHandles,
             processId: host.processId,
@@ -785,6 +788,48 @@ export function createNtdllFunctions(host){
             : {}),
 
         /**
+         * NTSTATUS NtQueryDefaultLocale(BOOLEAN UserProfile, PLCID DefaultLocaleId)
+         * NTSTATUS NtSetDefaultLocale(BOOLEAN UserProfile, LCID DefaultLocaleId)
+         *
+         * The user's or the system's default locale, as GetUserDefaultLCID and
+         * GetSystemDefaultLCID answer them. The flag is a BOOLEAN, its low
+         * byte: a caller that leaves garbage above it still asks for the
+         * system's. One locale is installed, so setting another is said and
+         * the default stays.
+         */
+        ...(kernel32.GetUserDefaultLCID && kernel32.GetSystemDefaultLCID
+            ? {
+                NtQueryDefaultLocale: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([user, out])=>{
+                        const lcid = ((user & 0xff) !== 0 ? kernel32.GetUserDefaultLCID
+                            : kernel32.GetSystemDefaultLCID).handler([]);
+                        host.writeMemory(out >>> 0, Uint8Array.of(lcid & 0xff, lcid >>> 8 & 0xff,
+                            lcid >>> 16 & 0xff, lcid >>> 24 & 0xff));
+                        return STATUS.SUCCESS;
+                    },
+                },
+                NtSetDefaultLocale: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([user, lcid])=>{
+                        const which = (user & 0xff) !== 0 ? 'user' : 'system';
+                        const current = ((user & 0xff) !== 0 ? kernel32.GetUserDefaultLCID
+                            : kernel32.GetSystemDefaultLCID).handler([]);
+                        if ((lcid >>> 0) !== current >>> 0)
+                        {
+                            host.divergence?.('NtSetDefaultLocale', `the ${which} default `
+                                + `0x${(lcid >>> 0).toString(16)} is not installed; `
+                                + `0x${(current >>> 0).toString(16)} stays`);
+                        }
+                        return STATUS.SUCCESS;
+                    },
+                },
+            }
+            : {}),
+
+        /**
          * NTSTATUS NtUnloadKey(POBJECT_ATTRIBUTES TargetKey)
          *
          * A hive RegLoadKey mounted, named the native way --
@@ -845,7 +890,8 @@ export function createNtdllFunctions(host){
          *
          * CloseHandle answered as a status: one handle table, so whatever the
          * handle names -- a file NtCreateFile opened, an event, a thread -- it
-         * closes the same way.
+         * closes the same way, and a handle it does not hold is
+         * STATUS_INVALID_HANDLE.
          */
         ...(kernel32.CloseHandle
             ? {
@@ -854,7 +900,7 @@ export function createNtdllFunctions(host){
                     /** @param {number[]} args */
                     handler: ([handle])=>registry?.close(handle >>> 0)
                         ?? (kernel32.CloseHandle.handler([handle]) !== 0
-                            ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND),
+                            ? STATUS.SUCCESS : STATUS.INVALID_HANDLE),
                 },
             }
             : {}),
