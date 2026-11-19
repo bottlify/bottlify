@@ -44,6 +44,32 @@ const STRING_ARG = '$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@';
  */
 
 /**
+ * The x86-64 leaves of the library a program calls in its inner loops, as code:
+ * a constant, a byte moved, `this` handed back. Crysis asks
+ * `numeric_limits<float>::max()` a third of all its calls into the host a
+ * frame, each a crossing for one constant.
+ */
+export const LONG_LEAVES = Object.freeze({
+    /** mov rax, rcx; ret */
+    self: Uint8Array.of(0x48, 0x89, 0xc8, 0xc3),
+    /** ret */
+    nothing: Uint8Array.of(0xc3),
+    /** mov al, [r8]; mov [rdx], al; ret */
+    construct: Uint8Array.of(0x41, 0x8a, 0x00, 0x88, 0x02, 0xc3),
+    /** mov rax, -1; ret */
+    every: Uint8Array.of(0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0xc3),
+    /** mov eax, 0xff; ret */
+    byteMax: Uint8Array.of(0xb8, 0xff, 0x00, 0x00, 0x00, 0xc3),
+    /** mov eax, 0x7fff; ret */
+    shortMax: Uint8Array.of(0xb8, 0xff, 0x7f, 0x00, 0x00, 0xc3),
+    /** mov eax, 0x7f7fffff; movd xmm0, eax; ret */
+    floatMax: Uint8Array.of(0xb8, 0xff, 0xff, 0x7f, 0x7f, 0x66, 0x0f, 0x6e, 0xc0, 0xc3),
+    /** mov rax, 0x7fefffffffffffff; movq xmm0, rax; ret */
+    doubleMax: Uint8Array.of(0x48, 0xb8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xef, 0x7f,
+        0x66, 0x48, 0x0f, 0x6e, 0xc0, 0xc3),
+});
+
+/**
  * @param {Record<string, any>} crt  MSVCR80's table, for operator new and delete.
  * @param {Msvcp80Host} host
  * @returns {Record<string, any>}  The members under the names of the process's width.
@@ -326,8 +352,10 @@ export function createMsvcp80Functions(crt, host){
             [`?npos@${STRING}2_KB`]: { data: ()=>new Uint8Array(8).fill(0xff) },
 
             /** allocator<char>::allocator(), and from another: nothing to build. */
-            [`??0${ALLOCATOR}QEAA@XZ`]: cdecl(4, ([self])=>self),
-            [`??0${ALLOCATOR}QEAA@AEBV01@@Z`]: cdecl(8, ([self])=>self),
+            [`??0${ALLOCATOR}QEAA@XZ`]: { ...cdecl(4, ([self])=>self),
+                long: ()=>LONG_LEAVES.self },
+            [`??0${ALLOCATOR}QEAA@AEBV01@@Z`]: { ...cdecl(8, ([self])=>self),
+                long: ()=>LONG_LEAVES.self },
             /** char *allocator<char>::allocate(size_type): operator new's. */
             [`?allocate@${ALLOCATOR}QEAAPEAD_K@Z`]: cdecl(8, ([, count])=>
                 crt['??2@YAPAXI@Z'].handler([count >>> 0]) >>> 0),
@@ -337,27 +365,31 @@ export function createMsvcp80Functions(crt, host){
                 return 0;
             }),
             /** void allocator<char>::construct(char *, const char &) */
-            [`?construct@${ALLOCATOR}QEAAXPEADAEBD@Z`]: cdecl(12, ([, at, from])=>{
+            [`?construct@${ALLOCATOR}QEAAXPEADAEBD@Z`]: { ...cdecl(12, ([, at, from])=>{
                 host.writeMemory(at >>> 0, host.readMemory(from >>> 0, 1).slice());
                 return 0;
-            }),
+            }), long: ()=>LONG_LEAVES.construct },
             /** void allocator<char>::destroy(char *): a char has nothing to destroy. */
-            [`?destroy@${ALLOCATOR}QEAAXPEAD@Z`]: cdecl(8, ()=>0),
+            [`?destroy@${ALLOCATOR}QEAAXPEAD@Z`]: { ...cdecl(8, ()=>0),
+                long: ()=>LONG_LEAVES.nothing },
             /** size_type allocator<char>::max_size() const: every size_t, sign-extended. */
-            [`?max_size@${ALLOCATOR}QEBA_KXZ`]: cdecl(4, ()=>0xffffffff),
+            [`?max_size@${ALLOCATOR}QEBA_KXZ`]: { ...cdecl(4, ()=>0xffffffff),
+                long: ()=>LONG_LEAVES.every },
 
             /** numeric_limits<unsigned char>::max(), <short>, <float> and <double>. */
-            '?max@?$numeric_limits@E@std@@SAEXZ': cdecl(0, ()=>0xff),
-            '?max@?$numeric_limits@F@std@@SAFXZ': cdecl(0, ()=>0x7fff),
+            '?max@?$numeric_limits@E@std@@SAEXZ': { ...cdecl(0, ()=>0xff),
+                long: ()=>LONG_LEAVES.byteMax },
+            '?max@?$numeric_limits@F@std@@SAFXZ': { ...cdecl(0, ()=>0x7fff),
+                long: ()=>LONG_LEAVES.shortMax },
             ...fpu?.setSingleResult ? {
-                '?max@?$numeric_limits@M@std@@SAMXZ': cdecl(0, ()=>{
+                '?max@?$numeric_limits@M@std@@SAMXZ': { ...cdecl(0, ()=>{
                     /** @type {any} */ (fpu).setSingleResult(3.4028234663852886e38);
                     return 0;
-                }),
-                '?max@?$numeric_limits@N@std@@SANXZ': cdecl(0, ()=>{
+                }), long: ()=>LONG_LEAVES.floatMax },
+                '?max@?$numeric_limits@N@std@@SANXZ': { ...cdecl(0, ()=>{
                     fpu.setResult(Number.MAX_VALUE);
                     return 0;
-                }),
+                }), long: ()=>LONG_LEAVES.doubleMax },
             } : {},
 
             // complex<float>'s operators: the result is a class, returned through

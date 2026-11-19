@@ -35,8 +35,10 @@ import { CF, ZF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind } from './flags.js';
 import { Local } from './region.js';
-import { checkAccess, noteStore, ramAt } from './memory.js';
-import { emitAddress, mask, prepare, readOp, writeOp, writeReg } from './integer.js';
+import { checkAccess, noteStore, ramAt, windowAddress } from './memory.js';
+import {
+    emitAddress, emitAddress64, mask, prepare, readOp, writeOp, writeReg,
+} from './integer.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
@@ -44,7 +46,7 @@ import { emitAddress, mask, prepare, readOp, writeOp, writeReg } from './integer
 const I32_LE_U = 0x4d;
 const ELSE = 0x05;
 const I64 = Object.freeze({ eq: 0x51, ne: 0x52, add: 0x7c, sub: 0x7d, and: 0x83, or: 0x84,
-    xor: 0x85, shl: 0x86, shrU: 0x88, wrap: 0xa7, extendU: 0xad });
+    xor: 0x85, shl: 0x86, shrS: 0x87, shrU: 0x88, wrap: 0xa7, extendS: 0xac, extendU: 0xad });
 const SELECT = 0x1b;
 
 /** The atomic kinds' width suffix for an operand of `size` bytes. @param {number} size */
@@ -567,10 +569,9 @@ function swapLong(e, size, old, next){
 /**
  * Emits a locked instruction of the atomic variant in long mode: as
  * `emitLocked`, every value held as a quadword (the flag record's operands are
- * quadwords there) and narrowed where a register or the record takes it. A bit
- * string named by a register is left to the interpreter; `cmpxchg16b` - sixteen
- * bytes no host access swaps at once - is its plain form holding the lock word
- * (`integer.js`).
+ * quadwords there) and narrowed where a register or the record takes it.
+ * `cmpxchg16b` - sixteen bytes no host access swaps at once - is its plain form
+ * holding the lock word (`integer.js`).
  *
  * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
  * @returns {boolean} false where the interpreter takes it
@@ -716,13 +717,42 @@ export function emitLockedLong(e, instruction, flagsLive){
             return true;
         case 'bts': case 'btr': case 'btc':
         {
+            const count = size * 8;
             if (src.kind !== 'imm')
             {
-                return false;
+                // A bit string, as the plain form (`bitTestLong`): the register
+                // names a bit anywhere from the address, signed.
+                readOp(e, src);
+                if (size === 2)
+                {
+                    b.i32const(16).op(I32.shl).i32const(16).op(I32.shrS);
+                }
+                if (size === 8)
+                {
+                    b.localTee(W0);
+                    b.op(I64.wrap);
+                }
+                else
+                {
+                    b.localTee(Local.t2);
+                    b.op(I64.extendS).localSet(W0);
+                    b.localGet(Local.t2);
+                }
+                b.i32const(count - 1).op(I32.and).localSet(Local.count);
+                windowAddress(e, ()=>{
+                    emitAddress64(e, dst);
+                    b.localGet(W0).i64const(BigInt(Math.log2(count))).op(I64.shrS)
+                        .i64const(BigInt(Math.log2(size))).op(I64.shl).op(I64.add);
+                });
+                checkAccess(e, size, { window: true, store: true });
+                noteStore(e, size);
             }
-            addressOf(e, dst, size);
-            readOp(e, src);
-            b.i32const(size * 8 - 1).op(I32.and).localSet(Local.count);
+            else
+            {
+                addressOf(e, dst, size);
+                readOp(e, src);
+                b.i32const(count - 1).op(I32.and).localSet(Local.count);
+            }
             /** Pushes the bit's mask. */
             const bit = ()=>b.i64const(1n).localGet(Local.count).op(I64.extendU).op(I64.shl);
             const next = ()=>{

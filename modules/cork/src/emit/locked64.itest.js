@@ -141,3 +141,18 @@ test('long mode\'s locked instructions, atomic, interpreted leave what the plain
                 `${failures.length} differences, ${processors} processors`);
         }
     }));
+
+test('a locked bit string named by a register is translated, not left to the interpreter',
+    ifRoom(()=>{
+        const cases = lockedCases().cases.filter(one=>
+            /\bbt[src] \w+ ptr \[[^\]]*\], [a-z]/.test(one.text));
+        assert.ok(cases.length > 100, `${cases.length} cases`);
+        const atomic = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
+            createRuntimeRunner64({ memory, layout, config: { atomic: true } });
+        const { failures, stats } = compare(cases, { budget: 100000, makeRunner: atomic,
+            config: { atomic: true }, processors: 2 });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        // What is left is each case's way out and what the corpus's other
+        // instructions leave; a bit string interpreted was one more a case.
+        assert.ok(stats.interpreted < cases.length / 2, JSON.stringify(stats));
+    }));

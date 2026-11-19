@@ -2445,7 +2445,7 @@ function windowed(e, operand, store){
  *
  * @param {E} e @param {Operand} operand
  */
-function emitAddress64(e, operand){
+export function emitAddress64(e, operand){
     const { b } = e;
     let pushed = false;
     if ((operand.base ?? -1) >= 0)
