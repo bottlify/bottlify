@@ -6726,6 +6726,20 @@ export function createWin32Module(){
                         ? kernel.handles.resolve(handle, 'process') : null),
                 askChild,
                 processes: runProcesses,
+                // Whether a debugger hears a process, by what its debugger
+                // records: this one's from the ear its parent keeps, a child's
+                // from this process's own record of it (`debug-events.js`).
+                debugState: (/** @type {any} */ child)=>(child ? {
+                    debugged: Boolean(child.debugged),
+                    object: child.debugged?.object ?? null,
+                    inherit: !child.noDebugInherit,
+                } : {
+                    debugged: debuggerNow() !== null,
+                    object: config?.debugger?.object?.() ?? null,
+                    inherit: !(config?.debugger?.noInherit?.() ?? false),
+                }),
+                openDebugObject: (/** @type {any} */ object)=>
+                    kernel.handles.open('debug-object', object),
                 // The program's path, and as the object manager names it.
                 imagePath: ()=>{
                     const win32 = modules.imagePath();

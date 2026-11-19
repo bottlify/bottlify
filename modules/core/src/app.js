@@ -4841,7 +4841,8 @@ const TRACED_KEPT = 200;
  *     terminate?: (request: any, code: number) => boolean,
  *     askChild?: (request: any, call: any) => Promise<any> | null,
  *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
- *         .DebugReport) => Promise<number>, debugged?: () => boolean },
+ *         .DebugReport) => Promise<number>, debugged?: () => boolean,
+ *         object?: () => any, noInherit?: () => boolean },
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
@@ -13811,7 +13812,9 @@ export async function createApp(options){
                         // its start or since it attached (`debug-events.js`).
                         debugger: { report: (/** @type {any} */ report)=>
                             parent.debugEvent(request, report),
-                        debugged: ()=>Boolean(request.debugged) },
+                        debugged: ()=>Boolean(request.debugged),
+                        object: ()=>request.debugged?.object ?? null,
+                        noInherit: ()=>Boolean(request.noDebugInherit) },
                         audio: sound.options,
                     });
                     sound.announce(child);

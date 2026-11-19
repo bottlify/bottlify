@@ -125,7 +125,9 @@ handle, or the debugger's end, its debuggees end where it says `DEBUG_KILL_ON_CL
 otherwise. A child run beside its parent always carries its parent's ear and is heard only while
 its record says it is debugged, so `DebugActiveProcess` attaches by marking it and asking it, as
 a cross-process call no program can name, to tell what it already is and break in on a thread of
-its own. The engine
+its own. What `NtQueryInformationProcess` says of a process's debugger - its port, a handle to its
+debug object, its debug flags - and whether `UnhandledExceptionFilter` leaves the exception to the
+debugger are read from that same record, never answered to suit the program that asks. The engine
 thread then runs no program and is the system (what it builds before any process starts is in
 section 4), and what the page asks of the program it asks the program's thread.
 

@@ -632,6 +632,23 @@ test('the top-level filter is guest code, and is called', async()=>{
     assert.deepEqual(m.called, [{ entry: 0x61000, args: [0x1234] }]);
 });
 
+test('under a debugger the top-level filter is not called: the debugger has the exception',
+    async()=>{
+        // Wine's kernel32 debugger.c test_unhandled_exception_filter: with a
+        // debug port UnhandledExceptionFilter answers EXCEPTION_CONTINUE_SEARCH
+        // and calls nothing; without one it calls the filter.
+        const m = machine({ answer: ()=>1 });
+        let debugged = true;
+        const seh = createSeh({ ...m.host, debugReport: ()=>Promise.resolve(0),
+            debugged: ()=>debugged });
+        seh.table.SetUnhandledExceptionFilter.handler([0x61000]);
+        assert.equal(await seh.table.UnhandledExceptionFilter.handler([0x1234]), 0);
+        assert.deepEqual(m.called, []);
+        debugged = false;
+        assert.equal(await seh.table.UnhandledExceptionFilter.handler([0x1234]), 1);
+        assert.deepEqual(m.called, [{ entry: 0x61000, args: [0x1234] }]);
+    });
+
 test('RaiseException dispatches instead of throwing', async()=>{
     const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
     m.registerFrames([0x51000]);
