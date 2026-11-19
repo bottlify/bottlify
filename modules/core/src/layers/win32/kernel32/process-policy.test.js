@@ -477,3 +477,61 @@ test('a job tells its completion port of its processes, and ends them with its l
     jobEvents().closed(plain);
     assert.deepEqual(ended, [third], 'a job without the limit ends nothing');
 });
+
+test('a child of a process in a job is in the job, unless the job lets it break away', ()=>{
+    // Wine's process.c test_jobInheritance, test_BreakawayOk and test_SilentBreakawayOk.
+    const { view, call, handles, posted, jobEvents } = machine();
+    const job = call('CreateJobObjectW', 0, 0);
+    assert.equal(call('AssignProcessToJobObject', job, CURRENT_PROCESS), 1);
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which = job)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    const child = { id: 0x300, breakaway: false };
+    jobEvents().started(child);
+    assert.equal(inJob(child), 1, 'it inherits the job');
+    assert.equal(jobEvents().refusesBreakaway(), true,
+        'without BREAKAWAY_OK, CREATE_BREAKAWAY_FROM_JOB is refused');
+    view.setUint32(0x3100 + 16, 0x800, true);
+    assert.equal(call('SetInformationJobObject', job, 9, 0x3100, 112), 1);
+    assert.equal(jobEvents().refusesBreakaway(), false);
+    const allowed = { id: 0x320, breakaway: true };
+    jobEvents().started(allowed);
+    assert.equal(inJob(allowed), 0, 'BREAKAWAY_OK: asked, it leaves');
+    const plain = { id: 0x330, breakaway: false };
+    jobEvents().started(plain);
+    assert.equal(inJob(plain), 1, 'BREAKAWAY_OK: not asked, it stays');
+    view.setUint32(0x3100 + 16, 0x1000, true);
+    call('SetInformationJobObject', job, 9, 0x3100, 112);
+    const silent = { id: 0x340, breakaway: false };
+    jobEvents().started(silent);
+    assert.equal(inJob(silent), 0, 'SILENT_BREAKAWAY_OK: it leaves without asking');
+    const outside = call('CreateJobObjectW', 0, 0);
+    assert.equal(inJob(child, outside), 0, 'a job this process is not in takes nothing');
+    assert.equal(posted.length, 0, 'no port, nobody told');
+});
+
+test('a child breaks away from nested jobs from the innermost out, until one keeps it', ()=>{
+    // Wine's process.c test_BreakawayOk with nested jobs.
+    const { view, call, handles, jobEvents } = machine();
+    const outer = call('CreateJobObjectW', 0, 0);
+    const inner = call('CreateJobObjectW', 0, 0);
+    call('AssignProcessToJobObject', outer, CURRENT_PROCESS);
+    call('AssignProcessToJobObject', inner, CURRENT_PROCESS);
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    assert.equal(jobEvents().refusesBreakaway(), true, 'the innermost keeps its children');
+    view.setUint32(0x3100 + 16, 0x800, true);
+    call('SetInformationJobObject', inner, 9, 0x3100, 112);
+    assert.equal(jobEvents().refusesBreakaway(), false, 'the outer one is not asked');
+    const child = { id: 0x400, breakaway: true };
+    jobEvents().started(child);
+    assert.deepEqual([inJob(child, inner), inJob(child, outer)], [0, 1],
+        'out of the inner, kept by the outer');
+    call('SetInformationJobObject', outer, 9, 0x3100, 112);
+    const free = { id: 0x410, breakaway: true };
+    jobEvents().started(free);
+    assert.deepEqual([inJob(free, inner), inJob(free, outer)], [0, 0], 'out of both');
+});

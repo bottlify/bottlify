@@ -1001,6 +1001,28 @@ test('CreateProcess\'s current directory is where a system program starts', ()=>
     assert.equal(host.kernel.processes.all().length, 2, 'and nothing is made');
 });
 
+test('a child may break away only from the jobs that let it', ()=>{
+    // Wine's process test_BreakawayOk: CREATE_BREAKAWAY_FROM_JOB from a job
+    // that allows no breaking away is refused.
+    const CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+    let refused = true;
+    const host = fakeHost({});
+    const fns = createSpawnFunctions({ ...host, breakawayRefused: ()=>refused });
+    const line = putAnsi(host, 0x100, 'regsvr32 /s x.dll');
+    const create = (/** @type {number} */ flags)=>fns.CreateProcessA.handler(
+        [0, line, 0, 0, 0, flags, 0, 0, 0, 0x300]);
+    assert.equal(create(CREATE_BREAKAWAY_FROM_JOB), 0);
+    assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(host.kernel.processes.all().length, 0, 'nothing is made');
+    assert.equal(create(0), 1, 'a child that stays is made');
+    const kept = /** @type {any} */ (host.kernel.processes.all()[0]);
+    assert.equal(kept.breakaway, false);
+    refused = false;
+    assert.equal(create(CREATE_BREAKAWAY_FROM_JOB), 1);
+    assert.equal(/** @type {any} */ (host.kernel.processes.all()[1]).breakaway, true,
+        'its record says it asked, for its parent\'s jobs to let it go');
+});
+
 test('an unquoted image name with a space reaches the child quoted, as CreateProcess quotes it',
     ()=>{
         const host = fakeHost({ files: ['C:\\Program Files\\Game\\game.exe'] });

@@ -132,8 +132,10 @@ const ATTRIBUTE_SIZES = new Map([
     [0x00020019, size=>size === 2],
 ]);
 
-/** dwCreationFlags, the one bit that changes what a create does here. */
+/** dwCreationFlags: a child that starts suspended. */
 const CREATE_SUSPENDED = 0x00000004;
+/** A child that asks to leave the jobs its parent is in, where they allow it. */
+const CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
 
 /** STARTUPINFO's dwFlags bit that says its three handles are the child's own. */
 const STARTF_USESTDHANDLES = 0x00000100;
@@ -466,6 +468,8 @@ export function createSpawner(host){
                 childThread(made, made.threadId));
             // A child its parent debugs reports to it (`debug-events.js`).
             made.debugged = debuggeeFor(flags, host.debugObject);
+            // Whether it asked to break away from its parent's jobs.
+            made.breakaway = (flags & CREATE_BREAKAWAY_FROM_JOB) !== 0;
             // A child starts where Windows starts it: in the directory asked
             // for, else in its parent's current one -- which is where the
             // paths on its command line, and the libraries it loads by bare
@@ -505,6 +509,8 @@ export function createSpawner(host){
  *           that asked for it, so this is where the evidence has to be taken.
  * @property {() => string} [currentDirectory]
  *           The process's current directory, for the spawner this builds.
+ * @property {() => boolean} [breakawayRefused]  Whether a job this process is in
+ *           keeps its children: CREATE_BREAKAWAY_FROM_JOB is then refused.
  * @property {Spawner} [spawner]
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
@@ -902,6 +908,12 @@ export function createSpawnFunctions(host){
         if (directory.trim() !== '' && !isDirectory(directory.trim()))
         {
             host.setLastError(ERROR_DIRECTORY);
+            return 0;
+        }
+        // A child may break away only from jobs that let it.
+        if ((flags & CREATE_BREAKAWAY_FROM_JOB) !== 0 && host.breakawayRefused?.())
+        {
+            host.setLastError(ERROR_ACCESS_DENIED);
             return 0;
         }
         const inheritedHandles = inherit && host.inheritedHandles

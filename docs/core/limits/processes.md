@@ -74,7 +74,11 @@
   job associated with a completion port tells it of each process it takes (those it already runs
   as it is associated), of each child that exits (an exception's code as an abnormal exit) and of
   its last running process gone; with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` its last handle closed
-  ends its processes. The job's other limits are kept and read back, not enforced, and this
+  ends its processes. A child of a process in a job is in the job too, unless the job lets it
+  break away (`JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK`, or `JOB_OBJECT_LIMIT_BREAKAWAY_OK` and a
+  `CREATE_BREAKAWAY_FROM_JOB` child), and `CREATE_BREAKAWAY_FROM_JOB` from a job that allows
+  neither is refused (`ERROR_ACCESS_DENIED`). The job's other limits are kept and read back, not
+  enforced, and this
   process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
 - In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has

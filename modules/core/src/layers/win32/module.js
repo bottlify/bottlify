@@ -856,7 +856,8 @@ export function createWin32Module(){
              * closed (`kernel32/process-policy.js`), once the jobs are made.
              *
              * @type {{ exited: (process: any, code: number) => void,
-             *     closed: (job: any) => void } | null}
+             *     closed: (job: any) => void, started: (process: any) => void,
+             *     refusesBreakaway: () => boolean } | null}
              */
             let jobEvents = null;
             /** Whether CreateProcessWithLogonW has said it checks no password. */
@@ -3044,7 +3045,11 @@ export function createWin32Module(){
                 // this process, because honouring one erases every log and ring the
                 // run that asked for it produced.
                 /** @param {any} request */
-                spawned: request=>config?.spawned?.(request),
+                spawned: request=>{
+                    // A child of a process in a job is in the job too.
+                    jobEvents?.started(request);
+                    config?.spawned?.(request);
+                },
                 currentDirectory: ()=>filesystem.currentDirectory(),
             });
 
@@ -4077,6 +4082,7 @@ export function createWin32Module(){
                         stat: path=>volume.stat(path),
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
+                        breakawayRefused: ()=>jobEvents?.refusesBreakaway() ?? false,
                         spawner,
                         pointerSize,
                         patchMemory: (address, bytes)=>
