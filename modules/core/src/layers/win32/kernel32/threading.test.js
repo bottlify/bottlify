@@ -1532,6 +1532,23 @@ test('the run\'s processes list a process\'s threads in the order they were made
     ]);
 });
 
+test('an ended thread stays in its process\'s list, and opens by id, while a handle holds it', ()=>{
+    // Wine's ntdll om.c test_get_next_thread: the thread waited for to its
+    // end is still found through the handle its creator keeps.
+    const ended = { id: 0x1c, state: 'terminated' };
+    let held = true;
+    const kernel = {
+        threads: ()=>[{ id: 0x10, state: 'running' }, ended],
+        handles: { holds: (/** @type {any} */ object)=>held && object === ended },
+        processes: { STILL_ACTIVE: 259, all: ()=>[] },
+    };
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
+        [0x10, 0x1c]);
+    held = false;
+    assert.deepEqual(listProcesses(kernel, { id: 0x2a4, parent: 0, path: '' })[0].threads,
+        [0x10], 'its last handle gone, so is it');
+});
+
 test("OpenThread opens a live thread or a child's first, and refuses any other", ()=>{
     // Wine's kernel32 process.c test_Toolhelp opens the thread the walk found.
     const { fns, host, errors } = setup();
