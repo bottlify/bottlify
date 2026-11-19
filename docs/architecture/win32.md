@@ -184,8 +184,8 @@ flowchart TD
   each of those in turn; a full path, one from a drive's current folder (`C:x.dll`) or one that
   starts with `.\` or `..\` names one file. `LoadLibraryEx`'s `LOAD_LIBRARY_SEARCH_*` flags (or
   the default `SetDefaultDllDirectories` set) replace the whole search with their folders - the
-  library's own for its imports, the `.exe` folder, those `AddDllDirectory` and `SetDllDirectory`
-  named, `system32` - for the library and its imports alike; the engine's own libraries count as
+  library's own for its imports, the `.exe` folder, those `AddDllDirectory` named (the last added
+  first) and `SetDllDirectory`'s, `system32` - for the library and its imports alike; the engine's own libraries count as
   `system32`'s. `LdrGetDllPath` answers that list. Static imports are looked up the same way, without the current folder. For
   a name the engine has a table for, the system directories are skipped: a copy an installer put
   there would be a second library of the name in the process beside the engine's.

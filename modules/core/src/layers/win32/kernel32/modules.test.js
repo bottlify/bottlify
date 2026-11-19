@@ -453,10 +453,11 @@ test('LOAD_LIBRARY_SEARCH_* flags are the whole search, the default one too', ()
     assert.equal(lastError(), 126);
     assert.deepEqual(asked.pop(), ['1\\x.dll', 0,
         { application: false, user: [], system: true, loadDirectory: false }]);
-    // DEFAULT_DIRS is the program's, the user's and the system directory.
+    // DEFAULT_DIRS is the program's, the user's and the system directory; AddDllDirectory's
+    // before SetDllDirectory's.
     fns.LoadLibraryExA.handler([0x100, 0, 0x1000 | 0x2]);
     assert.deepEqual(asked.pop(), ['1\\x.dll', 0x2,
-        { application: true, user: ['D:\\Mine', 'E:\\Added'], system: true,
+        { application: true, user: ['E:\\Added', 'D:\\Mine'], system: true,
             loadDirectory: false }], 'the other flags handed on');
     assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x800 | 0x8]), 0);
     assert.equal(lastError(), 87, 'with LOAD_WITH_ALTERED_SEARCH_PATH: ERROR_INVALID_PARAMETER');
@@ -547,7 +548,14 @@ test('GetDllDirectory answers as the path calls do', ()=>{
     assert.equal(bytes[0x100], 0);
     say(0x10, 'C:\\Libs');
     fns.SetDllDirectoryA.handler([0x10]);
+    bytes.fill(0x41, 0x100, 0x110);
+    assert.equal(fns.GetDllDirectoryA.handler([0, 0x100]), 8, 'no room: the size needed');
+    assert.equal(bytes[0x100], 0x41, 'and nothing written');
     assert.equal(fns.GetDllDirectoryA.handler([4, 0x100]), 8, 'too small: the size needed');
+    assert.equal(bytes[0x100], 0, 'and an empty string');
+    bytes.fill(0x41, 0x200, 0x210);
+    assert.equal(fns.GetDllDirectoryW.handler([7, 0x200]), 8);
+    assert.deepEqual([bytes[0x200], bytes[0x201], bytes[0x202]], [0, 0, 0x41]);
     assert.equal(fns.GetDllDirectoryA.handler([8, 0x100]), 7);
     assert.equal(String.fromCharCode(...bytes.subarray(0x100, 0x108)), 'C:\\Libs\0');
     assert.equal(fns.GetDllDirectoryW.handler([8, 0x200]), 7);

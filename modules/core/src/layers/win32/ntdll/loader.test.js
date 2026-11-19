@@ -287,3 +287,46 @@ test('the loader lock is taken with a cookie; a try with nowhere to answer is re
     assert.equal(call('LdrUnlockLoaderLock', 0, cookie), STATUS.SUCCESS);
     assert.equal(call('LdrUnlockLoaderLock', 0, 0), 0xc00000f0);
 });
+
+test('LdrGetDllDirectory fills a counted string; one too small is told the bytes it needs',
+    ()=>{
+    // Wine's kernel32:module (test_SetDllDirectory): a string with room has
+    // the directory and its length without the terminator; one without is
+    // STATUS_BUFFER_TOO_SMALL, its length the bytes needed with the
+    // terminator, its buffer an empty string.
+        const directory = 'C:\\Libs';
+        /** @type {DataView} */
+        let into = new DataView(new ArrayBuffer(0));
+        const one = machine({
+            GetDllDirectoryW: { handler: (/** @type {number[]} */ [size, buffer])=>{
+                if (directory.length + 1 > size)
+                {
+                    return directory.length + 1;
+                }
+                for (let i = 0; i <= directory.length; i++)
+                {
+                    const unit = i < directory.length ? directory.charCodeAt(i) : 0;
+                    into.setUint16(buffer + i * 2, unit, true);
+                }
+                return directory.length;
+            } },
+        });
+        into = one.view;
+        const { view, call, wideAt } = one;
+        const STRING = 0x400;
+        const BUFFER = 0x500;
+        view.setUint32(STRING + 4, BUFFER, true);
+        view.setUint16(STRING + 2, 64, true);
+        assert.equal(call('LdrGetDllDirectory', STRING), STATUS.SUCCESS);
+        assert.equal(view.getUint16(STRING, true), directory.length * 2);
+        assert.equal(wideAt(BUFFER), directory);
+        for (let at = BUFFER; at < BUFFER + 16; at += 2)
+        {
+            view.setUint16(at, 0xcccc, true);
+        }
+        view.setUint16(STRING + 2, (directory.length - 1) * 2, true);
+        assert.equal(call('LdrGetDllDirectory', STRING), STATUS.BUFFER_TOO_SMALL);
+        assert.equal(view.getUint16(STRING, true), (directory.length + 1) * 2);
+        assert.deepEqual([view.getUint16(BUFFER, true), view.getUint16(BUFFER + 2, true)],
+            [0, 0xcccc]);
+    });

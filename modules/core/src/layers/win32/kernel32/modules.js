@@ -315,9 +315,12 @@ export function createModuleFunctions(host){
             ? search | SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32 : search;
     };
 
-    /** The directories SetDllDirectory and AddDllDirectory named, in that order. */
-    const userSearched = ()=>/** @type {string[]} */ ([dllDirectory, ...userDirectories.values()]
-        .filter(directory=>directory !== null && directory !== ''));
+    /**
+     * The directories LOAD_LIBRARY_SEARCH_USER_DIRS looks in: AddDllDirectory's, the one
+     * added last first, then SetDllDirectory's (Wine's kernel32:module, test_LoadLibraryEx).
+     */
+    const userSearched = ()=>/** @type {string[]} */ ([...userDirectories.values()].reverse()
+        .concat(dllDirectory ?? '').filter(directory=>directory !== ''));
 
     /**
      * One look for a library by the name given.
@@ -522,6 +525,12 @@ export function createModuleFunctions(host){
         const text = dllDirectory ?? '';
         if (text.length + 1 > size || buffer === 0)
         {
+            // A buffer with room for anything is left an empty string, as
+            // Windows leaves it; one of no size is not touched.
+            if (size > 0 && buffer !== 0)
+            {
+                host.writeMemory(buffer, new Uint8Array(wide ? 2 : 1));
+            }
             return text.length + 1;
         }
         if (wide)

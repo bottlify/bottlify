@@ -537,7 +537,7 @@ export function createLoaderFunctions({
          * NTSTATUS LdrGetDllDirectory(PUNICODE_STRING Directory)
          *
          * GetDllDirectoryW's into the string's buffer; one too small is told
-         * the length it needs in bytes.
+         * the bytes it needs, its terminator counted, and left empty.
          */
         LdrGetDllDirectory: {
             argBytes: 4,
@@ -545,12 +545,20 @@ export function createLoaderFunctions({
             handler: ([directory])=>{
                 const room = u16((directory >>> 0) + 2) >>> 1;
                 const needed = kernel32.GetDllDirectoryW.handler([0, 0]) >>> 0;
-                const length = (needed - 1) * 2;
-                writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
                 if (needed > room)
                 {
+                    // Told the bytes it needs, its terminator counted, and
+                    // left an empty string, as Windows answers.
+                    const length = needed * 2;
+                    writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
+                    if (room > 0)
+                    {
+                        writeMemory(u32((directory >>> 0) + 4), new Uint8Array(2));
+                    }
                     return STATUS.BUFFER_TOO_SMALL;
                 }
+                const length = (needed - 1) * 2;
+                writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
                 kernel32.GetDllDirectoryW.handler([room, u32((directory >>> 0) + 4)]);
                 return STATUS.SUCCESS;
             },
