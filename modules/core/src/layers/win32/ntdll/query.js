@@ -129,6 +129,9 @@ const THREAD_STATE_WAITING = 5;
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
 const PROCESS_EXECUTE_FLAGS = 0x22;
+/** The image's path, a UNICODE_STRING and the characters after it: native, Win32. */
+const PROCESS_IMAGE_FILE_NAME = 27;
+const PROCESS_IMAGE_FILE_NAME_WIN32 = 43;
 
 /**
  * The process's execute flags: data runs as code, and that cannot be changed.
@@ -338,6 +341,9 @@ const NORMAL_BASE_PRIORITY = 8;
  *           handle was granted, null for every right (the handle table's
  *           `access`). Without it every handle has every right.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {() => { win32: string, native: string }} [imagePath]  The program's
+ *           path, and as the object manager names it: ProcessImageFileName's
+ *           answers. Without it those classes are unknown.
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
  *           is an unknown class.
@@ -519,22 +525,17 @@ export function createQueryFunctions(host){
     };
 
     /**
-     * OBJECT_NAME_INFORMATION: a UNICODE_STRING and the name after it,
-     * terminated; an object with no name has an empty string and no buffer.
+     * A UNICODE_STRING and its characters after it, terminated, as a name is
+     * answered (OBJECT_NAME_INFORMATION, ProcessImageFileName): an empty one
+     * has no buffer; a buffer too short for both is refused with the size it
+     * needs.
      *
-     * @param {number} handle @param {number} buffer @param {number} length
+     * @param {string} text @param {number} buffer @param {number} length
      * @param {number} returnLength
      */
-    const objectNameOf = (handle, buffer, length, returnLength)=>{
-        const name = host.objectName?.(handle) ?? null;
-        if (name === null)
-        {
-            host.divergence?.('NtQueryObject', `the name of a ${host.handleType?.(handle)}`
-                + ' handle is not kept: none answered');
-        }
+    const writeName = (text, buffer, length, returnLength)=>{
         const wide = host.pointerSize === 8;
         const head = wide ? 16 : 8;
-        const text = name ?? '';
         const size = head + (text.length > 0 ? (text.length + 1) * 2 : 0);
         writeU32If(returnLength, size);
         if (length < size || buffer === 0)
@@ -555,6 +556,23 @@ export function createQueryFunctions(host){
         }
         host.writeMemory(buffer, struct);
         return STATUS.SUCCESS;
+    };
+
+    /**
+     * OBJECT_NAME_INFORMATION: the object's name, an empty one where nothing
+     * keeps it.
+     *
+     * @param {number} handle @param {number} buffer @param {number} length
+     * @param {number} returnLength
+     */
+    const objectNameOf = (handle, buffer, length, returnLength)=>{
+        const name = host.objectName?.(handle) ?? null;
+        if (name === null)
+        {
+            host.divergence?.('NtQueryObject', `the name of a ${host.handleType?.(handle)}`
+                + ' handle is not kept: none answered');
+        }
+        return writeName(name ?? '', buffer, length, returnLength);
     };
 
     /** @returns {number} the process block, or zero when there is none yet */
@@ -999,6 +1017,13 @@ export function createQueryFunctions(host){
                     // differently under one, and it would find none.
                     writeU32If(buffer >>> 0, wanted === PROCESS_EXECUTE_FLAGS ? EXECUTE_FLAGS : 0);
                     return STATUS.SUCCESS;
+                }
+                if ((wanted === PROCESS_IMAGE_FILE_NAME || wanted === PROCESS_IMAGE_FILE_NAME_WIN32)
+                    && host.imagePath && (host.pointerSize ?? 4) === 4)
+                {
+                    const paths = host.imagePath();
+                    return writeName(wanted === PROCESS_IMAGE_FILE_NAME ? paths.native
+                        : paths.win32, buffer >>> 0, length >>> 0, returnLength >>> 0);
                 }
                 return STATUS.INVALID_INFO_CLASS;
             },

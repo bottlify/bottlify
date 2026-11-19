@@ -205,6 +205,30 @@ test('data runs as code, permanently, and a program asking to change that is ref
         'any other class is taken');
 });
 
+test('the image file name is the program\'s path, natively or as Win32 names it', ()=>{
+    const native = '\\Device\\HarddiskVolume1\\App\\a.exe';
+    const host = { ...fakeHost(),
+        imagePath: ()=>({ win32: 'C:\\App\\a.exe', native }) };
+    const fns = createQueryFunctions(host);
+    const size = 8 + (native.length + 1) * 2;
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 27, BUFFER, 8, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH, 'no room for the characters');
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), size, 'and the size it needs');
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 27, BUFFER, size, 0]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint16(BUFFER, true), native.length * 2, 'Length');
+    assert.equal(host.view.getUint16(BUFFER + 2, true), native.length * 2 + 2, 'MaximumLength');
+    assert.equal(host.view.getUint32(BUFFER + 4, true), BUFFER + 8, 'the characters follow');
+    const text = String.fromCharCode(...new Uint16Array(host.bytes.slice(BUFFER + 8,
+        BUFFER + 8 + native.length * 2).buffer));
+    assert.equal(text, native);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 43, BUFFER, 0x100, 0]),
+        STATUS.SUCCESS);
+    assert.equal(host.view.getUint16(BUFFER, true), 'C:\\App\\a.exe'.length * 2, 'Win32\'s');
+    assert.equal(createQueryFunctions(fakeHost()).NtQueryInformationProcess.handler(
+        [-1, 27, BUFFER, 0x100, 0]), STATUS.INVALID_INFO_CLASS, 'without the path, unknown');
+});
+
 test('the length a class needs is reported even when the buffer is too small', ()=>{
     // This is the two-call protocol every caller of these uses: ask with nothing,
     // allocate what it was told, ask again. Withholding the length on the failing

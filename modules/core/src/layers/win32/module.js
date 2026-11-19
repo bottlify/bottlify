@@ -6726,6 +6726,11 @@ export function createWin32Module(){
                         ? kernel.handles.resolve(handle, 'process') : null),
                 askChild,
                 processes: runProcesses,
+                // The program's path, and as the object manager names it.
+                imagePath: ()=>{
+                    const win32 = modules.imagePath();
+                    return { win32, native: nativePathOf(win32) ?? win32 };
+                },
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
                 processors,
