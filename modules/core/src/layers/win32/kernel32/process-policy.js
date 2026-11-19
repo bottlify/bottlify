@@ -175,6 +175,8 @@ const HANDLE_PROBE = 1 << 20;
  * @property {() => Record<string, number>} [registers]
  * @property {number} [pointerSize]
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
+ * @property {(thread: any) => number} [cancelSynchronous]  Ends cancelled the
+ *     synchronous I/O a thread waits in, how many there were: a pipe's reads and connects.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
  * @property {(process: any, code: number) => any} [terminateProcess]  A process ended as
  *     TerminateProcess ends it, null for this one (which does not return: its answer is the park).
@@ -1337,14 +1339,24 @@ export function createProcessPolicyFunctions(host){
         /**
          * BOOL CancelSynchronousIo(HANDLE hThread)
          *
-         * No synchronous read or write here waits in a way another thread
-         * can cut short, so there is never one to cancel (ERROR_NOT_FOUND).
+         * The synchronous I/O the thread waits in ends cancelled, its call
+         * failing ERROR_OPERATION_ABORTED, and the last error is left alone.
+         * A file's reads and writes have finished by the time their calls
+         * answer; what waits is a pipe's read or connect. A thread waiting in
+         * none, or only in overlapped I/O, has nothing to cancel
+         * (ERROR_NOT_FOUND).
          */
         CancelSynchronousIo: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>fail(host.threadOf(handle) ? ERROR_NOT_FOUND
-                : ERROR_INVALID_HANDLE),
+            handler: ([handle])=>{
+                const thread = host.threadOf(handle);
+                if (!thread)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                return (host.cancelSynchronous?.(thread) ?? 0) > 0 ? 1 : fail(ERROR_NOT_FOUND);
+            },
         },
 
         /**

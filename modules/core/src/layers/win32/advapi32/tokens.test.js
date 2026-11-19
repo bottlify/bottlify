@@ -25,7 +25,7 @@ const NEEDED = 0x104;
 const BUFFER = 0x200;
 const SID = 0x600;
 
-function setup(/** @type {{ currentThread?: () => any }} */ extra = {}){
+function setup(/** @type {{ currentThread?: () => any, pipeClient?: (handle: number) => any }} */ extra = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -1132,6 +1132,22 @@ test('ImpersonateSelf gives the calling thread a token, RevertToSelf takes it aw
     assert.equal(fns.ImpersonateSelf.argBytes, 4);
     assert.equal(fns.RevertToSelf.argBytes, 0);
     assert.equal(fns.SetThreadToken.argBytes, 8);
+});
+
+test('ImpersonateNamedPipeClient takes the client on once the server has read from it', ()=>{
+    /** @type {Record<number, 'none' | 'unknown' | 'client'>} */
+    const pipes = { 0x40: 'unknown', 0x44: 'client' };
+    const { errors, fns, table, dword } = setup({
+        pipeClient: (/** @type {number} */ handle)=>pipes[handle] ?? 'none' });
+    assert.equal(fns.ImpersonateNamedPipeClient.handler([0x40]), 0);
+    assert.equal(errors.at(-1), 1368, 'ERROR_CANNOT_IMPERSONATE: nothing read yet');
+    assert.equal(fns.ImpersonateNamedPipeClient.handler([0x48]), 0);
+    assert.equal(errors.at(-1), 6, 'no pipe\'s server end');
+    assert.equal(fns.ImpersonateNamedPipeClient.handler([0x44]), 1);
+    assert.equal(fns.OpenThreadToken.handler([CURRENT_THREAD, TOKEN_QUERY, 0, OUT]), 1);
+    assert.equal(table.get(dword(OUT))?.object.impersonationLevel, 2, 'SecurityImpersonation');
+    assert.equal(fns.RevertToSelf.handler(), 1);
+    assert.equal(fns.ImpersonateNamedPipeClient.argBytes, 4);
 });
 
 test('a descriptor is read back through its getters, absolute or self-relative', ()=>{

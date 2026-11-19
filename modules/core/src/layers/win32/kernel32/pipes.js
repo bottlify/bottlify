@@ -33,6 +33,7 @@ import { STATUS, toDosError } from '../ntdll/status.js';
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { OBJ_INHERIT, readObjectAttributes } from './object-attributes.js';
 import { readLargeInteger } from './due-time.js';
+import { INTERACTIVE_SESSION } from './teb.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -41,10 +42,14 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SEM_TIMEOUT = 121;
 const ERROR_INVALID_NAME = 123;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+/** A pipe whose client is on this machine has no client computer name. */
+const ERROR_PIPE_LOCAL = 229;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_BAD_PIPE = 230;
 const ERROR_PIPE_BUSY = 231;
 const ERROR_NO_DATA = 232;
+const ERROR_PIPE_NOT_CONNECTED = 233;
 const ERROR_PIPE_CONNECTED = 535;
 const ERROR_PIPE_LISTENING = 536;
 const ERROR_IO_PENDING = 997;
@@ -124,6 +129,9 @@ const ACROSS_STATUS = 2;
 /** A name read whole, as Windows reads it: 256 characters is a pipe name's limit. */
 const NAME_BYTES = 520;
 
+/** What a server end's client is, by its handle (`functions[PIPE_CLIENT]`). */
+export const PIPE_CLIENT = Symbol('pipeClient');
+
 /**
  * Whether a name is a pipe's, as CreateFile is handed one.
  *
@@ -160,6 +168,8 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  *     skip?: { port?: boolean, event?: boolean }) => boolean} [completed]
  *           Finishes an OVERLAPPED: its status, its count, its event, the port.
  * @property {(event: number) => void} [setEvent]
+ * @property {(event: number) => void} [resetEvent]  an OVERLAPPED's event, as its
+ *     operation begins
  * @property {(file: number, transferred: number, status: number, value: number) => boolean}
  *     [posted]  a native call's packet to the handle's port, its ApcContext the value
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
@@ -239,6 +249,8 @@ export function pipeStandIn(id, described){
  * @property {End | null} client
  * @property {Op[]} connects  ConnectNamedPipe's waits
  * @property {number} clientProcess
+ * @property {boolean} [heard]  the server has read what this connection's client
+ *     wrote: the client's identity is known, and may be impersonated
  */
 
 /**
@@ -308,6 +320,8 @@ export function pipeStandIn(id, described){
  *     answered STATUS_PENDING, it finishes through its block, event, APC and port
  * @property {number} [statusAt]  the OVERLAPPED a call on a handle opened
  *     without FILE_FLAG_OVERLAPPED gave, which waits and is told its status there
+ * @property {number} [routine]  ReadFileEx's completion routine: queued to the
+ *     thread that asked, with no event set and no packet posted
  */
 
 /**
@@ -370,6 +384,27 @@ export function createNamedPipes(host){
     const readDword = address=>{
         const bytes = host.readMemory(address >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /**
+     * An OVERLAPPED's event is reset as its operation begins, as the I/O
+     * manager resets the event any I/O call is given: a program that reuses
+     * one manual-reset event for a connect, a read and a write waits on it
+     * after each, and a wait that found it still set by the one before went
+     * on before its own had finished.
+     *
+     * @param {number} overlapped
+     */
+    const begin = overlapped=>{
+        if ((overlapped >>> 0) === 0)
+        {
+            return;
+        }
+        // The low bit asks that no packet go to a port; the handle is the rest.
+        const event = (readDword((overlapped >>> 0) + layout.event) & ~1) >>> 0;
+        if (event !== 0)
+        {
+            host.resetEvent?.(event);
+        }
     };
     /** @param {number} handle @returns {End | null} */
     const endOf = handle=>{
@@ -486,6 +521,23 @@ export function createNamedPipes(host){
     }
 
     /**
+     * Finishes a ReadFileEx or WriteFileEx where its process asked it: the
+     * OVERLAPPED says how it ended, and the completion routine is queued to
+     * the thread that asked, to run at its next alertable wait. Its event is
+     * the program's own and no port hears of it, as Windows documents.
+     *
+     * @param {PipeHost} owner @param {any} thread @param {number} overlapped
+     * @param {number} routine @param {number} status @param {number} count
+     */
+    const completeRoutine = (owner, thread, overlapped, routine, status, count)=>{
+        const theirs = overlappedLayout(owner.pointerSize);
+        overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)), theirs,
+            overlapped, status, count);
+        owner.queueApc?.(thread, routine,
+            [status === STATUS.SUCCESS ? ERROR_SUCCESS : toDosError(status), count, overlapped]);
+    };
+
+    /**
      * Finishes an operation where its process asked it, and wakes that process's
      * thread when it was parked.
      *
@@ -499,6 +551,11 @@ export function createNamedPipes(host){
         }
         const error = toDosError(status);
         const succeeded = status === STATUS.SUCCESS;
+        if (op.routine)
+        {
+            completeRoutine(owner, op.thread, op.overlapped, op.routine, status, count);
+            return;
+        }
         if (op.overlapped !== 0)
         {
             if (owner.completed)
@@ -565,6 +622,10 @@ export function createNamedPipes(host){
         if (end.inbox.length === 0)
         {
             return null;
+        }
+        if (end.side === 'server')
+        {
+            end.instance.heard = true;
         }
         if (end.readMessages)
         {
@@ -894,10 +955,12 @@ export function createNamedPipes(host){
             {
                 return { error: ERROR_PIPE_BUSY };
             }
-            // A second instance is the first's kind of pipe.
+            // A second instance carries bytes the way the first does: its
+            // direction must agree, while the type, the count and the sizes it
+            // asks for are the pipe's already (Wine's test_CreateNamedPipe_
+            // instances_must_match: a message instance of a byte pipe is made).
             if (asked.disposition === 'create'
-                || direction !== (pipe.openMode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND))
-                || asked.messages !== pipe.messages)
+                || direction !== (pipe.openMode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND)))
             {
                 return { error: ERROR_ACCESS_DENIED };
             }
@@ -1003,6 +1066,7 @@ export function createNamedPipes(host){
         /** @type {any} */ (client).overlapped = ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0;
         instance.client = client;
         instance.state = 'connected';
+        instance.heard = false;
         instance.clientProcess = host.processId ?? 0;
         const handle = host.handles.open('pipe', client);
         inheritable.set(handle, inheritsBy(attributes));
@@ -1038,6 +1102,7 @@ export function createNamedPipes(host){
         const client = makeEnd(instance, 'client', false, false);
         instance.client = client;
         instance.state = 'connected';
+        instance.heard = false;
         instance.clientProcess = host.processId ?? 0;
         connected(instance);
         closeEnd(client);
@@ -1050,8 +1115,9 @@ export function createNamedPipes(host){
      * @param {End} end @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {number} overlapped @param {boolean} native
      * @param {NativeAsync} [io]  NtReadFile's event, APC and context
+     * @param {number} [routine]  ReadFileEx's completion routine
      */
-    const startRead = (end, handle, buffer, length, out, overlapped, native, io)=>{
+    const startRead = (end, handle, buffer, length, out, overlapped, native, io, routine = 0)=>{
         // A native read on an end opened for overlapped I/O does not wait.
         const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
             ? io : undefined;
@@ -1067,6 +1133,12 @@ export function createNamedPipes(host){
                 {
                     host.posted?.(handle, count, status, async.context);
                 }
+            }
+            if (routine !== 0)
+            {
+                // Done at once, the routine is still queued, never run here.
+                completeRoutine(host, host.currentThread(), overlapped, routine, status, count);
+                return 1;
             }
             if (overlapped !== 0)
             {
@@ -1126,13 +1198,14 @@ export function createNamedPipes(host){
         // its offset and its status alone: the read waits, as a synchronous
         // one, and says its count where the call asked. A service that polls
         // that count waited for ever on a read answered "pending".
-        const waits = overlapped !== 0 && !native
+        const waits = overlapped !== 0 && !native && routine === 0
             && /** @type {any} */ (end).overlapped !== true;
         /** @type {Op} */
         const op = { kind: 'read', ctx, thread: host.currentThread(), handle,
             overlapped: waits ? 0 : overlapped >>> 0, buffer: buffer >>> 0,
             length: length >>> 0, out: out >>> 0, native, end,
-            ...waits ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {} };
+            ...waits ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {},
+            ...routine !== 0 ? { routine } : {} };
         end.readers.push(op);
         if (end.signal)
         {
@@ -1141,6 +1214,12 @@ export function createNamedPipes(host){
         if (async)
         {
             return STATUS.PENDING;
+        }
+        if (routine !== 0)
+        {
+            // ReadFileEx answers TRUE for a read that has begun.
+            overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+            return 1;
         }
         if (op.overlapped !== 0)
         {
@@ -1156,8 +1235,9 @@ export function createNamedPipes(host){
      *
      * @param {End} end @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {number} overlapped @param {boolean} native
+     * @param {number} [routine]  WriteFileEx's completion routine
      */
-    const startWrite = (end, handle, buffer, length, out, overlapped, native)=>{
+    const startWrite = (end, handle, buffer, length, out, overlapped, native, routine = 0)=>{
         if (!end.canWrite)
         {
             return native ? STATUS.ACCESS_DENIED : fail(ERROR_ACCESS_DENIED);
@@ -1182,7 +1262,12 @@ export function createNamedPipes(host){
             peer.inbox.push({ bytes: count === 0 ? new Uint8Array(0)
                 : host.readMemory(buffer >>> 0, count).slice(), at: 0 });
         }
-        if (overlapped !== 0 && host.completed)
+        if (routine !== 0)
+        {
+            completeRoutine(host, host.currentThread(), overlapped, routine, STATUS.SUCCESS,
+                count);
+        }
+        else if (overlapped !== 0 && host.completed)
         {
             const modes = ctx.modes.get(handle) ?? 0;
             host.completed(handle, count, overlapped, STATUS.SUCCESS, {
@@ -1313,17 +1398,43 @@ export function createNamedPipes(host){
      * @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {boolean} [native] @param {number} [overlapped]
      * @param {NativeAsync} [io]  NtReadFile's event, APC and context
+     * @param {number} [routine]  ReadFileEx's completion routine
      */
-    const read = (handle, buffer, length, out, native = false, overlapped = 0, io = undefined)=>{
+    const read = (handle, buffer, length, out, native = false, overlapped = 0, io = undefined,
+        routine = 0)=>
+    {
         const end = endOf(handle);
+        const standIn = end ? null : standInOf(handle);
+        if (!end && !standIn)
+        {
+            return null;
+        }
+        if (routine === 0)
+        {
+            begin(overlapped);
+        }
         if (end)
         {
             return startRead(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
-                native, io);
+                native, io, routine >>> 0);
         }
-        const standIn = standInOf(handle);
-        return standIn ? readAcross(standIn, handle >>> 0, buffer, length, out >>> 0,
-            overlapped >>> 0, native) : null;
+        if (routine !== 0)
+        {
+            return exAcross('ReadFileEx');
+        }
+        return readAcross(/** @type {StandIn} */ (standIn), handle >>> 0, buffer, length,
+            out >>> 0, overlapped >>> 0, native);
+    };
+
+    /**
+     * ReadFileEx or WriteFileEx on an end another thread serves: refused, and said.
+     *
+     * @param {string} api
+     */
+    const exAcross = api=>{
+        host.divergence?.(api, 'a completion routine on a pipe end its parent serves from '
+            + 'another thread is not delivered; the call fails with ERROR_INVALID_FUNCTION');
+        return fail(ERROR_INVALID_FUNCTION);
     };
 
     /**
@@ -1331,17 +1442,30 @@ export function createNamedPipes(host){
      *
      * @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {boolean} [native] @param {number} [overlapped]
+     * @param {number} [routine]  WriteFileEx's completion routine
      */
-    const write = (handle, buffer, length, out, native = false, overlapped = 0)=>{
+    const write = (handle, buffer, length, out, native = false, overlapped = 0, routine = 0)=>{
         const end = endOf(handle);
+        const standIn = end ? null : standInOf(handle);
+        if (!end && !standIn)
+        {
+            return null;
+        }
+        if (routine === 0)
+        {
+            begin(overlapped);
+        }
         if (end)
         {
             return startWrite(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
-                native);
+                native, routine >>> 0);
         }
-        const standIn = standInOf(handle);
-        return standIn ? writeAcross(standIn, handle >>> 0, buffer, length, out >>> 0,
-            overlapped >>> 0, native) : null;
+        if (routine !== 0)
+        {
+            return exAcross('WriteFileEx');
+        }
+        return writeAcross(/** @type {StandIn} */ (standIn), handle >>> 0, buffer, length,
+            out >>> 0, overlapped >>> 0, native);
     };
 
     /**
@@ -1362,6 +1486,35 @@ export function createNamedPipes(host){
         return abort(end, op=>op.ctx === ctx && op.handle === (handle >>> 0)
             && (which.overlapped === undefined || op.overlapped === which.overlapped)
             && (which.thread === undefined || op.thread === which.thread));
+    };
+
+    /**
+     * CancelSynchronousIo: the reads and connects a thread of this process
+     * waits in synchronously end cancelled. How many there were.
+     *
+     * @param {any} thread
+     */
+    const cancelSynchronous = thread=>{
+        let count = 0;
+        for (const [key, entry] of table)
+        {
+            if (!key.startsWith(TABLE_PREFIX) || entry?.kind !== 'pipe')
+            {
+                continue;
+            }
+            for (const instance of /** @type {Pipe} */ (entry.object).instances)
+            {
+                for (const end of [instance.server, instance.client])
+                {
+                    if (end)
+                    {
+                        count += abort(end, op=>op.ctx === ctx && op.thread === thread
+                            && op.overlapped === 0 && !op.async && !op.routine);
+                    }
+                }
+            }
+        }
+        return count;
     };
 
     /**
@@ -1519,7 +1672,56 @@ export function createNamedPipes(host){
         },
     });
 
+    /** A pipe end's session, either side's. */
+    const sessionOf = ()=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([handle, out])=>{
+            if (!endOf(handle))
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if ((out >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            writeDword(out, INTERACTIVE_SESSION);
+            return 1;
+        },
+    });
+
+    /** A pipe client's computer name, which a local client has none of. */
+    const clientComputerName = ()=>({
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([handle, , length])=>{
+            if (!endOf(handle))
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            return fail((length >>> 0) === 0 ? ERROR_INSUFFICIENT_BUFFER : ERROR_PIPE_LOCAL);
+        },
+    });
+
     const functions = {
+        /**
+         * Whose identity a server end can take on, for advapi32's
+         * ImpersonateNamedPipeClient: 'none' for a handle that is no pipe's
+         * server end, 'unknown' until the server has read what its client
+         * wrote, 'client' after. Every process of the run is the one account,
+         * so the client's identity is the process's own.
+         *
+         * @param {number} handle @returns {'none' | 'unknown' | 'client'}
+         */
+        [PIPE_CLIENT]: handle=>{
+            const end = endOf(handle);
+            if (!end || end.side !== 'server')
+            {
+                return 'none';
+            }
+            return end.instance.heard ? 'client' : 'unknown';
+        },
+
         /**
          * HANDLE CreateNamedPipeA(LPCSTR lpName, DWORD dwOpenMode, DWORD dwPipeMode,
          *   DWORD nMaxInstances, DWORD nOutBufferSize, DWORD nInBufferSize,
@@ -1552,6 +1754,7 @@ export function createNamedPipes(host){
                 {
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
+                begin(overlapped);
                 const { instance } = end;
                 if (instance.state === 'connected')
                 {
@@ -1610,6 +1813,11 @@ export function createNamedPipes(host){
                 {
                     return fail(ERROR_PIPE_LISTENING);
                 }
+                // Once cut off, there is no client to cut off again.
+                if (instance.state === 'disconnected')
+                {
+                    return fail(ERROR_PIPE_NOT_CONNECTED);
+                }
                 const client = instance.client;
                 if (client)
                 {
@@ -1655,6 +1863,7 @@ export function createNamedPipes(host){
                 {
                     return fail(ERROR_BAD_PIPE);
                 }
+                begin(overlapped);
                 const wrote = startWrite(end, handle >>> 0, input, inputSize, 0, 0, false);
                 if (wrote !== 1)
                 {
@@ -1757,6 +1966,24 @@ export function createNamedPipes(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL GetNamedPipeClientSessionId(HANDLE Pipe, PULONG ClientSessionId), and the
+         * server's: both ends are the interactive user's, in its one session.
+         */
+        GetNamedPipeClientSessionId: sessionOf(),
+        GetNamedPipeServerSessionId: sessionOf(),
+
+        /**
+         * BOOL GetNamedPipeClientComputerNameA(HANDLE Pipe, LPSTR ClientComputerName,
+         *   ULONG ClientComputerNameLength), and W
+         *
+         * The name of a client across the network. Every client here is on
+         * this machine: no room is ERROR_INSUFFICIENT_BUFFER, any other call
+         * ERROR_PIPE_LOCAL, and the buffer is left as it was.
+         */
+        GetNamedPipeClientComputerNameA: clientComputerName(),
+        GetNamedPipeClientComputerNameW: clientComputerName(),
 
         /**
          * BOOL SetFileCompletionNotificationModes(HANDLE FileHandle, UCHAR Flags)
@@ -1943,6 +2170,23 @@ export function createNamedPipes(host){
         },
         read,
         write,
+        cancelSynchronous,
+        /**
+         * ReadFileEx's way in: the answer, or null for a handle that is no pipe end.
+         *
+         * @param {number} handle @param {number} buffer @param {number} length
+         * @param {number} overlapped @param {number} routine
+         */
+        readEx: (handle, buffer, length, overlapped, routine)=>
+            read(handle, buffer, length, 0, false, overlapped, undefined, routine),
+        /**
+         * WriteFileEx's.
+         *
+         * @param {number} handle @param {number} buffer @param {number} length
+         * @param {number} overlapped @param {number} routine
+         */
+        writeEx: (handle, buffer, length, overlapped, routine)=>
+            write(handle, buffer, length, 0, false, overlapped, routine),
         open,
         query,
         cancel,
@@ -2029,6 +2273,13 @@ export function createNamedPipes(host){
             if (!end)
             {
                 return null;
+            }
+            // A server end cut from its client is in no state to be peeked at
+            // (STATUS_INVALID_PIPE_STATE); the client end it cut is merely not
+            // connected.
+            if (end.side === 'server' && end.instance.state === 'disconnected')
+            {
+                return fail(ERROR_BAD_PIPE);
             }
             const why = blocked(end, false);
             if (why !== null && end.inbox.length === 0)

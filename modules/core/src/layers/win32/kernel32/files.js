@@ -476,7 +476,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     native?: boolean, overlapped?: number,
  *     io?: { event: number, apc: number, context: number }) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean, overlapped?: number) => any }[]} [streams]
+ *     native?: boolean, overlapped?: number) => any,
+ *     readEx?: (handle: number, buffer: number, length: number, overlapped: number,
+ *     routine: number) => any,
+ *     writeEx?: (handle: number, buffer: number, length: number, overlapped: number,
+ *     routine: number) => any }[]} [streams]
  *           Handles the reads and writes hand on before taking them for files:
  *           each answers the call, or null for a handle that is not its own.
  *           `native` asks for NtReadFile's answers: `out` is the IO_STATUS_BLOCK.
@@ -1120,6 +1124,7 @@ export function createFileFunctions(host){
     };
 
     /** Handles that are no file, each answering a read or write of its own first. */
+    /** @type {NonNullable<FileHost['streams']>} */
     const streams = [nulStream, ...host.streams ?? []];
 
     /**
@@ -4660,6 +4665,18 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, buffer, length, overlapped, routine])=>{
+                const pointer = overlapped >>> 0;
+                // A stream that keeps its own operations (a pipe end) queues
+                // the routine when its operation ends.
+                for (const stream of streams)
+                {
+                    const answer = pointer === 0 || !host.queueApc ? null
+                        : stream.readEx?.(handle, buffer, length, pointer, routine >>> 0) ?? null;
+                    if (answer !== null)
+                    {
+                        return answer;
+                    }
+                }
                 const file = object(handle, 'file');
                 if (!file)
                 {
@@ -4669,7 +4686,6 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                const pointer = overlapped >>> 0;
                 if (pointer === 0 || !host.queueApc)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -4721,6 +4737,16 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, buffer, length, overlapped, routine])=>{
+                const pointer = overlapped >>> 0;
+                for (const stream of streams)
+                {
+                    const answer = pointer === 0 || !host.queueApc ? null
+                        : stream.writeEx?.(handle, buffer, length, pointer, routine >>> 0) ?? null;
+                    if (answer !== null)
+                    {
+                        return answer;
+                    }
+                }
                 const file = object(handle, 'file');
                 if (!file)
                 {
@@ -4730,7 +4756,6 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                const pointer = overlapped >>> 0;
                 if (pointer === 0 || !host.queueApc)
                 {
                     return fail(ERROR_INVALID_PARAMETER);

@@ -128,8 +128,12 @@
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails
-  (`ERROR_INVALID_HANDLE`, said as a divergence). Writes are never held back by a full buffer, and `GetOverlappedResult` on a pipe
-  operation whose OVERLAPPED has no event waits on nothing.
+  (`ERROR_INVALID_HANDLE`, said as a divergence); so does a `ReadFileEx` or `WriteFileEx` on one,
+  which works on a pipe of the engine's thread. Writes are never held back by a full buffer, and
+  `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on nothing.
+  `ImpersonateNamedPipeClient` takes on the client once the server has read from it, as the
+  process's own account at SecurityImpersonation: every process is the one user, and a client's
+  security quality of service and impersonated token are not carried.
 - A child in a worker of its own shares the run's registry, files, window directory (it finds,
   reads, posts and sends to every other process's windows, and they to its), ids, bundle (a block
   it misses is fetched for it), named events, semaphores and mutexes, and the position of a file

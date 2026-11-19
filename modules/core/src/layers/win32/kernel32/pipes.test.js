@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createNamedPipes, isPipeName } from './pipes.js';
+import { PIPE_CLIENT, createNamedPipes, isPipeName } from './pipes.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
@@ -28,6 +28,10 @@ const ERROR_MORE_DATA = 234;
 const ERROR_PIPE_CONNECTED = 535;
 const ERROR_PIPE_LISTENING = 536;
 const ERROR_IO_PENDING = 997;
+const ERROR_OPERATION_ABORTED = 995;
+const ERROR_BAD_PIPE = 230;
+const ERROR_PIPE_LOCAL = 229;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 
 const PIPE_ACCESS_INBOUND = 0x1;
 const PIPE_ACCESS_DUPLEX = 0x3;
@@ -73,6 +77,8 @@ function processOn(table, id = 1){
     const timeouts = [];
     /** @type {number[]} */
     const events = [];
+    /** @type {number[]} */
+    const resets = [];
     /** @type {{ file: number, transferred: number, overlapped: number, status: number }[]} */
     const packets = [];
     /** @type {Set<number>} */
@@ -163,6 +169,7 @@ function processOn(table, id = 1){
             return true;
         },
         setEvent: (/** @type {number} */ event)=>events.push(event),
+        resetEvent: (/** @type {number} */ event)=>resets.push(event),
         queueApc: (thread, routine, args)=>apcs.push({ thread, routine, args }),
     });
     const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
@@ -179,7 +186,7 @@ function processOn(table, id = 1){
     };
     const u32 = (/** @type {number} */ at)=>view.getUint32(at, true);
     return {
-        pipes, fns, bytes, view, u32, putString, putWide, blocked, woken, timeouts, events,
+        pipes, fns, bytes, view, u32, putString, putWide, blocked, woken, timeouts, events, resets,
         packets, bound, handles, apcs,
         error: ()=>lastError.get(current),
         errorOf: (/** @type {any} */ thread)=>lastError.get(thread),
@@ -786,3 +793,111 @@ test('NtCreateNamedPipeFile makes the instance CreateNamedPipe makes, by its nat
     const opened = p.pipes.open('\\\\.\\pipe\\test\\pipe', GENERIC_READ, 0);
     assert.ok('handle' in opened, 'CreateFile finds it by the Win32 name');
 });
+
+test('an OVERLAPPED\'s event is reset as each operation on it begins', ()=>{
+    // One manual-reset event for a connect, a read and a write (Wine's
+    // serverThreadMain3): the wait after the read found it still set by the
+    // connect and went on before the read had finished.
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+    p.view.setUint32(OVERLAPPED + 16, 0x88, true);
+    assert.equal(p.fns.ConnectNamedPipe.handler([server, OVERLAPPED]), 0);
+    assert.deepEqual(p.resets, [0x88], 'the connect');
+    const client = p.client();
+    assert.equal(p.read(server, 10, OVERLAPPED), 0);
+    assert.equal(p.error(), ERROR_IO_PENDING);
+    assert.deepEqual(p.resets, [0x88, 0x88], 'and the read');
+    p.write(client, 'ping');
+    p.view.setUint32(OVERLAPPED + 0x40 + 16, 0x8c, true);
+    assert.equal(p.write(server, 'pong', OVERLAPPED + 0x40), 1);
+    assert.deepEqual(p.resets, [0x88, 0x88, 0x8c], 'and the write, done at once and set after');
+    assert.equal(p.events.at(-1), 0x8c);
+});
+
+test('a server cut from its client: a second disconnect and a peek are refused', ()=>{
+    const p = processOn(new Map());
+    const server = p.server();
+    const client = p.client();
+    p.write(client, 'waiting');
+    assert.equal(p.fns.DisconnectNamedPipe.handler([server]), 1);
+    assert.equal(p.fns.DisconnectNamedPipe.handler([server]), 0);
+    assert.equal(p.error(), ERROR_PIPE_NOT_CONNECTED, 'no client to cut off again');
+    assert.equal(p.pipes.peek([server, 0, 0, 0, COUNT, 0]), 0);
+    assert.equal(p.error(), ERROR_BAD_PIPE, 'the server end is in no state to peek');
+    assert.equal(p.pipes.peek([client, 0, 0, 0, COUNT, 0]), 0);
+    assert.equal(p.error(), ERROR_PIPE_NOT_CONNECTED, 'the client end merely not connected');
+});
+
+test('a second instance takes the pipe\'s type and count; only its direction must agree', ()=>{
+    const p = processOn(new Map());
+    const first = p.server(PIPE_ACCESS_DUPLEX, 0, 4);
+    assert.ok(first > 0);
+    assert.notEqual(p.server(PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE, 3), 0xffffffff,
+        'a message instance of a byte pipe, three of four');
+    assert.equal(p.server(PIPE_ACCESS_INBOUND, 0, 4), 0xffffffff);
+    assert.equal(p.error(), ERROR_ACCESS_DENIED);
+});
+
+test('ReadFileEx and WriteFileEx on a pipe queue their routine, at once or when the bytes come',
+    ()=>{
+        const p = processOn(new Map());
+        const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+        const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+        p.view.setUint32(OVERLAPPED + 16, 0x88, true);
+        assert.equal(p.pipes.readEx(server, BUFFER, 10, OVERLAPPED, 0x4000), 1, 'begun');
+        assert.equal(p.u32(OVERLAPPED), STATUS_PENDING);
+        assert.deepEqual(p.apcs, [], 'nothing yet');
+        p.write(client, 'ping');
+        assert.deepEqual(p.apcs,
+            [{ thread: 'p1:main', routine: 0x4000, args: [0, 4, OVERLAPPED] }]);
+        assert.equal(p.text(4), 'ping');
+        assert.deepEqual(p.events, [], 'the event is the program\'s own');
+        assert.deepEqual(p.resets, [], 'and left alone');
+
+        p.bytes.set([0x61, 0x62], BUFFER + 0x800);
+        assert.equal(p.pipes.writeEx(client, BUFFER + 0x800, 2, OVERLAPPED + 0x40, 0x4004), 1);
+        assert.deepEqual(p.apcs.at(-1),
+            { thread: 'p1:main', routine: 0x4004, args: [0, 2, OVERLAPPED + 0x40] },
+            'a write done at once still queues its routine');
+        assert.equal(p.pipes.readEx(server, BUFFER, 10, OVERLAPPED, 0x4000), 1);
+        assert.deepEqual(/** @type {any} */ (p.apcs.at(-1))?.args, [0, 2, OVERLAPPED],
+            'bytes there: queued at once');
+        assert.equal(p.pipes.readEx(0x9999, BUFFER, 10, OVERLAPPED, 0x4000), null, 'no pipe');
+    });
+
+test('CancelSynchronousIo ends the read or connect a thread waits in, not an overlapped one',
+    ()=>{
+        const p = processOn(new Map());
+        const server = p.server();
+        p.as('p1:connecting');
+        assert.equal(p.fns.ConnectNamedPipe.handler([server, 0]), 'parked');
+        assert.equal(p.pipes.cancelSynchronous('p1:other'), 0, 'another thread waits in nothing');
+        assert.equal(p.pipes.cancelSynchronous('p1:connecting'), 1);
+        assert.equal(p.errorOf('p1:connecting'), ERROR_OPERATION_ABORTED);
+
+        const async = processOn(new Map());
+        const pending = async.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+        assert.equal(async.fns.ConnectNamedPipe.handler([pending, OVERLAPPED]), 0);
+        assert.equal(async.pipes.cancelSynchronous('p1:main'), 0, 'an overlapped wait is not');
+    });
+
+test('a server end knows its client once it has read from it; its computer name is local',
+    ()=>{
+        const p = processOn(new Map());
+        const server = p.server();
+        const clientOf = /** @type {any} */ (p.pipes.functions)[PIPE_CLIENT];
+        assert.equal(clientOf(server), 'unknown', 'no client yet');
+        const client = p.client();
+        assert.equal(clientOf(client), 'none', 'a client end has no client');
+        p.write(client, 'hello');
+        assert.equal(clientOf(server), 'unknown', 'written, not yet read');
+        assert.equal(p.read(server, 10), 1);
+        assert.equal(clientOf(server), 'client');
+
+        assert.equal(p.fns.GetNamedPipeClientComputerNameA.handler([server, 0, 0]), 0);
+        assert.equal(p.error(), ERROR_INSUFFICIENT_BUFFER);
+        assert.equal(p.fns.GetNamedPipeClientComputerNameW.handler([server, BUFFER, 10]), 0);
+        assert.equal(p.error(), ERROR_PIPE_LOCAL);
+        assert.equal(p.fns.GetNamedPipeServerSessionId.handler([client, COUNT]), 1);
+        assert.equal(p.u32(COUNT), 1, 'the interactive session');
+    });
