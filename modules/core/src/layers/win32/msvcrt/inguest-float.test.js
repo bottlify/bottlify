@@ -30,7 +30,7 @@ const SOURCE = new URL('./inguest-float.js', import.meta.url);
 const model = await loadModel(await readFile(SOURCE, 'utf8'), {
     file: 'inguest-float.js', url: SOURCE.href, values: sources,
 });
-const { same } = equivalence(COMPILED, sources, model);
+const { same, sameAt64 } = equivalence(COMPILED, sources, model);
 
 /** Double, single, extended, and each with another rounding. */
 const CONTROLS = [0x27f, 0x07f, 0x37f, 0xe7f, 0x47f, 0x87f];
@@ -197,6 +197,79 @@ test('_statusfp and _clearfp fold in MXCSR\'s flags, and _clearfp clears both un
     }
     assert.equal(same('_statusfp', { mxcsr: 0x1f81 }).eax >>> 0, 0x10, '_SW_INVALID');
 });
+
+/** MXCSR's bits and the runtime's for each, bit by bit. @param {number} word */
+function abstractSse(word){
+    let bits = 0;
+    for (const [x87, runtime] of EXCEPTION_BITS)
+    {
+        bits |= (word & x87 << 7) !== 0 ? runtime : 0;
+    }
+    bits |= [0, 0x100, 0x200, 0x300][word >>> 13 & 3];
+    bits |= (word & 0x8000) !== 0 ? (word & 0x40) !== 0 ? 0x01000000 : 0x03000000
+        : (word & 0x40) !== 0 ? 0x02000000 : 0;
+    return bits >>> 0;
+}
+
+test('a 64-bit process\'s control and status calls are MXCSR\'s: masks, rounding and the '
+    + 'denormal bits, the flags kept, no precision', ()=>{
+    const next = random(53);
+    const words = [0x1f80, 0x0000, 0x7f80, 0x3f80, 0x5f80, 0x9fc0, 0x1fc0, 0x9f80, 0x1fbf,
+        0xffff, 0x0a15];
+    /** @type {[number, number][]} newControl, mask */
+    const asked = [[0, 0], [0x300, 0x300], [0x100, 0x300], [0, 0x8001f], [0x8001f, 0x8001f],
+        [0x01000000, 0x03000000], [0x02000000, 0x03000000], [0x03000000, 0x03000000],
+        [0, 0x03000000], [0x20000, 0x30000], [0x40000, 0x40000], [0xffffffff, 0xffffffff],
+        [0, 0x80000]];
+    for (let i = 0; i < 40; i++)
+    {
+        asked.push([next(), next()]);
+    }
+    const OUT = 0x20100;
+    for (const mxcsr of words)
+    {
+        for (const [wanted, mask] of asked)
+        {
+            for (const name of /** @type {const} */ (['_control87', '_controlfp']))
+            {
+                const ran = sameAt64(name, { stack: [wanted, mask], mxcsr });
+                const changed = mask & 0x0308031f & (name === '_controlfp' ? ~0x80000 : ~0);
+                const expected = (abstractSse(mxcsr) & ~changed | wanted & changed) >>> 0;
+                const what = `${name}(0x${wanted.toString(16)}, 0x${mask.toString(16)}) under `
+                    + `MXCSR 0x${mxcsr.toString(16)}`;
+                assert.equal(ran.eax >>> 0, expected, what);
+                assert.equal(abstractSse(/** @type {number} */ (ran.mxcsr)), expected,
+                    `${what}: loaded`);
+                assert.equal(/** @type {number} */ (ran.mxcsr) & 0x3f, mxcsr & 0x3f,
+                    `${what}: the flags kept`);
+            }
+            const written = sameAt64('_controlfp_s', { stack: [OUT, wanted, mask], mxcsr });
+            assert.equal(written.eax, 0);
+            assert.equal(new DataView(written.data.buffer, written.data.byteOffset)
+                .getUint32(OUT - 0x10000, true), abstractSse(/** @type {number} */ (written.mxcsr)),
+            '_controlfp_s writes what it loaded');
+            sameAt64('_controlfp_s', { stack: [0, wanted, mask], mxcsr });
+        }
+        const flags = abstractFlags(mxcsr);
+        assert.equal(sameAt64('_statusfp', { mxcsr, status: 0x3f }).eax >>> 0, flags,
+            '_statusfp reads MXCSR alone');
+        const cleared = sameAt64('_clearfp', { mxcsr, status: 0x3f });
+        assert.equal(cleared.eax >>> 0, flags);
+        assert.equal(cleared.mxcsr, mxcsr & ~0x3f, '_clearfp clears the flags and nothing else');
+    }
+    assert.equal(sameAt64('_controlfp', { stack: [0, 0] }).eax >>> 0, 0x8001f,
+        'the reset word: every exception masked, to nearest');
+});
+
+/** MXCSR's flags as the runtime numbers them. @param {number} word */
+function abstractFlags(word){
+    let bits = 0;
+    for (const [x87, runtime] of EXCEPTION_BITS)
+    {
+        bits |= (word & x87) !== 0 ? runtime : 0;
+    }
+    return bits >>> 0;
+}
 
 test('_isnan, _finite and _fpclass read the bits of every kind of double', ()=>{
     const next = random(42);

@@ -4536,6 +4536,16 @@ class FunctionCompiler {
             {
                 this.arity(node, 1);
                 const value = this.expr(node.arguments[0]);
+                // A float variable's bits where it lies: no fld and no
+                // cvtss2sd, which would quiet a signalling NaN and flag a
+                // denormal operand. At 64 bits a float argument lies in its
+                // home slot, where the entry put XMM's dword.
+                if (value.where === 'var' && value.type === 'f32' && !value.v.onStack
+                    && !this.x87.includes(value.v))
+                {
+                    this.op(0x8b, ...this.frameAt(EAX, value.v.disp));      // mov eax, [v]
+                    return { where: 'eax', type: 'u32' };
+                }
                 if (this.long)
                 {
                     this.toXmm(value, node.arguments[0]);
@@ -4543,14 +4553,6 @@ class FunctionCompiler {
                     this.sse(0xf2, 0x5a, x, x);                            // cvtsd2ss
                     a.emit(0x66, 0x0f, 0x7e, 0xc0 | (x & 7) << 3);         // movd eax, xmm
                     this.fpu--;
-                    return { where: 'eax', type: 'u32' };
-                }
-                // A float variable's bits where it lies: no fld, which would
-                // quiet a signalling NaN and flag a denormal operand.
-                if (value.where === 'var' && value.type === 'f32' && !value.v.onStack
-                    && !this.x87.includes(value.v))
-                {
-                    this.op(0x8b, ...this.frameAt(EAX, value.v.disp));      // mov eax, [v]
                     return { where: 'eax', type: 'u32' };
                 }
                 this.toSt0(value, node.arguments[0]);

@@ -29,6 +29,7 @@
  */
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
+/** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
 /** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
@@ -242,10 +243,10 @@ export function SetVector({ u32, setU32, callStd, host, pointerBytes }, self, de
  * the first lane of one register.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {u32} f
+ * @param {Guest} guest @param {ptr} self @param {ptr} device @param {ptr} h @param {f32} f
  * @returns {u32}
  */
-export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, device, h, f){
+export function SetFloat({ u32, setU32, callStd, host, pointerBytes, floatBits }, self, device, h, f){
     const block = u32(self + pointerBytes);
     if (block === 0 || device === 0 || h === 0 || u32(h + HANDLE_TAG) !== block
         || u32(h + HANDLE_CHECK) !== (~block >>> 0))
@@ -268,7 +269,7 @@ export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, dev
     {
         setU32(out + lane * 4, 0);
     }
-    setU32(out, f);
+    setU32(out, floatBits(f));
     const slot = u32(block + BLOCK_PIXEL) !== 0 ? SET_PS_F : SET_VS_F;
     return callStd(u32(u32(device) + slot * pointerBytes), device, u32(h + INDEX), out, 1) >>> 0;
 }
@@ -315,7 +316,8 @@ export function SetDefaults({ u32, callStd, host, pointerBytes }, self, device){
 
 /**
  * HRESULT GetConstantDesc(D3DXHANDLE, D3DXCONSTANT_DESC *pDesc, UINT *pCount):
- * the description the record carries, one of it.
+ * the description the record carries, one of it, laid out as the caller's
+ * width has it (56 bytes at 64 bits, where its two pointers are quadwords).
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {ptr} self @param {ptr} h @param {ptr} out @param {ptr} countAt
@@ -330,9 +332,24 @@ export function GetConstantDesc({ u32, setU32, host, pointerBytes }, self, h, ou
     }
     if (out !== 0)
     {
-        for (let i = 0; i < 12; i++)
+        if (pointerBytes === 8)
         {
-            setU32(out + i * 4, u32(h + HANDLE_DESC + i * 4));
+            // Name and DefaultValue quadwords, the ten counts between them.
+            setU32(out, u32(h + HANDLE_DESC));
+            setU32(out + 4, 0);
+            for (let i = 1; i < 11; i++)
+            {
+                setU32(out + 4 + i * 4, u32(h + HANDLE_DESC + i * 4));
+            }
+            setU32(out + 48, u32(h + HANDLE_DESC + 44));
+            setU32(out + 52, 0);
+        }
+        else
+        {
+            for (let i = 0; i < 12; i++)
+            {
+                setU32(out + i * 4, u32(h + HANDLE_DESC + i * 4));
+            }
         }
     }
     if (countAt !== 0)

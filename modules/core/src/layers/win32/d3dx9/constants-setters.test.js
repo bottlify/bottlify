@@ -14,6 +14,7 @@
  */
 
 import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import { COMPILED } from './constants-setters.x86.js';
 import { COMPILED as LONG } from './constants-setters.x64.js';
 import * as sources from './constants-setters.js';
@@ -143,6 +144,8 @@ test('the table\'s methods in the guest answer, write and call the device as the
 test('the table\'s methods in a 64-bit process answer, write and call the device as their'
     + ' JavaScript', ()=>{
     const next = random(64);
+    /** The calls the x86-64 answered itself. */
+    const taken = { SetFloat: 0, GetConstantDesc: 0 };
     for (let round = 0; round < 500; round++)
     {
         const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, layout(next, 8)]]);
@@ -152,7 +155,16 @@ test('the table\'s methods in a 64-bit process answer, write and call the device
         sameAt64('SetMatrix', { stack: [SELF, device, h, pointer], memory }, HANDED_64);
         sameAt64('SetMatrixTranspose', { stack: [SELF, device, h, pointer], memory }, HANDED_64);
         sameAt64('SetVector', { stack: [SELF, device, h, pointer], memory }, HANDED_64);
+        const set = sameAt64('SetFloat', { stack: [SELF, device, h, next()], memory },
+            HANDED_64);
+        const described = sameAt64('GetConstantDesc', { stack: [SELF, h,
+            next() % 5 === 0 ? 0 : OUT, next() % 3 === 0 ? 0 : OUT + 0x40], memory }, HANDED_64);
+        taken.SetFloat += set.handedOver ? 0 : 1;
+        taken.GetConstantDesc += described.handedOver ? 0 : 1;
         sameAt64('GetConstantElement', { stack: [SELF, h, next() % 8], memory }, HANDED_64);
         sameAt64('SetDefaults', { stack: [SELF, device], memory }, HANDED_64);
     }
+    assert.ok(taken.SetFloat > 20 && taken.SetFloat < 500, `SetFloat took ${taken.SetFloat}`);
+    assert.ok(taken.GetConstantDesc > 100 && taken.GetConstantDesc < 500,
+        `GetConstantDesc took ${taken.GetConstantDesc}`);
 });

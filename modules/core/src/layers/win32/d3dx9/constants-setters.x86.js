@@ -167,9 +167,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetFloat: {
         convention: 'stdcall',
-        params: ['ptr', 'ptr', 'ptr', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'f32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
+        uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes', 'floatBits'],
         host: 310,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x08, 0x8b, 0x7c, 0x24, 0x24, 0x8b,

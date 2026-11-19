@@ -22,10 +22,14 @@
  * never spell: a decimal text after white space and a sign, as long as 22
  * digits, so the value passes 2^63 about one time in three.
  *
+ * `_nextafter` hands the host only the step past the largest double, which
+ * random bits never ask for: one input in four is that double, of either
+ * sign, with a direction of either sign.
+ *
  * For the tests: no part of the product.
  */
 
-import { DATA } from './equivalence.mjs';
+import { DATA, doubleWords } from './equivalence.mjs';
 import { classGraph } from './class-graph.mjs';
 
 /**
@@ -107,6 +111,16 @@ export const SHAPED_INPUTS = {
                 : types[next() % types.length];
             return { stack: [object, delta, types[next() % types.length], to, 0],
                 memory: [[DATA, graph.image]], bounds: [DATA, DATA + graph.image.length] };
+        },
+    },
+    'layers/win32/msvcrt/inguest-float.js': {
+        _nextafter: next=>{
+            const some = ()=>[next(), next()];
+            const largest = doubleWords(next() % 2 === 0 ? Number.MAX_VALUE : -Number.MAX_VALUE);
+            const x = next() % 4 === 0 ? largest : some();
+            const y = next() % 2 === 0 ? doubleWords(next() % 2 === 0 ? Infinity : -Infinity)
+                : some();
+            return { stack: [...x, ...y], memory: [], bounds: [DATA, DATA] };
         },
     },
     'layers/win32/msvcrt/inguest-int64.js': {
