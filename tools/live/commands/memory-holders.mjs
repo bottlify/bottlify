@@ -12,8 +12,15 @@
  *
  *   node tools/live/live.mjs memory holders [minMB=8] [worker]
  *
- * The snapshot is parsed in memory and not kept: it runs to hundreds of MB.
+ * The snapshot goes to a file in the system's temporary folder as it comes and
+ * is read back once, its node and edge arrays as 32-bit numbers and each node
+ * with one retainer, not all: an engine worker holding 600 MB of objects made
+ * a snapshot that a parse keeping two copies of its bytes, 64-bit numbers and
+ * every retainer of every node could not fit in 6.5 GB.
  */
+import { closeSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { connect } from '../../lib/connect.mjs';
 
 const minBytes = Number(process.argv[2] ?? 8) * 1048576;
@@ -27,47 +34,74 @@ if (!worker)
     console.log('the page has no worker');
     process.exit(1);
 }
-// The snapshot's text is kept as bytes, chunk by chunk: the engine worker's
-// runs past the half gigabyte a string may hold in Node.
-/** @type {Buffer[]} */
-const chunks = [];
+// The snapshot's text goes to a file chunk by chunk: the engine worker's runs
+// past the half gigabyte a string may hold in Node, and past what two copies
+// of it in memory leave room for.
+const file = join(tmpdir(), `bottlify-heap-${process.pid}.heapsnapshot`);
+const out = openSync(file, 'w');
 cdp.on('HeapProfiler.addHeapSnapshotChunk', (/** @type {any} */ params)=>{
-    chunks.push(Buffer.from(params.chunk, 'utf8'));
+    writeSync(out, params.chunk);
 });
 await cdp.send('HeapProfiler.enable', {}, worker.sessionId);
 // Minutes for a worker whose heap runs to gigabytes, not CDP's usual 30 s.
 await cdp.send('HeapProfiler.takeHeapSnapshot', { reportProgress: false }, worker.sessionId,
     15 * 60 * 1000);
-const snapshot = parseSnapshot(Buffer.concat(chunks));
-chunks.length = 0;
+closeSync(out);
+const snapshot = parseSnapshot(file);
+rmSync(file, { force: true });
 
 /**
- * A heap snapshot read without one string of it whole: the header and the
- * strings as JSON, the node and edge arrays -- most of it -- as numbers
- * straight out of the bytes.
+ * A heap snapshot read from its file in pieces, never whole: a busy engine
+ * worker's runs past the 2 GiB one read may take. The header as JSON, the node
+ * and edge arrays - most of it - as numbers straight out of the bytes, and the
+ * strings one by one.
  *
- * @param {Buffer} bytes
+ * @param {string} path
  */
-function parseSnapshot(bytes){
-    /** @param {string} key */
-    const find = key=>{
-        const at = bytes.indexOf(`"${key}":[`);
-        if (at < 0)
+function parseSnapshot(path){
+    const fd = openSync(path, 'r');
+    const piece = Buffer.alloc(64 << 20);
+    let length = 0;
+    let at = 0;
+    let offset = 0;
+    /** The next byte, or -1 at the end. */
+    const next = ()=>{
+        if (at === length)
         {
-            throw new Error(`the snapshot has no ${key}`);
+            length = readSync(fd, piece, 0, piece.length, offset);
+            offset += length;
+            at = 0;
+            if (length === 0)
+            {
+                return -1;
+            }
         }
-        return at + key.length + 4;
+        return piece[at++];
     };
-    /** @param {number} from @returns {{ values: Float64Array, end: number }} */
-    const numbers = from=>{
-        let values = new Float64Array(1 << 20);
-        let length = 0;
+    /** Reads up to and past `text`, answering what came before it. @param {string} text */
+    const until = text=>{
+        const bytes = [];
+        let matched = 0;
+        for (let c = next(); c >= 0; c = next())
+        {
+            bytes.push(c);
+            matched = c === text.charCodeAt(matched) ? matched + 1
+                : c === text.charCodeAt(0) ? 1 : 0;
+            if (matched === text.length)
+            {
+                return Buffer.from(bytes.slice(0, bytes.length - text.length)).toString('utf8');
+            }
+        }
+        throw new Error(`the snapshot has no ${text}`);
+    };
+    /** The numbers of an array whose opening bracket was read, to its close. */
+    const numbers = ()=>{
+        let values = new Uint32Array(1 << 20);
+        let count = 0;
         let value = 0;
         let inNumber = false;
-        let at = from;
-        for (; at < bytes.length; at++)
+        for (let c = next(); c >= 0; c = next())
         {
-            const c = bytes[at];
             if (c >= 48 && c <= 57)
             {
                 value = value * 10 + (c - 48);
@@ -76,13 +110,13 @@ function parseSnapshot(bytes){
             }
             if (inNumber)
             {
-                if (length === values.length)
+                if (count === values.length)
                 {
-                    const grown = new Float64Array(values.length * 2);
+                    const grown = new Uint32Array(Math.ceil(values.length * 1.5));
                     grown.set(values);
                     values = grown;
                 }
-                values[length++] = value;
+                values[count++] = value;
                 value = 0;
                 inNumber = false;
             }
@@ -91,16 +125,43 @@ function parseSnapshot(bytes){
                 break;
             }
         }
-        return { values: values.subarray(0, length), end: at };
+        return values.subarray(0, count);
     };
-    const nodesAt = find('nodes');
-    const header = JSON.parse(`${bytes.subarray(0, bytes.indexOf('"nodes":[')).toString('utf8')
-        .replace(/,\s*$/, '')}}`);
-    const nodes = numbers(nodesAt).values;
-    const edges = numbers(find('edges')).values;
-    const stringsAt = find('strings') - 1;
-    const stringsEnd = bytes.lastIndexOf(']');
-    const strings = JSON.parse(bytes.subarray(stringsAt, stringsEnd + 1).toString('utf8'));
+    /** The strings of an array whose opening bracket was read, to its close. */
+    const stringList = ()=>{
+        /** @type {string[]} */
+        const list = [];
+        for (let c = next(); c >= 0 && c !== 93; c = next())
+        {
+            if (c !== 34)
+            {
+                continue;
+            }
+            const bytes = [34];
+            for (let d = next(); d >= 0; d = next())
+            {
+                bytes.push(d);
+                if (d === 92)
+                {
+                    bytes.push(next());
+                    continue;
+                }
+                if (d === 34)
+                {
+                    break;
+                }
+            }
+            list.push(JSON.parse(Buffer.from(bytes).toString('utf8')));
+        }
+        return list;
+    };
+    const header = JSON.parse(`${until('"nodes":[').replace(/,\s*$/, '')}}`);
+    const nodes = numbers();
+    until('"edges":[');
+    const edges = numbers();
+    until('"strings":[');
+    const strings = stringList();
+    closeSync(fd);
     return { ...header, nodes, edges, strings };
 }
 
@@ -119,23 +180,31 @@ const EDGE_NAME = meta.edge_fields.indexOf('name_or_index');
 const EDGE_TO = meta.edge_fields.indexOf('to_node');
 const count = nodes.length / nodeFields;
 
-/** @type {[number, string][][]} */
-const retainers = Array.from({ length: count }, ()=>[]);
+// One retainer a node: the first edge to it that is not weak, its holder and
+// the edge (`retainedVia`, the edge's own index, so its name is read when a
+// path is printed). A path through it may loop; printing stops where it does.
+const retainedBy = new Int32Array(count).fill(-1);
+const retainedVia = new Int32Array(count).fill(-1);
+const WEAK = edgeTypes.indexOf('weak');
 for (let node = 0, edge = 0; node < count; node++)
 {
     const end = edge + nodes[node * nodeFields + EDGES] * edgeFields;
     for (; edge < end; edge += edgeFields)
     {
-        const type = edgeTypes[edges[edge + EDGE_TYPE]];
-        if (type === 'weak')
+        const to = edges[edge + EDGE_TO] / nodeFields;
+        if (edges[edge + EDGE_TYPE] !== WEAK && retainedBy[to] < 0)
         {
-            continue;
+            retainedBy[to] = node;
+            retainedVia[to] = edge;
         }
-        const name = type === 'element' || type === 'hidden'
-            ? String(edges[edge + EDGE_NAME]) : strings[edges[edge + EDGE_NAME]];
-        retainers[edges[edge + EDGE_TO] / nodeFields].push([node, name]);
     }
 }
+/** @param {number} edge */
+const edgeName = edge=>{
+    const type = edgeTypes[edges[edge + EDGE_TYPE]];
+    return type === 'element' || type === 'hidden'
+        ? String(edges[edge + EDGE_NAME]) : strings[edges[edge + EDGE_NAME]];
+};
 /** @param {number} node */
 const label = node=>`${nodeTypes[nodes[node * nodeFields + TYPE]]}:`
     + `${strings[nodes[node * nodeFields + NAME]].slice(0, 50)}`;
@@ -145,14 +214,14 @@ const pathOf = node=>{
     const seen = new Set();
     for (let depth = 0; depth < 14; depth++)
     {
-        const next = retainers[node].find(([holder])=>!seen.has(holder));
-        if (!next)
+        const holder = retainedBy[node];
+        if (holder < 0 || seen.has(holder))
         {
             break;
         }
-        seen.add(next[0]);
-        steps.push(`${next[1]} <- ${label(next[0])}`);
-        node = next[0];
+        seen.add(holder);
+        steps.push(`${edgeName(retainedVia[node])} <- ${label(holder)}`);
+        node = holder;
     }
     return steps.join(' | ');
 };
@@ -167,20 +236,22 @@ for (let node = 0; node < count; node++)
     }
 }
 /** Every node's own size, by its type and name: a heap whose weight is many small things. */
-/** @type {Map<string, number>} */
+// Keyed by the name's string index and the type, not a string made per node:
+// a heap of tens of millions of nodes.
+/** @type {Map<number, number>} */
 const byKind = new Map();
 let all = 0;
 for (let node = 0; node < count; node++)
 {
     const size = nodes[node * nodeFields + SIZE];
     all += size;
-    const kind = `${nodeTypes[nodes[node * nodeFields + TYPE]]}:${
-        String(strings[nodes[node * nodeFields + NAME]]).slice(0, 48)}`;
-    byKind.set(kind, (byKind.get(kind) ?? 0) + size);
+    const key = nodes[node * nodeFields + NAME] * 16 + nodes[node * nodeFields + TYPE];
+    byKind.set(key, (byKind.get(key) ?? 0) + size);
 }
 console.log(`the heap: ${Math.round(all / 1048576)} MB in ${count} nodes; by kind:`);
-for (const [kind, size] of [...byKind].sort((a, b)=>b[1] - a[1]).slice(0, 20))
+for (const [key, size] of [...byKind].sort((a, b)=>b[1] - a[1]).slice(0, 20))
 {
+    const kind = `${nodeTypes[key % 16]}:${String(strings[Math.floor(key / 16)]).slice(0, 48)}`;
     console.log(`${(size / 1048576).toFixed(1).padStart(8)} MB  ${kind}`);
 }
 
@@ -188,7 +259,7 @@ big.sort((a, b)=>b[1] - a[1]);
 const total = big.reduce((sum, [, size])=>sum + size, 0);
 console.log(`${big.length} stores of ${minBytes / 1048576} MB or more, `
     + `${Math.round(total / 1048576)} MB together`);
-for (const [node, size] of big.slice(0, 30))
+for (const [node, size] of big.slice(0, 120))
 {
     console.log(`${Math.round(size / 1048576)} MB ${label(node)}\n   ${pathOf(node)}`);
 }

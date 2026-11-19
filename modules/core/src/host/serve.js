@@ -23,6 +23,7 @@
 import { PAGE_YIELD_MS, createMacrotask, pagePacing } from '../app.js';
 import { createInboundReader } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
+import { createFrameClock } from './frame-clock.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { gcNudgeOf } from '../layers/cpu/internal/gc-nudge.js';
 import { DEFAULT_MEMORY_SIZE } from '../layers/cpu/module.js';
@@ -426,7 +427,12 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     let hidden = false;
     /** @type {import('./messages.js').Presented[]} */
     const presented = [];
-    let frames = 0;
+    // Every frame on this worker's canvas, read by the page's fps meter
+    // straight from the buffer; the count a program's run reports is the
+    // frames since it started.
+    const frameClock = createFrameClock();
+    let framesAtStart = 0;
+    const frames = ()=>frameClock.count() - framesAtStart;
     /** @type {import('./messages.js').StartOptions | null} */
     let started = null;
     /**
@@ -576,7 +582,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 throw new Error('this worker is already running a program');
             }
             viewport = canvas ?? viewport;
-            frames = 0;
+            framesAtStart = frameClock.count();
             presented.length = 0;
             signal = options.signal ? new Int32Array(options.signal) : null;
             signalSeen = signal ? Atomics.load(signal, 0) : 0;
@@ -711,7 +717,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                         now: clock,
                         /** @param {any} payload */
                         onFrame: payload=>{
-                            frames = payload.presented;
                             emit('frame', {
                                 width: payload.width, height: payload.height,
                                 presented: payload.presented,
@@ -730,6 +735,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                             : undefined,
                         /** @param {any} payload */
                         onPresentFailed: payload=>emit('present-failed', payload),
+                        frameClock,
                     }
                     : undefined,
             });
@@ -876,7 +882,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // reads: the threads and the guest's time by module.
         report: async()=>plain({
             ...await app.report(),
-            presented: { count: frames, history: presented.slice() },
+            presented: { count: frames(), history: presented.slice() },
             threads: reading?.threads() ?? [],
             guestByModule: reading?.guestByModule() ?? {},
         }),
@@ -893,7 +899,10 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // Awaited: a program in a worker of its own answers across its link.
         'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
             (await app.debug.read(address, length)).slice(),
-        presented: ()=>({ count: frames, history: presented.slice() }),
+        presented: ()=>({ count: frames(), history: presented.slice() }),
+        // The buffer itself: shared, so the page reads every frame's time
+        // without asking again (`host/frame-clock.js`).
+        frameClock: ()=>frameClock.buffer,
         /*
          * An engine's account of where the guest ran, by address. Only the
          * engine's own thread can start it, and the run worth taking an account

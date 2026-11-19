@@ -502,6 +502,7 @@ export async function createRemoteApp(wiring){
         }),
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
+        frameClock: ()=>request('frameClock'),
 
         /**
          * An engine's account of where the guest ran, by address, weighted by

@@ -44,6 +44,7 @@
     "./steam/redist": "./src/steam/redist.js",
     "./programs": "./src/layers/win32/programs/table.js",
     "./storage": "./src/storage.js",
+    "./frame-clock": "./src/host/frame-clock.js",
     "./jpeg": "./src/layers/media/internal/jpeg.js",
     "./icon": "./src/icon.js",
     "./engine.worker.js": "./dist/engine.worker.js",

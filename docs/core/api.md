@@ -199,6 +199,7 @@ counts the frames that went so.
 | `adapter` | `{ vendor, architecture, description }` of the GPU the engine opened. |
 | `canvas`, `host` | The viewport and where the engine runs. |
 | `frames()`, `presented()` | Frames shown so far; the history of presents. |
+| `frameClock()` | A promise of a `SharedArrayBuffer` the engine writes each frame's time into as it reaches the canvas, every API and path alike: read it with `readFrameClock(buffer, since?)` from `@bottlify/core/frame-clock` (`{ count, times }`, the newest 1023 times, milliseconds of the engine's clock - only their gaps mean anything) on the page's own animation frames, without asking the engine again. An fps meter's source. A page that is not cross-origin isolated cannot be given one. |
 | `files.list(path)`, `files.read(path)` | The volume as the program sees it; `read` is a promise of the whole file (a lazily read bundle's blocks fetched first), null for no file. |
 | `session.export()`, `registry().toJSON()` | After the exit: the files the program wrote (with `collectOnExit`) and its registry. A file with more than one name (a hard link) is in the list under each of its names, with the same bytes. A file of an `opfs` session the program did not write is `{ path, size, read(offset?, length?) }`, its bytes read when asked. |
 | `attachLog(sink)`, `detachLog(sink)` | What the program writes to its standard handles, as `(handle, text)`. |
