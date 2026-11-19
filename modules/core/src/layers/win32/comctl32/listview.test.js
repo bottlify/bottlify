@@ -253,3 +253,46 @@ test('a list view tells its custom draw with the context TRANSPARENT', async()=>
     assert.deepEqual(order.slice(0, 2), ['mode 99 1', 'notify -12'],
         'TRANSPARENT before NM_CUSTOMDRAW\'s first stage');
 });
+
+test('LVM_SUBITEMHITTEST in the report view finds the column, and counts rows as Windows does',
+    async()=>{
+        const lv = listview(LVS_REPORT);
+        for (const index of [0, 1])
+        {
+            lv.bytes.fill(0, BUFFER, BUFFER + LVCOLUMN.SIZE);
+            lv.view.setUint32(BUFFER + LVCOLUMN.mask, LVCF_WIDTH, true);
+            lv.view.setInt32(BUFFER + LVCOLUMN.cx, 100, true);
+            await lv.send(LVM.INSERTCOLUMNA, index, BUFFER);
+        }
+        await lv.send(LVM.INSERTITEMA, 0, lv.item(LVIF_TEXT, 0, { text: 'one' }));
+        const rect = 0x10600;
+        lv.view.setInt32(rect, 0, true);
+        lv.send(LVM.GETITEMRECT, 0, rect);
+        const height = lv.view.getInt32(rect + 12, true) - lv.view.getInt32(rect + 4, true);
+        const HITINFO = 0x10700;
+        /** @param {number} message @param {number} x @param {number} y */
+        const hit = (message, x, y)=>{
+            lv.view.setInt32(HITINFO, x, true);
+            lv.view.setInt32(HITINFO + 4, y, true);
+            lv.view.setInt32(HITINFO + 16, 10, true);
+            const index = lv.send(message, 0, HITINFO);
+            return [index, lv.view.getInt32(HITINFO + 12, true),
+                lv.view.getInt32(HITINFO + 16, true), lv.view.getUint32(HITINFO + 8, true)];
+        };
+        const middle = height >> 1;
+        assert.deepEqual(hit(LVM.SUBITEMHITTEST, 150, middle), [0, 0, 1, 0x4], 'the second column');
+        assert.deepEqual(hit(LVM.SUBITEMHITTEST, 250, middle), [-1, -1, -1, 0x1], 'past them');
+        assert.deepEqual(hit(LVM.SUBITEMHITTEST, -1, middle), [-1, -1, -1, 0x1], 'before them');
+        assert.deepEqual(hit(LVM.SUBITEMHITTEST, 150, -height), [-1, -1, 1, 0x1],
+            'the row above the first is no item, its column still told');
+        assert.deepEqual(hit(LVM.SUBITEMHITTEST, 150, -2 * height), [-2, -2, 1, 0x4],
+            'further up the index goes negative');
+        assert.deepEqual(hit(LVM.SUBITEMHITTEST, 150, 3 * height), [-1, -1, 1, 0x1], 'below');
+        assert.deepEqual(hit(LVM.HITTEST, 150, middle), [-1, -1, 10, 0x1],
+            'LVM_HITTEST: the item is its first column, the subitem untouched');
+        lv.send(LVM.SETEXTENDEDLISTVIEWSTYLE, 0, 0x20);
+        assert.deepEqual(hit(LVM.HITTEST, 150, middle), [0, 0, 10, 0xe],
+            'a full row answers the whole item');
+        assert.deepEqual(hit(LVM.HITTEST, 50, middle), [0, 0, 10, 0x4],
+            'its first column still its part');
+    });
