@@ -31,7 +31,7 @@
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { FILE_OBJECT_KINDS } from './handle-tags.js';
 import { FILE_IMPLIED, SYNCHRONIZE, allows, mappedAccess } from './access.js';
-import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
+import { fileAttributes, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
@@ -525,6 +525,10 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Sets a reparse point (null: takes it off): null, or the volume's code for why not.
  * @property {(path: string) => { tag: number, data: Uint8Array | null } | null} [reparseOf]
  *           The reparse point as it was set.
+ * @property {(path: string) => number} fileId
+ *           The file's number on its volume: the same under every name, kept across renames.
+ * @property {(path: string, id: number) => string | null} pathOfFileId
+ *           Where the file numbered `id` is on the volume `path` is on.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
  * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
  *     Uint8Array | Promise<Uint8Array>} read
@@ -3029,10 +3033,7 @@ export function createFileFunctions(host){
     /**
      * FILE_OPEN_BY_FILE_ID's name: the eight bytes of a file's number on the
      * volume the root handle is on, as FileInternalInformation and the
-     * directory listings answer it. A number is made from what the file is
-     * known by, so it is found by walking the volume: the root handle's folder
-     * first, where a program that just listed it looks, then the drive. A
-     * reparse point is not walked through, so a loop is never followed.
+     * directory listings answer it - the volume keeps each number's file.
      *
      * @param {{ root: number, name: string }} given
      * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
@@ -3051,49 +3052,7 @@ export function createFileFunctions(host){
         }
         const number = (name.charCodeAt(0) | name.charCodeAt(1) << 16) >>> 0;
         const above = (name.charCodeAt(2) | name.charCodeAt(3) << 16) >>> 0;
-        const drive = /^[A-Za-z]:/.exec(directory.path)?.[0];
-        if (above !== 0 || !drive)
-        {
-            return { status: STATUS_INVALID_PARAMETER };
-        }
-        const start = opened && !opened.directory
-            ? directory.path.replace(/\\[^\\]*$/, '') : directory.path;
-        const seen = new Set();
-        /** @param {string} folder @returns {string | null} */
-        const walk = folder=>{
-            const key = folder.toLowerCase();
-            if (seen.has(key))
-            {
-                return null;
-            }
-            seen.add(key);
-            if (fileIndex(folder) === number)
-            {
-                return folder;
-            }
-            const entries = files.list(folder, '*') ?? [];
-            for (const entry of entries)
-            {
-                const identity = listedIdentity(folder, entry);
-                if (!entry.isDirectory && fileIndex(identity) === number)
-                {
-                    return identity;
-                }
-            }
-            for (const entry of entries)
-            {
-                if (entry.isDirectory && !(/** @type {any} */ (entry).reparseTag))
-                {
-                    const found = walk(`${folder.replace(/\\$/, '')}${SEPARATOR}${entry.name}`);
-                    if (found)
-                    {
-                        return found;
-                    }
-                }
-            }
-            return null;
-        };
-        const found = walk(start) ?? walk(`${drive}${SEPARATOR}`);
+        const found = above === 0 ? files.pathOfFileId(directory.path, number) : null;
         return found ? { path: fullPath(found) } : { status: STATUS_INVALID_PARAMETER };
     };
 
@@ -3568,7 +3527,7 @@ export function createFileFunctions(host){
         // A file's number on its volume, GetFileInformationByHandle's: the
         // same for the same file under any of its names, which is what
         // comparing two handles asks.
-        const index = fileIndex(entry?.identity ?? file.path);
+        const index = files.fileId(file.path);
         switch (kind)
         {
             case FILE_BASIC_INFORMATION:
@@ -4844,7 +4803,7 @@ export function createFileFunctions(host){
                     if (shape.id !== undefined)
                     {
                         view.setBigUint64(at + shape.id,
-                            BigInt(fileIndex(listedIdentity(directory.path, entry))), true);
+                            BigInt(files.fileId(listedIdentity(directory.path, entry))), true);
                     }
                 });
             }

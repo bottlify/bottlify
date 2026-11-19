@@ -83,6 +83,8 @@ export function inIndexOrder(entries){
  *                                link): what it stands for - a directory's
  *                                contents are seen through it.
  * @property {ReparsePoint | null} reparse  The reparse point set on it, as set.
+ * @property {number} id          Its number on the volume once anyone asked for it, 0
+ *                                before: every name of a file has the same one.
  */
 
 /**
@@ -109,6 +111,7 @@ export function inIndexOrder(entries){
  * @property {boolean} [junction]
  * @property {{ tag: number, data?: string }} [reparse]
  * @property {string} [target]
+ * @property {number} [id]  A file's number on the volume (`owner`, no further names).
  */
 
 /**
@@ -186,6 +189,7 @@ function makeNode(parent, name){
         body: null,
         junction: null,
         reparse: null,
+        id: 0,
     };
 }
 
@@ -200,6 +204,13 @@ const storePath = node=>(node.body?.owner ?? node).path;
 
 /** Every name a file has: itself alone, or its body's. @param {Node} node @returns {Node[]} */
 const namesOf = node=>(node.body ? [...node.body.names] : [node]);
+
+/**
+ * The root's number, as NTFS numbers its root directory. A file's number is
+ * handed out from FIRST_FILE_ID up, past the records NTFS keeps for itself.
+ */
+const ROOT_ID = 5;
+const FIRST_FILE_ID = 64;
 
 /** What changes a drive: everything else of it only reads. */
 const CHANGES = /** @type {const} */ (['setModified', 'replace', 'write', 'truncate', 'createFile',
@@ -246,6 +257,67 @@ export function createOverlay({
     root.directory = true;
     root.inSource = source !== null;
     root.inWritable = true;
+    root.id = ROOT_ID;
+    /**
+     * Each numbered file by its number: a file is numbered the first time
+     * anyone asks (FileInternalInformation, an open by id), and keeps its
+     * number across renames and under every name it is given. Numbering on
+     * asking keeps a bundle of a hundred thousand files from a map entry each.
+     *
+     * @type {Map<number, Node>}
+     */
+    const numbered = new Map([[ROOT_ID, root]]);
+    let nextId = FIRST_FILE_ID;
+
+    /**
+     * A file's number, given it now if it had none.
+     *
+     * @param {Node} node @returns {number}
+     */
+    const idOf = node=>{
+        if (node.id === 0)
+        {
+            const id = nextId++;
+            for (const name of namesOf(node))
+            {
+                name.id = id;
+            }
+            numbered.set(id, node);
+        }
+        return node.id;
+    };
+
+    /**
+     * Hands a name's number to the name that takes its place (`to`: a rename,
+     * a recreated directory), or gives it up when the file has no other name
+     * left: a deleted file's number is never another file's.
+     *
+     * @param {Node} node @param {Node | null} to
+     */
+    const passId = (node, to)=>{
+        const id = node.id;
+        if (id === 0)
+        {
+            return;
+        }
+        node.id = 0;
+        const heir = to ?? (node.body ? [...node.body.names].find(name=>name !== node) : null);
+        if (to)
+        {
+            to.id = id;
+        }
+        if (numbered.get(id) === node)
+        {
+            if (heir)
+            {
+                numbered.set(id, heir);
+            }
+            else
+            {
+                numbered.delete(id);
+            }
+        }
+    };
 
     /**
      * @param {string} path
@@ -559,6 +631,7 @@ export function createOverlay({
      */
     const forget = node=>{
         copying.delete(node);
+        passId(node, null);
         if (node.body)
         {
             unname(node);
@@ -635,6 +708,7 @@ export function createOverlay({
         target.inWritable = true;
         target.body = body;
         target.modified = node.modified;
+        target.id = node.id;
         // A reparse point is the file's, so every name of it is one.
         target.reparse = node.reparse;
         target.junction = node.junction;
@@ -675,6 +749,7 @@ export function createOverlay({
         target.modified = node.modified;
         target.body = body;
         body.names.add(target);
+        passId(node, target);
         if (body.owner === node)
         {
             body.owner = target;
@@ -1020,6 +1095,7 @@ export function createOverlay({
             target.directory = false;
             target.inWritable = true;
             target.modified = node.modified;
+            passId(node, target);
             node.inWritable = false;
             forget(node);
             changed(node.path, 'removed');
@@ -1156,6 +1232,54 @@ export function createOverlay({
         },
 
         /**
+         * The number of the file or directory at `components` on this volume:
+         * the same under every name it has and across renames, never another
+         * file's while the volume stands (FileInternalInformation's).
+         *
+         * @param {string[]} components @returns {number}
+         */
+        fileId(components){
+            return idOf(mustFind(components));
+        },
+
+        /**
+         * Where the file numbered `id` is, as components: one of its names,
+         * null for a number no file here has.
+         *
+         * @param {number} id @returns {string[] | null}
+         */
+        pathOfId(id){
+            const node = numbered.get(id);
+            if (!node)
+            {
+                return null;
+            }
+            /** @type {string[]} */
+            const components = [];
+            for (let at = node; at.parent; at = at.parent)
+            {
+                components.unshift(at.name);
+            }
+            return components;
+        },
+
+        /**
+         * Gives the directory at `to` the number the one at `from` had: a
+         * directory is moved by making it anew and moving what it holds, and
+         * on NTFS it stays the same file.
+         *
+         * @param {string[]} from @param {string[]} to
+         */
+        carryId(from, to){
+            const leaving = find(from);
+            const arriving = find(to);
+            if (leaving && arriving && arriving.id === 0)
+            {
+                passId(leaving, arriving);
+            }
+        },
+
+        /**
          * Every name the file at `components` has, as paths: itself alone
          * unless it is linked.
          *
@@ -1208,9 +1332,12 @@ export function createOverlay({
                 }
             };
             walk(root);
+            // Numbers last: a restored file is given its names before its number.
+            const numbers = [...numbered].filter(([id])=>id !== ROOT_ID)
+                .map(([id, node])=>({ owner: storePath(node), names: [], id }));
             return [...[...bodies].map(body=>({ owner: body.owner.path,
                 names: [...body.names].filter(name=>name !== body.owner).map(name=>name.path) })),
-            ...junctions];
+            ...junctions, ...numbers];
         },
 
         /**
@@ -1226,6 +1353,21 @@ export function createOverlay({
                 data: record.reparse.data ? fromBase64(record.reparse.data) : null } : null);
             for (const record of records)
             {
+                if (typeof record.id === 'number')
+                {
+                    const node = find(record.owner.split('\\').filter(part=>part.length > 0));
+                    const id = record.id >>> 0;
+                    if (node && node.id === 0 && id >= FIRST_FILE_ID && !numbered.has(id))
+                    {
+                        for (const name of namesOf(node))
+                        {
+                            name.id = id;
+                        }
+                        numbered.set(id, node);
+                        nextId = Math.max(nextId, id + 1);
+                    }
+                    continue;
+                }
                 if (record.reparse && !record.junction)
                 {
                     const node = find(record.owner.split('\\').filter(part=>part.length > 0));

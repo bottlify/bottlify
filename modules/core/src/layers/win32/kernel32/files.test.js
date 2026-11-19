@@ -112,6 +112,30 @@ function fakeMemory(size = 0x1000){
  * Paths are matched exactly: case folding belongs to the filesystem, and a test
  * that relied on it here would be testing this fake.
  */
+/**
+ * A volume's numbering as the filesystem keeps it: a number per file, given
+ * the first time it is asked for, the same for the same path whatever its case.
+ */
+function numbering(){
+    /** @type {Map<string, { id: number, path: string }>} */
+    const ids = new Map();
+    return {
+        /** @param {string} path */
+        fileId: path=>{
+            const key = path.toLowerCase();
+            if (!ids.has(key))
+            {
+                ids.set(key, { id: 64 + ids.size, path });
+            }
+            return /** @type {{ id: number }} */ (ids.get(key)).id;
+        },
+        /** @param {string} path @param {number} id */
+        pathOfFileId: (path, id)=>[...ids.values()].find(one=>one.id === id
+            && one.path.slice(0, 2).toLowerCase() === path.slice(0, 2).toLowerCase())?.path
+            ?? null,
+    };
+}
+
 function fakeFiles(){
     /** @type {Map<string, { data: Uint8Array, directory: boolean }>} */
     const nodes = new Map();
@@ -271,6 +295,7 @@ function fakeFiles(){
                     size: node.data.length,
                 }));
         },
+        ...numbering(),
         currentDirectory: ()=>current,
         /** @param {string} path */
         setCurrentDirectory: path=>{

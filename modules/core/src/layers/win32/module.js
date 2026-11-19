@@ -4014,6 +4014,8 @@ export function createWin32Module(){
                         list: (path, pattern)=>volume.list(path, pattern),
                         /** @param {string} path @param {number} modified */
                         setModified: (path, modified)=>filesystem.setModified(path, modified),
+                        /** @param {string} path */
+                        fileId: path=>volume.fileId(path),
                     }),
                     ...createConsoleIoFunctions({
                         readMemory,

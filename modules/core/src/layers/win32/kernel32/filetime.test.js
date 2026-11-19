@@ -34,6 +34,7 @@ function setup(){
             }
             return file;
         },
+        fileId: path=>(path === file.path ? 64 : 65),
         stat: path=>path === file.path
             ? { exists: true, isDirectory: false, size: 0x1234,
                 modified: stamped.at(-1)?.modified ?? Date.UTC(1980, 0, 1) }
@@ -462,6 +463,7 @@ test('a directory lists by handle as many entries as fit, then goes on, then has
             errors.push(code);
         },
         resolveHandle: ()=>folder,
+        fileId: path=>64 + path.length,
         stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
         list: ()=>[{ name: 'SAVE.DAT', isDirectory: false, size: 5000 },
             { name: 'DATA', isDirectory: true, size: 0 }],

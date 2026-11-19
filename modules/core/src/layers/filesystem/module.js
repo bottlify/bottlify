@@ -806,6 +806,37 @@ export function createFilesystemModule(){
                 },
 
                 /**
+                 * The number of the file at `path` on its volume, the same
+                 * under every name and across renames (the tree's `fileId`).
+                 *
+                 * @param {string} path @returns {number}
+                 */
+                fileId(path){
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const { tree, components } = locate(path);
+                    return tree.fileId(components);
+                },
+
+                /**
+                 * Where the file numbered `id` is on the volume `path` is on,
+                 * as a full path: null for a number no file there has.
+                 *
+                 * @param {string} path @param {number} id @returns {string | null}
+                 */
+                pathOfFileId(path, id){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    const { tree, drive } = locate(path);
+                    const components = tree.pathOfId(id);
+                    return components ? formatPath(drive, components) : null;
+                },
+
+                /**
                  * Every name the file at `path` has, as full paths: its own
                  * alone unless it is linked.
                  *
@@ -1039,6 +1070,7 @@ export function createFilesystemModule(){
                                     formatPath(key, splitComponents(path))),
                                 ...record.junction ? { junction: true } : {},
                                 ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.id !== undefined ? { id: record.id } : {},
                                 ...record.target
                                     ? { target: formatPath(key, splitComponents(record.target)) }
                                     : {} });
@@ -1074,6 +1106,7 @@ export function createFilesystemModule(){
                                 names: names.map(at=>at.components.join('\\')),
                                 ...record.junction ? { junction: true } : {},
                                 ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.id !== undefined ? { id: record.id } : {},
                                 ...target && target.tree === owner.tree
                                     ? { target: target.components.join('\\') } : {} }]);
                         }
@@ -1227,6 +1260,11 @@ export function createFilesystemModule(){
                                 `${from} cannot be moved into itself, to ${to}`);
                         }
                         this.createDirectory(to);
+                        if (locate(from).tree === locate(to).tree)
+                        {
+                            locate(from).tree.carryId(locate(from).components,
+                                locate(to).components);
+                        }
                         for (const child of this.list(from))
                         {
                             this.rename(`${from}\\${child.name}`, `${to}\\${child.name}`);
