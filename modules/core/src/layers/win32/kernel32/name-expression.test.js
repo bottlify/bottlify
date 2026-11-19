@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isNameInExpression } from './name-expression.js';
+import { isNameInExpression, win32Expression } from './name-expression.js';
 
 /** @param {string} expression @param {string[]} names */
 const listed = (expression, names)=>names.filter(name=>isNameInExpression(expression, name));
@@ -46,4 +46,31 @@ test('"." and ".." are matched as the one dot or as nothing', ()=>{
     assert.ok(!isNameInExpression('??', '..'));
     assert.ok(!isNameInExpression('?.', '..'));
     assert.ok(isNameInExpression('*.', '..'));
+});
+
+test('a Win32 search pattern is the native expression kernel32 makes of it', ()=>{
+    // Wine's test_FindFirstFile_wildcards, the rows no 8.3 name decides.
+    const names = ['.', '..', '..a', '..a.a', '.a', '.a..a', '.a.a', '.aaa', 'a', 'a..a', 'a.a',
+        'a.a.a', 'aa', 'aaa', 'aaaa', ' .a'];
+    /** @param {string} pattern */
+    const found = pattern=>listed(win32Expression(pattern), names);
+    assert.equal(win32Expression('*.*'), '*');
+    assert.deepEqual(found('*.*'), names, 'every name');
+    assert.equal(win32Expression('*.'), '<"', 'the names with no extension');
+    assert.deepEqual(found('*.'), ['.', '..', 'a', 'aa', 'aaa', 'aaaa']);
+    assert.equal(win32Expression('* .'), '<"', 'trailing dots and spaces, one dot kept');
+    assert.equal(win32Expression('*..'), '<"');
+    assert.equal(win32Expression('*. '), '*', 'ending in a space: none kept');
+    assert.deepEqual(found('*. '), names);
+    assert.equal(win32Expression('?.??.'), '>">>"');
+    assert.deepEqual(found('?.??.'), ['.', '..', '.a', 'a', 'a.a', ' .a']);
+    assert.deepEqual(found('*..*'), ['.', '..', '..a', '..a.a', '.a..a', 'a..a']);
+    assert.deepEqual(found('. *'), [], 'a space is a character like any other');
+});
+
+test('a long expression is matched without recursion', ()=>{
+    // The guest-pointer validator hands every argument a long string: the
+    // matcher recursed once a character and overflowed the stack.
+    assert.ok(isNameInExpression('*'.repeat(20000), 'name'));
+    assert.ok(!isNameInExpression('?'.repeat(20000), 'name'));
 });

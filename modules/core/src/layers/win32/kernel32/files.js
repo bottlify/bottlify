@@ -40,7 +40,7 @@ import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
 import { isPipeName } from './pipes.js';
-import { isNameInExpression } from './name-expression.js';
+import { isNameInExpression, win32Expression } from './name-expression.js';
 import { fullPathName } from '../ntdll/paths.js';
 
 /** Codes this surface reports through the last-error slot. */
@@ -476,7 +476,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     native?: boolean, overlapped?: number,
  *     io?: { event: number, apc: number, context: number }) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean, overlapped?: number) => any }[]} [streams]
+ *     native?: boolean, overlapped?: number) => any,
+ *     readEx?: (handle: number, buffer: number, length: number, overlapped: number,
+ *     routine: number) => any,
+ *     writeEx?: (handle: number, buffer: number, length: number, overlapped: number,
+ *     routine: number) => any }[]} [streams]
  *           Handles the reads and writes hand on before taking them for files:
  *           each answers the call, or null for a handle that is not its own.
  *           `native` asks for NtReadFile's answers: `out` is the IO_STATUS_BLOCK.
@@ -1120,6 +1124,7 @@ export function createFileFunctions(host){
     };
 
     /** Handles that are no file, each answering a read or write of its own first. */
+    /** @type {NonNullable<FileHost['streams']>} */
     const streams = [nulStream, ...host.streams ?? []];
 
     /**
@@ -2285,14 +2290,19 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
         }
-        // Every folder but a drive's root lists itself and its parent first,
-        // as "." and "..", for any pattern of wildcards and dots alone; a
-        // program that skips the first two entries unseen relies on it.
-        // ponytail: wildcards-and-dots stands in for the volume's own match,
-        // which "." and ".." pass exactly then.
-        const dots = /^[A-Za-z]:\\?$/.test(directory) || !/^[*?.]+$/.test(pattern) ? []
+        // The pattern is matched as the native expression kernel32 makes of
+        // it (`win32Expression`), each name of the folder in turn; every
+        // folder but a drive's root lists itself and its parent first, as "."
+        // and "..", when the expression takes them - a program that skips the
+        // first two entries unseen relies on it.
+        const expression = win32Expression(pattern);
+        const dots = /^[A-Za-z]:\\?$/.test(directory) ? []
             : ['.', '..'].map(dot=>({ ...holder, name: dot, isDirectory: true, size: 0 }));
-        const entries = [...dots, ...files.list(directory, pattern) ?? []];
+        // A name without wildcards is looked up as itself, which finds the
+        // libraries this build implements in the system folder too.
+        const listed = files.list(directory, /[*?<>"]/.test(pattern) ? '*' : pattern) ?? [];
+        const entries = [...dots, ...listed]
+            .filter(entry=>isNameInExpression(expression, entry.name));
         if (entries.length === 0)
         {
             return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);
@@ -4660,6 +4670,18 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, buffer, length, overlapped, routine])=>{
+                const pointer = overlapped >>> 0;
+                // A stream that keeps its own operations (a pipe end) queues
+                // the routine when its operation ends.
+                for (const stream of streams)
+                {
+                    const answer = pointer === 0 || !host.queueApc ? null
+                        : stream.readEx?.(handle, buffer, length, pointer, routine >>> 0) ?? null;
+                    if (answer !== null)
+                    {
+                        return answer;
+                    }
+                }
                 const file = object(handle, 'file');
                 if (!file)
                 {
@@ -4669,7 +4691,6 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                const pointer = overlapped >>> 0;
                 if (pointer === 0 || !host.queueApc)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -4721,6 +4742,16 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, buffer, length, overlapped, routine])=>{
+                const pointer = overlapped >>> 0;
+                for (const stream of streams)
+                {
+                    const answer = pointer === 0 || !host.queueApc ? null
+                        : stream.writeEx?.(handle, buffer, length, pointer, routine >>> 0) ?? null;
+                    if (answer !== null)
+                    {
+                        return answer;
+                    }
+                }
                 const file = object(handle, 'file');
                 if (!file)
                 {
@@ -4730,7 +4761,6 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                const pointer = overlapped >>> 0;
                 if (pointer === 0 || !host.queueApc)
                 {
                     return fail(ERROR_INVALID_PARAMETER);

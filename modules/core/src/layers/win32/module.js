@@ -63,7 +63,7 @@ import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
 import { createMailslots } from './kernel32/mailslots.js';
-import { createNamedPipes } from './kernel32/pipes.js';
+import { PIPE_CLIENT, createNamedPipes } from './kernel32/pipes.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
 import { createFileTimeFunctions, msToFileTime } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
@@ -1537,6 +1537,18 @@ export function createWin32Module(){
                         kernel.setEvent(kernel.handles.resolve(handle, 'event'));
                     }
                     catch (e){
+                        void e;
+                    }
+                },
+                /** @param {number} handle */
+                resetEvent: handle=>{
+                    try
+                    {
+                        kernel.resetEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        // An OVERLAPPED whose hEvent names no event: the I/O
+                        // goes on, its completion sets nothing either.
                         void e;
                     }
                 },
@@ -3827,6 +3839,9 @@ export function createWin32Module(){
                         // through a handle of the moment, or this process's own.
                         // A job tells the completion port it was associated with.
                         postCompletion: (port, packet)=>ports.postTo(port, packet),
+                        // The waits CancelSynchronousIo can cut short: a pipe's.
+                        cancelSynchronous: (/** @type {any} */ thread)=>
+                            pipes.cancelSynchronous(thread),
                         listenJobs: events=>{
                             jobEvents = events;
                         },
@@ -6052,6 +6067,10 @@ export function createWin32Module(){
                         readMemory,
                         // Impersonation is the thread's, not the process's.
                         currentThread: ()=>kernel.currentThread(),
+                        // A pipe's client is the pipes' to know.
+                        /** @param {number} handle */
+                        pipeClient: handle=>/** @type {any} */ (
+                            libraries['KERNEL32.dll'])[PIPE_CLIENT]?.(handle) ?? 'none',
                         // A service's descriptor is the service manager's.
                         /** @param {number} handle @param {number} wanted */
                         serviceSecurity: (handle, wanted)=>/** @type {any} */ (
