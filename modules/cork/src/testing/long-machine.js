@@ -99,11 +99,7 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
     {
         flags[(at + codeHigh) / 4096] = PageFlag.INACCESSIBLE;
     }
-    if (tiered && window !== undefined)
-    {
-        throw new Error('long machine: no wasm interpreter tier over a wide window yet');
-    }
-    const tier = tiered ? createWasmInterpreter({ memory, layout,
+    const tier = tiered ? createWasmInterpreter({ memory, ram, layout,
         area: layout.tables + tablesSize(layout),
         statics: layout.regs + WASM_INTERPRETER_STATICS_AT, hotThreshold: 1, trapPort,
         parkBase: 0 }) : null;

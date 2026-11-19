@@ -330,7 +330,7 @@ export function withRamMemory(bytes){
                 }
             }
         }
-        else if (id === 8 || id === 9)
+        else if (id === 8 || (id === 9 && r.leb() !== 0))
         {
             throw new Error(`ram-memory: section ${id} names functions by index`);
         }

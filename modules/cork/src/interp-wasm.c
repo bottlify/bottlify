@@ -5343,6 +5343,9 @@ __attribute__((export_name("run")))
 u32 run(u32 budget)
 {
     xNeedsFlags = 0;
+#ifdef WIDE
+    exitHigh = 0;
+#endif
     exactIn();
     u32 code = runInteger(budget), n = retired;
     while (code == W_UNSUPPORTED && xNeedsFlags)
@@ -5401,6 +5404,7 @@ u32 enter(u32 budget)
         return 0;
     }
 #ifdef WIDE
+    exitHigh = 0;
     /* Code outside the block has no count and no region: it is run as it is. */
     if (IN_CODE(at))
 #endif

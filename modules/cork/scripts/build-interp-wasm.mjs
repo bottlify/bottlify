@@ -9,9 +9,10 @@
  * for wasm32 into `src/interp-wasm.bytes.js`, and again with LONG defined,
  * long mode's tier, into `src/interp-wasm64.bytes.js`, and with LONG and WIDE,
  * long mode's over a wide window, into `src/interp-wasm-wide.bytes.js`: each
- * module as base64 beside the SHA-256 of the source it came from. The generated files are committed, so a
- * checkout runs without a C compiler; `interp-wasm.test.js` fails when the
- * source changed and this was not run again.
+ * module as base64 beside the SHA-256 of the source it came from. The
+ * generated files are committed, so a checkout runs without a C compiler;
+ * `interp-wasm.test.js` fails when the source changed and this was not run
+ * again.
  *
  *   node modules/cork/scripts/build-interp-wasm.mjs [--clang PATH | --docker]
  *

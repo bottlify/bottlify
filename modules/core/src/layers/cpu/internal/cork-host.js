@@ -373,9 +373,8 @@ export function createCorkHost(config){
     // and the interpreter tier in wasm its hot counts past that.
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
-    // Not over a wide window, whose RAM the interpreter tier in wasm does not address yet.
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
-        && corkConfig?.wasmInterpreter !== false && own.ramMemory === undefined;
+        && corkConfig?.wasmInterpreter !== false;
     const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
     // Every other executor's: its state page, its tables and what lies past them.
     const executorPages = Math.ceil((executorBytes(own) - tables + past) / 65536);
@@ -830,7 +829,7 @@ export function createCorkHost(config){
      * @type {import('../engine.js').WasmInterpreter | null}
      */
     const wasmTier = wasmWanted
-        ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
+        ? engine.createWasmInterpreter({ memory, ram: ramMemory, layout, area: wasmArea,
             statics: stateBase + WASM_INTERPRETER_STATICS_AT,
             hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
             precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true })
@@ -1520,7 +1519,15 @@ export function createCorkHost(config){
             tierInstalled = true;
             runtime.interpretWith?.(tier.entry(), tier.entered);
         }
-        blockView.setUint32(inBlock.eip, address >>> 0, true);
+        if (long)
+        {
+            // Whole: a wide window's code lies past 4 GiB.
+            blockView.setBigUint64(inBlock.eip, BigInt(address), true);
+        }
+        else
+        {
+            blockView.setUint32(inBlock.eip, address >>> 0, true);
+        }
         lastStart = address;
         if (jumpedIn)
         {
