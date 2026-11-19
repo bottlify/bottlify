@@ -758,39 +758,6 @@ export function createSpawnFunctions(host){
         },
     });
 
-    /**
-     * The files a STARTUPINFO hands the child as its output and error, when
-     * it hands any: a handle the parent inherits shares one file position
-     * with the child's, so each names the parent's own open file, whose
-     * position the child's writes move. A handle that is not a file -- the
-     * console, a pipe -- leaves that stream where it was.
-     *
-     * @param {number} startup
-     * @returns {{ output?: any, error?: any } | undefined}
-     */
-    const standardFiles = startup=>{
-        if (startup === 0 || (readDword(startup + STARTUP_.flags) & STARTF_USESTDHANDLES) === 0)
-        {
-            return undefined;
-        }
-        /** @param {number} handle */
-        const fileOf = handle=>{
-            try
-            {
-                const file = kernel.handles.resolve(handle, 'file');
-                return file?.path && file.write ? file : undefined;
-            }
-            catch (e){
-                void e;
-                return undefined;
-            }
-        };
-        return {
-            output: fileOf(readDword(startup + STARTUP_.output)),
-            error: fileOf(readDword(startup + STARTUP_.error)),
-        };
-    };
-
     /** GetStdHandle's numbers for the three standard handles. */
     const STANDARD_HANDLES = { input: -10, output: -11, error: -12 };
     /**
@@ -934,7 +901,6 @@ export function createSpawnFunctions(host){
         const inheritedHandles = inherit && host.inheritedHandles
             ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [];
         const made = record(named ?? '', line, flags, directory, {
-            standardFiles: standardFiles(startup >>> 0),
             standardHandles: standardPipes(startup >>> 0, inheritedHandles),
             // What the child's GetStartupInfo answers: values, since the child
             // may be built on another thread from what crosses to it.

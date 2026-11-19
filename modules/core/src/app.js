@@ -76,6 +76,7 @@ import { SHARED_MODULE_BYTES, storeHandlers, withHeldModules } from './layers/cp
 import { createMemoryBudget, guestByLength, openMemoryBudget, RUN_HOLDER }
     from './layers/cpu/internal/memory-budget.js';
 import { eventFrom } from './system/events-across.js';
+import { crossingFiles, handedFiles, inheritedOpen } from './system/inherited-files.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
 import { PROGRAMS_LIBRARY, WINDOWS_DIRECTORY, programInPlaceOf, systemProgramImage }
@@ -127,10 +128,6 @@ const hashText = (hash, text)=>{
  * imports have to become guest addresses that call into win32, but win32 does
  * not know what a guest call looks like and the bridge does not know what win32
  * implements. Neither should. Assembling a process is what knows both.
- */
-
-/**
- * @typedef {{ path: string, position: number }} StandardFile
  */
 
 /**
@@ -408,16 +405,16 @@ const hashText = (hash, text)=>{
  * @property {(name: string, payload: any) => void} [relay]
  *           Told every event this process emits, for a process in a worker of its own
  *           to tell the bus of the run that started it.
- * @property {{ output?: StandardFile, error?: StandardFile }} [standardFiles]
- *           The files a child's parent handed it as its output and error,
- *           each the parent's own open file, whose position the child's
- *           writes move.
  * @property {import('./layers/win32/kernel32/startup-info.js').StartupRecord | null} [startup]
  *           The STARTUPINFO a child's parent handed CreateProcess, which its
  *           GetStartupInfo answers.
  * @property {{ handle: number, type: string, object: any }[]} [inheritedHandles]
  *           The handles a child inherits from its parent on this thread, under
- *           the parent's numbers: pipe ends.
+ *           the parent's numbers: pipe ends, open files, kernel objects.
+ * @property {{ handle: number, type: 'file', access: number | null, object: any }[]}
+ *           [inheritedFiles]  The open files a child in a worker of its own inherits:
+ *           each the parent's open as values, its position asked across the link
+ *           (`system/inherited-files.js`).
  * @property {{ input?: number, output?: number, error?: number }} [standardHandles]
  *           Which of those its parent's STARTUPINFO made its standard handles.
  * @property {{ handle: number, side: 'server' | 'client', canRead: boolean, canWrite: boolean,
@@ -6145,11 +6142,13 @@ async function buildApp(options){
             // SECTION_IMAGE_INFORMATION of the program's image, from its own
             // headers and what is mapped of it now (ProcessImageInformation).
             imageInformation: ()=>imageInformation?.() ?? null,
-            standardFiles: options.standardFiles,
-            // The handles a parent's CreateProcess handed down (pipe ends):
-            // the ends themselves on this thread, stand-ins of them across.
-            inheritedHandles: options.inheritedHandles ?? options.pipeEnds?.map(end=>({
-                handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
+            // The handles a parent's CreateProcess handed down: the objects
+            // themselves on this thread; across, stand-ins of its pipe ends and
+            // its open files as values, their position the parent's.
+            inheritedHandles: options.inheritedHandles ?? [
+                ...(options.pipeEnds ?? []).map(end=>({
+                    handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
+                ...options.inheritedFiles ?? []],
             standardHandles: options.standardHandles,
             startup: options.startup,
             // A child's variables, as its parent handed them on; absent, the
@@ -11002,7 +11001,7 @@ const EXIT_NOTICE_TYPE = 0x40;
  */
 const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
     'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
-    'executable', 'standardFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
+    'executable', 'inheritedFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
     'com', 'memoryCredit', 'memoryHolder']);
 
 /**
@@ -13313,17 +13312,17 @@ export async function createApp(options){
                 ask: (/** @type {number} */ id, /** @type {any} */ call)=>
                     askBeside({ id }, call),
             },
-            // The parent's open files the child writes its output and error
-            // into: one position, the parent's, which the child's writes move.
-            standard: {
-                /** @param {'output' | 'error'} which */
-                position: which=>request.standardFiles?.[which]?.position ?? 0,
-                /** @param {'output' | 'error'} which @param {number} at */
-                setPosition: (which, at)=>{
-                    const file = request.standardFiles?.[which];
-                    if (file)
+            // The parent's open files the child inherited: one position, the
+            // parent's open's, which the child's reads and writes move.
+            inherited: {
+                /** @param {number} handle */
+                position: handle=>inheritedOpen(request.inheritedHandles, handle)?.position ?? 0,
+                /** @param {number} handle @param {number} at */
+                setPosition: (handle, at)=>{
+                    const open = inheritedOpen(request.inheritedHandles, handle);
+                    if (open)
                     {
-                        file.position = at;
+                        open.position = at;
                     }
                 },
             },
@@ -13474,10 +13473,8 @@ export async function createApp(options){
                         ...request.environment ? { environment: request.environment } : {},
                         processId: request.id,
                         mainThreadId: request.threadId,
-                        // Named, not handed: the position stays here.
-                        standardFiles: request.standardFiles && Object.fromEntries(
-                            Object.entries(request.standardFiles).filter(([, file])=>file)
-                                .map(([which, file])=>[which, { path: file.path }])),
+                        // Its open files as values: the position stays here.
+                        inheritedFiles: crossingFiles(request.inheritedHandles),
                         // Its pipe ends by number, and which are its standard handles.
                         pipeEnds,
                         standardHandles: request.standardHandles,
@@ -13726,22 +13723,18 @@ export async function createApp(options){
         {
             return false;
         }
-        /** @param {string} which */
-        const handedOn = which=>({
-            path: asked.standardFiles[which].path,
-            get position(){
-                return link.callWaiting('parent', 'position', [asked.id, which]);
-            },
-            set position(at){
-                link.callWaiting('parent', 'setPosition', [asked.id, which, at]);
-            },
-        });
-        // Inherited handles are objects of this thread's and do not cross.
-        const values = { ...asked };
-        delete values.inheritedHandles;
-        delete values.standardHandles;
-        const request = { ...values, standardFiles: asked.standardFiles && Object.fromEntries(
-            Object.keys(asked.standardFiles).map(which=>[which, handedOn(which)])) };
+        // Its open files, as its parent's worker handed them: their position
+        // asked of that worker, where the parent's opens keep it. Its pipe
+        // ends are objects of that worker's and do not cross, nor do the
+        // standard handles that name them.
+        const files = handedFiles(asked.inheritedFiles,
+            handle=>link.callWaiting('parent', 'position', [asked.id, handle]),
+            (handle, at)=>link.callWaiting('parent', 'setPosition', [asked.id, handle, at]));
+        const crossed = new Set(files.map(one=>one.handle));
+        const request = { ...asked, inheritedHandles: files, inheritedFiles: undefined,
+            standardHandles: asked.standardHandles && Object.fromEntries(
+                Object.entries(asked.standardHandles)
+                    .filter(([, handle])=>crossed.has(handle))) };
         startAcross({
             // Read from the run's volume, where the parent found it: a launcher
             // that starts its game and exits is gone before the game's image
@@ -13769,15 +13762,15 @@ export async function createApp(options){
      */
     const childrenAcross = new Map();
     options.system?.processes?.answer({
-        /** @param {number} id @param {'output' | 'error'} which */
-        position: (id, which)=>childrenAcross.get(id)?.request.standardFiles?.[which]
-            ?.position ?? 0,
-        /** @param {number} id @param {'output' | 'error'} which @param {number} at */
-        setPosition: (id, which, at)=>{
-            const file = childrenAcross.get(id)?.request.standardFiles?.[which];
-            if (file)
+        /** @param {number} id @param {number} handle */
+        position: (id, handle)=>inheritedOpen(childrenAcross.get(id)?.request.inheritedHandles,
+            handle)?.position ?? 0,
+        /** @param {number} id @param {number} handle @param {number} at */
+        setPosition: (id, handle, at)=>{
+            const open = inheritedOpen(childrenAcross.get(id)?.request.inheritedHandles, handle);
+            if (open)
             {
-                file.position = at;
+                open.position = at;
             }
         },
         /** @param {number} id @param {number} code */
@@ -13838,9 +13831,10 @@ export async function createApp(options){
                 ...request.environment ? { environment: request.environment } : {},
                 id: request.id,
                 threadId: request.threadId,
-                standardFiles: request.standardFiles && Object.fromEntries(
-                    Object.entries(request.standardFiles).filter(([, file])=>file)
-                        .map(([which, file])=>[which, { path: file.path }])),
+                // Its open files as values, the position kept here, and which
+                // of its handles are its standard ones.
+                inheritedFiles: crossingFiles(request.inheritedHandles),
+                standardHandles: request.standardHandles,
                 arena: sound?.options.beside.arena ?? null,
             });
             if (placed)
@@ -13904,7 +13898,6 @@ export async function createApp(options){
                         commandLine: request.commandLine,
                         processId: request.id,
                         mainThreadId: request.threadId,
-                        standardFiles: request.standardFiles,
                         // Objects, which only a child on this thread can hold.
                         inheritedHandles: request.inheritedHandles,
                         standardHandles: request.standardHandles,

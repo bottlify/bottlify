@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
+import { createConsoleFunctions } from './kernel32/console.js';
 import { createThreadingFunctions, listProcesses } from './kernel32/threading.js';
 import { createFiberFunctions } from './kernel32/fibers.js';
 import { createFiberLocalStorage } from './kernel32/fls.js';
@@ -1207,27 +1207,12 @@ export function createWin32Module(){
                     } });
                 return mine;
             };
-            // A child whose parent handed it files for its output and error
-            // writes there, at the position it shares with the parent's handle,
-            // rather than to the console.
-            /** @type {{ output?: { path: string, position: number },
-             *           error?: { path: string, position: number } } | undefined} */
-            const standardFiles = config?.standardFiles;
+            // What a process writes to its console's handles. A file its
+            // parent handed it as a standard handle is a handle it inherited
+            // (`adoptFile`), which its GetStdHandle answers and WriteFile
+            // writes; what reaches here is the console's.
             /** @param {number} handle @param {string} text */
-            const sink = (handle, text)=>{
-                const file = handle === HANDLE_STDOUT ? standardFiles?.output
-                    : handle === HANDLE_STDERR ? standardFiles?.error : undefined;
-                // The parent's own open file, handed on: written on the terms
-                // it was opened with, whatever another open would be refused.
-                const node = file && volume.open(file.path, { write: true, inherited: true });
-                if (!file || !node)
-                {
-                    toConsole(handle, text);
-                    return;
-                }
-                file.position += volume.write(node, file.position, encodeAnsi(text));
-                volume.close(node);
-            };
+            const sink = (handle, text)=>toConsole(handle, text);
             // The registry is the run's: the first process's, handed to every
             // process after it rather than copied into each, so a key a parent
             // writes is there for its child the moment it is written, and the
@@ -4238,9 +4223,6 @@ export function createWin32Module(){
                         park: ()=>bridge.park(),
                         handleType: (/** @type {number} */ handle)=>
                             kernel.handles.typeOf?.(handle) ?? null,
-                        standardFile: (/** @type {number} */ handle)=>Boolean(
-                            handle === HANDLE_STDOUT ? standardFiles?.output
-                                : handle === HANDLE_STDERR ? standardFiles?.error : undefined),
                         resolveHandle: (/** @type {number} */ handle,
                             /** @type {string | undefined} */ type)=>
                             kernel.handles.resolve(handle, type),

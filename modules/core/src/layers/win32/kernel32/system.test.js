@@ -433,17 +433,15 @@ test('a console is a character device and a file is not', ()=>{
     assert.equal(fns.GetFileType.handler([0x14]), FILE_TYPE_DISK);
 });
 
-test('the standard handles are the console\'s, or a file the parent handed for output', ()=>{
+test('the console\'s standard handles are characters', ()=>{
     // A runtime that finds its stdout of no type writes it nowhere: Mono's
-    // Console did, and a .NET program printed nothing.
+    // Console did, and a .NET program printed nothing. A file handed as a
+    // standard handle is an inherited file handle, a disk's.
     const host = /** @type {any} */ (fakeHost());
     const fns = createSystemFunctions(host);
     assert.deepEqual([1, 2, 3].map(handle=>fns.GetFileType.handler([handle])),
         [FILE_TYPE_CHAR, FILE_TYPE_CHAR, FILE_TYPE_CHAR]);
     assert.deepEqual(host.errors, []);
-    host.standardFile = (/** @type {number} */ handle)=>handle === 2;
-    assert.deepEqual([1, 2, 3].map(handle=>fns.GetFileType.handler([handle])),
-        [FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_CHAR]);
 });
 
 test('a pipe is a pipe, a mailslot unknown, and an object that is no file a bad handle', ()=>{

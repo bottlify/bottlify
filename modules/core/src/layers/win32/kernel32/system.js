@@ -266,8 +266,6 @@ const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRES
  *     process's image for module 0; null where it has none.
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(handle: number) => string | null} [handleType]  what kind of object a handle is
- * @property {(handle: number) => boolean} [standardFile]  whether a standard handle writes to
- *           a file the parent handed the process rather than to its console
  * @property {() => any} currentThread
  * @property {import('./cross-process.js').AskHost['askChild']} [askChild]
  *           A call made in a child, for the exit code of one of its threads.
@@ -1533,11 +1531,11 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const target = object(handle);
-                // The standard handles a process starts with are its console's,
-                // or a file its parent handed it for its output.
+                // The console's standard handles; a file handed as one is an
+                // inherited file handle, answered below.
                 if (!target && (handle >>> 0) >= HANDLE_STDIN && (handle >>> 0) <= HANDLE_STDERR)
                 {
-                    return host.standardFile?.(handle >>> 0) ? FILE_TYPE_DISK : FILE_TYPE_CHAR;
+                    return FILE_TYPE_CHAR;
                 }
                 if (!target)
                 {

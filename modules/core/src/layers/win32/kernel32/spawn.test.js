@@ -847,28 +847,26 @@ test('ReadProcessMemory of this process where nothing is mapped is ERROR_PARTIAL
     assert.equal(host.errors.at(-1), 299);
 });
 
-test('a STARTUPINFO\'s output and error files are handed to the child, the parent\'s own', ()=>{
-    // winetest hands each test its log this way and reads what the test wrote.
-    const host = fakeHost({ files: ['C:\\App\\test.exe'] });
-    const fns = createSpawnFunctions(host);
+test('a STARTUPINFO\'s files the child inherits are its standard handles, nothing apart', ()=>{
+    // winetest hands each test its log this way and reads what the test wrote:
+    // the log is a handle the child inherits, the parent's own open file.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\test.exe'] }));
     const log = { path: 'C:\\App\\log.txt', node: {}, read: true, write: true, position: 12 };
-    const file = host.kernel.handles.open('file', log);
+    host.inheritedHandles = ()=>[{ handle: 0x30, type: 'file', object: log }];
+    const fns = createSpawnFunctions(host);
     const startup = 0x400;
     host.view.setUint32(startup + 44, 0x100, true); // STARTF_USESTDHANDLES
-    host.view.setUint32(startup + 60, file, true);
-    host.view.setUint32(startup + 64, file, true);
+    host.view.setUint32(startup + 60, 0x30, true);
+    host.view.setUint32(startup + 64, 0x34, true);
 
     assert.equal(fns.CreateProcessA.handler(
         [0, putAnsi(host, 0x100, 'test.exe --list'), 0, 0, 1, 0, 0, 0, startup, 0]), 1);
-    const { standardFiles } = pending(host);
-    assert.equal(standardFiles.output, log, 'the same open file, so its position is shared');
-    assert.equal(standardFiles.error, log);
-
-    host.view.setUint32(startup + 44, 0, true);
-    assert.equal(fns.CreateProcessA.handler(
-        [0, putAnsi(host, 0x100, 'test.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
-    assert.equal(host.requests.at(-1).standardFiles, undefined,
-        'without the flag the child keeps the console');
+    const request = pending(host);
+    assert.deepEqual(request.standardHandles, { output: 0x30 },
+        'the inherited file is its output; a handle it does not inherit is nothing');
+    assert.equal(request.inheritedHandles[0].object, log,
+        'the same open file, so its position is shared');
+    assert.equal('standardFiles' in request, false, 'no second way of handing a file');
 });
 
 test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', ()=>{

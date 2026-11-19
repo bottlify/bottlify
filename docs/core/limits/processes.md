@@ -138,8 +138,11 @@
   semaphores, waitable timers, processes and threads the same way, and its open files: the
   child opens the file as its own on the terms the parent's open agreed, sharing the parent's file
   pointer, and the file stays open until the last of their handles closes, as it does for a file
-  `DuplicateHandle` puts into another process of the run; a child in a worker of its own
-  inherits only pipe ends. A child's standard handles are the ones its STARTUPINFO names with
+  `DuplicateHandle` puts into another process of the run. A child in a worker of its own
+  inherits pipe ends and open files: a file there is opened on the same terms, its pointer the
+  parent's open's, read and moved across the link on each read and write, and the parent's hold
+  on it lasts until that child ends. A file handed as a standard handle is one of these, so it
+  must be inheritable, as on Windows. A child's standard handles are the ones its STARTUPINFO names with
   `STARTF_USESTDHANDLES`, or else its parent's own, of those it inherits; a console child that
   inherits nothing is not handed its parent's standard handles, as Windows hands them. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard

@@ -34,7 +34,8 @@ const cstring = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 
 /**
  * A parent that hands its child a file as the child's output: it creates
- * C:\App\out.txt, starts child.exe with STARTF_USESTDHANDLES and the file as
+ * C:\App\out.txt inheritable, as an installer redirecting a tool's output
+ * does, starts child.exe inheriting handles with STARTF_USESTDHANDLES and the file as
  * hStdOutput and hStdError, waits for it, writes "P" through its own handle
  * and reads the file back from the start. The exit code is the bytes read,
  * plus 0x100 when the last is the parent's "P" and 0x200 when the first is
@@ -50,6 +51,8 @@ function buildOutputParent(){
             path: cstring('C:\\App\\out.txt'), child: cstring('C:\\App\\child.exe'),
             startup: [...le32(startupSize), ...new Array(startupSize - 4).fill(0)],
             info: new Array(16).fill(0), mark: cstring('P'), count: [0, 0, 0, 0],
+            // SECURITY_ATTRIBUTES: nLength 12, no descriptor, bInheritHandle.
+            inheritable: [...le32(12), ...le32(0), ...le32(1)],
             buffer: new Array(16).fill(0),
         },
         codeSize: 0x200,
@@ -59,7 +62,7 @@ function buildOutputParent(){
             const bytes = [
                 // STARTF_USESTDHANDLES
                 0xc7, 0x05, ...le32(at('startup') + 44), ...le32(0x100),
-                ...push(0), ...push(0x80), ...push(2), ...push(0), ...push(3),
+                ...push(0), ...push(0x80), ...push(2), ...push(at('inheritable')), ...push(3),
                 ...push(0xc0000000), ...push(at('path')), ...call('CreateFileA'),
                 0x89, 0xc3,                                                   // mov ebx, eax
                 0xa3, ...le32(at('startup') + 60),                           // hStdOutput
