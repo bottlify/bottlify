@@ -78,9 +78,59 @@ enum
 /*
  * Guest memory. Every access goes through these, and an instruction's bytes
  * through `fetched`: the memory is the module's own, from `ram`, in every
- * build but the wide window's, whose guest RAM is a second memory this source
- * cannot name (see the build script).
+ * build but the wide window's (WIDE, with LONG). There the guest's RAM is the
+ * module's second memory, a memory64 one, which this source cannot name: an
+ * access is a call of a function imported from `ram`, and the build script
+ * puts the load, the store, the copy or the fill of the second memory where
+ * the call was, so none of them is a call in the module that runs.
  */
+#ifdef WIDE
+/* A guest address is a quadword whole. */
+typedef u64 ga;
+#define GA(a) ((u64)(a))
+#define NOWHERE ((ga)~(ga)0)
+#define RAM(name) __attribute__((import_module("ram"), import_name(name)))
+RAM("load8") extern u32 ramLoad8(u64 a);
+RAM("load16") extern u32 ramLoad16(u64 a);
+RAM("load32") extern u32 ramLoad32(u64 a);
+RAM("load64") extern u64 ramLoad64(u64 a);
+RAM("store8") extern void ramStore8(u64 a, u32 v);
+RAM("store16") extern void ramStore16(u64 a, u32 v);
+RAM("store32") extern void ramStore32(u64 a, u32 v);
+RAM("store64") extern void ramStore64(u64 a, u64 v);
+RAM("copy") extern void ramCopy(u64 to, u64 from, u64 bytes);
+RAM("fill") extern void ramFill(u64 to, u32 byte, u64 bytes);
+#undef RAM
+#define guest8(a) ((u8)ramLoad8(a))
+#define guest16(a) ((u16)ramLoad16(a))
+#define guest32(a) (ramLoad32(a))
+#define guest64(a) (ramLoad64(a))
+#define setGuest8(a, v) ramStore8((a), (v))
+#define setGuest16(a, v) ramStore16((a), (v))
+#define setGuest32(a, v) ramStore32((a), (v))
+#define setGuest64(a, v) ramStore64((a), (v))
+#define guest16Past(a, d) guest16((a) + (d))
+#define guest32Past(a, d) guest32((a) + (d))
+#define guest64Past(a, d) guest64((a) + (d))
+#define setGuest16Past(a, d, v) setGuest16((a) + (d), (v))
+#define setGuest32Past(a, d, v) setGuest32((a) + (d), (v))
+#define setGuest64Past(a, d, v) setGuest64((a) + (d), (v))
+static inline void guestCopy(ga to, ga from, u32 bytes) { ramCopy(to, from, bytes); }
+static inline void guestFill(ga to, u32 byte, u32 bytes) { ramFill(to, byte, bytes); }
+/* An instruction's bytes are decoded through a pointer, which reaches only the
+ * module's own memory: the sixteen from `a`, more than the longest instruction
+ * has, copied there. Its caller has seen that they lie in the window. */
+static u64 fetchedBytes[2];
+static u64 fetchedFrom;
+static inline const u8 *fetched(ga a)
+{
+    fetchedBytes[0] = ramLoad64(a);
+    fetchedBytes[1] = ramLoad64(a + 8);
+    fetchedFrom = a;
+    return (const u8 *)fetchedBytes;
+}
+#define fetchedAt(p) (fetchedFrom)
+#else
 static u8 *ram;
 /* A guest address, and a quadword taken as one: within 4 GiB its low half is it. */
 typedef u32 ga;
@@ -115,6 +165,7 @@ static inline void guestFill(ga to, u32 byte, u32 bytes)
 static inline const u8 *fetched(ga a) { return ram + a; }
 /* Where the instruction whose bytes `p` are lies. */
 #define fetchedAt(p) ((u64)(u32)((p) - ram))
+#endif
 static u8 *pageFlags;
 static u8 *codeRanges;
 #ifdef LONG
@@ -172,7 +223,9 @@ void configure(u32 ramBase, u32 pageFlagsAt, u32 codeRangesAt, u32 hashAt, u32 h
     u32 regsAt, u32 eipAt, u32 eflagsAt, u32 fsBaseAt, u32 area, u32 hotSlots, u32 threshold,
     u32 port, u32 park)
 {
+#ifndef WIDE
     ram = (u8 *)ramBase;
+#endif
     pageFlags = (u8 *)pageFlagsAt;
     codeRanges = (u8 *)codeRangesAt;
     hash = (u8 *)hashAt;
@@ -258,7 +311,33 @@ static const u64 MASKS[4] = { 0xff, 0xffff, 0xffffffff, 0xffffffffffffffffull };
 static const u64 SIGNS[4] = { 0x80, 0x8000, 0x80000000, 0x8000000000000000ull };
 
 #define SIZE_INDEX(size) ((u32)__builtin_ctz(size))
+#ifdef WIDE
+/* The window's bytes, 8 or 16 GiB, and the 4 GiB block of it the process's code
+ * lies in: the hash, the hot counts and the ring of starts know an instruction
+ * by its offset there, as the translator does, which is its address's low half. */
+static u64 window;
+static u64 codeBase;
+__attribute__((export_name("configureWide")))
+void configureWide(u32 windowPages, u32 codeBlock)
+{
+    window = (u64)windowPages << 12;
+    codeBase = (u64)codeBlock << 32;
+}
+#define WINDOW window
+#define BEYOND(a) ((a) >= WINDOW)
+#define IN_CODE(a) ((((a) - codeBase) >> 32) == 0)
+/* Where a store into translated code landed, for the host: its low half the
+ * exit's value, the high one beside it. */
+static u32 exitHigh;
+__attribute__((export_name("exitHigh"))) u32 getExitHigh(void) { return exitHigh; }
+#define EXIT_AT(a) do { exitValue = (u32)(a); exitHigh = (u32)((a) >> 32); } while (0)
+#else
 #define WINDOW 0x100000000ull
+/* Whether a quadword is no address of the window, and whether it is one of code. */
+#define BEYOND(a) (((a) >> 32) != 0)
+#define IN_CODE(a) (((a) >> 32) == 0)
+#define EXIT_AT(a) do { exitValue = (a); } while (0)
+#endif
 
 /* A byte register: with any REX the low byte of each of the sixteen, without
  * one 4..7 are AH..BH. */
@@ -365,7 +444,7 @@ static inline u32 pageRoom(ga a, u32 size, u32 down)
 static u32 repeatBulk(u32 kind, u32 size, u32 down)
 {
     u64 to64 = regs[7], from64 = regs[6], count = regs[1];
-    if ((to64 >> 32) != 0 || (kind == 0xa4 && (from64 >> 32) != 0)) return 0;
+    if (BEYOND(to64) || (kind == 0xa4 && BEYOND(from64))) return 0;
     ga to = GA(to64), from = GA(from64);
     u32 n = pageRoom(to, size, down);
     if (count < n) n = (u32)count;
@@ -400,7 +479,7 @@ static u32 repeatBulk(u32 kind, u32 size, u32 down)
 static void passBulk(u32 kind, u32 size, u32 down, u32 stopOnEqual)
 {
     u64 to64 = regs[7], from64 = regs[6], count = regs[1];
-    if ((to64 >> 32) != 0 || (kind == 0xa6 && (from64 >> 32) != 0)) return;
+    if (BEYOND(to64) || (kind == 0xa6 && BEYOND(from64))) return;
     ga to = GA(to64), from = GA(from64);
     u32 n = pageRoom(to, size, down);
     if (count < n) n = (u32)count;
@@ -3443,7 +3522,7 @@ static u32 runInteger(u32 budget)
                 {
                     if (regs[1] != 0)
                     {
-                        exitValue = codeWrite;
+                        EXIT_AT(codeWrite);
                         exitSize = codeWriteSize;
                         code = W_CODE_WRITE;
                         rip = start;
@@ -4079,7 +4158,7 @@ static u32 runInteger(u32 budget)
             rip = target;
             /* As runInteger's, for a target in the window: one past it is the
              * host's to fault at the next fetch. */
-            if ((target >> 32) == 0)
+            if (IN_CODE(target))
             {
                 u32 to = (u32)target;
                 if (to - parkBase > 2)
@@ -4116,7 +4195,7 @@ static u32 runInteger(u32 budget)
         }
         if (codeWrite != NOWHERE)
         {
-            exitValue = codeWrite;
+            EXIT_AT(codeWrite);
             exitSize = codeWriteSize;
             code = W_CODE_WRITE;
             goto done;
@@ -5304,12 +5383,12 @@ u32 enter(u32 budget)
 {
 #ifdef LONG
     /* A start past the window is the host's to fault. */
-    if ((*ripField >> 32) != 0)
+    if (BEYOND(*ripField))
     {
         retired = 0;
         return 0;
     }
-    u32 at = (u32)*ripField;
+    ga at = GA(*ripField);
 #else
     u32 at = *eipField;
 #endif
@@ -5321,14 +5400,20 @@ u32 enter(u32 budget)
         retired = 0;
         return 0;
     }
-    u8 *count = hotCounts + ((at >> 2) & hotMask);
-    u32 c = *count;
-    if (c < 255) *count = (u8)++c;
-    if (c >= hotThreshold && (c & (c - 1)) == 0)
+#ifdef WIDE
+    /* Code outside the block has no count and no region: it is run as it is. */
+    if (IN_CODE(at))
+#endif
     {
-        exitValue = c;
-        retired = 0;
-        return W_HOT;
+        u8 *count = hotCounts + (((u32)at >> 2) & hotMask);
+        u32 c = *count;
+        if (c < 255) *count = (u8)++c;
+        if (c >= hotThreshold && (c & (c - 1)) == 0)
+        {
+            exitValue = c;
+            retired = 0;
+            return W_HOT;
+        }
     }
     /* What it retired must fit above the code's byte. */
     u32 code = run(budget < 0xffffff ? budget : 0xffffff);
