@@ -62,6 +62,15 @@ The order matters in three places.
   (`kernel32/dllentry.js`). A static import of a library found nowhere and carried by no Windows
   puts the loader's refusal in that stub's place: ExitProcess with STATUS_DLL_NOT_FOUND, nothing
   attached and nothing of the program run (`roadmap/decisions.md` A256).
+- **What the loader leaves in a process appears with its first instruction.** The engine maps and
+  binds every image before the process exists for anyone to see, but the program's import slots,
+  the module list, the process heap and the service pack in the process block are put in place
+  only before the first slice any of its threads gets (`kernel.beforeFirstSlice`), as Windows'
+  loader initialises a process inside whichever thread starts first. A parent reading a child made
+  `CREATE_SUSPENDED` sees the slots as the file has them and those fields empty, until the child's
+  first thread, or a thread made in it from outside, runs. 32-bit only: a 64-bit process carries
+  them from its creation. The libraries' own imports are bound at creation in both widths, where
+  Windows binds them in the child too.
 - **A session is a logon.** Its first process's stub first calls the engine's RunOnce pass
   (`programs/runonce.js`): each command under `HKLM` and then `HKCU`
   `Software\Microsoft\Windows\CurrentVersion\RunOnce`, by name, run by the system program it names

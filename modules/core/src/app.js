@@ -9063,6 +9063,47 @@ async function buildApp(options){
         });
     }
 
+    /**
+     * Takes back what the loader wrote into the process that Windows writes
+     * only once the process runs, and answers the work that puts it back.
+     * 32-bit only: a 64-bit process keeps it all from its creation.
+     *
+     * @returns {() => void}
+     */
+    const holdLoaderState = ()=>{
+        if (long)
+        {
+            return ()=>{};
+        }
+        const fields = blockLayouts(pointerSize).peb;
+        /** @type {[number, Uint8Array, Uint8Array][]} each place, as built, as held */
+        const held = [
+            [process.peb + fields.LDR, 4],
+            [process.peb + fields.PROCESS_HEAP, 4],
+            // CSDVersion's UNICODE_STRING: its lengths and its buffer.
+            [process.peb + fields.CSD_VERSION, 8],
+        ].map(([at, size])=>[at, memory.readBytes(at, size), new Uint8Array(size)]);
+        for (const { entries } of readImports(options.executable, ownImage))
+        {
+            for (const { iatRva } of entries)
+            {
+                const offset = rvaToFileOffset(ownImage, iatRva);
+                held.push([image.base + iatRva, memory.readBytes(image.base + iatRva, 4),
+                    options.executable.slice(offset, offset + 4)]);
+            }
+        }
+        for (const [at, , before] of held)
+        {
+            memory.writeBytes(at, before);
+        }
+        return ()=>{
+            for (const [at, built] of held)
+            {
+                memory.writeBytes(at, built);
+            }
+        };
+    };
+
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
     // Its id the one the parent was told, for a child.
@@ -9084,6 +9125,14 @@ async function buildApp(options){
     {
         kernel.suspendThread(mainThread);
     }
+    // What the loader leaves in a process is put there by its first thread to
+    // run, as Windows' loader initialises a process inside it (LdrInitializeThunk):
+    // a parent that reads a suspended child finds the program's import slots
+    // as its file has them and no module list, heap or service pack in its
+    // process block yet. The engine binds and builds all of it here, before
+    // the process runs; held back until its first slice, it is the same work
+    // in the same order, only seen when Windows would show it.
+    kernel.beforeFirstSlice(holdLoaderState());
     // Its thread-local blocks are the ones the startup stub hands TlsSetValue.
     holdBlock(mainThread, process.createThreadBlock({
         id: mainThread.id,
