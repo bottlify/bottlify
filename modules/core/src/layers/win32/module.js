@@ -6736,6 +6736,7 @@ export function createWin32Module(){
                     /** @type {any} */ (modules.find(library))?.addressOf?.(name) ?? 0,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 processBlock: ()=>config?.processBlock?.() ?? 0,
+                imageInformation: ()=>config?.imageInformation?.() ?? null,
                 currentThread: ()=>kernel.currentThread(),
                 lastErrorOf,
                 arena,

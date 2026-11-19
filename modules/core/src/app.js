@@ -49,6 +49,7 @@ import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.
 import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
+import { sectionImageInformation } from './layers/win32/kernel32/mapping.js';
 import { STEAM_PATH, announceSteamClient } from './layers/win32/steamclient/functions.js';
 import { synthesiseProcessInit, synthesiseStartRefused, DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH }
     from './layers/loader/internal/init.js';
@@ -5282,6 +5283,8 @@ async function buildApp(options){
      * } | null}
      */
     let threadBlocks = null;
+    /** @type {(() => Uint8Array) | null} */
+    let imageInformation = null;
     /**
      * The callbacks LdrRegisterDllNotification registered, by their cookie, in
      * the order registered (`tellNotified`).
@@ -6135,6 +6138,9 @@ async function buildApp(options){
             // The process block, made once the image is placed: what a call
             // its parent makes in it reads with no thread of its own running.
             processBlock: ()=>threadBlocks?.peb ?? 0,
+            // SECTION_IMAGE_INFORMATION of the program's image, from its own
+            // headers and what is mapped of it now (ProcessImageInformation).
+            imageInformation: ()=>imageInformation?.() ?? null,
             standardFiles: options.standardFiles,
             // The handles a parent's CreateProcess handed down (pipe ends):
             // the ends themselves on this thread, stand-ins of them across.
@@ -8524,6 +8530,8 @@ async function buildApp(options){
     // directory's head has changed since; one the image could not hold is no
     // exports at all, said once.
     const ownImage = parsePe(options.executable, { wide: true });
+    imageInformation = ()=>sectionImageInformation({ file: options.executable, image: ownImage,
+        bytes: memory.readBytes(image.base, ownImage.sizeOfImage) });
     const ownDirectory = ownImage.directories[DIR_EXPORT];
     /** @type {({ head: string } & ReturnType<typeof exportTables>) | null} */
     let ownTable = null;

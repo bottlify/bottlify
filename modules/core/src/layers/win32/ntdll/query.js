@@ -139,6 +139,9 @@ const DEBUG_CLASSES = new Set([PROCESS_DEBUG_PORT, PROCESS_DEBUG_OBJECT_HANDLE,
 const PROCESS_EXECUTE_FLAGS = 0x22;
 /** The image's path, a UNICODE_STRING and the characters after it: native, Win32. */
 const PROCESS_IMAGE_FILE_NAME = 27;
+/** SECTION_IMAGE_INFORMATION of the process's own image. */
+const PROCESS_IMAGE_INFORMATION = 37;
+const SECTION_IMAGE_INFORMATION_SIZE = 48;
 const PROCESS_IMAGE_FILE_NAME_WIN32 = 43;
 
 /**
@@ -370,6 +373,9 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => OpenHandle[]} [openHandles]  The handles this process holds,
  *           what SystemHandleInformation lists; without it the class is unknown.
  * @property {number} [processId]  This process's id, the owner of its handles.
+ * @property {() => Uint8Array | null} [imageInformation]  SECTION_IMAGE_INFORMATION
+ *           of the program's image (`mapping.js` sectionImageInformation), null
+ *           before it is placed.
  * @property {(child: any) => DebugState} [debugState]  Whether a debugger hears
  *           a process, through which debug object, and whether a process it
  *           starts is debugged with it (NoDebugInherit clear): this process's
@@ -1100,8 +1106,10 @@ export function createQueryFunctions(host){
                     view.setUint32(PROCESS_BASIC.PEB_BASE_ADDRESS, peb(), true);
                     view.setUint32(PROCESS_BASIC.AFFINITY_MASK, processors.processMask(), true);
                     view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
-                    view.setUint32(PROCESS_BASIC.PROCESS_ID,
-                        teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID), true);
+                    // The process's own, whichever thread runs or none: a call
+                    // its parent makes in it runs between its threads' turns.
+                    view.setUint32(PROCESS_BASIC.PROCESS_ID, host.processId
+                        ?? (teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID)), true);
                     // The process list names this process first, with the
                     // process that started it; 0 where none did.
                     view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID,
@@ -1122,6 +1130,18 @@ export function createQueryFunctions(host){
                     // an evasion: this is asked by code that means to behave
                     // differently under one, and it would find none.
                     writeU32If(buffer >>> 0, wanted === PROCESS_EXECUTE_FLAGS ? EXECUTE_FLAGS : 0);
+                    return STATUS.SUCCESS;
+                }
+                const information = wanted === PROCESS_IMAGE_INFORMATION
+                    && (host.pointerSize ?? 4) === 4 ? host.imageInformation?.() ?? null : null;
+                if (information)
+                {
+                    if ((length >>> 0) !== SECTION_IMAGE_INFORMATION_SIZE)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    host.writeMemory(buffer >>> 0, information);
+                    writeU32If(returnLength >>> 0, SECTION_IMAGE_INFORMATION_SIZE);
                     return STATUS.SUCCESS;
                 }
                 if ((wanted === PROCESS_IMAGE_FILE_NAME || wanted === PROCESS_IMAGE_FILE_NAME_WIN32)

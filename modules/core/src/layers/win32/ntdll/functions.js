@@ -225,6 +225,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @property {() => import('./query.js').OpenHandle[]} [openHandles]
  *           The handles this process holds, what SystemHandleInformation lists.
  * @property {number} [processId]  This process's id.
+ * @property {() => Uint8Array | null} [imageInformation]  SECTION_IMAGE_INFORMATION of
+ *           the program's image, for ProcessImageInformation.
  * @property {string} [processorName]  CPUID's brand string, what
  *           SystemProcessorBrandString answers.
  * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
@@ -666,6 +668,7 @@ export function createNtdllFunctions(host){
             processors: host.processors,
             openHandles: host.openHandles,
             processId: host.processId,
+            ...host.imageInformation ? { imageInformation: host.imageInformation } : {},
             systemClasses: {
                 ...time.systemClasses,
                 // SYSTEM_KERNEL_DEBUGGER_INFORMATION: no kernel debugger, none

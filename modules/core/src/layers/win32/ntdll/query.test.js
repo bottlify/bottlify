@@ -303,6 +303,28 @@ test('the process reports the block a program would have found itself', ()=>{
     createQueryFunctions(child).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
     assert.equal(child.view.getUint32(BUFFER + 0x14, true), 0x2a4,
         'InheritedFromUniqueProcessId: the process that started it');
+
+    // Asked between its threads' turns - a parent's call made in it, a
+    // suspended child's first thread never having run - the process still
+    // knows its block and its id.
+    const between = { ...fakeHost(), teb: ()=>0, processBlock: ()=>PEB_AT, processId: 0x1234 };
+    createQueryFunctions(between).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
+    assert.equal(between.view.getUint32(BUFFER + 0x04, true), PEB_AT, 'PebBaseAddress');
+    assert.equal(between.view.getUint32(BUFFER + 0x10, true), 0x1234, 'UniqueProcessId');
+});
+
+test('ProcessImageInformation is the program image\'s SECTION_IMAGE_INFORMATION', ()=>{
+    const information = new Uint8Array(48).fill(7);
+    const host = { ...fakeHost(), imageInformation: ()=>information };
+    const fns = createQueryFunctions(host);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 37, BUFFER, 47, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 37, BUFFER, 48, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    assert.deepEqual([...host.bytes.slice(BUFFER, BUFFER + 48)], [...information]);
+    assert.equal(host.view.getUint32(RETURN_LENGTH, true), 48);
+    assert.equal(createQueryFunctions(fakeHost()).NtQueryInformationProcess.handler(
+        [-1, 37, BUFFER, 48, 0]), STATUS.INVALID_INFO_CLASS, 'no image placed, unknown');
 });
 
 test('there is no debugger, and the answer says so rather than declining', ()=>{
