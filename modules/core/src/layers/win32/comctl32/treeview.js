@@ -39,6 +39,7 @@ import {
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
+import { stableSort } from './stable-sort.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -69,7 +70,9 @@ export const TVM_GETITEMA = TVM_FIRST + 12;
 export const TVM_SETITEMA = TVM_FIRST + 13;
 export const TVM_GETVISIBLECOUNT = TVM_FIRST + 16;
 export const TVM_HITTEST = TVM_FIRST + 17;
+export const TVM_SORTCHILDREN = TVM_FIRST + 19;
 export const TVM_ENSUREVISIBLE = TVM_FIRST + 20;
+export const TVM_SORTCHILDRENCB = TVM_FIRST + 21;
 export const TVM_SETBKCOLOR = TVM_FIRST + 29;
 export const TVM_SETTEXTCOLOR = TVM_FIRST + 30;
 export const TVM_GETBKCOLOR = TVM_FIRST + 31;
@@ -549,7 +552,7 @@ export function createTreeViewProcedure(host, tk){
         {
             const at = siblings.findIndex(/** @param {number} each */ each=>{
                 const other = held.nodes.get(each);
-                return other ? other.text.toLowerCase() > item.text.toLowerCase() : false;
+                return other ? textOrder(other.text, item.text) > 0 : false;
             });
             siblings.splice(at === -1 ? siblings.length : at, 0, item.handle);
         }
@@ -571,6 +574,34 @@ export function createTreeViewProcedure(host, tk){
                 parentNode.childrenCount = Math.max(1, parentNode.childrenCount);
             }
         }
+    };
+
+    /**
+     * The order of two items' texts the tree sorts by, TVI_SORT and
+     * TVM_SORTCHILDREN alike: without case.
+     *
+     * @param {string} a @param {string} b
+     */
+    const textOrder = (a, b)=>{
+        const left = a.toLowerCase();
+        const right = b.toLowerCase();
+        return left < right ? -1 : left > right ? 1 : 0;
+    };
+
+    /**
+     * Puts a list of siblings in the order a comparison of their items
+     * answers, in place; TRUE once done.
+     *
+     * @param {any} record @param {number[]} siblings
+     * @param {(a: TreeNode, b: TreeNode) => number | Promise<number>} order
+     */
+    const sortChildren = (record, siblings, order)=>{
+        const items = siblings.map(handle=>/** @type {TreeNode} */ (node(record, handle)));
+        return stableSort(items, order).then(sorted=>{
+            siblings.splice(0, siblings.length, ...sorted.map(item=>item.handle));
+            host.invalidate(record);
+            return 1;
+        });
     };
 
     /** @param {any} record @param {number} handle  Removes an item and its subtree. */
@@ -1095,8 +1126,49 @@ export function createTreeViewProcedure(host, tk){
                 host.invalidate(record);
                 return item.handle;
             }
+            case TVM_SORTCHILDREN: {
+                // An item's children by their text, without case; equal ones
+                // keep their order. No item, or TVI_ROOT, sorts nothing and is
+                // answered TRUE when the tree has items; an item without
+                // children FALSE (Wine's treeview.c test_TVM_SORTCHILDREN,
+                // Windows' answers). The children's own children stay as they
+                // are, whatever wParam.
+                const at = message.lParam >>> 0;
+                if (at === 0 || at === TVI_ROOT)
+                {
+                    return state(record).roots.length > 0 ? 1 : 0;
+                }
+                const item = node(record, at);
+                if (!item || item.children.length === 0)
+                {
+                    return 0;
+                }
+                return sortChildren(record, item.children, (a, b)=>textOrder(a.text, b.text));
+            }
+            case TVM_SORTCHILDRENCB: {
+                // TVSORTCB: the parent, the program's comparison and its word;
+                // the comparison is handed the two items' lParams.
+                const at = message.lParam >>> 0;
+                const compare = at === 0 ? 0 : readU32(at + 4);
+                if (compare === 0 || !host.call)
+                {
+                    return 0;
+                }
+                const parent = readU32(at);
+                const siblings = parent === 0 || parent === TVI_ROOT ? state(record).roots
+                    : node(record, parent)?.children;
+                if (!siblings || siblings.length === 0)
+                {
+                    return 0;
+                }
+                const call = host.call;
+                const word = readU32(at + 8);
+                return sortChildren(record, siblings, (a, b)=>call(compare, [a.param, b.param,
+                    word], thread));
+            }
             case TVM_DELETEITEM: {
-                if ((message.lParam >>> 0) === TVI_ROOT)
+                // TVI_ROOT, or no item at all, is every item (MSDN TVM_DELETEITEM).
+                if ((message.lParam >>> 0) === TVI_ROOT || (message.lParam >>> 0) === 0)
                 {
                     return deleteAll(record, thread);
                 }

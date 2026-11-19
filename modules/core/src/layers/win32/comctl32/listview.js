@@ -38,6 +38,7 @@ import { notifyWindow } from './notify.js';
 import { LPSTR_TEXTCALLBACK, MAX_TEXT, readText, writeText } from './strings.js';
 import { HDITEM, HDM, HEADER_CLASS } from './header.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
+import { stableSort } from './stable-sort.js';
 
 /** The class name a program creates the control by. */
 export const LISTVIEW_CLASS = 'SysListView32';
@@ -1302,30 +1303,10 @@ export function createListViewProcedure(host, tk, setBkMode){
         /** @type {ListItem[]} */
         const items = held.items;
         const before = new Map(items.map((item, index)=>[item, index]));
-        /** @param {ListItem[]} list @returns {Promise<ListItem[]>} */
-        const sort = async list=>{
-            if (list.length < 2)
-            {
-                return list;
-            }
-            const middle = list.length >> 1;
-            const left = await sort(list.slice(0, middle));
-            const right = await sort(list.slice(middle));
-            /** @type {ListItem[]} */
-            const merged = [];
-            let i = 0;
-            let j = 0;
-            while (i < left.length && j < right.length)
-            {
-                const a = byIndex ? /** @type {number} */ (before.get(left[i])) : left[i].lParam;
-                const b = byIndex ? /** @type {number} */ (before.get(right[j]))
-                    : right[j].lParam;
-                const order = (await call(compare, [a, b, lParam], thread)) | 0;
-                merged.push(order <= 0 ? left[i++] : right[j++]);
-            }
-            return [...merged, ...left.slice(i), ...right.slice(j)];
-        };
-        held.items = await sort(items);
+        /** @param {ListItem} item */
+        const word = item=>(byIndex ? /** @type {number} */ (before.get(item)) : item.lParam);
+        held.items = await stableSort(items, (a, b)=>call(compare, [word(a), word(b), lParam],
+            thread));
         host.invalidate(record);
         return 1;
     };
