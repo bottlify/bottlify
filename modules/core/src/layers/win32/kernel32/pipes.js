@@ -58,9 +58,7 @@ const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_BAD_PIPE = 230;
 const ERROR_PIPE_BUSY = 231;
 const ERROR_NO_DATA = 232;
-const ERROR_PIPE_NOT_CONNECTED = 233;
 const ERROR_PIPE_CONNECTED = 535;
-const ERROR_PIPE_LISTENING = 536;
 const ERROR_IO_PENDING = 997;
 const ERROR_NOACCESS = 998;
 
@@ -121,9 +119,14 @@ const STATUS_PIPE_DISCONNECTED = STATUS.PIPE_DISCONNECTED;
 const STATUS_PIPE_LISTENING = STATUS.PIPE_LISTENING;
 /** A write to an end whose peer is gone: ERROR_NO_DATA. */
 const STATUS_PIPE_CLOSING = STATUS.PIPE_CLOSING;
+/** A listen whose client came first: a good connection. */
+const STATUS_PIPE_CONNECTED = STATUS.PIPE_CONNECTED;
 
 /** NtFsControlFile's peek, and the head of the FILE_PIPE_PEEK_BUFFER it fills. */
 const FSCTL_PIPE_PEEK = 0x11400c;
+/** NtFsControlFile's ConnectNamedPipe and DisconnectNamedPipe. */
+const FSCTL_PIPE_LISTEN = 0x110008;
+const FSCTL_PIPE_DISCONNECT = 0x110004;
 const PEEK_HEAD = 16;
 /** FILE_PIPE_PEEK_BUFFER.NamedPipeState: both ends there, or the other gone. */
 const FILE_PIPE_CONNECTED_STATE = 3;
@@ -983,6 +986,92 @@ export function createNamedPipes(host){
     };
 
     /**
+     * A server end listens for its client, as ConnectNamedPipe and
+     * FSCTL_PIPE_LISTEN ask: a client already there is STATUS_PIPE_CONNECTED
+     * (a good connection), one that came and went STATUS_PIPE_CLOSING, an end
+     * that does not wait STATUS_PIPE_LISTENING; a disconnected instance
+     * listens again. Otherwise the connect waits: pending through its
+     * OVERLAPPED or its native block, or parked - the answer then the park's.
+     *
+     * @param {End} end @param {number} handle
+     * @param {{ overlapped?: number, block?: number, io?: NativeAsync }} how
+     * @returns {number | any}  a status, or the park
+     */
+    const listen = (end, handle, { overlapped = 0, block = 0, io })=>{
+        const { instance } = end;
+        if (instance.state === 'connected')
+        {
+            return STATUS_PIPE_CONNECTED;
+        }
+        if (instance.state === 'closing')
+        {
+            return STATUS_PIPE_CLOSING;
+        }
+        if (instance.state === 'disconnected')
+        {
+            instance.state = 'listening';
+            listening(instance.pipe);
+        }
+        if (end.nowait)
+        {
+            return STATUS_PIPE_LISTENING;
+        }
+        const native = block !== 0;
+        const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
+            ? io : undefined;
+        /** @type {Op} */
+        const op = { kind: 'connect', ctx, thread: host.currentThread(), handle,
+            overlapped, buffer: 0, length: 0, out: block, end,
+            ...native ? { native } : {}, ...async ? { async } : {} };
+        instance.connects.push(op);
+        if (end.signal)
+        {
+            kernel.resetEvent?.(end.signal);
+        }
+        if (overlapped !== 0 || async)
+        {
+            return STATUS.PENDING;
+        }
+        kernel.block(op.thread, `pipe ${instance.pipe.name}`);
+        return host.park();
+    };
+
+    /**
+     * A server end cuts its client off, as DisconnectNamedPipe and
+     * FSCTL_PIPE_DISCONNECT ask: the client's handle stays and every call on
+     * it says the pipe is not connected, what was unread either way is
+     * dropped, and a write still waiting for room, or a flush, finds the
+     * pipe not connected. The instance may then be connected again. An
+     * instance still listening is STATUS_PIPE_LISTENING; one already cut off
+     * has no client to cut off again.
+     *
+     * @param {End} end  a server end
+     */
+    const disconnect = end=>{
+        const { instance } = end;
+        if (instance.state === 'listening')
+        {
+            return STATUS_PIPE_LISTENING;
+        }
+        if (instance.state === 'disconnected')
+        {
+            return STATUS_PIPE_DISCONNECTED;
+        }
+        const client = instance.client;
+        dropInbox(end, STATUS_PIPE_DISCONNECTED);
+        if (client)
+        {
+            client.cut = true;
+            dropInbox(client, STATUS_PIPE_DISCONNECTED);
+            abort(client, ()=>true);
+        }
+        abort(end, op=>op.kind === 'read');
+        instance.client = null;
+        instance.state = 'disconnected';
+        return STATUS.SUCCESS;
+    };
+
+    /**
      * An end served across a link (`EndAcross`). Its reads that wait are ops
      * whose process is the promise: what `serve` writes for them is kept, and
      * what wakes them answers it. The end's own event is the kernel's here.
@@ -1726,7 +1815,11 @@ export function createNamedPipes(host){
      * all of it, the calling thread's alone, or the one OVERLAPPED -- ends
      * cancelled. The count, or null for a handle that is no pipe end.
      *
-     * @param {number} handle @param {{ overlapped?: number, thread?: any }} which
+     * NtCancelIoFileEx names the one by its IO_STATUS_BLOCK (`block`): an
+     * OVERLAPPED is one, a native call's is where it was asked.
+     *
+     * @param {number} handle
+     * @param {{ overlapped?: number, thread?: any, block?: number }} which
      */
     const cancel = (handle, which)=>{
         const end = endOf(handle);
@@ -1738,20 +1831,25 @@ export function createNamedPipes(host){
         }
         return abort(end, op=>op.ctx === ctx && op.handle === (handle >>> 0)
             && (which.overlapped === undefined || op.overlapped === which.overlapped)
+            && (which.block === undefined || op.overlapped === which.block
+                || op.statusAt === which.block || (op.native === true && op.out === which.block))
             && (which.thread === undefined || op.thread === which.thread));
     };
 
     /**
-     * CancelSynchronousIo: the reads and connects a thread of this process
-     * waits in synchronously end cancelled. How many there were.
+     * CancelSynchronousIo: the reads, writes and connects a thread of this
+     * process waits in synchronously end cancelled - NtCancelSynchronousIoFile's,
+     * the one whose IO_STATUS_BLOCK is `block`. How many there were.
      *
-     * @param {any} thread
+     * @param {any} thread @param {number} [block]
      */
-    const cancelSynchronous = thread=>{
+    const cancelSynchronous = (thread, block = 0)=>{
         let count = 0;
         forEachEnd(end=>{
             count += abort(end, op=>op.ctx === ctx && op.thread === thread
-                && op.overlapped === 0 && !op.async && !op.routine);
+                && op.overlapped === 0 && !op.async && !op.routine
+                && (block === 0 || (op.native === true && op.out === block)
+                    || op.statusAt === block));
         });
         return count;
     };
@@ -2053,40 +2151,18 @@ export function createNamedPipes(host){
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
                 begin(overlapped);
-                const { instance } = end;
-                if (instance.state === 'connected')
-                {
-                    return fail(ERROR_PIPE_CONNECTED);
-                }
-                if (instance.state === 'closing')
-                {
-                    return fail(ERROR_NO_DATA);
-                }
-                if (instance.state === 'disconnected')
-                {
-                    instance.state = 'listening';
-                    listening(instance.pipe);
-                }
-                if (end.nowait)
-                {
-                    return fail(ERROR_PIPE_LISTENING);
-                }
-                /** @type {Op} */
-                const op = { kind: 'connect', ctx, thread: host.currentThread(),
-                    handle: handle >>> 0, overlapped: overlapped >>> 0, buffer: 0, length: 0,
-                    out: 0, end };
-                instance.connects.push(op);
-                if (end.signal)
-                {
-                    kernel.resetEvent?.(end.signal);
-                }
-                if ((overlapped >>> 0) !== 0)
+                const answer = listen(end, handle >>> 0, { overlapped: overlapped >>> 0 });
+                if (answer === STATUS.PENDING)
                 {
                     overlappedResult(writeDword, layout, overlapped >>> 0, STATUS.PENDING, 0);
                     return fail(ERROR_IO_PENDING);
                 }
-                kernel.block(op.thread, `pipe ${instance.pipe.name}`);
-                return host.park();
+                if (answer === STATUS_PIPE_CONNECTED)
+                {
+                    return fail(ERROR_PIPE_CONNECTED);
+                }
+                return typeof answer === 'number' ? fail(answer === STATUS_PIPE_CLOSING
+                    ? ERROR_NO_DATA : toDosError(answer)) : answer;
             },
         },
 
@@ -2106,30 +2182,8 @@ export function createNamedPipes(host){
                 {
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                const { instance } = end;
-                if (instance.state === 'listening')
-                {
-                    return fail(ERROR_PIPE_LISTENING);
-                }
-                // Once cut off, there is no client to cut off again.
-                if (instance.state === 'disconnected')
-                {
-                    return fail(ERROR_PIPE_NOT_CONNECTED);
-                }
-                // What was unread either way is dropped, and a write still
-                // waiting for room, or a flush, finds the pipe not connected.
-                const client = instance.client;
-                dropInbox(end, STATUS_PIPE_DISCONNECTED);
-                if (client)
-                {
-                    client.cut = true;
-                    dropInbox(client, STATUS_PIPE_DISCONNECTED);
-                    abort(client, ()=>true);
-                }
-                abort(end, op=>op.kind === 'read');
-                instance.client = null;
-                instance.state = 'disconnected';
-                return 1;
+                const status = disconnect(end);
+                return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
             },
         },
 
@@ -2619,15 +2673,36 @@ export function createNamedPipes(host){
          * Null for a handle that is no pipe end; another code answers
          * STATUS_INVALID_DEVICE_REQUEST, said.
          *
+         * FSCTL_PIPE_LISTEN and FSCTL_PIPE_DISCONNECT are ConnectNamedPipe's and
+         * DisconnectNamedPipe's, native: a listen that waits is STATUS_PENDING
+         * on an overlapped end, finished through its block, event, APC and
+         * port, and parks a synchronous one (`parked`, the call's answer).
+         *
          * @param {number} handle @param {number} code @param {number} output
-         * @param {number} room
-         * @returns {{ status: number, information: number } | null}
+         * @param {number} room @param {number} [block]  the IO_STATUS_BLOCK
+         * @param {NativeAsync} [io]  the event, APC and context the call was given
+         * @returns {{ status: number, information: number } | { parked: any } | null}
          */
-        control(handle, code, output, room){
+        control(handle, code, output, room, block = 0, io = undefined){
             const end = endOf(handle);
             if (!end)
             {
                 return null;
+            }
+            if ((code >>> 0) === FSCTL_PIPE_LISTEN || (code >>> 0) === FSCTL_PIPE_DISCONNECT)
+            {
+                if (end.side !== 'server')
+                {
+                    return { status: STATUS.INVALID_PARAMETER, information: 0 };
+                }
+                if ((block >>> 0) === 0)
+                {
+                    return { status: STATUS.ACCESS_VIOLATION, information: 0 };
+                }
+                const answer = (code >>> 0) === FSCTL_PIPE_DISCONNECT ? disconnect(end)
+                    : listen(end, handle >>> 0, { block: block >>> 0, io });
+                return typeof answer === 'number' ? { status: answer, information: 0 }
+                    : { parked: answer };
             }
             if ((code >>> 0) !== FSCTL_PIPE_PEEK)
             {

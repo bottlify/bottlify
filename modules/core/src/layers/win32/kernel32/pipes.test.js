@@ -1101,7 +1101,8 @@ test('a peek sees a message pipe\'s front message whatever the end reads in; FSC
             [3, 35, messages ? 2 : 0, messages ? 20 : 0]);
         assert.deepEqual(p.pipes.control(client, 0x11400c, PEEK, 16 + 1),
             { status: STATUS_BUFFER_OVERFLOW, information: 17 });
-        assert.equal(p.pipes.control(client, 0x11400c, PEEK, 15)?.status, 0xc0000023,
+        assert.deepEqual(p.pipes.control(client, 0x11400c, PEEK, 15),
+            { status: 0xc0000023, information: 0 },
             'no room for the head: STATUS_BUFFER_TOO_SMALL');
     }
 });
@@ -1116,4 +1117,44 @@ test('a pipe made with buffer sizes of 0 holds the default, 4096 bytes, each way
     assert.equal(p.pipes.write(server, 0x3000, 4096, COUNT, false, R1), 1);
     assert.equal(p.fns.GetNamedPipeInfo.handler([server, 0, STATE, STATE + 4, 0]), 1);
     assert.deepEqual([p.u32(STATE), p.u32(STATE + 4)], [0, 0], 'the sizes asked are answered');
+});
+
+test('FSCTL_PIPE_LISTEN is ConnectNamedPipe, native: pending on an overlapped end, cancelled by'
+    + ' its block', ()=>{
+    const FSCTL_PIPE_LISTEN = 0x110008;
+    const FSCTL_PIPE_DISCONNECT = 0x110004;
+    const IOSB = 0x2b00;
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+    const io = { event: 0x77, apc: 0, context: 0x55 };
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_LISTEN, 0, 0, IOSB, io),
+        { status: STATUS_PENDING, information: 0 });
+    assert.equal(p.pipes.cancel(server, { block: 0x9999 }), 0, 'another block: nothing');
+    assert.equal(p.pipes.cancel(server, { block: IOSB }), 1);
+    assert.deepEqual([p.u32(IOSB), p.u32(IOSB + 4)], [STATUS_CANCELLED, 0]);
+    assert.ok(p.events.includes(0x77), 'its event set');
+
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_LISTEN, 0, 0, IOSB, io),
+        { status: STATUS_PENDING, information: 0 });
+    p.client();
+    assert.deepEqual([p.u32(IOSB), p.u32(IOSB + 4)], [0, 0], 'the client came: connected');
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_LISTEN, 0, 0, IOSB, io),
+        { status: 0xc00000b2, information: 0 }, 'STATUS_PIPE_CONNECTED');
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_DISCONNECT, 0, 0, IOSB, io),
+        { status: 0, information: 0 });
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_DISCONNECT, 0, 0, IOSB, io),
+        { status: 0xc00000b0, information: 0 }, 'cut off already: STATUS_PIPE_DISCONNECTED');
+});
+
+test('a synchronous listen parks; CancelSynchronousIo by its block ends it cancelled', ()=>{
+    const IOSB = 0x2b00;
+    const p = processOn(new Map());
+    const server = p.server();
+    p.as('p1:listener');
+    assert.deepEqual(p.pipes.control(server, 0x110008, 0, 0, IOSB, undefined),
+        { parked: 'parked' });
+    assert.equal(p.pipes.cancelSynchronous('p1:listener', 0x9999), 0);
+    assert.equal(p.pipes.cancelSynchronous('p1:listener', IOSB), 1);
+    assert.equal(p.u32(IOSB), STATUS_CANCELLED);
+    assert.deepEqual(p.woken.at(-1), { thread: 'p1:listener', result: STATUS_CANCELLED });
 });

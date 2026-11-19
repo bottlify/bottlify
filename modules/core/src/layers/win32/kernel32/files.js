@@ -102,6 +102,8 @@ const ERROR_FILENAME_EXCED_RANGE = 206;
 
 /** ReadDirectoryChangesW's statuses, and the error a completion routine is told. */
 const STATUS_PENDING = 0x103;
+/** What a cancel found nothing to cancel with. */
+const STATUS_NOT_FOUND = 0xc0000225;
 const STATUS_NOTIFY_ENUM_DIR = 0x10c;
 const ERROR_NOTIFY_ENUM_DIR = 1022;
 /** Every FILE_NOTIFY_CHANGE_ flag. */
@@ -3488,6 +3490,49 @@ export function createFileFunctions(host){
         NtCreateFile: { argBytes: 44, handler: ntCreateFile },
 
         /**
+         * NTSTATUS NtCancelIoFile(HANDLE, PIO_STATUS_BLOCK)
+         *
+         * What the calling thread waits for on the handle ends cancelled - a
+         * pipe's reads, writes and connects; a file's I/O has finished by the
+         * time its call answers. Success, written in the block, whether or
+         * not there was any; a handle that is no file object is refused.
+         */
+        NtCancelIoFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, block])=>{
+                if (host.pipes?.cancel(handle, { thread: host.currentThread?.() }) == null
+                    && !FILE_OBJECTS.has(host.handles.typeOf?.(handle >>> 0) ?? ''))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                return report(block >>> 0, STATUS_SUCCESS, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtCancelIoFileEx(HANDLE, PIO_STATUS_BLOCK IoRequestToCancel,
+         *   PIO_STATUS_BLOCK)
+         *
+         * The one request whose IO_STATUS_BLOCK is named, or every one on the
+         * handle of any thread: STATUS_NOT_FOUND, written in the block, when
+         * there was none (CancelIoEx's ERROR_NOT_FOUND).
+         */
+        NtCancelIoFileEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, request, block])=>{
+                const count = host.pipes?.cancel(handle,
+                    (request >>> 0) === 0 ? {} : { block: request >>> 0 });
+                if (count == null && !FILE_OBJECTS.has(host.handles.typeOf?.(handle >>> 0) ?? ''))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                return report(block >>> 0, (count ?? 0) > 0 ? STATUS_SUCCESS : STATUS_NOT_FOUND, 0);
+            },
+        },
+
+        /**
          * NTSTATUS NtFsControlFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID,
          *   PIO_STATUS_BLOCK, ULONG FsControlCode, PVOID, ULONG, PVOID, ULONG)
          *
@@ -3498,10 +3543,23 @@ export function createFileFunctions(host){
         NtFsControlFile: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([handle, , , , block, code, , , output, room])=>{
-                const piped = host.pipes?.control(handle, code, output, room);
+            handler: ([handle, event, apc, context, block, code, , , output, room])=>{
+                const piped = host.pipes?.control(handle, code, output, room, block,
+                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 });
                 if (piped)
                 {
+                    if ('parked' in piped)
+                    {
+                        return piped.parked;
+                    }
+                    if (piped.status === STATUS_PENDING)
+                    {
+                        if ((event >>> 0) !== 0)
+                        {
+                            host.resetEvent?.(event >>> 0);
+                        }
+                        return STATUS_PENDING;
+                    }
                     return settled(block >>> 0, piped.status, piped.information);
                 }
                 if (!object(handle, 'file'))

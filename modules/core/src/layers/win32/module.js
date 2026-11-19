@@ -3842,8 +3842,9 @@ export function createWin32Module(){
                         // A job tells the completion port it was associated with.
                         postCompletion: (port, packet)=>ports.postTo(port, packet),
                         // The waits CancelSynchronousIo can cut short: a pipe's.
-                        cancelSynchronous: (/** @type {any} */ thread)=>
-                            pipes.cancelSynchronous(thread),
+                        cancelSynchronous: (/** @type {any} */ thread,
+                            /** @type {number | undefined} */ block)=>
+                            pipes.cancelSynchronous(thread, block),
                         listenJobs: events=>{
                             jobEvents = events;
                         },

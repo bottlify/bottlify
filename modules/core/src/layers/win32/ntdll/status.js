@@ -101,6 +101,10 @@ export const STATUS = Object.freeze({
     PIPE_DISCONNECTED: 0xc00000b0,
     PIPE_LISTENING: 0xc00000b3,
     PIPE_CLOSING: 0xc00000b1,
+    /** A listen whose client came first. */
+    PIPE_CONNECTED: 0xc00000b2,
+    /** A cancel that found no I/O to cancel. */
+    NOT_FOUND: 0xc0000225,
     /** A pipe end in no state for the request: a server cut from its client. */
     INVALID_PIPE_STATE: 0xc00000ad,
     /** A file-system or device control code the object does not answer. */
@@ -161,6 +165,8 @@ const ERROR = Object.freeze({
     PIPE_BUSY: 231,
     PIPE_NOT_CONNECTED: 233,
     BAD_PIPE: 230,
+    PIPE_CONNECTED: 535,
+    NOT_FOUND: 1168,
     PIPE_LISTENING: 536,
     OPERATION_ABORTED: 995,
 });
@@ -236,6 +242,8 @@ const TO_DOS_ERROR = new Map([
     [STATUS.PIPE_BROKEN, ERROR.BROKEN_PIPE],
     [STATUS.PIPE_DISCONNECTED, ERROR.PIPE_NOT_CONNECTED],
     [STATUS.INVALID_PIPE_STATE, ERROR.BAD_PIPE],
+    [STATUS.PIPE_CONNECTED, ERROR.PIPE_CONNECTED],
+    [STATUS.NOT_FOUND, ERROR.NOT_FOUND],
     [STATUS.INVALID_DEVICE_REQUEST, ERROR.INVALID_FUNCTION],
     [STATUS.PIPE_LISTENING, ERROR.PIPE_LISTENING],
     [STATUS.PIPE_CLOSING, ERROR.NO_DATA],
