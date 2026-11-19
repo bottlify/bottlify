@@ -195,7 +195,12 @@ flowchart TD
   program imports: its dialogs are not shown and answer Cancel, each said as a loss; and Visual
   C++ 6's `MSVCP60.dll`, whose `std::string` and `std::wstring` keep that compiler's layout and
   share their text by count, as its headers inline; a position past the end or a string too long
-  throws out_of_range or length_error into the program, as the library does.
+  throws out_of_range or length_error into the program, as the library does. Its iostreams
+  (stringstreams, fstreams over the C runtime's FILE, `cin`/`cout`/`cerr`/`clog` laid out
+  whole as static objects) are in that compiler's layout too, a stream reaching its virtual
+  `basic_ios` through its vbtable; a locale says the decimal point Windows' locale data gives.
+  A stream buffer or manipulator of the program's own class, whose virtual functions are its
+  code, is not run from the library: the call reads as end of stream, said once as a loss.
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers

@@ -6896,6 +6896,7 @@ export function createWin32Module(){
             libraries['MSVCP60.dll'] = createMsvcp60Functions(libraries['msvcrt.dll'], {
                 readMemory, writeMemory,
                 addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
+                divergence: config?.divergence,
             });
 
             // Added after the rest because it is built from them: nearly everything
