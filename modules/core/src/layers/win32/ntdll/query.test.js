@@ -670,6 +670,25 @@ test('a child\'s handle is answered by the child about itself, or from its recor
         assert.equal(fns.NtQueryInformationProcess.handler([0x40, 7, BUFFER, 4, 0]),
             STATUS.INVALID_INFO_CLASS, 'and nothing else');
         assert.equal(asked.length, 1);
+
+        // Its name and priority class stay, its image went with its memory
+        // (Wine's process.c test_dead_process).
+        Object.assign(child, { imagePath: 'C:\\App\\child.exe' });
+        host.nativePath = (/** @type {string} */ path)=>`\\Device\\HarddiskVolume1${path.slice(2)}`;
+        const named = createQueryFunctions(host);
+        assert.equal(named.NtQueryInformationProcess.handler([0x40, 27, BUFFER, 0x100, 0]),
+            STATUS.SUCCESS);
+        const text = String.fromCharCode(...new Uint16Array(host.bytes.slice(BUFFER + 8,
+            BUFFER + 8 + host.view.getUint16(BUFFER, true)).buffer));
+        assert.equal(text, '\\Device\\HarddiskVolume1\\App\\child.exe');
+        host.bytes.fill(0xcc, BUFFER, BUFFER + 2);
+        assert.equal(named.NtQueryInformationProcess.handler([0x40, 18, BUFFER, 2, 0]),
+            STATUS.SUCCESS);
+        assert.deepEqual([...host.bytes.subarray(BUFFER, BUFFER + 2)], [0, 2], 'normal');
+        host.bytes.fill(0xcc, BUFFER, BUFFER + 4);
+        assert.equal(named.NtQueryInformationProcess.handler([0x40, 37, BUFFER, 0x30, 0]),
+            STATUS.PROCESS_IS_TERMINATING);
+        assert.equal(host.view.getUint32(BUFFER, true), 0xcccccccc, 'nothing written');
     });
 
 test('NtQueryObject names a file under its volume device, an unnamed object nothing', ()=>{

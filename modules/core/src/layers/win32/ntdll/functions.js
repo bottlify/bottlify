@@ -220,6 +220,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           process block. Absent, the default.
  * @property {() => { win32: string, native: string }} [imagePath]  The program's
  *           path, and as the object manager names it (`\\Device\\HarddiskVolume1\\...`).
+ * @property {(path: string) => string | null} [nativePath]  A path as the object
+ *           manager names it, null where it has no drive: an ended child's image name.
  * @property {() => import('./query.js').SystemProcess[]} [processes]
  *           What SystemProcessInformation lists.
  * @property {(handle: number) => string | null} [handleType]
@@ -680,6 +682,7 @@ export function createNtdllFunctions(host){
             divergence: host.divergence,
             processes: host.processes,
             imagePath: host.imagePath,
+            nativePath: host.nativePath,
             processors: host.processors,
             openHandles: host.openHandles,
             processId: host.processId,

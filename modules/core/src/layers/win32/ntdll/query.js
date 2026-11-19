@@ -147,6 +147,9 @@ const PROCESS_IMAGE_FILE_NAME = 27;
 const PROCESS_IMAGE_INFORMATION = 37;
 const SECTION_IMAGE_INFORMATION_SIZE = 48;
 const PROCESS_IMAGE_FILE_NAME_WIN32 = 43;
+/** ProcessPriorityClass, and the class a process runs at unless it asks otherwise. */
+const PROCESS_PRIORITY_CLASS = 18;
+const PRIORITY_CLASS_NORMAL = 2;
 
 /**
  * The process's execute flags: data runs as code, and that cannot be changed.
@@ -364,6 +367,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => { win32: string, native: string }} [imagePath]  The program's
  *           path, and as the object manager names it: ProcessImageFileName's
  *           answers. Without it those classes are unknown.
+ * @property {(path: string) => string | null} [nativePath]  A path as the object
+ *           manager names it, null where it has no drive: an ended child's image name.
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
  *           is an unknown class.
@@ -724,6 +729,31 @@ export function createQueryFunctions(host){
      * @param {number} buffer @param {number} length @param {number} returned
      */
     const recorded = (child, wanted, buffer, length, returned)=>{
+        // An ended process keeps its name and priority class; its image is
+        // gone with its memory (Wine's process.c test_dead_process).
+        if (wanted === PROCESS_IMAGE_FILE_NAME || wanted === PROCESS_IMAGE_FILE_NAME_WIN32)
+        {
+            const path = String(child.imagePath ?? '');
+            const named = wanted === PROCESS_IMAGE_FILE_NAME_WIN32 ? path
+                : host.nativePath?.(path) ?? null;
+            return named === null ? STATUS.INVALID_INFO_CLASS
+                : writeName(named, buffer, length, returned);
+        }
+        if (wanted === PROCESS_PRIORITY_CLASS)
+        {
+            writeU32If(returned, 2);
+            if (length < 2 || buffer === 0)
+            {
+                return STATUS.INFO_LENGTH_MISMATCH;
+            }
+            // Not in the foreground, PROCESS_PRIORITY_CLASS_NORMAL.
+            host.writeMemory(buffer, Uint8Array.of(0, PRIORITY_CLASS_NORMAL));
+            return STATUS.SUCCESS;
+        }
+        if (wanted === PROCESS_IMAGE_INFORMATION && child.completed)
+        {
+            return STATUS.PROCESS_IS_TERMINATING;
+        }
         if (wanted !== PROCESS_BASIC_INFORMATION)
         {
             return STATUS.INVALID_INFO_CLASS;
