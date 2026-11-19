@@ -234,6 +234,9 @@ export function createImageLists(host){
      * @property {readonly number[]} overlays  The images the fifteen overlays are, or -1.
      * @property {number[] | null} [colors]  A list of four or eight bits a pixel's colour
      *     table, 0xRRGGBB: its image's, kept to make the image again when it grows.
+     * @property {boolean} [colorsSet]  Whether its table was set, by ImageList_SetColorTable
+     *     or by the first image brought to it empty with a table of its own: once set, later
+     *     images, a list emptied included, leave it.
      */
 
     /** @type {Map<number, ImageList>} */
@@ -418,10 +421,12 @@ export function createImageLists(host){
         const depth = depthOf(list);
         const size = depth <= 8 ? 1 << depth : 0;
         const set = Math.max(0, Math.min(colors.length, size - start));
-        if (set === 0 || !list.colors)
+        if (set === 0)
         {
             return 0;
         }
+        // A table set before the list has an image is the one it is made with.
+        list.colors ??= [...(depth === 4 ? DEFAULT_COLORS_4 : DEFAULT_COLORS_8)];
         colors.slice(0, set).forEach((rgb, index)=>{
             /** @type {number[]} */ (list.colors)[start + index] = rgb & 0xffffff;
         });
@@ -605,12 +610,15 @@ export function createImageLists(host){
         }
         if (host.gdi32 && (bitmap >>> 0) !== 0)
         {
-            // The first images a list of a palette is given bring theirs:
-            // a bitmap with a colour table puts its colours in the list's.
-            const own = first === 0 && depthOf(list) <= 8 ? colorsOf(bitmap >>> 0) : null;
+            // The first images a list of a palette is given bring theirs,
+            // once: a bitmap with a colour table, added to an empty list
+            // whose table nothing set yet, puts its colours in the list's.
+            const own = first === 0 && !list.colorsSet && depthOf(list) <= 8
+                ? colorsOf(bitmap >>> 0) : null;
             if (own)
             {
                 setColors(list, 0, own);
+                list.colorsSet = true;
             }
             for (let at = 0; at < count; at++)
             {
@@ -1524,6 +1532,7 @@ export function createImageLists(host){
                 const size = 1 << depthOf(list);
                 const wanted = Math.max(0, Math.min(entries >>> 0, size - (start >>> 0)));
                 const bytes = host.readMemory(quads >>> 0, wanted * 4);
+                list.colorsSet = true;
                 return setColors(list, start >>> 0, Array.from({ length: wanted },
                     (_, index)=>bytes[index * 4] | bytes[index * 4 + 1] << 8
                         | bytes[index * 4 + 2] << 16));

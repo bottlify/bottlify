@@ -628,6 +628,37 @@ test('the first bitmap a list of a palette is given brings its colour table', ()
     assert.deepEqual(imageOf(m, list).colors.slice(0, 3), [0xff00ff, 0xffff00, 0x00ffff]);
 });
 
+test('a list\'s colour table is set once: later bitmaps, an emptied list\'s included, leave it',
+    ()=>{
+        // test_color_table's "remove all, add 4" and "SetColorTable".
+        const m = machine();
+        /** A four-bit DIB whose first three colours are these. @param {number[]} colors */
+        const dib = colors=>{
+            m.bytes.fill(0, INFO, INFO + 40 + 64);
+            m.view.setUint32(INFO, 40, true);
+            m.view.setInt32(INFO + 4, 1, true);
+            m.view.setInt32(INFO + 8, 1, true);
+            m.view.setUint16(INFO + 12, 1, true);
+            m.view.setUint16(INFO + 14, 4, true);
+            colors.forEach((rgb, index)=>m.view.setUint32(INFO + 40 + index * 4, rgb, true));
+            return m.gdi32.CreateDIBSection.handler([0, INFO, 0, POINTER, 0, 0]);
+        };
+        const list = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+        m.fns.ImageList_Add.handler([list, dib([0xff0000, 0x00ff00, 0x0000ff]), 0]);
+        m.fns.ImageList_Remove.handler([list, -1]);
+        m.fns.ImageList_Add.handler([list, dib([0xff00ff, 0xffff00, 0x00ffff]), 0]);
+        assert.deepEqual(imageOf(m, list).colors.slice(0, 3), [0xff0000, 0x00ff00, 0x0000ff],
+            'the first table stays');
+
+        const set = m.fns.ImageList_Create.handler([1, 1, 0x0004, 1, 1]);
+        m.view.setUint32(PARAMS + 0x40, 0x00cc0000, true);
+        m.view.setUint32(PARAMS + 0x44, 0x000000cc, true);
+        assert.equal(m.fns['#390'].handler([set, 0, 2, PARAMS + 0x40]), 2, 'before any image');
+        m.fns.ImageList_Add.handler([set, dib([0xff00ff, 0xffff00, 0x00ffff]), 0]);
+        assert.deepEqual(imageOf(m, set).colors.slice(0, 4),
+            [0xcc0000, 0x0000cc, 0x008000, 0x808000], 'the set entries, the defaults after');
+    });
+
 test('ImageList_LoadImageW loads through user32\'s wide LoadImage', ()=>{
     /** @type {string[]} */
     const asked = [];
