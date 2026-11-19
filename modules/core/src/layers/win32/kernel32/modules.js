@@ -255,7 +255,11 @@ export function createModuleFunctions(host){
         {
             return settle(0);
         }
-        if ((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+        // The library's own folder is known only of a path from the root:
+        // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR with a name relative to anything
+        // is refused, as Windows refuses it.
+        if (((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+            || ((flags & SEARCH_DLL_LOAD_DIR) !== 0 && !/^([A-Za-z]:)?[\\/]/.test(name)))
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;

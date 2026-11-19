@@ -462,6 +462,10 @@ test('LOAD_LIBRARY_SEARCH_* flags are the whole search, the default one too', ()
     assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x800 | 0x8]), 0);
     assert.equal(lastError(), 87, 'with LOAD_WITH_ALTERED_SEARCH_PATH: ERROR_INVALID_PARAMETER');
     assert.equal(asked.length, 0, 'and nothing looked for');
+    // The library's own folder is only of a path from the root.
+    assert.equal(fns.LoadLibraryExA.handler([0x100, 0, 0x100]), 0);
+    assert.equal(lastError(), 87, 'DLL_LOAD_DIR with a relative name: ERROR_INVALID_PARAMETER');
+    assert.equal(asked.length, 0);
 
     assert.equal(fns.SetDefaultDllDirectories.handler([0x100]), 0,
         'a flag LoadLibraryEx alone takes is not a default');

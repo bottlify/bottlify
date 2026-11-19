@@ -51,7 +51,11 @@ const PAGE_READONLY = 0x02;
 const SEC_IMAGE = 0x1000000;
 /** ERROR_PROC_NOT_FOUND, which GetProcAddress leaves. */
 const ERROR_PROC_NOT_FOUND = 127;
-const ERROR_DLL_INIT_FAILED = 1114;
+/**
+ * What a load fails with that ends LdrLoadDll's search where it is, as the
+ * status it answers: flags it refuses, and a library whose DllMain failed.
+ */
+const ENDING_ERRORS = new Map([[87, STATUS.INVALID_PARAMETER], [1114, STATUS.DLL_INIT_FAILED]]);
 
 /**
  * The calls these are made of; without one, the calls over it stay unexported.
@@ -283,8 +287,9 @@ export function createLoaderFunctions({
          * found that is no image a section takes ends the search with the
          * status NtCreateSection(SEC_IMAGE) refuses it with, as Windows'
          * loader maps what it finds (`refusalAt`); one a section takes and
-         * the load still refuses is passed over for the next place, and one
-         * whose initialisation fails is STATUS_DLL_INIT_FAILED. A
+         * the load still refuses is passed over for the next place; one whose
+         * initialisation fails is STATUS_DLL_INIT_FAILED, flags LoadLibraryEx
+         * refuses STATUS_INVALID_PARAMETER. A
          * SearchPath with its low bit set is not a path but LoadLibraryEx's
          * LOAD_LIBRARY_SEARCH_* flags, as kernelbase hands them down since
          * Windows 8; a path is the directories, `;` apart, a name that does
@@ -318,13 +323,14 @@ export function createLoaderFunctions({
                     const text = heapWide(places[next]);
                     /** @param {number} base */
                     const settle = base=>{
-                        if ((base >>> 0) === 0
-                            && kernel32.GetLastError.handler([]) === ERROR_DLL_INIT_FAILED)
+                        const ended = (base >>> 0) === 0
+                            ? ENDING_ERRORS.get(kernel32.GetLastError.handler([])) : undefined;
+                        if (ended !== undefined)
                         {
-                            // Found and mapped, its DllMain refused: the
-                            // search ends there.
+                            // Asked wrongly, or found and mapped and its
+                            // DllMain refused: the search ends there.
                             free(text);
-                            return STATUS.DLL_INIT_FAILED;
+                            return ended;
                         }
                         if ((base >>> 0) === 0)
                         {

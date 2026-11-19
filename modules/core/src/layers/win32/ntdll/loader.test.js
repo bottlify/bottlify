@@ -190,9 +190,9 @@ test('a library found and refused ends the search: its section\'s status, or its
         const one = machine({
             LoadLibraryW: { handler: (/** @type {number[]} */ [name])=>{
                 const text = wideAt(name);
-                if (text === 'C:\\One\\x.dll' && files.get(text) === -1)
+                if (text === 'C:\\One\\x.dll' && (files.get(text) ?? 0) < 0)
                 {
-                    failWith(1114);
+                    failWith(files.get(text) === -1 ? 1114 : 87);
                 }
                 else
                 {
@@ -231,6 +231,9 @@ test('a library found and refused ends the search: its section\'s status, or its
         files.set('C:\\One\\x.dll', -1);
         assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), 0xc0000142,
             'STATUS_DLL_INIT_FAILED');
+        files.set('C:\\One\\x.dll', -2);
+        assert.equal(await call('LdrLoadDll', PATH, 0, NAME, OUT), STATUS.INVALID_PARAMETER,
+            'refused as asked');
     });
 
 test('LdrGetDllPath answers the search\'s directories in a block RtlReleasePath gives back', ()=>{
