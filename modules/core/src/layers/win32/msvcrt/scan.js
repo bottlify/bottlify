@@ -652,6 +652,32 @@ export const STANDARD_SCAN = Symbol('standard scans');
 export const KERNEL_SCAN = Symbol('kernel scan');
 
 /**
+ * sscanf's handler over a `va_list`: what the code in the guest
+ * (`inguest-scan.js`) hands over, the places read from the list's slots as
+ * the conversions come to them and no more of them than sscanf's own handler
+ * reads.
+ *
+ * @param {ScanHost & { readMemory: (address: number, length: number) => Uint8Array }} host
+ * @returns {(args: number[]) => number}
+ */
+export function listScanHandler(host){
+    const store = createScanStore(host);
+    const slotBytes = host.pointerSize ?? 4;
+    return ([input, format, list])=>{
+        let taken = 0;
+        return runScan(host.readCString(input, MAX_STRING), host.readCString(format, MAX_STRING),
+            ()=>{
+                if (taken >= VARIADIC_SLOTS)
+                {
+                    return 0;
+                }
+                const slot = host.readMemory((list >>> 0) + slotBytes * taken++, 4);
+                return new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
+            }, store, { pointerBytes: slotBytes });
+    };
+}
+
+/**
  * @param {ScanHost} host
  */
 export function createScanFunctions(host){

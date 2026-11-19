@@ -25,7 +25,7 @@ import { createSecureFunctions } from './secure.js';
 import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createErrorFunctions, messageOf } from './errors.js';
 import { createConversionFunctions } from './convert.js';
-import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
+import { createScanFunctions, listScanHandler, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
 import { createPathFunctions, splitSearch } from './paths.js';
@@ -34,7 +34,7 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createClassFunctions } from './classes.js';
-import { guestEntry, guestExport, variadicEntry } from './guest-code.js';
+import { guestEntry, guestExport, halvesEntry, variadicEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestFloat from './inguest-float.js';
@@ -43,6 +43,8 @@ import * as inGuest64 from './inguest-int64.js';
 import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
+import * as inGuestScan from './inguest-scan.js';
+import { COMPILED as SCAN_CODE } from './inguest-scan.x86.js';
 import * as inGuestRtti from './inguest-rtti.js';
 import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { createMathFunctions } from './math.js';
@@ -570,6 +572,13 @@ export function createMsvcrtFunctions(host){
      */
     let currentLocale = 0;
 
+    const scans = createScanFunctions(host);
+    /** sscanf's arguments as a list: the form its code in the guest is compiled as. */
+    const scanList = guestEntry(inGuestScan.scanList, SCAN_CODE.scanList, host, {
+        argBytes: 12,
+        handler: listScanHandler(host),
+    });
+
     /**
      * int vsprintf(char *buffer, const char *format, va_list args) -- in the
      * guest (`inguest-print.js`), a format with a double, a 64-bit integer or
@@ -785,14 +794,15 @@ export function createMsvcrtFunctions(host){
          * guest (`inguest-float.js`) that reads them as integers: no FPU, so
          * they are here rather than with the maths. A 64-bit caller passes the
          * double in XMM0: _isnan and _finite read it there too; _fpclass, whose
-         * code takes the double as its two halves, is the handler's at 64 bits.
+         * code takes the double as its two halves, after the instructions that
+         * make XMM0 the two (`halvesEntry`).
          */
         _isnan: { ...guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
             floats: DOUBLE_HALVES },
         _finite: { ...guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
             floats: DOUBLE_HALVES },
-        _fpclass: { ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
-            floats: DOUBLE_HALVES },
+        _fpclass: halvesEntry({ ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+            floats: DOUBLE_HALVES }),
 
         /**
          * unsigned int _control87(unsigned int newControl, unsigned int mask),
@@ -1438,7 +1448,14 @@ export function createMsvcrtFunctions(host){
             errno,
             ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
         }),
-        ...createScanFunctions(host),
+        ...scans,
+
+        /**
+         * int sscanf(const char *buffer, const char *format, ...) - in the
+         * guest (`inguest-scan.js`): the plain conversions of an ASCII text
+         * stored there, the rest handed to the scanner here whole.
+         */
+        sscanf: variadicEntry(2, scanList, scans.sscanf),
         ...createSortFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,

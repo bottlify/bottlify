@@ -41,6 +41,8 @@ import { COMPILED as RTTI } from './inguest-rtti.x86.js';
 import { COMPILED as RTTI_LONG } from './inguest-rtti.x64.js';
 import { COMPILED as INT64 } from './inguest-int64.x86.js';
 import { COMPILED as INT64_LONG } from './inguest-int64.x64.js';
+import { COMPILED as SCAN } from './inguest-scan.x86.js';
+import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
 
 /**
@@ -52,7 +54,8 @@ import { setSingle } from './float.js';
 const LONG_CODE = new Map();
 /** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
 const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG],
-    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG], [INT64, INT64_LONG]];
+    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG], [INT64, INT64_LONG],
+    [SCAN, SCAN_LONG]];
 /**
  * Pairs each function of a module's x86-64 with its i386 record, so that an
  * export bound with the i386 (`guestEntry`, `guestExport`) carries the x86-64
@@ -743,6 +746,49 @@ export function xmmEntry(form, own){
                 jump: (/** @type {number} */ at, /** @type {number} */ target)=>
                     builder.jump(at + head.length, target) };
             const body = form.code(shifted);
+            const bytes = new Uint8Array(head.length + body.length);
+            bytes.set(head);
+            bytes.set(body, head.length);
+            return bytes;
+        } };
+}
+
+/**
+ * A function of one double whose code reads it as its two halves, integers
+ * (`_fpclass`: a signalling NaN is a NaN its bits say, which a double held on
+ * the way would quiet), for a 64-bit caller, who passes the double in XMM0:
+ * the halves put where the x86-64 code reads its two arguments, by three
+ * instructions before it.
+ *
+ *     movq rcx, xmm0         ; the low half, read as ECX
+ *     mov rdx, rcx
+ *     shr rdx, 32            ; the high half
+ *   form:                    ; the code of (low, high)
+ *
+ * Nothing of the stack moves and no register a caller keeps changes: a leaf
+ * still, where its form is one.
+ *
+ * @template {{ long?: (builder?: CodeBuilder) => Uint8Array }} T
+ * @param {T} form  The export as `guestEntry` made it, its `long` the code of (low, high).
+ * @returns {T}
+ */
+export function halvesEntry(form){
+    const { long } = form;
+    if (long === undefined)
+    {
+        throw new Error('guest code: a function of a double\'s halves has no x86-64 code');
+    }
+    const head = [
+        0x66, 0x48, 0x0f, 0x7e, 0xc1,       // movq rcx, xmm0
+        0x48, 0x89, 0xca,                   // mov rdx, rcx
+        0x48, 0xc1, 0xea, 0x20,             // shr rdx, 32
+    ];
+    return { ...form,
+        long: (/** @type {CodeBuilder | undefined} */ builder)=>{
+            const shifted = builder && { register: builder.register,
+                jump: (/** @type {number} */ at, /** @type {number} */ target)=>
+                    builder.jump(at + head.length, target) };
+            const body = long(shifted);
             const bytes = new Uint8Array(head.length + body.length);
             bytes.set(head);
             bytes.set(body, head.length);

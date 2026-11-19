@@ -270,7 +270,8 @@ export function _isnan({ doubleLow, doubleHigh }, x){
  * int _fpclass(double x) -- signalling or quiet NaN, an infinity, a normal,
  * a denormal or a zero, each of either sign. Its halves are its arguments:
  * a signalling NaN in a JavaScript double, as its handler would hold one,
- * is quieted on the way.
+ * is quieted on the way. A 64-bit caller's double is in XMM0, made the two
+ * halves by the instructions before this code (`halvesEntry`).
  *
  * @guestCode cdecl
  * @param {u32} low @param {i32} high
