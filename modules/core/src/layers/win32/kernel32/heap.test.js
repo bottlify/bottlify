@@ -683,6 +683,34 @@ function recording(arena = RESERVING_ARENA){
     return { host, errors, fns: createHeapFunctions(host) };
 }
 
+test('a commit the machine has no memory for is refused, and leaves nothing behind', ()=>{
+    const { host, errors } = recording();
+    // Room up to the arena's second granule and no further.
+    const limit = RESERVING_ARENA.base + GRANULARITY;
+    const fns = createHeapFunctions({ ...host, reach: (/** @type {number} */ end)=>end <= limit });
+    const COMMITMENT_LIMIT = 1455;
+
+    // Reserving costs nothing; a commit inside the reservation past the room is refused.
+    const reserved = fns.VirtualAlloc.handler([0, 3 * GRANULARITY, MEM_RESERVE, 0x04]);
+    assert.equal(reserved, RESERVING_ARENA.base);
+    assert.equal(fns.VirtualAlloc.handler([reserved, GRANULARITY, MEM_COMMIT, 0x04]), reserved);
+    assert.equal(fns.VirtualAlloc.handler([reserved + GRANULARITY, PAGE_SIZE, MEM_COMMIT, 0x04]),
+        0);
+    assert.equal(errors.at(-1), COMMITMENT_LIMIT);
+    assert.equal(fns.VirtualFree.handler([reserved, 0, MEM_RELEASE]), 1);
+
+    // Reserved and committed at once, with no address and with one: refused
+    // whole, the span free for a reservation after.
+    assert.equal(fns.VirtualAlloc.handler([0, 2 * GRANULARITY, MEM_RESERVE | MEM_COMMIT, 0x04]),
+        0);
+    assert.equal(errors.at(-1), COMMITMENT_LIMIT);
+    assert.equal(fns.VirtualAlloc.handler([RESERVING_ARENA.base, 2 * GRANULARITY,
+        MEM_RESERVE | MEM_COMMIT, 0x04]), 0);
+    assert.equal(errors.at(-1), COMMITMENT_LIMIT);
+    assert.equal(fns.VirtualAlloc.handler([RESERVING_ARENA.base, 4 * GRANULARITY, MEM_RESERVE,
+        0x04]), RESERVING_ARENA.base, 'nothing of the refused commits holds the arena');
+});
+
 test('the allocator places a block at a chosen address only when all of it is free', ()=>{
     const allocator = createHeapAllocator({ base: 0x10000, size: 0x40000 });
 

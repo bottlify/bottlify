@@ -297,8 +297,10 @@ export function createCorkHost(config){
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
         memoryHolder, guestCharge } = config;
-    /** Whether the guest's memory counts by its length, not by what it was given. */
-    const byLength = guestByLength(guestCharge);
+    // Whether the guest's memory counts by its length, not by what it was given.
+    // A wide window is 8 GiB long whatever its program takes of it, more than
+    // any machine's memory here: counted by what was given wherever it runs.
+    const byLength = guestByLength(guestCharge) && wideWindow === undefined;
     /** The machine's memory this process's grows are taken from, where the run has one. */
     const machine = memoryBudget === undefined ? null
         : openMemoryBudget(memoryBudget, memoryHolder);
