@@ -2712,7 +2712,7 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number,
-     *     mode?: number }} request
+     *     mode?: number, native?: 'supersede' | 'other' }} request  (`openPathOnce`)
      * @param {number} [implied]  rights the handle is granted beside those asked
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean,
      *     deletePending?: boolean }}
@@ -2730,12 +2730,16 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number,
-     *     mode?: number }} request
+     *     mode?: number, native?: 'supersede' | 'other' }} request
+     *        `native`: the open is NtCreateFile's, whose overwriting dispositions
+     *        need no write access, and whose FILE_SUPERSEDE replaces even a
+     *        read-only file.
      * @param {number} implied
      * @returns {{ handle: number, existed: boolean }
      *     | { error: number, cannotDelete?: boolean, deletePending?: boolean }}
      */
-    const openPathOnce = (path, { access, share, disposition, flags, mode: kept }, implied)=>{
+    const openPathOnce = (path, request, implied)=>{
+        const { access, share, disposition, flags, mode: kept, native } = request;
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
@@ -2748,7 +2752,7 @@ export function createFileFunctions(host){
         const deleteOnClose = ((flags >>> 0) & FILE_FLAG_DELETE_ON_CLOSE) !== 0;
         // Emptying an existing file is asked with GENERIC_WRITE itself:
         // FILE_WRITE_DATA alone does not do.
-        if (disposition === TRUNCATE_EXISTING && (rights & GENERIC_WRITE) === 0)
+        if (disposition === TRUNCATE_EXISTING && (rights & GENERIC_WRITE) === 0 && !native)
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
@@ -2767,7 +2771,8 @@ export function createFileFunctions(host){
         if (landed.path !== path)
         {
             return openPathOnce(landed.path, { access, share, disposition,
-                flags: (flags >>> 0) | FILE_FLAG_OPEN_REPARSE_POINT, mode: kept }, implied);
+                flags: (flags >>> 0) | FILE_FLAG_OPEN_REPARSE_POINT, mode: kept, native },
+            implied);
         }
         const existing = named;
         const exists = Boolean(existing && existing.exists);
@@ -2820,7 +2825,8 @@ export function createFileFunctions(host){
         }
         if (readOnlyFile(existing))
         {
-            if (write || disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+            if (write || ((disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+                && native !== 'supersede'))
             {
                 return { error: ERROR_ACCESS_DENIED };
             }
@@ -2852,7 +2858,8 @@ export function createFileFunctions(host){
         }
         // A new file takes the attributes it was created with; one that is
         // replaced takes them too, as a file made afresh would.
-        if (!exists || disposition === CREATE_ALWAYS)
+        if (!exists || disposition === CREATE_ALWAYS
+            || (native && disposition === TRUNCATE_EXISTING))
         {
             giveAttributes(path, flags);
         }
@@ -3288,12 +3295,18 @@ export function createFileFunctions(host){
                 { path: landed.path, held: hold?.held ?? null }), FILE_CREATED);
         }
 
+        // A name ending in a separator names a directory, and a file is none.
+        if (given && given.name.endsWith(SEPARATOR))
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
         // The reparse points on the way are behind it: the file is opened as it is.
         const result = openPath(landed.path, {
             access, share, disposition: creation,
             flags: (givenAttributes >>> 0) | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0)
                 | FILE_FLAG_OPEN_REPARSE_POINT,
             mode: wanted & FILE_MODE_OPTIONS,
+            native: (disposition >>> 0) === FILE_SUPERSEDE ? 'supersede' : 'other',
         });
         if ('error' in result)
         {

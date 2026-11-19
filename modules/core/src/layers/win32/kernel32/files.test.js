@@ -4040,3 +4040,38 @@ test('a device that holds no files opens as itself, in the mode it was opened in
         objectAttributes(memory, '\\??\\MountPointManager'), NT_STATUS, 0, 0, 0, FILE_CREATE, 0,
         0, 0]) >>> 0, 0xc000000d, 'a device is opened, never made');
 });
+
+test('NtCreateFile overwrites without write access, and supersedes a read-only file', ()=>{
+    const { memory, files, fns } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    const FILE_SUPERSEDE = 0;
+    const FILE_OVERWRITE = 4;
+    const FILE_OVERWRITE_IF = 5;
+    const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+    /** @param {string} name @param {number} disposition @param {number} attributes */
+    const create = (name, disposition, attributes)=>{
+        const status = native.handler([NT_HANDLE, GENERIC_READ, objectAttributes(memory, name),
+            NT_STATUS, 0, attributes, 3, disposition, 0, 0, 0]) >>> 0;
+        if (status === 0)
+        {
+            fns.CloseHandle.handler([memory.dword(NT_HANDLE)]);
+        }
+        return status;
+    };
+    files.put('C:\\GAME\\o.tmp', 'abc');
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_OVERWRITE, FILE_ATTRIBUTE_READONLY), 0,
+        'GENERIC_READ is enough to overwrite');
+    assert.equal(memory.dword(NT_STATUS + 4), 3, 'FILE_OVERWRITTEN');
+    assert.equal(files.text('C:\\GAME\\o.tmp'), '', 'emptied');
+    assert.equal(files.stat('C:\\GAME\\o.tmp')?.attributes,
+        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE, 'and given the attributes asked');
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_OVERWRITE, 0), 0xc0000022,
+        'a read-only file is not overwritten');
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_OVERWRITE_IF, 0), 0xc0000022);
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_SUPERSEDE, 0), 0, 'but superseded');
+    assert.equal(memory.dword(NT_STATUS + 4), 0, 'FILE_SUPERSEDED');
+    assert.equal(create('\\??\\C:\\GAME\\none.tmp', FILE_OVERWRITE, 0), 0xc0000034,
+        'nothing to overwrite');
+    assert.equal(create('\\??\\C:\\GAME\\dir\\', 2, 0), 0xc0000033,
+        'a name ending in a separator is no file\'s');
+});
