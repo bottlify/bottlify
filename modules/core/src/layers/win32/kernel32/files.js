@@ -467,6 +467,10 @@ const modeOfFlags = flags=>(((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0
 const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 /** The name goes as the handle that asked closes, other opens or not. */
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
+/** FileDispositionInformationEx's flag that says the open's delete-on-close. */
+const FILE_DISPOSITION_FLAG_ON_CLOSE = 0x8;
+/** FileDispositionInformationEx's flag that deletes a read-only file all the same. */
+const FILE_DISPOSITION_FLAG_IGNORE_READONLY = 0x10;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
 const FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x40;
 /** NtSetInformationFile's hard link classes (FILE_LINK_INFORMATION and its Ex form). */
@@ -525,6 +529,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Sets a reparse point (null: takes it off): null, or the volume's code for why not.
  * @property {(path: string) => { tag: number, data: Uint8Array | null } | null} [reparseOf]
  *           The reparse point as it was set.
+ * @property {(path: string, access: { read?: boolean, write?: boolean, delete?: boolean },
+ *     share: { read?: boolean, write?: boolean, delete?: boolean })
+ *     => { token: number } | { error: string }} [holdDirectory]
+ *           Holds a directory open on its open's terms, settled against its other opens.
+ * @property {(token: number) => void} [releaseDirectory]
  * @property {(path: string) => number} fileId
  *           The file's number on its volume: the same under every name, kept across renames.
  * @property {(path: string, id: number) => string | null} pathOfFileId
@@ -2760,11 +2769,17 @@ export function createFileFunctions(host){
             {
                 return { error: ERROR_FILE_EXISTS };
             }
+            const hold = holdFolder(path, rights | (deleteOnClose ? DELETE : 0), share);
+            if (!hold)
+            {
+                return { error: ERROR_SHARING_VIOLATION };
+            }
             const handle = host.handles.open('file',
                 { path, node: null, directory: true, read: false, write: false, position: 0,
+                    held: hold.held, ...deleteOnClose ? { deleteOnClose } : {},
                     // A folder watched through a completion port is opened so.
                     ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} },
-                mappedAccess('file', rights | implied));
+                mappedAccess('file', rights | implied | (deleteOnClose ? DELETE : 0)));
             return { handle, existed: true };
         }
         if (exists && disposition === CREATE_NEW)
@@ -3199,8 +3214,17 @@ export function createFileFunctions(host){
             {
                 return STATUS_ACCESS_DENIED;
             }
+            if (deletePending.has(path.toLowerCase()))
+            {
+                return STATUS_DELETE_PENDING;
+            }
+            const hold = holdFolder(path, access >>> 0, share >>> 0);
+            if (!hold)
+            {
+                return STATUS_SHARING_VIOLATION;
+            }
             return opened(host.handles.open('directory',
-                { path, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
+                { path, held: hold.held, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
         }
         if (directoryOnly)
         {
@@ -3221,7 +3245,9 @@ export function createFileFunctions(host){
                 return onReadOnlyMedia(path)
                     ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_OBJECT_PATH_NOT_FOUND;
             }
-            return opened(host.handles.open('directory', { path: landed.path }), FILE_CREATED);
+            const hold = holdFolder(landed.path, access >>> 0, share >>> 0);
+            return opened(host.handles.open('directory',
+                { path: landed.path, held: hold?.held ?? null }), FILE_CREATED);
         }
 
         // The reparse points on the way are behind it: the file is opened as it is.
@@ -3255,6 +3281,33 @@ export function createFileFunctions(host){
      * @type {Map<string, string>}
      */
     const deletePending = new Map();
+
+    /**
+     * Holds a directory open as its open asked - `rights` as granted, `share`
+     * CreateFile's FILE_SHARE_* - so its other opens, a rename and a
+     * RemoveDirectory are settled against it as they are against a file's:
+     * the hold's number, or null when the opens already there refuse it.
+     *
+     * @param {string} path @param {number} rights @param {number} share
+     * @returns {{ held: number | null } | null}
+     */
+    const holdFolder = (path, rights, share)=>{
+        if (!files.holdDirectory)
+        {
+            return { held: null };
+        }
+        const granted = mappedAccess('file', rights) ?? 0;
+        const answer = files.holdDirectory(path, {
+            read: (granted & (FILE_READ_DATA | FILE_EXECUTE)) !== 0,
+            write: (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0,
+            delete: (granted & DELETE) !== 0,
+        }, {
+            read: (share & FILE_SHARE_READ) !== 0,
+            write: (share & FILE_SHARE_WRITE) !== 0,
+            delete: (share & FILE_SHARE_DELETE) !== 0,
+        });
+        return 'token' in answer ? { held: answer.token } : null;
+    };
 
     /**
      * The byte ranges locked in each file, by the file's name folded to one
@@ -3386,6 +3439,11 @@ export function createFileFunctions(host){
                     locks.set(key, kept);
                 }
             }
+            // A directory's hold goes with the last handle of its open.
+            if (closed?.held && !host.handles.holds?.(closed))
+            {
+                files.releaseDirectory?.(closed.held);
+            }
             // With the last handle to the file, not with a duplicate of it.
             // POSIX semantics: the name goes with the handle that asked.
             if (closed?.posixDelete && closed.path !== undefined && !host.handles.holds?.(closed))
@@ -3405,8 +3463,9 @@ export function createFileFunctions(host){
             {
                 for (const [key, path] of [...deletePending])
                 {
-                    // A directory's open is its handle alone.
-                    if (!(files.isOpen?.(path) ?? false) || (!closed.node && own === key))
+                    // A directory held by no open goes; one with something
+                    // in it stays, and is no longer pending.
+                    if (!(files.isOpen?.(path) ?? false))
                     {
                         files.remove(path);
                         deletePending.delete(key);
@@ -3542,8 +3601,10 @@ export function createFileFunctions(host){
                     view.setBigUint64(0, allocated, true);
                     view.setBigUint64(8, size, true);
                     view.setUint32(16, entry?.links ?? 1, true);
+                    // A name deleted under the open leaves the open's file pending too.
                     view.setUint8(20, file.deleteOnClose
-                        || deletePending.has(String(file.path).toLowerCase()) ? 1 : 0);
+                        || deletePending.has(String(file.path).toLowerCase())
+                        || !files.stat(file.path) ? 1 : 0);
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
             case FILE_INTERNAL_INFORMATION:
@@ -4656,6 +4717,11 @@ export function createFileFunctions(host){
         {
             return NATIVE_FAILURES[missing(named.path)];
         }
+        // A file whose deletion is pending is there, and answers nothing.
+        if (deletePending.has(named.path.toLowerCase()))
+        {
+            return STATUS_DELETE_PENDING;
+        }
         const record = informationOf({ path: named.path, directory: entry.isDirectory }, kind);
         if (!(record instanceof Uint8Array))
         {
@@ -4894,7 +4960,11 @@ export function createFileFunctions(host){
                 if (deleting)
                 {
                     const entry = files.stat(file.path);
-                    if (readOnlyFile(entry) || onReadOnlyMedia(file.path))
+                    const ignoreReadOnly = type === FILE_INFO.DISPOSITION_EX
+                        && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_IGNORE_READONLY) !== 0;
+                    // A file a section maps, or a view of it, is not deleted.
+                    if ((readOnlyFile(entry) && !ignoreReadOnly) || onReadOnlyMedia(file.path)
+                        || (!entry?.isDirectory && files.mappedAs?.(file.path)))
                     {
                         return { error: ERROR_ACCESS_DENIED, status: STATUS_CANNOT_DELETE };
                     }
@@ -4907,6 +4977,14 @@ export function createFileFunctions(host){
                 // Pending, the file opens no more, and goes with the last
                 // handle onto it; cleared through any handle, it stays.
                 const key = String(file.path).toLowerCase();
+                // FILE_DISPOSITION_ON_CLOSE sets or clears the open's
+                // delete-on-close itself, as FILE_FLAG_DELETE_ON_CLOSE set it.
+                if (type === FILE_INFO.DISPOSITION_EX
+                    && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_ON_CLOSE) !== 0)
+                {
+                    file.deleteOnClose = deleting;
+                    return 0;
+                }
                 if (deleting && type === FILE_INFO.DISPOSITION_EX
                     && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) !== 0)
                 {
@@ -4918,8 +4996,8 @@ export function createFileFunctions(host){
                 }
                 else
                 {
+                    // FILE_FLAG_DELETE_ON_CLOSE is the open's, and is not undone.
                     deletePending.delete(key);
-                    file.deleteOnClose = false;
                 }
                 return 0;
             }
@@ -5192,6 +5270,11 @@ export function createFileFunctions(host){
                 if (((flags >>> 0) & 0xffff) !== 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+                }
+                // A directory is not reopened, FILE_FLAG_BACKUP_SEMANTICS or not.
+                if (files.stat(path)?.isDirectory)
+                {
+                    return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
                 }
                 const opened = openPath(path, { access: access >>> 0, share: share >>> 0,
                     disposition: OPEN_EXISTING, flags: flags >>> 0 });

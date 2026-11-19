@@ -941,6 +941,39 @@ export function createFilesystemModule(){
                     }
                 },
 
+                /**
+                 * Holds the directory at `path` open on `access` and `share`,
+                 * as CreateFile with FILE_FLAG_BACKUP_SEMANTICS opens one:
+                 * its number, or SHARING_VIOLATION thrown when the opens
+                 * already there do not allow it (NOT_FOUND for no directory).
+                 *
+                 * @param {string} path
+                 * @param {import('./internal/handles.js').AccessFlags} access
+                 * @param {import('./internal/handles.js').AccessFlags} share
+                 * @returns {number}
+                 */
+                holdDirectory(path, access, share){
+                    const where = locate(path);
+                    const entry = where.tree.stat(where.components);
+                    if (!entry?.directory)
+                    {
+                        throw fsError(ErrorCode.NOT_FOUND, `No directory at "${path}"`);
+                    }
+                    return state.files.holdDirectory({ key: where.key, path: entry.path,
+                        access: { read: !!access.read, write: !!access.write,
+                            delete: !!access.delete },
+                        share: { read: !!share.read, write: !!share.write,
+                            delete: !!share.delete } });
+                },
+
+                /** @param {number} token */
+                releaseDirectory(token){
+                    if (live())
+                    {
+                        state.files.releaseDirectory(token);
+                    }
+                },
+
                 /** @param {string} path @returns {boolean} whether any process holds it open */
                 isOpen: path=>live() && state.files.isOpen(locate(path).key),
 

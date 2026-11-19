@@ -619,6 +619,36 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
         },
 
         /**
+         * Holds the directory at `path` open on `access` and `share`: its
+         * number, or the volume's code for why not - SHARING_VIOLATION when
+         * the opens already there do not allow it.
+         *
+         * @param {string} path
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} access
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} share
+         * @returns {{ token: number } | { error: string }}
+         */
+        holdDirectory(path, access, share){
+            try
+            {
+                return { token: fs.holdDirectory(path, access, share) };
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return { error: error.code };
+            }
+        },
+
+        /** @param {number} token */
+        releaseDirectory(token){
+            fs.releaseDirectory(token);
+        },
+
+        /**
          * The number of the file at `path` on its volume, the same under
          * every name and across renames: 0 for a path that names nothing.
          *

@@ -2410,6 +2410,9 @@ test('a deletion is the file\'s: pending, it opens no more and goes with the las
         assert.equal(native.handler([NT_HANDLE, GENERIC_READ,
             objectAttributes(memory, '\\??\\C:\\GAME\\d.tmp'), NT_STATUS, 0, 0, 7, FILE_OPEN,
             0, 0, 0]) >>> 0, 0xc0000056, 'STATUS_DELETE_PENDING');
+        const attributes = /** @type {any} */ (fns.CreateFileW).natives.NtQueryAttributesFile;
+        assert.equal(attributes.handler([objectAttributes(memory, '\\??\\C:\\GAME\\d.tmp'),
+            0x400]) >>> 0, 0xc0000056, 'its attributes asked by name: pending too');
         assert.equal(fns.CloseHandle.handler([deleter]), 1);
         assert.ok(files.nodes.has('C:\\GAME\\d.tmp'), 'the writer still has it open');
         assert.equal(fns.CloseHandle.handler([writer]), 1);
