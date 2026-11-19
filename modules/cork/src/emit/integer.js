@@ -584,7 +584,7 @@ function returnToCall(e, taken){
         // Long mode's whole return address (`returnLong`), which matching the
         // call's says lies inside the window.
         b.op(I64.extendU);
-        if (e.layout.codeBase !== undefined)
+        if (e.layout.codeBase)
         {
             b.i64const(BigInt(e.layout.codeBase)).op(I64.or);
         }
@@ -690,6 +690,15 @@ function predictCall(e){
         e.close();
     }
 }
+
+/**
+ * Whether an indirect call's target is tested against the code block after its
+ * push rather than before (`nearTarget`): in a wide window, whose other block
+ * it may call into, the call made (`leaveFar`).
+ *
+ * @param {E} e
+ */
+const farCall = e=>isLong(e) && e.layout.window !== undefined;
 
 /**
  * Whether a long-mode indirect call's target is tested against the window
@@ -1331,10 +1340,10 @@ export function emitInstruction(e, instruction, flagsLive){
                 // and free between instructions; t2 is the push's scratch.
                 prepare(e, dst);
                 readOp(e, dst);
-                if (farPastPrediction(e))
+                if (farPastPrediction(e) || farCall(e))
                 {
                     b.localTee(LONG_WIDE).op(I64.wrap);
-                    if (e.blockRetired - e.blockCarried === 1)
+                    if (farPastPrediction(e) && e.blockRetired - e.blockCarried === 1)
                     {
                         // Its far exit leaves at the block's start, which then
                         // must not be an entry (`exitBefore`).
@@ -1362,6 +1371,16 @@ export function emitInstruction(e, instruction, flagsLive){
                 // every way on from here; a slot read or a push that faults
                 // left before the call.
                 e.blockRetired++;
+            }
+            if (dst.kind !== 'rel' && farCall(e) && !farPastPrediction(e))
+            {
+                // Pushed: a target in the other block leaves for it, the call made.
+                b.localGet(LONG_WIDE);
+                outsideBlock(e);
+                e.openGuard('far', EMPTY);
+                leaveFar(e, LONG_WIDE, ()=>e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE),
+                    ()=>addStack(e, 8));
+                e.close();
             }
             if (dst.kind === 'rel' && dst.target === next && !instruction.prefixes.operand)
             {
@@ -1412,8 +1431,8 @@ export function emitInstruction(e, instruction, flagsLive){
                     b.localGet(LONG_WIDE);
                     outsideBlock(e);
                     e.openGuard('far', EMPTY);
-                    addStack(e, 8);
-                    e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE);
+                    leaveFar(e, LONG_WIDE, ()=>e.exitBefore(instruction.eip, Exit.UNTRANSLATED,
+                        RARE), ()=>addStack(e, 8));
                     e.close();
                 }
                 profileCall(e, instruction.eip);
@@ -1846,6 +1865,34 @@ const outsideBlock = e=>e.b.i64const(32n).op(I64.shrU)
     .i64const(BigInt(e.layout.codeBase ?? 0) >> 32n).op(I64.ne);
 
 /**
+ * Inside the guard of a target outside the code block, in the i64 local
+ * `local`: in a wide window's other block, the instruction done, a far exit
+ * there (`exitFar`), which the host takes into that block's runtime; past the
+ * window, or in long mode's 4 GiB, which has no other block, a leave before
+ * the instruction (`before`), what it did put back first (`undo`); `done`
+ * finishes the instruction before the far exit.
+ *
+ * @param {E} e @param {number} local @param {() => void} before
+ * @param {() => void} [undo] @param {() => void} [done]
+ */
+function leaveFar(e, local, before, undo, done){
+    const { b } = e;
+    if (e.layout.window === undefined)
+    {
+        undo?.();
+        before();
+        return;
+    }
+    b.localGet(local).i64const(BigInt(e.layout.window)).op(I64.geU);
+    e.openIf('beyond');
+    undo?.();
+    before();
+    e.close();
+    done?.();
+    e.exitFar(local);
+}
+
+/**
  * An indirect jump's or call's target, read, as the dword EIP the region
  * keeps: in long mode one past the window leaves before the instruction,
  * for the interpreter to take it where it goes.
@@ -1861,7 +1908,7 @@ function nearTarget(e, instruction){
     b.localTee(LONG_WIDE);
     outsideBlock(e);
     e.openGuard('far', EMPTY);
-    e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE);
+    leaveFar(e, LONG_WIDE, ()=>e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE));
     e.close();
     b.localGet(LONG_WIDE).op(I64.wrap);
 }
@@ -1905,10 +1952,11 @@ function returnLong(e, instruction){
     b.localGet(Local.t64b);
     outsideBlock(e);
     e.openGuard('farReturn', EMPTY);
-    // Past the window, #GP; outside a code block (`codeBase`) but in the
-    // window, the interpreter's to take where it goes.
-    e.exitBefore(instruction.eip, e.layout.codeBase === undefined ? Exit.FAULT
-        : Exit.UNTRANSLATED, e.layout.codeBase === undefined ? 13 : 0);
+    // Past the window, #GP, or in a wide one the interpreter's to fault; in a
+    // wide window's other code block, the return made and a far exit there.
+    leaveFar(e, Local.t64b, ()=>e.exitBefore(instruction.eip,
+        e.layout.codeBase === undefined ? Exit.FAULT : Exit.UNTRANSLATED,
+        e.layout.codeBase === undefined ? 13 : 0), undefined, ()=>addStack(e, popped));
     e.close();
     addStack(e, popped);
     e.charge();

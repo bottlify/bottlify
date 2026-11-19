@@ -10,9 +10,11 @@
  * into pages the program asked for as executable, the heap's own routines and
  * the C runtime's `strlen` - each with the image placed low, where one code
  * block holds everything, and with its relocations stripped, at 0x140000000
- * over a wide window, where the code block is the image's and the rest is the
- * interpreter tier's (`roadmap/x64.md`). The answers are the same and so is
- * the count of instructions retired, wherever the code lay.
+ * over a wide window, where the image's block and the one below 4 GiB are each
+ * translated by a runtime of their own (cork-host's `twoBlockRuntime`), the
+ * calls between them far exits. The answers are the same and so is the count
+ * of instructions retired, wherever the code lay; over the window the code
+ * below 4 GiB is translated, not left to the interpreter tier.
  */
 
 import { test } from 'node:test';
@@ -52,7 +54,7 @@ async function run(how, wide){
         const code = await app.run({ timeoutMs: 250000 });
         const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
         return { code, lines: output.join('').split('\r\n').filter(Boolean),
-            instructions: cpu?.metrics?.instructions };
+            instructions: cpu?.metrics?.instructions, below: cpu?.metrics?.cork?.belowBlock };
     }
     finally
     {
@@ -79,6 +81,13 @@ for (const [how, what] of Object.entries(WHERE))
             {
                 // The pages lie below 4 GiB in both: outside a wide window's code block.
                 assert.ok(wide.lines.includes('code 0'), wide.lines.join('\n'));
+            }
+            if (how !== 'i')
+            {
+                // Translated below 4 GiB, its loop's instructions retired there.
+                assert.ok(wide.below?.regions > 0, JSON.stringify(wide.below?.exits));
+                assert.ok(wide.below?.retired > low.instructions / 4,
+                    `${wide.below?.retired} of ${low.instructions} retired below 4 GiB`);
             }
         });
 }

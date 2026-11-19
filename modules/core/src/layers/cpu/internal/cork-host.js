@@ -465,6 +465,13 @@ export function createCorkHost(config){
     // between (`blockLayout`).
     const inBlock = blockFields(own);
     const firstPages = growing ? Math.ceil((own.tables + past) / 65536) : pagesFor(own, past);
+    // A wide window whose code block lies past 4 GiB: the block below it, where the system's
+    // libraries, the heap and a JIT's pages lie, is translated by a runtime of its own
+    // (`twoBlockRuntime`), its tables past everything of the first's (cork's `wideLayout`).
+    const lowLayout = long && wideWindow !== undefined && codeBase !== 0 && executors === 1
+        && corkConfig?.lowBlock !== false
+        ? ownLayout({ ...layoutOptions, codeBase: 0, tablesAt: firstPages * 65536 }) : null;
+    const lowPages = lowLayout === null ? 0 : Math.ceil(tables / 65536);
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
         : othersArea.to > othersArea.from ? othersArea.from + (index - 1) * executorPages * 65536
@@ -480,7 +487,7 @@ export function createCorkHost(config){
     // A growing memory starts with its floor and the slack past it, and may
     // grow to its whole RAM's (wasm's 4 GiB at most).
     const pages = growing ? (ramFloor + engine.WRAP_SLACK) / 65536
-        : firstPages + (executors - 1) * executorPages + sharedPages;
+        : firstPages + (executors - 1) * executorPages + sharedPages + lowPages;
     const maximumPages = growing
         ? Math.min(65536, (memorySize + engine.WRAP_SLACK) / 65536) : pages;
     if (given !== undefined && given.buffer.byteLength < pages * 65536)
@@ -856,7 +863,8 @@ export function createCorkHost(config){
         ? engine.createWasmInterpreter({ memory, ram: ramMemory, layout, area: wasmArea,
             statics: stateBase + WASM_INTERPRETER_STATICS_AT,
             hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
-            precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true })
+            precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true,
+            ...lowLayout === null ? {} : { lowHash: lowLayout.tables + Tables.HASH } })
         : null;
     /** The last run starts the interpreter ran, a ring: the path a run took
      * into wherever it sits. The wasm tier's, when there is one. */
@@ -940,9 +948,15 @@ export function createCorkHost(config){
         return counted / VIRTUAL_INSTRUCTIONS_PER_MS;
     } : ()=>performance.now();
 
-    // RIP in long mode, whose code lies in the window below 4 GiB.
-    const eip = long ? ()=>Number(blockView.getBigUint64(inBlock.eip, true))
-        : ()=>blockView.getUint32(inBlock.eip, true) >>> 0;
+    // RIP in long mode, whole: a wide window's code lies past 4 GiB. There it is read as
+    // two dwords: the loop asks at every crossing between its code blocks, and the
+    // quadword's BigInt made a crossing a third dearer (jit64's strlen loop: 46 to 27
+    // machine instructions a guest one). In 4 GiB the quadword read is the cheaper
+    // (calls8 0.2 % fewer machine instructions an iteration).
+    const eip = !long ? ()=>blockView.getUint32(inBlock.eip, true) >>> 0
+        : wideWindow === undefined ? ()=>Number(blockView.getBigUint64(inBlock.eip, true))
+            : ()=>blockView.getUint32(inBlock.eip, true)
+                + blockView.getUint32(inBlock.eip + 4, true) * 2 ** 32;
     /** @param {number} value */
     const setEip = value=>{
         if (long)
@@ -1070,7 +1084,9 @@ export function createCorkHost(config){
     const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && timings
         ? ()=>performance.now() : ()=>0;
 
-    const runtime = codeBlockRuntime(createEngine({
+    /** What every runtime of this host is made with: the image's code block's, and the
+     * one below 4 GiB of a wide window (`lowLayout`) with its own layout. */
+    const engineEnv = {
         memory,
         ...ramMemory === undefined ? {} : { ram: ramMemory },
         layout,
@@ -1120,7 +1136,12 @@ export function createCorkHost(config){
             trap: raiseTrap,
             rdtsc: readTsc,
         },
-    }), codeBase);
+    };
+    const imageRuntime = codeBlockRuntime(createEngine(engineEnv), codeBase);
+    const runtime = lowLayout === null ? imageRuntime
+        : twoBlockRuntime(imageRuntime, createEngine({ ...engineEnv, layout: lowLayout,
+            // The block profile lies past the first runtime's tables alone.
+            config: { ...engineEnv.config, blockProfile: false } }));
 
     // A translated read outside `precise` still wraps into RAM rather than
     // testing the range (`checkReads`): the interpreter and stores find it closed.
@@ -2785,6 +2806,96 @@ export function createCorkHost(config){
         entered = true;
     };
     return host;
+}
+
+/**
+ * A wide window's two code blocks (cork's `wideLayout`), each translated by a
+ * runtime of its own: the image's, from past 4 GiB, and the one below 4 GiB,
+ * where the system's libraries, the heap and a JIT's pages lie. A RIP picks
+ * the runtime, an entry of the second is told apart by `LOW_ENTRY`, and the
+ * stores into code one's run met reach the other's code too. A jump from one
+ * block into the other leaves translated code, and the host's loop enters
+ * the other runtime there. Whatever else is asked of it is the image's.
+ * `interpretedAt` is told the ring of starts' dwords, which name the block below
+ * 4 GiB: a diagnostic, kept by the runtime that address names.
+ *
+ * @template {Record<string, any>} T
+ * @param {T} image @param {Record<string, any>} low
+ * @returns {T}
+ */
+function twoBlockRuntime(image, low){
+    const LOW_ENTRY = 2 ** 30;
+    /** @param {number} at */
+    const below = at=>at < 2 ** 32;
+    /** @param {string} name */
+    const byRip = name=>(/** @type {number} */ at, /** @type {any} */ a, /** @type {any} */ b)=>
+        (below(at) ? low : image)[name]?.(at, a, b);
+    // Asked for at every crossing: taken once, not through the image's proxy each time.
+    const { entryOf: imageEntryOf, run: imageRun } = image;
+    const lowEntryOf = low.entryOf.bind(low);
+    const lowRun = low.run.bind(low);
+    /** @type {Record<string, any>} */
+    const own = {
+        /** @param {number} at @param {number} top */
+        entryOf: (at, top)=>{
+            if (!below(at))
+            {
+                return imageEntryOf(at, top);
+            }
+            const entry = lowEntryOf(at, top);
+            return entry < 0 ? entry : entry + LOW_ENTRY;
+        },
+        /** @param {number} entry @param {number} budget */
+        run: (entry, budget)=>{
+            const fromLow = entry >= LOW_ENTRY;
+            const exit = fromLow ? lowRun(entry - LOW_ENTRY, budget) : imageRun(entry, budget);
+            if ((exit.staleSize ?? 0) > 0)
+            {
+                (fromLow ? image : low).stored(exit.staleAt, exit.staleSize, true);
+            }
+            return exit;
+        },
+        noteHot: byRip('noteHot'),
+        missAt: byRip('missAt'),
+        forcedStep: byRip('forcedStep'),
+        interpretedAt: byRip('interpretedAt'),
+        translatePending: ()=>Promise.all([image.translatePending(), low.translatePending()]),
+        /** @param {number} address @param {number} length @param {boolean} [guest] */
+        stored: (address, length, guest)=>{
+            image.stored(address, length, guest);
+            low.stored(address, length, guest);
+        },
+        /** @param {number} address @param {number} length */
+        codeWritten: (address, length)=>{
+            image.codeWritten(address, length);
+            low.codeWritten(address, length);
+        },
+        takeCodeWrites: ()=>image.takeCodeWrites() + low.takeCodeWrites(),
+        readsFaulted: ()=>{
+            image.readsFaulted?.();
+            low.readsFaulted?.();
+        },
+        /** @param {number} base @param {number} size */
+        noteStack: (base, size)=>{
+            image.noteStack(base, size);
+            low.noteStack(base, size);
+        },
+        /** @param {any} entry @param {() => number} entered */
+        interpretWith: (entry, entered)=>{
+            low.interpretWith?.(entry, entered);
+            return image.interpretWith?.(entry, entered);
+        },
+        diagnostics: ()=>({ ...image.diagnostics(), belowBlock: low.diagnostics() }),
+        counters: ()=>{
+            const first = image.counters();
+            const second = low.counters();
+            return Object.fromEntries(Object.entries(first).map(([key, value])=>[key,
+                typeof value === 'number' && typeof second[key] === 'number'
+                    ? value + second[key] : value]));
+        },
+    };
+    // Whatever else is asked is the image's, through the prototype.
+    return /** @type {T} */ (Object.setPrototypeOf(own, image));
 }
 
 /**

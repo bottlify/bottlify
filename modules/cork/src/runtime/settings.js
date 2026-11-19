@@ -379,6 +379,10 @@ export const SETTINGS = {
     yieldChunk: { kind: 'test', value: undefined, shown: '2^24',
         doc: '`createMachine` alone (cork\'s machine for its tests): the instructions translated'
             + ' code runs at a time.' },
+    lowBlock: { kind: 'test', value: undefined, shown: '`true`',
+        doc: 'The core\'s host: over a wide window whose code block is past 4 GiB, the block'
+            + ' below it translated by a runtime of its own (`twoBlockRuntime`); false leaves'
+            + ' its code to the interpreter tier.' },
     sliceMs: { kind: 'test', value: undefined, shown: '8',
         doc: 'How long an interpreting slice may take.' },
     wasmInterpreterAfter: { kind: 'test', value: undefined, shown: '8192',

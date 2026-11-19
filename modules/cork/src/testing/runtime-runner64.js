@@ -27,14 +27,20 @@ import { features as probeFeatures } from '../wasm/features.js';
  * region holds, from translated code's misses as from here, as the core's host
  * installs it (`interpretWith`); what it stops for answered as the host answers it.
  *
+ * With `low`, a wide window's block below 4 GiB has a runtime of its own beside the
+ * code block's, as the core's host gives it one (`twoBlockRuntime`): a RIP picks the
+ * runtime, and the stores into code a run of one met reach the other's.
+ *
  * @param {{ memory: WebAssembly.Memory, ram?: WebAssembly.Memory,
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
+ *     low?: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     config?: Record<string, unknown>, defaultNaNNegative?: boolean,
  *     tier?: import('../../../core/src/layers/cpu/engine.js').WasmInterpreter | null }} settings
  *     `defaultNaNNegative`: the float code as for that host (false: an arm64 one), the
- *     host's own unless given; `ram`: a wide window's RAM (`ramMemory`)
+ *     host's own unless given; `ram`: a wide window's RAM (`ramMemory`); `low`: the layout
+ *     of the block below 4 GiB, its tables apart (`wideLayout`)
  */
-export function createRuntimeRunner64({ memory, ram, layout, config = {},
+export function createRuntimeRunner64({ memory, ram, layout, low = undefined, config = {},
     defaultNaNNegative = undefined, tier = null })
 {
     const flagsAt = pageFlagsAt(layout);
@@ -53,8 +59,9 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
     // with the fix-ups that make them, as the sequence judge is.
     const exact = (defaultNaNNegative ?? probeFeatures().defaultNaNNegative)
         || 'exactNaN' in config ? {} : { exactNaN: true };
-    const runtime = createCorkRuntime({
-        memory, ram, layout,
+    /** @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} of */
+    const runtimeOf = of=>createCorkRuntime({
+        memory, ram, layout: of,
         ...defaultNaNNegative === undefined ? {}
             : { features: { ...probeFeatures(), defaultNaNNegative } },
         config: { feed: 'slice', precise: true, hotThreshold: 1, missThreshold: 1,
@@ -70,9 +77,15 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
             rdtsc: ()=>0n,
         },
     });
-    if (tier !== null)
+    const runtime = runtimeOf(layout);
+    const lowRuntime = low === undefined ? null : runtimeOf(low);
+    const runtimes = lowRuntime === null ? [runtime] : [runtime, lowRuntime];
+    for (const each of runtimes)
     {
-        runtime.interpretWith?.(tier.entry(), tier.entered);
+        if (tier !== null)
+        {
+            each.interpretWith?.(tier.entry(), tier.entered);
+        }
     }
     /** Ranges the caller or the interpreter rewrote, dropped before the next region
      * runs: the runtime drops a region only for bytes that changed, which they
@@ -90,22 +103,26 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
      */
     // The translator's addresses are offsets in the code block (`codeBase`).
     const codeBase = BigInt(layout.codeBase ?? 0);
+    /** The runtime whose block RIP lies in, or null. @param {bigint} at */
+    const owner = at=>(at >= codeBase && at - codeBase < 2n ** 32n ? runtime
+        : lowRuntime !== null && at < 2n ** 32n ? lowRuntime : null);
     const entryAt = (/** @type {bigint} */ at)=>{
-        if (at < codeBase || at - codeBase >= 2n ** 32n)
+        const by = owner(at);
+        if (by === null)
         {
             return -1;
         }
-        const address = Number(at - codeBase);
+        const address = Number(at & 0xffffffffn);
         // Regions are compiled for the x87 stack's top they are entered with.
         const top = view().getUint8(layout.x87Top);
-        const key = `${address}@${top}`;
-        let entry = runtime.entryOf(address, top);
+        const key = `${at}@${top}`;
+        let entry = by.entryOf(address, top);
         if (entry < 0 && !asked.has(key))
         {
             asked.add(key);
-            runtime.noteHot(address, top, 1);
-            void runtime.translatePending();
-            entry = runtime.entryOf(address, top);
+            by.noteHot(address, top, 1);
+            void by.translatePending();
+            entry = by.entryOf(address, top);
         }
         return entry;
     };
@@ -139,11 +156,17 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
                 // again, as the host's write hook drops them.
                 for (const [address, size] of rewritten.splice(0))
                 {
-                    runtime.codeWritten(address, size);
+                    for (const each of runtimes)
+                    {
+                        each.codeWritten(address, size);
+                    }
                     asked.clear();
                 }
-                // What the runtime noted itself (its misses), formed now.
-                void runtime.translatePending();
+                // What the runtimes noted themselves (their misses), formed now.
+                for (const each of runtimes)
+                {
+                    void each.translatePending();
+                }
                 const at = rip();
                 const entry = entryAt(at);
                 if (entry < 0)
@@ -151,7 +174,20 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
                     step(state);
                     continue;
                 }
-                const exit = runtime.run(entry, budget - (state.retired - before));
+                const by = /** @type {ReturnType<typeof createCorkRuntime>} */ (owner(at));
+                const exit = by.run(entry, budget - (state.retired - before));
+                if ((exit.staleSize ?? 0) > 0)
+                {
+                    // Stores into code the run met: the other block's runtime is told too.
+                    for (const each of runtimes)
+                    {
+                        if (each !== by)
+                        {
+                            each.stored(exit.staleAt ?? 0, exit.staleSize ?? 0, true);
+                        }
+                    }
+                    asked.clear();
+                }
                 state.retired += exit.retired;
                 stats.translated += exit.retired;
                 if (exit.kind === 'interpreted')
@@ -162,7 +198,10 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
                     if (code === WasmExit.CODE_WRITE)
                     {
                         const held = /** @type {NonNullable<typeof tier>} */ (tier);
-                        runtime.codeWritten(held.exitValue(), held.exitSize());
+                        for (const each of runtimes)
+                        {
+                            each.codeWritten(held.exitValue(), held.exitSize());
+                        }
                         asked.clear();
                     }
                     else if (code === WasmExit.HALT)
@@ -201,10 +240,16 @@ export function createRuntimeRunner64({ memory, ram, layout, config = {},
         },
         /** @param {number} base @param {number} size */
         noteStack(base, size){
-            runtime.noteStack(base, size);
+            for (const each of runtimes)
+            {
+                each.noteStack(base, size);
+            }
         },
         readsFaulted(){
-            runtime.readsFaulted?.();
+            for (const each of runtimes)
+            {
+                each.readsFaulted?.();
+            }
         },
     };
 }

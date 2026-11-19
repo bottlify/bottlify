@@ -132,17 +132,20 @@ function wasmModule(shared, build){
  * @param {{ memory: WebAssembly.Memory, ram?: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     area: number, statics: number, hotThreshold: number, trapPort?: number,
- *     parkBase: number, precise?: boolean, atomic?: boolean }} options
+ *     parkBase: number, precise?: boolean, atomic?: boolean, lowHash?: number }} options
  *     ram: a wide window's guest RAM (the layout's `ramMemory`), shared as `memory` is;
  *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; statics: where the
  *     instance's `WASM_INTERPRETER_STATICS` bytes, its data and stack, lie; parkBase: the
  *     park loop's address, whose jumps the ring leaves out; precise: the engine's `precise`,
  *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it;
- *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier
+ *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier;
+ *     lowHash: over a wide window whose code block is past 4 GiB, the entry hash of the
+ *     runtime for the block below it (`wideLayout`), whose code is then counted and entered
+ *     too
  * @returns {WasmInterpreter | null}
  */
 export function createWasmInterpreter({ memory, ram, layout, area, statics, hotThreshold,
-    trapPort, parkBase, precise = false, atomic = false })
+    trapPort, parkBase, precise = false, atomic = false, lowHash = 0 })
 {
     const long = layout.bits === 64;
     const wide = layout.ramMemory !== undefined;
@@ -201,6 +204,7 @@ export function createWasmInterpreter({ memory, ram, layout, area, statics, hotT
         {
             exports.configureWide(/** @type {number} */ (layout.window) / 4096,
                 (layout.codeBase ?? 0) / 2 ** 32);
+            exports.configureLowHash(lowHash);
             ({ exitHigh } = exports);
         }
         exports.configureFloat(layout.x87, layout.x87Top, layout.x87Empty, layout.x87Control,

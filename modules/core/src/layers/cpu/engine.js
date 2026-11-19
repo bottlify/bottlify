@@ -357,6 +357,9 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
  *     instructions translated code runs at a time. Default 2^24.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
+ * @property {boolean} [lowBlock]  The core's host over a wide window whose code block lies
+ *     past 4 GiB: the block below it translated by a runtime of its own; false leaves its code
+ *     to the interpreter tier. Default true.
  * @property {'host' | 'virtual'} [clock]  The clock the cork host and its translator take
  *     their decisions by: `host`, the machine's (the default); `virtual`, the instructions the
  *     guest retired, a million a millisecond (`VIRTUAL_INSTRUCTIONS_PER_MS`) -- a slice's
@@ -466,6 +469,9 @@ export function engineContractProblem(engineModule, url){
  * @property {ExitKind} kind
  * @property {number} vector   For `fault`: 0 (#DE), 6 (#UD), 3 (int 3), 13 (page flag);
  *                             `int n` reports n.
+ * @property {number} [staleAt]   The span of code the run's stores reached, in the window,
+ * @property {number} [staleSize] its size 0 for none: a wide window's other code block's
+ *                             runtime is told of it (cork-host's `twoBlockRuntime`).
  */
 
 /**

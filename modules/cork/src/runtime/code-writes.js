@@ -27,7 +27,7 @@ import { SharedSwitch } from './shared-code.js';
  */
 export function createCodeWrites(state){
     const rt = /** @type {import('./state.js').State} */ (state);
-    const { codeBase, codePages, codeShared, guestBytes, nowMs, pages, read, settings
+    const { codeBase, codePages, codeShared, guestBytes, layout, nowMs, pages, read, settings
     } = /** @type {import('./state.js').Base} */ (state);
     const { WATCH_KEYS, barren, byPage, counts, pageKeys, readsFaulted, stackCodeSeen, stackPages,
         unpublish, unqueue, watchable, watched } = rt;
@@ -389,7 +389,8 @@ export function createCodeWrites(state){
      */
     const storeIntoBlock = (address, size, own = true)=>{
         const offset = address - codeBase;
-        if (codeBase === 0 || (offset > -size && offset < 2 ** 32))
+        // A 4 GiB window's code is all of it; a wide window's block only its own.
+        if (layout.codeBase === undefined || (offset > -size && offset < 2 ** 32))
         {
             storedInto(offset, size, own);
         }
@@ -540,6 +541,7 @@ export function createCodeWrites(state){
         sourcesChanged,
         pageBytes,
         storedInto,
+        storeIntoBlock,
         translatable,
         stubPage,
         formableFrom,
