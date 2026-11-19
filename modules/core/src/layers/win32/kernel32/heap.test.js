@@ -2118,8 +2118,13 @@ test('GetWriteWatch tells the pages written since the reset, and RESET starts th
         return Array.from({ length: view.getUint32(0x100, true) },
             (_, at)=>(view.getUint32(0x200 + 4 * at, true) - base) / PAGE_SIZE);
     };
-    assert.equal(fns.ResetWriteWatch.handler([base, 4 * PAGE_SIZE]), 0);
+    // Watched from the reservation on, as Windows' is: nothing written yet
+    // (Wine's virtual.c test_write_watch).
     assert.deepEqual(asked, [[base, GRANULARITY]], 'one watch over the whole reservation');
+    assert.deepEqual(told(0), [], 'nothing written since it was made');
+    marks.add((base >>> 12) + 1);
+    assert.deepEqual(told(0), [1], 'the one page written');
+    assert.equal(fns.ResetWriteWatch.handler([base, 4 * PAGE_SIZE]), 0);
     assert.deepEqual(told(0), [], 'nothing written since the reset');
 
     marks.add((base >>> 12) + 1).add((base >>> 12) + 3);

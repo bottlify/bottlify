@@ -1718,13 +1718,13 @@ export function createHeapFunctions(host){
 
     /**
      * The reservations made with MEM_WRITE_WATCH, by base: the engine's watch
-     * over its pages (`watchWrites`), made at the first GetWriteWatch or
-     * ResetWriteWatch, and the pages it found written that no reset has taken
-     * since. Until that first look every page counts as written; null where
-     * the engine cannot tell writes, and then every committed page is told.
+     * over its pages (`watchWrites`), made with the reservation, as Windows
+     * tracks writes from it on, and the pages it found written that no reset
+     * has taken since; null where the engine cannot tell writes, and then
+     * every committed page is told.
      *
      * @type {Map<number, { watch: { take: (address: number, length: number) => number[] }
-     *     | null | undefined, written: Set<number> }>}
+     *     | null, written: Set<number> }>}
      */
     const watched = new Map();
 
@@ -1738,18 +1738,6 @@ export function createHeapFunctions(host){
     const writesIn = (block, address, end)=>{
         const state = /** @type {NonNullable<ReturnType<typeof watched.get>>} */ (
             watched.get(block.address));
-        if (state.watch === undefined)
-        {
-            state.watch = host.watchWrites?.(block.address, block.capacity) ?? null;
-            // Windows tracks writes from the reservation on, and a watch
-            // begins at its first look, which takes nothing written before
-            // it: every page counts as written until a reset takes it.
-            for (let page = block.address >>> 12;
-                page < (block.address + block.capacity) >>> 12; page++)
-            {
-                state.written.add(page);
-            }
-        }
         if (state.watch === null)
         {
             return null;
@@ -2246,7 +2234,8 @@ export function createHeapFunctions(host){
         }
         if ((kind & MEM_WRITE_WATCH) !== 0)
         {
-            watched.set(start, { watch: undefined, written: new Set() });
+            watched.set(start, { watch: host.watchWrites?.(start, span) ?? null,
+                written: new Set() });
         }
         handOverReservation(start, span, (kind & MEM_COMMIT) !== 0);
         settleAccess(start, start, start + span);
@@ -2599,7 +2588,8 @@ export function createHeapFunctions(host){
         }
         if ((kind & MEM_WRITE_WATCH) !== 0)
         {
-            watched.set(address, { watch: undefined, written: new Set() });
+            watched.set(address, { watch: host.watchWrites?.(address, span) ?? null,
+                written: new Set() });
         }
         handOverReservation(address, span, (kind & MEM_COMMIT) !== 0);
         settleAccess(address, address, address + span);
