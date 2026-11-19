@@ -60,6 +60,7 @@
     "src/bundle-in-place.js",
     "src/bundle-node.js",
     "src/bundle.js",
+    "src/host/frame-clock.js",
     "src/icon.js",
     "src/iso.js",
     "src/layers/cpu/internal/translation-store.js",
