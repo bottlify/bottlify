@@ -20,7 +20,11 @@
  *   string. A `*` width or precision takes an argument of its own, counted
  *   as Windows counts it: from an array, the insert's own slot and then the
  *   slots after the last one used; from a va_list, the arguments in the order
- *   they are read, an insert seen before naming what it named then.
+ *   they are read, an insert seen before naming what it named then, and the
+ *   ones an insert skips read at its own size (an I64 value two slots).
+ * - The specification is printf's (`ll` a long, `h` a short), what follows its
+ *   conversion is printed as written, and one longer than thirty characters
+ *   or with three stars cannot be formatted.
  * - A line break in the message is CR LF; with a width it is a space, and a
  *   line is broken before it reaches the width, at its last space (the spaces
  *   before the break dropped) or, with none, where it is full. Width 0xff is
@@ -29,6 +33,9 @@
 
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
+
+/** The longest specification between an insert's exclamation marks. */
+const MAX_SPECIFICATION = 30;
 
 /** FormatMessage's low byte of flags: no wrapping, and newlines made spaces. */
 const MAX_WIDTH = 0xff;
@@ -56,23 +63,38 @@ const MAX_WIDTH = 0xff;
  * @param {MessageArguments} args
  */
 function argumentReader(args){
-    /** va_list: what each insert number was given, and how many slots are read. */
+    /** va_list: what each insert number was given, its slots. */
     const named = new Map();
+    /** va_list: how many slots are read, and how many arguments (an I64 one is one). */
     let read = 0;
+    let calls = 0;
     /** An array's: the first slot past the last one used. */
     let cursor = 0;
+    /** The next argument of `size` slots from a va_list. @param {number} size */
+    const next = size=>{
+        const slots = Array.from({ length: size }, (_, index)=>args.read(read + index));
+        read += size;
+        calls++;
+        return slots;
+    };
     return {
         get reads(){
             return read;
         },
         /**
-         * An insert's slots: its first (its own) and then `count - 1` more.
+         * An insert's slots: its stars' and then its value's, which is `size`
+         * slots (2 for an I64 value, 1 otherwise). From a va_list, an insert
+         * not yet read past the arguments read so far first reads the ones
+         * before it at the same size, as Windows does; the first argument an
+         * insert reads (its value, or its first star) is what it names from
+         * then on.
          *
-         * @param {number} insert @param {number} count
+         * @param {number} insert @param {number} stars @param {number} size
          */
-        take(insert, count){
+        take(insert, stars, size){
             /** @type {number[]} */
             const slots = [];
+            const count = stars + size;
             if (args.array)
             {
                 let at = insert - 1;
@@ -84,25 +106,27 @@ function argumentReader(args){
                 }
                 return slots;
             }
+            const first = stars > 0 ? 1 : size;
             if (!named.has(insert))
             {
-                if (read < insert)
+                for (let skipped = calls + 1; skipped < insert; skipped++)
                 {
-                    while (read < insert)
-                    {
-                        named.set(read + 1, args.read(read));
-                        read++;
-                    }
+                    named.set(skipped, next(size));
                 }
-                else
-                {
-                    named.set(insert, args.read(read++));
-                }
+                named.set(insert, next(first));
             }
-            slots.push(named.get(insert));
-            for (let index = 1; index < count; index++)
+            slots.push(...named.get(insert).slice(0, first));
+            while (slots.length < first)
             {
-                slots.push(args.read(read++));
+                slots.push(0);
+            }
+            if (stars > 0)
+            {
+                for (let star = 1; star < stars; star++)
+                {
+                    slots.push(...next(1));
+                }
+                slots.push(...next(size));
             }
             return slots;
         },
@@ -160,26 +184,45 @@ function lines(width){
  * One insert's text, as printf writes its conversion.
  *
  * @param {string} spec  What stands between the exclamation marks.
- * @param {(count: number) => number[]} take  The insert's slots.
+ * @param {(stars: number, size: number) => number[]} take  The insert's slots:
+ *     its stars', then its value's (`size` of them).
  * @param {MessageOptions} options
  * @returns {string | null}  Null for a specification that is none.
  */
 function insertText(spec, take, options){
-    const match = /^([-+ #0]*)(\*|\d*)(?:\.(\*|\d*))?(hh?|ll?|[wLjzt]|I64|I32|I)?([sScCdiuxXop])$/
+    // Windows hands `%` and the specification to its printf: what follows
+    // the conversion is printed as written, and with no conversion the rest
+    // is; a specification longer than its buffer, or with three stars, is no
+    // specification at all.
+    if (spec.length > MAX_SPECIFICATION || (spec.match(/\*/g) ?? []).length > 2)
+    {
+        return null;
+    }
+    const match = /^([-+ #0]*)(\*|\d*)(?:\.(\*|\d*))?(hh?|ll?|[wLjzt]|I64|I32|I)?([sScCdiuxXop])?/
         .exec(spec);
     if (match === null)
     {
         return null;
     }
-    const [, flags, widthText, precisionText, size = '', conversion] = match;
-    const long = size === 'I64' || size === 'll';
-    const count = (widthText === '*' ? 1 : 0) + (precisionText === '*' ? 1 : 0) + (long ? 2 : 1);
-    const slots = take(count);
+    const [whole, flags, widthText, precisionText, size = '', conversion] = match;
+    const rest = spec.slice(whole.length);
+    const long = size === 'I64';
+    const stars = (widthText === '*' ? 1 : 0) + (precisionText === '*' ? 1 : 0);
+    if (conversion === undefined)
+    {
+        if (stars > 0)
+        {
+            take(stars - 1, 1);
+        }
+        return rest;
+    }
+    const slots = take(stars, long ? 2 : 1);
     let at = 0;
     const width = widthText === '*' ? slots[at++] | 0 : Number(widthText || 0);
     const precision = precisionText === undefined ? -1
         : precisionText === '*' ? slots[at++] | 0 : Number(precisionText || 0);
-    const value = slots[at] >>> 0;
+    const short = size === 'h' && 'diuxXo'.includes(conversion);
+    const value = short ? slots[at] & 0xffff : slots[at] >>> 0;
     const high = long ? slots[at + 1] >>> 0 : 0;
     const big = BigInt(high) << 32n | BigInt(value);
 
@@ -206,7 +249,8 @@ function insertText(spec, take, options){
         }
         default: {
             const signed = conversion === 'd' || conversion === 'i';
-            const number = signed ? (long ? BigInt.asIntN(64, big) : BigInt(value | 0))
+            const number = signed ? (long ? BigInt.asIntN(64, big)
+                : BigInt(short ? value << 16 >> 16 : value | 0))
                 : (long ? big : BigInt(value));
             const negative = number < 0n;
             const magnitude = negative ? -number : number;
@@ -238,17 +282,18 @@ function insertText(spec, take, options){
     }
     if (body.length >= Math.abs(width))
     {
-        return body;
+        return body + rest;
     }
-    return flags.includes('-') || width < 0 ? body.padEnd(Math.abs(width))
-        : body.padStart(width);
+    return (flags.includes('-') || width < 0 ? body.padEnd(Math.abs(width))
+        : body.padStart(width)) + rest;
 }
 
 /**
  * A message formatted.
  *
  * @param {string} format @param {MessageOptions} options
- * @returns {{ text: string, error: number, reads: number }}  `error` is 0,
+ * @returns {{ text: string, error: number, reads: number,
+ *     piece: { start: number, kind: string } }}  `error` is 0,
  *          ERROR_INVALID_PARAMETER for a message that cannot be formatted, or
  *          ERROR_INSUFFICIENT_BUFFER when it outgrew `room` and was stopped.
  */
@@ -258,11 +303,23 @@ export function formatMessageText(format, options){
     const room = options.room ?? Infinity;
     const newline = options.width === 0 ? null : ' ';
     /** @param {number} error */
-    const result = error=>({ text: out.text, error, reads: reader?.reads ?? 0 });
+    /**
+     * Where the piece last written began, and what it was: a character of the
+     * message, an escape or an insert - what a caller whose buffer the text
+     * outgrew keeps of it.
+     */
+    let piece = { start: 0, kind: 'character' };
+    /** @param {string} kind */
+    const begin = kind=>{
+        piece = { start: out.length, kind };
+    };
+    /** @param {number} error */
+    const result = error=>({ text: out.text, error, reads: reader?.reads ?? 0, piece });
 
     for (let at = 0; at < format.length; at++)
     {
-        if (out.length > room)
+        // A piece is made before the room for it is judged, its argument read.
+        if (at > 0 && out.length > room)
         {
             return result(ERROR_INSUFFICIENT_BUFFER);
         }
@@ -285,6 +342,7 @@ export function formatMessageText(format, options){
         }
         if (character !== '%')
         {
+            begin('character');
             out.put(character);
             continue;
         }
@@ -305,6 +363,7 @@ export function formatMessageText(format, options){
         if (next === 'n' || next === 'r' || next === 't')
         {
             at++;
+            begin('escape');
             if (next === 't')
             {
                 out.put('\t');
@@ -322,6 +381,7 @@ export function formatMessageText(format, options){
         }
         if (next < '1' || next > '9')
         {
+            begin('escape');
             out.put(next);
             at++;
             continue;
@@ -345,11 +405,12 @@ export function formatMessageText(format, options){
         {
             return result(ERROR_INVALID_PARAMETER);
         }
-        const text = insertText(spec, count=>reader.take(insert, count), options);
+        const text = insertText(spec, (stars, size)=>reader.take(insert, stars, size), options);
         if (text === null)
         {
             return result(ERROR_INVALID_PARAMETER);
         }
+        begin('insert');
         out.put(text);
     }
     return result(out.length > room ? ERROR_INSUFFICIENT_BUFFER : 0);

@@ -776,7 +776,8 @@ test('a gone process on this thread gives its names back, and a name another pro
     const names = ()=>[...table]
         .filter(([, held])=>held.kind !== 'objdir' && held.kind !== 'symlink')
         .map(([name])=>name);
-    assert.deepEqual(names().sort(), ['Local\\Lock', 'Local\\Ready'],
+    // Local\X is kept under the key X, as a native call names it.
+    assert.deepEqual(names().sort(), ['Lock', 'Ready'],
         'a name only the gone process held is free again');
     assert.equal(waiter.waitResult, 0x80, 'the lock went to the waiter, abandoned');
     assert.ok(await letGo(memoryOfGone, gc), 'the gone machine\'s memory is nobody\'s');

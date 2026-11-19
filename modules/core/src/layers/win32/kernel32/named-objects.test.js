@@ -165,3 +165,48 @@ test('across a link, events, semaphores and mutexes are the run\'s; a mapping\'s
     assert.deepEqual(asked.filter(each=>each[1] === 'mapping'), [], 'never asked across');
     assert.deepEqual(errors, [0, 0]);
 });
+
+test('a kernel32 name with Global\\, Local\\ or Session\\1\\ is the object its bare name is,'
+    + ' the one a native call reaches', ()=>{
+    const names = createNamedObjects();
+    const { errors, setLastError } = errorSink();
+    const event = { kind: 'event' };
+    names.remember('Global\\Ready', 'event', event, false, setLastError);
+    for (const spelt of ['Ready', 'Local\\Ready', 'Session\\1\\Ready', 'Global\\Ready'])
+    {
+        assert.equal(names.existing(spelt, 'event'), event, spelt);
+    }
+    assert.equal(names.win32Key('Global\\Ready'), 'Ready');
+    assert.equal(names.keyOf({ root: 0, name: '\\BaseNamedObjects\\Ready', attributes: 0,
+        invalid: 0, security: 0 }, 'event'), 'Ready', 'the native path, the same key');
+    assert.equal(names.existing('global\\Ready', 'event'), null,
+        'a link is found as it is spelt, as kernel32 asks');
+    assert.equal(names.existing('Nowhere\\Ready', 'event'), null);
+    assert.equal(names.win32Key('Nowhere\\Ready'), 'Nowhere\\Ready',
+        'a path that leads nowhere stays as spelt');
+
+    names.remember('Local\\Ready', 'event', event, true, setLastError);
+    assert.deepEqual(errors, [ERROR_SUCCESS, ERROR_ALREADY_EXISTS], 'one object, two spellings');
+});
+
+test('across a link, the run is asked by the key, not the spelling', ()=>{
+    /** @type {any[]} */
+    const asked = [];
+    const objects = {
+        peek: (/** @type {string} */ kind, /** @type {string} */ name)=>{
+            asked.push(['peek', name]);
+            return null;
+        },
+        create: (/** @type {string} */ kind, /** @type {string} */ name)=>{
+            asked.push(['create', name]);
+            return { id: 7, reused: false };
+        },
+        reference: ()=>{},
+        close: ()=>{},
+    };
+    const kernel = { createMutex: (/** @type {any} */ options)=>({ kind: 'mutex', ...options }) };
+    const names = createRemoteNamedObjects({ objects, kernel });
+    assert.equal(names.existing('Global\\One', 'mutex'), null);
+    names.remember('Local\\One', 'mutex', { kind: 'mutex' }, false, ()=>{});
+    assert.deepEqual(asked, [['peek', 'One'], ['create', 'One']]);
+});

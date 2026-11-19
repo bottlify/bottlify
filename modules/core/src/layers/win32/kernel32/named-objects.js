@@ -101,7 +101,25 @@ export function createNamedObjects({ table = new Map(), handles } = {}){
             mine.delete(name);
         }
     };
+    /**
+     * The key a Win32 name is kept under: every spelling of one object
+     * (`Global\X`, `Local\X`, the native path) is one key, through the
+     * namespace's one walk. A name whose path leads nowhere stays as it is
+     * spelt: no other spelling can reach it.
+     *
+     * @param {string | null} name
+     */
+    const win32Key = name=>{
+        if (name === null)
+        {
+            return null;
+        }
+        const key = namespace.win32(name);
+        return typeof key === 'string' ? key : name;
+    };
     return {
+        win32Key,
+
         /**
          * The key a native call's OBJECT_ATTRIBUTES names in the namespace
          * (`object-namespace.js`) - a name something holds already in the
@@ -160,11 +178,12 @@ export function createNamedObjects({ table = new Map(), handles } = {}){
          * @param {string | null} name @param {string} kind
          */
         existing(name, kind){
-            if (name === null)
+            const key = win32Key(name);
+            if (key === null)
             {
                 return null;
             }
-            const held = table.get(name);
+            const held = table.get(key);
             return !held ? null : held.kind === kind ? held.object : TAKEN;
         },
 
@@ -179,18 +198,19 @@ export function createNamedObjects({ table = new Map(), handles } = {}){
          * @param {(code: number) => void} setLastError
          */
         remember(name, kind, made, reused, setLastError){
-            if (name !== null)
+            const key = win32Key(name);
+            if (key !== null)
             {
-                const held = table.get(name);
+                const held = table.get(key);
                 if (reused && held)
                 {
                     held.refs++;
                 }
                 else
                 {
-                    table.set(name, { kind, object: made, refs: 1 });
+                    table.set(key, { kind, object: made, refs: 1 });
                 }
-                count(name, 1);
+                count(key, 1);
             }
             setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
         },
@@ -348,6 +368,7 @@ export function createRemoteNamedObjects({ objects, kernel, handles }){
         return made;
     };
     return {
+        win32Key: own.win32Key,
         keyOf: own.keyOf,
         place: own.place,
         list: own.list,
@@ -357,12 +378,13 @@ export function createRemoteNamedObjects({ objects, kernel, handles }){
             {
                 return own.existing(name, kind);
             }
-            if (name === null)
+            const key = own.win32Key(name);
+            if (key === null)
             {
                 return null;
             }
-            const found = objects.peek(kind, name);
-            return found === null ? null : found.taken ? TAKEN : standInFor(kind, found.id, name);
+            const found = objects.peek(kind, key);
+            return found === null ? null : found.taken ? TAKEN : standInFor(kind, found.id, key);
         },
 
         /**
@@ -379,7 +401,8 @@ export function createRemoteNamedObjects({ objects, kernel, handles }){
                 own.remember(name, kind, made, reused, setLastError);
                 return;
             }
-            if (name !== null)
+            const key = own.win32Key(name);
+            if (key !== null)
             {
                 if (reused)
                 {
@@ -388,14 +411,14 @@ export function createRemoteNamedObjects({ objects, kernel, handles }){
                 }
                 else
                 {
-                    const answer = objects.create(kind, name, {
+                    const answer = objects.create(kind, key, {
                         manualReset: made.manualReset === true, signalled: made.signalled === true,
                         initial: made.count, maximum: made.maximum,
                         owner: made.owner ? made.owner.id : null,
                     });
                     made.remote = answer.id;
                     standIns.set(answer.id, made);
-                    names.set(answer.id, name);
+                    names.set(answer.id, key);
                     count(answer.id, 1);
                     reused = answer.reused === true;
                 }

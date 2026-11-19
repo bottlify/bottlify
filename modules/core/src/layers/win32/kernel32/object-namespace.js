@@ -21,12 +21,14 @@
  *
  * Win32's names are the objects of the BaseNamedObjects directories, the
  * shared one and the interactive session's, and are kept under the name
- * itself, as kernel32 has always kept them: an event CreateEvent makes is
- * found by NtOpenEvent through \BaseNamedObjects, \Sessions\1\BaseNamedObjects
- * or a handle to either. Elsewhere in the namespace an object is kept under
- * its whole path, which no Win32 name can be (a Win32 name has no leading
- * backslash). The two BaseNamedObjects directories are one set of names
- * here, as Global\ and Local\ always were (decisions.md A271).
+ * itself: an event CreateEvent makes is found by NtOpenEvent through
+ * \BaseNamedObjects, \Sessions\1\BaseNamedObjects or a handle to either. A
+ * kernel32 name is a path below the session's directory, taken by the same
+ * walk (`win32`), so `Global\X`, `Local\X` and `Session\1\X` are the one key
+ * `X`. Elsewhere in the namespace an object is kept under its whole path,
+ * which no Win32 name can be (a Win32 name has no leading backslash). The
+ * two BaseNamedObjects directories are one set of names here (decisions.md
+ * A271).
  *
  * The directories and links Windows makes at boot are made once in a table
  * and never go; one a program makes lives as long as a handle onto it, as a
@@ -51,6 +53,8 @@ const WIN32_DIRECTORY = /^\\(?:Sessions\\\d+\\)?BaseNamedObjects$/;
 
 /** The session a program runs in, whose BaseNamedObjects Local\ names. */
 const SESSION = 1;
+/** The directory kernel32's names are relative to. */
+const SESSION_OBJECTS = `\\Sessions\\${SESSION}\\BaseNamedObjects`;
 
 /**
  * The directories Windows makes at boot, and the links among them.
@@ -209,6 +213,29 @@ export function createObjectNamespace(host){
     };
 
     return {
+        /**
+         * The key a Win32 name stands for. kernel32 makes and opens its
+         * objects relative to the session's BaseNamedObjects (Windows'
+         * BaseGetNamedObjectDirectory), case sensitive, so `Global\X`
+         * follows the link to \BaseNamedObjects, `Local\X` and
+         * `Session\1\X` to the session's own, and every spelling of one
+         * object is one key - the one a native call naming it reaches. A key
+         * already (a bare name, or a whole path) is itself; a name whose path
+         * leads nowhere is answered with the walk's status.
+         *
+         * @param {string} name
+         * @returns {string | { status: number }}
+         */
+        win32(name){
+            if (!name.includes('\\') || name.startsWith('\\'))
+            {
+                return name;
+            }
+            const found = walk(host.at(SESSION_OBJECTS, false)?.object ?? { path: SESSION_OBJECTS },
+                name.split('\\'), false, false);
+            return 'status' in found ? found : found.key;
+        },
+
         /**
          * Where an OBJECT_ATTRIBUTES' name is, or the status that refuses it.
          * The name is not empty: a call that makes an unnamed object takes no

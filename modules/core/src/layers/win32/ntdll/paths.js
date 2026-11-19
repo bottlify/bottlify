@@ -122,6 +122,74 @@ export function dosDeviceName(path){
     return DOS_DEVICE.test(name) ? { offset: start * 2, length: name.length * 2 } : null;
 }
 
+/**
+ * The full path a DOS path names, as RtlGetFullPathName_U (and so
+ * GetFullPathName) writes it, and where its file part starts (-1 for none).
+ * `resolve` places an ordinary name - a drive's, the current directory's, a
+ * share's - as every file call places it; what is written here around it:
+ *
+ * - a DOS device in any folder (`C:\dir\nul.`, `AUX`) is `\\.\NUL`, no file part;
+ * - a local device path written with either separator (`//./x`, `\\?`,
+ *   `//?/x/..`) is its root (`\\.\` or `\\?\`) and the rest, `.` and `..`
+ *   taken but never above the root; only `\\?\` spelt with backslashes is the
+ *   namespace that takes nothing, and is the caller's to keep as written;
+ * - the last name loses its trailing dots and spaces, a wildcard's too
+ *   (`*.` is `*`); one of nothing else is a directory (`...`, `x\.. `), and a
+ *   path that names a directory by its separator keeps it, with no file part;
+ * - a share's server alone (`\\server`) has no file part.
+ *
+ * @param {string} asked  the name as the caller wrote it, not empty
+ * @param {(path: string) => string} resolve
+ * @returns {{ path: string, filePart: number }}
+ */
+export function fullPathName(asked, resolve){
+    const device = dosDeviceName(asked);
+    if (device !== null)
+    {
+        const name = asked.slice(device.offset / 2, device.offset / 2 + device.length / 2);
+        return { path: `\\\\.\\${name}`, filePart: -1 };
+    }
+    const type = dosPathType(asked);
+    if (type === 6 || type === 7)
+    {
+        const root = `\\\\${asked[2]}\\`;
+        /** @type {string[]} */
+        const parts = [];
+        const pieces = asked.slice(3).split(/[\\/]/);
+        pieces.forEach((part, index)=>{
+            if (part === '..')
+            {
+                parts.pop();
+            }
+            else if (part !== '' && part !== '.')
+            {
+                const kept = index === pieces.length - 1 ? part.replace(/[. ]+$/, '') : part;
+                if (kept !== '')
+                {
+                    parts.push(kept);
+                }
+            }
+        });
+        const directory = parts.length > 0 && isSeparator(asked[asked.length - 1]);
+        const path = root + parts.join('\\') + (directory ? '\\' : '');
+        return { path, filePart: parts.length === 0 || directory ? -1
+            : path.lastIndexOf('\\') + 1 };
+    }
+    let given = asked;
+    const cut = Math.max(asked.lastIndexOf('\\'), asked.lastIndexOf('/'));
+    const last = asked.slice(cut + 1);
+    if (!/^(?:[A-Za-z]:)?\.{0,2}$/.test(last))
+    {
+        const kept = last.replace(/[. ]+$/, '');
+        given = asked.slice(0, cut + 1) + (kept === '' ? (cut === -1 ? '.\\' : '') : kept);
+    }
+    const resolved = resolve(given);
+    const directory = isSeparator(given[given.length - 1]) && !resolved.endsWith('\\');
+    const path = directory ? `${resolved}\\` : resolved;
+    const server = type === 1 && !path.slice(2).includes('\\');
+    return { path, filePart: path.endsWith('\\') || server ? -1 : path.lastIndexOf('\\') + 1 };
+}
+
 /** Characters a short name cannot hold. */
 const NOT_IN_SHORT_NAME = /["*+,/:;<=>?[\\\]|]/;
 /** @param {string} name */
@@ -175,6 +243,11 @@ export function createPathFunctions(host){
         {
             return DOS_DEVICES + text.slice(4);
         }
+        // An object name already, taken as written.
+        if (text.startsWith(DOS_DEVICES) && text.length > DOS_DEVICES.length)
+        {
+            return text;
+        }
         const fullPath = host.kernel32.GetFullPathNameW.handler;
         const needed = fullPath([dos, 0, 0, 0]) >>> 0;
         if (needed === 0)
@@ -194,7 +267,7 @@ export function createPathFunctions(host){
         {
             return null;
         }
-        if (full.startsWith('\\\\.\\'))
+        if (full.startsWith('\\\\.\\') || full.startsWith('\\\\?\\'))
         {
             return DOS_DEVICES + full.slice(4);
         }
@@ -235,7 +308,12 @@ export function createPathFunctions(host){
         {
             // The last component, inside the buffer just handed out; none
             // when the path ends in a separator and so names a directory.
-            const part = name.endsWith('\\') ? 0 : buffer + (name.lastIndexOf('\\') + 1) * 2;
+            // A share's server alone is no file either.
+            const server = /^\\\?\?\\UNC\\[^\\]*$/.test(name);
+            // Nor is a DOS device.
+            const device = dosDeviceName(host.readWideString(dos >>> 0, 0x10000)) !== null;
+            const part = name.endsWith('\\') || server || device ? 0
+                : buffer + (name.lastIndexOf('\\') + 1) * 2;
             const out = new Uint8Array(4);
             new DataView(out.buffer).setUint32(0, part, true);
             host.writeMemory(filePart >>> 0, out);

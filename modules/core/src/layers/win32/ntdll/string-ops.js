@@ -283,6 +283,24 @@ export function createStringOperations(host){
     };
     /** @param {string} text */
     const wideBytes = text=>unitsBytes(textUnits(text));
+    /**
+     * What RtlFormatMessage leaves in a buffer its text outgrew: the
+     * message's own characters as far as they fit, unterminated; an escape
+     * that does not fit not at all; an insert cut to leave room for its
+     * terminator, as its printf cuts it - where any of it fits.
+     *
+     * @param {string} text  the text as far as it was made
+     * @param {{ start: number, kind: string }} piece  the piece that outgrew it
+     * @param {number} total  the buffer's characters
+     */
+    const overflowed = (text, piece, total)=>{
+        if (piece.kind === 'insert' && total - 1 > piece.start)
+        {
+            return wideBytes(`${text.slice(0, total - 1)}\0`);
+        }
+        return wideBytes(text.slice(0, piece.kind === 'character' ? total
+            : Math.min(piece.start, total)));
+    };
 
     /** @param {number} address */
     const guidText = address=>{
@@ -868,8 +886,9 @@ export function createStringOperations(host){
                 // A va_list is a pointer to the first argument, passed by
                 // address; an array is passed as itself.
                 const slots = list === 0 ? 0 : asked(isArray) ? list >>> 0 : readU32(list >>> 0);
-                const room = Math.floor((size >>> 0) / 2) - 1;
-                const { text, error } = formatMessageText(format, {
+                const total = Math.floor((size >>> 0) / 2);
+                const room = total - 1;
+                const { text, error, reads, piece } = formatMessageText(format, {
                     wide: !asked(ansi),
                     ignoreInserts: asked(ignoreInserts),
                     width: width >>> 0,
@@ -880,12 +899,20 @@ export function createStringOperations(host){
                         : host.readCString(address >>> 0, 0x10000)),
                     room,
                 });
+                // A va_list is used up as far as it was read, as va_arg leaves it.
+                if (list !== 0 && !asked(isArray) && reads > 0)
+                {
+                    host.writeMemory(list >>> 0, u32(slots + reads * 4));
+                }
                 if (error === 87)
                 {
+                    // What was written before the fault stays, unterminated.
+                    host.writeMemory(buffer >>> 0, wideBytes(text.slice(0, total)));
                     return STATUS.INVALID_PARAMETER;
                 }
                 if (error !== 0 || text.length > room)
                 {
+                    host.writeMemory(buffer >>> 0, overflowed(text, piece, total));
                     return STATUS.BUFFER_OVERFLOW;
                 }
                 host.writeMemory(buffer >>> 0, wideBytes(`${text}\0`));

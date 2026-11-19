@@ -503,14 +503,15 @@ test('the debugging calls are in the table, and the process calls only over kern
 
     const more = /** @type {Record<string, any>} */ (host.kernel32);
     for (const name of ['ResumeThread', 'OpenProcess', 'FindResourceExW', 'LoadResource',
-        'SizeofResource'])
+        'SizeofResource', 'OpenThread', 'GetProcessId', 'GetThreadId'])
     {
         more[name] = { argBytes: 4, handler: ()=>0 };
     }
     const full = /** @type {Record<string, any>} */ (createNtdllFunctions(host));
     for (const name of ['NtResumeThread', 'ZwResumeThread', 'NtOpenProcess', 'ZwOpenProcess',
         'RtlFindMessage', 'RtlCreateProcessParameters', 'RtlDestroyProcessParameters',
-        'RtlCreateUserProcess', 'NtCreateUserProcess', 'ZwCreateUserProcess'])
+        'RtlCreateUserProcess', 'NtCreateUserProcess', 'ZwCreateUserProcess', 'NtGetNextProcess',
+        'NtGetNextThread'])
     {
         assert.equal(typeof full[name]?.handler, 'function', name);
     }

@@ -572,3 +572,71 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
     assert.deepEqual([fns.NtCreateThreadEx.argBytes, fns.RtlCreateUserThread.argBytes,
         fns.NtSuspendProcess.argBytes], [44, 40, 4]);
 });
+
+test('NtGetNextProcess and NtGetNextThread walk the system\'s list, opening what lets them', ()=>{
+    const bytes = new Uint8Array(0x1000);
+    const view = new DataView(bytes.buffer);
+    /** @type {any[]} */
+    const opened = [];
+    // Handles: 0x100 + id for a process, 0x200 + id for a thread; 0x2a refuses.
+    const kernel32 = {
+        GetLastError: { handler: ()=>0 },
+        SetLastError: { handler: ()=>0 },
+        GetProcessId: { handler: (/** @type {number[]} */ [handle])=>
+            (handle === 0xffffffff ? 4 : handle > 0x100 && handle < 0x200 ? handle - 0x100 : 0) },
+        GetThreadId: { handler: (/** @type {number[]} */ [handle])=>
+            (handle > 0x200 && handle < 0x300 ? handle - 0x200 : 0) },
+        OpenProcess: { handler: (/** @type {number[]} */ [access, inherit, id])=>{
+            opened.push(['process', access, inherit, id]);
+            return id === 0x2a ? 0 : 0x100 + id;
+        } },
+        OpenThread: { handler: (/** @type {number[]} */ [access, inherit, id])=>{
+            opened.push(['thread', access, inherit, id]);
+            return 0x200 + id;
+        } },
+    };
+    const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        kernel32,
+        teb: ()=>0,
+        allocate: ()=>0,
+        free: ()=>true,
+        processes: ()=>[
+            { id: 4, parent: 0, path: 'a.exe', threads: [8, 12, 16] },
+            { id: 0x2a, parent: 4, path: 'b.exe', threads: [0x30] },
+            { id: 0x40, parent: 4, path: 'c.exe', threads: [0x44] },
+        ],
+    }));
+    const NO_MORE_ENTRIES = 0x8000001a;
+    const INVALID_HANDLE = STATUS_INVALID_HANDLE;
+    const STATUS_INVALID_PARAMETER = 0xc000000d;
+    /** @param {string} name @param {number[]} args */
+    const next = (name, args)=>{
+        view.setUint32(OUT, 0xdeadbeef, true);
+        const status = fns[name].handler([...args, OUT]) >>> 0;
+        return [status, view.getUint32(OUT, true)];
+    };
+
+    assert.deepEqual(next('NtGetNextProcess', [0, 0x1000, 2, 0]), [STATUS_SUCCESS, 0x104]);
+    assert.deepEqual(next('NtGetNextProcess', [0x104, 0x1000, 0, 0]), [STATUS_SUCCESS, 0x140],
+        'the one that refuses the access passed over');
+    assert.deepEqual(next('NtGetNextProcess', [0x140, 0x1000, 0, 0]), [NO_MORE_ENTRIES, 0]);
+    assert.deepEqual(next('NtGetNextProcess', [0, 0x1000, 0, 1]), [STATUS_SUCCESS, 0x140],
+        'backwards, the last first');
+    assert.deepEqual(next('NtGetNextProcess', [0, 0x1000, 0, 2]).slice(0, 1),
+        [STATUS_INVALID_PARAMETER]);
+    assert.deepEqual(next('NtGetNextProcess', [0x5, 0x1000, 0, 0]), [INVALID_HANDLE, 0]);
+    assert.deepEqual(opened[0], ['process', 0x1000, 1, 4], 'OBJ_INHERIT: an inheritable handle');
+
+    assert.deepEqual(next('NtGetNextThread', [0xffffffff, 0, 0x800, 0, 0]),
+        [STATUS_SUCCESS, 0x208], 'the process\'s first thread');
+    assert.deepEqual(next('NtGetNextThread', [0xffffffff, 0x20c, 0x800, 0, 0]),
+        [STATUS_SUCCESS, 0x210]);
+    assert.deepEqual(next('NtGetNextThread', [0xffffffff, 0x210, 0x800, 0, 0]),
+        [NO_MORE_ENTRIES, 0]);
+    assert.deepEqual(next('NtGetNextThread', [0x7, 0, 0x800, 0, 0]), [INVALID_HANDLE, 0]);
+    assert.deepEqual(next('NtGetNextThread', [0xffffffff, 0x7, 0x800, 0, 0]), [INVALID_HANDLE, 0]);
+    assert.equal(fns.NtGetNextThread.handler([0xffffffff, 0, 0x800, 0, 0, 0]) >>> 0,
+        STATUS_ACCESS_VIOLATION);
+});

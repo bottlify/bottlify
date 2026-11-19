@@ -90,6 +90,8 @@ const THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER = 0x4;
 const CURRENT_PROCESS = 0xffffffff;
 const CURRENT_THREAD = 0xfffffffe;
 const THREAD_TERMINATE = 0x1;
+/** OBJ_INHERIT in a handle's attributes: the handle a child would inherit. */
+const OBJ_INHERIT = 0x2;
 const THREAD_SUSPEND_RESUME = 0x2;
 
 /** NtCreateThreadEx's flags this honours, and the ones it does not. */
@@ -199,6 +201,55 @@ export function createProcessFunctions(host){
         const error = kernel32.GetLastError?.handler([]) ?? 0;
         kernel32.SetLastError?.handler([before]);
         return { result, error };
+    };
+
+    /**
+     * NtGetNextProcess and NtGetNextThread: the id after the one `previous`
+     * names in a list (before it, with Flags 1), opened by `open` with the
+     * access asked; an id that refuses it is passed over. A handle that names
+     * nothing is STATUS_INVALID_HANDLE, past the end STATUS_NO_MORE_ENTRIES,
+     * both with a null handle written.
+     *
+     * @param {() => number[]} ids  the list, read when the call is made
+     * @param {number} previous  a handle, or 0 for the start
+     * @param {string} idOf  the kernel32 call that reads a handle's id
+     * @param {string} open  the kernel32 call that opens an id
+     * @param {number} access @param {number} attributes @param {number} flags
+     * @param {number} out
+     */
+    const nextOpened = (ids, previous, idOf, open, access, attributes, flags, out)=>{
+        if ((out >>> 0) === 0)
+        {
+            return STATUS.ACCESS_VIOLATION;
+        }
+        if ((flags >>> 0) > 1)
+        {
+            return STATUS.INVALID_PARAMETER;
+        }
+        const listed = flags === 1 ? ids().reverse() : ids();
+        let from = 0;
+        if ((previous >>> 0) !== 0)
+        {
+            const id = quietly(idOf, [previous]).result >>> 0;
+            if (id === 0)
+            {
+                writeU32(out, 0);
+                return STATUS.INVALID_HANDLE;
+            }
+            from = listed.indexOf(id) + 1;
+        }
+        const inherit = (attributes & OBJ_INHERIT) !== 0 ? 1 : 0;
+        for (const id of from === 0 && (previous >>> 0) !== 0 ? [] : listed.slice(from))
+        {
+            const handle = quietly(open, [access, inherit, id]).result >>> 0;
+            if (handle !== 0)
+            {
+                writeU32(out, handle);
+                return STATUS.SUCCESS;
+            }
+        }
+        writeU32(out, 0);
+        return STATUS.NO_MORE_ENTRIES;
     };
 
     /**
@@ -879,6 +930,50 @@ export function createProcessFunctions(host){
                 }
                 writeU32(out, result);
                 return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS NtGetNextProcess(HANDLE Process, ACCESS_MASK DesiredAccess,
+         *   ULONG HandleAttributes, ULONG Flags, PHANDLE NewProcess)
+         *
+         * The process after the one a handle names, or the first with none, in
+         * the order the system lists them (Flags 1 walks it backwards), opened
+         * with the access asked: one that refuses it is passed over. Past the
+         * last, STATUS_NO_MORE_ENTRIES and a null handle.
+         */
+        NtGetNextProcess: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([process, access, attributes, flags, out])=>nextOpened(
+                ()=>(host.processes?.() ?? []).map(each=>each.id),
+                process, 'GetProcessId', 'OpenProcess', access, attributes, flags, out),
+        },
+
+        /**
+         * NTSTATUS NtGetNextThread(HANDLE Process, HANDLE Thread, ACCESS_MASK
+         *   DesiredAccess, ULONG HandleAttributes, ULONG Flags, PHANDLE NewThread)
+         *
+         * The process's thread after the one a handle names, or its first, in
+         * the order they were made, as NtGetNextProcess walks processes.
+         */
+        NtGetNextThread: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([process, thread, access, attributes, flags, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                const id = quietly('GetProcessId', [process]).result >>> 0;
+                if (id === 0)
+                {
+                    writeU32(out, 0);
+                    return STATUS.INVALID_HANDLE;
+                }
+                return nextOpened(()=>(host.processes?.() ?? [])
+                    .find(each=>each.id === id)?.threads ?? [],
+                thread, 'GetThreadId', 'OpenThread', access, attributes, flags, out);
             },
         },
 
