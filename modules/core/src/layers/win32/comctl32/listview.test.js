@@ -254,6 +254,36 @@ test('a list view tells its custom draw with the context TRANSPARENT', async()=>
         'TRANSPARENT before NM_CUSTOMDRAW\'s first stage');
 });
 
+test('the selection mark follows a focus that moves, not a selection; a count below it drops it',
+    async()=>{
+        const lv = listview(LVS_REPORT);
+        for (const index of [0, 1, 2])
+        {
+            await lv.send(LVM.INSERTITEMA, index, lv.item(LVIF_TEXT, index, { text: 'x' }));
+        }
+        await lv.send(LVM.SETITEMSTATE, 1, lv.item(0, 0, { state: LVIS_SELECTED,
+            stateMask: LVIS_SELECTED }));
+        assert.equal(lv.send(LVM.GETSELECTIONMARK, 0, 0), -1, 'a selection does not set it');
+        await lv.send(LVM.SETITEMSTATE, 2, lv.item(0, 0, { state: LVIS_FOCUSED,
+            stateMask: LVIS_FOCUSED }));
+        assert.equal(lv.send(LVM.GETSELECTIONMARK, 0, 0), 2, 'a new focus with no mark');
+        await lv.send(LVM.SETITEMSTATE, 0, lv.item(0, 0, { state: LVIS_FOCUSED,
+            stateMask: LVIS_FOCUSED }));
+        assert.equal(lv.send(LVM.GETSELECTIONMARK, 0, 0), 2, 'a mark already set stays');
+        assert.equal(lv.send(LVM.SETSELECTIONMARK, 0, -1), 2);
+        await lv.send(LVM.SETITEMSTATE, 0, lv.item(0, 0, { state: LVIS_FOCUSED,
+            stateMask: LVIS_FOCUSED }));
+        assert.equal(lv.send(LVM.GETSELECTIONMARK, 0, 0), -1, 'a focus that did not move');
+
+        const data = listview(LVS_REPORT | LVS_OWNERDATA);
+        data.send(LVM.SETITEMCOUNT, 1, 0);
+        await data.send(LVM.SETITEMSTATE, 0, data.item(0, 0, { state: LVIS_FOCUSED,
+            stateMask: LVIS_FOCUSED }));
+        assert.equal(data.send(LVM.GETSELECTIONMARK, 0, 0), 0);
+        data.send(LVM.SETITEMCOUNT, 0, 0);
+        assert.equal(data.send(LVM.GETSELECTIONMARK, 0, 0), -1, 'gone with its item');
+    });
+
 test('LVM_SUBITEMHITTEST in the report view finds the column, and counts rows as Windows does',
     async()=>{
         const lv = listview(LVS_REPORT);

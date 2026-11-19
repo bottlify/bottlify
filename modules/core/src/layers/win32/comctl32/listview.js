@@ -819,7 +819,10 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             held.items[index].state = next;
         }
-        if (next & LVIS_SELECTED && !(old & LVIS_SELECTED))
+        // The mark follows the focus, not the selection: an item that takes
+        // the focus becomes the mark when there is none (Wine's listview.c
+        // test_multiselect, Windows' answers).
+        if (next & LVIS_FOCUSED && !(old & LVIS_FOCUSED))
         {
             held.mark = held.mark < 0 ? index : held.mark;
         }
@@ -1865,6 +1868,10 @@ export function createListViewProcedure(host, tk, setBkMode){
                     if (held.focus >= held.count)
                     {
                         held.focus = -1;
+                    }
+                    if (held.mark >= held.count)
+                    {
+                        held.mark = -1;
                     }
                     host.invalidate(record);
                 }
