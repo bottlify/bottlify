@@ -683,7 +683,11 @@ export function connectGraphicsWorker(options){
                     return [...sum].sort(([, a], [, b])=>b.bytes - a.bytes).slice(0, 24)
                         .map(([name, { count, bytes }])=>`${name} ${count} ${bytes}`).join(' | ');
                 })(),
-                lent: lentOf(senders) };
+                lent: lentOf(senders),
+                // Every process's connection onto this worker that has not
+                // left it: one a process that ended still counts here holds
+                // that process's memory through its frames' handlers.
+                joined: onWorker.get(worker)?.connections.length ?? 0 };
         },
         dispose(){
             leave();
