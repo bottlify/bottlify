@@ -972,14 +972,21 @@ export function createQueryFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, infoClass, buffer, length, returnLength])=>{
                 const wanted = infoClass >>> 0;
-                // No handle names no process, for a class there is (Wine's
-                // info.c test_query_process_image_file_name); a class there
-                // is not is refused as one first.
+                // No handle names no process. Windows checks the class, then a
+                // fixed-size class's length, then the handle (Wine's info.c
+                // 1860, 2115, test_query_process_image_file_name).
                 if ((handle >>> 0) === 0)
                 {
-                    return [PROCESS_BASIC_INFORMATION, PROCESS_DEBUG_PORT, PROCESS_EXECUTE_FLAGS,
-                        PROCESS_IMAGE_FILE_NAME, PROCESS_IMAGE_FILE_NAME_WIN32].includes(wanted)
-                        ? STATUS.INVALID_HANDLE : STATUS.INVALID_INFO_CLASS;
+                    const fixed = new Map([[PROCESS_BASIC_INFORMATION, PROCESS_BASIC.SIZE],
+                        [PROCESS_DEBUG_PORT, 4], [PROCESS_EXECUTE_FLAGS, 4]]);
+                    const named = wanted === PROCESS_IMAGE_FILE_NAME
+                        || wanted === PROCESS_IMAGE_FILE_NAME_WIN32;
+                    if (!fixed.has(wanted) && !named)
+                    {
+                        return STATUS.INVALID_INFO_CLASS;
+                    }
+                    return (length >>> 0) < (fixed.get(wanted) ?? 0)
+                        ? STATUS.INFO_LENGTH_MISMATCH : STATUS.INVALID_HANDLE;
                 }
                 const child = (handle >>> 0) === CURRENT_PROCESS ? null
                     : host.processOf?.(handle >>> 0) ?? null;

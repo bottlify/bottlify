@@ -227,8 +227,12 @@ test('the image file name is the program\'s path, natively or as Win32 names it'
     assert.equal(host.view.getUint16(BUFFER, true), 'C:\\App\\a.exe'.length * 2, 'Win32\'s');
     assert.equal(createQueryFunctions(fakeHost()).NtQueryInformationProcess.handler(
         [-1, 27, BUFFER, 0x100, 0]), STATUS.INVALID_INFO_CLASS, 'without the path, unknown');
-    assert.equal(fns.NtQueryInformationProcess.handler([0, 43, BUFFER, 0x100, 0]),
+    assert.equal(fns.NtQueryInformationProcess.handler([0, 43, BUFFER, 8, 0]),
         STATUS.INVALID_HANDLE, 'no handle names no process');
+    assert.equal(fns.NtQueryInformationProcess.handler([0, 0, 0, 0, 0]),
+        STATUS.INFO_LENGTH_MISMATCH, 'a fixed class\'s length is checked before the handle');
+    assert.equal(fns.NtQueryInformationProcess.handler([0, 0, BUFFER, 0x18, 0]),
+        STATUS.INVALID_HANDLE);
 });
 
 test('the length a class needs is reported even when the buffer is too small', ()=>{
