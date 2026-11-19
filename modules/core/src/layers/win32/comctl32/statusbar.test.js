@@ -14,6 +14,7 @@ import {
     STATUSBAR_CLASS, CCS_NORESIZE, CCS_TOP, SBT_POPOUT, SBT_NOBORDERS, SB_SIMPLEID,
     SB_SETPARTS, SB_GETPARTS, SB_GETRECT, SB_GETBORDERS, SB_SETTEXTA, SB_SETTEXTW,
     SB_GETTEXTA, SB_GETTEXTW, SB_GETTEXTLENGTHA, SB_SIMPLE, SB_ISSIMPLE, SB_SETMINHEIGHT,
+    SBT_OWNERDRAW, NM_CLICK, NM_RCLICK, NM_DBLCLK, NM_RDBLCLK,
 } from './statusbar.js';
 
 /** The fixture over the graphics layer's drawing engine. */
@@ -28,6 +29,8 @@ const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces })
 const WM_SIZE = 0x0005;
 const WM_SETTEXT = 0x000c;
 const WM_GETTEXT = 0x000d;
+const WM_NOTIFY = 0x004e;
+const WM_DRAWITEM = 0x002b;
 const FACE = 0x00c0c0c0;
 const SHADOW = 0x00808080;
 const LIGHT = 0x00ffffff;
@@ -166,4 +169,44 @@ test('a part is drawn sunken, raised with SBT_POPOUT or with no border, its text
             inked.push(context.pixel(bar, x, row));
         }
         assert.ok(inked.some(color=>color !== FACE), 'the text is drawn in the part');
+    });
+
+test('a control character in a part\'s text other than a tab is kept as a space', async()=>{
+    const context = setupBars();
+    await context.makeParent(300, 200);
+    const bar = await context.control(STATUSBAR_CLASS, 0);
+    context.memory.putString(TEXT, 'Inval\x01id\tok\n');
+    assert.equal(context.send([bar, SB_SETTEXTA, 0, TEXT]), 1);
+    context.send([bar, SB_GETTEXTA, 0, OUT]);
+    assert.equal(context.memory.readCString(OUT, 64), 'Inval id\tok ');
+});
+
+test('an owner-drawn part keeps its value and is drawn by the parent; clicks are told',
+    async()=>{
+        const context = setupBars();
+        await context.makeParent(300, 200);
+        const bar = await context.control(STATUSBAR_CLASS, 0);
+        assert.equal(context.send([bar, SB_SETTEXTA, SBT_OWNERDRAW, 0x1234]), 1);
+        assert.equal(context.send([bar, SB_GETTEXTA, 0, OUT]), 0x1234, 'the value, not a length');
+        context.sent.length = 0;
+        context.fns.InvalidateRect.handler([bar, 0, 1]);
+        await context.fns.UpdateWindow.handler([bar]);
+        const drawn = context.sent.filter(message=>message.message === WM_DRAWITEM);
+        assert.equal(drawn.length, 1, 'WM_DRAWITEM for the part');
+        const item = drawn[0].lParam;
+        assert.equal(context.memory.u32(item + 8), 0, 'the first part');
+        assert.equal(context.memory.u32(item + 20), bar);
+        assert.equal(context.memory.u32(item + 44), 0x1234, 'with its value');
+
+        for (const [mouse, code] of [[0x0202, NM_CLICK], [0x0205, NM_RCLICK],
+            [0x0203, NM_DBLCLK], [0x0206, NM_RDBLCLK]])
+        {
+            context.sent.length = 0;
+            await context.send([bar, mouse, 0, 5 | 3 << 16]);
+            const told = context.sent.filter(message=>message.message === WM_NOTIFY);
+            assert.equal(told.length, 1);
+            assert.equal(context.memory.u32(told[0].lParam + 8), code);
+            assert.equal(context.memory.u32(told[0].lParam + 12), 0, 'over the first part');
+            assert.equal(context.memory.i32(told[0].lParam + 20), 5);
+        }
     });
