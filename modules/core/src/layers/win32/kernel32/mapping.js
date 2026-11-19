@@ -9,7 +9,7 @@ import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { imageKind, relocateImage } from '../../loader/internal/pe.js';
-import { sectionRights, viewProtection } from './view-rights.js';
+import { copyOnWrite, sectionRights, viewProtection } from './view-rights.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -218,6 +218,11 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {Map<number, import('./heap.js').ViewRegion>} [viewRegions]
  *           Every view of this process by its address, for VirtualQuery and
  *           VirtualProtect.
+ * @property {(address: number, length: number) =>
+ *     ({ take: (address: number, length: number) => number[] } | null)} [watchWrites]
+ *           The engine's watch over a range's writes (the memory layer's): a view
+ *           with copy-on-write pages is watched from its mapping, so their first
+ *           write is seen (`copies` in heap.js's ViewRegion).
  * @property {(handle: number) => number | null} [handleAccess]  The rights a handle
  *           was granted (a section's, FILE_MAP_*), which a view asks within.
  * @property {{ views: number, waited: number, failed: number }} [metrics]
@@ -368,6 +373,18 @@ export function imageRefusal(kind, machine64){
  * @param {MappingHost} host
  */
 export function createMappingFunctions(host){
+    /**
+     * The watch a view's copy-on-write pages are written under (heap.js's
+     * `ViewRegion.copies`): begun at the mapping when the view has such pages,
+     * after its bytes are in, so only the program's writes are seen; else at
+     * the first VirtualProtect that gives one.
+     *
+     * @param {number} address @param {number} length @param {boolean} now
+     * @returns {import('./heap.js').ViewCopies}
+     */
+    const watchCopies = (address, length, now)=>({
+        watch: now ? host.watchWrites?.(address, length) ?? null : undefined,
+    });
     /**
      * Views handed out by MapViewOfFile, by the address the guest holds.
      *
@@ -1025,10 +1042,14 @@ export function createMappingFunctions(host){
                     // An image's view is mapped PAGE_EXECUTE_WRITECOPY whatever
                     // was asked, each section with its own protection within it.
                     const image = mapping.image && offset === 0;
-                    host.viewRegions?.set(address, { length: wanted, writable,
-                        protect: image ? PAGE_EXECUTE_WRITECOPY : viewProtection(access >>> 0),
+                    const protect = image ? PAGE_EXECUTE_WRITECOPY : viewProtection(access >>> 0);
+                    const sections = image ? imageSections(mapping.image.image) : undefined;
+                    host.viewRegions?.set(address, { length: wanted, writable, protect,
                         anonymous: !mapping.node, pages: new Map(),
-                        ...image ? { sections: imageSections(mapping.image.image) } : {} });
+                        copies: watchCopies(address, wanted,
+                            sections ? sections.some(each=>copyOnWrite(each.protect))
+                                : copyOnWrite(protect)),
+                        ...sections ? { sections } : {} });
                     if (metrics)
                     {
                         metrics.views++;

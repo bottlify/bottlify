@@ -36,7 +36,7 @@ import {
     heapReAllocLongCode, heapSizeLongCode,
 } from './guest-heap-long.js';
 import { createPageRuns } from './page-runs.js';
-import { imageWriteCopy, protectionWithin } from './view-rights.js';
+import { copyOnWrite, imageWriteCopy, protectionWithin, writtenCopy } from './view-rights.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
@@ -1127,12 +1127,23 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
  * whether it writes through, the protection it was mapped with (`protect`, its
  * AllocationProtect: PAGE_EXECUTE_WRITECOPY for an image's), whether its
  * section is the page file's (`anonymous`), each page VirtualProtect has
- * given another protection (`pages`), and an image's sections, each with the
+ * given another protection (`pages`), the watch its copy-on-write pages are
+ * written under and the pages it found copied (`copies`), and an image's sections, each with the
  * protection its pages start with.
  *
  * @typedef {{ length: number, writable: boolean, protect?: number, anonymous?: boolean,
- *     pages?: Map<number, number>,
+ *     pages?: Map<number, number>, copies?: ViewCopies,
  *     sections?: { start: number, end: number, protect: number }[] }} ViewRegion
+ */
+
+/**
+ * The engine's watch over a view's writes, for its copy-on-write pages: a
+ * written one is the process's own copy from then on, read-write. Undefined
+ * until a page of the view is first copy-on-write; null where the engine
+ * cannot tell writes, and then such a page keeps its protection (A248).
+ *
+ * @typedef {{ watch: { take: (address: number, length: number) => number[] }
+ *     | null | undefined, copied?: Set<number> }} ViewCopies
  */
 
 /**
@@ -1832,6 +1843,7 @@ export function createHeapFunctions(host){
             // was mapped with until VirtualProtect gives it another; a run is
             // the pages that share one, as Windows answers a view.
             const end = ((view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) >>> 0;
+            takeCopies(view, page, end);
             const protection = viewPageProtection(view, page);
             let to = page + PAGE_SIZE;
             while (to < end && viewPageProtection(view, to) === protection)
@@ -2133,6 +2145,7 @@ export function createHeapFunctions(host){
             host.setLastError(ERROR_INVALID_PARAMETER);
             return false;
         }
+        takeCopies(view, from, end);
         writeDword(oldProtect, viewPageProtection(view, from));
         settleView(view, from, end, given);
         return true;
@@ -2175,11 +2188,54 @@ export function createHeapFunctions(host){
      * @param {number} from @param {number} end @param {number} protection
      */
     const settleView = (view, from, end, protection)=>{
+        // What was written under the old protection is settled first: a write
+        // the new one follows is the only one it sees.
+        takeCopies(view, from, end);
+        // A page already copied is the process's own: asked to be
+        // copy-on-write again, it is read-write, as Windows answers it.
+        const copied = view.copies?.copied;
         for (let page = from; page < end; page += PAGE_SIZE)
         {
-            view.pages?.set(page, protection);
+            view.pages?.set(page, copied?.has(page) ? writtenCopy(protection) : protection);
+        }
+        if (copyOnWrite(protection) && view.copies && view.copies.watch === undefined)
+        {
+            view.copies.watch = host.watchWrites?.(view.base, roundUp(view.length, PAGE_SIZE))
+                ?? null;
         }
         host.pageAccess?.(from, end - from, (protection & 0xff) !== PAGE_NOACCESS);
+    };
+
+    /**
+     * The copy-on-write pages of a view written since the last look become
+     * the process's own copies, read-write (`writtenCopy`), as the first write
+     * to one does on Windows. The engine marks a page at its first store
+     * after the watch armed it, by the page check every store makes anyway,
+     * so an ordinary page pays nothing and a watched one once
+     * (`watchWrites`); the look is made where a protection is read.
+     *
+     * Only [from, to) is looked at: a page past it keeps its mark for a
+     * later look.
+     *
+     * @param {ViewRegion & { base: number }} view
+     * @param {number} from @param {number} to
+     */
+    const takeCopies = (view, from, to)=>{
+        const copies = view.copies;
+        if (!copies?.watch || to <= from)
+        {
+            return;
+        }
+        for (const number of copies.watch.take(from, to - from))
+        {
+            const page = number * PAGE_SIZE;
+            const now = viewPageProtection(view, page);
+            if (copyOnWrite(now))
+            {
+                view.pages?.set(page, writtenCopy(now));
+                (copies.copied ??= new Set()).add(page);
+            }
+        }
     };
 
     /**

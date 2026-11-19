@@ -1612,6 +1612,78 @@ test('a view\'s pages take a protection within what the view was mapped for', ()
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
 });
 
+test('a written copy-on-write page is the process\'s own, read-write', ()=>{
+    // Wine's kernel32:virtual (test_mapping): after a write to a
+    // PAGE_WRITECOPY page VirtualQuery answers it PAGE_READWRITE, a run of its
+    // own, and PAGE_EXECUTE_WRITECOPY turns PAGE_EXECUTE_READWRITE; asked to
+    // be copy-on-write again, a copied page stays read-write. The engine's
+    // watch stands in for cork's page marks: a page is written when the test
+    // says so, a watch sees what is written after it begins, and take answers
+    // each page once.
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const watched = [];
+    /** @type {any} */
+    const view = { base: 0x80000, length: 0x3000, writable: false, protect: 0x02,
+        pages: new Map(), copies: { watch: undefined } };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: ()=>{},
+        viewAt: (/** @type {number} */ at)=>(at >= 0x80000 && at < 0x83000 ? view : null),
+        pageAccess: ()=>true,
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            watched.push([from, length]);
+            marks.clear();
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        },
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>data.getUint32(0x100 + field, true));
+    };
+
+    // A read-only view's page written before it was copy-on-write is no copy.
+    marks.add(0x80);
+    assert.equal(fns.VirtualProtect.handler([0x80000, 0x3000, 0x08, 0x200]), 1);
+    assert.deepEqual(watched, [[0x80000, 0x3000]], 'watched from the first copy-on-write page');
+    assert.deepEqual(query(0x80000), [0x3000, 0x08]);
+
+    marks.add(0x81);
+    assert.deepEqual(query(0x80000), [0x1000, 0x08]);
+    assert.deepEqual(query(0x81000), [0x1000, 0x04], 'written: its own copy');
+    assert.deepEqual(query(0x82000), [0x1000, 0x08]);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x08, 0x200]), 1);
+    assert.equal(data.getUint32(0x200, true), 0x04, 'the old protection, the copy\'s');
+    assert.deepEqual(query(0x81000), [0x1000, 0x04], 'a copy stays read-write');
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x02, 0x200]), 1);
+    assert.deepEqual(query(0x81000), [0x1000, 0x02], 'and takes any other protection');
+    assert.equal(watched.length, 1, 'one watch for the view');
+
+    // An executable copy-on-write page turns executable read-write.
+    view.protect = 0x20;
+    assert.equal(fns.VirtualProtect.handler([0x82000, 1, 0x80, 0x200]), 1);
+    marks.add(0x82);
+    assert.deepEqual(query(0x82000), [0x1000, 0x40]);
+
+    // Where the engine cannot tell writes the page keeps its protection.
+    const blind = { ...view, copies: { watch: null }, pages: new Map() };
+    const fnsBlind = createHeapFunctions({ ...host, viewAt: ()=>blind });
+    marks.add(0x80);
+    assert.equal(fnsBlind.VirtualProtect.handler([0x80000, 1, 0x08, 0x200]), 1);
+    assert.equal(fnsBlind.VirtualQuery.handler([0x80000, 0x100, MBI.SIZE]), MBI.SIZE);
+    assert.equal(data.getUint32(0x100 + MBI.Protect, true), 0x08);
+});
+
 test('an image\'s view answers its sections and takes any protection, writes as copies', ()=>{
     // Wine's kernel32:virtual (test_mapping, SEC_IMAGE): the view's
     // AllocationProtect is PAGE_EXECUTE_WRITECOPY and its type MEM_IMAGE,

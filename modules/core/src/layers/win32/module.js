@@ -3848,6 +3848,9 @@ export function createWin32Module(){
                         setLastError: setError,
                         namedObjects,
                         viewRegions,
+                        /** @param {number} address @param {number} length */
+                        watchWrites: (address, length)=>
+                            memory.watchWrites?.(address, length) ?? null,
                         handleAccess: (/** @type {number} */ handle)=>
                             kernel.handles.access?.(handle) ?? null,
                         // Views of one page-file section agree at the edges of
