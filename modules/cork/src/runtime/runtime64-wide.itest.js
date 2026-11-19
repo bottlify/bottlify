@@ -104,6 +104,27 @@ test('code past 4 GiB: seeded programs and loops as interpreted', ifRoom(()=>{
     }
 }));
 
+test('the interpreter tier in wasm runs translated code\'s misses in place over the window,'
+    + ' as interpreted', ifRoom(()=>{
+    // As long mode's own gate has it (runtime64.itest.js): every start hot at once and
+    // formed where it is first met, so a miss is a target the runtime has not formed
+    // yet, which the tier takes from inside the region - its RAM the window's memory.
+    const cases = [...CORPUS.cases,
+        ...Object.values(CALLS).flatMap(code=>CORPUS.cases.slice(0, 2)
+            .map((/** @type {any} */ one)=>({ ...one, text: 'calls', code })))];
+    for (const placed of [{ high: 2 ** 32 }, { high: 2 ** 32, codeHigh: 2 ** 32 }])
+    {
+        for (const budget of [7, 100000])
+        {
+            const { failures, stats } = compare(cases, { budget, tiered: true, window: 2 ** 33,
+                ...placed });
+            assert.deepEqual(failures.slice(0, 20), [],
+                `${JSON.stringify(placed)}, budget ${budget}`);
+            assert.ok(stats.tiered > cases.length / 2, JSON.stringify(stats));
+        }
+    }
+}));
+
 test('a store through a pointer past 4 GiB, then the stack below it: each access takes its own'
     + ' address\'s high half', ifRoom(()=>{
     // The stack in the code's area, below 4 GiB; rdi in the data's, 4 GiB past its place.
