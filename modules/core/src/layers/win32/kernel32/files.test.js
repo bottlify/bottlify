@@ -2699,6 +2699,23 @@ test('NtQueryInformationFile answers the name, the size and the position of an o
         'no block to write is not a fault');
 });
 
+test('NtQueryEaFile: a file has none, said without the block; another object is a mismatch', ()=>{
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abc');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ);
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryEaFile;
+    memory.putDword(0x300, 0xdeadbeef);
+    memory.bytes.fill(0xcc, 0x400, 0x410);
+    assert.equal(query.handler([handle, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000052,
+        'STATUS_NO_EAS_ON_FILE');
+    assert.equal(memory.dword(0x300) >>> 0, 0xdeadbeef, 'the block untouched');
+    assert.deepEqual([...memory.bytes.subarray(0x400, 0x409)], [0, 0, 0, 0, 0, 0, 0, 0, 0xcc],
+        'the buffer cleared to its length');
+    assert.equal(query.handler([0xffffffff, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000024,
+        'the process\'s pseudo-handle');
+    assert.equal(query.handler([0xdead, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000008);
+});
+
 test('a file opens by the number FileInternalInformation answers, from any folder of its drive',
     ()=>{
         const { memory, files, fns, open } = setup();

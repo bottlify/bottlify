@@ -225,6 +225,7 @@ const STATUS_DIRECTORY_NOT_EMPTY = 0xc0000101;
 const STATUS_NO_SUCH_FILE = 0xc000000f;
 const STATUS_NO_MORE_FILES = 0x80000006;
 const STATUS_EAS_NOT_SUPPORTED = 0xc000004f;
+const STATUS_NO_EAS_ON_FILE = 0xc0000052;
 
 /** dwCreationDisposition. */
 const CREATE_NEW = 1;
@@ -4220,17 +4221,26 @@ export function createFileFunctions(host){
          *   BOOLEAN ReturnSingleEntry, PVOID EaList, ULONG EaListLength,
          *   PULONG EaIndex, BOOLEAN RestartScan)
          *
-         * No file has any (FileEaInformation says a size of 0 for every one).
+         * No file has any (FileEaInformation says a size of 0 for every one):
+         * STATUS_NO_EAS_ON_FILE, the buffer cleared to its length and the
+         * status block untouched, as the file system answers a file without
+         * them. A handle of another kind of object is a type mismatch.
          */
         NtQueryEaFile: {
             argBytes: 36,
             /** @param {number[]} args */
-            handler: ([handle, block])=>{
+            handler: ([handle, , buffer, length])=>{
                 if (!fileOrDirectory(handle))
                 {
-                    return STATUS_INVALID_HANDLE;
+                    const held = heldKind(handle);
+                    return held !== null && held !== 'pipe' && !FILE_OBJECT_KINDS.has(held)
+                        ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_INVALID_HANDLE;
                 }
-                return report(block >>> 0, STATUS_EAS_NOT_SUPPORTED, 0);
+                if ((buffer >>> 0) !== 0 && (length >>> 0) !== 0)
+                {
+                    host.writeMemory(buffer >>> 0, new Uint8Array(length >>> 0));
+                }
+                return STATUS_NO_EAS_ON_FILE;
             },
         },
 
