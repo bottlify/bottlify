@@ -293,6 +293,8 @@ function fakeFiles(){
                     name: key.slice(prefix.length),
                     isDirectory: node.directory,
                     size: node.data.length,
+                    // A reparse point is listed as one, as the volume lists it.
+                    .../** @type {any} */ (node).link ?? {},
                 }));
         },
         ...numbering(),
@@ -1614,6 +1616,23 @@ test('a wide directory listing writes twice as wide a name, at the same offset',
     assert.equal(memory.bytes[0x600 + 591], 0, 'the last byte of the wide form is written');
     assert.equal(memory.bytes[0x600 + 592], 0xee, 'and nothing beyond it is');
     fns.FindClose.handler([search]);
+});
+
+test('both FindFirstFile forms put a reparse point\'s tag in dwReserved0', ()=>{
+    const { memory, files, fns, at } = setup();
+    files.put('C:\\GAME\\LINK.DAT', '');
+    /** @type {any} */ (files.nodes.get('C:\\GAME\\LINK.DAT')).link =
+        { reparseTag: 0xa000000c, junction: 'GAME\\TARGET.DAT' };
+    for (const [form, name] of /** @type {const} */ ([
+        ['FindFirstFileA', at(NAME, 'C:\\GAME\\LINK.DAT')],
+        ['FindFirstFileW', putWide(memory, NAME2, 'C:\\GAME\\LINK.DAT')]]))
+    {
+        memory.putDword(0x600 + 36, 0xeeeeeeee);
+        const search = fns[form].handler([name, 0x600]);
+        assert.notEqual(search, INVALID_HANDLE_VALUE, form);
+        assert.equal(memory.dword(0x600 + 36), 0xa000000c, form);
+        fns.FindClose.handler([search]);
+    }
 });
 
 test('GetFullPathNameW keeps a trailing separator the caller wrote', ()=>{
@@ -3704,6 +3723,18 @@ test('GetFinalPathNameByHandle names the file in the namespace asked for', ()=>{
     assert.equal(error.code, ERROR_INVALID_HANDLE);
 });
 
+test('GetFinalPathNameByHandle names the file as its volume does, through its junctions', ()=>{
+    const { memory, files, fns, open } = setup();
+    const anyFiles = /** @type {any} */ (files);
+    files.mkdir('C:\\GAME\\LINK');
+    const file = open('C:\\GAME\\LINK\\SAVE.DAT', CREATE_ALWAYS);
+    anyFiles.finalPath = (/** @type {string} */ path)=>
+        path.replace(/^C:\\GAME\\LINK\\/i, 'C:\\Store\\');
+    assert.equal(fns.GetFinalPathNameByHandleW.handler([file, 0x400, 64, 0]),
+        '\\\\?\\C:\\Store\\SAVE.DAT'.length);
+    assert.equal(wideAt(memory, 0x400), '\\\\?\\C:\\Store\\SAVE.DAT');
+});
+
 test('SetFileInformationByHandle renames, deletes on close and moves the end', ()=>{
     const { memory, files, fns, open, error } = setup();
     files.put('C:\\GAME\\a.tmp', 'abcdef');
@@ -3961,6 +3992,41 @@ test('NtQueryDirectoryFile lists a folder a call at a time, from where it left o
         0x100, 1, 0, 0, 1]), 0);
     const next = memory.dword(BUFFER);
     assert.ok(next > 0 && next % 8 === 0, `the next record at ${next}`);
+});
+
+test('a reparse point listed through its own handle holds "." and ".." alone', ()=>{
+    const { memory, files, fns } = setup();
+    const anyFiles = /** @type {any} */ (files);
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    files.mkdir('C:\\GAME\\DIR');
+    files.put('C:\\GAME\\DIR\\A.TXT', 'a');
+    // The point stands for the folder it is: listed by name, it shows A.TXT.
+    const stat = anyFiles.stat.bind(files);
+    let pointed = false;
+    anyFiles.stat = (/** @type {string} */ path)=>{
+        const entry = stat(path);
+        return entry && pointed && path === 'C:\\GAME\\DIR'
+            ? { ...entry, reparseTag: 0xa0000003, junction: 'GAME\\DIR' } : entry;
+    };
+    assert.equal(natives.NtCreateFile.handler([NT_HANDLE, GENERIC_READ,
+        objectAttributes(memory, '\\??\\C:\\GAME\\DIR'), NT_STATUS, 0, 0, 7, FILE_OPEN,
+        FILE_DIRECTORY_FILE | 0x00200000, 0, 0]), 0);
+    const handle = memory.dword(NT_HANDLE);
+    pointed = true;
+    const names = [];
+    for (;;)
+    {
+        const status = natives.NtQueryDirectoryFile.handler([handle, 0, 0, 0, NT_STATUS, BUFFER,
+            0x100, 12, 1, 0, 0]);
+        if (status !== 0)
+        {
+            break;
+        }
+        const length = memory.dword(BUFFER + 8);
+        names.push(String.fromCharCode(...[...memory.bytes.subarray(BUFFER + 12,
+            BUFFER + 12 + length)].filter((_, at)=>at % 2 === 0)));
+    }
+    assert.deepEqual(names, ['.', '..']);
 });
 
 test('NtQueryDirectoryFile matches its mask as a native expression, "." and ".." first', ()=>{

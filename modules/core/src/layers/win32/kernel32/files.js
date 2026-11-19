@@ -593,6 +593,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => void} setCurrentDirectory
  * @property {(path: string) => boolean} [writeProtected]
  *           Whether the path is on read-only media, a disc.
+ * @property {(path: string) => string} [finalPath]
+ *           The path as the volume spells it, every junction on the way
+ *           taken. Absent, a path is its own final name.
  * @property {(path: string, attributes: number | null) => boolean} [setAttributes]
  *           Records the attributes a program set on a name; `null` forgets
  *           them. Absent, SetFileAttributes changes nothing a later call sees.
@@ -1509,16 +1512,10 @@ export function createFileFunctions(host){
 
     /** @param {number} address @param {DirectoryEntry} entry */
     const writeWideFindData = (address, entry)=>{
+        // The same head as the ANSI form's, the reparse tag in it; the names
+        // after it are twice as wide.
         const data = new Uint8Array(WIN32_FIND_DATAW.SIZE);
-        const view = new DataView(data.buffer);
-        view.setUint32(WIN32_FIND_DATAW.dwFileAttributes, attributesOf(entry), true);
-        const time = msToFileTime(entry.modified ?? 0);
-        view.setBigUint64(WIN32_FIND_DATAW.ftCreationTime, time, true);
-        view.setBigUint64(WIN32_FIND_DATAW.ftLastAccessTime, time, true);
-        view.setBigUint64(WIN32_FIND_DATAW.ftLastWriteTime, time, true);
-        const size = entry.size ?? 0;
-        view.setUint32(WIN32_FIND_DATAW.nFileSizeHigh, high(size), true);
-        view.setUint32(WIN32_FIND_DATAW.nFileSizeLow, low(size), true);
+        data.set(findDataHead(entry).subarray(0, WIN32_FIND_DATAW.cFileName));
         data.set(utf16(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAW.cFileName);
         host.writeMemory(address, data);
     };
@@ -4763,8 +4760,9 @@ export function createFileFunctions(host){
 
     /**
      * GetFinalPathNameByHandle in either width. The name is the one the file
-     * was opened by -- a volume's names are its own spelling, with no links
-     * to resolve -- in the namespace the flags ask for: the drive's
+     * was opened by as the volume spells it, every junction on its way taken
+     * (a hard link is a name of its own and stays) - in the namespace the
+     * flags ask for: the drive's
      * (`\\?\C:\...`), the volume's device (`\Device\HarddiskVolumeN\...`,
      * the drives numbered from C as QueryDosDevice names them), or none (the
      * path below the root). A volume GUID path is not one this answers.
@@ -4775,11 +4773,12 @@ export function createFileFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([handle, buffer, room, flags])=>{
-            const path = handlePath(handle);
-            if (path === null)
+            const opened = handlePath(handle);
+            if (opened === null)
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
+            const path = files.finalPath?.(opened) ?? opened;
             const volumeName = (flags >>> 0) & 0x7;
             if (((flags >>> 0) & ~0xf) !== 0 || (volumeName !== VOLUME_NAME_DOS
                 && volumeName !== VOLUME_NAME_NT && volumeName !== VOLUME_NAME_NONE))
@@ -4913,7 +4912,12 @@ export function createFileFunctions(host){
                 : [['.', directory.path], ['..', /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent]]
                     .map(([dot, of])=>({ ...holder, name: dot, isDirectory: true, size: 0,
                         identity: of }));
-            const entries = [...dots, ...files.list(directory.path, '*') ?? []]
+            // A handle whose own name is a reparse point was opened as the
+            // point (one opened through it stands on what it names): it holds
+            // nothing of its own, and what it stands for is listed through
+            // its name, not through its handle.
+            const held = holder?.reparseTag ? [] : files.list(directory.path, '*') ?? [];
+            const entries = [...dots, ...held]
                 .filter(entry=>isNameInExpression(pattern === '' ? '*' : pattern, entry.name));
             directory.listing = { pattern, entries, next: 0, first: true };
         }

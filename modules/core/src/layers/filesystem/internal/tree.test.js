@@ -313,6 +313,18 @@ test('a junction shows the directory it stands for; removing it leaves that dire
     assert.equal(tree.stat(['Cache'])?.reparseTag, 0);
 });
 
+test('a path\'s final name takes the junctions on its way but the last, in the volume\'s spelling',
+    ()=>{
+        const { tree } = mounted();
+        tree.createDirectory(['Store']);
+        tree.createFile(['Store', 'A.DLL']);
+        tree.createDirectory(['Cache']);
+        tree.setReparse(['Cache'], { tag: MOUNT_POINT, data: null, target: ['Store'] });
+        assert.deepEqual(tree.finalPath(['cache', 'a.dll']), ['Store', 'A.DLL']);
+        assert.deepEqual(tree.finalPath(['CACHE']), ['Cache'], 'the point itself');
+        assert.deepEqual(tree.finalPath(['game', 'setup.exe']), ['Game', 'Setup.EXE']);
+    });
+
 test('a reparse point is set on an empty directory or a file, and taken off only of one', ()=>{
     const { tree } = mounted();
     const point = (/** @type {string[]} */ target)=>({ tag: MOUNT_POINT, data: null, target });

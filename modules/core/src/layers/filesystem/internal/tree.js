@@ -1288,6 +1288,17 @@ export function createOverlay({
         },
 
         /**
+         * The name `components` reaches, as the volume spells it, every
+         * junction on the way taken: what a handle opened by it is named
+         * (GetFinalPathNameByHandle). The last component is not followed.
+         *
+         * @param {string[]} components @returns {string[]}
+         */
+        finalPath(components){
+            return mustFind(components).path.split('\\').filter(part=>part.length > 0);
+        },
+
+        /**
          * Where the file numbered `id` is, as components: one of its names,
          * null for a number no file here has.
          *

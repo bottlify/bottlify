@@ -822,6 +822,21 @@ export function createFilesystemModule(){
                 },
 
                 /**
+                 * The full path `path` reaches, as the volume spells it, every
+                 * junction on the way taken; the last name is not followed.
+                 *
+                 * @param {string} path @returns {string}
+                 */
+                finalPath(path){
+                    if (!live())
+                    {
+                        return path;
+                    }
+                    const { tree, drive, components } = locate(path);
+                    return formatPath(drive, tree.finalPath(components));
+                },
+
+                /**
                  * Where the file numbered `id` is on the volume `path` is on,
                  * as a full path: null for a number no file there has.
                  *

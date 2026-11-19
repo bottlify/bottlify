@@ -619,6 +619,16 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
         },
 
         /**
+         * The path `path` reaches as its volume spells it, every junction on
+         * the way taken: itself where it names nothing.
+         *
+         * @param {string} path @returns {string}
+         */
+        finalPath(path){
+            return attempt(()=>fs.finalPath(path), path);
+        },
+
+        /**
          * Where the file numbered `id` is on the volume `path` is on: null
          * for a number no file there has.
          *
