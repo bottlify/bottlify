@@ -2266,6 +2266,25 @@ test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only 
     assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
 });
 
+test('CreateFile opens the pipe device by its Win32 name, as its native name opens', ()=>{
+    /** @type {[string, number, number][]} */
+    const opens = [];
+    const { fns, at, handles } = setup({ pipes: {
+        /** @param {{ root: number, name: string }} given @param {number} access @param {number} options */
+        nativeOpen: (given, access, options)=>{
+            opens.push([given.name, access, options]);
+            return { handle: handles.open('pipe', {}, access) };
+        },
+        isPipe: ()=>false,
+    } });
+    const device = fns.CreateFileA.handler([at(NAME, '\\\\.\\pipe'), 0, 0, 0, OPEN_EXISTING, 0, 0]);
+    assert.notEqual(device >>> 0, 0xffffffff);
+    assert.deepEqual(opens.at(-1), ['\\??\\pipe', 0x00100080, 0x20],
+        'the device, with SYNCHRONIZE and FILE_READ_ATTRIBUTES, opened for synchronous I/O');
+    fns.CreateFileA.handler([at(NAME, '\\\\.\\PIPE\\'), 0, 0, 0, OPEN_EXISTING, 0x40000000, 0]);
+    assert.deepEqual(opens.at(-1), ['\\??\\pipe\\', 0x00100080, 0], 'its root, overlapped');
+});
+
 test('NtCreateFile opens what the pipe device answers there, with the rights asked', ()=>{
     /** @type {[string, number, number, number][]} */
     const opens = [];

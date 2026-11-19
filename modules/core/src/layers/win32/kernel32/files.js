@@ -2689,6 +2689,21 @@ export function createFileFunctions(host){
             host.setLastError(ERROR_SUCCESS);
             return host.handles.open('device', { device: 'nul' });
         }
+        // The pipe device by its Win32 name, `\\.\pipe` (its root with a
+        // separator after), opens as the native name of it does.
+        const deviceName = name === 0 ? null : /^\\\\[.?]\\pipe(\\?)$/i.exec(text.raw(name));
+        if (deviceName && host.pipes)
+        {
+            const device = host.pipes.nativeOpen({ root: 0, name: `\\??\\pipe${deviceName[1]}` },
+                (access | SYNCHRONIZE | FILE_READ_ATTRIBUTES) >>> 0,
+                ((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? 0 : FILE_SYNCHRONOUS_IO_NONALERT,
+                FILE_OPEN);
+            if (device && 'handle' in device)
+            {
+                host.setLastError(ERROR_SUCCESS);
+                return device.handle;
+            }
+        }
         // A pipe's name opens a client end of an instance that listens.
         if (name !== 0 && host.pipes && isPipeName(text.raw(name)))
         {
