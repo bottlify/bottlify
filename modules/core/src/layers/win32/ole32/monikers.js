@@ -141,8 +141,6 @@ const BIND_OPTS = Object.freeze({
     LOCALE: 24, SERVER_INFO: 28, HWND: 32, SIZE_OF: 36, SIZE_OF_V1: 16, SIZE_OF_V2: 32,
 });
 
-/** MULTI_QI: the IID asked for, the interface answered, and its HRESULT. */
-const MULTI_QI = Object.freeze({ IID: 0, ITF: 4, HR: 8, SIZE_OF: 12 });
 
 /** The largest count an anti moniker loads; one more is refused. */
 const MAX_ANTI_COUNT = 0xfffff;
@@ -164,6 +162,7 @@ const FILE_MONIKER_WIDE_TAG = 3;
  * What the moniker functions need of the rest of ole32.
  *
  * @typedef {Object} MonikerEnv
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose MULTI_QI is wider
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
@@ -458,6 +457,9 @@ const comparisonDataOf = state=>{
  * @param {MonikerEnv} env
  */
 export function createMonikerFunctions(env){
+    /** MULTI_QI: the IID asked for, the interface answered, each a pointer wide, and its HRESULT. */
+    const MULTI_QI = env.pointerSize === 8 ? { IID: 0, ITF: 8, HR: 16, SIZE_OF: 24 }
+        : { IID: 0, ITF: 4, HR: 8, SIZE_OF: 12 };
     /** @param {number} address */
     const readU32 = address=>readU32Of(env.readMemory(address >>> 0, 4), 0);
     /** @param {number} address @param {number} value */

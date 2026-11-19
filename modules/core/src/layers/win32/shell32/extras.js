@@ -90,8 +90,6 @@ const SCALAR_TYPES = Object.freeze(new Set([0, 1, 2, 3, 4, 5, 11, 16, 17, 18, 19
     23, 64]));
 const VT_LPWSTR = 31;
 
-/** SHSTOCKICONINFO: cbSize, hIcon, iSysImageIndex, iIcon, then szPath[MAX_PATH]. */
-const SHSTOCKICONINFO_SIZE = 16 + MAX_PATH * 2;
 /** SIID_MAX_ICONS: the stock icons are numbered from 0 to one below it. */
 const SIID_MAX_ICONS = 181;
 const SHGSI_ICON = 0x100;
@@ -99,6 +97,7 @@ const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
 
 /**
  * @typedef {Object} ExtrasHost
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -142,6 +141,13 @@ const utf16z = text=>{
  * @param {ExtrasHost} host @param {ExtrasParts} parts
  */
 export function createShellExtras(host, parts){
+    /**
+     * SHSTOCKICONINFO: cbSize, hIcon (a handle wide, on its own boundary),
+     * iSysImageIndex, iIcon, then szPath[MAX_PATH].
+     */
+    const STOCK = host.pointerSize === 8 ? { icon: 8, image: 16, index: 20, path: 24 }
+        : { icon: 4, image: 8, index: 12, path: 16 };
+    const SHSTOCKICONINFO_SIZE = STOCK.path + MAX_PATH * 2;
     const { listFor, exists, parse } = parts;
     /** @param {string} name @param {number[]} args */
     const kernel32 = async(name, args)=>{
@@ -781,9 +787,13 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(info + 4, 0);
-                writeU32(info + 8, -1);
-                writeU32(info + 12, -1);
+                writeU32(info + STOCK.icon, 0);
+                if (host.pointerSize === 8)
+                {
+                    writeU32(info + STOCK.icon + 4, 0);
+                }
+                writeU32(info + STOCK.image, -1);
+                writeU32(info + STOCK.index, -1);
                 if ((id | 0) < 0 || (id | 0) >= SIID_MAX_ICONS)
                 {
                     return E_INVALIDARG;
@@ -798,8 +808,8 @@ export function createShellExtras(host, parts){
                     return length > 0 && length < MAX_PATH ? wide(at) : null;
                 }, null);
                 const path = system === null ? 'shell32.dll' : `${system}\\shell32.dll`;
-                host.writeMemory(info + 16, utf16z(path.slice(0, MAX_PATH - 1)));
-                writeU32(info + 12, id | 0);
+                host.writeMemory(info + STOCK.path, utf16z(path.slice(0, MAX_PATH - 1)));
+                writeU32(info + STOCK.index, id | 0);
                 return S_OK;
             },
         },

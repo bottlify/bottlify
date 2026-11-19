@@ -290,3 +290,32 @@ test('GetIpAddrTable lists the adapter\'s address and the loopback\'s, in order 
     assert.equal(offline.fns.GetIpAddrTable.handler([INFO, SIZE, 0]), 0);
     assert.equal(offline.view.getUint32(INFO, true), 1, 'with no network, the loopback alone');
 });
+
+test('a 64-bit process\'s address-change request is cancelled through its wider OVERLAPPED', ()=>{
+    // hEvent lies 24 bytes in, after two eight-byte words and the offsets:
+    // read at 16 the event was the file position and never set.
+    const memory = new Uint8Array(0x1000);
+    const view = new DataView(memory.buffer);
+    /** @type {number[]} */
+    const signalled = [];
+    const fns = createIphlpapiFunctions({
+        pointerSize: 8,
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        openEvent: ()=>0x44,
+        signalEvent: handle=>signalled.push(handle),
+    });
+    const overlapped = 0x200;
+    memory.fill(0xee, overlapped, overlapped + 32);
+    view.setUint32(overlapped + 16, 0x1234, true);
+    view.setBigUint64(overlapped + 24, 0x58n, true);
+    memory.fill(0xee, 0x30, 0x38);
+    assert.equal(fns.NotifyAddrChange.handler([0x30, overlapped]), 997, 'ERROR_IO_PENDING');
+    assert.equal(view.getBigUint64(0x30, true), 0x44n, 'the handle whole');
+    assert.equal(view.getBigUint64(overlapped, true), 0x103n, 'STATUS_PENDING');
+    assert.equal(fns.CancelIPChangeNotify.handler([overlapped]), 1);
+    assert.equal(view.getBigUint64(overlapped, true), 0xc0000120n, 'STATUS_CANCELLED');
+    assert.equal(view.getBigUint64(overlapped + 8, true), 0n);
+    assert.equal(view.getUint32(overlapped + 16, true), 0x1234, 'the offset is not the event');
+    assert.ok(signalled.includes(0x58), 'hEvent, 24 bytes in');
+});

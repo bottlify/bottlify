@@ -4489,6 +4489,7 @@ export function createWin32Module(){
 
                 // The adapters behind the sockets: one, on the network they reach.
                 'IPHLPAPI.dll': createIphlpapiFunctions({
+                    pointerSize,
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                     // MIB tables the caller frees with FreeMibTable.
                     allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc

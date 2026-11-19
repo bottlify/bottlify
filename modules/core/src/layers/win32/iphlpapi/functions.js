@@ -16,6 +16,8 @@
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => number} [localAddress]  The machine's IPv4 address, the
  *           first octet in the high byte; the loopback when it has no network.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose OVERLAPPED and
+ *           handles are laid out wider; absent, 4.
  * @property {(bytes: number) => number} [allocate]  Memory the caller frees
  *           with FreeMibTable (GetIfTable2's table); 0 when there is none.
  * @property {(address: number) => void} [free]
@@ -33,6 +35,7 @@
  *           its new handle: NotifyAddrChange's, which a program waits on.
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { createIphlpapiTables } from './tables.js';
 
 const NO_ERROR = 0;
@@ -491,6 +494,7 @@ export function createIphlpapiFunctions(host){
         return row;
     };
 
+    const asynchronous = overlappedLayout(host.pointerSize);
     /** The overlapped structures NotifyAddrChange left pending, for CancelIPChangeNotify. */
     /** @type {Map<number, number>} */
     const pendingChanges = new Map();
@@ -840,11 +844,15 @@ export function createIphlpapiFunctions(host){
                 if ((handle >>> 0) !== 0)
                 {
                     writeU32(handle >>> 0, opened);
+                    if (asynchronous.word === 8)
+                    {
+                        writeU32((handle >>> 0) + 4, 0);
+                    }
                 }
                 pendingChanges.set(overlapped >>> 0, opened);
                 // Pending as an overlapped call is: STATUS_PENDING in Internal,
                 // which GetOverlappedResult reads as ERROR_IO_INCOMPLETE.
-                writeU32(overlapped >>> 0, STATUS_PENDING);
+                overlappedResult(writeU32, asynchronous, overlapped >>> 0, STATUS_PENDING);
                 host.setLastError?.(ERROR_IO_PENDING);
                 return ERROR_IO_PENDING;
             },
@@ -869,9 +877,8 @@ export function createIphlpapiFunctions(host){
                     return 0;
                 }
                 pendingChanges.delete(at);
-                writeU32(at, STATUS_CANCELLED);
-                writeU32(at + 4, 0);
-                const event = readU32(at + 16);
+                overlappedResult(writeU32, asynchronous, at, STATUS_CANCELLED, 0);
+                const event = readU32(at + asynchronous.event);
                 if (event !== 0)
                 {
                     host.signalEvent?.(event);

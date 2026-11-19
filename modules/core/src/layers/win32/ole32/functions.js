@@ -63,8 +63,6 @@ const E_NOINTERFACE = 0x80004002;
 const CO_E_NOT_SUPPORTED = 0x80004021;
 /** Some of the interfaces CoCreateInstanceEx was asked for, not all. */
 const CO_S_NOTALLINTERFACES = 0x00080012;
-/** MULTI_QI: the interface asked for, the pointer found, and the answer. */
-const MULTI_QI_SIZE = 12;
 const E_POINTER = 0x80004003;
 const E_FAIL = 0x80004005;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -2794,7 +2792,13 @@ export function createOleFunctions(host){
      *
      * @type {import('./monikers.js').MonikerEnv}
      */
+    /**
+     * MULTI_QI in this process's layout: the interface asked for and the
+     * pointer found, each a pointer wide, then the answer.
+     */
+    const multi = width.size === 8 ? { itf: 8, hr: 16, size: 24 } : { itf: 4, hr: 8, size: 12 };
     const monikerEnv = {
+        pointerSize: width.size,
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         heap: host.heap,
@@ -3574,26 +3578,26 @@ export function createOleFunctions(host){
                         'the server a program names is made on this machine');
                 }
                 /** @param {number} index */
-                const entry = index=>(results >>> 0) + index * MULTI_QI_SIZE;
+                const entry = index=>(results >>> 0) + index * multi.size;
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    writeU32(entry(index) + 4, 0);
-                    writeU32(entry(index) + 8, E_NOINTERFACE);
+                    writeU32(entry(index) + multi.itf, 0);
+                    writeU32(entry(index) + multi.hr, E_NOINTERFACE);
                 }
                 const thread = host.callerThread?.();
                 const first = entry(0);
                 return andThen(coCreateInstance([classId, outer, context, readU32(first),
-                    first + 4]), (/** @type {number} */ made)=>{
+                    first + multi.itf]), (/** @type {number} */ made)=>{
                     if ((made | 0) < 0)
                     {
                         for (let index = 0; index < (count >>> 0); index++)
                         {
-                            writeU32(entry(index) + 8, made);
+                            writeU32(entry(index) + multi.hr, made);
                         }
                         return made;
                     }
-                    writeU32(first + 8, S_OK);
-                    const object = readU32(first + 4);
+                    writeU32(first + multi.hr, S_OK);
+                    const object = readU32(first + multi.itf);
                     /** @param {number} index @returns {number | Promise<number>} */
                     const ask = index=>{
                         if (index >= (count >>> 0))
@@ -3601,15 +3605,15 @@ export function createOleFunctions(host){
                             let found = 0;
                             for (let at = 0; at < (count >>> 0); at++)
                             {
-                                found += readU32(entry(at) + 8) === S_OK ? 1 : 0;
+                                found += readU32(entry(at) + multi.hr) === S_OK ? 1 : 0;
                             }
                             return found === (count >>> 0) ? S_OK
                                 : found === 0 ? E_NOINTERFACE : CO_S_NOTALLINTERFACES;
                         }
                         return callMethod(object, SLOT_QUERY_INTERFACE,
-                            [readU32(entry(index)), entry(index) + 4], thread)
+                            [readU32(entry(index)), entry(index) + multi.itf], thread)
                             .then(hr=>{
-                                writeU32(entry(index) + 8, hr);
+                                writeU32(entry(index) + multi.hr, hr);
                                 return ask(index + 1);
                             });
                     };
