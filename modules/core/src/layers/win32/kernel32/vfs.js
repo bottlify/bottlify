@@ -304,6 +304,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
         ...entry.readOnly ? { readOnly: true } : {},
         ...entry.hidden ? { hidden: true } : {},
         ...entry.junction ? { junction: entry.junction } : {},
+        ...entry.reparseTag ? { reparseTag: entry.reparseTag } : {},
     });
 
     /**
@@ -542,7 +543,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
          * @returns {{ exists: boolean, isDirectory: boolean, size: number,
          *             modified: number, readOnly?: boolean, hidden?: boolean,
          *             attributes?: number, links?: number, identity?: string,
-         *             junction?: string } | null}
+         *             junction?: string, reparseTag?: number } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
@@ -582,17 +583,20 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
         },
 
         /**
-         * Makes the empty directory at `path` a junction standing for the
-         * directory `target` on its drive, or with null a directory again:
-         * null when it did, or the volume's code for why not.
+         * Sets a reparse point on the file or directory at `path`, or with
+         * null takes it off: null when it did, or the volume's code for why
+         * not. `target`, the place a mount point or a symbolic link names,
+         * makes it stand for that place on its drive; `away` is set when that
+         * place is on another drive, and the point stands for nothing here.
          *
-         * @param {string} path @param {string | null} target
-         * @returns {string | null}
+         * @param {string} path
+         * @param {{ tag: number, data: Uint8Array | null, target: string | null } | null} point
+         * @returns {string | null | { away: true }}
          */
-        setJunction(path, target){
+        setReparse(path, point){
             try
             {
-                fs.setJunction(path, target);
+                return fs.setReparse(path, point) === false ? { away: true } : null;
             }
             catch (e){
                 const error = /** @type {any} */ (e);
@@ -602,7 +606,16 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 }
                 return error.code;
             }
-            return null;
+        },
+
+        /**
+         * The reparse point at `path` as it was set, null for none.
+         *
+         * @param {string} path
+         * @returns {{ tag: number, data: Uint8Array | null } | null}
+         */
+        reparseOf(path){
+            return attempt(()=>fs.reparseOf?.(path) ?? null, null);
         },
 
         /**

@@ -2877,22 +2877,25 @@ test('a directory handle sets, reads and deletes a mount point through DeviceIoC
     const { memory, files, fns, error, at } = setup();
     const anyFiles = /** @type {any} */ (files);
     files.mkdir('C:\\GAME\\LIB');
-    /** @type {[string, string | null][]} */
+    /** @type {[string, any][]} */
     const asked = [];
-    let junction = /** @type {string | null} */ (null);
+    /** @type {{ tag: number, data: Uint8Array | null, target: string | null } | null} */
+    let point = null;
     let refusal = /** @type {string | null} */ (null);
-    anyFiles.setJunction = (/** @type {string} */ path, /** @type {string | null} */ target)=>{
-        asked.push([path, target]);
+    anyFiles.setReparse = (/** @type {string} */ path, /** @type {any} */ given)=>{
+        asked.push([path, given && { tag: given.tag, target: given.target }]);
         if (refusal === null)
         {
-            junction = target;
+            point = given;
         }
         return refusal;
     };
+    anyFiles.reparseOf = ()=>point && { tag: point.tag, data: point.data };
     const stat = anyFiles.stat.bind(files);
     anyFiles.stat = (/** @type {string} */ path)=>{
         const entry = stat(path);
-        return entry && junction ? { ...entry, junction } : entry;
+        return entry && point && path === 'C:\\GAME\\LIB'
+            ? { ...entry, reparseTag: point.tag, junction: point.target?.slice(3) } : entry;
     };
     const folder = fns.CreateFileA.handler([at(NAME, 'C:\\GAME\\LIB'), GENERIC_READ, 0, 0,
         OPEN_EXISTING, 0x02200000, 0]);
@@ -2916,22 +2919,26 @@ test('a directory handle sets, reads and deletes a mount point through DeviceIoC
     memory.writeMemory(input, buffer);
     assert.equal(fns.DeviceIoControl.handler(
         [folder, SET, input, buffer.length, 0, 0, 0x500, 0]), 1);
-    assert.deepEqual(asked, [['C:\\GAME\\LIB', 'C:\\SXS\\LIB']], 'the NT prefix is taken off');
+    assert.deepEqual(asked, [['C:\\GAME\\LIB', { tag: 0xa0000003, target: 'C:\\SXS\\LIB' }]],
+        'the NT prefix is taken off');
 
     assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 4, 0x500, 0]), 0);
-    assert.equal(error.code, 122, 'smaller than the header: ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(error.code, 122, 'smaller than a GUID buffer\'s head: ERROR_INSUFFICIENT_BUFFER');
     assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 0x100, 0x500, 0]), 1);
-    assert.equal(memory.dword(0x800), 0xa0000003);
-    const length = memory.bytes[0x800 + 10] | memory.bytes[0x800 + 11] << 8;
-    const read = String.fromCharCode(...new Uint16Array(
-        memory.readMemory(0x800 + 16, length).slice().buffer));
-    assert.equal(read, target, 'the substitute name comes back with its prefix');
-    assert.equal(memory.dword(0x500), 8 + (memory.bytes[0x804] | memory.bytes[0x805] << 8));
+    assert.deepEqual(memory.readMemory(0x800, buffer.length), buffer, 'handed back as it was set');
+    assert.equal(memory.dword(0x500), buffer.length);
     assert.equal(fns.GetFileAttributesA.handler([NAME]) & 0x410, 0x410,
         'a junction is a directory and a reparse point');
 
-    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0, 0, 0, 0, 0]));
-    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 8, 0, 0, 0x500, 0]), 1);
+    // A delete hands the header alone, at the size of REPARSE_GUID_DATA_BUFFER's head.
+    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0, ...new Array(20).fill(0)]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 8, 0, 0, 0x500, 0]), 0);
+    assert.equal(error.code, 4392, 'a header too short: ERROR_INVALID_REPARSE_DATA');
+    memory.writeMemory(input, new Uint8Array([0x0c, 0, 0, 0xa0]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 24, 0, 0, 0x500, 0]), 0);
+    assert.equal(error.code, 4394, 'another tag than the one set: ERROR_REPARSE_TAG_MISMATCH');
+    memory.writeMemory(input, new Uint8Array([3, 0, 0, 0xa0]));
+    assert.equal(fns.DeviceIoControl.handler([folder, UNSET, input, 24, 0, 0, 0x500, 0]), 1);
     assert.deepEqual(asked.at(-1), ['C:\\GAME\\LIB', null]);
     assert.equal(fns.DeviceIoControl.handler([folder, GET, 0, 0, 0x800, 0x100, 0x500, 0]), 0);
     assert.equal(error.code, 4390, 'ERROR_NOT_A_REPARSE_POINT');
@@ -2941,9 +2948,9 @@ test('a directory handle sets, reads and deletes a mount point through DeviceIoC
     assert.equal(fns.DeviceIoControl.handler(
         [folder, SET, input, buffer.length, 0, 0, 0x500, 0]), 0);
     assert.equal(error.code, 145, 'ERROR_DIR_NOT_EMPTY');
-    memory.writeMemory(input, new Uint8Array([0x0c, 0, 0, 0xa0, 0, 0, 0, 0]));
+    memory.writeMemory(input, new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0]));
     assert.equal(fns.DeviceIoControl.handler([folder, SET, input, 8, 0, 0, 0x500, 0]), 0);
-    assert.equal(error.code, 4393, 'a symbolic link tag: ERROR_REPARSE_TAG_INVALID');
+    assert.equal(error.code, 4393, 'tag 0: ERROR_REPARSE_TAG_INVALID');
 });
 
 test('GetFileAttributesEx fills the head a find would, and nothing past it', ()=>{

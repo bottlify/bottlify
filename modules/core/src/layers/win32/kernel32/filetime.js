@@ -336,15 +336,17 @@ const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
  * FILE_ATTRIBUTE_NORMAL means "no other attribute" and is only ever answered
  * alone: a directory set to it is just a directory.
  *
- * A junction is a directory with the reparse-point bit, whatever else it is.
+ * A reparse point - a junction, a symbolic link, a tag of a program's own -
+ * has the reparse-point bit, whatever else it is.
  *
  * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean,
- *           attributes?: number, junction?: string } | null | undefined} entry
+ *           attributes?: number, junction?: string, reparseTag?: number }
+ *           | null | undefined} entry
  * @returns {number}
  */
 export function fileAttributes(entry){
     const kind = (entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : 0)
-        | (entry?.junction ? FILE_ATTRIBUTE_REPARSE_POINT : 0);
+        | (entry?.reparseTag || entry?.junction ? FILE_ATTRIBUTE_REPARSE_POINT : 0);
     const hidden = entry?.hidden ? FILE_ATTRIBUTE_HIDDEN : 0;
     const media = entry?.readOnly ? FILE_ATTRIBUTE_READONLY : 0;
     if (entry?.attributes !== undefined)

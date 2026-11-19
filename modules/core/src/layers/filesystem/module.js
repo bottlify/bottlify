@@ -663,6 +663,11 @@ export function createFilesystemModule(){
                         out.push(.../** @type {any[]} */ (tree.keptFiles?.() ?? []));
                         for (const record of options?.everyName ? tree.links() : [])
                         {
+                            // A reparse point's file is its own owner, already out.
+                            if (record.reparse && !record.junction)
+                            {
+                                continue;
+                            }
                             // A junction's files go under its name as well:
                             // a reader that keeps no links keeps no junction.
                             if (record.junction)
@@ -958,33 +963,50 @@ export function createFilesystemModule(){
                 },
 
                 /**
-                 * Makes the empty directory at `path` a junction standing for
-                 * the directory `target` on the same drive, what a mount point
-                 * set by FSCTL_SET_REPARSE_POINT is; with `target` null it is
-                 * a directory again. What is under the junction is the
-                 * target's, reached and listed through it; removing the
-                 * junction leaves the target as it was.
+                 * Sets a reparse point on the file or directory at `path`, what
+                 * FSCTL_SET_REPARSE_POINT does; null takes it off. `target`,
+                 * the place a mount point or a symbolic link names, makes it
+                 * stand for that place when it is on the same drive - a
+                 * directory's contents reached and listed through it; one on
+                 * another drive is kept and stands for nothing here. Taking
+                 * it off leaves the target as it was.
                  *
-                 * @param {string} path @param {string | null} target
+                 * @param {string} path
+                 * @param {{ tag: number, data: Uint8Array | null, target: string | null }
+                 *     | null} point
+                 * @returns {boolean | undefined}  whether the target was on the same drive
                  */
-                setJunction(path, target){
+                setReparse(path, point){
                     if (!live())
                     {
                         return;
                     }
                     const at = locate(path);
-                    if (target === null)
+                    if (point === null)
                     {
-                        at.tree.setJunction(at.components, null);
-                        return;
+                        at.tree.setReparse(at.components, null);
+                        return true;
                     }
-                    const to = locate(target);
-                    if (to.tree !== at.tree)
+                    const to = point.target === null ? null : locate(point.target);
+                    const here = to !== null && to.tree === at.tree;
+                    at.tree.setReparse(at.components, { tag: point.tag, data: point.data,
+                        target: here ? to.components : null });
+                    return to === null || here;
+                },
+
+                /**
+                 * The reparse point at `path` as it was set, null for none.
+                 *
+                 * @param {string} path
+                 * @returns {{ tag: number, data: Uint8Array | null } | null}
+                 */
+                reparseOf(path){
+                    if (!live())
                     {
-                        throw fsError(ErrorCode.NOT_SAME_DEVICE,
-                            `"${path}" and "${target}" are on different drives`);
+                        return null;
                     }
-                    at.tree.setJunction(at.components, to.components);
+                    const at = locate(path);
+                    return at.tree.reparseOf(at.components);
                 },
 
                 /**
@@ -995,14 +1017,14 @@ export function createFilesystemModule(){
                  * owner, the junction as its name, `junction` set.
                  *
                  * @param {string} [letter]
-                 * @returns {{ owner: string, names: string[], junction?: boolean }[]}
+                 * @returns {import('./internal/tree.js').LinkRecord[]}
                  */
                 exportLinks(letter){
                     if (!live())
                     {
                         return [];
                     }
-                    /** @type {{ owner: string, names: string[], junction?: boolean }[]} */
+                    /** @type {import('./internal/tree.js').LinkRecord[]} */
                     const out = [];
                     for (const [key, tree] of state.drives)
                     {
@@ -1015,7 +1037,11 @@ export function createFilesystemModule(){
                             out.push({ owner: formatPath(key, splitComponents(record.owner)),
                                 names: record.names.map((/** @type {string} */ path)=>
                                     formatPath(key, splitComponents(path))),
-                                ...record.junction ? { junction: true } : {} });
+                                ...record.junction ? { junction: true } : {},
+                                ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.target
+                                    ? { target: formatPath(key, splitComponents(record.target)) }
+                                    : {} });
                         }
                     }
                     return out;
@@ -1026,7 +1052,7 @@ export function createFilesystemModule(){
                  * `apply` has put the files themselves in. A record whose names
                  * span drives, or whose file is not there, is passed over.
                  *
-                 * @param {{ owner: string, names: string[], junction?: boolean }[]} records
+                 * @param {import('./internal/tree.js').LinkRecord[]} records
                  * @param {{ saved?: boolean }} [options]  as `apply` takes it
                  */
                 applyLinks(records, options){
@@ -1043,9 +1069,13 @@ export function createFilesystemModule(){
                             const owner = locate(record.owner);
                             const names = record.names.map(path=>locate(path))
                                 .filter(at=>at.tree === owner.tree);
+                            const target = record.target ? locate(record.target) : null;
                             owner.tree.restoreLinks([{ owner: owner.components.join('\\'),
                                 names: names.map(at=>at.components.join('\\')),
-                                ...record.junction ? { junction: true } : {} }]);
+                                ...record.junction ? { junction: true } : {},
+                                ...record.reparse ? { reparse: record.reparse } : {},
+                                ...target && target.tree === owner.tree
+                                    ? { target: target.components.join('\\') } : {} }]);
                         }
                     }
                     finally
