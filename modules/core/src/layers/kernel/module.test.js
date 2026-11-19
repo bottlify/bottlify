@@ -729,6 +729,33 @@ test('a child that outlives the process that made it sets its exit when it ends,
         'its exit is set though its maker is gone');
 });
 
+test('a thread of another process that waits on a child\'s exit before its maker ends is woken'
+    + ' when the child ends', async()=>{
+    // The root waits on the child the launcher made, then the launcher exits
+    // before the child does: the root's wait is in the exit event's queue, and
+    // the event the gone launcher leaves must still be the one it waits on.
+    const { createKernelModule } = await import('./module.js');
+    const directory = new Map();
+    const ids = { thread: 1, process: 0x6000 };
+    /** @param {any} module */
+    const machine = async module=>/** @type {any} */ (await module.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE }, processDirectory: directory, ids },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? fakeCpu() : fakeMemory()),
+            provide: ()=>{},
+        })));
+    const launcherModule = createKernelModule();
+    const launcher = await machine(launcherModule);
+    const root = await machine(createKernelModule());
+    const child = launcher.processes.create({ imagePath: 'C:\\a.exe', commandLine: 'a' });
+    const waiter = root.createThread({ entry: 0x00402000, name: 'waiter' });
+    assert.equal(root.wait(root.processes.find(child.id).exited, waiter), null, 'it waits');
+    await launcherModule.dispose();
+    launcher.processes.finish(child, 3);
+    assert.equal(waiter.state, 'ready', 'the child\'s end wakes the wait made before');
+});
+
 test('a gone process\'s record in the run\'s directory keeps its exit, not its memory', async()=>{
     const { setFlagsFromString } = await import('node:v8');
     const { runInNewContext } = await import('node:vm');
