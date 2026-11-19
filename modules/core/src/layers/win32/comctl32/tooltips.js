@@ -82,6 +82,9 @@ const TEXT_MARGIN = 2;
 /** A balloon's: wider, and its stem above the text. */
 const BALLOON_MARGIN = 10;
 const BALLOON_STEM = 13;
+/** A title's icon: the small icon size; TTI_NONE is a title with none. */
+const SMALL_ICON = 16;
+const TTI_NONE = 0;
 const TTDT_AUTOMATIC = 0;
 const TTDT_RESHOW = 1;
 const TTDT_AUTOPOP = 2;
@@ -252,6 +255,26 @@ export function createTooltipProcedure(host, tk, resources){
      */
     const acceptable = (info, wide, version = 5)=>info >>> 0 !== 0
         && (!wide || read32(info + TOOLINFO.cbSize) <= (version >= 6 ? TOOLINFO.V3 : TOOLINFO.V2));
+
+    /**
+     * The room a title takes beside and above a version 5 tip's text: its
+     * icon's column, when it has one, and its row, a line of the tip's font
+     * or the icon, whichever is taller. The title's length does not count:
+     * the row is as wide as the tip.
+     *
+     * @param {any} record @param {any} held @returns {[number, number]}
+     */
+    const titleRoom = (record, held)=>{
+        if (held.title === '')
+        {
+            return [0, 0];
+        }
+        const icon = held.icon !== TTI_NONE ? SMALL_ICON + TEXT_MARGIN : 0;
+        const { hdc } = host.contextOn(record);
+        const line = hdc !== 0 && host.draw ? host.draw.measure(hdc, 'M').height : SMALL_ICON;
+        host.endPaint(record, hdc);
+        return [icon, Math.max(line, held.icon !== TTI_NONE ? SMALL_ICON : 0) + TEXT_MARGIN];
+    };
 
     /** @param {any} record @param {number} info @param {boolean} wide @returns {Tool} */
     const readTool = (record, info, wide)=>({
@@ -582,18 +605,22 @@ export function createTooltipProcedure(host, tk, resources){
                 return 0;
             case TTM.ADJUSTRECT: {
                 // The text's rectangle and the tip's window around it differ by
-                // the frame, the margins and the text's own margin: TRUE grows
-                // a text rectangle to its window, FALSE shrinks a window to its
-                // text.
+                // the frame and the text's own margin: TRUE grows a text
+                // rectangle to its window, FALSE shrinks a window to its text.
+                // Common Controls 5 also counts the margins TTM_SETMARGIN set
+                // and a title's row and icon; version 6 counts neither.
                 if (lParam >>> 0 === 0)
                 {
                     return 0;
                 }
                 const frame = (record.style & WS_BORDER) !== 0 ? 1 : 0;
                 const balloon = (record.style & TTS_BALLOON) !== 0;
+                const classic = (record.controlsVersion ?? 5) < 6;
+                const title = classic ? titleRoom(record, held) : [0, 0];
                 const sides = held.margin.map((/** @type {number} */ side,
-                    /** @type {number} */ at)=>side + frame + (balloon
-                    ? BALLOON_MARGIN + (at === 1 ? BALLOON_STEM : 0) : TEXT_MARGIN));
+                    /** @type {number} */ at)=>(classic ? side : 0) + frame + (balloon
+                    ? BALLOON_MARGIN + (at === 1 ? BALLOON_STEM : 0) : TEXT_MARGIN)
+                    + (at === 0 ? title[0] : at === 1 ? title[1] : 0));
                 const sign = wParam !== 0 ? 1 : -1;
                 const rect = [0, 4, 8, 12].map(at=>read32(lParam + at) | 0);
                 [rect[0] - sign * sides[0], rect[1] - sign * sides[1],

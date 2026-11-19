@@ -38,6 +38,7 @@ import { notifyWindow } from './notify.js';
 import { LPSTR_TEXTCALLBACK, MAX_TEXT, readText, writeText } from './strings.js';
 import { HDITEM, HDM, HEADER_CLASS } from './header.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
+import { stableSort } from './stable-sort.js';
 
 /** The class name a program creates the control by. */
 export const LISTVIEW_CLASS = 'SysListView32';
@@ -73,6 +74,7 @@ export const LVS_OWNERDATA = 0x1000;
 const LVS_NOCOLUMNHEADER = 0x4000;
 const LVS_NOSORTHEADER = 0x8000;
 const LVS_EX_HEADERDRAGDROP = 0x0010;
+const LVS_EX_FULLROWSELECT = 0x0020;
 
 const LVM_FIRST = 0x1000;
 /** The messages, numbered off LVM_FIRST as commctrl.h numbers them. */
@@ -176,6 +178,9 @@ const LVHT_ABOVE = 0x0008;
 const LVHT_BELOW = 0x0010;
 const LVHT_TORIGHT = 0x0020;
 const LVHT_TOLEFT = 0x0040;
+/** On the state icon: the same bit as LVHT_ABOVE, answered only on an item. */
+const LVHT_ONITEMSTATEICON = 0x0008;
+const LVHT_ONITEM = LVHT_ONITEMICON | LVHT_ONITEMLABEL | LVHT_ONITEMSTATEICON;
 
 /** GETITEMRECT's portions. */
 const LVIR_ICON = 1;
@@ -669,19 +674,81 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             return { index: -1, flags };
         }
+        // In the report view an item is its first column, or its whole row
+        // with LVS_EX_FULLROWSELECT, whose other columns answer the whole item.
+        const report = view(record) === LVS_REPORT;
+        const fullRow = report && (state(record).extended & LVS_EX_FULLROWSELECT) !== 0;
         for (let index = 0; index < count(record); index++)
         {
             const box = bounds(record, index);
-            if (x >= box.left && x < box.right && y >= box.top && y < box.bottom)
+            const first = report && state(record).columns.length > 0
+                ? box.left + Math.max(0, state(record).columns[0].width) : box.right;
+            const right = fullRow ? box.right : first;
+            if (x >= box.left && x < right && y >= box.top && y < box.bottom)
             {
-                const icon = itemRect(record, index, LVIR_ICON);
-                const onIcon = x >= icon.left && x < icon.right && y >= icon.top
-                    && y < icon.bottom;
-                return { index, flags: onIcon && icon.right > icon.left ? LVHT_ONITEMICON
-                    : LVHT_ONITEMLABEL };
+                return { index, flags: x >= first ? LVHT_ONITEM
+                    : firstColumnPart(record, index, x, y) };
             }
         }
         return { index: -1, flags: LVHT_NOWHERE };
+    };
+
+    /**
+     * Which part of an item's first column a point is on: the state icon,
+     * when the list has state images, then the icon, then the label.
+     *
+     * @param {any} record @param {number} index @param {number} x @param {number} y
+     */
+    const firstColumnPart = (record, index, x, y)=>{
+        const held = state(record);
+        const left = bounds(record, index).left;
+        const stateRoom = view(record) !== LVS_ICON && held.images[2] !== 0 ? SMALL_ICON_SIZE : 0;
+        if (x < left + stateRoom)
+        {
+            return LVHT_ONITEMSTATEICON;
+        }
+        const icon = itemRect(record, index, LVIR_ICON);
+        const iconLeft = icon.left + stateRoom;
+        const iconRight = icon.right + stateRoom;
+        return iconRight > iconLeft && x >= iconLeft && x < iconRight && y >= icon.top
+            && y < icon.bottom ? LVHT_ONITEMICON : LVHT_ONITEMLABEL;
+    };
+
+    /**
+     * LVM_SUBITEMHITTEST in the report view: the column under the point,
+     * whatever the client's size, and the row its height counts from the
+     * first item's top, truncated toward zero - so a point in the header's
+     * band is the first row's, the row just above is no item, and rows
+     * further up answer negative indices, as Windows' own arithmetic does.
+     * A point outside every column is nothing.
+     *
+     * @param {any} record @param {number} x @param {number} y
+     * @returns {{ index: number, subItem: number, flags: number }}
+     */
+    const subItemHitTest = (record, x, y)=>{
+        const held = state(record);
+        let left = -held.scroll.x;
+        let subItem = -1;
+        held.columns.forEach((/** @type {Column} */ column, /** @type {number} */ c)=>{
+            const width = Math.max(0, column.width);
+            if (subItem === -1 && x >= left && x < left + width)
+            {
+                subItem = c;
+            }
+            left += width;
+        });
+        if (subItem === -1)
+        {
+            return { index: -1, subItem: -1, flags: LVHT_NOWHERE };
+        }
+        const row = Math.trunc((y - held.headerHeight) / rowHeight(record)) + held.top;
+        if (row === -1 || row >= count(record))
+        {
+            return { index: -1, subItem, flags: LVHT_NOWHERE };
+        }
+        const flags = subItem === 0 && row >= 0
+            ? firstColumnPart(record, row, x, bounds(record, row).top) : LVHT_ONITEMLABEL;
+        return { index: row, subItem, flags };
     };
 
     // --- Items -----------------------------------------------------------------
@@ -753,7 +820,10 @@ export function createListViewProcedure(host, tk, setBkMode){
         {
             held.items[index].state = next;
         }
-        if (next & LVIS_SELECTED && !(old & LVIS_SELECTED))
+        // The mark follows the focus, not the selection: an item that takes
+        // the focus becomes the mark when there is none (Wine's listview.c
+        // test_multiselect, Windows' answers).
+        if (next & LVIS_FOCUSED && !(old & LVIS_FOCUSED))
         {
             held.mark = held.mark < 0 ? index : held.mark;
         }
@@ -1233,30 +1303,10 @@ export function createListViewProcedure(host, tk, setBkMode){
         /** @type {ListItem[]} */
         const items = held.items;
         const before = new Map(items.map((item, index)=>[item, index]));
-        /** @param {ListItem[]} list @returns {Promise<ListItem[]>} */
-        const sort = async list=>{
-            if (list.length < 2)
-            {
-                return list;
-            }
-            const middle = list.length >> 1;
-            const left = await sort(list.slice(0, middle));
-            const right = await sort(list.slice(middle));
-            /** @type {ListItem[]} */
-            const merged = [];
-            let i = 0;
-            let j = 0;
-            while (i < left.length && j < right.length)
-            {
-                const a = byIndex ? /** @type {number} */ (before.get(left[i])) : left[i].lParam;
-                const b = byIndex ? /** @type {number} */ (before.get(right[j]))
-                    : right[j].lParam;
-                const order = (await call(compare, [a, b, lParam], thread)) | 0;
-                merged.push(order <= 0 ? left[i++] : right[j++]);
-            }
-            return [...merged, ...left.slice(i), ...right.slice(j)];
-        };
-        held.items = await sort(items);
+        /** @param {ListItem} item */
+        const word = item=>(byIndex ? /** @type {number} */ (before.get(item)) : item.lParam);
+        held.items = await stableSort(items, (a, b)=>call(compare, [word(a), word(b), lParam],
+            thread));
         host.invalidate(record);
         return 1;
     };
@@ -1800,6 +1850,10 @@ export function createListViewProcedure(host, tk, setBkMode){
                     {
                         held.focus = -1;
                     }
+                    if (held.mark >= held.count)
+                    {
+                        held.mark = -1;
+                    }
                     host.invalidate(record);
                 }
                 return 1;
@@ -2019,28 +2073,16 @@ export function createListViewProcedure(host, tk, setBkMode){
                 {
                     return -1;
                 }
-                const hit = hitTest(record, read32(lParam + HITTEST.x) | 0,
-                    read32(lParam + HITTEST.y) | 0);
+                const x = read32(lParam + HITTEST.x) | 0;
+                const y = read32(lParam + HITTEST.y) | 0;
+                const sub = message.message === LVM.SUBITEMHITTEST;
+                const hit = sub && view(record) === LVS_REPORT ? subItemHitTest(record, x, y)
+                    : { subItem: 0, ...hitTest(record, x, y) };
                 write32(lParam + HITTEST.flags, hit.flags);
                 write32(lParam + HITTEST.iItem, hit.index);
-                if (message.message === LVM.SUBITEMHITTEST)
+                if (sub)
                 {
-                    let subItem = 0;
-                    if (hit.index >= 0 && view(record) === LVS_REPORT)
-                    {
-                        const x = read32(lParam + HITTEST.x) | 0;
-                        let left = bounds(record, hit.index).left;
-                        held.columns.forEach((/** @type {Column} */ column,
-                            /** @type {number} */ c)=>
-                        {
-                            if (x >= left && x < left + Math.max(0, column.width))
-                            {
-                                subItem = c;
-                            }
-                            left += Math.max(0, column.width);
-                        });
-                    }
-                    write32(lParam + HITTEST.iSubItem, subItem);
+                    write32(lParam + HITTEST.iSubItem, hit.subItem);
                 }
                 return hit.index;
             }
