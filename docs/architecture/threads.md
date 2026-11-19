@@ -111,14 +111,16 @@ child and made there with its own kernel32, between its turns, whichever way it 
 bytes cross. The other way, a child its parent started with `DEBUG_PROCESS` reports its debug
 events to the parent as values - its start (the process, every library mapped with it, the loader's
 breakpoint), a library loaded or unloaded, a thread made or ended, `OutputDebugString`, an exception
-first and, unhandled, again - and the reporting thread waits for the status `ContinueDebugEvent`
-answers, called directly: a child its parent debugs is always started beside it, on its thread or
+first and, unhandled, again - and the whole child stops, its threads frozen (their suspend counts
+untouched) until the status `ContinueDebugEvent` answers, called directly: a child its parent
+debugs is always started beside it, on its thread or
 in its worker, never in a worker of its own, so its parent always hears it. While a
 thread waits on an exception's answer the exception's context is its context, so a debugger's
 `GetThreadContext` and `SetThreadContext` read and change the context it goes on from
 ([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A
-library of the engine's loaded after the start and a thread made are told without the thread
-waiting. A child run beside its parent always carries its parent's ear and is heard only while
+debuggee belongs to its debugger's debug object, a kernel object kept in the debugging thread's
+block; with the object's last handle, or the debugger's end, its debuggees end where it says
+`DEBUG_KILL_ON_CLOSE` and go on otherwise. A child run beside its parent always carries its parent's ear and is heard only while
 its record says it is debugged, so `DebugActiveProcess` attaches by marking it and asking it, as
 a cross-process call no program can name, to tell what it already is and break in on a thread of
 its own. The engine

@@ -144,14 +144,19 @@
   caption and class, and posts to it. A message sent to another process's window is answered with
   every concurrency; its pointers cross only for `WM_COPYDATA`, `WM_SETTEXT` and `WM_GETTEXT`.
 - A child started with `DEBUG_PROCESS` or `DEBUG_ONLY_THIS_PROCESS` reports its debug events to
-  its parent, each stopping the reporting thread until `ContinueDebugEvent`. `DebugActiveProcess`
+  its parent, each stopping the whole child until `ContinueDebugEvent`. `DebugActiveProcess`
   attaches to a running child the parent hears - one run beside it, as every child is at
-  concurrency 1: it is told the process, ntdll, its threads and its libraries at once, without
-  the child waiting, then breaks in on a thread of its own at `DbgBreakPoint`, as
-  `DebugBreakProcess` breaks into a debuggee. A child in a worker of its own cannot be attached
-  to (refused). A breakpoint shows its debugger the thread past the `int3`. Not done: the native
-  debug objects (`NtCreateDebugObject` and the `DbgUi*` calls refuse); a debuggee's own children
-  are not debugged under `DEBUG_PROCESS`; hardware breakpoints and the trap flag raise nothing; a
-  64-bit debuggee reports neither its start nor its exceptions; `hFile` and `lpImageName` are
-  always null. A library of the engine's loaded after the start and a new thread are reported
-  without the debuggee waiting for the answer.
+  concurrency 1: it is told the process, ntdll, its threads and its libraries, the child stopped
+  until each is continued, then breaks in on a thread of its own at `DbgBreakPoint`, as
+  `DebugBreakProcess` breaks into a debuggee. A debuggee belongs to a debug object - the
+  debugging thread's, made at its first `DEBUG_PROCESS` or attach (`DbgUiConnectToDbg`), or one
+  made by `NtCreateDebugObject` and attached through (`NtDebugActiveProcess`); when its last
+  handle closes, or its process ends, the debuggees end (`STATUS_DEBUGGER_INACTIVE`) where it
+  says `DEBUG_KILL_ON_CLOSE` (`DebugSetProcessKillOnExit`, `NtSetInformationDebugObject`) and
+  go on otherwise. A child in a worker of its own cannot be attached to (refused). A breakpoint
+  shows its debugger the thread past the `int3`. Not done: waiting and continuing natively
+  (`NtWaitForDebugEvent`, `NtDebugContinue`, the `DbgUi` state changes), and
+  `WaitForDebugEvent` hears every debuggee of the process, not only those of the calling
+  thread's debug object; a debuggee's own children are not debugged under `DEBUG_PROCESS`;
+  hardware breakpoints and the trap flag raise nothing; a 64-bit debuggee reports neither its
+  start nor its exceptions; `hFile` and `lpImageName` are always null.

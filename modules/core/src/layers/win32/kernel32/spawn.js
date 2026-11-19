@@ -215,6 +215,8 @@ const directoryOf = path=>path.slice(0, Math.max(
 /**
  * @typedef {Object} SpawnerHost
  * @property {any} kernel                        The kernel layer's API.
+ * @property {() => any} [debugObject]  The calling thread's debug object, made if it has
+ *           none: what a child started with DEBUG_PROCESS reports through.
  * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
  *           Whether a path names a file on the volume. Case is folded there.
  * @property {() => string} imagePath
@@ -463,7 +465,7 @@ export function createSpawner(host){
             made.threadHandle = kernel.handles.open('process-thread',
                 childThread(made, made.threadId));
             // A child its parent debugs reports to it (`debug-events.js`).
-            made.debugged = debuggeeFor(flags);
+            made.debugged = debuggeeFor(flags, host.debugObject);
             // A child starts where Windows starts it: in the directory asked
             // for, else in its parent's current one -- which is where the
             // paths on its command line, and the libraries it loads by bare

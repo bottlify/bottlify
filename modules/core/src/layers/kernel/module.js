@@ -805,6 +805,36 @@ export function createKernelModule(){
                 suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
 
                 /**
+                 * Stops a thread as a suspension does without counting in its
+                 * suspend count (`scheduler.freeze`): a debuggee's freeze.
+                 *
+                 * @param {any} thread
+                 */
+                freezeThread: thread=>{
+                    if (live())
+                    {
+                        state.scheduler.freeze(thread);
+                    }
+                },
+
+                /**
+                 * Undoes one `freezeThread`; a thread free again is handed what
+                 * it waits on, as a resumed one is.
+                 *
+                 * @param {any} thread
+                 */
+                thawThread: thread=>{
+                    if (live())
+                    {
+                        state.scheduler.thaw(thread);
+                        if (!(thread.suspendCount > 0))
+                        {
+                            state.sync.retry(thread);
+                        }
+                    }
+                },
+
+                /**
                  * Brings a thread running on another of the process's executors
                  * back to it, its registers saved (`scheduler.settle`).
                  *

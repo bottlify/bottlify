@@ -18,7 +18,7 @@ import {
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
-import { SKIP_THREAD_ATTACH, blockLayouts } from './kernel32/teb.js';
+import { SKIP_THREAD_ATTACH, TEB, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -585,8 +585,29 @@ export function createWin32Module(){
              *
              * @returns {{ report: (report: any) => Promise<number> } | null}
              */
-            const debuggerNow = ()=>(config?.debugger && (config.debugger.debugged?.() ?? true)
-                ? config.debugger : null);
+            const debuggerNow = ()=>(debuggerEar && (config?.debugger?.debugged?.() ?? true)
+                ? debuggerEar : null);
+            /**
+             * Every event goes to the debugger with the whole process stopped
+             * until it is continued, as Windows' debug object freezes a
+             * debuggee for each event it holds: the threads alive as it is
+             * reported are frozen once and thawed once by its answer, their
+             * suspend counts as they were (`freezeThread`).
+             * Events reported together - an attach's - hold the process until
+             * the last is continued, and a thread made meanwhile is stopped by
+             * its own CREATE_THREAD.
+             */
+            const debuggerEar = config?.debugger ? {
+                /** @param {any} report @returns {Promise<number>} */
+                report: report=>{
+                    const held = kernel.threads().filter((/** @type {any} */ thread)=>
+                        thread.state !== kernel.ThreadState?.TERMINATED);
+                    held.forEach((/** @type {any} */ thread)=>kernel.freezeThread(thread));
+                    return Promise.resolve(/** @type {any} */ (config.debugger).report(report))
+                        .finally(()=>held.forEach((/** @type {any} */ thread)=>
+                            kernel.thawThread(thread)));
+                },
+            } : null;
             // The thread and process blocks a handler reads, at that width.
             const blocks = blockLayouts(pointerSize);
 
@@ -2391,7 +2412,8 @@ export function createWin32Module(){
                 trace: text=>trace(text),
                 // Its debugger, when its parent debugs it (`debug-events.js`).
                 ...config?.debugger ? { debugReport: (/** @type {any} */ report)=>
-                    config.debugger.report(report), debugged: ()=>debuggerNow() !== null } : {},
+                    /** @type {any} */ (debuggerEar).report(report), debugged: ()=>debuggerNow() !== null }
+                    : {},
                 // What Windows does once nothing handled an exception and the
                 // last-chance filter declined it: the process ends, with the
                 // exception's code as its exit code.
@@ -2998,6 +3020,7 @@ export function createWin32Module(){
             // it named, which needs the image found the same way in both.
             const spawner = createSpawner({
                 kernel,
+                debugObject: ()=>/** @type {any} */ (debuggerSide).connect(),
                 /** @param {string} path */
                 stat: path=>volume.stat(path),
                 // A child is recorded with a full path, because everything that
@@ -3444,7 +3467,30 @@ export function createWin32Module(){
                 askChild,
                 debugged: ()=>debuggerNow() !== null,
                 breakIn,
+                terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
+                    config?.terminate?.(child, code) === true,
+                readMemory,
+                // DbgSsReserved[1] of the calling thread's block; a 64-bit
+                // thread's has no slot here yet, and keeps none.
+                threadDebugObject: {
+                    get: ()=>{
+                        const block = pointerSize === 8 ? 0
+                            : kernel.currentThread()?.tebAddress ?? 0;
+                        return block === 0 ? 0 : new DataView(readMemory(block + TEB.DEBUG_OBJECT,
+                            4).slice().buffer).getUint32(0, true);
+                    },
+                    set: (/** @type {number} */ handle)=>{
+                        const block = pointerSize === 8 ? 0
+                            : kernel.currentThread()?.tebAddress ?? 0;
+                        if (block !== 0)
+                        {
+                            writeMemory(block + TEB.DEBUG_OBJECT, Uint8Array.of(handle & 0xff,
+                                handle >>> 8 & 0xff, handle >>> 16 & 0xff, handle >>> 24 & 0xff));
+                        }
+                    },
+                },
             });
+            endTasks.push(()=>debuggerSide?.debuggerEnded());
             // The libraries this build implements, standing in the system
             // folder for a setup that looks before it loads -- kernel32's
             // file calls and setupapi's alike. Every layer's, not only this
@@ -3556,7 +3602,7 @@ export function createWin32Module(){
                         },
                         // Told to its debugger too, when its parent debugs it.
                         ...config?.debugger ? { report: (/** @type {any} */ report)=>
-                            config.debugger.report({ ...report,
+                            /** @type {any} */ (debuggerEar).report({ ...report,
                                 threadId: kernel.currentThread()?.id >>> 0 }),
                         debugged: ()=>debuggerNow() !== null } : {},
                     }),
@@ -4145,6 +4191,7 @@ export function createWin32Module(){
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                        debugObjects: { closed: object=>debuggerSide?.closed(object) },
                         ports: {
                             /** @param {number} overlapped */
                             offsetOf: overlapped=>ports.offsetOf(overlapped),

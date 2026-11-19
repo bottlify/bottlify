@@ -15,6 +15,11 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SEM_TIMEOUT = 121;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_PORT_NOT_SET = 0xc0000353;
+const STATUS_DEBUGGER_INACTIVE = 0xc0000354;
 
 /**
  * A debugger with its children: guest memory, a handle table that hands out
@@ -43,8 +48,11 @@ function debuggerOf(children, extra = {}, table = new Map()){
         processes: { all: ()=>children },
         handles: { open: (/** @type {string} */ type, /** @type {any} */ object)=>{
             opened.push({ type, object });
-            return 0x100 + opened.length * 4;
+            const handle = 0x100 + opened.length * 4;
+            table.set(handle, [type, object]);
+            return handle;
         },
+        holds: (/** @type {any} */ object)=>[...table.values()].some(([, held])=>held === object),
         typeOf: (/** @type {number} */ handle)=>table.get(handle)?.[0] ?? null,
         resolve: (/** @type {number} */ handle)=>table.get(handle)?.[1] ?? null },
         block: (/** @type {any} */ who, /** @type {string} */ why, /** @type {any} */ timed)=>
@@ -53,9 +61,14 @@ function debuggerOf(children, extra = {}, table = new Map()){
         clock: { virtualTime: ()=>1000 },
         onTimeout: (/** @type {(thread: any) => void} */ handler)=>expiries.push(handler),
     };
+    let slot = 0;
     const side = createDebuggerFunctions({
         kernel,
         writeMemory: (address, written)=>bytes.set(written, address),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
+        threadDebugObject: { get: ()=>slot, set: handle=>{
+            slot = handle;
+        } },
         setLastError: code=>errors.push(code),
         setLastErrorFor: (who, code)=>errorsFor.push([who, code]),
         currentThread: ()=>thread,
@@ -65,7 +78,8 @@ function debuggerOf(children, extra = {}, table = new Map()){
     const fns = /** @type {any} */ (side.functions);
     /** @param {number} at */
     const u32 = at=>view.getUint32(at, true);
-    return { side, fns, errors, opened, blocked, woken, expiries, errorsFor, thread, u32, view };
+    return { side, fns, errors, opened, blocked, woken, expiries, errorsFor, thread, u32, view,
+        table, slot: ()=>slot };
 }
 
 /** @param {number} [flags] */
@@ -203,25 +217,95 @@ test('ContinueDebugEvent takes the statuses Windows takes, DBG_REPLY_LATER from 
     return answered.then(value=>assert.equal(value, DBG_CONTINUE));
 });
 
-test('DebugActiveProcessStop lets the debuggee go; DebugSetProcessKillOnExit needs one', async()=>{
-    const debuggee = child();
-    const plain = { id: 0x310, debugged: null };
-    const { side, fns, errors } = debuggerOf([debuggee, plain]);
-    assert.deepEqual([fns.WaitForDebugEvent.argBytes, fns.ContinueDebugEvent.argBytes,
-        fns.DebugActiveProcessStop.argBytes, fns.DebugSetProcessKillOnExit.argBytes],
-    [8, 12, 4, 4]);
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1);
-    assert.equal(debuggee.debugged?.killOnExit, false);
-    const pending = side.deliver(debuggee, { code: DEBUG_EVENT.LOAD_DLL, threadId: 0x304 });
-    assert.equal(fns.DebugActiveProcessStop.handler([0x310]), 0, 'not debugged here');
-    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x999]), 0, 'no such process');
-    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
-    assert.equal(fns.DebugActiveProcessStop.handler([0x300]), 1);
-    assert.equal(await pending, DBG_CONTINUE, 'what it reported is continued');
+test('DebugActiveProcessStop lets the debuggee go; DebugSetProcessKillOnExit needs a debug object',
+    async()=>{
+        const debuggee = child();
+        const plain = { id: 0x310, debugged: null };
+        const { side, fns, errors } = debuggerOf([debuggee, plain]);
+        assert.deepEqual([fns.WaitForDebugEvent.argBytes, fns.ContinueDebugEvent.argBytes,
+            fns.DebugActiveProcessStop.argBytes, fns.DebugSetProcessKillOnExit.argBytes],
+        [8, 12, 4, 4]);
+        assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 0, 'the thread has none');
+        assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+        const object = side.connect();
+        assert.equal(fns.DebugSetProcessKillOnExit.handler([0]), 1);
+        assert.equal(object.killOnClose, false, 'set on the thread\'s debug object');
+        const pending = side.deliver(debuggee, { code: DEBUG_EVENT.LOAD_DLL, threadId: 0x304 });
+        assert.equal(fns.DebugActiveProcessStop.handler([0x310]), 0, 'not debugged here');
+        assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+        assert.equal(fns.DebugActiveProcessStop.handler([0x999]), 0, 'no such process');
+        assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+        assert.equal(fns.DebugActiveProcessStop.handler([0x300]), 1);
+        assert.equal(await pending, DBG_CONTINUE, 'what it reported is continued');
+        assert.equal(debuggee.debugged, null);
+    });
+
+test('a debugger that ends takes its debuggees with it, and lets go those told not to', async()=>{
+    const taken = child();
+    const kept = { ...child(), id: 0x320 };
+    /** @type {any} */ (kept.debugged).object = { killOnClose: false };
+    /** @type {[number, number][]} */
+    const ended = [];
+    const { side } = debuggerOf([taken, kept], {
+        terminateChild: (/** @type {any} */ who, /** @type {number} */ code)=>
+            ended.push([who.id, code]) > 0,
+    });
+    const waiting = side.deliver(kept, { code: DEBUG_EVENT.LOAD_DLL, threadId: 0x324 });
+    side.debuggerEnded();
+    assert.deepEqual(ended, [[0x300, STATUS_DEBUGGER_INACTIVE]]);
+    assert.equal(await waiting, DBG_CONTINUE, 'what the one let go reported is continued');
+    assert.deepEqual([taken.debugged, kept.debugged], [null, null]);
+});
+
+test('the native debug object: made, set, connected to, attached through and closed', async()=>{
+    const debuggee = { id: 0x330, threadId: 0x334, debugged: null };
+    /** @type {[number, number][]} */
+    const ended = [];
+    const { side, fns, view, u32, table, slot } = debuggerOf([debuggee], {
+        terminateChild: (/** @type {any} */ who, /** @type {number} */ code)=>
+            ended.push([who.id, code]) > 0,
+        askChild: ()=>Promise.resolve({ result: 1, error: 0, outs: [] }),
+    });
+    const natives = fns.DebugSetProcessKillOnExit.natives;
+    assert.equal(natives.NtCreateDebugObject.handler([0x200, 0x1f000f, 0, 0xfffe]),
+        STATUS_INVALID_PARAMETER, 'a flag that is not DEBUG_KILL_ON_CLOSE');
+    assert.equal(natives.NtCreateDebugObject.handler([0x200, 0x1f000f, 0, 0]), 0);
+    const debug = u32(0x200);
+    assert.deepEqual(table.get(debug)?.[1], { killOnClose: false });
+    view.setUint32(0x210, 1, true);
+    assert.equal(natives.NtSetInformationDebugObject.handler([debug, 1, 0x210, 4, 0]), 0);
+    assert.equal(table.get(debug)?.[1].killOnClose, true);
+    assert.equal(natives.NtSetInformationDebugObject.handler([debug, 1, 0x210, 2, 0x214]),
+        STATUS_INFO_LENGTH_MISMATCH);
+    assert.equal(u32(0x214), 4);
+    assert.equal(natives.NtSetInformationDebugObject.handler([debug, 2, 0x210, 4, 0]),
+        STATUS_INVALID_PARAMETER);
+    assert.equal(natives.NtSetInformationDebugObject.handler([0x999, 1, 0x210, 4, 0]),
+        STATUS_INVALID_HANDLE);
+
+    assert.equal(slot(), 0);
+    assert.equal(natives.DbgUiConnectToDbg.handler([]), 0);
+    const connected = slot();
+    assert.equal(table.get(connected)?.[0], 'debug-object', 'the thread\'s, in its block');
+    assert.deepEqual(table.get(connected)?.[1], { killOnClose: true });
+    natives.DbgUiConnectToDbg.handler([]);
+    assert.equal(slot(), connected, 'one per thread');
+
+    table.set(0x400, ['process', debuggee]);
+    assert.equal(await natives.NtDebugActiveProcess.handler([0x400, debug]), 0);
+    assert.equal(/** @type {any} */ (debuggee.debugged).object, table.get(debug)?.[1]);
+    assert.equal(natives.NtRemoveProcessDebug.handler([0x400, connected]), STATUS_PORT_NOT_SET,
+        'not through another debug object');
+    assert.equal(natives.NtRemoveProcessDebug.handler([0x400, debug]), 0);
     assert.equal(debuggee.debugged, null);
-    assert.equal(fns.DebugSetProcessKillOnExit.handler([1]), 0, 'no debug object any more');
-    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.deepEqual(ended, [], 'removed, not ended');
+
+    // Attached again, then its last handle closed: DEBUG_KILL_ON_CLOSE ends it.
+    await natives.NtDebugActiveProcess.handler([0x400, debug]);
+    const object = table.get(debug)?.[1];
+    table.delete(debug);
+    side.closed(object);
+    assert.deepEqual(ended, [[0x330, STATUS_DEBUGGER_INACTIVE]]);
 });
 
 test('a debugger\'s SetThreadContext replaces only the groups the record names', ()=>{

@@ -2581,7 +2581,7 @@ export function createScheduler(options){
          */
         suspend(thread){
             const previous = thread.suspendCount ?? 0;
-            if (previous >= MAXIMUM_SUSPEND_COUNT)
+            if (previous - (thread.frozen ?? 0) >= MAXIMUM_SUSPEND_COUNT)
             {
                 return null;
             }
@@ -2593,7 +2593,34 @@ export function createScheduler(options){
             {
                 cpu.executorBell?.()?.goOn?.(false);
             }
-            return previous;
+            return previous - (thread.frozen ?? 0);
+        },
+
+        /**
+         * Stops a thread as a suspension does, in a count of its own that
+         * SuspendThread and ResumeThread neither report nor take away: how
+         * Windows freezes a debuggee while its debugger holds an event, the
+         * threads' suspend counts as they were.
+         *
+         * @param {any} thread
+         */
+        freeze(thread){
+            thread.frozen = (thread.frozen ?? 0) + 1;
+            this.suspend(thread);
+        },
+
+        /** @param {any} thread  Undoes one `freeze`. */
+        thaw(thread){
+            if ((thread.frozen ?? 0) > 0)
+            {
+                thread.frozen -= 1;
+                thread.suspendCount = Math.max(0, (thread.suspendCount ?? 0) - 1);
+                if (thread.suspendCount === 0)
+                {
+                    thread.readySince = now();
+                    noteReady(thread);
+                }
+            }
         },
 
         /**
@@ -2670,10 +2697,10 @@ export function createScheduler(options){
          * @returns {number} the count before
          */
         resume(thread){
-            const previous = thread.suspendCount ?? 0;
+            const previous = (thread.suspendCount ?? 0) - (thread.frozen ?? 0);
             if (previous > 0)
             {
-                thread.suspendCount = previous - 1;
+                thread.suspendCount -= 1;
                 // Measured from here: time spent suspended is not time spent
                 // passed over, and counting it would boost the thread over
                 // every other on its first turn back.

@@ -55,6 +55,19 @@ const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_SEM_TIMEOUT = 121;
+const STATUS_SUCCESS = 0;
+const STATUS_INFO_LENGTH_MISMATCH = 0xc0000004;
+const STATUS_ACCESS_VIOLATION = 0xc0000005;
+const STATUS_INVALID_HANDLE = 0xc0000008;
+const STATUS_INVALID_PARAMETER = 0xc000000d;
+const STATUS_ACCESS_DENIED = 0xc0000022;
+/** NtRemoveProcessDebug's answer for a process its debug object does not debug. */
+const STATUS_PORT_NOT_SET = 0xc0000353;
+/** NtCreateDebugObject's one flag, and its information class. */
+const DEBUG_KILL_ON_CLOSE = 1;
+const DEBUG_OBJECT_KILL_PROCESS_ON_EXIT_INFORMATION = 1;
+/** The code a debuggee ends with when its debugger ends and takes it along. */
+const STATUS_DEBUGGER_INACTIVE = 0xc0000354;
 
 /**
  * An event as a debuggee reports it: values only, since it may come from
@@ -76,7 +89,17 @@ const ERROR_SEM_TIMEOUT = 121;
  *
  * @typedef {{ events: { report: DebugReport, answer: (status: number) => void }[],
  *     current: { report: DebugReport, answer: (status: number) => void } | null,
- *     onlyThis: boolean, killOnExit: boolean }} Debuggee
+ *     onlyThis: boolean, object: DebugObject }} Debuggee
+ */
+
+/**
+ * A debug object, what Windows' kernel keeps between a debugger and its
+ * debuggees: whether they end when the last handle to it closes
+ * (DEBUG_KILL_ON_CLOSE) or are let go. A thread debugs through the one its
+ * thread block names (DbgUiGetThreadDebugObject), made when it first
+ * debugs (DbgUiConnectToDbg).
+ *
+ * @typedef {{ killOnClose: boolean }} DebugObject
  */
 
 /**
@@ -84,9 +107,11 @@ const ERROR_SEM_TIMEOUT = 121;
  * null when it is not debugged.
  *
  * @param {number} flags
+ * @param {() => DebugObject} [objectOf]  The caller's debug object, made if it
+ *        has none: asked only for a child that is debugged.
  * @returns {Debuggee | null}
  */
-export function debuggeeFor(flags){
+export function debuggeeFor(flags, objectOf = ()=>({ killOnClose: true })){
     const DEBUG_PROCESS = 0x1;
     const DEBUG_ONLY_THIS_PROCESS = 0x2;
     if ((flags & (DEBUG_PROCESS | DEBUG_ONLY_THIS_PROCESS)) === 0)
@@ -94,7 +119,7 @@ export function debuggeeFor(flags){
         return null;
     }
     return { events: [], current: null, onlyThis: (flags & DEBUG_PROCESS) === 0,
-        killOnExit: true };
+        object: objectOf() };
 }
 
 /**
@@ -168,6 +193,11 @@ export function mergeContextGroups(into, given){
  * @property {() => boolean} [debugged]  Whether a debugger hears this process now.
  * @property {() => number} [breakIn]  This process breaks into its own debugger:
  *           a thread of its own runs DbgBreakPoint.
+ * @property {(child: any, code: number) => boolean} [terminateChild]  Ends a child
+ *           where it runs, as TerminateProcess does.
+ * @property {{ get: () => number, set: (handle: number) => void }} [threadDebugObject]
+ *           The debug object handle the calling thread's block keeps.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
  */
 
 /**
@@ -207,6 +237,112 @@ export function createDebuggerFunctions(host){
     /** @returns {any[]} */
     const debuggees = ()=>(kernel.processes?.all() ?? []).filter(
         (/** @type {any} */ child)=>child.debugged);
+
+    /**
+     * The debug object a handle names; null for none.
+     *
+     * @param {number} handle @returns {DebugObject | null}
+     */
+    const objectOf = handle=>{
+        const plain = untagged(handle >>> 0);
+        return plain !== 0 && kernel.handles.typeOf?.(plain) === 'debug-object'
+            ? kernel.handles.resolve(plain) : null;
+    };
+
+    /** @returns {DebugObject | null} the calling thread's */
+    const threadObject = ()=>objectOf(host.threadDebugObject?.get() ?? 0);
+
+    /**
+     * The calling thread's debug object, made - set to end its debuggees with
+     * it - when it has none (DbgUiConnectToDbg).
+     *
+     * @returns {DebugObject}
+     */
+    const connect = ()=>{
+        const held = threadObject();
+        if (held)
+        {
+            return held;
+        }
+        /** @type {DebugObject} */
+        const made = { killOnClose: true };
+        host.threadDebugObject?.set(kernel.handles.open('debug-object', made));
+        return made;
+    };
+
+    /**
+     * A debuggee is let go, what it reported continued: ended with
+     * STATUS_DEBUGGER_INACTIVE when `end` says so - its debugger gone and its
+     * debug object set to end it - else going on, as DebugActiveProcessStop
+     * lets one go.
+     *
+     * @param {any} child @param {boolean} end
+     */
+    const release = (child, end)=>{
+        const { current, events } = child.debugged;
+        child.debugged = null;
+        for (const each of [...current ? [current] : [], ...events])
+        {
+            each.answer(DBG_CONTINUE);
+        }
+        if (end && !host.terminateChild?.(child, STATUS_DEBUGGER_INACTIVE))
+        {
+            host.divergence?.('debug object',
+                `debuggee ${child.id} could not be ended with its debugger, and goes on`);
+        }
+    };
+
+    /** @param {any} child */
+    const debuggerGone = child=>release(child, child.debugged.object.killOnClose);
+
+    /**
+     * Attaches a running child to a debug object (DebugActiveProcess,
+     * NtDebugActiveProcess): it is debugged from now, tells at once what it
+     * already is (`attachEvents`) and breaks in on a thread of its own. Only
+     * a child the debugger hears can be attached to - one run beside it.
+     *
+     * @param {any} child @param {DebugObject} object
+     * @returns {Promise<number> | number} 1, or 0 with ERROR_ACCESS_DENIED set
+     */
+    const attach = (child, object)=>{
+        if (child.debugged || kernel.processes?.finished?.(child))
+        {
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+        child.debugged = { events: [], current: null, onlyThis: true, object };
+        const asked = ask(child, DEBUG_ATTACH);
+        if (asked === null)
+        {
+            child.debugged = null;
+            host.setLastError?.(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+        return asked.then(result=>{
+            if (result === 0)
+            {
+                child.debugged = null;
+            }
+            return result;
+        });
+    };
+
+    /** @param {Promise<number> | number} attached @returns {Promise<number>} */
+    const attachStatus = attached=>Promise.resolve(attached).then(result=>(result === 0
+        ? STATUS_ACCESS_DENIED : STATUS_SUCCESS));
+
+    /** @param {number} handle @returns {any} the process a handle names, or null */
+    const processHandle = handle=>{
+        const plain = untagged(handle >>> 0);
+        return kernel.handles.typeOf?.(plain) === 'process' ? kernel.handles.resolve(plain) : null;
+    };
+
+    /** @param {number} address @param {number} value */
+    const writeU32 = (address, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        host.writeMemory(address >>> 0, bytes);
+    };
 
     /**
      * The handle a thread of a debuggee is handed to its debugger by.
@@ -347,6 +483,31 @@ export function createDebuggerFunctions(host){
             }
         },
 
+        /**
+         * This process, a debugger, has ended, and every handle to its debug
+         * objects with it: each debuggee goes as its debug object says.
+         */
+        debuggerEnded(){
+            debuggees().forEach(debuggerGone);
+        },
+
+        /**
+         * A handle to a debug object was closed: with the last, its
+         * debuggees go as it says.
+         *
+         * @param {DebugObject} object
+         */
+        closed(object){
+            if (!kernel.handles.holds?.(object))
+            {
+                debuggees().filter(child=>child.debugged.object === object)
+                    .forEach(debuggerGone);
+            }
+        },
+
+        /** The calling thread's debug object, made if it has none (CreateProcess). */
+        connect,
+
         functions: {
             /**
              * BOOL WaitForDebugEvent(LPDEBUG_EVENT lpDebugEvent, DWORD dwMilliseconds)
@@ -448,27 +609,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    if (child.debugged || kernel.processes?.finished?.(child))
-                    {
-                        host.setLastError?.(ERROR_ACCESS_DENIED);
-                        return 0;
-                    }
-                    child.debugged = { events: [], current: null, onlyThis: true,
-                        killOnExit: true };
-                    const asked = ask(child, DEBUG_ATTACH);
-                    if (asked === null)
-                    {
-                        child.debugged = null;
-                        host.setLastError?.(ERROR_ACCESS_DENIED);
-                        return 0;
-                    }
-                    return asked.then(result=>{
-                        if (result === 0)
-                        {
-                            child.debugged = null;
-                        }
-                        return result;
-                    });
+                    return attach(child, connect());
                 },
             },
 
@@ -528,12 +669,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_INVALID_HANDLE);
                         return 0;
                     }
-                    const { current, events } = child.debugged;
-                    child.debugged = null;
-                    for (const each of [...current ? [current] : [], ...events])
-                    {
-                        each.answer(DBG_CONTINUE);
-                    }
+                    release(child, false);
                     return 1;
                 },
             },
@@ -541,26 +677,162 @@ export function createDebuggerFunctions(host){
             /**
              * BOOL DebugSetProcessKillOnExit(BOOL KillOnExit)
              *
-             * Whether the debuggees end when their debugger does. A caller
-             * debugging none has no debug object to set it on and is refused
-             * as such. Kept on each; a debuggee here ends with its debugger
-             * either way, as a child running beside its parent does.
+             * Whether the debuggees end when their debugger does: set on the
+             * calling thread's debug object, as NtSetInformationDebugObject
+             * sets it. A thread with none has nothing to set it on.
              */
             DebugSetProcessKillOnExit: {
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([kill])=>{
-                    const debugged = debuggees();
-                    if (debugged.length === 0)
+                    const object = threadObject();
+                    if (!object)
                     {
                         host.setLastError?.(ERROR_INVALID_HANDLE);
                         return 0;
                     }
-                    for (const child of debugged)
-                    {
-                        child.debugged.killOnExit = (kill >>> 0) !== 0;
-                    }
+                    object.killOnClose = (kill >>> 0) !== 0;
                     return 1;
+                },
+                // The native calls on debug objects, ntdll's, over the same
+                // objects and debuggees.
+                natives: {
+                    /**
+                     * NTSTATUS NtCreateDebugObject(PHANDLE DebugObjectHandle,
+                     *   ACCESS_MASK, POBJECT_ATTRIBUTES, ULONG Flags)
+                     *
+                     * DEBUG_KILL_ON_CLOSE is its one flag.
+                     */
+                    NtCreateDebugObject: {
+                        argBytes: 16,
+                        /** @param {number[]} args */
+                        handler: ([out, , , flags])=>{
+                            if (((flags >>> 0) & ~DEBUG_KILL_ON_CLOSE) !== 0)
+                            {
+                                return STATUS_INVALID_PARAMETER;
+                            }
+                            if ((out >>> 0) === 0)
+                            {
+                                return STATUS_ACCESS_VIOLATION;
+                            }
+                            writeU32(out, kernel.handles.open('debug-object',
+                                { killOnClose: ((flags >>> 0) & DEBUG_KILL_ON_CLOSE) !== 0 }));
+                            return STATUS_SUCCESS;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtSetInformationDebugObject(HANDLE DebugObject,
+                     *   DEBUGOBJECTINFOCLASS, PVOID, ULONG, PULONG ReturnLength)
+                     *
+                     * Its one class, DebugObjectKillProcessOnExitInformation: a
+                     * ULONG of DEBUG_KILL_ON_CLOSE or 0.
+                     */
+                    NtSetInformationDebugObject: {
+                        argBytes: 20,
+                        /** @param {number[]} args */
+                        handler: ([handle, kind, info, length, returned])=>{
+                            if ((kind >>> 0) !== DEBUG_OBJECT_KILL_PROCESS_ON_EXIT_INFORMATION)
+                            {
+                                return STATUS_INVALID_PARAMETER;
+                            }
+                            if ((length >>> 0) !== 4)
+                            {
+                                if ((returned >>> 0) !== 0)
+                                {
+                                    writeU32(returned, 4);
+                                }
+                                return STATUS_INFO_LENGTH_MISMATCH;
+                            }
+                            const object = objectOf(handle);
+                            if (!object)
+                            {
+                                return STATUS_INVALID_HANDLE;
+                            }
+                            const bytes = host.readMemory?.(info >>> 0, 4) ?? new Uint8Array(4);
+                            const value = new DataView(bytes.slice().buffer).getUint32(0, true);
+                            if ((value & ~DEBUG_KILL_ON_CLOSE) !== 0)
+                            {
+                                return STATUS_INVALID_PARAMETER;
+                            }
+                            object.killOnClose = value !== 0;
+                            return STATUS_SUCCESS;
+                        },
+                    },
+
+                    /** NTSTATUS DbgUiConnectToDbg(void): the thread's debug object, made. */
+                    DbgUiConnectToDbg: {
+                        argBytes: 0,
+                        handler: ()=>{
+                            connect();
+                            return STATUS_SUCCESS;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtDebugActiveProcess(HANDLE Process, HANDLE DebugObject)
+                     *
+                     * DebugActiveProcess's attach, on the debug object given.
+                     */
+                    NtDebugActiveProcess: {
+                        argBytes: 8,
+                        /** @param {number[]} args */
+                        handler: ([process, handle])=>{
+                            const object = objectOf(handle);
+                            const child = processHandle(process);
+                            if (!object)
+                            {
+                                return STATUS_INVALID_HANDLE;
+                            }
+                            if (!child)
+                            {
+                                return (process >>> 0) === OWN_PROCESS ? STATUS_ACCESS_DENIED
+                                    : STATUS_INVALID_HANDLE;
+                            }
+                            return attachStatus(attach(child, object));
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS DbgUiDebugActiveProcess(HANDLE Process)
+                     *
+                     * NtDebugActiveProcess on the calling thread's debug object;
+                     * the attach breaks in.
+                     */
+                    DbgUiDebugActiveProcess: {
+                        argBytes: 4,
+                        /** @param {number[]} args */
+                        handler: ([process])=>{
+                            const child = processHandle(process);
+                            return child ? attachStatus(attach(child, connect()))
+                                : STATUS_INVALID_HANDLE;
+                        },
+                    },
+
+                    /**
+                     * NTSTATUS NtRemoveProcessDebug(HANDLE Process, HANDLE DebugObject)
+                     *
+                     * DebugActiveProcessStop on the debug object given: a process
+                     * it does not debug has no port to remove.
+                     */
+                    NtRemoveProcessDebug: {
+                        argBytes: 8,
+                        /** @param {number[]} args */
+                        handler: ([process, handle])=>{
+                            const object = objectOf(handle);
+                            const child = processHandle(process);
+                            if (!object || !child)
+                            {
+                                return STATUS_INVALID_HANDLE;
+                            }
+                            if (child.debugged?.object !== object)
+                            {
+                                return STATUS_PORT_NOT_SET;
+                            }
+                            release(child, false);
+                            return STATUS_SUCCESS;
+                        },
+                    },
                 },
             },
         },

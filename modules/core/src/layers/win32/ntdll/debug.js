@@ -5,14 +5,15 @@
  */
 
 /**
- * The debugging interface, for a process no debugger can attach to.
+ * The debugging interface's own calls: the thread's debug object in its
+ * thread block, the breakpoint and the debug print.
  *
- * There is no debug object here and no second process to hold one, so the
- * calls that make, wait on or continue through a debug object answer the
- * way the system answers a handle that is none, attaching is denied, and
- * the system's own debug channel is not implemented. A program asks these
- * to find out whether it is being debugged, or to debug a child; the
- * answers say no, and say it as statuses it tests for.
+ * The debug objects themselves - made, set, attached through, removed - are
+ * kernel32's (`kernel32/debug-events.js`, published as natives), one with
+ * its debuggers' and debuggees' records. Waiting on one and continuing
+ * through it natively (NtWaitForDebugEvent, NtDebugContinue and the state
+ * changes DbgUi converts) is not made, and the system's own debug channel
+ * is not implemented.
  *
  * Two calls are real. DbgBreakPoint is the processor's breakpoint -- an
  * `int3` in the library's own code, raised through the same fault path any
@@ -23,21 +24,16 @@
 
 import { STATUS } from './status.js';
 import { createRefusals } from '../common/refusal.js';
+import { TEB } from '../kernel32/teb.js';
 
 /** The processor's breakpoint, as DbgBreakPoint raises it. */
 const STATUS_BREAKPOINT = 0x80000003;
-
-/** A process with no debugger attached, asked to have it removed. */
-const STATUS_PORT_NOT_SET = 0xc0000353;
 
 /** `int3; ret`: DbgBreakPoint as the system's own library has it. */
 const BREAK_CODE = Uint8Array.of(0xcc, 0xc3);
 
 /** The most DbgPrint formats: the system's own buffer. */
 const DBG_PRINT_LIMIT = 512;
-
-/** Where the thread block keeps the thread's debug object: DbgSsReserved[1]. */
-const TEB_DEBUG_OBJECT = 0xf24;
 
 /** How many argument slots DbgPrint's format is read for. */
 const VARIADIC_SLOTS = 32;
@@ -69,9 +65,6 @@ const dword = value=>{
 export function createDebugFunctions(host){
     const refuse = createRefusals({ divergence: host.divergence });
     const why = 'no debugger can attach to this process';
-
-    const refusedCreate = refuse('NtCreateDebugObject',
-        { argBytes: 16, answer: STATUS.NOT_IMPLEMENTED, why: 'no debug object can be made' });
 
     /** The debug object a thread keeps with no thread block to keep it in. */
     let detached = 0;
@@ -233,7 +226,7 @@ export function createDebugFunctions(host){
                 {
                     return detached;
                 }
-                const bytes = host.readMemory(teb + TEB_DEBUG_OBJECT, 4);
+                const bytes = host.readMemory(teb + TEB.DEBUG_OBJECT, 4);
                 return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
             },
         },
@@ -249,7 +242,7 @@ export function createDebugFunctions(host){
                 }
                 else
                 {
-                    writeU32(teb + TEB_DEBUG_OBJECT, handle);
+                    writeU32(teb + TEB.DEBUG_OBJECT, handle);
                 }
                 return 0;
             },
@@ -269,50 +262,13 @@ export function createDebugFunctions(host){
         DbgUiConvertStateChangeStructure: refuse('DbgUiConvertStateChangeStructure',
             { argBytes: 8, answer: STATUS.UNSUCCESSFUL, why }),
 
-        /**
-         * NTSTATUS NtCreateDebugObject(PHANDLE DebugObjectHandle, ACCESS_MASK,
-         *                              POBJECT_ATTRIBUTES, ULONG Flags)
-         *
-         * No debug object type exists to make one of. The handle is left
-         * NULL, so a caller that closes it closes nothing.
-         */
-        NtCreateDebugObject: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    writeU32(out, 0);
-                }
-                return refusedCreate.handler();
-            },
-        },
-
-        /** NTSTATUS NtDebugActiveProcess(HANDLE Process, HANDLE DebugObject) */
-        NtDebugActiveProcess: refuse('NtDebugActiveProcess',
-            { argBytes: 8, answer: STATUS.ACCESS_DENIED, why }),
-
-        /**
-         * NTSTATUS NtRemoveProcessDebug(HANDLE Process, HANDLE DebugObject)
-         *
-         * No process has a debugger to remove: the status for a process
-         * with no debug port.
-         */
-        NtRemoveProcessDebug: refuse('NtRemoveProcessDebug',
-            { argBytes: 8, answer: STATUS_PORT_NOT_SET, why }),
-
-        // The calls on a debug object: none can exist, so the handle is none.
+        // The waits and answers through a debug object, not made: a handle
+        // is answered as none. kernel32's WaitForDebugEvent and
+        // ContinueDebugEvent are the debugger's way here.
 
         /** NTSTATUS NtDebugContinue(HANDLE DebugObject, PCLIENT_ID, NTSTATUS) */
         NtDebugContinue: refuse('NtDebugContinue',
             { argBytes: 12, answer: STATUS.INVALID_HANDLE, why }),
-
-        /**
-         * NTSTATUS NtSetInformationDebugObject(HANDLE DebugObject,
-         *   DEBUGOBJECTINFOCLASS, PVOID, ULONG, PULONG)
-         */
-        NtSetInformationDebugObject: refuse('NtSetInformationDebugObject',
-            { argBytes: 20, answer: STATUS.INVALID_HANDLE, why }),
 
         /**
          * NTSTATUS NtWaitForDebugEvent(HANDLE DebugObject, BOOLEAN Alertable,
