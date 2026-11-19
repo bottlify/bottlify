@@ -126,6 +126,10 @@ const SYSTEM_THREAD = {
 /** KTHREAD_STATE: the idle thread runs; every other one waits. */
 const THREAD_STATE_RUNNING = 2;
 const THREAD_STATE_WAITING = 5;
+/** The right that reads every process class, and the classes the limited right reads alone. */
+const PROCESS_QUERY_INFORMATION = 0x0400;
+const LIMITED_PROCESS_CLASSES = new Set([0, 1, 2, 3, 4, 12, 18, 20, 22, 26, 27, 28, 33, 37,
+    38, 39, 43]);
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
 /** A handle to the debug object that debugs a process; its NoDebugInherit, inverted. */
@@ -1087,6 +1091,17 @@ export function createQueryFunctions(host){
                     }
                     return (length >>> 0) < (fixed.get(wanted) ?? 0)
                         ? STATUS.INFO_LENGTH_MISMATCH : STATUS.INVALID_HANDLE;
+                }
+                // A handle opened with PROCESS_QUERY_LIMITED_INFORMATION alone
+                // reads the classes Windows lets it, this process's own
+                // included; the rest are refused (Wine's process.c
+                // test_process_info on such a handle).
+                const access = (handle >>> 0) === CURRENT_PROCESS ? null
+                    : host.handleAccess?.(handle >>> 0) ?? null;
+                if (access !== null && (access & PROCESS_QUERY_INFORMATION) === 0
+                    && !LIMITED_PROCESS_CLASSES.has(wanted))
+                {
+                    return STATUS.ACCESS_DENIED;
                 }
                 const child = (handle >>> 0) === CURRENT_PROCESS ? null
                     : host.processOf?.(handle >>> 0) ?? null;

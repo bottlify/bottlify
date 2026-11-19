@@ -235,6 +235,26 @@ test('the image file name is the program\'s path, natively or as Win32 names it'
         STATUS.INVALID_HANDLE);
 });
 
+test('a process handle with only the limited query right reads the classes Windows lets it', ()=>{
+    // Wine's process.c test_process_info on OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION).
+    const native = '\\Device\\HarddiskVolume1\\App\\a.exe';
+    const host = { ...fakeHost(),
+        imagePath: ()=>({ win32: 'C:\\App\\a.exe', native }),
+        // This process's own id, opened with the limited right alone.
+        processOf: (/** @type {number} */ handle)=>(handle === 0x40 ? { current: true } : null),
+        handleAccess: (/** @type {number} */ handle)=>(handle === 0x40 ? 0x1000 : null) };
+    const fns = createQueryFunctions(host);
+    for (const refused of [7, 31, 0x22])
+    {
+        assert.equal(fns.NtQueryInformationProcess.handler([0x40, refused, BUFFER, 4, 0]),
+            STATUS.ACCESS_DENIED, `class ${refused}`);
+    }
+    assert.equal(fns.NtQueryInformationProcess.handler([0x40, 27, BUFFER, 0x100, 0]),
+        STATUS.SUCCESS, 'the image name is the limited right\'s');
+    assert.equal(fns.NtQueryInformationProcess.handler([-1, 0x22, BUFFER, 4, 0]),
+        STATUS.SUCCESS, 'the pseudo-handle reads everything');
+});
+
 test('the length a class needs is reported even when the buffer is too small', ()=>{
     // This is the two-call protocol every caller of these uses: ask with nothing,
     // allocate what it was told, ask again. Withholding the length on the failing
