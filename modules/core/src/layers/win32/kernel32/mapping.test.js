@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMappingFunctions, imageRefusal } from './mapping.js';
 import { imageKind } from '../../loader/internal/pe.js';
-import { protectionRights, sectionRights, viewProtection } from './view-rights.js';
+import { imageWriteCopy, protectionWithin, sectionRights, viewProtection }
+    from './view-rights.js';
 import { createNamedObjects } from './named-objects.js';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
@@ -240,8 +241,15 @@ test('a view asks no more of its section than the section\'s protection allows',
     assert.equal(sectionRights(0x01), 0, 'PAGE_NOACCESS allows nothing');
     assert.deepEqual([0, 1, 2, 3, 4, 5, 6, 0x20, 0x21, 0x22, 0x24].map(viewProtection),
         [0x01, 0x08, 0x04, 0x04, 0x02, 0x02, 0x04, 0x01, 0x80, 0x40, 0x20]);
-    assert.deepEqual([0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80].map(protectionRights),
-        [0, 4, 6, 4, 8, 12, 14, 12]);
+    // A page takes no access its view's protection lacks: a read-only view's
+    // pages read or copy; an image's (PAGE_EXECUTE_WRITECOPY) take any, its
+    // writable ones as their copy-on-write forms.
+    const pages = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80];
+    assert.deepEqual(pages.filter(page=>protectionWithin(0x02, page)), [0x01, 0x02, 0x08]);
+    assert.deepEqual(pages.filter(page=>protectionWithin(0x01, page)), [0x01]);
+    assert.deepEqual(pages.map(imageWriteCopy),
+        [0x01, 0x02, 0x08, 0x08, 0x10, 0x20, 0x80, 0x80]);
+    assert.ok(pages.map(imageWriteCopy).every(page=>protectionWithin(0x80, page)));
 
     const { fns, errors, fileHandle } = setup();
     const readOnly = fns.CreateFileMappingA.handler([fileHandle, 0, 0x02, 0, 8, 0]);

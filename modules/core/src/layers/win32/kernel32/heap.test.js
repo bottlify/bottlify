@@ -1556,14 +1556,16 @@ test('a view\'s pages take a protection within what the view was mapped for', ()
     // with the protection it was mapped with until VirtualProtect gives a
     // page another, which must be within the view's access (else
     // ERROR_INVALID_PARAMETER), a run split where it changes; a commit over
-    // it only makes its pages copy-on-write, anything else is
-    // ERROR_ACCESS_DENIED; PAGE_NOACCESS closes a page to the processor.
+    // a file's view is ERROR_ACCESS_DENIED, over a page-file section's view
+    // it gives a protection within the view's (else ERROR_INVALID_PARAMETER);
+    // PAGE_NOACCESS closes a page to the processor.
     /** @type {number[]} */
     const errors = [];
     /** @type {[number, number, boolean][]} */
     const access = [];
-    const view = { base: 0x80000, length: 0x2000, writable: false, protect: 0x02,
-        rights: 0x04, pages: new Map() };
+    /** @type {any} */
+    let view = { base: 0x80000, length: 0x2000, writable: false, protect: 0x02,
+        pages: new Map() };
     const host = {
         ...fakeHost({ base: 0x10000, size: 0x40000 }),
         setLastError: (/** @type {number} */ code)=>errors.push(code),
@@ -1594,12 +1596,62 @@ test('a view\'s pages take a protection within what the view was mapped for', ()
     assert.equal(fns.VirtualProtect.handler([0x80000, 0x3000, PAGE_NOACCESS, 0x200]), 0,
         'past the view');
 
-    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x02]), 0);
-    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    for (const protection of [0x02, 0x08])
+    {
+        assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, protection]), 0);
+        assert.equal(errors.at(-1), 5, 'a file\'s view: ERROR_ACCESS_DENIED');
+    }
+
+    view = { base: 0x80000, length: 0x2000, writable: false, protect: 0x02, anonymous: true,
+        pages: new Map([[0x80000, PAGE_NOACCESS]]) };
     assert.equal(fns.VirtualAlloc.handler([0x80010, 0xff0, MEM_COMMIT, 0x08]), 0x80000);
     assert.deepEqual(access.at(-1), [0x80000, 0x1000, true], 'opened');
-    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x80]), 0,
-        'not executable');
+    assert.deepEqual(query(0x80000), [0x02, 0x1000, MEM_COMMIT, 0x08, 0x40000]);
+    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x04]), 0,
+        'not writable');
+    assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
+});
+
+test('an image\'s view answers its sections and takes any protection, writes as copies', ()=>{
+    // Wine's kernel32:virtual (test_mapping, SEC_IMAGE): the view's
+    // AllocationProtect is PAGE_EXECUTE_WRITECOPY and its type MEM_IMAGE,
+    // the headers read-only and each section its own protection; any
+    // protection is taken, a writable one as its copy-on-write form; a
+    // commit over it is ERROR_ACCESS_DENIED.
+    /** @type {number[]} */
+    const errors = [];
+    const view = { base: 0x80000, length: 0x3000, writable: false, protect: 0x80,
+        anonymous: false, pages: new Map(),
+        sections: [{ start: 0x1000, end: 0x2000, protect: 0x20 },
+            { start: 0x2000, end: 0x3000, protect: 0x08 }] };
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        viewAt: (/** @type {number} */ at)=>(at >= 0x80000 && at < 0x83000 ? view : null),
+        pageAccess: ()=>true,
+    };
+    const fns = createHeapFunctions(host);
+    const data = new DataView(host.bytes.buffer);
+    /** @param {number} at */
+    const query = at=>{
+        assert.equal(fns.VirtualQuery.handler([at, 0x100, MBI.SIZE]), MBI.SIZE);
+        return [MBI.AllocationProtect, MBI.RegionSize, MBI.Protect, MBI.Type]
+            .map(field=>data.getUint32(0x100 + field, true));
+    };
+    const MEM_IMAGE = 0x1000000;
+    assert.deepEqual(query(0x80000), [0x80, 0x1000, 0x02, MEM_IMAGE], 'the headers');
+    assert.deepEqual(query(0x81000), [0x80, 0x1000, 0x20, MEM_IMAGE], 'code');
+    assert.equal(fns.VirtualProtect.handler([0x80000, 1, 0x04, 0x200]), 1);
+    assert.equal(data.getUint32(0x200, true), 0x02, 'the old protection');
+    assert.deepEqual(query(0x80000), [0x80, 0x1000, 0x08, MEM_IMAGE], 'its own copy');
+    assert.equal(fns.VirtualProtect.handler([0x80000, 1, 0x40, 0x200]), 1);
+    assert.equal(data.getUint32(0x200, true), 0x08);
+    assert.deepEqual(query(0x80000), [0x80, 0x1000, 0x80, MEM_IMAGE]);
+    assert.equal(fns.VirtualProtect.handler([0x81000, 1, 0x08, 0x200]), 1);
+    assert.deepEqual(query(0x81000), [0x80, 0x2000, 0x08, MEM_IMAGE],
+        'a run of one protection spans sections');
+    assert.equal(fns.VirtualAlloc.handler([0x80000, 0x1000, MEM_COMMIT, 0x08]), 0);
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
 });
 
 test('VirtualQuery inside a reservation answers the reservation, page by page as committed',

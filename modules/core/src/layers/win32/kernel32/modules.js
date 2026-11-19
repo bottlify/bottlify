@@ -49,6 +49,11 @@ const SEARCH_FLAGS = SEARCH_DLL_LOAD_DIR | SEARCH_APPLICATION_DIR | SEARCH_USER_
     | SEARCH_SYSTEM32 | SEARCH_DEFAULT_DIRS;
 /** Which a LOAD_LIBRARY_SEARCH_* search cannot be combined with. */
 const LOAD_WITH_ALTERED_SEARCH_PATH = 0x8;
+/**
+ * LoadLibraryEx's loads of a file for its data (AS_DATAFILE, AS_IMAGE_RESOURCE,
+ * AS_DATAFILE_EXCLUSIVE): a file of that name, never a module that is loaded.
+ */
+const LOAD_AS_DATA = 0x2 | 0x20 | 0x40;
 
 /** The flags SetDefaultDllDirectories takes: all of them but DLL_LOAD_DIR. */
 const DEFAULT_DLL_DIRECTORIES = SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32
@@ -228,11 +233,14 @@ export function createModuleFunctions(host){
      * this. A second decision function drifts from the first, and then the
      * answer about whether waiting is needed stops matching the waiting.
      *
-     * @param {string} name
+     * @param {string} asked
      * @param {number} [flags]  LoadLibraryEx's.
      * @returns {number | Promise<number>}
      */
-    const load = (name, flags = 0)=>{
+    const load = (asked, flags = 0)=>{
+        // A path's trailing spaces are not part of it: Windows drops them
+        // from a name as it makes it a path ("kernel32   " is kernel32.dll).
+        const name = asked.replace(/ +$/, '');
         /** @param {number} base @param {string} [tried] */
         const settle = (base, tried = name)=>{
             if (base === 0)
@@ -247,7 +255,11 @@ export function createModuleFunctions(host){
         {
             return settle(0);
         }
-        if ((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+        // The library's own folder is known only of a path from the root:
+        // LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR with a name relative to anything
+        // is refused, as Windows refuses it.
+        if (((flags & SEARCH_FLAGS) !== 0 && (flags & LOAD_WITH_ALTERED_SEARCH_PATH) !== 0)
+            || ((flags & SEARCH_DLL_LOAD_DIR) !== 0 && !/^([A-Za-z]:)?[\\/]/.test(name)))
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
@@ -307,9 +319,12 @@ export function createModuleFunctions(host){
             ? search | SEARCH_APPLICATION_DIR | SEARCH_USER_DIRS | SEARCH_SYSTEM32 : search;
     };
 
-    /** The directories SetDllDirectory and AddDllDirectory named, in that order. */
-    const userSearched = ()=>/** @type {string[]} */ ([dllDirectory, ...userDirectories.values()]
-        .filter(directory=>directory !== null && directory !== ''));
+    /**
+     * The directories LOAD_LIBRARY_SEARCH_USER_DIRS looks in: AddDllDirectory's, the one
+     * added last first, then SetDllDirectory's (Wine's kernel32:module, test_LoadLibraryEx).
+     */
+    const userSearched = ()=>/** @type {string[]} */ ([...userDirectories.values()].reverse()
+        .concat(dllDirectory ?? '').filter(directory=>directory !== ''));
 
     /**
      * One look for a library by the name given.
@@ -326,7 +341,7 @@ export function createModuleFunctions(host){
         {
             const answer = search ? host.load(name, flags, search) : host.load(name, flags);
             return typeof answer === 'number' && answer === 0 && !search
-                ? host.find(name)?.base ?? 0 : answer;
+                && (flags & LOAD_AS_DATA) === 0 ? host.find(name)?.base ?? 0 : answer;
         }
         return host.find(name)?.base ?? 0;
     };
@@ -514,6 +529,12 @@ export function createModuleFunctions(host){
         const text = dllDirectory ?? '';
         if (text.length + 1 > size || buffer === 0)
         {
+            // A buffer with room for anything is left an empty string, as
+            // Windows leaves it; one of no size is not touched.
+            if (size > 0 && buffer !== 0)
+            {
+                host.writeMemory(buffer, new Uint8Array(wide ? 2 : 1));
+            }
             return text.length + 1;
         }
         if (wide)
@@ -851,10 +872,13 @@ export function createModuleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, name])=>{
-                const module = host.byBase(handle >>> 0);
+                // No module is the program's own, as GetModuleHandle(NULL)
+                // answers it: what it does not export is a procedure not found.
+                const module = (handle >>> 0) === 0 ? host.find(null) : host.byBase(handle >>> 0);
                 if (!module)
                 {
-                    host.setLastError(ERROR_MOD_NOT_FOUND);
+                    host.setLastError((handle >>> 0) === 0 ? ERROR_PROC_NOT_FOUND
+                        : ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
 

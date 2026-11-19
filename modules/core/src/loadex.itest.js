@@ -332,3 +332,57 @@ test('a library loaded by its path is that file, though one of the same name is 
         const code = await app.run({ timeoutMs: 40000 });
         assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
     });
+
+test('a load that cannot be answers why: a path not there, an empty file, a name with spaces',
+    { timeout: 60000 }, async t=>{
+        // Wine's kernel32:module: LoadLibraryEx as data of a path that is not
+        // there is ERROR_FILE_NOT_FOUND, though a module of its name is loaded;
+        // of an empty file ERROR_FILE_INVALID; "kernel32   " is kernel32;
+        // GetProcAddress(NULL) of a name the program does not export is
+        // ERROR_PROC_NOT_FOUND. One exit code bit for each answer as expected.
+        const EVERY = 0x3f;
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'LoadLibraryExA', 'GetLastError',
+                'GetModuleHandleA', 'GetProcAddress', 'ExitProcess'] },
+            data: { absent: cString('C:\\Nowhere\\kernel32.dll'),
+                empty: cString('C:\\App\\empty.dll'), spaced: cString('kernel32   '),
+                kernel: cString('kernel32'), missing: cString('NoSuchExport') },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const flag = (/** @type {number} */ bit)=>[0x81, 0xcb, ...u32(bit)];
+                const push = (/** @type {number} */ value)=>[0x68, ...u32(value)];
+                const JNE = 0x75;
+                /** @param {string} name @param {number} zero @param {number} error */
+                const asData = (name, zero, error)=>[
+                    ...push(LOAD_LIBRARY_AS_DATAFILE), ...push(0), ...push(at(name)),
+                    ...call('LoadLibraryExA'),
+                    0x85, 0xc0, JNE, 6, ...flag(zero), //        test eax, eax
+                    ...call('GetLastError'),
+                    0x3d, ...u32(error), JNE, 6, ...flag(zero << 1), // cmp eax, error
+                ];
+                return [
+                    0x31, 0xdb, //                                   xor ebx, ebx
+                    ...asData('absent', 0x1, 2),
+                    ...asData('empty', 0x4, 1006),
+                    ...push(at('spaced')), ...call('LoadLibraryA'),
+                    0x89, 0xc6, //                                   mov esi, eax
+                    ...push(at('kernel')), ...call('GetModuleHandleA'),
+                    0x39, 0xc6, JNE, 6, ...flag(0x10), //           cmp esi, eax
+                    ...push(at('missing')), ...push(0), ...call('GetProcAddress'),
+                    ...call('GetLastError'),
+                    0x3d, ...u32(127), JNE, 6, ...flag(0x20),
+                    0x53, ...call('ExitProcess'), //                 push ebx
+                ];
+            },
+        });
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\answers.exe',
+            files: [{ path: 'C:\\App\\empty.dll', bytes: new Uint8Array(0) }],
+        });
+        t.after(()=>app.dispose());
+        const code = await app.run({ timeoutMs: 40000 });
+        assert.equal(code, EVERY, `missing bits 0x${(EVERY & ~code).toString(16)}`);
+    });

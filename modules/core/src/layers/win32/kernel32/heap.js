@@ -36,7 +36,7 @@ import {
     heapReAllocLongCode, heapSizeLongCode,
 } from './guest-heap-long.js';
 import { createPageRuns } from './page-runs.js';
-import { protectionRights } from './view-rights.js';
+import { imageWriteCopy, protectionWithin } from './view-rights.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
@@ -1124,15 +1124,40 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
 
 /**
  * A view of a section, as mapping.js records it for VirtualQuery: its length,
- * whether it writes through, the protection it was mapped with (`protect`),
- * the FILE_MAP_* rights its section allows a page of it (`rights`), and each
- * page VirtualProtect has given another protection (`pages`); an image's
- * view its sections instead.
+ * whether it writes through, the protection it was mapped with (`protect`, its
+ * AllocationProtect: PAGE_EXECUTE_WRITECOPY for an image's), whether its
+ * section is the page file's (`anonymous`), each page VirtualProtect has
+ * given another protection (`pages`), and an image's sections, each with the
+ * protection its pages start with.
  *
- * @typedef {{ length: number, writable: boolean, protect?: number, rights?: number,
+ * @typedef {{ length: number, writable: boolean, protect?: number, anonymous?: boolean,
  *     pages?: Map<number, number>,
  *     sections?: { start: number, end: number, protect: number }[] }} ViewRegion
  */
+
+/**
+ * The protection a view's page has now: what VirtualProtect last gave it,
+ * else what its image section or the view itself was mapped with; an image's
+ * headers, and a page of it no section holds, read-only.
+ *
+ * @param {ViewRegion & { base: number }} view
+ * @param {number} page
+ * @returns {number}
+ */
+const viewPageProtection = (view, page)=>{
+    const given = view.pages?.get(page);
+    if (given !== undefined)
+    {
+        return given;
+    }
+    if (view.sections)
+    {
+        const rva = page - view.base;
+        return view.sections.find(each=>rva >= each.start && rva < each.end)?.protect
+            ?? PAGE_READONLY_VIEW;
+    }
+    return view.protect ?? (view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW);
+};
 
 /**
  * @typedef {Object} HeapHost
@@ -1801,31 +1826,21 @@ export function createHeapFunctions(host){
         // length: a program that opens a section another made learns the
         // section's size from its view's RegionSize.
         const view = host.viewAt?.(at) ?? null;
-        if (view?.sections)
-        {
-            // An image's view: each section a region of its own protection,
-            // as Windows maps an image, the headers read-only.
-            const rva = page - view.base;
-            const part = view.sections.find(each=>rva >= each.start && rva < each.end)
-                ?? { start: 0, end: PAGE_SIZE, protect: PAGE_READONLY_VIEW };
-            return [page, view.base, PAGE_EXECUTE_WRITECOPY, view.base + part.end - page,
-                MEM_COMMIT, part.protect, MEM_IMAGE];
-        }
         if (view)
         {
-            // Each page has the protection the view was mapped with until
-            // VirtualProtect gives it another; a run is the pages that share one.
+            // Each page has the protection the view, or an image's section,
+            // was mapped with until VirtualProtect gives it another; a run is
+            // the pages that share one, as Windows answers a view.
             const end = ((view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) >>> 0;
-            const mapped = view.protect
-                ?? (view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW);
-            const protectionOf = (/** @type {number} */ where)=>view.pages?.get(where) ?? mapped;
-            const protection = protectionOf(page);
+            const protection = viewPageProtection(view, page);
             let to = page + PAGE_SIZE;
-            while (to < end && protectionOf(to) === protection)
+            while (to < end && viewPageProtection(view, to) === protection)
             {
                 to += PAGE_SIZE;
             }
-            return [page, view.base, mapped, to - page, MEM_COMMIT, protection, MEM_MAPPED];
+            return [page, view.base, view.sections ? PAGE_EXECUTE_WRITECOPY
+                : view.protect ?? (view.writable ? PAGE_READWRITE_VIEW : PAGE_READONLY_VIEW),
+            to - page, MEM_COMMIT, protection, view.sections ? MEM_IMAGE : MEM_MAPPED];
         }
         const image = imageAt(page);
         if (image)
@@ -2096,10 +2111,11 @@ export function createHeapFunctions(host){
 
     /**
      * Gives [from, to) of a view of a section `protection`, as VirtualProtect
-     * does: within the view, and no more than the section allows (its
-     * `rights`), else ERROR_INVALID_PARAMETER; the old protection of the first
-     * page written to `oldProtect`, a PAGE_NOACCESS page closed to the
-     * processor and any other open.
+     * does: within the view, and no access the view was not mapped with (an
+     * image's writes its own copies, `imageWriteCopy`), else
+     * ERROR_INVALID_PARAMETER; the old protection of the first page written to
+     * `oldProtect`, a PAGE_NOACCESS page closed to the processor and any
+     * other open.
      *
      * @param {ViewRegion & { base: number }} view
      * @param {number} from @param {number} to @param {number} protection
@@ -2108,23 +2124,25 @@ export function createHeapFunctions(host){
      */
     const protectView = (view, from, to, protection, oldProtect)=>{
         const end = roundUp(to, PAGE_SIZE);
+        const given = view.sections ? imageWriteCopy(protection) : protection;
+        const allocation = view.sections ? PAGE_EXECUTE_WRITECOPY
+            : view.protect ?? PAGE_READWRITE_VIEW;
         if (end > view.base + roundUp(view.length, PAGE_SIZE) || !imageProtection(protection)
-            || (protectionRights(protection) & (view.rights ?? 0)) !== protectionRights(protection))
+            || !protectionWithin(allocation, given))
         {
             host.setLastError(ERROR_INVALID_PARAMETER);
             return false;
         }
-        writeDword(oldProtect, view.pages?.get(from) ?? view.protect ?? PAGE_READWRITE_VIEW);
-        settleView(view, from, end, protection);
+        writeDword(oldProtect, viewPageProtection(view, from));
+        settleView(view, from, end, given);
         return true;
     };
 
     /**
-     * VirtualAlloc's MEM_COMMIT over a view: its pages are committed already,
-     * and the one commit Windows takes of them makes them copy-on-write
-     * (PAGE_WRITECOPY, or PAGE_EXECUTE_WRITECOPY where the view executes);
-     * any other protection, or one the view's access does not reach, is
-     * ERROR_ACCESS_DENIED.
+     * VirtualAlloc's MEM_COMMIT over a view: its pages are committed already.
+     * A view of a file or an image takes none (ERROR_ACCESS_DENIED); a
+     * page-file section's view takes a protection within the view's, which
+     * its pages then have, and refuses one past it (ERROR_INVALID_PARAMETER).
      *
      * @param {ViewRegion & { base: number }} view
      * @param {number} from @param {number} to @param {number} protection
@@ -2137,10 +2155,15 @@ export function createHeapFunctions(host){
             host.setLastError(ERROR_INVALID_ADDRESS);
             return false;
         }
-        if (!PAGE_WRITECOPIES.includes(protection)
-            || (protectionRights(protection) & (view.rights ?? 0)) !== protectionRights(protection))
+        if (!view.anonymous || view.sections)
         {
             host.setLastError(ERROR_ACCESS_DENIED);
+            return false;
+        }
+        if (!imageProtection(protection)
+            || !protectionWithin(view.protect ?? PAGE_READWRITE_VIEW, protection))
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
             return false;
         }
         settleView(view, from, end, protection);
@@ -2199,14 +2222,15 @@ export function createHeapFunctions(host){
         const requested = pointer >>> 0;
         const protection = protect >>> 0;
         const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
-        const view = acting === MEM_COMMIT && requested !== 0 && size !== 0
-            ? host.viewAt?.(requested) ?? null : null;
-        if (view && !view.sections && view.pages)
+        const view = (acting === MEM_COMMIT || acting === MEM_RESET) && requested !== 0
+            && size !== 0 ? host.viewAt?.(requested) ?? null : null;
+        if (view)
         {
-            // A view's pages are committed already: committing them again is
-            // asking for their own copies (`commitView`).
+            // A view's pages are committed already (`commitView`); a reset
+            // of them changes nothing a program sees, as of private pages.
             const first = (requested & ~(PAGE_SIZE - 1)) >>> 0;
-            return commitView(view, first, requested + size, protection) ? first : 0;
+            return acting === MEM_RESET || commitView(view, first, requested + size, protection)
+                ? first : 0;
         }
         // A protection is asked of a reservation as of a commit, and a reset
         // takes any: it changes none.
@@ -3510,7 +3534,7 @@ export function createHeapFunctions(host){
                     }
                 }
                 const view = block?.owner === VIRTUAL ? null : host.viewAt?.(first) ?? null;
-                if (view && !view.sections && view.pages)
+                if (view)
                 {
                     return protectView(view, first, (address >>> 0) + (size >>> 0),
                         protect >>> 0, oldProtect >>> 0) ? 1 : 0;

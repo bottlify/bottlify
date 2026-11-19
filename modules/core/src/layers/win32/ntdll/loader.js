@@ -39,8 +39,23 @@ const LDR_LOCK_TRY_ONLY = 0x2;
 const LDR_LOCK_ACQUIRED = 1;
 /** The longest path, in characters, a string read here is taken to be. */
 const MAX_PATH_CHARACTERS = 32767;
+
+/** What the loader opens a found file with, to ask a section of it. */
+const GENERIC_READ = 0x80000000;
+const GENERIC_EXECUTE = 0x20000000;
+const FILE_SHARE_READ = 0x1;
+const OPEN_EXISTING = 3;
+const INVALID_HANDLE_VALUE = 0xffffffff;
+const SECTION_QUERY = 0x1;
+const PAGE_READONLY = 0x02;
+const SEC_IMAGE = 0x1000000;
 /** ERROR_PROC_NOT_FOUND, which GetProcAddress leaves. */
 const ERROR_PROC_NOT_FOUND = 127;
+/**
+ * What a load fails with that ends LdrLoadDll's search where it is, as the
+ * status it answers: flags it refuses, and a library whose DllMain failed.
+ */
+const ENDING_ERRORS = new Map([[87, STATUS.INVALID_PARAMETER], [1114, STATUS.DLL_INIT_FAILED]]);
 
 /**
  * The calls these are made of; without one, the calls over it stay unexported.
@@ -160,6 +175,45 @@ export function createLoaderFunctions({
         }
     };
 
+    /**
+     * What NtCreateSection(SEC_IMAGE) answers for the file at a path the
+     * loader found and could not load: its refusal status, or null for a
+     * file a section takes (the load refused it for another reason) and for
+     * a path that names no file.
+     *
+     * @param {number} path  a wide path in guest memory
+     * @returns {number | null | Promise<number | null>}
+     */
+    const refusalAt = path=>{
+        const section = /** @type {any} */ (kernel32.CreateFileMappingW)?.natives?.NtCreateSection;
+        const open = kernel32.CreateFileW;
+        const close = kernel32.CloseHandle;
+        if (!section || !open || !close)
+        {
+            return null;
+        }
+        const file = open.handler([path, GENERIC_READ | GENERIC_EXECUTE, FILE_SHARE_READ, 0,
+            OPEN_EXISTING, 0, 0]) >>> 0;
+        if (file === INVALID_HANDLE_VALUE)
+        {
+            return null;
+        }
+        const out = allocate(4);
+        /** @param {number} status */
+        const settle = status=>{
+            const refused = (status >>> 0) !== STATUS.SUCCESS;
+            if (!refused)
+            {
+                close.handler([u32(out)]);
+            }
+            free(out);
+            close.handler([file]);
+            return refused ? status >>> 0 : null;
+        };
+        const status = section.handler([out, SECTION_QUERY, 0, 0, PAGE_READONLY, SEC_IMAGE, file]);
+        return status instanceof Promise ? status.then(settle) : settle(status);
+    };
+
     return {
         /**
          * NTSTATUS LdrGetDllHandle(PWSTR DllPath, PULONG DllCharacteristics,
@@ -229,7 +283,13 @@ export function createLoaderFunctions({
          *     PUNICODE_STRING DllName, PVOID *BaseAddress)
          *
          * LoadLibraryW's load and search; a module it cannot find is
-         * STATUS_DLL_NOT_FOUND, and *BaseAddress is left as it was. A
+         * STATUS_DLL_NOT_FOUND, and *BaseAddress is left as it was. A file
+         * found that is no image a section takes ends the search with the
+         * status NtCreateSection(SEC_IMAGE) refuses it with, as Windows'
+         * loader maps what it finds (`refusalAt`); one a section takes and
+         * the load still refuses is passed over for the next place; one whose
+         * initialisation fails is STATUS_DLL_INIT_FAILED, flags LoadLibraryEx
+         * refuses STATUS_INVALID_PARAMETER. A
          * SearchPath with its low bit set is not a path but LoadLibraryEx's
          * LOAD_LIBRARY_SEARCH_* flags, as kernelbase hands them down since
          * Windows 8; a path is the directories, `;` apart, a name that does
@@ -263,11 +323,25 @@ export function createLoaderFunctions({
                     const text = heapWide(places[next]);
                     /** @param {number} base */
                     const settle = base=>{
-                        free(text);
+                        const ended = (base >>> 0) === 0
+                            ? ENDING_ERRORS.get(kernel32.GetLastError.handler([])) : undefined;
+                        if (ended !== undefined)
+                        {
+                            // Asked wrongly, or found and mapped and its
+                            // DllMain refused: the search ends there.
+                            free(text);
+                            return ended;
+                        }
                         if ((base >>> 0) === 0)
                         {
-                            return look(next + 1);
+                            const refused = refusalAt(text);
+                            const then = (/** @type {number | null} */ status)=>{
+                                free(text);
+                                return status === null ? look(next + 1) : status;
+                            };
+                            return refused instanceof Promise ? refused.then(then) : then(refused);
                         }
+                        free(text);
                         setU32(out >>> 0, base >>> 0);
                         return STATUS.SUCCESS;
                     };
@@ -469,7 +543,7 @@ export function createLoaderFunctions({
          * NTSTATUS LdrGetDllDirectory(PUNICODE_STRING Directory)
          *
          * GetDllDirectoryW's into the string's buffer; one too small is told
-         * the length it needs in bytes.
+         * the bytes it needs, its terminator counted, and left empty.
          */
         LdrGetDllDirectory: {
             argBytes: 4,
@@ -477,12 +551,20 @@ export function createLoaderFunctions({
             handler: ([directory])=>{
                 const room = u16((directory >>> 0) + 2) >>> 1;
                 const needed = kernel32.GetDllDirectoryW.handler([0, 0]) >>> 0;
-                const length = (needed - 1) * 2;
-                writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
                 if (needed > room)
                 {
+                    // Told the bytes it needs, its terminator counted, and
+                    // left an empty string, as Windows answers.
+                    const length = needed * 2;
+                    writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
+                    if (room > 0)
+                    {
+                        writeMemory(u32((directory >>> 0) + 4), new Uint8Array(2));
+                    }
                     return STATUS.BUFFER_TOO_SMALL;
                 }
+                const length = (needed - 1) * 2;
+                writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
                 kernel32.GetDllDirectoryW.handler([room, u32((directory >>> 0) + 4)]);
                 return STATUS.SUCCESS;
             },

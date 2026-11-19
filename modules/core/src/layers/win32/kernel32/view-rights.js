@@ -5,10 +5,11 @@
  */
 
 /**
- * What a view of a section may be, as rights: the FILE_MAP_* a section's
- * protection allows (MapViewOfFile asks within them), the protection a view
- * starts with from its access, and what VirtualProtect may give its pages
- * later. mapping.js maps views by it, heap.js protects their pages by it.
+ * What a view of a section may be: the FILE_MAP_* a section's protection
+ * allows (MapViewOfFile asks within them), the protection a view starts with
+ * from its access, and what VirtualProtect may give its pages later - no
+ * access its view was not mapped with, an image's writes its own copies.
+ * mapping.js maps views by it, heap.js protects their pages by it.
  */
 
 const PAGE_MASK = 0xff;
@@ -58,34 +59,47 @@ export function viewProtection(access){
 }
 
 /**
- * What VirtualProtect may later give a view's pages, as rights
- * (`protectionRights`): what its access asked - reading for FILE_MAP_READ or
- * FILE_MAP_COPY, writing for FILE_MAP_WRITE, executing for FILE_MAP_EXECUTE -
- * within its section's.
- *
- * @param {number} access  FILE_MAP_*
- * @param {number} section  the section's PAGE_* protection
- * @returns {number}
- */
-export function viewRights(access, section){
-    const asked = ((access & (FILE_MAP_READ | FILE_MAP_COPY | FILE_MAP_WRITE)) !== 0
-        ? FILE_MAP_READ : 0)
-        | (access & FILE_MAP_WRITE) | ((access & FILE_MAP_EXECUTE) !== 0 ? SECTION_MAP_EXECUTE : 0);
-    return asked & sectionRights(section);
-}
-
-/**
- * The FILE_MAP_* rights a page protection needs of its section: none for
- * PAGE_NOACCESS, reading for any readable one (a copy-on-write page among
- * them, whose writes are its own), writing for a read-write one.
+ * What a page protection lets the processor do, as bits: 1 reading, 2
+ * writing, 4 executing. A copy-on-write page reads (its writes are its own
+ * copy's); PAGE_NOACCESS does nothing.
  *
  * @param {number} page  PAGE_*
  * @returns {number}
  */
-export function protectionRights(page){
+export function pageAccess(page){
+    switch (page & PAGE_MASK)
+    {
+        case 0x02: case 0x08: return 1;
+        case 0x04: return 3;
+        case 0x10: case 0x20: case 0x80: return 5;
+        case 0x40: return 7;
+        default: return 0;
+    }
+}
+
+/**
+ * Whether a view's page may take `page`, given the protection the view was
+ * mapped with (its AllocationProtect): VirtualProtect, and a commit over a
+ * page-file section's view, give a page no access its view does not have.
+ *
+ * @param {number} allocation  the view's PAGE_* AllocationProtect
+ * @param {number} page  the PAGE_* asked for
+ * @returns {boolean}
+ */
+export function protectionWithin(allocation, page){
+    return (pageAccess(allocation) & pageAccess(page)) === pageAccess(page);
+}
+
+/**
+ * The protection an image's page takes when `page` is asked of it: an image
+ * is never written through, so a writable protection is its copy-on-write
+ * form, as Windows protects a SEC_IMAGE view's pages.
+ *
+ * @param {number} page  PAGE_*
+ * @returns {number}
+ */
+export function imageWriteCopy(page){
     const base = page & PAGE_MASK;
-    const reads = [0x02, 0x04, 0x08, 0x20, 0x40, 0x80].includes(base) ? FILE_MAP_READ : 0;
-    const writes = [0x04, 0x40].includes(base) ? FILE_MAP_WRITE : 0;
-    const executes = base >= 0x10 ? SECTION_MAP_EXECUTE : 0;
-    return reads | writes | executes;
+    const copied = base === 0x04 ? 0x08 : base === 0x40 ? 0x80 : base;
+    return (page & ~PAGE_MASK) | copied;
 }

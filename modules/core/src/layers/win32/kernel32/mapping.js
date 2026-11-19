@@ -9,7 +9,7 @@ import { nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { imageKind, relocateImage } from '../../loader/internal/pe.js';
-import { sectionRights, viewProtection, viewRights } from './view-rights.js';
+import { sectionRights, viewProtection } from './view-rights.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -62,6 +62,8 @@ const WRITABLE_PAGES = [0x04, 0x08, 0x40, 0x80];
 /** The protections whose writes reach the file: the copy-on-write ones never do. */
 const FILE_WRITING_PAGES = [0x04, 0x40];
 const PAGE_SIZE = 0x1000;
+/** What an image's view is mapped with: executed, its writes its own copies. */
+const PAGE_EXECUTE_WRITECOPY = 0x80;
 
 /**
  * The SEC_* half: what a section is made as, and the attributes
@@ -1020,12 +1022,13 @@ export function createMappingFunctions(host){
                         pointerSize: host.pointerSize ?? 4,
                     }) ?? null;
                     views.set(address, view);
+                    // An image's view is mapped PAGE_EXECUTE_WRITECOPY whatever
+                    // was asked, each section with its own protection within it.
+                    const image = mapping.image && offset === 0;
                     host.viewRegions?.set(address, { length: wanted, writable,
-                        protect: viewProtection(access >>> 0),
-                        rights: viewRights(access >>> 0, mapping.protect ?? 0x04),
-                        pages: new Map(),
-                        ...mapping.image && offset === 0
-                            ? { sections: imageSections(mapping.image.image) } : {} });
+                        protect: image ? PAGE_EXECUTE_WRITECOPY : viewProtection(access >>> 0),
+                        anonymous: !mapping.node, pages: new Map(),
+                        ...image ? { sections: imageSections(mapping.image.image) } : {} });
                     if (metrics)
                     {
                         metrics.views++;

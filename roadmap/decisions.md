@@ -2253,10 +2253,11 @@ reservation's own; `VirtualProtect` hands back the page's real old protection, a
 that reaches an uncommitted page (`ERROR_INVALID_ADDRESS`), a protection that is no single base
 one with at most `PAGE_GUARD`/`PAGE_NOCACHE`/`PAGE_WRITECOMBINE`, and copy-on-write, which private
 memory cannot have (`ERROR_INVALID_PARAMETER`), as Windows does (Wine's kernel32:virtual). A
-loaded image answers as Windows maps one: `MEM_IMAGE` from its base, allocated
+loaded image, and a view of a `SEC_IMAGE` section, answers as Windows maps one: `MEM_IMAGE` from its base, allocated
 `PAGE_EXECUTE_WRITECOPY`, its headers `PAGE_READONLY`, each section by its characteristics (a
 writable one copy-on-write unless shared), a page no section covers `PAGE_NOACCESS`, read from the
-image's own headers; `VirtualProtect` of its pages is kept and handed back. A copy-on-write page
+image's own headers; `VirtualProtect` of its pages is kept and handed back, a section view's
+writable protection kept as its copy-on-write form. A copy-on-write page
 still reads `PAGE_WRITECOPY` after it is written, where Windows turns it `PAGE_READWRITE`: no write
 is seen page by page. What a
 program can tell apart only by faulting is not reproduced: a closed page faults where the processor
