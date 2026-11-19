@@ -40,7 +40,6 @@ import { readMappedTls, readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { imagePlacementOf, installedHeaders } from './layers/loader/internal/synth.js';
 import { blockLayouts, createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
@@ -98,6 +97,8 @@ import { openProcessWorker } from './host/process-worker.js';
 import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
 import { createInputRoute } from './layers/input/route.js';
 import { mobileOrSafari, tailCallsFault, withoutFaultingTailCalls } from './tail-calls.js';
+import { createModuleTable, pathKey } from './process/module-table.js';
+import { createSystemModules } from './process/system-modules.js';
 
 /** FNV-1a, 32 bits: a call's number for telling its repeats apart in the journal. */
 const FNV_OFFSET = 0x811c9dc5;
@@ -2551,7 +2552,7 @@ export async function inParallel(items, limit, work){
  * (`file`) has its directory read from that.
  *
  * @param {() => any} main       The running program's module, once loaded.
- * @param {Map<number, any>} byBase  Every mapped module by its base.
+ * @param {{ get: (base: number) => any }} byBase  Every mapped module by its base.
  * @param {Map<number, any>} [dataFiles]  Libraries mapped as data, by handle.
  * @param {(address: number, length: number) => Uint8Array} [readMemory]
  * @param {(address: number, length: number) => Uint8Array} [viewMemory]  Guest
@@ -3225,7 +3226,7 @@ export function isWindowsLibrary(name, windows){
  */
 export async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
-        isKnownDll, byName, byBase } = options;
+        isKnownDll, modules } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
     const bits = options.bits ?? 32;
     /**
@@ -3356,8 +3357,7 @@ export async function mapShippedLibraries(options){
             // to find it.
             path: placeOf(name),
         };
-        byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
-        byBase.set(base, held);
+        modules.add(held, name.toLowerCase().replace(/\.dll$/, ''));
         mapped.push(held);
 
         if (image.relocatable)
@@ -5019,16 +5019,27 @@ async function buildApp(options){
         ? LARGE_ADDRESS_TOP - HEAP_BASE : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
     /**
-     * The modules win32 implements, filled in below. win32 is built before they
-     * exist -- it is what says which functions they export -- so it is handed
-     * these lookups rather than the answers, and only ever calls them while the
-     * guest is running.
-     *
-     * @type {Map<string, any>}
+     * The process's modules, win32's among them, filled in below. win32 is
+     * built before they exist -- it is what says which functions they export
+     * -- so it is handed lookups rather than the answers, and only ever calls
+     * them while the guest is running.
      */
-    const byName = new Map();
-    /** @type {Map<number, any>} */
-    const byBase = new Map();
+    const modules = createModuleTable({
+        keyOf: moduleKeyOf,
+        placesNamed: (path, only)=>placesNamed(path, only),
+        importsOf: (/** @type {any} */ module)=>SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [],
+        onLoaded: (/** @type {any} */ module)=>{
+            threadBlocks?.addModule(module);
+            // A library of the engine's loaded once the process runs is told to
+            // its debugger as it is marked, without waiting for the answer: the
+            // mark is made inside a lookup that cannot wait (`debug-events.js`).
+            if (debugStarted)
+            {
+                debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
+                    threadId: kernel.currentThread()?.id >>> 0, base: module.base });
+            }
+        },
+    });
     /** The heap up to the highest address it ever handed out: what of it the tab pays for. */
     const heapTouched = ()=>{
         const handedTo = core.api('win32')?.heap?.()?.handedTo?.();
@@ -5048,7 +5059,7 @@ async function buildApp(options){
      */
     const guestHeld = ()=>{
         let images = 0;
-        for (const held of byBase.values())
+        for (const held of modules.all())
         {
             images += held.loaded !== false && held.base < HEAP_BASE ? held.size ?? 0 : 0;
         }
@@ -5151,57 +5162,6 @@ async function buildApp(options){
     let debugStarted = false;
 
     /**
-     * Marks a module the process has loaded, with what it brings in, for
-     * everything that answers only about loaded modules: GetModuleHandle and
-     * PEB->Ldr. A module synthesised at the start is there to be bound to
-     * whenever it is asked for, but it is loaded only once something imports
-     * it or loads it.
-     *
-     * @param {any} module
-     */
-    const markLoaded = module=>{
-        if (!module || module.loaded !== false)
-        {
-            return;
-        }
-        module.loaded = true;
-        threadBlocks?.addModule(module);
-        // A library of the engine's loaded once the process runs is told to
-        // its debugger as it is marked, without waiting for the answer: the
-        // mark is made inside a lookup that cannot wait (`debug-events.js`).
-        if (debugStarted)
-        {
-            debuggerNow()?.report({ code: DEBUG_EVENT.LOAD_DLL,
-                threadId: kernel.currentThread()?.id >>> 0, base: module.base });
-        }
-        for (const imported of SYSTEM_IMPORTS[moduleKeyOf(module.name)] ?? [])
-        {
-            markLoaded(byName.get(imported) ?? null);
-        }
-    };
-
-    /** A path as the loader compares two: one separator, any case. @param {string} path */
-    const pathKey = path=>path.replace(/\//g, '\\').replace(/\\{2,}/g, '\\').toLowerCase();
-
-    /**
-     * The module loaded from a file at this path, whichever name it has: a
-     * path names a file, and two files of one name are two modules.
-     *
-     * @param {string} path
-     */
-    const moduleAtPath = path=>{
-        const wanted = placesNamed(path);
-        for (const module of byBase.values())
-        {
-            if (module.fromFile && module.path && wanted.includes(pathKey(module.path)))
-            {
-                return module;
-            }
-        }
-        return null;
-    };
-
-    /**
      * Every file a path given to LoadLibrary can name, as `pathKey`s: the one
      * it fixes, or each place a relative one is searched for in.
      *
@@ -5211,15 +5171,8 @@ async function buildApp(options){
         options.imagePath ?? 'C:\\app.exe', core.api('filesystem').currentDirectory(), { only })
         .map(pathKey);
 
-    /** @param {string | null} name */
-    const findModule = name=>{
-        if (name === null || name === '')
-        {
-            return mainModule;
-        }
-        return (/[\\/]/.test(name) ? moduleAtPath(name) : null)
-            ?? byName.get(moduleKeyOf(name)) ?? null;
-    };
+    const { markLoaded, answersPath } = modules;
+    const findModule = modules.find;
 
     /**
      * Whether a file, not a directory, stands at a path on the volume.
@@ -5234,45 +5187,6 @@ async function buildApp(options){
         }
         catch {
             return false;
-        }
-    };
-
-    /**
-     * Whether a load by this name is answered by `module`: a bare name by the
-     * first module of that name, a path only by the module read from that
-     * file. Windows looks a path up among the loaded modules by the whole of
-     * it, so a second file of a loaded module's name -- the .NET Framework's
-     * native image of a mixed assembly, beside the assembly itself -- is
-     * loaded as a module of its own.
-     *
-     * @param {string} name @param {any} module @param {string[]} [only]  A
-     *     LoadLibraryEx search's places.
-     */
-    const answersPath = (name, module, only = undefined)=>!/[\\/]/.test(name)
-        || !module?.fromFile || !module.path
-        || placesNamed(name, only).includes(pathKey(module.path));
-
-    /**
-     * Takes a module's name off the bare-name index when it is the one there,
-     * and puts in its place another loaded module of that name, the next a
-     * bare name finds.
-     *
-     * @param {any} held
-     */
-    const forgetName = held=>{
-        const key = moduleKeyOf(held.name);
-        if (byName.get(key) !== held)
-        {
-            return;
-        }
-        byName.delete(key);
-        for (const other of byBase.values())
-        {
-            if (other !== held && moduleKeyOf(other.name) === key)
-            {
-                byName.set(key, other);
-                return;
-            }
         }
     };
 
@@ -6472,26 +6386,16 @@ async function buildApp(options){
                     return module?.loaded === false ? null : module;
                 },
                 /** @param {number} base */
-                byBase: base=>byBase.get(base >>> 0) ?? null,
+                byBase: modules.atBase,
                 /** Every module the process has loaded, in the order it loaded them. */
-                list: ()=>[...byBase.values()].filter(module=>module.loaded !== false),
+                list: modules.loaded,
                 /**
                  * The module an address lies in, or null: what a program asks
                  * GetModuleHandleEx of an address in its own code.
                  *
                  * @param {number} address
                  */
-                containing: address=>{
-                    const at = address >>> 0;
-                    for (const module of byBase.values())
-                    {
-                        if (at >= module.base && at < module.base + (module.size ?? 0))
-                        {
-                            return module;
-                        }
-                    }
-                    return null;
-                },
+                containing: modules.containing,
                 /**
                  * The image an address lies in, its base and size and its
                  * exception directory, for the x64 unwinder (`imageOf`): the
@@ -6502,7 +6406,7 @@ async function buildApp(options){
                  */
                 imageOf: address=>{
                     const at = address >>> 0;
-                    for (const module of byBase.values())
+                    for (const module of modules.all())
                     {
                         if (module.loaded === false || !module.image
                             || at < module.base || at >= module.base + (module.size ?? 0))
@@ -6573,7 +6477,7 @@ async function buildApp(options){
                 loaderLock: ()=>loaderLock,
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
-                ...resourceLookup(()=>mainModule, byBase, dataFiles,
+                ...resourceLookup(()=>mainModule, { get: modules.atBase }, dataFiles,
                     (address, length)=>core.api('memory').readBytes(address, length),
                     (address, length)=>core.api('memory').window(address, length)),
                 /**
@@ -6617,7 +6521,7 @@ async function buildApp(options){
                  * @param {string} name
                  */
                 systemImage: name=>{
-                    const module = byName.get(moduleKeyOf(name));
+                    const module = modules.named(moduleKeyOf(name));
                     return module && !module.fromFile ? imageInMemory(/** @type {any} */ (memory), module) : null;
                 },
             },
@@ -6968,57 +6872,6 @@ async function buildApp(options){
             ...(/** @type {() => string[]} */ (audio.runtimes)?.() ?? []),
             ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
         ]);
-    /** An export's x86-64 as its code, with the pointers laid out in it. @param {any} fn */
-    const longOf = fn=>({ ...fn, code: fn.long, pointers: fn.longPointers ?? fn.pointers });
-    /**
-     * An export that is code of its own, with the traps it jumps to registered
-     * and the jumps to them for the loader to fill in.
-     *
-     * @param {any} fn @param {string} qualified  `DLL!Name`.
-     */
-    const codeExport = (fn, qualified)=>{
-        /** @type {{ at: number, target: number }[]} */
-        const jumps = [];
-        const code = fn.code({
-            /** @param {any} trap */
-            register: trap=>bridge.register(qualified, trap),
-            /** @param {number} at @param {number} target */
-            jump: (at, target)=>void jumps.push({ at, target }),
-        });
-        return { code, jumps, pointers: fn.pointers };
-    };
-    /**
-     * An export the host answers: a trampoline jumping to its trap, or guest
-     * code placed at bind time where the function has any (`guest`; in a
-     * 64-bit process only where it places its x86-64 there, `guestLong`, and
-     * its host handler where the machine had no room for it).
-     *
-     * ntdll's system calls (Nt*, Zw*) are the trap's own bytes instead. On
-     * Windows each is a few position-independent instructions that enter the
-     * kernel, and a program may copy one elsewhere and call the copy - a
-     * protection does, to call the kernel past a hook on the original; a
-     * trampoline's relative jump, copied, lands nowhere. The trap's bytes
-     * carry its id and run wherever they are.
-     *
-     * @param {string} library @param {string} exported @param {any} fn
-     */
-    const trapExport = (library, exported, fn)=>{
-        const target = (fn.guest && (!long || fn.guestLong)
-            ? fn.guest({
-                /** @param {string} label @param {any} trap */
-                register: (label, trap)=>bridge.register(label, trap),
-            }) : 0)
-            || bridge.register(`${library}!${exported}`, fn);
-        const systemCall = !long && !fn.guest && library.toLowerCase() === 'ntdll.dll'
-            && /^(Nt|Zw)[A-Z]/.test(exported);
-        const own = systemCall ? cpu.stubAt(target) : null;
-        return own ? { code: own } : { target };
-    };
-    // Each system module where the one before it ends, at the granularity
-    // every image is placed at: the window they share is the room left for
-    // the libraries a program brings, and a module is a few pages -- a
-    // megabyte apart, sixty of them left a third of the window to those.
-    let systemModulesEnd = MODULE_BASE;
     /**
      * The spans `claim` took from the heap's arena, by base, with the region
      * each was cut from: what `giveBack` puts back.
@@ -7108,154 +6961,20 @@ async function buildApp(options){
             });
         },
     };
-    /**
-     * The exports a 64-bit process's modules leave out: i386 alone -- guest
-     * code with neither x86-64 (`long`) nor a host handler to trap into, as
-     * `_chkesp` and the __fastcall entries are. Bound, its i386 would run as
-     * x86-64; left out, a program that imports one is refused at load, by
-     * name. Most have no x64 export on Windows either.
-     *
-     * @type {string[]}
-     */
-    const leftOutAt64 = [];
+    const systemModules = createSystemModules({
+        loader, bridge, cpu, long, ordinalsOf, librarySpace, placeLibrary,
+        atomicCode: (address, length)=>core.api('kernel').atomicCode(address, length),
+        start: MODULE_BASE, end: LIBRARIES_END, align: LIBRARY_ALIGN,
+        clientFiles: options.win32?.steam?.clientFiles,
+        reportDivergence: (api, detail)=>reportDivergence(api, detail),
+        release: record=>releaseLibrary(record),
+    });
+    const { leftOutAt64 } = systemModules;
     builtLibraries = allLibraries;
-    /**
-     * A table of ours made a module in guest memory, after the ones before it.
-     *
-     * @param {string} name @param {Record<string, any>} table
-     * @param {string} [region]  Its region's name, for one beside a library of the same name.
-     */
-    const synthesiseLibrary = (name, table, region = name)=>{
-        // A library imported by number has to be synthesised with the numbers
-        // the program compiled against; one we assigned ourselves would bind to
-        // a different function, silently.
-        /** @type {Record<number, string>} */
-        const byOrdinal = ordinalsOf[name] ?? {};
-        const declared = new Map(Object.entries(byOrdinal)
-            .map(([ordinal, exported])=>[exported, Number(ordinal)]));
-
-        const exports = Object.entries(table).filter(([exported, fn])=>{
-            const runs = !long || fn.long || fn.handler || fn.data;
-            if (!runs)
-            {
-                leftOutAt64.push(`${name}!${exported}`);
-            }
-            return runs;
-        }).map(([exported, fn])=>({
-            name: exported,
-            ordinal: declared.get(exported),
-            // An export is a function that is code of its own, a variable the
-            // program reads through its address, a trap into the host, or
-            // guest code that decides for itself when to trap: the builder
-            // hands such an entry the means to register the traps it falls
-            // back to. Code of its own that hands a call to the host jumps to
-            // a trap answering as the export, and named as it; the jump's
-            // displacement is the loader's, which places the code.
-            // A variable may hold other exports' addresses: a vtable's slots.
-            // A long-mode process runs no i386: an export that is guest code
-            // runs its x86-64 there (`long`), where the build made any, and
-            // is a trap into its host handler where it did not.
-            // A long export's pointers are its own: its code lays them out apart.
-            ...long && fn.long || fn.code && !(long && fn.handler)
-                ? codeExport(long && fn.long ? longOf(fn) : fn, `${name}!${exported}`)
-                : fn.data ? {
-                    data: fn.data(), pointers: fn.pointers, entry: fn.entry,
-                } : trapExport(name, exported, fn),
-        }));
-
-        // A table with a DllMain is a module with an entry point, run when a
-        // program first loads it -- which is how a library the program did not
-        // import announces itself to the one that asked for it.
-        // The Steam client's own file, where the embedder fetched Valve's: the
-        // module carries its headers, as the file stands in Steam's folder
-        // (the win32 layer's volume), and sits where the file says it belongs.
-        // Windows loads a DLL at its preferred base when that base is free -
-        // Valve's files are linked for ASLR, which allows a move and does not
-        // ask for one (decision A259) - and a DRM wrapper reads the file and
-        // compares its headers with the module's: placed elsewhere, the module answers with
-        // the loader's base where the file names Valve's, and the wrapper
-        // refuses it (Proton keeps Valve's own client DLL where it says it
-        // belongs for the same reason). It is placed as a library that can only
-        // live at its base is: in the window when free there, else cut from
-        // the heap.
-        const installed = options.win32?.steam?.clientFiles?.[name];
-        const wanted = installed ? imagePlacementOf(installed) : null;
-        let base = systemModulesEnd;
-        if (wanted)
-        {
-            const place = placeLibrary({ relocatable: false, imageBase: wanted.base,
-                sizeOfImage: wanted.span }, { next: systemModulesEnd, ...librarySpace });
-            if ('base' in place)
-            {
-                base = place.base;
-            }
-            else
-            {
-                reportDivergence('image', `${name} is placed away from the image base `
-                    + `0x${wanted.base.toString(16)} its file names, which is not free`);
-            }
-        }
-        const placed = loader.synthesise({
-            name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
-            region, headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
-        });
-        const end = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
-        if (base === systemModulesEnd)
-        {
-            systemModulesEnd = end;
-        }
-        else if (base < LIBRARIES_END)
-        {
-            // A module given its own base inside the window keeps that span from
-            // the ones laid out after it.
-            systemModulesEnd = Math.max(systemModulesEnd, end);
-        }
-
-
-        // An export's address is its trampoline inside the module, and that is
-        // what both the import table and GetProcAddress hand out -- so a program
-        // comparing the two finds them equal, as it does on Windows.
-        const addresses = new Map(exports.map(entry=>[entry.name, placed.addressOf(entry.name)]));
-        const ordinals = new Map([...addresses]
-            .map(([exported, address])=>[placed.ordinalOf(exported), address]));
-        for (const [exported, address] of addresses)
-        {
-            bridge.label(Number(address), `${name}!${exported}`);
-        }
-        // An export whose code writes what another thread's entry into the
-        // host reads, and never waits, runs unbroken (the kernel's atomicCode).
-        for (const entry of exports)
-        {
-            if (table[entry.name]?.unbroken && 'code' in entry)
-            {
-                core.api('kernel').atomicCode(Number(addresses.get(entry.name)), entry.code.length);
-            }
-        }
-
-        const record = {
-            name,
-            base,
-            size: placed.size,
-            /** @param {string} exported */
-            addressOf: exported=>addresses.get(exported) ?? null,
-            /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
-            entryPoint: placed.entryPoint,
-            // Not until a program asks for it: a synthesised module exists
-            // from the first instruction, but its entry point is a promise
-            // to whoever loads it, and runs on that caller's thread.
-            attached: false,
-            loaded: false,
-            /** @returns {number | Promise<number>} */
-            release: ()=>releaseLibrary(record),
-        };
-        return record;
-    };
     for (const [name, table] of Object.entries(allLibraries))
     {
-        const record = synthesiseLibrary(name, table);
-        byName.set(moduleKeyOf(name), record);
-        byBase.set(record.base, record);
+        const record = systemModules.build(name, table);
+        modules.add(record, moduleKeyOf(name));
     }
     /**
      * The libraries an assembly of the engine's store carries in a version of
@@ -7270,8 +6989,8 @@ async function buildApp(options){
         /** @type {any} */ (win32).faces?.() ?? {}))
     {
         // Beside system32's library of the same name, so its region is its own.
-        const record = synthesiseLibrary(name, table, `${name} (assembly)`);
-        byBase.set(record.base, record);
+        const record = systemModules.build(name, table, `${name} (assembly)`);
+        modules.add(record, null);
         faces.set(moduleKeyOf(name), record);
     }
     /**
@@ -7301,8 +7020,8 @@ async function buildApp(options){
         ? faceFor(name, activation?.redirect(name) ?? null) : null) ?? findModule(name);
     for (const name of ALWAYS_LOADED)
     {
-        markLoaded(byName.get(name) ?? null);
-        const always = byName.get(name);
+        markLoaded(modules.named(name));
+        const always = modules.named(name);
         if (always)
         {
             always.pinned = true;
@@ -7406,7 +7125,7 @@ async function buildApp(options){
             return { error: ERROR_MOD_NOT_FOUND };
         }
         return Promise.resolve(load(library, module)).then(got=>{
-            const loaded = got ? byBase.get(got >>> 0) : null;
+            const loaded = got ? modules.atBase(got) : null;
             if (!loaded)
             {
                 return { error: ERROR_MOD_NOT_FOUND };
@@ -7720,8 +7439,7 @@ async function buildApp(options){
             }
             if (held.fromFile)
             {
-                byBase.delete(held.base);
-                forgetName(held);
+                modules.remove(held);
                 memory.unregister(held.region);
                 librarySpace.giveBack(held.base);
                 // Room given back: a library refused for want of it may fit now.
@@ -7911,7 +7629,7 @@ async function buildApp(options){
         // the directories PATH names now: a program that puts its own folder
         // of libraries on PATH and loads one of them by its path has that
         // library's imports found there.
-        const importing = importer ? byBase.get(importer) : null;
+        const importing = importer ? modules.atBase(importer) : null;
         const pathValue = Object.entries(win32.environment?.() ?? {})
             .find(([variable])=>variable.toUpperCase() === 'PATH')?.[1];
         const candidates = !searched ? []
@@ -8056,11 +7774,7 @@ async function buildApp(options){
                     }, inert ? { inert, attached: false } : {});
                     // A bare name finds the first module of its name, as
                     // Windows walks its modules in the order they loaded.
-                    if (!byName.has(moduleKeyOf(name)))
-                    {
-                        byName.set(moduleKeyOf(name), held);
-                    }
-                    byBase.set(base, held);
+                    modules.add(held, moduleKeyOf(name), 'first');
                     // Joins PEB->Ldr's own module list the same moment: a
                     // program that walks it right after this LoadLibraryA
                     // returns is not told the library it just asked for was
@@ -8111,7 +7825,7 @@ async function buildApp(options){
                                 else
                                 {
                                     // Its load's reference is this library's hold.
-                                    const dependencyHeld = byBase.get(got);
+                                    const dependencyHeld = modules.atBase(got);
                                     brought.push(dependencyHeld);
                                     if (dependencyHeld && dependencyHeld !== held)
                                     {
@@ -8123,8 +7837,7 @@ async function buildApp(options){
                         /** @param {string} reason */
                         const refuse = async reason=>{
                             threadBlocks?.removeModule(base);
-                            byBase.delete(base);
-                            forgetName(held);
+                            modules.remove(held);
                             memory.unregister(region);
                             librarySpace.giveBack(base);
                             for (const other of brought)
@@ -8591,16 +8304,16 @@ async function buildApp(options){
         currentDirectory: filesystem.currentDirectory(),
         path: pathDirectories(Object.entries(options.environment ?? win32.environment?.() ?? {})
             .find(([variable])=>variable.toUpperCase() === 'PATH')?.[1]),
-        byName, byBase,
+        modules,
         // Straight after the system modules, which is the first address nothing
         // else has claimed, and up to the pool of thread stacks.
-        base: systemModulesEnd,
+        base: systemModules.end(),
         ...librarySpace,
     });
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
     nextLibraryBase = shipped.reduce(
-        (highest, library)=>Math.max(highest, library.base + library.size), systemModulesEnd);
+        (highest, library)=>Math.max(highest, library.base + library.size), systemModules.end());
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
         bits: processBits,
@@ -8666,13 +8379,12 @@ async function buildApp(options){
         // looking for its own data there.
         path: options.imagePath ?? 'C:\\app.exe',
     };
-    byBase.set(image.base, mainModule);
     // Known by its file name as well: a program that loads or asks for a
     // handle to its own image by name -- the way it reaches its own resources
     // -- is handed the mapping it is running from, as Windows hands back a
     // module already loaded, rather than a second copy at the one base an
     // image without relocations can take.
-    byName.set(moduleKeyOf(mainModule.path), mainModule);
+    modules.setMain(mainModule, moduleKeyOf(mainModule.path));
     for (const library of shipped)
     {
         loader.bind(library.mapped, resolveImport, missingImport);
@@ -8847,7 +8559,7 @@ async function buildApp(options){
         });
         // Libraries the bundle shipped and the image imported statically are
         // already placed by now; a runtime load binds itself as it maps.
-        for (const held of byBase.values())
+        for (const held of modules.all())
         {
             if (held.image && held.base !== image.base)
             {
@@ -8957,7 +8669,7 @@ async function buildApp(options){
             const threadId = kernel.currentThread()?.id >>> 0;
             await report({ code: DEBUG_EVENT.CREATE_PROCESS, threadId, base: image.base,
                 start: image.entryPoint });
-            for (const held of byBase.values())
+            for (const held of modules.all())
             {
                 if (held !== mainModule && held.loaded !== false)
                 {
@@ -9070,7 +8782,7 @@ async function buildApp(options){
         // shipped, and the program's own image -- PEB->Ldr walked before a
         // program calls a single import of its own finds all of them, never
         // an empty list. A system library loaded later joins it then.
-        modules: [...byBase.values()].filter(held=>held.loaded !== false)
+        modules: modules.loaded()
             .map(held=>held === mainModule ? {
                 ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
             } : held),
@@ -10403,7 +10115,7 @@ async function buildApp(options){
              *
              * @returns {{ name: string, base: number, size: number }[]}
              */
-            modules: ()=>[...new Set(byName.values())].map(module=>({
+            modules: ()=>[...modules.nameHolders()].map(module=>({
                 // The program's own image by its file, which is the name a
                 // tool asks for it by; its record's own name is a stand-in.
                 name: module === mainModule
@@ -10420,7 +10132,7 @@ async function buildApp(options){
              */
             moduleAt: address=>{
                 const at = address >>> 0;
-                for (const module of byName.values())
+                for (const module of modules.nameHolders())
                 {
                     if (at >= module.base && at < module.base + (module.size ?? 0))
                     {

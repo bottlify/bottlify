@@ -762,7 +762,7 @@ async function mapBeside(files, executable, space){
         events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             emitted.push([name, payload]) },
         isSystem: kernel32, isKnownDll: kernel32,
-        byName: new Map(), byBase: new Map(),
+        modules: { add: ()=>{} },
         floor,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>[...held, ...placed].find(one=>
