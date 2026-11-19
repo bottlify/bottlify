@@ -44,7 +44,7 @@ import { emitSimd } from './simd.js';
 import { SIMD } from '../wasm/simd.js';
 import { atState, atTables, intoState, intoTables } from './bases.js';
 import { ANY_TOP, slotOf } from '../runtime/entries.js';
-import { emitLocked, emitLockedLong, isLocked } from './locked.js';
+import { emitLocked, emitLockedLong, isLocked, lockHeld } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
 const I32_EXTRA = Object.freeze({
@@ -729,7 +729,7 @@ export function emitInstruction(e, instruction, flagsLive){
         // a wrapped address path here.
         return false;
     }
-    if (e.context.atomic === true && isLocked(instruction))
+    if (e.context.atomic === true && isLocked(instruction) && op !== 'cmpxchg16b')
     {
         return isLong(e) ? emitLockedLong(e, instruction, flagsLive)
             : emitLocked(e, instruction, flagsLive);
@@ -4538,28 +4538,40 @@ function cmpxchg16b(e, instruction, flagsLive){
     e.openGuard('misaligned', EMPTY);
     e.exitBefore(e.current.eip, Exit.FAULT, 13);
     e.close();
-    b.localGet(Local.addr).load('i64', ram(e)).localSet(low);
-    b.localGet(Local.addr).load('i64', ram(e, 8)).localSet(high);
     if (flagsLive)
     {
         e.eagerWrite(ZF);
     }
-    b.localGet(low).localGet(registerLocal(e, 0)).op(I64.eq);
-    b.localGet(high).localGet(registerLocal(e, 2)).op(I64.eq);
-    b.op(I32.and);
-    e.openIf('equal', EMPTY);
-    noteStore(e, 16);
-    b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', ram(e));
-    b.localGet(Local.addr).localGet(registerLocal(e, 1))
-        .store('i64', ram(e, 8));
-    if (flagsLive)
+    const swap = ()=>{
+        b.localGet(Local.addr).load('i64', ram(e)).localSet(low);
+        b.localGet(Local.addr).load('i64', ram(e, 8)).localSet(high);
+        b.localGet(low).localGet(registerLocal(e, 0)).op(I64.eq);
+        b.localGet(high).localGet(registerLocal(e, 2)).op(I64.eq);
+        b.op(I32.and);
+        e.openIf('equal', EMPTY);
+        noteStore(e, 16);
+        b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', ram(e));
+        b.localGet(Local.addr).localGet(registerLocal(e, 1))
+            .store('i64', ram(e, 8));
+        if (flagsLive)
+        {
+            b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+        }
+        b.op(0x05); // else
+        b.localGet(low).localSet(registerLocal(e, 0));
+        b.localGet(high).localSet(registerLocal(e, 2));
+        e.close();
+    };
+    // Sixteen bytes no host atomic swaps: locked among several executors, the
+    // read, the compare and the write hold the process's lock word.
+    if (e.context.atomic === true && instruction.prefixes.lock === true)
     {
-        b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+        lockHeld(e, swap);
     }
-    b.op(0x05); // else
-    b.localGet(low).localSet(registerLocal(e, 0));
-    b.localGet(high).localSet(registerLocal(e, 2));
-    e.close();
+    else
+    {
+        swap();
+    }
     return true;
 }
 

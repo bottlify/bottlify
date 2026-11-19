@@ -9,10 +9,10 @@
  * locked form a compiler or a runtime's own assembly writes: `lock xadd`, `lock
  * add`, `sub`, `inc`, `dec`, `and`, `or`, `xor`, `not`, `neg`, `bts` and `btr`
  * with an immediate, `lock cmpxchg` in a loop, `xchg` as a spin lock around a
- * plain increment, at a byte, a word, a dword and a quadword, and at a dword
- * and a word that lie across their own alignment inside one aligned quadword
- * (one across two is a split lock, not indivisible here: decision A274). Each
- * sum is what it is
+ * plain increment, at a byte, a word, a dword and a quadword, at a dword and a
+ * word that lie across their own alignment inside one aligned quadword, at a
+ * quadword across two (a split lock), and `lock cmpxchg16b` on a pair of
+ * quadwords. Each sum is what it is
  * only if no thread's change is lost: on several executors that is each form
  * made one indivisible access. Each check prints a line; the exit code counts
  * the checks that failed.
@@ -41,8 +41,11 @@ static struct
     char pad;
     unsigned odd32;        /* at 1: across its own alignment, inside one quadword */
     unsigned short odd16;  /* at 5: likewise */
+    QWORD odd64;           /* at 7: across two quadwords, a split lock */
 } crooked;
 #pragma pack(pop)
+
+static struct { QWORD low, high; } __attribute__((aligned(16))) pair;
 
 static volatile unsigned char sum8;
 static volatile unsigned short sum16;
@@ -80,6 +83,21 @@ static DWORD __stdcall hammer(void *parameter)
         __sync_fetch_and_add(&sum64, 0x100000001ull);
         __asm__ volatile("lock addl $1, %0" : "+m"(crooked.odd32));
         __asm__ volatile("lock addw $1, %0" : "+m"(crooked.odd16));
+        __asm__ volatile("lock addq %1, %0" : "+m"(crooked.odd64) : "r"(0x100000001ull));
+        for (;;)
+        {
+            /* Read apart, as a lock-free list reads its head: the swap is the judge. */
+            QWORD low = *(volatile QWORD *)&pair.low;
+            QWORD high = *(volatile QWORD *)&pair.high;
+            unsigned char swapped16;
+            __asm__ volatile("lock cmpxchg16b %0; setz %1"
+                : "+m"(pair), "=q"(swapped16), "+a"(low), "+d"(high)
+                : "b"(low + 1), "c"(high + 3) : "cc");
+            if (swapped16)
+            {
+                break;
+            }
+        }
         for (;;)
         {
             unsigned seen = swapped;
@@ -139,6 +157,8 @@ void mainCRTStartup(void)
     check(sum64 == all * 0x100000001ull, "lock xadd at a quadword");
     check(crooked.odd32 == all, "a dword across its alignment");
     check(crooked.odd16 == (unsigned short)all, "a word across its alignment");
+    check(crooked.odd64 == all * 0x100000001ull, "a quadword across two");
+    check(pair.low == all && pair.high == all * 3, "lock cmpxchg16b on a pair");
     check(swapped == all, "lock cmpxchg at a dword");
     check(swapped64 == all * 0x100000001ull, "lock cmpxchg at a quadword");
     check(guarded == all, "xchg as a spin lock");

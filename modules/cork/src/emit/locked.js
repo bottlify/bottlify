@@ -21,7 +21,9 @@
  * such an access inside one aligned qword is a compare-and-swap of the whole
  * qword, as indivisible as the processor's; one across a qword's boundary (a
  * split lock, which hardware too makes the slow exception) is a plain
- * read-modify-write, not indivisible against another executor.
+ * read-modify-write made holding the process's lock word (`lockHeld`): no other
+ * such access comes between, and those are the only writers a program has at
+ * an address it locks across a boundary.
  *
  * Plain loads and stores stay plain: they keep the order the host's own
  * plain accesses keep, which is x86's on an x86 host and weaker on arm64
@@ -116,8 +118,34 @@ function swapLoop(e, size, old, next){
 }
 
 /**
+ * `body`'s plain accesses made holding the process's lock word
+ * (`layout.lockWord`), spun for: what no wasm atomic spans - an access across
+ * two aligned qwords - is indivisible against every other such access of every
+ * executor. `body` leaves no way out between the word's taking and its letting
+ * go. A layout of one processor has no word, and nobody to exclude.
+ *
+ * @param {E} e @param {() => void} body
+ */
+export function lockHeld(e, body){
+    const { b } = e;
+    const at = /** @type {{ lockWord?: number }} */ (e.layout).lockWord;
+    if (at === undefined)
+    {
+        body();
+        return;
+    }
+    e.openLoop('lockWord');
+    b.i32const(at).i32const(0).i32const(1).atomic('cmpxchg_i32');
+    b.brIf(e.depthOf('lockWord'));
+    e.close();
+    body();
+    b.i32const(at).i32const(0).atomic('store_i32');
+}
+
+/**
  * An access not a multiple of its width: inside one aligned qword, a
- * compare-and-swap of the qword; across two, a plain read-modify-write.
+ * compare-and-swap of the qword; across two, a plain read-modify-write
+ * holding the lock word (`lockHeld`).
  *
  * @param {E} e @param {number} size @param {number} old @param {() => void} next
  */
@@ -156,10 +184,12 @@ function unaligned(e, size, old, next){
     b.brIf(e.depthOf('qwordLocked'));
     e.close();
     b.op(ELSE);
-    b.localGet(Local.addr).load(plainLoad(size), ramAt(offset)).localSet(old);
-    b.localGet(Local.addr);
-    next();
-    b.store(plainStore(size), ramAt(offset));
+    lockHeld(e, ()=>{
+        b.localGet(Local.addr).load(plainLoad(size), ramAt(offset)).localSet(old);
+        b.localGet(Local.addr);
+        next();
+        b.store(plainStore(size), ramAt(offset));
+    });
     e.close();
 }
 
@@ -390,15 +420,18 @@ export function emitLocked(e, instruction, flagsLive){
             b.localGet(registerLocal(e, 0)).op(I64.extendU).op(I64.or).localSet(Local.t64b);
             b.localGet(Local.addr).i32const(7).op(I32.and);
             e.openGuard('splitLock', EMPTY);
-            // Across two qwords: a plain read and, if it matched, a plain write.
-            b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
-            b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
-            e.openIf('plainEqual', EMPTY);
-            b.localGet(Local.addr);
-            b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
-            b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
-            b.store('i64', ramAt(offset));
-            e.close();
+            // Across two qwords: a plain read and, if it matched, a plain write,
+            // holding the lock word.
+            lockHeld(e, ()=>{
+                b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
+                b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
+                e.openIf('plainEqual', EMPTY);
+                b.localGet(Local.addr);
+                b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
+                b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
+                b.store('i64', ramAt(offset));
+                e.close();
+            });
             b.op(ELSE);
             b.localGet(Local.addr).localGet(Local.t64b);
             b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
@@ -438,7 +471,7 @@ const wideWidth = size=>(size === 8 ? 'i64' : width(size));
  * `next()` pushes from it, an i64 within the operand's bits. A
  * compare-and-swap loop at the access's width where the address is a multiple
  * of it; as `unaligned` otherwise - the aligned qword holding the access, or
- * plain across two.
+ * plain across two, holding the lock word.
  *
  * @param {E} e @param {number} size @param {number} old @param {() => void} next
  */
@@ -474,7 +507,7 @@ function swapLong(e, size, old, next){
         b.brIf(e.depthOf('locked'));
         e.close();
     };
-    const plain = ()=>{
+    const plain = ()=>lockHeld(e, ()=>{
         b.localGet(Local.addr).load(size === 8 ? 'i64' : plainLoad(size), ramAt(offset));
         widen();
         b.localSet(old);
@@ -482,7 +515,7 @@ function swapLong(e, size, old, next){
         next();
         narrow();
         b.store(size === 8 ? 'i64' : plainStore(size), ramAt(offset));
-    };
+    });
     if (size === 1)
     {
         aligned();
@@ -535,8 +568,9 @@ function swapLong(e, size, old, next){
  * Emits a locked instruction of the atomic variant in long mode: as
  * `emitLocked`, every value held as a quadword (the flag record's operands are
  * quadwords there) and narrowed where a register or the record takes it. A bit
- * string named by a register, and `cmpxchg16b` - sixteen bytes no host access
- * swaps at once - are left to the interpreter.
+ * string named by a register is left to the interpreter; `cmpxchg16b` - sixteen
+ * bytes no host access swaps at once - is its plain form holding the lock word
+ * (`integer.js`).
  *
  * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
  * @returns {boolean} false where the interpreter takes it
@@ -755,14 +789,17 @@ export function emitLockedLong(e, instruction, flagsLive){
             b.localSet(Local.t64b);
             b.localGet(Local.addr).i32const(7).op(I32.and);
             e.openGuard('splitLock', EMPTY);
-            // Across two qwords: a plain read and, if it matched, a plain write.
-            b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
-            b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
-            e.openIf('plainEqual', EMPTY);
-            b.localGet(Local.addr);
-            pair(1, 3);
-            b.store('i64', ramAt(offset));
-            e.close();
+            // Across two qwords: a plain read and, if it matched, a plain write,
+            // holding the lock word.
+            lockHeld(e, ()=>{
+                b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
+                b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
+                e.openIf('plainEqual', EMPTY);
+                b.localGet(Local.addr);
+                pair(1, 3);
+                b.store('i64', ramAt(offset));
+                e.close();
+            });
             b.op(ELSE);
             b.localGet(Local.addr).localGet(Local.t64b);
             pair(1, 3);

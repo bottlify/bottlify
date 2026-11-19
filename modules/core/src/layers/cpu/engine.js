@@ -110,6 +110,9 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [apic]  Cork's own, beside `interrupt`: an i32 holding the processor this
  *     executor is to the code it runs, where `cpuid`'s leaf 1 answers it (EBX[31:24]); a
  *     translation made for every executor reads it there.
+ * @property {number} [lockWord]  Cork's own, where the process has several executors: an i32
+ *     in the first executor's page, the same address for every executor, held around a locked
+ *     access no host atomic spans (across two aligned quadwords, `cmpxchg16b`).
  * @property {boolean} [shared]  Cork's own: the process's shared layout (`sharedLayout`), whose
  *     state fields and tables are offsets from bases each instance is given.
  * @property {string} id           A hash of every field above.

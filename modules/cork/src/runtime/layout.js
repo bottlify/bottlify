@@ -359,8 +359,12 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // runs, where leaf 1 of `cpuid` has it (its initial APIC id, EBX[31:24]).
         // A translation made for every executor (`sharedLayout`) reads it there;
         // whoever gives an executor its state page writes it (`apicWord`).
+        // And the process's one lock word, in its first executor's page for every
+        // executor (no state field: `executorLayout` leaves it where it is): taken
+        // around a locked access no host atomic spans (`emit/locked.js` `lockHeld`).
         ...processors > 1
-            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052 } : {},
+            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052,
+                lockWord: state + 2056 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -417,10 +421,12 @@ function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, proc
         tables: tablesAt ?? ramBase + ramSize,
         ...ramFloor === undefined ? {} : { ramFloor, wrap: state + WRAP_WORD },
         hashShift: 32 - Math.log2(hashSlots),
-        // As the 32-bit layout's: the word another executor asks through and the
-        // processor this one is, only where others run beside it.
+        // As the 32-bit layout's: the word another executor asks through, the
+        // processor this one is and the process's lock word, only where others run
+        // beside it.
         ...processors > 1
-            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052 } : {},
+            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052,
+                lockWord: state + 2056 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }

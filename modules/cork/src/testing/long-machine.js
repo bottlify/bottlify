@@ -61,7 +61,8 @@ export function fill(seed, size){
  *
  * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
- *     high?: number, codeHigh?: number }} [options]
+ *     high?: number, codeHigh?: number, processors?: number }} [options]
+ *     `processors`: the layout's (the first executor's, with the process's lock word);
  *     `closed`: pages of the code area closed too, by address; `config`: the runtime's
  *     settings over the runner's; `tiered`: what no region holds runs on the interpreter tier
  *     in wasm (`createWasmInterpreter`), `interp64.js` taking what it hands back; `ramSize`:
@@ -73,13 +74,14 @@ export function fill(seed, size){
  */
 export function machine({ config = {}, trapPort = undefined, tiered = false,
     makeRunner = null, ramSize = CORPUS.codeAt + 0x100000, closed = [], window = undefined,
-    high = 0, codeHigh = 0 } = {})
+    high = 0, codeHigh = 0, processors = 1 } = {})
 {
     if (window !== undefined)
     {
         allowMemory64();
     }
-    const layout = window === undefined ? ownLayout({ ramSize, ramBase: 0, bits: 64 })
+    const layout = window === undefined
+        ? ownLayout({ ramSize, ramBase: 0, bits: 64, processors })
         : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,
             // The code area's 4 GiB block, which its code is translated in.
             codeBase: Math.floor((CORPUS.codeAt + codeHigh) / 2 ** 32) * 2 ** 32 });
@@ -542,7 +544,7 @@ export function run(m, translated, budget = 7){
  * @param {any[]} cases
  * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
- *     high?: number, codeHigh?: number }} [options]
+ *     high?: number, codeHigh?: number, processors?: number }} [options]
  *     `budget`: each translated run's; `closed` both machines'; the rest the translated
  *     machine's (`machine`)
  */

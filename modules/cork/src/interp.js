@@ -376,6 +376,35 @@ export class BlockMemory {
         // The locked instructions as one indivisible access each (`lockedStep`),
         // as the atomic variant's translated code makes them.
         this.atomic = false;
+        // The process's lock word (`layout.lockWord`), -1 on one processor.
+        this.lockAt = /** @type {{ lockWord?: number }} */ (layout).lockWord ?? -1;
+    }
+
+    /**
+     * `body` made holding the process's lock word, spun for, as the atomic
+     * variant's translated code holds it (`emit/locked.js` `lockHeld`): a locked
+     * access no host atomic spans, indivisible against every other such access.
+     *
+     * @template T @param {() => T} body @returns {T}
+     */
+    held(body){
+        if (!this.atomic || this.lockAt < 0)
+        {
+            return body();
+        }
+        const at = this.lockAt >>> 2;
+        while (Atomics.compareExchange(this.words32, at, 0, 1) !== 0)
+        {
+            // Another executor's few instructions.
+        }
+        try
+        {
+            return body();
+        }
+        finally
+        {
+            Atomics.store(this.words32, at, 0);
+        }
     }
 
     /**
@@ -425,7 +454,8 @@ export class BlockMemory {
     /**
      * A locked access's read, as one load: of its own width on an address that
      * is a multiple of it, of the aligned qword holding it otherwise, and plain
-     * across two qwords, as the atomic variant's code does it. A locked access
+     * across two qwords (its swap holds the lock word), as the atomic variant's
+     * code does it. A locked access
      * writes, so a page a store may not reach faults it here.
      *
      * @param {number} address @param {number} size
@@ -482,12 +512,14 @@ export class BlockMemory {
         else
         {
             // Across two qwords: a split lock, which no wasm atomic spans either.
-            swapped = this.read(address, size) === old;
-            if (swapped)
-            {
+            return this.held(()=>{
+                if (this.read(address, size) !== old)
+                {
+                    return false;
+                }
                 this.write(address, size, next);
                 return true;
-            }
+            });
         }
         if (swapped)
         {
@@ -514,7 +546,7 @@ export class BlockMemory {
 
     /**
      * `cmpxchg8b`'s qword: one compare-and-swap where it is aligned, a plain
-     * read and write where not. Answers what memory held.
+     * read and write holding the lock word where not. Answers what memory held.
      *
      * @param {number} address @param {bigint} expected @param {bigint} value
      */
@@ -531,11 +563,14 @@ export class BlockMemory {
         }
         else
         {
-            held = this.view.getBigUint64(at, true);
-            if (held === expected)
-            {
-                this.view.setBigUint64(at, value, true);
-            }
+            held = this.held(()=>{
+                const now = this.view.getBigUint64(at, true);
+                if (now === expected)
+                {
+                    this.view.setBigUint64(at, value, true);
+                }
+                return now;
+            });
         }
         if (held === expected)
         {

@@ -93,7 +93,8 @@ class WindowMemory {
 /**
  * Whether the instruction is one the atomic variant makes indivisible: a
  * `lock` prefix on a memory form, or `xchg` with a memory operand. Not
- * `cmpxchg16b`: no host access swaps sixteen bytes at once, and it runs plain.
+ * `cmpxchg16b`: no host access swaps sixteen bytes at once, and it runs plain
+ * holding the process's lock word (`BlockMemory.held`).
  *
  * @param {import('./decode/decoder.js').Instruction} instruction
  */
@@ -405,6 +406,11 @@ export function interpret64(state, budget, options = {}){
                 && isLocked(instruction))
             {
                 evaluateLocked(instruction, state);
+            }
+            else if (instruction.op === 'cmpxchg16b' && instruction.prefixes.lock === true
+                && state.blockMemory instanceof BlockMemory)
+            {
+                state.blockMemory.held(()=>evaluate64(instruction, state));
             }
             else
             {

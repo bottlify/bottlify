@@ -9,8 +9,10 @@
  * an x86-64 program change the same memory at once through every locked form
  * (`test/fixtures/src/locks64.c` says which), and each sum is right only if
  * no change is lost - the atomic variant of long-mode code (`emitLockedLong`)
- * and the interpreter's (`evaluateLocked`). On one executor the same program
- * is the reference: threads take turns, nothing can be lost.
+ * and the interpreter's (`evaluateLocked`), each alone on three executors, and
+ * for what no host atomic spans (a quadword across two, `cmpxchg16b`) the
+ * process's lock word. On one executor the same program is the reference:
+ * threads take turns, nothing can be lost.
  */
 
 import { test } from 'node:test';
@@ -20,12 +22,14 @@ import { createApp } from './app.js';
 
 const FIXTURE = new URL('../test/fixtures/locks64.exe', import.meta.url);
 
-for (const cores of [1, 3])
+for (const [cores, translate] of /** @type {[number, boolean][]} */ ([[1, true], [3, true],
+    [3, false]]))
 {
     test(`four threads of a 64-bit program lose no locked change on ${cores}`
-        + ` executor${cores > 1 ? 's' : ''}`, { timeout: 120_000 }, async t=>{
+        + ` executor${cores > 1 ? 's' : ''}${translate ? '' : ', interpreted'}`,
+    { timeout: 240_000 }, async t=>{
         const app = await createApp({ executable: new Uint8Array(await readFile(FIXTURE)),
-            cpu: { cores } });
+            cpu: { cores }, ...translate ? {} : { cork: { config: { translate: false } } } });
         t.after(()=>app.dispose());
         /** @type {string[]} */
         const output = [];

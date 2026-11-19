@@ -23,8 +23,8 @@ import { ifRoom } from '../testing/memory64.js';
 import { MODE_64, decode } from '../decode/decoder.js';
 import { createRuntimeRunner64 } from '../testing/runtime-runner64.js';
 
-const LOCKABLE = new Set(['add', 'adc', 'and', 'btc', 'btr', 'bts', 'cmpxchg', 'cmpxchg8b', 'dec',
-    'inc', 'neg', 'not', 'or', 'sbb', 'sub', 'xor', 'xadd']);
+const LOCKABLE = new Set(['add', 'adc', 'and', 'btc', 'btr', 'bts', 'cmpxchg', 'cmpxchg8b',
+    'cmpxchg16b', 'dec', 'inc', 'neg', 'not', 'or', 'sbb', 'sub', 'xor', 'xadd']);
 
 /**
  * The corpus's cases that hold a lockable instruction on memory, each such
@@ -103,7 +103,9 @@ test('long mode\'s locked instructions, atomic, translated leave what the plain 
     ifRoom(()=>{
         const { cases, forms } = lockedCases();
         assert.ok(cases.length > 250, `${cases.length} cases`);
-        for (const op of [...LOCKABLE].filter(name=>name !== 'cmpxchg8b'))
+        assert.ok(forms.has('cmpxchg8b 8') && forms.has('cmpxchg16b 16'), [...forms].join(', '));
+        for (const op of [...LOCKABLE]
+            .filter(name=>!name.startsWith('cmpxchg') || name === 'cmpxchg'))
         {
             for (const size of [1, 2, 4, 8].filter(bytes=>!op.startsWith('bt') || bytes > 1))
             {
@@ -113,10 +115,17 @@ test('long mode\'s locked instructions, atomic, translated leave what the plain 
         }
         const atomic = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
             createRuntimeRunner64({ memory, layout, config: { atomic: true } });
-        const { failures, stats } = compare(cases, { budget: 7, makeRunner: atomic,
-            config: { atomic: true } });
-        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
-        assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
+        // On one processor, and as the first of two: an access no host atomic spans
+        // (across two quadwords, `cmpxchg16b`) holds the process's lock word there,
+        // and lets it go - held on, the next such access would spin for ever.
+        for (const processors of [1, 2])
+        {
+            const { failures, stats } = compare(cases, { budget: 7, makeRunner: atomic,
+                config: { atomic: true }, processors });
+            assert.deepEqual(failures.slice(0, 20), [],
+                `${failures.length} differences, ${processors} processors`);
+            assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
+        }
     }));
 
 test('long mode\'s locked instructions, atomic, interpreted leave what the plain ones leave',
@@ -124,7 +133,11 @@ test('long mode\'s locked instructions, atomic, interpreted leave what the plain
         const { cases } = lockedCases();
         const interpreted = (/** @type {WebAssembly.Memory} */ memory, /** @type {any} */ layout)=>
             createRuntimeRunner64({ memory, layout, config: { atomic: true, translate: false } });
-        const { failures } = compare(cases, { budget: 7, makeRunner: interpreted,
-            config: { atomic: true } });
-        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        for (const processors of [1, 2])
+        {
+            const { failures } = compare(cases, { budget: 7, makeRunner: interpreted,
+                config: { atomic: true }, processors });
+            assert.deepEqual(failures.slice(0, 20), [],
+                `${failures.length} differences, ${processors} processors`);
+        }
     }));
