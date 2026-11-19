@@ -812,7 +812,9 @@ export function createFileTimeFunctions(host){
                 }
                 const entry = host.stat(file.path);
                 const size = entry?.size ?? 0;
-                const index = host.fileId(file.path);
+                // Kept on the open file once asked, as NtQueryInformationFile
+                // keeps it: a file's number stays across renames.
+                const index = file.volumeNumber ??= host.fileId(file.path);
 
                 const data = new Uint8Array(BY_HANDLE_FILE_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);

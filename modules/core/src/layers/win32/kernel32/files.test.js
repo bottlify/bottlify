@@ -2797,6 +2797,25 @@ test('NtQueryEaFile: a file has none, said without the block; another object is 
     assert.equal(query.handler([0xdead, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000008);
 });
 
+test('an open file asks its volume for its number once, and only a class that answers it', ()=>{
+    const { files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+    /** @type {string[]} */
+    const asked = [];
+    const fileId = files.fileId;
+    files.fileId = (/** @type {string} */ path)=>{
+        asked.push(path);
+        return fileId(path);
+    };
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
+    const save = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ);
+    assert.equal(query.handler([save, 0x300, 0x400, 40, 4]), 0, 'FileBasicInformation');
+    assert.deepEqual(asked, [], 'a class without the number gives the file none');
+    assert.equal(query.handler([save, 0x300, 0x400, 8, 6]), 0, 'FileInternalInformation');
+    assert.equal(query.handler([save, 0x300, 0x400, 8, 6]), 0, 'and again');
+    assert.deepEqual(asked, ['C:\\GAME\\SAVE.DAT'], 'asked once, kept on the open file');
+});
+
 test('a file opens by the number FileInternalInformation answers, from any folder of its drive',
     ()=>{
         const { memory, files, fns, open } = setup();

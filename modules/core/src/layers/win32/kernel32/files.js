@@ -3645,6 +3645,17 @@ export function createFileFunctions(host){
     };
 
     /**
+     * An open file's number on its volume, GetFileInformationByHandle's and
+     * FileInternalInformation's: the same for the same file under any of its
+     * names, which is what comparing two handles asks. A file keeps its
+     * number across renames, so the open file keeps it once asked: the
+     * volume is not walked again on every query.
+     *
+     * @param {any} file @returns {number}
+     */
+    const numberOf = file=>(file.volumeNumber ??= files.fileId(file.path));
+
+    /**
      * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
      * lays it out; null for a class this keeps nothing for. The volume keeps
      * one time per file, the last write, and every time answers with it, as
@@ -3678,10 +3689,6 @@ export function createFileFunctions(host){
         const mode = modeOf(file);
         const access = handle !== 0 ? rightsOf(handle)
             : (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
-        // A file's number on its volume, GetFileInformationByHandle's: the
-        // same for the same file under any of its names, which is what
-        // comparing two handles asks.
-        const index = files.fileId(file.path);
         switch (kind)
         {
             case FILE_BASIC_INFORMATION:
@@ -3703,7 +3710,7 @@ export function createFileFunctions(host){
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
             case FILE_INTERNAL_INFORMATION:
-                return record(8, view=>view.setBigUint64(0, BigInt(index), true));
+                return record(8, view=>view.setBigUint64(0, BigInt(numberOf(file)), true));
             case FILE_EA_INFORMATION:
                 return new Uint8Array(4);
             case FILE_ACCESS_INFORMATION:
