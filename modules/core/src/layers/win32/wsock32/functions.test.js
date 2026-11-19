@@ -1784,6 +1784,32 @@ test('select lists a full socket as not writable, and waits for room', async()=>
     assert.equal(fx.dword(FDSET + 4), client);
 });
 
+test('a 64-bit process reads its protoent and servent with quadword pointers', ()=>{
+    // struct protoent at 64 bits: p_name 0, p_aliases 8, p_proto 16; struct
+    // servent: s_name 0, s_aliases 8, s_proto 16, s_port 24 (the protocol
+    // before the port there). The lists' entries are quadwords.
+    const fx = fixture({ pointerSize: 8 });
+    /** @param {number} at  a quadword pointer below 4 GiB */
+    const pointer = at=>{
+        assert.equal(fx.dword(at + 4), 0, 'the upper half');
+        return fx.dword(at);
+    };
+    fx.bytes.fill(0xaa, 0, 0x10000);
+    const tcp = fx.call('getprotobyname', [cstring(fx, TEXT, 'tcp')]);
+    assert.equal(fx.host.readCString(pointer(tcp), 32), 'tcp');
+    const aliases = pointer(tcp + 8);
+    assert.equal(fx.host.readCString(pointer(aliases), 32), 'TCP');
+    assert.equal(pointer(aliases + 8), 0, 'the list ends in a null quadword');
+    assert.equal(fx.dword(tcp + 16) & 0xffff, 6);
+
+    const http = fx.call('getservbyname', [cstring(fx, TEXT, 'http'), 0]);
+    assert.notEqual(http, 0);
+    assert.equal(fx.host.readCString(pointer(http), 32), 'http');
+    assert.equal(pointer(pointer(http + 8)), 0, 'no aliases: a null quadword');
+    assert.equal(fx.host.readCString(pointer(http + 16), 32), 'tcp');
+    assert.deepEqual([fx.bytes[http + 24], fx.bytes[http + 25]], [0, 80], 'the port, big-endian');
+});
+
 test('a 64-bit process reads its hostent with quadword pointers: the name, the alias list'
     + ' and the address list where its struct has them', ()=>{
     // struct hostent at 64 bits: char *h_name at 0, char **h_aliases at 8,

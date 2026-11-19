@@ -197,6 +197,23 @@ test('a trace has no consumer: OpenTrace answers the invalid handle and why', ()
     assert.equal(fns.CloseTrace.handler([1, 0]), 6);
 });
 
+test('a 64-bit trace provider\'s registrations are two quadwords each', ()=>{
+    // TRACE_GUID_REGISTRATION at 64 bits: LPCGUID at 0, HANDLE at 8, sixteen
+    // bytes a registration. In the 32-bit layout the handle went into the GUID
+    // pointer's upper half, and the second registration's into the first's handle.
+    const { bytes, fns } = setup({ pointerSize: 8 });
+    const view = new DataView(bytes.buffer);
+    bytes.fill(0xaa, 0x500, 0x548);
+    view.setBigUint64(0x500, 0x520n, true);
+    view.setBigUint64(0x510, 0x530n, true);
+    assert.equal(fns.RegisterTraceGuidsW.handler([0x401000, 0, 0x520, 2, 0x500, 0, 0, 0x540]), 0);
+    const handle = view.getBigUint64(0x540, true);
+    assert.notEqual(handle, 0n);
+    assert.deepEqual([0x500, 0x508, 0x510, 0x518].map(at=>view.getBigUint64(at, true)),
+        [0x520n, handle, 0x530n, handle], 'the pointers whole, each handle beside its own');
+    assert.equal(view.getUint32(0x520, true), 0xaaaaaaaa, 'nothing past the registrations');
+});
+
 test('a classic trace provider registers, is never enabled, and unregisters', ()=>{
     const { bytes, fns } = setup();
     const view = new DataView(bytes.buffer);

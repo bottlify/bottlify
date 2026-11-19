@@ -6081,6 +6081,7 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes),
                     }),
                     ...createEventLogFunctions({
+                        pointerSize,
                         readCString,
                         readWideString,
                         setLastError: setError,
