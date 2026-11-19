@@ -49,6 +49,7 @@ export const LONG = new Map([
     ['layers/win32/msvcrt/inguest-string.js', {}],
     ['layers/win32/msvcrt/inguest-rtti.js', {}],
     ['layers/win32/msvcrt/inguest-int64.js', {}],
+    ['layers/win32/msvcrt/inguest-scan.js', {}],
     ['layers/win32/kernel32/inguest.js', {}],
     ['layers/win32/kernel32/semaphore-guest.js', {}],
     ['layers/win32/d3dx9/constants-setters.js', {

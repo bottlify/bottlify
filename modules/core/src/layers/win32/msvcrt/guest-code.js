@@ -41,6 +41,8 @@ import { COMPILED as RTTI } from './inguest-rtti.x86.js';
 import { COMPILED as RTTI_LONG } from './inguest-rtti.x64.js';
 import { COMPILED as INT64 } from './inguest-int64.x86.js';
 import { COMPILED as INT64_LONG } from './inguest-int64.x64.js';
+import { COMPILED as SCAN } from './inguest-scan.x86.js';
+import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
 
 /**
@@ -52,7 +54,8 @@ import { setSingle } from './float.js';
 const LONG_CODE = new Map();
 /** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
 const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG],
-    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG], [INT64, INT64_LONG]];
+    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG], [INT64, INT64_LONG],
+    [SCAN, SCAN_LONG]];
 /**
  * Pairs each function of a module's x86-64 with its i386 record, so that an
  * export bound with the i386 (`guestEntry`, `guestExport`) carries the x86-64

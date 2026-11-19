@@ -25,7 +25,7 @@ import { createSecureFunctions } from './secure.js';
 import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createErrorFunctions, messageOf } from './errors.js';
 import { createConversionFunctions } from './convert.js';
-import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
+import { createScanFunctions, listScanHandler, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
 import { createPathFunctions, splitSearch } from './paths.js';
@@ -43,6 +43,8 @@ import * as inGuest64 from './inguest-int64.js';
 import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
+import * as inGuestScan from './inguest-scan.js';
+import { COMPILED as SCAN_CODE } from './inguest-scan.x86.js';
 import * as inGuestRtti from './inguest-rtti.js';
 import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { createMathFunctions } from './math.js';
@@ -569,6 +571,13 @@ export function createMsvcrtFunctions(host){
      * which nothing here ever does, this runtime carrying only the one.
      */
     let currentLocale = 0;
+
+    const scans = createScanFunctions(host);
+    /** sscanf's arguments as a list: the form its code in the guest is compiled as. */
+    const scanList = guestEntry(inGuestScan.scanList, SCAN_CODE.scanList, host, {
+        argBytes: 12,
+        handler: listScanHandler(host),
+    });
 
     /**
      * int vsprintf(char *buffer, const char *format, va_list args) -- in the
@@ -1438,7 +1447,14 @@ export function createMsvcrtFunctions(host){
             errno,
             ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
         }),
-        ...createScanFunctions(host),
+        ...scans,
+
+        /**
+         * int sscanf(const char *buffer, const char *format, ...) - in the
+         * guest (`inguest-scan.js`): the plain conversions of an ASCII text
+         * stored there, the rest handed to the scanner here whole.
+         */
+        sscanf: variadicEntry(2, scanList, scans.sscanf),
         ...createSortFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
