@@ -115,6 +115,8 @@ function fakeMemory(size = 0x1000){
 function fakeFiles(){
     /** @type {Map<string, { data: Uint8Array, directory: boolean }>} */
     const nodes = new Map();
+    /** The opens not closed yet. @type {Set<{ path: string }>} */
+    const live = new Set();
     /** What SetFileAttributes recorded, as the volume adapter records it. @type {Map<string, number>} */
     const attributes = new Map();
     let current = 'C:\\GAME';
@@ -186,7 +188,9 @@ function fakeFiles(){
             {
                 nodes.set(path, { data: new Uint8Array(0), directory: false });
             }
-            return { path };
+            const node = { path };
+            live.add(node);
+            return node;
         },
         /** @param {{ path: string }} node @param {number} offset @param {number} length */
         read(node, offset, length){
@@ -210,10 +214,13 @@ function fakeFiles(){
             cut.set(entry.data.subarray(0, Math.min(size, entry.data.length)));
             entry.data = cut;
         },
-        /** @param {{ path: string }} node */
+        /** @param {{ path: string, closed?: boolean }} node */
         close: node=>{
-            void node;
+            node.closed = true;
+            live.delete(node);
         },
+        /** Whether any open of the file is still open. @param {string} path */
+        isOpen: path=>[...live].some(node=>node.path.toLowerCase() === path.toLowerCase()),
         /** @param {string} path */
         remove(path){
             const node = nodes.get(path);
@@ -2209,6 +2216,121 @@ test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only 
     assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
 });
 
+test('NtCreateFile opens a pipe\'s client end by its native name, with the rights asked', ()=>{
+    /** @type {[string, number, number][]} */
+    const opens = [];
+    const { fns, memory, handles } = setup({ pipes: {
+        /** @param {string} name @param {number} access @param {number} flags */
+        open: (name, access, flags)=>{
+            opens.push([name, access, flags]);
+            return name.endsWith('busy') ? { error: 231 }
+                : { handle: handles.open('pipe', {}, access) };
+        },
+        isPipe: ()=>false,
+    } });
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    const SYNCHRONIZE = 0x00100000;
+    /** @param {string} name @param {number} options */
+    const open = (name, options)=>native.handler([NT_HANDLE, SYNCHRONIZE,
+        objectAttributes(memory, name), NT_STATUS, 0, 0, 3, FILE_OPEN, options, 0, 0]) >>> 0;
+    assert.equal(open('\\??\\pipe\\game', 0x20), 0);
+    assert.deepEqual(opens.at(-1), ['\\\\.\\pipe\\game', SYNCHRONIZE, 0],
+        'a synchronous end, asked nothing more');
+    assert.equal(open('\\Device\\NamedPipe\\game', 0), 0);
+    assert.equal(opens.at(-1)?.[2], 0x40000000, 'no synchronous option: overlapped');
+    assert.equal(open('\\??\\pipe\\busy', 0), 0xc00000ac, 'STATUS_PIPE_NOT_AVAILABLE');
+
+    // FileAccessInformation is the handle's rights; a process handle is the wrong object.
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
+    assert.equal(open('\\??\\pipe\\game', 0x20), 0);
+    assert.equal(query.handler([memory.dword(NT_HANDLE), 0x300, 0x400, 4, 8]), 0);
+    assert.equal(memory.dword(0x400), SYNCHRONIZE);
+    assert.equal(query.handler([0xffffffff, 0x300, 0x400, 8, 23]) >>> 0, 0xc0000024,
+        'STATUS_OBJECT_TYPE_MISMATCH');
+    assert.equal(query.handler([0x7770, 0x300, 0x400, 8, 23]) >>> 0, 0xc0000008,
+        'STATUS_INVALID_HANDLE');
+});
+
+test('a native request on a pipe end clears its event first, and one done at once with a'
+    + ' warning signals it and queues its APC', ()=>{
+    /** @type {string[]} */
+    const said = [];
+    /** @type {any[]} */
+    const queued = [];
+    /** @type {{ handles: any }} */
+    const held = { handles: null };
+    const { fns, handles } = setup({
+        resetEvent: (/** @type {number} */ event)=>said.push(`reset ${event}`),
+        setEvent: (/** @type {number} */ event)=>said.push(`set ${event}`),
+        currentThread: ()=>'main',
+        queueApc: (/** @type {any[]} */ ...args)=>queued.push(args),
+        streams: [{
+            /** @param {number} handle */
+            read: handle=>(held.handles.typeOf(handle) === 'pipe' ? 0x80000005 : null),
+            write: ()=>null,
+        }],
+        pipes: {
+            isPipe: (/** @type {number} */ handle)=>held.handles.typeOf(handle) === 'pipe',
+            control: ()=>({ status: 0, information: 16 }),
+            flushNative: ()=>0,
+            information: ()=>null,
+            setInformation: ()=>null,
+        },
+    });
+    held.handles = handles;
+    const pipe = handles.open('pipe', {});
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    assert.equal(natives.NtReadFile.handler([pipe, 0x44, 0x401000, 5, 0x300, 0x400, 2, 0, 0])
+        >>> 0, 0x80000005, 'STATUS_BUFFER_OVERFLOW: part of a message');
+    assert.deepEqual(said, ['reset 68', 'set 68'], 'cleared as made, set as done');
+    assert.deepEqual(queued.at(-1), ['main', 0x401000, [5, 0x300, 0]]);
+    said.length = 0;
+    assert.equal(natives.NtFsControlFile.handler([pipe, 0x44, 0, 0, 0x300, 0x11400c, 0, 0,
+        0x400, 32]), 0);
+    assert.deepEqual(said, ['reset 68', 'set 68'], 'a peek done at once says so too');
+    assert.equal(natives.NtFlushBuffersFile.handler([pipe, 0x300]), 0, 'the pipe flushes it');
+});
+
+test('a deletion is the file\'s: pending, it opens no more and goes with the last open of it',
+    ()=>{
+        const { memory, files, fns, open } = setup();
+        const set = /** @type {any} */ (fns.CreateFileW).natives.NtSetInformationFile;
+        const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
+        const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+        files.put('C:\\GAME\\d.tmp', 'x');
+        const writer = open('C:\\GAME\\d.tmp', OPEN_EXISTING, GENERIC_WRITE);
+        memory.bytes[0x800] = 1;
+        assert.equal(set.handler([writer, 0x300, 0x800, 1, 13]) >>> 0, 0xc0000022,
+            'STATUS_ACCESS_DENIED: no DELETE on the handle');
+        const deleter = open('C:\\GAME\\d.tmp', OPEN_EXISTING, DELETE);
+        assert.equal(set.handler([deleter, 0x300, 0x800, 1, 13]), 0);
+        assert.equal(query.handler([writer, 0x300, 0x400, 24, 5]), 0);
+        assert.equal(memory.bytes[0x400 + 20], 1, 'DeletePending, through either handle');
+        assert.equal(native.handler([NT_HANDLE, GENERIC_READ,
+            objectAttributes(memory, '\\??\\C:\\GAME\\d.tmp'), NT_STATUS, 0, 0, 7, FILE_OPEN,
+            0, 0, 0]) >>> 0, 0xc0000056, 'STATUS_DELETE_PENDING');
+        assert.equal(fns.CloseHandle.handler([deleter]), 1);
+        assert.ok(files.nodes.has('C:\\GAME\\d.tmp'), 'the writer still has it open');
+        assert.equal(fns.CloseHandle.handler([writer]), 1);
+        assert.ok(!files.nodes.has('C:\\GAME\\d.tmp'), 'gone with the last');
+
+        // A handle deleting on close leaves the file pending to the open it shares.
+        files.put('C:\\GAME\\e.tmp', 'x');
+        const reader = open('C:\\GAME\\e.tmp', OPEN_EXISTING, GENERIC_READ);
+        const closing = open('C:\\GAME\\e.tmp', OPEN_EXISTING, GENERIC_READ, 0x04000000);
+        assert.equal(fns.CloseHandle.handler([closing]), 1);
+        assert.ok(files.nodes.has('C:\\GAME\\e.tmp'));
+        assert.equal(fns.CloseHandle.handler([reader]), 1);
+        assert.ok(!files.nodes.has('C:\\GAME\\e.tmp'));
+
+        // A read-only file cannot be deleted: the native call names it.
+        files.put('C:\\GAME\\r.tmp', 'x');
+        files.setAttributes('C:\\GAME\\r.tmp', FILE_ATTRIBUTE_READONLY);
+        const readOnly = open('C:\\GAME\\r.tmp', OPEN_EXISTING, DELETE);
+        assert.equal(set.handler([readOnly, 0x300, 0x800, 1, 13]) >>> 0, 0xc0000121,
+            'STATUS_CANNOT_DELETE');
+    });
+
 test('NtCreateFile names what is missing, and takes only object names', ()=>{
     const { fns, memory, files } = setup();
     const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
@@ -3182,7 +3304,7 @@ test('GetFinalPathNameByHandle names the file in the namespace asked for', ()=>{
 test('SetFileInformationByHandle renames, deletes on close and moves the end', ()=>{
     const { memory, files, fns, open, error } = setup();
     files.put('C:\\GAME\\a.tmp', 'abcdef');
-    const file = open('C:\\GAME\\a.tmp', OPEN_EXISTING);
+    const file = open('C:\\GAME\\a.tmp', OPEN_EXISTING, GENERIC_READ | GENERIC_WRITE | DELETE);
     const view = new DataView(memory.bytes.buffer);
     view.setBigInt64(0x800, 3n, true);
     assert.equal(fns.SetFileInformationByHandle.handler([file, 6, 0x800, 8]), 1);
@@ -3204,11 +3326,20 @@ test('SetFileInformationByHandle renames, deletes on close and moves the end', (
     assert.equal(files.text('C:\\GAME\\b.dat'), 'abc');
     assert.ok(!files.nodes.has('C:\\GAME\\a.tmp'));
 
-    // FileDispositionInfo: gone with its last handle.
+    // FileDispositionInfo: asked of a handle that may delete; pending, the
+    // file opens no more and is gone with the last handle onto it.
+    const reader = open('C:\\GAME\\b.dat', OPEN_EXISTING, GENERIC_READ);
     memory.bytes[0x800] = 1;
+    assert.equal(fns.SetFileInformationByHandle.handler([reader, 4, 0x800, 1]), 0);
+    assert.equal(error.code, 5, 'no DELETE: ERROR_ACCESS_DENIED');
     assert.equal(fns.SetFileInformationByHandle.handler([file, 4, 0x800, 1]), 1);
-    assert.ok(files.nodes.has('C:\\GAME\\b.dat'), 'not before the handle closes');
+    memory.putString(NAME, 'C:\\GAME\\b.dat');
+    assert.equal(fns.CreateFileA.handler([NAME, GENERIC_READ, 7, 0, OPEN_EXISTING, 0, 0]),
+        INVALID_HANDLE_VALUE, 'pending: no more opens');
+    assert.equal(error.code, 5);
     assert.equal(fns.CloseHandle.handler([file]), 1);
+    assert.ok(files.nodes.has('C:\\GAME\\b.dat'), 'not while another handle is open');
+    assert.equal(fns.CloseHandle.handler([reader]), 1);
     assert.ok(!files.nodes.has('C:\\GAME\\b.dat'));
 
     const other = open('C:\\GAME\\c.dat', CREATE_ALWAYS);

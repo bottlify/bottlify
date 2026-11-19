@@ -111,6 +111,10 @@ export const STATUS = Object.freeze({
     INVALID_DEVICE_REQUEST: 0xc0000010,
     /** A pipe whose instances are all made: no other is to be had. */
     INSTANCE_NOT_AVAILABLE: 0xc00000ab,
+    /** A pipe none of whose instances listens: a client cannot open it now. */
+    PIPE_NOT_AVAILABLE: 0xc00000ac,
+    /** A request the object is of the wrong kind for: a client end asked to listen. */
+    ILLEGAL_FUNCTION: 0xc00000af,
     CANCELLED: 0xc0000120,
     /** A success: a create with OBJ_OPENIF opened an object its name held already. */
     OBJECT_NAME_EXISTS: 0x40000000,
@@ -248,6 +252,8 @@ const TO_DOS_ERROR = new Map([
     [STATUS.PIPE_LISTENING, ERROR.PIPE_LISTENING],
     [STATUS.PIPE_CLOSING, ERROR.NO_DATA],
     [STATUS.INSTANCE_NOT_AVAILABLE, ERROR.PIPE_BUSY],
+    [STATUS.PIPE_NOT_AVAILABLE, ERROR.PIPE_BUSY],
+    [STATUS.ILLEGAL_FUNCTION, ERROR.INVALID_FUNCTION],
     [STATUS.CANCELLED, ERROR.OPERATION_ABORTED],
 ]);
 

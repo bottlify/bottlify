@@ -1520,6 +1520,7 @@ export function createWin32Module(){
                 setLastErrorFor: setErrorOn,
                 currentThread: ()=>kernel.currentThread(),
                 park: ()=>bridge.park(),
+                alertably: (alertable, wait, answer)=>apcs.waitWith(alertable, wait, answer),
                 table: system?.namedObjects ?? null,
                 // A process in a worker of its own holds stand-ins of the
                 // run's objects, never the objects a pipe's ends are.
