@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createImageLists } from './imagelist.js';
 import { createImageListIcons } from './imagelist-icon.js';
+import { IID_IIMAGELIST2 } from './imagelist-com.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { surfaceForDdb, surfaceForDibSection } from '../../graphics/gdi/surface.js';
@@ -39,7 +40,7 @@ const SRCINVERT = 0x00660046;
 
 /**
  * @param {{ user32?: (name: string) => ({ handler: (args: number[]) => number } | undefined),
- *     ownInstance?: () => number }} [wired]
+ *     ownInstance?: () => number, vtables?: { publish: (object: any) => number } }} [wired]
  */
 function machine(wired = {}){
     const bytes = new Uint8Array(0x100000);
@@ -79,6 +80,7 @@ function machine(wired = {}){
         user32: wired.user32,
         ownInstance: wired.ownInstance,
         bitmapSize: bitmap=>gdi.bitmapSize(bitmap),
+        vtables: wired.vtables,
     });
     const fns = /** @type {Record<string, { argBytes: number,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (lists.functions));
@@ -626,6 +628,33 @@ test('the first bitmap a list of a palette is given brings its colour table', ()
     const bitmap = m.gdi32.CreateDIBSection.handler([0, INFO, 0, POINTER, 0, 0]);
     assert.equal(m.fns.ImageList_Add.handler([list, bitmap, 0]), 0);
     assert.deepEqual(imageOf(m, list).colors.slice(0, 3), [0xff00ff, 0xffff00, 0x00ffff]);
+});
+
+test('IImageList::GetItemFlags says which images of a 32-bit list came with alpha', ()=>{
+    // Wine's test_alpha and test_IImageList_GetItemFlags.
+    /** @type {Map<number, any>} */
+    const published = new Map();
+    let next = 0x9000;
+    const m = machine({ vtables: { publish: object=>{
+        published.set(next, object);
+        return (next += 0x10) - 0x10;
+    } } });
+    const list = m.fns.ImageList_Create.handler([2, 1, ILC_COLOR32 | 0x0001, 0, 4]);
+    const flags = (/** @type {number} */ index, /** @type {number} */ out = OUT)=>published
+        .get(list).interfaceFor(IID_IIMAGELIST2).methods
+        .find((/** @type {any} */ x)=>x.name === 'GetItemFlags')
+        .invoke(published.get(list), [index, out]);
+    m.fns.ImageList_Add.handler([list, m.section(2, 1, [0x00654321, 0x00abcdef]).bitmap, 0]);
+    m.fns.ImageList_Add.handler([list, m.section(2, 1, [0x00654321, 0x89abcdef]).bitmap, 0]);
+    assert.equal(flags(0), 0);
+    assert.equal(m.view.getUint32(OUT, true), 0, 'no alpha');
+    assert.equal(flags(1), 0);
+    assert.equal(m.view.getUint32(OUT, true), 1, 'ILIF_ALPHA');
+    assert.equal(flags(2) | 0, 0x80070057 | 0, 'no such image: E_INVALIDARG');
+    assert.equal(flags(0, 0) | 0, 0x80070057 | 0, 'nowhere to answer');
+    m.fns.ImageList_Remove.handler([list, 0]);
+    flags(0);
+    assert.equal(m.view.getUint32(OUT, true), 1, 'the flag moves down with its image');
 });
 
 test('a list\'s colour table is set once: later bitmaps, an emptied list\'s included, leave it',

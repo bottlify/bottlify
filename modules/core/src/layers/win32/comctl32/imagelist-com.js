@@ -38,6 +38,8 @@ const KNOWN = new Set([IID_IIMAGELIST, IID_IIMAGELIST2, '{00000000-0000-0000-C00
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(handle: number, cx: number, cy: number, flags: number, initial: number,
  *     grow: number) => boolean} initialize  a list made empty again at a size and depth
+ * @property {(handle: number, index: number) => number | null} itemFlags  an image's
+ *     ILIF_* flags, null for no such image
  */
 
 /** @param {Uint8Array} bytes */
@@ -191,7 +193,15 @@ export function createImageListObjects(host){
             flat('ImageList_SetDragCursorImage', [cursor, i, dx, dy]))),
         method('DragShowNolock', 4, (h, [show])=>ok(flat('ImageList_DragShowNolock', [show]))),
         method('GetDragImage', 16, null),
-        method('GetItemFlags', 8, null),
+        method('GetItemFlags', 8, (h, [i, out])=>{
+            const flags = host.itemFlags(h, i | 0);
+            if (flags === null || (out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            host.putU32(out >>> 0, flags);
+            return S_OK;
+        }),
         method('GetOverlayImage', 8, null),
     ];
     const LIST2 = [
