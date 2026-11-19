@@ -5,6 +5,7 @@
  */
 
 import { HANDLE_STDERR, HANDLE_STDIN } from './console.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * What a handle value names before the table is asked.
@@ -31,7 +32,7 @@ const STD_INPUT_HANDLE = 0xfffffff6;
  * @returns {number}
  */
 export function untagged(handle){
-    const value = handle >>> 0;
+    const value = wholeAddress(handle);
     return value > HANDLE_STDERR && value < PSEUDO_FLOOR ? (value & ~3) >>> 0 : value;
 }
 
@@ -43,7 +44,7 @@ export function untagged(handle){
  * @param {number} handle
  */
 export function isStandardHandle(handle){
-    const value = handle >>> 0;
+    const value = wholeAddress(handle);
     return (value >= HANDLE_STDIN && value <= HANDLE_STDERR)
         || (value >= STD_ERROR_HANDLE && value <= STD_INPUT_HANDLE);
 }

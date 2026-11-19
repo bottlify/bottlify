@@ -5,6 +5,7 @@
  */
 
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The thread pool API: pools, cleanup groups and the callback objects a
@@ -165,7 +166,7 @@ export function createThreadpoolApi(core){
         {
             return { pool: processPool, group: null, cancel: 0, finalization: 0 };
         }
-        const at = environment >>> 0;
+        const at = wholeAddress(environment);
         const version = read32(at + ENVIRONMENT.VERSION);
         if ((version !== 1 && version !== 3)
             || (version === 3 && read32(at + ENVIRONMENT.PRIORITY) > TP_CALLBACK_PRIORITY_LOW))
@@ -503,8 +504,8 @@ export function createThreadpoolApi(core){
             {
                 return false;
             }
-            pool.lane.stack = { reserve: read32(information >>> 0),
-                commit: read32((information >>> 0) + 4) };
+            pool.lane.stack = { reserve: read32(wholeAddress(information)),
+                commit: read32(wholeAddress(information) + 4) };
             return true;
         },
 
@@ -520,8 +521,8 @@ export function createThreadpoolApi(core){
             {
                 return false;
             }
-            write32(information >>> 0, stack.reserve);
-            write32((information >>> 0) + 4, stack.commit);
+            write32(wholeAddress(information), stack.reserve);
+            write32(wholeAddress(information) + 4, stack.commit);
             return true;
         },
 

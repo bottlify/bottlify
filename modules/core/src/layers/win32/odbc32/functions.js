@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * odbc32 — the ODBC Driver Manager of a machine with no driver and no data
  * source configured, which is what a fresh Windows is.
@@ -77,13 +79,13 @@ export function createOdbcFunctions(host){
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {number} value */
     const writeI16 = (address, value)=>{
         const bytes = new Uint8Array(2);
         new DataView(bytes.buffer).setInt16(0, value, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {number} handle @param {number} [type] */
@@ -194,7 +196,7 @@ export function createOdbcFunctions(host){
     const writeRecord = (record, state, native, message, room, length)=>{
         if ((state >>> 0) !== 0)
         {
-            host.writeMemory(state >>> 0, Uint8Array.from([...record.state, '\0']
+            host.writeMemory(wholeAddress(state), Uint8Array.from([...record.state, '\0']
                 .map(ch=>ch.charCodeAt(0))));
         }
         if ((native >>> 0) !== 0)
@@ -209,7 +211,7 @@ export function createOdbcFunctions(host){
         if ((message >>> 0) !== 0 && (room | 0) > 0)
         {
             const kept = record.text.slice(0, (room | 0) - 1);
-            host.writeMemory(message >>> 0, Uint8Array.from([...kept, '\0']
+            host.writeMemory(wholeAddress(message), Uint8Array.from([...kept, '\0']
                 .map(ch=>ch.charCodeAt(0) & 0xff)));
         }
         return fits ? SQL_SUCCESS : SQL_SUCCESS_WITH_INFO;

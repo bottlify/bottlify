@@ -12,6 +12,7 @@
  */
 
 import { dword, u32 } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const MF_BYPOSITION = 0x400;
 const MF_ENABLED = 0x0;
@@ -315,7 +316,7 @@ export function createUiFunctions(host, { A, W }){
                     [hdc, colour]) ?? 0);
                 call('GDI32.dll', 'ExtTextOutW', [hdc, 0, 0, ETO_OPAQUE, rect, 0, 0, 0]);
                 call('GDI32.dll', 'SetBkColor', [hdc, before]);
-                return before >>> 0;
+                return wholeAddress(before);
             },
         },
 
@@ -364,7 +365,7 @@ export function createUiFunctions(host, { A, W }){
                         return 0;
                     }
                     // WNDCLASS: hInstance at 16, lpszClassName at 36.
-                    const fields = host.readMemory(wndclass >>> 0, 40);
+                    const fields = host.readMemory(wholeAddress(wndclass), 40);
                     const known = scratch(48, at=>user32(`GetClassInfo${suffix}`,
                         [u32(fields, 16), u32(fields, 36), at]), 0);
                     return known !== 0 ? 1 : user32(`RegisterClass${suffix}`, [wndclass]);
@@ -385,7 +386,7 @@ export function createUiFunctions(host, { A, W }){
                 }
                 for (let at = 0; at < (count | 0); at++)
                 {
-                    user32(`UnregisterClass${suffix}`, [u32(read((list >>> 0) + at * 4, 4)),
+                    user32(`UnregisterClass${suffix}`, [u32(read(wholeAddress(list) + at * 4, 4)),
                         instance]);
                 }
                 return 0;
@@ -441,7 +442,7 @@ export function createUiFunctions(host, { A, W }){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(guid >>> 0, 16);
+                const bytes = host.readMemory(wholeAddress(guid), 16);
                 const hex = [...bytes].map(byte=>byte.toString(16).padStart(2, '0')).join('');
                 return createCounter(W, hex, 0);
             },
@@ -501,10 +502,10 @@ export function createUiFunctions(host, { A, W }){
                 {
                     return 0;
                 }
-                const before = u32(host.readMemory(destination >>> 0, 4));
+                const before = u32(host.readMemory(wholeAddress(destination), 4));
                 if (before === (compare >>> 0))
                 {
-                    host.writeMemory(destination >>> 0, dword(exchange >>> 0));
+                    host.writeMemory(wholeAddress(destination), dword(exchange >>> 0));
                 }
                 return before;
             },
@@ -586,7 +587,7 @@ export function createUiFunctions(host, { A, W }){
                     {
                         return E_INVALIDARG;
                     }
-                    host.writeMemory(out >>> 0, w.sz(url));
+                    host.writeMemory(wholeAddress(out), w.sz(url));
                     return S_OK;
                 },
             } }), {}),

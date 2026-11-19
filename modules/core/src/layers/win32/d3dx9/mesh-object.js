@@ -12,6 +12,7 @@ import { DECLTYPE, DECLUSAGE, MAX_FVF_DECL_SIZE, declarationBytes, declaratorFro
 import { NO_FACE, adjacencyFromPointReps, attributeOrder, attributeTable,
     pointRepsFromAdjacency, pointRepsFromPositions } from './mesh-topology.js';
 import { indexBufferOf } from './mesh.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXMesh, D3DX's own: a vertex buffer and an index buffer made on the
@@ -260,11 +261,11 @@ export function createMeshObjects(host, buffers){
     };
 
     /** An adjacency's DWORDs, three a face. @param {any} state @param {number} at */
-    const adjacencyAt = (state, at)=>[...new Uint32Array(host.readMemory(at >>> 0,
+    const adjacencyAt = (state, at)=>[...new Uint32Array(host.readMemory(wholeAddress(at),
         state.faces * 12).slice().buffer)];
 
     /** @param {number} at @param {number[]} values */
-    const putAll = (at, values)=>host.writeMemory(at >>> 0,
+    const putAll = (at, values)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Uint32Array.from(values).buffer));
 
     /**
@@ -631,7 +632,7 @@ export function createMeshObjects(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            host.writeMemory(out >>> 0, declarationBytes(object.state.elements));
+            host.writeMemory(wholeAddress(out), declarationBytes(object.state.elements));
             return D3D_OK;
         } },
         /** DWORD GetNumBytesPerVertex() */
@@ -722,7 +723,8 @@ export function createMeshObjects(host, buffers){
                 return indices;
             }
             const given = (reps >>> 0) === 0 ? Array.from({ length: state.vertices }, (_, i)=>i)
-                : [...new Uint32Array(host.readMemory(reps >>> 0, state.vertices * 4).slice()
+                : [...new Uint32Array(host.readMemory(wholeAddress(reps),
+                    state.vertices * 4).slice()
                     .buffer)];
             putAll(out, adjacencyFromPointReps(indices, given));
             return D3D_OK;
@@ -855,8 +857,9 @@ export function createMeshObjects(host, buffers){
             {
                 return D3DERR_INVALIDCALL;
             }
-            const words = count === 0 ? [] : [...new Uint32Array(host.readMemory(table >>> 0,
-                count * 20).slice().buffer)];
+            const words = count === 0 ? []
+                : [...new Uint32Array(host.readMemory(wholeAddress(table), count * 20)
+                    .slice().buffer)];
             object.state.table = Array.from({ length: count }, (_, i)=>{
                 const [id, faceStart, faceCount, vertexStart, vertexCount]
                     = words.slice(i * 5, i * 5 + 5);

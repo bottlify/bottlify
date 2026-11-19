@@ -32,6 +32,7 @@ import { BLOCK_BYTES, BLOCK_DEFAULTS, BLOCK_PIXEL, DEFAULT_BYTES,
     HANDLE_TWIN } from './constants-setters.js';
 import { COMPILED } from './constants-setters.x86.js';
 import { COMPILED as COMPILED_LONG } from './constants-setters.x64.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_ID3DXCONSTANTTABLE = '{AB3C758F-093E-4356-B762-4DB18F1B3A01}';
 
@@ -252,7 +253,7 @@ export function registerValues(constant, values){
  */
 export function createConstantTableObjects(host){
     const u32 = (/** @type {number} */ address)=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     const dword = (/** @type {number} */ value)=>Uint8Array.of(value & 0xff, value >> 8 & 0xff,
@@ -289,7 +290,7 @@ export function createConstantTableObjects(host){
     };
     const readString = (/** @type {number} */ address)=>{
         let text = '';
-        for (let at = address >>> 0; text.length < 256; at++)
+        for (let at = wholeAddress(address); text.length < 256; at++)
         {
             const byte = host.readMemory(at, 1)[0];
             if (byte === 0)
@@ -831,7 +832,7 @@ export function createConstantTableObjects(host){
                     return D3DERR_INVALIDCALL;
                 }
                 const table = tableOf(object);
-                host.writeMemory(out >>> 0, words([...pointerWords(table.creatorAt),
+                host.writeMemory(wholeAddress(out), words([...pointerWords(table.creatorAt),
                     table.version, table.constants.length]));
                 return D3D_OK;
             } },
@@ -844,11 +845,11 @@ export function createConstantTableObjects(host){
                 }
                 if ((out >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, words(descOut(constant)));
+                    host.writeMemory(wholeAddress(out), words(descOut(constant)));
                 }
                 if ((countAt >>> 0) !== 0)
                 {
-                    host.writeMemory(countAt >>> 0, dword(1));
+                    host.writeMemory(wholeAddress(countAt), dword(1));
                 }
                 return D3D_OK;
             } },
@@ -1018,7 +1019,7 @@ export function createConstantTableObjects(host){
             object.release();
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(out >>> 0, words(pointerWords(pointer)));
+        host.writeMemory(wholeAddress(out), words(pointerWords(pointer)));
         return D3D_OK;
     };
 
@@ -1039,7 +1040,7 @@ export function createConstantTableObjects(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(POINTER));
+                host.writeMemory(wholeAddress(out), new Uint8Array(POINTER));
                 if (!host.heap || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;

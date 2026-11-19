@@ -33,6 +33,7 @@ import {
     O_U16TEXT, O_U8TEXT, O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf,
     foldUnits, markIn, markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
 } from './widetext.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
 /** The system error a read or write without the access answers. */
@@ -1062,7 +1063,7 @@ export function createIoFunctions(host, descriptors){
      * @param {boolean} wide  Whether the name is UTF-16.
      */
     const openNamed = (path, oflag, wide)=>{
-        const flags = oflag >>> 0;
+        const flags = wholeAddress(oflag);
         const access = flags & O_ACCMODE;
         if ((path >>> 0) === 0 || access === O_ACCMODE)
         {
@@ -1071,7 +1072,7 @@ export function createIoFunctions(host, descriptors){
         }
         return descriptors.open(wide
             ? wideStringAt(host.readMemory, path >>> 0)
-            : host.readCString(path >>> 0, MAX_STRING), {
+            : host.readCString(wholeAddress(path), MAX_STRING), {
             read: access !== O_WRONLY,
             write: access === O_WRONLY || access === O_RDWR,
             create: (flags & O_CREAT) !== 0,
@@ -1122,7 +1123,7 @@ export function createIoFunctions(host, descriptors){
                 view.setUint32(at, time, true);
             }
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -1212,7 +1213,7 @@ export function createIoFunctions(host, descriptors){
             return null;
         }
         const name = (wideName ? wideStringAt(host.readMemory, path >>> 0)
-            : host.readCString(path >>> 0, MAX_STRING)).replace(/ +$/, '');
+            : host.readCString(wholeAddress(path), MAX_STRING)).replace(/ +$/, '');
         return name !== '' && host.files.stat(name) ? name : null;
     };
 
@@ -1234,7 +1235,7 @@ export function createIoFunctions(host, descriptors){
         let stampSeconds = Math.floor((host.systemTimeMs?.() ?? Date.now()) / 1000);
         if ((times >>> 0) !== 0)
         {
-            const view = new DataView(host.readMemory((times >>> 0) + width, width).slice()
+            const view = new DataView(host.readMemory(wholeAddress(times) + width, width).slice()
                 .buffer);
             stampSeconds = width === 8 ? Number(view.getBigInt64(0, true)) : view.getInt32(0, true);
             if (stampSeconds < 0)
@@ -1269,7 +1270,7 @@ export function createIoFunctions(host, descriptors){
             return -1;
         }
         const name = (wideName ? wideStringAt(host.readMemory, path >>> 0)
-            : host.readCString(path >>> 0, MAX_STRING)).replace(/ +$/, '');
+            : host.readCString(wholeAddress(path), MAX_STRING)).replace(/ +$/, '');
         const bare = /^[A-Za-z]:$/.test(name);
         const trailing = /[\\/]$/.test(name) && !/^[A-Za-z]:[\\/]$/.test(name);
         const entry = bare || trailing || name === '' ? null : host.files.stat(name);
@@ -1385,7 +1386,7 @@ export function createIoFunctions(host, descriptors){
             const bytes = new Uint8Array(8);
             new DataView(bytes.buffer).setInt32(0, ends[0], true);
             new DataView(bytes.buffer).setInt32(4, ends[1], true);
-            host.writeMemory(fds >>> 0, bytes);
+            host.writeMemory(wholeAddress(fds), bytes);
             return 0;
         }),
 
@@ -1532,7 +1533,7 @@ export function createIoFunctions(host, descriptors){
                 return settle(descriptors.pull(descriptor, wanted, false), bytes=>{
                     if (bytes.length > 0)
                     {
-                        host.writeMemory(buffer >>> 0, bytes);
+                        host.writeMemory(wholeAddress(buffer), bytes);
                     }
                     return bytes.length;
                 });
@@ -1542,7 +1543,7 @@ export function createIoFunctions(host, descriptors){
             const deliver = (bytes, consumed)=>{
                 if (bytes.length > 0)
                 {
-                    host.writeMemory(buffer >>> 0, bytes);
+                    host.writeMemory(wholeAddress(buffer), bytes);
                 }
                 descriptor.position = start + consumed;
                 return bytes.length;
@@ -1601,7 +1602,7 @@ export function createIoFunctions(host, descriptors){
                 fail(EINVAL);
                 return -1;
             }
-            const bytes = host.readMemory(buffer >>> 0, wanted).slice();
+            const bytes = host.readMemory(wholeAddress(buffer), wanted).slice();
             if (descriptors.put(descriptor, bytes) < wanted)
             {
                 fail(ENOSPC);

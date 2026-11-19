@@ -25,6 +25,7 @@ import { CabinetError, COMPRESSION } from './cabinet.js';
 import { extractCabinet, readCabinetHead } from './stream.js';
 import { createFciFunctions } from './fci.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -93,7 +94,7 @@ export function createCabinetFunctions(host){
     let next = 0x0fd10001;
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
 
     /**
@@ -228,7 +229,7 @@ export function createCabinetFunctions(host){
                         view.setInt32(12, (cabinet.flags & 4) !== 0 ? 1 : 0, true);
                         view.setInt32(16, cabinet.previous !== null ? 1 : 0, true);
                         view.setInt32(20, cabinet.next !== null ? 1 : 0, true);
-                        host.writeMemory(info >>> 0, block);
+                        host.writeMemory(wholeAddress(info), block);
                     }
                     return 1;
                 }
@@ -265,8 +266,8 @@ export function createCabinetFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread();
-                const name = host.readCString(cabinetName >>> 0, WHOLE_NAME);
-                const directory = host.readCString(cabinetPath >>> 0, WHOLE_NAME);
+                const name = host.readCString(wholeAddress(cabinetName), WHOLE_NAME);
+                const directory = host.readCString(wholeAddress(cabinetPath), WHOLE_NAME);
                 const path = guestString(directory + name);
                 /** @param {number} kind @param {(block: Uint8Array) => void} fill */
                 const tell = async(kind, fill)=>{

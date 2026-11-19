@@ -32,6 +32,7 @@
 
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { listResources } from '../../loader/internal/resources.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
@@ -501,8 +502,8 @@ export function createResourceUpdates(host){
         {
             return pointer & 0xffff;
         }
-        const text = wide ? host.readWideString(pointer >>> 0, 0x10000)
-            : host.readCString(pointer >>> 0, 0x8000);
+        const text = wide ? host.readWideString(wholeAddress(pointer), 0x10000)
+            : host.readCString(wholeAddress(pointer), 0x8000);
         return /^#\d+$/.test(text) ? Number(text.slice(1)) & 0xffff : text.toUpperCase();
     };
 
@@ -515,8 +516,8 @@ export function createResourceUpdates(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            const path = host.fullPath(wide ? host.readWideString(name >>> 0, 0x10000)
-                : host.readCString(name >>> 0, 0x8000));
+            const path = host.fullPath(wide ? host.readWideString(wholeAddress(name), 0x10000)
+                : host.readCString(wholeAddress(name), 0x8000));
             /** @param {Uint8Array | null} file */
             const open = file=>{
                 if (file === null)
@@ -568,7 +569,7 @@ export function createResourceUpdates(host){
             if ((data >>> 0) !== 0)
             {
                 kept.push({ ...wanted,
-                    data: host.readMemory(data >>> 0, size >>> 0).slice() });
+                    data: host.readMemory(wholeAddress(data), size >>> 0).slice() });
             }
             state.resources = kept;
             return 1;
@@ -739,7 +740,7 @@ export function createResourceUpdates(host){
                 new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
                 host.writeMemory(address, bytes);
             };
-            const path = host.fullPath(host.readWideString(name >>> 0, 0x10000));
+            const path = host.fullPath(host.readWideString(wholeAddress(name), 0x10000));
             /** @param {Uint8Array | null} file */
             const answer = file=>{
                 if (file === null)
@@ -766,17 +767,17 @@ export function createResourceUpdates(host){
                 const needed = Math.max(FILEMUIINFO_SIZE, FILEMUIINFO_DATA + known.data.length);
                 if ((info >>> 0) === 0)
                 {
-                    write32(sizeAt >>> 0, needed);
+                    write32(wholeAddress(sizeAt), needed);
                     return known.data.length === 0 ? 1 : fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                if (read32((info >>> 0) + 4) !== MUI_FILEINFO_VERSION)
+                if (read32(wholeAddress(info) + 4) !== MUI_FILEINFO_VERSION)
                 {
-                    write32(sizeAt >>> 0, 0);
+                    write32(wholeAddress(sizeAt), 0);
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if (read32(sizeAt >>> 0) < needed)
+                if (read32(wholeAddress(sizeAt)) < needed)
                 {
-                    write32(sizeAt >>> 0, needed);
+                    write32(wholeAddress(sizeAt), needed);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 const out = new Uint8Array(needed - 8);
@@ -788,8 +789,8 @@ export function createResourceUpdates(host){
                 }
                 known.fields.forEach((value, index)=>view.setUint32(36 + index * 4, value, true));
                 out.set(known.data, FILEMUIINFO_DATA - 8);
-                host.writeMemory((info >>> 0) + 8, out);
-                write32(sizeAt >>> 0, needed);
+                host.writeMemory(wholeAddress(info) + 8, out);
+                write32(wholeAddress(sizeAt), needed);
                 return 1;
             };
             const file = readWhole(path);

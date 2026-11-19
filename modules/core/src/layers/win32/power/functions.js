@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * powrprof and pdh — the power-scheme library and the performance-counter
  * library, as a machine answers them that has one power scheme and publishes
@@ -87,8 +89,9 @@ export function createPowrprofFunctions(host){
      */
     const answerBytes = (bytes, buffer, size)=>{
         const room = host.readMemory
-            ? new DataView(host.readMemory(size >>> 0, 4).slice().buffer).getUint32(0, true) : 0;
-        host.writeMemory(size >>> 0, dword(bytes.length));
+            ? new DataView(host.readMemory(wholeAddress(size), 4).slice().buffer).getUint32(0,
+                true) : 0;
+        host.writeMemory(wholeAddress(size), dword(bytes.length));
         if ((buffer >>> 0) === 0)
         {
             return ERROR_SUCCESS;
@@ -97,7 +100,7 @@ export function createPowrprofFunctions(host){
         {
             return ERROR_MORE_DATA;
         }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), bytes);
         return ERROR_SUCCESS;
     };
 
@@ -125,7 +128,7 @@ export function createPowrprofFunctions(host){
                     return ERROR_NOT_ENOUGH_MEMORY;
                 }
                 host.writeMemory(block, BALANCED);
-                host.writeMemory(out >>> 0, dword(block));
+                host.writeMemory(wholeAddress(out), dword(block));
                 return ERROR_SUCCESS;
             },
         },
@@ -205,7 +208,7 @@ export function createPowrprofFunctions(host){
             handler: ([id])=>{
                 if ((id >>> 0) !== 0)
                 {
-                    host.writeMemory(id >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(id), dword(0));
                 }
                 return 1;
             },
@@ -257,7 +260,7 @@ export function createPowrprofFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const asked = host.readMemory(scheme >>> 0, 16);
+                const asked = host.readMemory(wholeAddress(scheme), 16);
                 return asked.every((byte, at)=>byte === BALANCED[at]) ? ERROR_SUCCESS
                     : ERROR_FILE_NOT_FOUND;
             },
@@ -294,7 +297,7 @@ export function createPowrprofFunctions(host){
                     view.setUint32(at + 8, host.mhz, true);
                     view.setUint32(at + 12, host.mhz, true);
                 }
-                host.writeMemory(output >>> 0, bytes);
+                host.writeMemory(wholeAddress(output), bytes);
                 return STATUS_SUCCESS;
             },
         },
@@ -321,7 +324,7 @@ export function createPdhFunctions(host){
             const query = nextQuery;
             nextQuery += 4;
             queries.add(query);
-            host.writeMemory(out >>> 0, dword(query));
+            host.writeMemory(wholeAddress(out), dword(query));
             return ERROR_SUCCESS;
         },
     };

@@ -24,6 +24,7 @@
 
 import { describe } from './describe.js';
 import { IID_IREFERENCE_CLOCK, IREFERENCE_CLOCK_SLOTS } from './interfaces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -84,7 +85,7 @@ export function createSystemClock(host){
                 return E_POINTER;
             }
             const now = Math.floor(host.now());
-            host.writeMemory(out >>> 0, quad(now * TICKS_PER_MS));
+            host.writeMemory(wholeAddress(out), quad(now * TICKS_PER_MS));
             const moved = now !== state.last;
             state.last = now;
             return moved ? S_OK : S_FALSE;
@@ -111,7 +112,7 @@ export function createSystemClock(host){
                 host.setEvent(event >>> 0);
             });
             state.advises.set(cookie, advise);
-            host.writeMemory(out >>> 0, dword(cookie));
+            host.writeMemory(wholeAddress(out), dword(cookie));
             return S_OK;
         },
 
@@ -135,7 +136,7 @@ export function createSystemClock(host){
             const advise = host.at(start / TICKS_PER_MS, Math.max(1, period / TICKS_PER_MS),
                 ()=>host.releaseSemaphore(semaphore >>> 0));
             state.advises.set(cookie, advise);
-            host.writeMemory(out >>> 0, dword(cookie));
+            host.writeMemory(wholeAddress(out), dword(cookie));
             return S_OK;
         },
 

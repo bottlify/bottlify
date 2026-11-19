@@ -23,6 +23,7 @@ import { DIRECTX_RELEASES } from '../advapi32/registry.js';
 import { createComObject } from './objects.js';
 import { ADAPTER_NAME, ADAPTER_RAM } from './wbem.js';
 import { DISPLAY_DEVICE_NAME } from '../devices.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const CLSID_DXDIAG_PROVIDER = '{A65B8071-3BFE-4213-9A5B-491DA4461CA7}';
 export const IID_IDXDIAG_PROVIDER = '{9C6B4CB0-23F8-49CC-A3ED-45A55000A6D2}';
@@ -276,10 +277,10 @@ export function registerDxDiagClasses(host){
         const name = names[index >>> 0];
         if (name === undefined)
         {
-            writeWide(out >>> 0, '');
+            writeWide(wholeAddress(out), '');
             return E_INVALIDARG;
         }
-        writeWide(out >>> 0, name.slice(0, (size >>> 0) - 1));
+        writeWide(wholeAddress(out), name.slice(0, (size >>> 0) - 1));
         return name.length < (size >>> 0) ? S_OK : DXDIAG_E_INSUFFICIENT_BUFFER;
     };
 
@@ -292,7 +293,7 @@ export function registerDxDiagClasses(host){
         {
             return E_INVALIDARG;
         }
-        writeU32(out >>> 0, value);
+        writeU32(wholeAddress(out), value);
         return S_OK;
     };
 
@@ -341,7 +342,7 @@ export function registerDxDiagClasses(host){
                     {
                         return E_INVALIDARG;
                     }
-                    const path = readName(name >>> 0);
+                    const path = readName(wholeAddress(name));
                     /** @type {DxDiagNode | undefined} */
                     let node = nodeOf(object);
                     for (const part of path.split('.'))
@@ -376,7 +377,7 @@ export function registerDxDiagClasses(host){
                     {
                         return E_INVALIDARG;
                     }
-                    const key = readName(name >>> 0);
+                    const key = readName(wholeAddress(name));
                     const property = nodeOf(object).properties.get(key);
                     if (!property)
                     {
@@ -399,7 +400,7 @@ export function registerDxDiagClasses(host){
                     {
                         view.setUint32(8, property.value >>> 0, true);
                     }
-                    host.writeMemory(out >>> 0, variant);
+                    host.writeMemory(wholeAddress(out), variant);
                     return S_OK;
                 } },
         ],
@@ -426,7 +427,7 @@ export function registerDxDiagClasses(host){
                                 return E_POINTER;
                             }
                             const block = new DataView(
-                                host.readMemory(params >>> 0, 8).slice().buffer);
+                                host.readMemory(wholeAddress(params), 8).slice().buffer);
                             if (block.getUint32(0, true) !== INIT_PARAMS_SIZE
                                 || block.getUint32(4, true) !== DXDIAG_DX9_SDK_VERSION)
                             {

@@ -6,7 +6,7 @@
 
 import { Convention, calleeCleanup } from './internal/conventions.js';
 import { createParking } from './internal/parking.js';
-import { createDispatcher } from './internal/dispatch.js';
+import { createDispatcher, unsignedAddress } from './internal/dispatch.js';
 import { createCallbacks } from './internal/callback.js';
 import { driven, isDriven, stepsThroughPromises } from './internal/drive.js';
 import { createVtables } from './internal/vtable.js';
@@ -216,7 +216,7 @@ export function createBridgeModule(){
              * @returns {number | bigint}
              */
             const lateAnswer = (value, zeroExtends)=>(typeof value === 'bigint' ? value
-                : zeroExtends ? BigInt(value >>> 0) : value | 0);
+                : zeroExtends ? BigInt(unsignedAddress(value)) : value | 0);
 
             /**
              * A handler that has not finished: the thread is stopped, and told where

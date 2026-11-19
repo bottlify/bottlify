@@ -12,6 +12,7 @@ import {
     O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, unitsOfText, wideStringAt,
 } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -1028,7 +1029,7 @@ export function createStdioFunctions(host){
             return settle(take(stream, wanted, false), bytes=>{
                 if (bytes.length > 0)
                 {
-                    host.writeMemory(buffer >>> 0, bytes);
+                    host.writeMemory(wholeAddress(buffer), bytes);
                 }
                 if (bytes.length < wanted)
                 {
@@ -1061,7 +1062,7 @@ export function createStdioFunctions(host){
                 fail(EINVAL);
                 return 0;
             }
-            const stored = emit(stream, host.readMemory(buffer >>> 0, wanted).slice());
+            const stored = emit(stream, host.readMemory(wholeAddress(buffer), wanted).slice());
             return Math.floor(stored / (size >>> 0));
         }) },
 
@@ -1111,7 +1112,7 @@ export function createStdioFunctions(host){
             }
             const bytes = new Uint8Array(8);
             new DataView(bytes.buffer).setBigInt64(0, BigInt(tellOf(stream)), true);
-            host.writeMemory(pos >>> 0, bytes);
+            host.writeMemory(wholeAddress(pos), bytes);
             return 0;
         }),
 
@@ -1137,7 +1138,7 @@ export function createStdioFunctions(host){
                 fail(EBADF);
                 return -1;
             }
-            const stored = host.readMemory(pos >>> 0, 8);
+            const stored = host.readMemory(wholeAddress(pos), 8);
             const position = new DataView(stored.buffer, stored.byteOffset, 8).getBigInt64(0, true);
             return reposition(stream, Number(position)) ? 0 : -1;
         }),
@@ -1301,8 +1302,8 @@ export function createStdioFunctions(host){
                 }
                 const line = new Uint8Array(bytes.length + 1);
                 line.set(bytes);
-                host.writeMemory(buffer >>> 0, line);
-                return buffer >>> 0;
+                host.writeMemory(wholeAddress(buffer), line);
+                return wholeAddress(buffer);
             });
         }), returns: 'pointer' },
 
@@ -1429,8 +1430,8 @@ export function createStdioFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, bytesOfUnits([...units, 0]));
-                return buffer >>> 0;
+                host.writeMemory(wholeAddress(buffer), bytesOfUnits([...units, 0]));
+                return wholeAddress(buffer);
             });
         }), returns: 'pointer' },
 

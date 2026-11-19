@@ -29,6 +29,7 @@ import {
     IMEDIA_SAMPLE2_SLOTS, IMEM_ALLOCATOR_SLOTS,
 } from './interfaces.js';
 import { createComObject } from '../ole32/objects.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -207,7 +208,7 @@ export function createMemoryAllocator(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(state.buffer.data));
+            host.writeMemory(wholeAddress(out), dword(state.buffer.data));
             return S_OK;
         },
         /** LONG GetSize(void) */
@@ -222,10 +223,10 @@ export function createMemoryAllocator(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(start >>> 0, quad(state.start));
+            host.writeMemory(wholeAddress(start), quad(state.start));
             // With no stop time the end answered is the start's next tick.
             const stopped = (state.flags & AM_SAMPLE_STOPVALID) !== 0;
-            host.writeMemory(end >>> 0, quad(stopped ? state.stop : state.start + 1));
+            host.writeMemory(wholeAddress(end), quad(stopped ? state.stop : state.start + 1));
             return stopped ? S_OK : VFW_S_NO_STOP_TIME;
         },
         /** HRESULT SetTime(REFERENCE_TIME *pTimeStart, REFERENCE_TIME *pTimeEnd) */
@@ -233,11 +234,11 @@ export function createMemoryAllocator(host){
             state.flags &= ~(AM_SAMPLE_TIMEVALID | AM_SAMPLE_STOPVALID);
             if ((start >>> 0) !== 0)
             {
-                state.start = readQuad(start >>> 0);
+                state.start = readQuad(wholeAddress(start));
                 state.flags |= AM_SAMPLE_TIMEVALID;
                 if ((end >>> 0) !== 0)
                 {
-                    state.stop = readQuad(end >>> 0);
+                    state.stop = readQuad(wholeAddress(end));
                     state.flags |= AM_SAMPLE_STOPVALID;
                 }
             }
@@ -266,10 +267,10 @@ export function createMemoryAllocator(host){
             }
             if (!(state.flags & AM_SAMPLE_TYPECHANGED))
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return S_FALSE;
             }
-            host.writeMemory(out >>> 0, dword(copyMediaType(state.mediaType)));
+            host.writeMemory(wholeAddress(out), dword(copyMediaType(state.mediaType)));
             return S_OK;
         },
         /** HRESULT SetMediaType(AM_MEDIA_TYPE *pMediaType) */
@@ -296,16 +297,16 @@ export function createMemoryAllocator(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(start >>> 0, quad(state.mediaStart));
-            host.writeMemory(end >>> 0, quad(state.mediaStop));
+            host.writeMemory(wholeAddress(start), quad(state.mediaStart));
+            host.writeMemory(wholeAddress(end), quad(state.mediaStop));
             return S_OK;
         },
         /** HRESULT SetMediaTime(LONGLONG *pTimeStart, LONGLONG *pTimeEnd) */
         SetMediaTime: (state, [start, end])=>{
             // Both or neither: one alone leaves the media time unset.
             const both = (start >>> 0) !== 0 && (end >>> 0) !== 0;
-            state.mediaStart = both ? readQuad(start >>> 0) : null;
-            state.mediaStop = both ? readQuad(end >>> 0) : null;
+            state.mediaStart = both ? readQuad(wholeAddress(start)) : null;
+            state.mediaStop = both ? readQuad(wholeAddress(end)) : null;
             return S_OK;
         },
     };
@@ -336,7 +337,8 @@ export function createMemoryAllocator(host){
             view.setUint32(SAMPLE2.MEDIA_TYPE, state.mediaType, true);
             view.setUint32(SAMPLE2.BUFFER, state.buffer.data, true);
             view.setInt32(SAMPLE2.BUFFER_BYTES, state.pool.properties.size, true);
-            host.writeMemory(out >>> 0, props.subarray(0, Math.min(bytes >>> 0, SAMPLE2.BYTES)));
+            host.writeMemory(wholeAddress(out), props.subarray(0, Math.min(bytes >>> 0,
+                SAMPLE2.BYTES)));
             return S_OK;
         },
         /** HRESULT SetProperties(DWORD cbProperties, const BYTE *pbProperties) */
@@ -428,7 +430,7 @@ export function createMemoryAllocator(host){
             view.setInt32(PROPERTIES.SIZE, size, true);
             view.setInt32(PROPERTIES.ALIGN, align, true);
             view.setInt32(PROPERTIES.PREFIX, prefix, true);
-            host.writeMemory(actual >>> 0, answer);
+            host.writeMemory(wholeAddress(actual), answer);
             return S_OK;
         },
         /** HRESULT GetProperties(ALLOCATOR_PROPERTIES *pProps) */
@@ -444,7 +446,7 @@ export function createMemoryAllocator(host){
             view.setInt32(PROPERTIES.SIZE, size, true);
             view.setInt32(PROPERTIES.ALIGN, align, true);
             view.setInt32(PROPERTIES.PREFIX, prefix, true);
-            host.writeMemory(out >>> 0, answer);
+            host.writeMemory(wholeAddress(out), answer);
             return S_OK;
         },
         /** HRESULT Commit(void) */
@@ -492,7 +494,7 @@ export function createMemoryAllocator(host){
             const take = ()=>{
                 if (!pool.committed)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return VFW_E_NOT_COMMITTED;
                 }
                 const buffer = pool.free.shift();
@@ -500,7 +502,7 @@ export function createMemoryAllocator(host){
                 {
                     return null;
                 }
-                host.writeMemory(out >>> 0, dword(handOut(pool, buffer)));
+                host.writeMemory(wholeAddress(out), dword(handOut(pool, buffer)));
                 return S_OK;
             };
             const now = take();
@@ -510,7 +512,7 @@ export function createMemoryAllocator(host){
             }
             if (flags & AM_GBF_NOWAIT)
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return VFW_E_TIMEOUT;
             }
             // Every buffer is out: the caller waits for one to come back.

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The IEnumXXX objects OLE hands out over a list it fixed when asked: the
  * formats a data object offers, a class's verbs, the sinks an advise holder
@@ -84,7 +86,7 @@ function publishOver(env, kind, shared, start, out){
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        env.writeMemory(address >>> 0, bytes);
+        env.writeMemory(wholeAddress(address), bytes);
     };
     const { items } = shared.snapshot;
     let position = start;
@@ -97,7 +99,7 @@ function publishOver(env, kind, shared, start, out){
                     // A NULL count is allowed only for one element, where
                     // the answer alone says whether it came.
                     invoke: async(_self, [celt, rgelt, fetched])=>{
-                        const wanted = celt >>> 0;
+                        const wanted = wholeAddress(celt);
                         if ((rgelt >>> 0) === 0 || ((fetched >>> 0) === 0 && wanted !== 1))
                         {
                             return E_INVALIDARG;

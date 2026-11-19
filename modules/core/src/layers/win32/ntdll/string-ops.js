@@ -21,6 +21,7 @@ import { unitsFromUtf8, utf8FromUnits } from '../kernel32/utf8.js';
 import { formatMessageText } from '../kernel32/format-message.js';
 import { decodeAnsi, decodeOem, downcaseUnit, encodeAnsi, encodeOem, upcaseUnit }
     from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const SOME_NOT_MAPPED = 0x00000107;
 const NOT_FOUND = 0xc0000225;
@@ -119,19 +120,19 @@ export function createStringOperations(host){
 
     /** @param {number} at @returns {number} */
     const readU32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** The characters of a narrow counted string, as bytes. @param {number} at */
     const narrowBytes = at=>{
-        const { length, buffer } = readDescriptor(at >>> 0);
+        const { length, buffer } = readDescriptor(wholeAddress(at));
         return buffer === 0 || length === 0 ? new Uint8Array(0) : host.readMemory(buffer, length);
     };
 
     /** The units of a wide counted string. @param {number} at */
     const wideUnits = at=>{
-        const { length, buffer } = readDescriptor(at >>> 0);
+        const { length, buffer } = readDescriptor(wholeAddress(at));
         return textUnits(wideAt(buffer, length));
     };
 
@@ -171,7 +172,7 @@ export function createStringOperations(host){
      * @param {boolean} terminate
      */
     const copyInto = (destination, bytes, unit, terminate)=>{
-        const to = readDescriptor(destination >>> 0);
+        const to = readDescriptor(wholeAddress(destination));
         const length = Math.min(bytes.length, to.maximumLength) & (unit === 2 ? ~1 : ~0);
         host.writeMemory(to.buffer, bytes.subarray(0, length));
         if (terminate && length + unit <= to.maximumLength)
@@ -195,7 +196,7 @@ export function createStringOperations(host){
         {
             return STATUS.SUCCESS;
         }
-        const to = readDescriptor(destination >>> 0);
+        const to = readDescriptor(wholeAddress(destination));
         const length = to.length + bytes.length;
         if (length > to.maximumLength)
         {
@@ -222,7 +223,7 @@ export function createStringOperations(host){
         handler: ([destination, source, allocate])=>{
             const units = wideUnits(source).map(fold);
             const length = units.length * 2;
-            const to = readDescriptor(destination >>> 0);
+            const to = readDescriptor(wholeAddress(destination));
             let { buffer, maximumLength } = to;
             if (asked(allocate))
             {
@@ -257,16 +258,16 @@ export function createStringOperations(host){
         handler: ([destination, maximum, written, source, length])=>{
             const count = Math.floor((length >>> 0) / unitIn);
             const all = count === 0 ? new Uint8Array(0)
-                : convert(host.readMemory(source >>> 0, count * unitIn));
+                : convert(host.readMemory(wholeAddress(source), count * unitIn));
             const room = Math.floor((maximum >>> 0) / unitOut) * unitOut;
             const kept = all.subarray(0, Math.min(all.length, room));
             if (kept.length > 0)
             {
-                host.writeMemory(destination >>> 0, kept);
+                host.writeMemory(wholeAddress(destination), kept);
             }
             if (written !== 0)
             {
-                host.writeMemory(written >>> 0, u32(kept.length));
+                host.writeMemory(wholeAddress(written), u32(kept.length));
             }
             return STATUS.SUCCESS;
         },
@@ -304,7 +305,7 @@ export function createStringOperations(host){
 
     /** @param {number} address */
     const guidText = address=>{
-        const bytes = host.readMemory(address >>> 0, 16);
+        const bytes = host.readMemory(wholeAddress(address), 16);
         const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
         /** @param {number} value @param {number} width */
         const hex = (value, width)=>value.toString(16).toUpperCase().padStart(width, '0');
@@ -325,7 +326,7 @@ export function createStringOperations(host){
                     writeDescriptor(destination >>> 0, { length: 0, maximumLength: 0, buffer: 0 });
                     return STATUS.SUCCESS;
                 }
-                const text = host.readWideString(source >>> 0, MAX_WIDE_BYTES + 2 * 2);
+                const text = host.readWideString(wholeAddress(source), MAX_WIDE_BYTES + 2 * 2);
                 if (text.length * 2 > MAX_WIDE_BYTES)
                 {
                     return STATUS.NAME_TOO_LONG;
@@ -343,7 +344,7 @@ export function createStringOperations(host){
             handler: ([destination, source])=>{
                 if (source === 0)
                 {
-                    const to = readDescriptor(destination >>> 0);
+                    const to = readDescriptor(wholeAddress(destination));
                     writeDescriptor(destination >>> 0, { ...to, length: 0 });
                     return 0;
                 }
@@ -379,7 +380,8 @@ export function createStringOperations(host){
                 {
                     return STATUS.SUCCESS;
                 }
-                return append(destination, encodeAnsi(host.readCString(source >>> 0, 0x10000)), 1);
+                return append(destination, encodeAnsi(host.readCString(wholeAddress(source),
+                    0x10000)), 1);
             },
         },
 
@@ -393,7 +395,7 @@ export function createStringOperations(host){
                     return STATUS.SUCCESS;
                 }
                 return append(destination,
-                    wideBytes(host.readWideString(source >>> 0, 0x20000)), 2);
+                    wideBytes(host.readWideString(wholeAddress(source), 0x20000)), 2);
             },
         },
 
@@ -425,10 +427,10 @@ export function createStringOperations(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const at = readU32(pointer >>> 0);
+                const at = readU32(wholeAddress(pointer));
                 const unit = decodeAnsi(host.readMemory(at, 1)).charCodeAt(0);
                 const next = at + 1 >>> 0;
-                host.writeMemory(pointer >>> 0,
+                host.writeMemory(wholeAddress(pointer),
                     Uint8Array.of(next & 0xff, next >>> 8 & 0xff, next >>> 16 & 0xff, next >>> 24));
                 return unit;
             },
@@ -500,8 +502,9 @@ export function createStringOperations(host){
             sizes: [1, 3],
             /** @param {number[]} args */
             handler: ([first, firstLength, second, secondLength, insensitive])=>compare(
-                textUnits(unitsText(host.readMemory(first >>> 0, (firstLength >>> 0) * 2))),
-                textUnits(unitsText(host.readMemory(second >>> 0, (secondLength >>> 0) * 2))),
+                textUnits(unitsText(host.readMemory(wholeAddress(first), (firstLength >>> 0) * 2))),
+                textUnits(unitsText(host.readMemory(wholeAddress(second),
+                    (secondLength >>> 0) * 2))),
                 asked(insensitive) ? upcaseUnit : same),
         },
 
@@ -544,7 +547,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const from = readDescriptor(source >>> 0);
+                const from = readDescriptor(wholeAddress(source));
                 if (from.length > from.maximumLength || (from.length & 1) !== 0
                     || (from.buffer === 0 && from.maximumLength !== 0))
                 {
@@ -580,7 +583,7 @@ export function createStringOperations(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([string])=>{
-                const to = readDescriptor(string >>> 0);
+                const to = readDescriptor(wholeAddress(string));
                 if (to.buffer !== 0 && to.maximumLength > 0)
                 {
                     host.writeMemory(to.buffer, new Uint8Array(to.maximumLength));
@@ -612,7 +615,7 @@ export function createStringOperations(host){
                     const folded = asked(insensitive) ? upcaseUnit(unit) : unit;
                     hash = (Math.imul(hash, 65599) + folded) >>> 0;
                 }
-                host.writeMemory(out >>> 0, u32(hash));
+                host.writeMemory(wholeAddress(out), u32(hash));
                 return STATUS.SUCCESS;
             },
         },
@@ -661,7 +664,7 @@ export function createStringOperations(host){
                         }
                     }
                 }
-                host.writeMemory(position >>> 0, Uint8Array.of(found & 0xff, found >> 8));
+                host.writeMemory(wholeAddress(position), Uint8Array.of(found & 0xff, found >> 8));
                 return status;
             },
         },
@@ -671,7 +674,8 @@ export function createStringOperations(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([string, base, out])=>{
-                const value = parseInteger(host.readCString(string >>> 0, 0x10000), base >>> 0);
+                const value = parseInteger(host.readCString(wholeAddress(string), 0x10000),
+                    base >>> 0);
                 if (value === null)
                 {
                     return STATUS.INVALID_PARAMETER;
@@ -680,7 +684,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                host.writeMemory(out >>> 0, u32(value));
+                host.writeMemory(wholeAddress(out), u32(value));
                 return STATUS.SUCCESS;
             },
         },
@@ -690,7 +694,7 @@ export function createStringOperations(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([string, base, out])=>{
-                const { length, buffer } = readDescriptor(string >>> 0);
+                const { length, buffer } = readDescriptor(wholeAddress(string));
                 const value = parseInteger(wideAt(buffer, length), base >>> 0);
                 if (value === null)
                 {
@@ -700,7 +704,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                host.writeMemory(out >>> 0, u32(value));
+                host.writeMemory(wholeAddress(out), u32(value));
                 return STATUS.SUCCESS;
             },
         },
@@ -731,7 +735,8 @@ export function createStringOperations(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                host.writeMemory(out >>> 0, encodeAnsi(text.length < room ? `${text}\0` : text));
+                host.writeMemory(wholeAddress(out),
+                    encodeAnsi(text.length < room ? `${text}\0` : text));
                 return STATUS.SUCCESS;
             },
         },
@@ -751,7 +756,7 @@ export function createStringOperations(host){
                     return STATUS.INVALID_PARAMETER;
                 }
                 const text = (value >>> 0).toString(radix).toUpperCase();
-                const to = readDescriptor(string >>> 0);
+                const to = readDescriptor(wholeAddress(string));
                 if (text.length * 2 >= to.maximumLength)
                 {
                     return STATUS.BUFFER_OVERFLOW;
@@ -767,7 +772,7 @@ export function createStringOperations(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, guid])=>{
-                const { length, buffer } = readDescriptor(string >>> 0);
+                const { length, buffer } = readDescriptor(wholeAddress(string));
                 const match = GUID_TEXT.exec(wideAt(buffer, length));
                 if (!match)
                 {
@@ -783,7 +788,7 @@ export function createStringOperations(host){
                 {
                     bytes[8 + at] = parseInt(tail.slice(at * 2, at * 2 + 2), 16);
                 }
-                host.writeMemory(guid >>> 0, bytes);
+                host.writeMemory(wholeAddress(guid), bytes);
                 return STATUS.SUCCESS;
             },
         },
@@ -837,7 +842,7 @@ export function createStringOperations(host){
                 }
                 const count = Math.floor((length >>> 0) / 2);
                 const units = count === 0 ? []
-                    : textUnits(unitsText(host.readMemory(source >>> 0, count * 2)));
+                    : textUnits(unitsText(host.readMemory(wholeAddress(source), count * 2)));
                 const { bytes, unmapped } = utf8FromUnits(units);
                 return emit(destination, maximum, written, bytes, 1, unmapped);
             },
@@ -860,7 +865,7 @@ export function createStringOperations(host){
                     return STATUS.INVALID_PARAMETER;
                 }
                 const bytes = (length >>> 0) === 0 ? new Uint8Array(0)
-                    : host.readMemory(source >>> 0, length >>> 0);
+                    : host.readMemory(wholeAddress(source), length >>> 0);
                 const { units, unmapped } = unitsFromUtf8(bytes);
                 // A unit at a time: a pair is cut where the buffer ends.
                 return emit(destination, maximum, written,
@@ -883,10 +888,12 @@ export function createStringOperations(host){
             /** @param {number[]} args */
             handler: ([message, width, ignoreInserts, ansi, isArray, list, buffer, size,
                 returned])=>{
-                const format = message === 0 ? '' : host.readWideString(message >>> 0, 0x20000);
+                const format = message === 0 ? '' : host.readWideString(wholeAddress(message),
+                    0x20000);
                 // A va_list is a pointer to the first argument, passed by
                 // address; an array is passed as itself.
-                const slots = list === 0 ? 0 : asked(isArray) ? list >>> 0 : readU32(list >>> 0);
+                const slots = list === 0 ? 0 : asked(isArray) ? list >>> 0
+                    : readU32(wholeAddress(list));
                 const total = Math.floor((size >>> 0) / 2);
                 const room = total - 1;
                 const { text, error, reads, piece } = formatMessageText(format, {
@@ -896,30 +903,30 @@ export function createStringOperations(host){
                     args: list === 0 ? null
                         : { array: asked(isArray), read: slot=>readU32(slots + slot * 4) },
                     readString: (address, wide)=>(address === 0 ? '(null)' : wide
-                        ? host.readWideString(address >>> 0, 0x20000)
-                        : host.readCString(address >>> 0, 0x10000)),
+                        ? host.readWideString(wholeAddress(address), 0x20000)
+                        : host.readCString(wholeAddress(address), 0x10000)),
                     room,
                 });
                 // A va_list is used up as far as it was read, as va_arg leaves it.
                 if (list !== 0 && !asked(isArray) && reads > 0)
                 {
-                    host.writeMemory(list >>> 0, u32(slots + reads * 4));
+                    host.writeMemory(wholeAddress(list), u32(slots + reads * 4));
                 }
                 if (error === 87)
                 {
                     // What was written before the fault stays, unterminated.
-                    host.writeMemory(buffer >>> 0, wideBytes(text.slice(0, total)));
+                    host.writeMemory(wholeAddress(buffer), wideBytes(text.slice(0, total)));
                     return STATUS.INVALID_PARAMETER;
                 }
                 if (error !== 0 || text.length > room)
                 {
-                    host.writeMemory(buffer >>> 0, overflowed(text, piece, total));
+                    host.writeMemory(wholeAddress(buffer), overflowed(text, piece, total));
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                host.writeMemory(buffer >>> 0, wideBytes(`${text}\0`));
+                host.writeMemory(wholeAddress(buffer), wideBytes(`${text}\0`));
                 if (returned !== 0)
                 {
-                    host.writeMemory(returned >>> 0, u32((text.length + 1) * 2));
+                    host.writeMemory(wholeAddress(returned), u32((text.length + 1) * 2));
                 }
                 return STATUS.SUCCESS;
             },
@@ -943,7 +950,7 @@ export function createStringOperations(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, , length])=>{
-                host.writeMemory(out >>> 0, u32((length >>> 0) * 2));
+                host.writeMemory(wholeAddress(out), u32(wholeAddress(length) * 2));
                 return STATUS.SUCCESS;
             },
         },
@@ -953,7 +960,7 @@ export function createStringOperations(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, , length])=>{
-                host.writeMemory(out >>> 0, u32((length >>> 0) >>> 1));
+                host.writeMemory(wholeAddress(out), u32(wholeAddress(length) >>> 1));
                 return STATUS.SUCCESS;
             },
         },
@@ -962,28 +969,28 @@ export function createStringOperations(host){
         RtlAnsiStringToUnicodeSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([string])=>(readDescriptor(string >>> 0).length + 1) * 2,
+            handler: ([string])=>(readDescriptor(wholeAddress(string)).length + 1) * 2,
         },
 
         /** ULONG RtlOemStringToUnicodeSize(PCOEM_STRING) */
         RtlOemStringToUnicodeSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([string])=>(readDescriptor(string >>> 0).length + 1) * 2,
+            handler: ([string])=>(readDescriptor(wholeAddress(string)).length + 1) * 2,
         },
 
         /** ULONG RtlUnicodeStringToAnsiSize(PCUNICODE_STRING): narrowed, with its terminator. */
         RtlUnicodeStringToAnsiSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([string])=>(readDescriptor(string >>> 0).length >>> 1) + 1,
+            handler: ([string])=>(readDescriptor(wholeAddress(string)).length >>> 1) + 1,
         },
 
         /** ULONG RtlUnicodeStringToOemSize(PCUNICODE_STRING) */
         RtlUnicodeStringToOemSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([string])=>(readDescriptor(string >>> 0).length >>> 1) + 1,
+            handler: ([string])=>(readDescriptor(wholeAddress(string)).length >>> 1) + 1,
         },
     };
 
@@ -998,7 +1005,7 @@ export function createStringOperations(host){
         const all = characters.reduce((total, character)=>total + character.length, 0);
         if (destination === 0)
         {
-            host.writeMemory(written >>> 0, u32(all));
+            host.writeMemory(wholeAddress(written), u32(all));
             return unmapped ? SOME_NOT_MAPPED : STATUS.SUCCESS;
         }
         const room = Math.floor((maximum >>> 0) / unit) * unit;
@@ -1014,9 +1021,9 @@ export function createStringOperations(host){
         }
         if (out.length > 0)
         {
-            host.writeMemory(destination >>> 0, Uint8Array.from(out));
+            host.writeMemory(wholeAddress(destination), Uint8Array.from(out));
         }
-        host.writeMemory(written >>> 0, u32(out.length));
+        host.writeMemory(wholeAddress(written), u32(out.length));
         if (out.length < all)
         {
             return STATUS.BUFFER_TOO_SMALL;

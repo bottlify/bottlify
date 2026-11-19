@@ -12,7 +12,7 @@ import { DATA_ORDINALS, createDataStructureFunctions } from './dpa.js';
  * A guest of plain memory, a heap that remembers each block's size, and
  * callbacks that are JavaScript functions at made-up addresses.
  */
-function machine(){
+function machine(pointerSize = 4){
     const memory = new Uint8Array(0x40000);
     const sizes = new Map();
     let next = 0x1000;
@@ -46,6 +46,7 @@ function machine(){
         writeMemory: (at, bytes)=>memory.set(bytes, at),
         kernel32: name=>kernel32[name],
         call: (entry, args)=>/** @type {any} */ (callbacks.get(entry))(...args),
+        ...pointerSize === 8 ? { pointerSize: /** @type {8} */ (8) } : {},
     });
     const run = (/** @type {string} */ name, /** @type {number[]} */ args)=>
         /** @type {any} */ (f)[name].handler(args);
@@ -182,4 +183,24 @@ test('the allocator and the string slots, by number alone', ()=>{
     assert.equal(view.getUint32(slot, true), 0, 'NULL frees the copy');
     assert.equal(DATA_ORDINALS[71], '#71');
     assert.equal(DATA_ORDINALS[328], 'DPA_Create');
+});
+
+test('a 64-bit process\'s DPA and DSA are the x86-64 layout, a pointer past 4 GiB kept whole', ()=>{
+    const { run, view } = machine(8);
+    const dpa = run('DPA_Create', [0]);
+    const far = 0x1_4000_2000;
+    assert.equal(run('DPA_InsertPtr', [dpa, 0, 0x30]), 0);
+    assert.equal(run('DPA_InsertPtr', [dpa, 1, far]), 1);
+    // count, pad, the block at 8, the heap at 16, the room at 24, the growth at 28.
+    assert.equal(view.getInt32(dpa, true), 2);
+    const block = view.getUint32(dpa + 8, true);
+    assert.equal(view.getUint32(dpa + 16, true), 0x77, 'the heap a pointer of its own');
+    assert.equal(view.getInt32(dpa + 28, true), 8, 'the growth after the room');
+    assert.deepEqual([0, 8].map(at=>view.getUint32(block + at, true)
+        + view.getUint32(block + at + 4, true) * 2 ** 32), [0x30, far]);
+    assert.equal(run('DPA_GetPtr', [dpa, 1]), far);
+    assert.equal(run('DPA_GetPtrIndex', [dpa, far]), 1);
+    const dsa = run('DSA_Create', [12, 4]);
+    assert.equal(view.getInt32(dsa + 20, true), 12, 'the item size after the room');
+    assert.equal(view.getInt32(dsa + 24, true), 4, 'and the growth after it');
 });

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The Unicode translations a descriptor can be in: `_O_WTEXT`, `_O_U16TEXT`
  * and `_O_U8TEXT`. In each, the program reads and writes UTF-16 and the file
@@ -251,7 +253,7 @@ const WIDE_STRETCH = 64;
 export function* unitsAt(readMemory, pointer, unit, limit){
     const last = (pointer >>> 0) + Math.max(0, limit) * unit;
     let low = -1;
-    for (let at = pointer >>> 0; at < last;)
+    for (let at = wholeAddress(pointer); at < last;)
     {
         const end = Math.min(at - at % WIDE_STRETCH + WIDE_STRETCH, last);
         for (const byte of readMemory(at, end - at))

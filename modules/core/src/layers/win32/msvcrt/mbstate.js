@@ -17,6 +17,7 @@
 import { EILSEQ, EINVAL, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -50,7 +51,7 @@ export function createRestartableFunctions(host){
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     /** @param {number} address @param {number} value */
@@ -59,12 +60,12 @@ export function createRestartableFunctions(host){
         {
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-            host.writeMemory(address >>> 0, bytes);
+            host.writeMemory(wholeAddress(address), bytes);
         }
     };
 
     /** A narrow string's bytes, each a character of its own value. @param {number} at */
-    const narrowUnits = at=>Array.from(encodeAnsi(host.readCString(at >>> 0, MAX_STRING)));
+    const narrowUnits = at=>Array.from(encodeAnsi(host.readCString(wholeAddress(at), MAX_STRING)));
 
     /** A wide string's units. @param {number} at */
     const wideUnits = at=>Array.from(wideStringAt(host.readMemory, at >>> 0),
@@ -75,7 +76,7 @@ export function createRestartableFunctions(host){
         const bytes = new Uint8Array(units.length * 2);
         const view = new DataView(bytes.buffer);
         units.forEach((unit, index)=>view.setUint16(index * 2, unit, true));
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
 
     /** @param {number} code */
@@ -181,7 +182,7 @@ export function createRestartableFunctions(host){
             {
                 return INCOMPLETE;
             }
-            return host.readMemory(string >>> 0, 1)[0] === 0 ? 0 : 1;
+            return host.readMemory(wholeAddress(string), 1)[0] === 0 ? 0 : 1;
         }) },
 
         /**
@@ -199,7 +200,7 @@ export function createRestartableFunctions(host){
             {
                 return INCOMPLETE;
             }
-            const byte = host.readMemory(string >>> 0, 1)[0];
+            const byte = host.readMemory(wholeAddress(string), 1)[0];
             if ((destination >>> 0) !== 0)
             {
                 writeUnits(destination, [byte]);
@@ -223,7 +224,7 @@ export function createRestartableFunctions(host){
                 host.errno?.(EILSEQ);
                 return FAILED;
             }
-            host.writeMemory(destination >>> 0, Uint8Array.of(c & 0xff));
+            host.writeMemory(wholeAddress(destination), Uint8Array.of(c & 0xff));
             return 1;
         }) },
 
@@ -245,7 +246,7 @@ export function createRestartableFunctions(host){
                     writeU32(length, FAILED);
                     return fail(EINVAL);
                 }
-                host.writeMemory(destination >>> 0, Uint8Array.of(c & 0xff));
+                host.writeMemory(wholeAddress(destination), Uint8Array.of(c & 0xff));
             }
             writeU32(length, 1);
             return 0;
@@ -290,7 +291,7 @@ export function createRestartableFunctions(host){
                 return FAILED;
             }
             return restartable(destination, source, count, units, 2,
-                (at, bytes)=>host.writeMemory(at >>> 0, Uint8Array.from(bytes)));
+                (at, bytes)=>host.writeMemory(wholeAddress(at), Uint8Array.from(bytes)));
         }) },
 
         /**
@@ -372,6 +373,6 @@ export function createRestartableFunctions(host){
             return fail(EINVAL);
         }
         return secure(converted, destination, size, wideUnits(source), count,
-            (at, bytes)=>host.writeMemory(at >>> 0, Uint8Array.from(bytes)), true);
+            (at, bytes)=>host.writeMemory(wholeAddress(at), Uint8Array.from(bytes)), true);
     }
 }

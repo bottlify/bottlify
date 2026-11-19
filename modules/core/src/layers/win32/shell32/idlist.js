@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The item id list functions: an ITEMIDLIST walked by its items' `cb`
  * words, whatever the items hold, as shlobj.h lays one out -- a WORD
@@ -45,7 +47,7 @@ export const IDLIST_ORDINALS = Object.freeze([
 export function createIdListFunctions(host){
     /** @param {number} at */
     const cbAt = at=>{
-        const bytes = host.readMemory(at >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(at), 2);
         return bytes[0] | bytes[1] << 8;
     };
 
@@ -58,7 +60,7 @@ export function createIdListFunctions(host){
     const walk = list=>{
         /** @type {number[]} */
         const items = [];
-        let at = list >>> 0;
+        let at = wholeAddress(list);
         for (let n = 0; at !== 0 && n < MOST_ITEMS; n++)
         {
             const cb = cbAt(at);
@@ -75,7 +77,7 @@ export function createIdListFunctions(host){
     /** @param {number} list  The bytes of a list, its terminator with them. */
     const bytesOf = list=>{
         const { end } = walk(list);
-        return host.readMemory(list >>> 0, end - (list >>> 0) + 2).slice();
+        return host.readMemory(wholeAddress(list), end - (list >>> 0) + 2).slice();
     };
 
     /** @param {Uint8Array} bytes @returns {number} a list holding them, 0 for no memory */
@@ -89,7 +91,7 @@ export function createIdListFunctions(host){
     };
 
     /** @param {number} at  One item's bytes, `cb` and all. */
-    const itemBytes = at=>host.readMemory(at >>> 0, cbAt(at)).slice();
+    const itemBytes = at=>host.readMemory(wholeAddress(at), cbAt(at)).slice();
 
     /** @param {...Uint8Array} parts @returns {Uint8Array} the items, then a terminator */
     const joined = (...parts)=>{

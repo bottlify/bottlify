@@ -41,6 +41,7 @@
 import {
     Disposition, EH_UNWINDING, EXCEPTION_EXECUTE_HANDLER, EXCEPTION_EXIT_UNWIND,
 } from '../kernel32/seh.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The registration frame a scope-table handler pushes. */
 export const SCOPE_FRAME = Object.freeze({
@@ -336,8 +337,8 @@ export function createCrtSeh(host){
         // -- so after the first one the thread on the processor is no longer
         // the one that faulted.
         const asked = host.currentThread?.();
-        const at = frame >>> 0;
-        const flags = readU32((record >>> 0) + 4);
+        const at = wholeAddress(frame);
+        const flags = readU32(wholeAddress(record) + 4);
         const table = scheme.table(at);
         let level = readU32(at + SCOPE_FRAME.TRY_LEVEL);
         // The exception pointers a filter reads through its frame, kept below
@@ -436,7 +437,7 @@ export function createCrtSeh(host){
      */
     const setjmp = (buffer, frame, argumentWords, unwind)=>{
         const registers = host.registers();
-        const at = buffer >>> 0;
+        const at = wholeAddress(buffer);
         const esp = frame ? frame.callerStack + 4 >>> 0 : registers.esp ?? 0;
         writeU32(at + JMP_BUF.EBP, registers.ebp ?? 0);
         writeU32(at + JMP_BUF.EBX, registers.ebx ?? 0);
@@ -477,7 +478,7 @@ export function createCrtSeh(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([buffer])=>{
-            const at = buffer >>> 0;
+            const at = wholeAddress(buffer);
             const asked = host.currentThread?.();
             return localUnwind(readU32(at + JMP_BUF.REGISTRATION),
                 readU32(at + JMP_BUF.TRY_LEVEL), {
@@ -512,7 +513,7 @@ export function createCrtSeh(host){
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: ([cookie, , record, frame, context, dispatcher])=>exceptHandler3(
-                    [record, frame, context, dispatcher], eh4(readU32(cookie >>> 0))),
+                    [record, frame, context, dispatcher], eh4(readU32(wholeAddress(cookie)))),
             },
 
             /**
@@ -622,7 +623,7 @@ export function createCrtSeh(host){
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([buffer, value])=>{
-                    const at = buffer >>> 0;
+                    const at = wholeAddress(buffer);
                     const target = {
                         ebp: readU32(at + JMP_BUF.EBP),
                         ebx: readU32(at + JMP_BUF.EBX),

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The Windows this machine says it is.
  *
@@ -403,7 +405,7 @@ const HIERARCHY = Object.freeze([
  * @returns {'met' | 'not-met' | 'invalid'}
  */
 export function verifyVersion(current, requested, typeMask, conditionMask){
-    const types = typeMask >>> 0;
+    const types = wholeAddress(typeMask);
     const mask = BigInt.asUintN(64, conditionMask);
     // A request that names nothing to compare is refused as a bad argument
     // rather than answered.

@@ -16,6 +16,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a string a program hands these is looked through for its
@@ -66,7 +67,7 @@ export function createWidths(host){
         wide: false,
         unit: 1,
         read: (address, limit = MAX_LENGTH)=>
-            ((address >>> 0) === 0 ? null : host.readCString(address >>> 0, limit)),
+            ((address >>> 0) === 0 ? null : host.readCString(wholeAddress(address), limit)),
         bytes: text=>encodeAnsi(text),
         sz: text=>encodeAnsi(`${text}\0`),
         char: code=>decodeAnsi(Uint8Array.of(code & 0xff)),
@@ -76,7 +77,7 @@ export function createWidths(host){
         wide: true,
         unit: 2,
         read: (address, limit = MAX_LENGTH)=>((address >>> 0) === 0 || !host.readWideString
-            ? null : host.readWideString(address >>> 0, limit)),
+            ? null : host.readWideString(wholeAddress(address), limit)),
         bytes: utf16,
         sz: text=>utf16(`${text}\0`),
         char: code=>String.fromCharCode(code & 0xffff),

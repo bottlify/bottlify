@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * httpapi - the HTTP Server API's configuration store, which a setup writes
  * its URL reservations into (the .NET Framework's ServiceModelReg reserves the
@@ -81,17 +83,17 @@ const textOf = bytes=>{
 /** @param {HttpapiHost} host */
 export function createHttpapiFunctions(host){
     /** @param {number} address */
-    const dword = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const dword = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} pointer */
     const wide = pointer=>((pointer >>> 0) === 0 ? null
-        : host.readWideString(pointer >>> 0, MAX_TEXT_BYTES));
+        : host.readWideString(wholeAddress(pointer), MAX_TEXT_BYTES));
 
     /** The stores this machine takes and keeps nowhere, each said once. */
     const said = new Set();
@@ -288,7 +290,7 @@ export function createHttpapiFunctions(host){
                 {
                     return ERROR_INSUFFICIENT_BUFFER;
                 }
-                const at = output >>> 0;
+                const at = wholeAddress(output);
                 writeDword(at, at + 8);
                 writeDword(at + 4, at + 8 + url.length);
                 host.writeMemory(at + 8, url);

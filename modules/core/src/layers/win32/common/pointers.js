@@ -225,3 +225,61 @@ export const forwarded = (args, index, signed = false)=>{
     return (high >>> 0) === said ? (signed ? low | 0 : low >>> 0)
         : BigInt(high >>> 0) << 32n | BigInt(low >>> 0);
 };
+
+/**
+ * Declares on each function of the libraries the dwords of its arguments that
+ * hold an address (`addresses`, the bridge's `readLongCall`), where it does not
+ * declare them itself: a 64-bit caller's address is then handed to the handler
+ * whole, not as its low dword, which past 4 GiB names another place. The
+ * places are the signature comment's (`table`, `pointer-arguments.js`); a C++
+ * member's `this`, the first dword of a thiscall, is one too. A place the
+ * function's own layout gives another meaning - half of a quadword, a float,
+ * a structure passed by value - or one past its arguments is left out.
+ *
+ * In a 32-bit process, and in a 64-bit one whose addresses stay below 4 GiB,
+ * nothing a handler is handed changes: the bridge joins only a high half that
+ * names an address past 4 GiB.
+ *
+ * @param {Record<string, Record<string, any>>} libraries
+ * @param {Readonly<Record<string, readonly number[]>>} table
+ */
+export function declareAddresses(libraries, table){
+    /** @type {Set<object>} */
+    const seen = new Set();
+    for (const exports of Object.values(libraries))
+    {
+        for (const [name, spec] of Object.entries(exports ?? {}))
+        {
+            if (!spec || typeof spec !== 'object' || seen.has(spec))
+            {
+                continue;
+            }
+            seen.add(spec);
+            if (spec.addresses !== undefined || typeof spec.handler !== 'function'
+                || spec.hook || spec.site || spec.invoke)
+            {
+                continue;
+            }
+            const listed = spec.convention === 'thiscall' ? [0]
+                : Object.hasOwn(table, name) ? table[name] : null;
+            if (!listed)
+            {
+                continue;
+            }
+            const words = (spec.argBytes ?? 0) >>> 2;
+            /** @type {number[]} */
+            const quadwords = spec.quadwords ?? [];
+            /** @type {Record<number, unknown>} */
+            const floats = spec.floats ?? {};
+            const structs = Object.entries(spec.structs ?? {});
+            const places = listed.filter(at=>at < words && !quadwords.includes(at)
+                && !quadwords.includes(at - 1) && floats[at] === undefined
+                && !structs.some(([from, size])=>at >= Number(from)
+                    && at < Number(from) + Number(size)));
+            if (places.length > 0)
+            {
+                spec.addresses = places;
+            }
+        }
+    }
+}

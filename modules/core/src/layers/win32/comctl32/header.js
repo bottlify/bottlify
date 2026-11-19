@@ -27,6 +27,7 @@ import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 import {
     EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_REORDER, CHILDID_SELF, raiseEvent,
 } from './winevents.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const HEADER_CLASS = 'SysHeader32';
@@ -155,13 +156,13 @@ const DT_END_ELLIPSIS = 0x8000;
 export function createHeaderProcedure(host, tk){
     /** @param {number} at */
     const read32 = at=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number} value */
     const write32 = (at, value)=>{
         const v = value >>> 0;
-        host.writeMemory(at >>> 0,
+        host.writeMemory(wholeAddress(at),
             Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
 
@@ -724,7 +725,7 @@ export function createHeaderProcedure(host, tk){
                     ()=>1);
             }
             case HDM.SETIMAGELIST: {
-                const which = wParam >>> 0;
+                const which = wholeAddress(wParam);
                 if (which > 2)
                 {
                     return 0;

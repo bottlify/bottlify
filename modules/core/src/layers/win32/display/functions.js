@@ -16,6 +16,7 @@
  */
 
 import { processAwareness, setProcessAwareness } from '../user32/dpi.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 
@@ -101,7 +102,7 @@ export function createShcoreFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, dword(processAwareness(host.dpi)));
+                host.writeMemory(wholeAddress(out), dword(processAwareness(host.dpi)));
                 return S_OK;
             },
         },
@@ -118,8 +119,8 @@ export function createShcoreFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(x >>> 0, dword(STANDARD_DPI));
-                host.writeMemory(y >>> 0, dword(STANDARD_DPI));
+                host.writeMemory(wholeAddress(x), dword(STANDARD_DPI));
+                host.writeMemory(wholeAddress(y), dword(STANDARD_DPI));
                 return S_OK;
             },
         },
@@ -133,7 +134,7 @@ export function createShcoreFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, dword(100));
+                host.writeMemory(wholeAddress(out), dword(100));
                 return S_OK;
             },
         },
@@ -162,7 +163,7 @@ export function createDwmapiFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, dword(1));
+                host.writeMemory(wholeAddress(out), dword(1));
                 return S_OK;
             },
         },
@@ -178,7 +179,7 @@ export function createDwmapiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hwnd, attribute, out, size])=>{
-                const which = attribute >>> 0;
+                const which = wholeAddress(attribute);
                 if ((out >>> 0) === 0 || which === 0 || which > DWMWA_LAST)
                 {
                     return E_INVALIDARG;
@@ -197,7 +198,7 @@ export function createDwmapiFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, kept);
+                host.writeMemory(wholeAddress(out), kept);
                 return S_OK;
             },
         },
@@ -213,7 +214,7 @@ export function createDwmapiFunctions(host){
                     return E_INVALIDARG;
                 }
                 set.set(`${hwnd >>> 0}:${attribute >>> 0}`,
-                    host.readMemory(value >>> 0, Math.min(size >>> 0, 64)).slice());
+                    host.readMemory(wholeAddress(value), Math.min(size >>> 0, 64)).slice());
                 return S_OK;
             },
         },
@@ -246,7 +247,7 @@ export function createDwmapiFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, info])=>{
                 if ((hwnd >>> 0) !== 0 || (info >>> 0) === 0
-                    || new DataView(host.readMemory(info >>> 0, 4).slice().buffer)
+                    || new DataView(host.readMemory(wholeAddress(info), 4).slice().buffer)
                         .getUint32(0, true) !== DWM_TIMING_INFO_SIZE)
                 {
                     return E_INVALIDARG;
@@ -268,7 +269,7 @@ export function createDwmapiFunctions(host){
                 view.setBigUint64(TIMING.REFRESH, refreshes, true);
                 view.setBigUint64(TIMING.COMPOSE, vblank, true);
                 view.setBigUint64(TIMING.FRAME, refreshes, true);
-                host.writeMemory(info >>> 0, bytes);
+                host.writeMemory(wholeAddress(info), bytes);
                 return S_OK;
             },
         },
@@ -353,8 +354,8 @@ export function createSessionInformationFunctions(host){
                 return 0;
             }
             host.writeMemory(block, bytes);
-            host.writeMemory(out >>> 0, dword(block));
-            host.writeMemory(returned >>> 0, dword(bytes.length));
+            host.writeMemory(wholeAddress(out), dword(block));
+            host.writeMemory(wholeAddress(returned), dword(bytes.length));
             return 1;
         },
     });
@@ -395,8 +396,8 @@ export function createSessionInformationFunctions(host){
                 host.writeMemory(text, names[at]);
                 text += names[at].length;
             });
-            host.writeMemory(out >>> 0, dword(block));
-            host.writeMemory(count >>> 0, dword(sessions.length));
+            host.writeMemory(wholeAddress(out), dword(block));
+            host.writeMemory(wholeAddress(count), dword(sessions.length));
             return 1;
         },
     });

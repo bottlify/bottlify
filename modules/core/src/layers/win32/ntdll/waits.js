@@ -5,6 +5,7 @@
  */
 
 import { STATUS } from './status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The native waits, over kernel32's.
@@ -80,7 +81,7 @@ export function createWaitFunctions(host){
         {
             return INFINITE;
         }
-        const value = new DataView(host.readMemory(pointer >>> 0, 8).buffer)
+        const value = new DataView(host.readMemory(wholeAddress(pointer), 8).buffer)
             .getBigInt64(0, true);
         const ticks = value < 0n ? -value : value - BigInt(systemTime());
         if (ticks <= 0n)
@@ -143,7 +144,7 @@ export function createWaitFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
+                const view = new DataView(host.readMemory(wholeAddress(handles), total * 4).buffer);
                 for (let at = 0; at < total; at++)
                 {
                     if (standard(view.getUint32(at * 4, true)))

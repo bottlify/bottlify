@@ -21,6 +21,7 @@
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { createAes } from '../crypto/aes.js';
 import { createMd4, createMd5, createSha1, createSha256 } from '../crypto/digest.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_SUCCESS = 0;
 const STATUS_INVALID_HANDLE = 0xc0000008 | 0;
@@ -157,7 +158,7 @@ export function createBcryptFunctions(host){
         {
             return STATUS_INVALID_PARAMETER;
         }
-        const length = inputLength >>> 0;
+        const length = wholeAddress(inputLength);
         const padded = (flags & BCRYPT_BLOCK_PADDING) !== 0;
         const cbc = held.chaining === 'ChainingModeCBC';
         const chained = cbc && (iv >>> 0) !== 0;
@@ -173,20 +174,20 @@ export function createBcryptFunctions(host){
             ? (Math.floor(length / AES_BLOCK) + 1) * AES_BLOCK : length;
         if ((output >>> 0) === 0)
         {
-            putU32(result >>> 0, needed);
+            putU32(wholeAddress(result), needed);
             return STATUS_SUCCESS;
         }
         const data = new Uint8Array(needed);
         if (length > 0)
         {
-            data.set(host.readMemory(input >>> 0, length));
+            data.set(host.readMemory(wholeAddress(input), length));
         }
         if (encrypting && padded)
         {
             data.fill(needed - length, length);
         }
         /** @type {Uint8Array} */
-        let chain = chained ? host.readMemory(iv >>> 0, AES_BLOCK).slice()
+        let chain = chained ? host.readMemory(wholeAddress(iv), AES_BLOCK).slice()
             : new Uint8Array(AES_BLOCK);
         const out = new Uint8Array(needed);
         for (let at = 0; at < needed; at += AES_BLOCK)
@@ -217,15 +218,15 @@ export function createBcryptFunctions(host){
             }
             size = needed - pad;
         }
-        putU32(result >>> 0, size);
+        putU32(wholeAddress(result), size);
         if ((room >>> 0) < size)
         {
             return STATUS_BUFFER_TOO_SMALL;
         }
-        host.writeMemory(output >>> 0, out.subarray(0, size));
+        host.writeMemory(wholeAddress(output), out.subarray(0, size));
         if (chained)
         {
-            host.writeMemory(iv >>> 0, chain);
+            host.writeMemory(wholeAddress(iv), chain);
         }
         return STATUS_SUCCESS;
     };
@@ -250,7 +251,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                host.writeMemory(enabled >>> 0, new Uint8Array(1));
+                host.writeMemory(wholeAddress(enabled), new Uint8Array(1));
                 return STATUS_SUCCESS;
             },
         },
@@ -280,7 +281,7 @@ export function createBcryptFunctions(host){
                 const made = handle();
                 algorithms.set(made, { name, hmac,
                     ...cipher ? { chaining: 'ChainingModeCBC' } : {} });
-                putU32(out >>> 0, made);
+                putU32(wholeAddress(out), made);
                 return STATUS_SUCCESS;
             },
         },
@@ -341,7 +342,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
-                putU32(result >>> 0, value.length);
+                putU32(wholeAddress(result), value.length);
                 if ((output >>> 0) === 0)
                 {
                     return STATUS_SUCCESS;
@@ -350,7 +351,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
-                host.writeMemory(output >>> 0, value);
+                host.writeMemory(wholeAddress(output), value);
                 return STATUS_SUCCESS;
             },
         },
@@ -384,7 +385,7 @@ export function createBcryptFunctions(host){
                 {
                     /** @type {Uint8Array} */
                     let key = (secretLength >>> 0) === 0 ? new Uint8Array(0)
-                        : host.readMemory(secret >>> 0, secretLength >>> 0).slice();
+                        : host.readMemory(wholeAddress(secret), secretLength >>> 0).slice();
                     if (key.length > HASH_BLOCK)
                     {
                         const long = digestOf(opened.name);
@@ -398,7 +399,7 @@ export function createBcryptFunctions(host){
                 }
                 const made = handle();
                 hashes.set(made, { algorithm: opened.name, digest, outer, finished: false });
-                putU32(out >>> 0, made);
+                putU32(wholeAddress(out), made);
                 return STATUS_SUCCESS;
             },
         },
@@ -418,7 +419,7 @@ export function createBcryptFunctions(host){
                 }
                 if ((length >>> 0) > 0)
                 {
-                    held.digest.update(host.readMemory(input >>> 0, length >>> 0).slice());
+                    held.digest.update(host.readMemory(wholeAddress(input), length >>> 0).slice());
                 }
                 return STATUS_SUCCESS;
             },
@@ -452,7 +453,7 @@ export function createBcryptFunctions(host){
                     outer.update(value);
                     value = outer.digest();
                 }
-                host.writeMemory(output >>> 0, value);
+                host.writeMemory(wholeAddress(output), value);
                 held.finished = true;
                 return STATUS_SUCCESS;
             },
@@ -481,7 +482,7 @@ export function createBcryptFunctions(host){
                 const made = handle();
                 hashes.set(made, { ...held, digest: held.digest.clone(),
                     outer: held.outer?.slice() ?? null });
-                putU32(out >>> 0, made);
+                putU32(wholeAddress(out), made);
                 return STATUS_SUCCESS;
             },
         },
@@ -510,7 +511,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
-                const mode = charactersOf(host.readMemory(input >>> 0, length >>> 0), 2)
+                const mode = charactersOf(host.readMemory(wholeAddress(input), length >>> 0), 2)
                     .split('\0')[0];
                 if (!CHAINING_MODES.has(mode))
                 {
@@ -538,17 +539,17 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                const length = secretLength >>> 0;
+                const length = wholeAddress(secretLength);
                 if ((out >>> 0) === 0 || (secret >>> 0) === 0
                     || (length !== 16 && length !== 24 && length !== 32))
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const secretBytes = host.readMemory(secret >>> 0, length).slice();
+                const secretBytes = host.readMemory(wholeAddress(secret), length).slice();
                 const made = handle();
                 keys.set(made, { secret: secretBytes, aes: createAes(secretBytes),
                     chaining: opened.chaining });
-                putU32(out >>> 0, made);
+                putU32(wholeAddress(out), made);
                 return STATUS_SUCCESS;
             },
         },
@@ -572,7 +573,7 @@ export function createBcryptFunctions(host){
                 }
                 const made = handle();
                 keys.set(made, { ...held });
-                putU32(out >>> 0, made);
+                putU32(wholeAddress(out), made);
                 return STATUS_SUCCESS;
             },
         },
@@ -621,12 +622,12 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_NOT_SUPPORTED;
                 }
-                const length = inputLength >>> 0;
+                const length = wholeAddress(inputLength);
                 if (length < KEY_DATA_BLOB_HEADER)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                const blob = host.readMemory(input >>> 0, length).slice();
+                const blob = host.readMemory(wholeAddress(input), length).slice();
                 const view = new DataView(blob.buffer);
                 const size = view.getUint32(8, true);
                 if (view.getUint32(0, true) !== KEY_DATA_BLOB_MAGIC || view.getUint32(4, true) !== 1
@@ -638,7 +639,7 @@ export function createBcryptFunctions(host){
                 const made = handle();
                 keys.set(made, { secret: secretBytes, aes: createAes(secretBytes),
                     chaining: opened.chaining });
-                putU32(out >>> 0, made);
+                putU32(wholeAddress(out), made);
                 return STATUS_SUCCESS;
             },
         },
@@ -673,7 +674,7 @@ export function createBcryptFunctions(host){
                 view.setUint32(4, 1, true);
                 view.setUint32(8, held.secret.length, true);
                 blob.set(held.secret, KEY_DATA_BLOB_HEADER);
-                putU32(result >>> 0, blob.length);
+                putU32(wholeAddress(result), blob.length);
                 if ((output >>> 0) === 0)
                 {
                     return STATUS_SUCCESS;
@@ -682,7 +683,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
-                host.writeMemory(output >>> 0, blob);
+                host.writeMemory(wholeAddress(output), blob);
                 return STATUS_SUCCESS;
             },
         },
@@ -751,7 +752,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_SUCCESS;
                 }
-                host.writeMemory(buffer >>> 0, randomBytes(count >>> 0));
+                host.writeMemory(wholeAddress(buffer), randomBytes(count >>> 0));
                 return STATUS_SUCCESS;
             },
         },
@@ -775,7 +776,7 @@ export function createBcryptPrimitivesFunctions(host){
             handler: ([buffer, count])=>{
                 if ((count >>> 0) > 0)
                 {
-                    host.writeMemory(buffer >>> 0, randomBytes(count >>> 0));
+                    host.writeMemory(wholeAddress(buffer), randomBytes(count >>> 0));
                 }
                 return 1;
             },

@@ -23,6 +23,7 @@ import { signerInfoBlock } from './signer-info.js';
 import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { derElement, oidContents, readGeneralNames } from '../crypto/x509.js';
 import { NAME_STR, stringToName } from './names.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_DATA = 13;
@@ -259,8 +260,8 @@ export function createEncodingFunctions(host){
                 return fail(ERROR_INVALID_PARAMETER);
             }
             const limit = (count >>> 0) === 0 ? 0x100000 : count >>> 0;
-            const read = wide ? host.readWideString(pointer >>> 0, limit * 2)
-                : host.readCString(pointer >>> 0, limit);
+            const read = wide ? host.readWideString(wholeAddress(pointer), limit * 2)
+                : host.readCString(wholeAddress(pointer), limit);
             const text = (count >>> 0) === 0 ? read : read.slice(0, count >>> 0);
             const found = stringToBinary(text, flags & 0xffff);
             if (!found)
@@ -290,7 +291,7 @@ export function createEncodingFunctions(host){
                 return fail(ERROR_INVALID_PARAMETER);
             }
             const bytes = (length >>> 0) === 0 ? new Uint8Array(0)
-                : host.readMemory(pointer >>> 0, length >>> 0).slice();
+                : host.readMemory(wholeAddress(pointer), length >>> 0).slice();
             const text = binaryToString(bytes, flags >>> 0);
             if (text === null)
             {
@@ -321,7 +322,7 @@ export function createEncodingFunctions(host){
                     encoded[i] = text.charCodeAt(i) & 0xff;
                 }
             }
-            host.writeMemory(out >>> 0, encoded);
+            host.writeMemory(wholeAddress(out), encoded);
             setDword(size >>> 0, text.length);
             return 1;
         },
@@ -346,7 +347,7 @@ export function createEncodingFunctions(host){
             }
             const key = (scope & (CRYPTPROTECTMEMORY_CROSS_PROCESS | CRYPTPROTECTMEMORY_SAME_LOGON))
                 !== 0 ? machineKey : processKey;
-            const bytes = host.readMemory(pointer >>> 0, length >>> 0).slice();
+            const bytes = host.readMemory(wholeAddress(pointer), length >>> 0).slice();
             for (let block = 0; block * 32 < bytes.length; block++)
             {
                 const digest = createSha256();
@@ -359,17 +360,17 @@ export function createEncodingFunctions(host){
                     bytes[block * 32 + i] ^= stream[i];
                 }
             }
-            host.writeMemory(pointer >>> 0, bytes);
+            host.writeMemory(wholeAddress(pointer), bytes);
             return 1;
         },
     });
 
     /** An LPCSTR struct type for a report. @param {number} pointer */
     const structName = pointer=>((pointer >>> 0) < 0x10000 ? String(pointer >>> 0)
-        : host.readCString(pointer >>> 0, 128));
+        : host.readCString(wholeAddress(pointer), 128));
     /** The struct type an LPCSTR names, or -1. @param {number} pointer */
     const structOf = pointer=>((pointer >>> 0) < 0x10000 ? pointer >>> 0
-        : STRUCT_OIDS.get(host.readCString(pointer >>> 0, 128)) ?? -1);
+        : STRUCT_OIDS.get(host.readCString(wholeAddress(pointer), 128)) ?? -1);
 
     /**
      * Lays out a decoded structure: `build` is given a writer of trailing
@@ -559,8 +560,8 @@ export function createEncodingFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            const string = wide ? host.readWideString(text >>> 0, 0x10000)
-                : host.readCString(text >>> 0, 0x8000);
+            const string = wide ? host.readWideString(wholeAddress(text), 0x10000)
+                : host.readCString(wholeAddress(text), 0x8000);
             const kind = (type >>> 0) & 0xffff;
             if (kind !== NAME_STR.X500 && kind !== NAME_STR.OID && kind !== NAME_STR.SIMPLE
                 && kind !== 0)
@@ -612,7 +613,7 @@ export function createEncodingFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const name = host.readWideString(algorithm >>> 0, 64 * 2).toUpperCase();
+                const name = host.readWideString(wholeAddress(algorithm), 64 * 2).toUpperCase();
                 const make = { SHA1: createSha1, SHA256: createSha256, MD5: createMd5 }[name];
                 if (!make)
                 {
@@ -621,7 +622,7 @@ export function createEncodingFunctions(host){
                 const digest = make();
                 if ((length >>> 0) > 0)
                 {
-                    digest.update(host.readMemory(pointer >>> 0, length >>> 0));
+                    digest.update(host.readMemory(wholeAddress(pointer), length >>> 0));
                 }
                 return answerBytes(digest.digest(), out >>> 0, size >>> 0);
             },
@@ -655,7 +656,8 @@ export function createEncodingFunctions(host){
                 try
                 {
                     build = type < 0 ? null
-                        : decode(type, host.readMemory(pointer >>> 0, length >>> 0).slice());
+                        : decode(type, host.readMemory(wholeAddress(pointer),
+                            length >>> 0).slice());
                 }
                 catch (e){
                     if (!(e instanceof DerError))
@@ -692,7 +694,7 @@ export function createEncodingFunctions(host){
                     setDword(size >>> 0, size0);
                     return fail(ERROR_MORE_DATA);
                 }
-                host.writeMemory(out >>> 0, build(out >>> 0));
+                host.writeMemory(wholeAddress(out), build(out >>> 0));
                 setDword(size >>> 0, size0);
                 return 1;
             },
@@ -785,7 +787,7 @@ export function createEncodingFunctions(host){
                 {
                     return fail(NTE_BAD_ALGID);
                 }
-                const at = info >>> 0;
+                const at = wholeAddress(info);
                 const oid = host.readCString(dword(at), 128);
                 const parameters = dword(at + 4) === 0 ? derElement(TAG.NULL)
                     : host.readMemory(dword(at + 8), dword(at + 4)).slice();

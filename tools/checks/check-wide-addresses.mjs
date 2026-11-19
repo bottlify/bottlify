@@ -60,7 +60,7 @@ import { isMain } from '../lib/common.mjs';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
 import { checkReturns, pointersOf } from './check-wide-arguments.mjs';
-import { longAnswer, zeroExtendsOf } from '../../modules/core/src/layers/bridge/internal/dispatch.js';
+import { longAnswer, wholeAddresses, zeroExtendsOf } from '../../modules/core/src/layers/bridge/internal/dispatch.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const LAYERS = join(ROOT, 'modules', 'core', 'src', 'layers');
@@ -261,6 +261,20 @@ export function signatures(){
     const typed = new Map();
     /** @type {Map<string, string | null>} */
     const places = new Map();
+    /**
+     * The other spelling of a name a comment gives one of (`PathIsUNCA` over a
+     * maker of both, `CreateFile` over CreateFileA and CreateFileW): taken
+     * where no comment of its own names it.
+     *
+     * @type {Map<string, string | null>}
+     */
+    const spelled = new Map();
+    /** @param {Map<string, string | null>} into @param {string} name @param {string | null} list */
+    const agree = (into, name, list)=>into.set(name,
+        into.has(name) && into.get(name) !== list ? null : list);
+    /** @param {string} name @returns {string | null} */
+    const otherSpelling = name=>(/^\w{3,}[AW]$/.test(name)
+        ? `${name.slice(0, -1)}${name.endsWith('A') ? 'W' : 'A'}` : null);
     /** @param {string} dir */
     const walk = dir=>{
         for (const name of readdirSync(dir))
@@ -272,21 +286,38 @@ export function signatures(){
             }
             else if (name.endsWith('.js') && !/\.(i?test|fixture|x86|x64)\.js$/.test(name))
             {
-                for (const one of checkReturns(readFileSync(path, 'utf8')))
+                for (const one of checkReturns(readFileSync(path, 'utf8'), { exported: true }))
                 {
                     const list = one.params == null ? null
                         : pointersOf(one.params, { addresses: true }).join(',');
-                    for (const each of one.key ? [one.name, one.key] : [one.name])
+                    const named = one.key ? [one.name, one.key] : [one.name];
+                    for (const each of named)
                     {
                         typed.set(each, (typed.get(each) ?? false) || one.pointer);
-                        places.set(each, places.has(each) && places.get(each) !== list
-                            ? null : list);
+                        agree(places, each, list);
+                        const other = otherSpelling(each);
+                        if (other)
+                        {
+                            agree(spelled, other, list);
+                        }
+                    }
+                    if (one.key && one.key.startsWith(one.name)
+                        && /^[AW]$/.test(one.key.slice(one.name.length)))
+                    {
+                        agree(spelled, `${one.name}${one.key.endsWith('A') ? 'W' : 'A'}`, list);
                     }
                 }
             }
         }
     };
     walk(join(ROOT, 'modules', 'core', 'src', 'layers'));
+    for (const [name, list] of spelled)
+    {
+        if (!places.has(name))
+        {
+            places.set(name, list);
+        }
+    }
     return {
         values: new Set([...typed].filter(([, pointer])=>!pointer).map(([name])=>name)),
         pointers: new Map([...places].filter(([, list])=>list !== null)
@@ -582,10 +613,17 @@ export async function compare(low, high, only = null, rebuild = null){
                 const highBefore = Uint8Array.from(hi.window);
                 const mine = lo.libraries[library]?.[name];
                 const theirs = hi.libraries[library]?.[name];
+                // The arguments as the bridge hands them: each the function
+                // declares an address (`addresses`) whole past 4 GiB.
+                const whole = mine?.addresses ?? mine?.[ORIGINAL_EXPORT]?.addresses ?? null;
+                const bridged = (/** @type {any[]} */ args)=>{
+                    wholeAddresses(whole, args, args.high);
+                    return args;
+                };
                 const a = await outcome((mine?.[ORIGINAL_EXPORT] ?? mine).handler,
-                    argumentsAt(shape, lo.base));
+                    bridged(argumentsAt(shape, lo.base)));
                 const b = await outcome((theirs?.[ORIGINAL_EXPORT] ?? theirs).handler,
-                    argumentsAt(shape, hi.base));
+                    bridged(argumentsAt(shape, hi.base)));
                 const key = `${library}!${name}`;
                 if (a.threw === STAND_IN || b.threw === STAND_IN)
                 {

@@ -26,6 +26,7 @@ import { STATUS } from './status.js';
 import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
 import { RTL_THREAD_ERROR_MODES } from '../kernel32/error-mode.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
 const OSVERSIONINFOW_SIZE = 276;
@@ -616,7 +617,7 @@ export function createQueryFunctions(host){
         const block = host.processBlock?.() ?? 0;
         if (block !== 0)
         {
-            return block >>> 0;
+            return wholeAddress(block);
         }
         const teb = host.teb() >>> 0;
         return teb === 0 ? 0 : readU32(teb + TEB.PEB);
@@ -786,7 +787,7 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const wanted = address >>> 0;
+                const wanted = wholeAddress(address);
                 for (const entry of loadOrder(readU32, block, layout))
                 {
                     const base = readU32(entry + ENTRY.DLL_BASE);
@@ -815,7 +816,7 @@ export function createQueryFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const at = pointer >>> 0;
+                const at = wholeAddress(pointer);
                 const declared = readU32(at + OSVERSIONINFO.SIZE_FIELD);
                 if (declared !== OSVERSIONINFOW_SIZE && declared !== OSVERSIONINFOEXW_SIZE)
                 {
@@ -881,7 +882,7 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.UNSUCCESSFUL;
                 }
-                const at = pointer >>> 0;
+                const at = wholeAddress(pointer);
                 const extended = host.readMemory(at + OSVERSIONINFO.SERVICE_PACK_MAJOR, 8)
                     .slice();
                 const fields = new DataView(extended.buffer);
@@ -934,7 +935,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(buffer >>> 0, chain);
+                    host.writeMemory(wholeAddress(buffer), chain);
                     return STATUS.SUCCESS;
                 }
                 const extended = (infoClass >>> 0) === SYSTEM_EXTENDED_HANDLE_INFORMATION;
@@ -954,7 +955,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.ACCESS_VIOLATION;
                     }
-                    host.writeMemory(buffer >>> 0, table);
+                    host.writeMemory(wholeAddress(buffer), table);
                     return STATUS.SUCCESS;
                 }
                 const other = host.systemClasses?.[infoClass >>> 0];
@@ -978,7 +979,7 @@ export function createQueryFunctions(host){
                     const written = other.partial ? bytes.subarray(0, given) : bytes;
                     if (written.length > 0)
                     {
-                        host.writeMemory(buffer >>> 0, written);
+                        host.writeMemory(wholeAddress(buffer), written);
                     }
                     writeU32If(returnLength >>> 0, written.length);
                     return STATUS.SUCCESS;
@@ -1022,7 +1023,7 @@ export function createQueryFunctions(host){
                 // The machine's processors, whatever the process is narrowed to.
                 view.setUint32(SYSTEM_BASIC.ACTIVE_PROCESSORS, processors.systemMask(), true);
                 view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, processors.count());
-                host.writeMemory(buffer >>> 0, struct);
+                host.writeMemory(wholeAddress(buffer), struct);
                 return STATUS.SUCCESS;
             },
         },
@@ -1070,7 +1071,7 @@ export function createQueryFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, infoClass, buffer, length, returnLength])=>{
-                const wanted = infoClass >>> 0;
+                const wanted = wholeAddress(infoClass);
                 // No handle names no process. Windows checks the class, then a
                 // fixed-size class's length, then the handle (Wine's info.c
                 // 1860, 2115, test_query_process_image_file_name).
@@ -1125,7 +1126,7 @@ export function createQueryFunctions(host){
                     // process that started it; 0 where none did.
                     view.setUint32(PROCESS_BASIC.PARENT_PROCESS_ID,
                         (host.processes?.()[0]?.parent ?? 0) >>> 0, true);
-                    host.writeMemory(buffer >>> 0, struct);
+                    host.writeMemory(wholeAddress(buffer), struct);
                     return STATUS.SUCCESS;
                 }
                 if (wanted === PROCESS_DEBUG_PORT || wanted === PROCESS_EXECUTE_FLAGS)
@@ -1151,7 +1152,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(buffer >>> 0, information);
+                    host.writeMemory(wholeAddress(buffer), information);
                     writeU32If(returnLength >>> 0, SECTION_IMAGE_INFORMATION_SIZE);
                     return STATUS.SUCCESS;
                 }
@@ -1247,10 +1248,10 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(buffer >>> 0, types);
+                    host.writeMemory(wholeAddress(buffer), types);
                     return STATUS.SUCCESS;
                 }
-                const named = handle >>> 0;
+                const named = wholeAddress(handle);
                 if (named !== CURRENT_PROCESS && named !== CURRENT_THREAD
                     && (host.handleType?.(named) ?? null) === null)
                 {
@@ -1273,7 +1274,7 @@ export function createQueryFunctions(host){
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    host.writeMemory(buffer >>> 0, struct);
+                    host.writeMemory(wholeAddress(buffer), struct);
                     return STATUS.SUCCESS;
                 }
                 if ((infoClass >>> 0) === OBJECT_NAME_INFORMATION && host.objectName)
@@ -1298,7 +1299,7 @@ export function createQueryFunctions(host){
                 view.setUint32(OBJECT_BASIC.GRANTED_ACCESS, granted ?? ALL_ACCESS, true);
                 view.setUint32(OBJECT_BASIC.HANDLE_COUNT, 1, true);
                 view.setUint32(OBJECT_BASIC.POINTER_COUNT, 1, true);
-                host.writeMemory(buffer >>> 0, struct);
+                host.writeMemory(wholeAddress(buffer), struct);
                 host.divergence?.('NtQueryObject',
                     'handle and reference counts are not kept; one handle answered');
                 return STATUS.SUCCESS;

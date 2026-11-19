@@ -23,6 +23,7 @@
 
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The last errors DeleteFile and RemoveDirectory leave. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -458,7 +459,7 @@ export function createPathFunctions(host){
      */
     const readWide = pointer=>{
         let text = '';
-        for (let at = pointer >>> 0; text.length < MAX_STRING; at += 2)
+        for (let at = wholeAddress(pointer); text.length < MAX_STRING; at += 2)
         {
             const unit = host.readMemory?.(at, 2) ?? new Uint8Array(2);
             const code = unit[0] | unit[1] << 8;
@@ -514,7 +515,7 @@ export function createPathFunctions(host){
         {
             bytes.set(encodeAnsi(name), layout.NAME);
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -1053,7 +1054,7 @@ export function createPathFunctions(host){
                     name = next();
                 }
                 tmpnamCount++;
-                let at = buffer >>> 0;
+                let at = wholeAddress(buffer);
                 if (at === 0)
                 {
                     tmpnamBuffer ||= host.allocate(TMPNAM_BUFFER);

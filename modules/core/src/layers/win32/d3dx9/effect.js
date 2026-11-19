@@ -51,6 +51,7 @@ import { FX_2_0, readCompiledEffect } from './effect-binary.js';
 import { COMPILED as SETTERS_IN_GUEST } from './effect-setters.x86.js';
 import { COMPILED as SETTERS_LONG } from './effect-setters.x64.js';
 import { COMPILED as COMMIT_IN_GUEST } from './effect-commit.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('./effect-model.js').EffectModel} EffectModel */
 /** @typedef {import('./effect-model.js').ParamModel} ParamModel */
@@ -937,7 +938,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} count */
     const words = (at, count)=>{
-        const bytes = host.readMemory(at >>> 0, count * 4);
+        const bytes = host.readMemory(wholeAddress(at), count * 4);
         // One copy of the words in place of a call a word: every value an
         // effect is set comes through here, bone palettes of hundreds of words
         // among them, many times a frame. The guest's words are little-endian
@@ -1239,7 +1240,7 @@ export function createEffects(host, helpers, options = {}){
                     putU32s(out, unpackColor(wordsOf(p)[0]).map(floatBits));
                     return D3D_OK;
                 }
-                host.writeMemory(out >>> 0, vectorBytes(p, 0));
+                host.writeMemory(wholeAddress(out), vectorBytes(p, 0));
                 return D3D_OK;
             } },
             /** HRESULT SetVectorArray(D3DXHANDLE, CONST D3DXVECTOR4 *, UINT Count) */
@@ -1421,7 +1422,7 @@ export function createEffects(host, helpers, options = {}){
                 if (p && (out >>> 0) !== 0 && !p.model.elements && transpose
                     && (p.model.cls === PC.SCALAR || p.model.cls === PC.VECTOR))
                 {
-                    host.writeMemory(out >>> 0, matrixBytes(p, 0, false));
+                    host.writeMemory(wholeAddress(out), matrixBytes(p, 0, false));
                     return D3D_OK;
                 }
                 return p && (out >>> 0) !== 0 && !p.model.elements && isMatrix(p)
@@ -4476,7 +4477,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} size */
     const bytesAt = (at, size)=>((at >>> 0) === 0 ? null
-        : host.readMemory(at >>> 0, size >>> 0).slice());
+        : host.readMemory(wholeAddress(at), size >>> 0).slice());
 
     const exports = {
         /**

@@ -24,6 +24,7 @@
  */
 
 import { createSteamObjects } from './objects.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} SteamAccount
@@ -136,7 +137,7 @@ export function createSteamclientFunctions(host){
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {string} text @param {number} room  Bytes, the NUL among them. */
     const writeString = (address, text, room)=>{
@@ -145,7 +146,7 @@ export function createSteamclientFunctions(host){
             return;
         }
         const bytes = new TextEncoder().encode(text).subarray(0, room - 1);
-        host.writeMemory(address >>> 0, Uint8Array.of(...bytes, 0));
+        host.writeMemory(wholeAddress(address), Uint8Array.of(...bytes, 0));
     };
 
     /** Strings the client hands out, which stay put for as long as the run. */
@@ -213,7 +214,7 @@ export function createSteamclientFunctions(host){
         {
             return 0;
         }
-        host.writeMemory(buffer >>> 0, ticket);
+        host.writeMemory(wholeAddress(buffer), ticket);
         return ticket.length;
     };
     /** @type {number} the CallbackMsg_t and data last handed out, until freed */
@@ -248,7 +249,7 @@ export function createSteamclientFunctions(host){
     const writeBool = (at, value)=>{
         if ((at >>> 0) !== 0)
         {
-            host.writeMemory(at >>> 0, Uint8Array.of(value ? 1 : 0));
+            host.writeMemory(wholeAddress(at), Uint8Array.of(value ? 1 : 0));
         }
     };
     /**
@@ -263,7 +264,7 @@ export function createSteamclientFunctions(host){
             && (out >>> 0) !== 0;
         if (ok)
         {
-            host.writeMemory(out >>> 0, result.data);
+            host.writeMemory(wholeAddress(out), result.data);
         }
         writeBool(failed, !ok);
         return ok ? 1 : 0;
@@ -278,12 +279,12 @@ export function createSteamclientFunctions(host){
      *
      * @param {number} name
      */
-    const remotePath = name=>`${remoteFolder()}\\${host.readCString(name >>> 0, MAX_PATH)
+    const remotePath = name=>`${remoteFolder()}\\${host.readCString(wholeAddress(name), MAX_PATH)
         .replace(/\//g, '\\')}`;
     const remoteFiles = ()=>host.files?.list(remoteFolder()) ?? [];
     /** @param {number} name */
     const remoteEntry = name=>{
-        const wanted = host.readCString(name >>> 0, MAX_PATH).replace(/\\/g, '/').toLowerCase();
+        const wanted = host.readCString(wholeAddress(name), MAX_PATH).replace(/\\/g, '/').toLowerCase();
         return remoteFiles().find(entry=>entry.name.toLowerCase() === wanted) ?? null;
     };
 
@@ -354,7 +355,7 @@ export function createSteamclientFunctions(host){
             {
                 const id = new Uint8Array(8);
                 new DataView(id.buffer).setBigUint64(0, steamId, true);
-                host.writeMemory(out >>> 0, id);
+                host.writeMemory(wholeAddress(out), id);
             }
             return 1;
         },
@@ -385,7 +386,7 @@ export function createSteamclientFunctions(host){
                 return 0;
             }
             const signed = new DataView(ticket.buffer, ticket.byteOffset, 4).getUint32(0, true);
-            host.writeMemory(buffer >>> 0, ticket);
+            host.writeMemory(wholeAddress(buffer), ticket);
             for (const [out, value] of /** @type {const} */ ([[appAt, 16], [steamIdAt, 8],
                 [signatureAt, signed], [signatureSize, ticket.length - signed]]))
             {
@@ -461,7 +462,7 @@ export function createSteamclientFunctions(host){
         GetAchievement: ([, achieved])=>{
             if ((achieved >>> 0) !== 0)
             {
-                host.writeMemory(achieved >>> 0, Uint8Array.of(0));
+                host.writeMemory(wholeAddress(achieved), Uint8Array.of(0));
             }
             return 1;
         },
@@ -480,7 +481,7 @@ export function createSteamclientFunctions(host){
             {
                 return 0;
             }
-            return host.files.write(remotePath(name), host.readMemory(data >>> 0, size | 0))
+            return host.files.write(remotePath(name), host.readMemory(wholeAddress(data), size | 0))
                 ? 1 : 0;
         },
         FileRead: ([name, data, size])=>{
@@ -495,7 +496,7 @@ export function createSteamclientFunctions(host){
                     return 0;
                 }
                 const read = bytes.subarray(0, Math.min(bytes.length, size | 0));
-                host.writeMemory(data >>> 0, read);
+                host.writeMemory(wholeAddress(data), read);
                 return read.length;
             };
             const bytes = host.files?.read(remotePath(name));
@@ -529,7 +530,7 @@ export function createSteamclientFunctions(host){
                 {
                     const bytes = new Uint8Array(wide ? 8 : 4);
                     new DataView(bytes.buffer).setUint32(0, value, true);
-                    host.writeMemory(at >>> 0, bytes);
+                    host.writeMemory(wholeAddress(at), bytes);
                 }
             }
             return 1;
@@ -583,13 +584,13 @@ export function createSteamclientFunctions(host){
          * The return code is 0 for an interface there is, 1 for none.
          */
         CreateInterface: { ...cdecl(8, ([name, code])=>{
-            const version = host.readCString(name >>> 0, 128);
+            const version = host.readCString(wholeAddress(name), 128);
             const object = account ? objects.objectFor(version) : 0;
             host.log?.(`CreateInterface ${version}: ${object === 0 ? 'none'
                 : `0x${object.toString(16)}`}`);
             if ((code >>> 0) !== 0)
             {
-                writeDword(code >>> 0, object === 0 ? 1 : 0);
+                writeDword(wholeAddress(code), object === 0 ? 1 : 0);
             }
             return object;
         }), returns: 'pointer' },
@@ -615,7 +616,7 @@ export function createSteamclientFunctions(host){
             view.setInt32(4, next.id, true);
             view.setUint32(8, message, true);
             view.setInt32(layout.sizeAt, next.data.length, true);
-            host.writeMemory(out >>> 0, record);
+            host.writeMemory(wholeAddress(out), record);
             return 1;
         }),
         /** void Steam_FreeLastCallback(HSteamPipe) */

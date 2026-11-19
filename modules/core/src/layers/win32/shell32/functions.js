@@ -51,7 +51,7 @@ import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import { urlOfShortcut } from './internet-shortcut.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -449,7 +449,7 @@ export function createShellFunctions(host){
         }
         try
         {
-            return host.readCString(address >>> 0, WHOLE_NAME);
+            return host.readCString(wholeAddress(address), WHOLE_NAME);
         }
         catch (e){
             void e;
@@ -545,7 +545,7 @@ export function createShellFunctions(host){
         // Each name read a window at a time, so a list at the end of what the
         // program allocated is not read past; one cut short by the end of the
         // list's room or of memory is no name.
-        for (let at = address >>> 0, read = 0; read < MAX_LIST;)
+        for (let at = wholeAddress(address), read = 0; read < MAX_LIST;)
         {
             const { bytes, terminated } = readToTerminator(scanned, at, unit, MAX_LIST - read);
             if (!terminated || bytes.length === 0)
@@ -591,7 +591,7 @@ export function createShellFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [operation])=>{
-            const at = operation >>> 0;
+            const at = wholeAddress(operation);
             if (at === 0)
             {
                 return ERROR_INVALID_PARAMETER;
@@ -1129,7 +1129,7 @@ export function createShellFunctions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [info])=>{
-            const at = info >>> 0;
+            const at = wholeAddress(info);
             if (at === 0)
             {
                 return 0;
@@ -1354,7 +1354,7 @@ export function createShellFunctions(host){
                 at += (arg.length + 1) * 2;
             });
             host.writeMemory(block, bytes);
-            host.writeMemory(count >>> 0, dword(args.length));
+            host.writeMemory(wholeAddress(count), dword(args.length));
             return block;
         },
     };
@@ -1504,7 +1504,7 @@ export function createShellFunctions(host){
             {
                 return 0;
             }
-            const held = host.readMemory(indexAt >>> 0, 2);
+            const held = host.readMemory(wholeAddress(indexAt), 2);
             const index = held[0] | held[1] << 8;
             return after(readFileIcons(volume, path, index), found=>{
                 if (!found.picture || !host.icon)
@@ -1517,7 +1517,7 @@ export function createShellFunctions(host){
                 if ((idAt >>> 0) !== 0)
                 {
                     const id = found.id ?? 0;
-                    host.writeMemory(idAt >>> 0, Uint8Array.of(id & 0xff, id >>> 8 & 0xff));
+                    host.writeMemory(wholeAddress(idAt), Uint8Array.of(id & 0xff, id >>> 8 & 0xff));
                 }
                 return host.icon(found.picture);
             });
@@ -1559,7 +1559,7 @@ export function createShellFunctions(host){
             {
                 view.setUint32(0, /^[A-Za-z]:\\$/.test(path) ? SHDID_COMPUTER_FIXED
                     : entry.isDirectory ? SHDID_FS_DIRECTORY : SHDID_FS_FILE, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return S_OK;
             }
             view.setUint32(WIN32_FIND_DATAA.dwFileAttributes, fileAttributes(entry), true);
@@ -1583,7 +1583,7 @@ export function createShellFunctions(host){
             {
                 bytes.set(encodeAnsi(name), WIN32_FIND_DATAA.cFileName);
             }
-            host.writeMemory(out >>> 0, bytes);
+            host.writeMemory(wholeAddress(out), bytes);
             return S_OK;
         },
     });
@@ -1701,7 +1701,7 @@ export function createShellFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const head = host.readMemory(info >>> 0, 4);
+                const head = host.readMemory(wholeAddress(info), 4);
                 const size = (head[0] | head[1] << 8 | head[2] << 16 | head[3] << 24) >>> 0;
                 if (size !== 20 && size !== 32)
                 {
@@ -1717,7 +1717,7 @@ export function createShellFunctions(host){
                     fields.setUint32(20, (2900 << 16 | 5512) >>> 0, true);
                     fields.setUint32(24, 6 << 16, true);
                 }
-                host.writeMemory((info >>> 0) + 4, new Uint8Array(fields.buffer));
+                host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
                 return S_OK;
             },
         },
@@ -1733,7 +1733,7 @@ export function createShellFunctions(host){
             /** @param {number[]} args */
             handler: ([, path, csidl])=>{
                 const folder = folderOf(csidl | 0);
-                writePath(path >>> 0, folder ?? '');
+                writePath(wholeAddress(path), folder ?? '');
                 return folder === null ? 0 : 1;
             },
         },
@@ -1744,7 +1744,7 @@ export function createShellFunctions(host){
             /** @param {number[]} args */
             handler: ([, path, csidl])=>{
                 const folder = folderOf(csidl | 0);
-                writeWidePath(path >>> 0, folder ?? '');
+                writeWidePath(wholeAddress(path), folder ?? '');
                 return folder === null ? 0 : 1;
             },
         },
@@ -1761,7 +1761,7 @@ export function createShellFunctions(host){
             /** @param {number[]} args */
             handler: ([, csidl, , , path])=>{
                 const folder = folderOf(csidl | 0);
-                writePath(path >>> 0, folder ?? '');
+                writePath(wholeAddress(path), folder ?? '');
                 return folder === null ? E_INVALIDARG : S_OK;
             },
         },
@@ -1772,7 +1772,7 @@ export function createShellFunctions(host){
             /** @param {number[]} args */
             handler: ([, csidl, , , path])=>{
                 const folder = folderOf(csidl | 0);
-                writeWidePath(path >>> 0, folder ?? '');
+                writeWidePath(wholeAddress(path), folder ?? '');
                 return folder === null ? E_INVALIDARG : S_OK;
             },
         },
@@ -1806,7 +1806,7 @@ export function createShellFunctions(host){
                     return E_INVALIDARG;
                 }
                 const pointer = host.taskAllocator?.pointer() ?? 0;
-                host.writeMemory(out >>> 0, dword(pointer));
+                host.writeMemory(wholeAddress(out), dword(pointer));
                 return pointer === 0 ? E_NOTIMPL : S_OK;
             },
         },
@@ -1958,12 +1958,12 @@ export function createShellFunctions(host){
                     : virtual === CSIDL_CONTROLS ? CONTROL_PANEL : folderOf(csidl | 0);
                 if (folder === null)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return E_INVALIDARG;
                 }
                 // The desktop is the namespace's root: the empty list.
                 const list = virtual === CSIDL_DESKTOP ? emptyList() : listFor(folder);
-                host.writeMemory(out >>> 0, dword(list));
+                host.writeMemory(wholeAddress(out), dword(list));
                 return list === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
@@ -1989,7 +1989,7 @@ export function createShellFunctions(host){
                 {
                     return namespace.desktop(out >>> 0);
                 }
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 host.divergence?.('SHGetDesktopFolder',
                     'no shell namespace: reports E_FAIL with a null interface');
                 return E_FAIL;
@@ -2084,11 +2084,12 @@ export function createShellFunctions(host){
                 const read = host.readMemory;
                 if (!host.drive || !read)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return E_NOTIMPL;
                 }
                 /** @param {number} at */
-                const u32 = at=>new DataView(read(at >>> 0, 4).slice().buffer).getUint32(0, true);
+                const u32 = at=>new DataView(read(wholeAddress(at),
+                    4).slice().buffer).getUint32(0, true);
                 // IShellFolder::BindToObject is its fifth method after IUnknown's three.
                 const entry = u32(u32(folder) + 5 * 4);
                 return host.drive((function* (){
@@ -2115,13 +2116,13 @@ export function createShellFunctions(host){
             handler: ([list, riid, out, last])=>{
                 if ((last >>> 0) !== 0)
                 {
-                    host.writeMemory(last >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(last), dword(0));
                 }
                 if ((out >>> 0) === 0 || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 if ((list >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -2134,7 +2135,7 @@ export function createShellFunctions(host){
                 const bound = namespace.parent(list >>> 0, riid >>> 0, out >>> 0);
                 if (bound.hr === S_OK && (last >>> 0) !== 0)
                 {
-                    host.writeMemory(last >>> 0, dword(bound.last));
+                    host.writeMemory(wholeAddress(last), dword(bound.last));
                 }
                 return bound.hr;
             },
@@ -2169,7 +2170,7 @@ export function createShellFunctions(host){
                 }
                 if ((reserved >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return E_INVALIDARG;
                 }
                 return table.SHGetSpecialFolderLocation.handler([window, csidl, out]);

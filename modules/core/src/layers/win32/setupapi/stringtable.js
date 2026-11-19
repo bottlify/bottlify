@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * setupapi's string tables: a set of strings, each found by its id, with a
  * few bytes of data a caller keeps beside it.
@@ -57,13 +59,13 @@ export function createStringTableFunctions(host){
     const tables = new Map();
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {string} text */
@@ -124,7 +126,8 @@ export function createStringTableFunctions(host){
         const length = Math.min(size >>> 0, readU32(table + TABLE.EXTRA));
         if ((buffer >>> 0) !== 0 && length > 0)
         {
-            host.writeMemory(buffer >>> 0, host.readMemory(extraAt(table, entry), length).slice());
+            host.writeMemory(wholeAddress(buffer), host.readMemory(extraAt(table, entry),
+                length).slice());
         }
     };
 
@@ -145,7 +148,7 @@ export function createStringTableFunctions(host){
         {
             return 0xffffffff;
         }
-        const text = host.readWideString(pointer >>> 0, 0x10000);
+        const text = host.readWideString(wholeAddress(pointer), 0x10000);
         const found = find(table >>> 0, text, flags);
         if (found)
         {
@@ -175,8 +178,9 @@ export function createStringTableFunctions(host){
         entry.set(wide(text), 4);
         if ((extra >>> 0) !== 0 && maxExtra > 0)
         {
-            entry.set(host.readMemory(extra >>> 0, Math.min(extraSize >>> 0, maxExtra)).slice(),
-                4 + (text.length + 1) * 2);
+            entry.set(host.readMemory(wholeAddress(extra), Math.min(extraSize >>> 0,
+                maxExtra)).slice(),
+            4 + (text.length + 1) * 2);
         }
         host.writeMemory(data + next, entry);
         writeU32(table + TABLE.NEXT, next + entrySize);
@@ -245,7 +249,7 @@ export function createStringTableFunctions(host){
             {
                 return 0xffffffff;
             }
-            return find(table >>> 0, host.readWideString(text >>> 0, 0x10000), flags)?.id
+            return find(table >>> 0, host.readWideString(wholeAddress(text), 0x10000), flags)?.id
                 ?? 0xffffffff;
         }),
 
@@ -261,7 +265,8 @@ export function createStringTableFunctions(host){
             {
                 return 0xffffffff;
             }
-            const entry = find(table >>> 0, host.readWideString(text >>> 0, 0x10000), flags);
+            const entry = find(table >>> 0, host.readWideString(wholeAddress(text), 0x10000),
+                flags);
             if (!entry)
             {
                 return 0xffffffff;
@@ -303,7 +308,7 @@ export function createStringTableFunctions(host){
                 return 0;
             }
             host.writeMemory(extraAt(table >>> 0, entry),
-                host.readMemory(extra >>> 0, size >>> 0).slice());
+                host.readMemory(wholeAddress(extra), size >>> 0).slice());
             return 1;
         }),
     };

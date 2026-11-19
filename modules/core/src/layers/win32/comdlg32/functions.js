@@ -34,6 +34,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -336,7 +337,7 @@ export function createCommonDialogFunctions(host){
 
     /** @param {number} address */
     const cancelled = address=>{
-        const size = u32(host.readMemory(address >>> 0, 4), OFN_STRUCT_SIZE);
+        const size = u32(host.readMemory(wholeAddress(address), 4), OFN_STRUCT_SIZE);
         extendedError = OPENFILENAME_SIZES.includes(size) ? 0 : CDERR_STRUCTSIZE;
         return 0;
     };
@@ -364,7 +365,7 @@ export function createCommonDialogFunctions(host){
             /** @param {number[]} args */
             handler: ([file, title, size])=>getFileTitle(
                 !host.readCString || (file >>> 0) === 0 ? null
-                    : host.readCString(file >>> 0, WHOLE_NAME), title, size, false),
+                    : host.readCString(wholeAddress(file), WHOLE_NAME), title, size, false),
         },
 
         /** short GetFileTitleW(LPCWSTR lpszFile, LPWSTR lpszTitle, WORD cchSize): the same, wide. */

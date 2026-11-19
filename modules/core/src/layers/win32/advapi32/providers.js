@@ -16,6 +16,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ } from './registry.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
@@ -128,14 +129,14 @@ export function createProviderRegistry(host){
     };
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {string} name @param {boolean} wide @returns {Uint8Array} */
     const encode = (name, wide)=>(wide
@@ -145,10 +146,10 @@ export function createProviderRegistry(host){
     const readName = (address, wide)=>{
         if (!wide)
         {
-            return host.readCString(address >>> 0, MAX_NAME);
+            return host.readCString(wholeAddress(address), MAX_NAME);
         }
         let name = '';
-        for (let at = address >>> 0; name.length < MAX_NAME; at += 2)
+        for (let at = wholeAddress(address); name.length < MAX_NAME; at += 2)
         {
             const unit = host.readMemory(at, 2);
             const code = unit[0] | unit[1] << 8;
@@ -180,7 +181,7 @@ export function createProviderRegistry(host){
         {
             return fail(ERROR_MORE_DATA);
         }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), bytes);
         return 1;
     };
 

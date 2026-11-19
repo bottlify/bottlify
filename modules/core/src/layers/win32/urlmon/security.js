@@ -16,6 +16,7 @@
  */
 
 import { canonicalUrl } from './monikers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -67,14 +68,15 @@ export function createSecurityManager(host){
     const writeU32 = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, new Uint8Array(new Uint32Array([value >>> 0]).buffer));
+            host.writeMemory(wholeAddress(address),
+                new Uint8Array(new Uint32Array([value >>> 0]).buffer));
         }
     };
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address */
-    const urlAt = address=>host.readWideString(address >>> 0, 0x8000);
+    const urlAt = address=>host.readWideString(wholeAddress(address), 0x8000);
     const said = new Set();
     /** @param {string} api @param {string} what */
     const sayOnce = (api, what)=>{
@@ -121,7 +123,7 @@ export function createSecurityManager(host){
                     {
                         return E_NOT_SUFFICIENT_BUFFER;
                     }
-                    host.writeMemory(out >>> 0, id);
+                    host.writeMemory(wholeAddress(out), id);
                     return S_OK;
                 } },
                 { name: 'ProcessUrlAction', argBytes: 36,

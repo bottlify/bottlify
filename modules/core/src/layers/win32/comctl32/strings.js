@@ -11,6 +11,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** What a control keeps of one text. */
 export const MAX_TEXT = 1024;
@@ -29,10 +30,10 @@ export const LPSTR_TEXTCALLBACK = 0xffffffff;
 export function readText(host, address, wide, max = MAX_TEXT){
     if (!wide)
     {
-        return host.readCString(address >>> 0, max);
+        return host.readCString(wholeAddress(address), max);
     }
     let text = '';
-    for (let at = address >>> 0; text.length < max; at += 32)
+    for (let at = wholeAddress(address); text.length < max; at += 32)
     {
         const bytes = host.readMemory(at, 32);
         for (let i = 0; i < 32; i += 2)
@@ -68,7 +69,7 @@ export function writeText(host, address, text, wide, room){
         const fit = bytes.subarray(0, room - 1);
         const out = new Uint8Array(fit.length + 1);
         out.set(fit);
-        host.writeMemory(address >>> 0, out);
+        host.writeMemory(wholeAddress(address), out);
         return fit.length;
     }
     const bytes = new Uint8Array((clipped.length + 1) * 2);
@@ -77,6 +78,6 @@ export function writeText(host, address, text, wide, room){
         bytes[i * 2] = clipped.charCodeAt(i) & 0xff;
         bytes[i * 2 + 1] = clipped.charCodeAt(i) >>> 8;
     }
-    host.writeMemory(address >>> 0, bytes);
+    host.writeMemory(wholeAddress(address), bytes);
     return clipped.length;
 }

@@ -14,7 +14,7 @@
  */
 
 import { INTERFACES } from './interfaces.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} SteamObjectsHost
@@ -53,7 +53,7 @@ export function createSteamObjects(host, behaviours){
     const writeQword = (address, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**

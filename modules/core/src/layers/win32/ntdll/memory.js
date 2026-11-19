@@ -7,6 +7,7 @@
 import { STATUS } from './status.js';
 import { RELEASE_PART, memoryBasicInformation } from '../kernel32/heap.js';
 import { VIRTUAL_MEMORY } from '../kernel32/process-memory.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The native virtual-memory calls, over kernel32's.
@@ -115,7 +116,7 @@ export function createMemoryFunctions(host){
     };
 
     /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const read32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /**
      * A PVOID or SIZE_T out-parameter, as wide as the process's: its high
@@ -126,7 +127,7 @@ export function createMemoryFunctions(host){
     const write32 = (address, value)=>{
         const bytes = new Uint8Array(pointer);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** Where a region's MEMORY_BASIC_INFORMATION is read into, once given. */
@@ -177,7 +178,7 @@ export function createMemoryFunctions(host){
                 view.setUint16(2, characters.length + 2, true);
                 view.setUint32(4, (buffer + UNICODE_STRING_SIZE) >>> 0, true);
                 answer.set(characters, UNICODE_STRING_SIZE);
-                host.writeMemory(buffer >>> 0, answer);
+                host.writeMemory(wholeAddress(buffer), answer);
                 return STATUS.SUCCESS;
             });
     };

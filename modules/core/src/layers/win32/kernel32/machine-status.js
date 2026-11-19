@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * SMSW in its register form, answered where the processor reported it invalid.
  *
@@ -82,7 +84,7 @@ const PRIVILEGED_0F = new Set([0x06, 0x08, 0x09, 0x20, 0x21, 0x22, 0x23, 0x30, 0
  * @returns {boolean}
  */
 export function privilegedAt(read, eip){
-    const bytes = read(eip >>> 0, 16);
+    const bytes = read(wholeAddress(eip), 16);
     let at = 0;
     while (at < 14 && PREFIXES.has(bytes[at]))
     {

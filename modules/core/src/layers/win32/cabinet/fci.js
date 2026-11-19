@@ -26,6 +26,7 @@
 
 import { cabinetChecksum, COMPRESSION } from './cabinet.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** FCIERR values an ERF's erfOper carries. */
 export const FCIERR = Object.freeze({
@@ -212,13 +213,13 @@ export function createFciFunctions(host){
     let next = 0x0fc10001;
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** @param {number} address */
-    const readU16 = address=>new DataView(host.readMemory(address >>> 0, 2).slice().buffer)
+    const readU16 = address=>new DataView(host.readMemory(wholeAddress(address), 2).slice().buffer)
         .getUint16(0, true);
 
     /**
@@ -365,7 +366,8 @@ export function createFciFunctions(host){
                 {
                     return fail(erf, FCIERR.ALLOC_FAIL);
                 }
-                host.writeMemory(copy, host.readMemory(ccab >>> 0, CCAB.CAB_PATH + CCAB.NAME)
+                host.writeMemory(copy, host.readMemory(wholeAddress(ccab),
+                    CCAB.CAB_PATH + CCAB.NAME)
                     .slice());
                 const handle = next++;
                 contexts.set(handle, { erf: erf >>> 0, placed: placed >>> 0, open: open >>> 0,
@@ -408,7 +410,7 @@ export function createFciFunctions(host){
                 {
                     return fail(context.erf, FCIERR.OPEN_SRC);
                 }
-                const name = host.readCString(namePointer >>> 0, 256);
+                const name = host.readCString(wholeAddress(namePointer), 256);
                 const thread = host.callerThread();
                 return (async()=>{
                     const memory = scratch();

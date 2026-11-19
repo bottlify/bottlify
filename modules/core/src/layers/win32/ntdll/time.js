@@ -17,6 +17,7 @@
  */
 
 import { STATUS } from './status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_PRIVILEGE_NOT_HELD = 0xc0000061;
 const STATUS_TIMER_RESOLUTION_NOT_SET = 0xc0000245;
@@ -135,7 +136,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([time, fields])=>{
-                const value = BigInt.asUintN(64, readTime(time >>> 0));
+                const value = BigInt.asUintN(64, readTime(wholeAddress(time)));
                 let days = Number(value / DAY);
                 const rest = Number(value % DAY / 10_000n);
                 const weekday = (days + 1) % 7;
@@ -159,7 +160,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 [year, month, days + 1, Math.floor(rest / 3_600_000),
                     Math.floor(rest / 60_000) % 60, Math.floor(rest / 1000) % 60, rest % 1000,
                     weekday].forEach((field, index)=>out.setInt16(index * 2, field, true));
-                writeMemory(fields >>> 0, new Uint8Array(out.buffer));
+                writeMemory(wholeAddress(fields), new Uint8Array(out.buffer));
                 return 0;
             },
         },
@@ -174,7 +175,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([fields, time])=>{
-                const view = new DataView(readMemory(fields >>> 0, 16).buffer.slice(0));
+                const view = new DataView(readMemory(wholeAddress(fields), 16).buffer.slice(0));
                 const [year, month, day, hour, minute, second, millisecond] = [0, 1, 2, 3, 4, 5, 6]
                     .map(index=>view.getInt16(index * 2, true));
                 if (year < 1601 || month < 1 || month > 12 || day < 1 || day > daysIn(year, month)
@@ -208,7 +209,8 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([system, local])=>{
-                writeTime(local >>> 0, readTime(system >>> 0) - BigInt(bias()) * 60n * SECOND);
+                writeTime(local >>> 0,
+                    readTime(wholeAddress(system)) - BigInt(bias()) * 60n * SECOND);
                 return STATUS.SUCCESS;
             },
         },
@@ -217,7 +219,8 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([local, system])=>{
-                writeTime(system >>> 0, readTime(local >>> 0) + BigInt(bias()) * 60n * SECOND);
+                writeTime(system >>> 0,
+                    readTime(wholeAddress(local)) + BigInt(bias()) * 60n * SECOND);
                 return STATUS.SUCCESS;
             },
         },
@@ -236,9 +239,9 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeU32(minimum >>> 0, COARSEST);
-                writeU32(maximum >>> 0, FINEST);
-                writeU32(current >>> 0, resolution);
+                writeU32(wholeAddress(minimum), COARSEST);
+                writeU32(wholeAddress(maximum), FINEST);
+                writeU32(wholeAddress(current), resolution);
                 return STATUS.SUCCESS;
             },
         },
@@ -275,7 +278,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                 {
                     status = STATUS_TIMER_RESOLUTION_NOT_SET;
                 }
-                writeU32(current >>> 0, resolution);
+                writeU32(wholeAddress(current), resolution);
                 return status;
             },
         },
@@ -429,12 +432,12 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [time, seconds])=>{
-                const value = readTime(time >>> 0) - epoch;
+                const value = readTime(wholeAddress(time)) - epoch;
                 if (value < 0n || value / SECOND > 0xffffffffn)
                 {
                     return 0;
                 }
-                writeU32(seconds >>> 0, Number(value / SECOND));
+                writeU32(wholeAddress(seconds), Number(value / SECOND));
                 return 1;
             },
         };

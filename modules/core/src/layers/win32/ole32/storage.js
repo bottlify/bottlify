@@ -27,6 +27,7 @@ import {
     MAX_NAME_LENGTH, createEntry, createRoot, isCompoundFile, nameKey,
     parseCompoundFile, serializeCompoundFile,
 } from './cfb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
 const GMEM_MOVEABLE = 0x0002;
@@ -607,13 +608,13 @@ export function createStorageFunctions(host){
             const state = object.state;
             if ((pcbRead >>> 0) !== 0)
             {
-                writeU32(pcbRead >>> 0, 0);
+                writeU32(wholeAddress(pcbRead), 0);
             }
             if (!readable(state.mode))
             {
                 return STG_E_ACCESSDENIED;
             }
-            const wanted = cb >>> 0;
+            const wanted = wholeAddress(cb);
             if ((pv >>> 0) === 0 && wanted !== 0)
             {
                 return STG_E_INVALIDPOINTER;
@@ -622,12 +623,12 @@ export function createStorageFunctions(host){
             const bytes = state.backing.read(state.position, Math.min(wanted, available));
             if (bytes.length > 0)
             {
-                host.writeMemory(pv >>> 0, bytes);
+                host.writeMemory(wholeAddress(pv), bytes);
             }
             state.position += bytes.length;
             if ((pcbRead >>> 0) !== 0)
             {
-                writeU32(pcbRead >>> 0, bytes.length);
+                writeU32(wholeAddress(pcbRead), bytes.length);
             }
             // S_OK even when short: a docfile stream reports the count and
             // leaves "was that the end" to the caller, and programs written
@@ -639,25 +640,26 @@ export function createStorageFunctions(host){
             const state = object.state;
             if ((pcbWritten >>> 0) !== 0)
             {
-                writeU32(pcbWritten >>> 0, 0);
+                writeU32(wholeAddress(pcbWritten), 0);
             }
             if (!writable(state.mode))
             {
                 return STG_E_ACCESSDENIED;
             }
-            const count = cb >>> 0;
+            const count = wholeAddress(cb);
             if ((pv >>> 0) === 0 && count !== 0)
             {
                 return STG_E_INVALIDPOINTER;
             }
-            if (count > 0 && !state.backing.write(state.position, host.readMemory(pv >>> 0, count)))
+            if (count > 0 && !state.backing.write(state.position,
+                host.readMemory(wholeAddress(pv), count)))
             {
                 return E_OUTOFMEMORY;
             }
             state.position += count;
             if ((pcbWritten >>> 0) !== 0)
             {
-                writeU32(pcbWritten >>> 0, count);
+                writeU32(wholeAddress(pcbWritten), count);
             }
             return S_OK;
         } },
@@ -692,7 +694,7 @@ export function createStorageFunctions(host){
             state.position = target;
             if ((out >>> 0) !== 0)
             {
-                writeU64(out >>> 0, BigInt(target));
+                writeU64(wholeAddress(out), BigInt(target));
             }
             return S_OK;
         } },
@@ -715,7 +717,7 @@ export function createStorageFunctions(host){
             invoke: (object, [pstm, low, high, pcbRead, pcbWritten])=>{
             /** @type {StreamState} */
                 const state = object.state;
-                const target = pstm >>> 0;
+                const target = wholeAddress(pstm);
                 for (const slot of [pcbRead >>> 0, pcbWritten >>> 0])
                 {
                     if (slot !== 0)
@@ -737,11 +739,11 @@ export function createStorageFunctions(host){
                 const report = written=>{
                     if ((pcbRead >>> 0) !== 0)
                     {
-                        writeU64(pcbRead >>> 0, BigInt(bytes.length));
+                        writeU64(wholeAddress(pcbRead), BigInt(bytes.length));
                     }
                     if ((pcbWritten >>> 0) !== 0)
                     {
-                        writeU64(pcbWritten >>> 0, BigInt(written));
+                        writeU64(wholeAddress(pcbWritten), BigInt(written));
                     }
                     return S_OK;
                 };
@@ -912,7 +914,7 @@ export function createStorageFunctions(host){
         { name: 'CreateStream', argBytes: 24, invoke: (object, [pwcsName, grfMode, r1, r2, out_])=>{
             /** @type {StorageState} */
             const state = object.state;
-            const out = out_ >>> 0;
+            const out = wholeAddress(out_);
             if (out === 0)
             {
                 return STG_E_INVALIDPOINTER;
@@ -928,7 +930,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDNAME;
             }
-            const mode = grfMode >>> 0;
+            const mode = wholeAddress(grfMode);
             const refused = checkElementMode(state, mode);
             if (refused !== S_OK)
             {
@@ -957,7 +959,7 @@ export function createStorageFunctions(host){
         { name: 'OpenStream', argBytes: 24, invoke: (object, [pwcsName, , grfMode, , ppstm])=>{
             /** @type {StorageState} */
             const state = object.state;
-            const out = ppstm >>> 0;
+            const out = wholeAddress(ppstm);
             if (out === 0)
             {
                 return STG_E_INVALIDPOINTER;
@@ -968,7 +970,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDNAME;
             }
-            const mode = grfMode >>> 0;
+            const mode = wholeAddress(grfMode);
             const refused = checkElementMode(state, mode);
             if (refused !== S_OK)
             {
@@ -986,7 +988,7 @@ export function createStorageFunctions(host){
         { name: 'CreateStorage', argBytes: 24, invoke: (object, [pwcsName, grfMode, , , ppstg])=>{
             /** @type {StorageState} */
             const state = object.state;
-            const out = ppstg >>> 0;
+            const out = wholeAddress(ppstg);
             if (out === 0)
             {
                 return STG_E_INVALIDPOINTER;
@@ -1002,7 +1004,7 @@ export function createStorageFunctions(host){
             {
                 return STG_E_INVALIDNAME;
             }
-            const mode = grfMode >>> 0;
+            const mode = wholeAddress(grfMode);
             const refused = checkElementMode(state, mode);
             if (refused !== S_OK)
             {
@@ -1025,7 +1027,7 @@ export function createStorageFunctions(host){
             invoke: (object, [pwcsName, , grfMode, , , ppstg])=>{
                 /** @type {StorageState} */
                 const state = object.state;
-                const out = ppstg >>> 0;
+                const out = wholeAddress(ppstg);
                 if (out === 0)
                 {
                     return STG_E_INVALIDPOINTER;
@@ -1040,7 +1042,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDNAME;
                 }
-                const mode = grfMode >>> 0;
+                const mode = wholeAddress(grfMode);
                 const refused = checkElementMode(state, mode);
                 if (refused !== S_OK)
                 {
@@ -1137,7 +1139,7 @@ export function createStorageFunctions(host){
         { name: 'EnumElements', argBytes: 20, invoke: (object, [, , , ppenum])=>{
             /** @type {StorageState} */
             const state = object.state;
-            const out = ppenum >>> 0;
+            const out = wholeAddress(ppenum);
             if (out === 0)
             {
                 return STG_E_INVALIDPOINTER;
@@ -1210,11 +1212,11 @@ export function createStorageFunctions(host){
                 }
                 if ((pctime >>> 0) !== 0)
                 {
-                    entry.created = readU64(pctime >>> 0);
+                    entry.created = readU64(wholeAddress(pctime));
                 }
                 if ((pmtime >>> 0) !== 0)
                 {
-                    entry.modified = readU64(pmtime >>> 0);
+                    entry.modified = readU64(wholeAddress(pmtime));
                 }
                 return S_OK;
             } },
@@ -1318,10 +1320,10 @@ export function createStorageFunctions(host){
         /** @type {import('./objects.js').ComMethod[]} */
         const methods = [
             { name: 'Next', argBytes: 16, invoke: (object, [celt, rgelt, pceltFetched])=>{
-                const wanted = celt >>> 0;
+                const wanted = wholeAddress(celt);
                 if ((pceltFetched >>> 0) !== 0)
                 {
-                    writeU32(pceltFetched >>> 0, 0);
+                    writeU32(wholeAddress(pceltFetched), 0);
                 }
                 if ((rgelt >>> 0) === 0 || (wanted > 1 && (pceltFetched >>> 0) === 0))
                 {
@@ -1344,7 +1346,7 @@ export function createStorageFunctions(host){
                 }
                 if ((pceltFetched >>> 0) !== 0)
                 {
-                    writeU32(pceltFetched >>> 0, fetched);
+                    writeU32(wholeAddress(pceltFetched), fetched);
                 }
                 return fetched === wanted ? S_OK : S_FALSE;
             } },
@@ -1365,7 +1367,7 @@ export function createStorageFunctions(host){
                 const hr = publishEnumerator(state.items, ppenum >>> 0);
                 if (hr === S_OK)
                 {
-                    stateAt(readU32(ppenum >>> 0), CLSID_ENUM).index = state.index;
+                    stateAt(readU32(wholeAddress(ppenum)), CLSID_ENUM).index = state.index;
                 }
                 return hr;
             } },
@@ -1620,11 +1622,11 @@ export function createStorageFunctions(host){
                     : backing.read(offset, Math.min(cb >>> 0, backing.size() - offset));
                 if (bytes.length > 0)
                 {
-                    host.writeMemory(pv >>> 0, bytes);
+                    host.writeMemory(wholeAddress(pv), bytes);
                 }
                 if ((pcbRead >>> 0) !== 0)
                 {
-                    writeU32(pcbRead >>> 0, bytes.length);
+                    writeU32(wholeAddress(pcbRead), bytes.length);
                 }
                 return S_OK;
             } },
@@ -1636,15 +1638,16 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                const count = cb >>> 0;
+                const count = wholeAddress(cb);
                 if ((high >>> 0) !== 0
-                || (count > 0 && !backing.write(low >>> 0, host.readMemory(pv >>> 0, count))))
+                || (count > 0 && !backing.write(low >>> 0, host.readMemory(wholeAddress(pv),
+                    count))))
                 {
                     return STG_E_MEDIUMFULL;
                 }
                 if ((pcbWritten >>> 0) !== 0)
                 {
-                    writeU32(pcbWritten >>> 0, count);
+                    writeU32(wholeAddress(pcbWritten), count);
                 }
                 return S_OK;
             } },
@@ -1897,7 +1900,7 @@ export function createStorageFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([pwcsName, grfMode, reserved, ppstgOpen])=>{
-                const out = ppstgOpen >>> 0;
+                const out = wholeAddress(ppstgOpen);
                 if (out === 0)
                 {
                     return STG_E_INVALIDPOINTER;
@@ -1907,7 +1910,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPARAMETER;
                 }
-                let mode = grfMode >>> 0;
+                let mode = wholeAddress(grfMode);
                 if ((mode & STGM_CREATE) !== 0 && (mode & STGM_CONVERT) !== 0)
                 {
                     return STG_E_INVALIDFLAG;
@@ -1917,7 +1920,7 @@ export function createStorageFunctions(host){
                 {
                     return refused;
                 }
-                let path = readWide(pwcsName >>> 0, MAX_PATH);
+                let path = readWide(wholeAddress(pwcsName), MAX_PATH);
                 if (path === null)
                 {
                     path = `${TEMP_DIRECTORY}\\~DF${(++temporaries).toString(16)
@@ -1962,13 +1965,13 @@ export function createStorageFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([pwcsName, , grfMode, , , ppstgOpen])=>{
-                const out = ppstgOpen >>> 0;
+                const out = wholeAddress(ppstgOpen);
                 if (out === 0)
                 {
                     return STG_E_INVALIDPOINTER;
                 }
                 writeU32(out, 0);
-                const mode = grfMode >>> 0;
+                const mode = wholeAddress(grfMode);
                 if ((mode & STGM_CREATE) !== 0)
                 {
                     return STG_E_INVALIDFLAG;
@@ -1978,7 +1981,7 @@ export function createStorageFunctions(host){
                 {
                     return refused;
                 }
-                const path = readWide(pwcsName >>> 0, MAX_PATH);
+                const path = readWide(wholeAddress(pwcsName), MAX_PATH);
                 if (path === null)
                 {
                     return STG_E_INVALIDNAME;
@@ -2014,7 +2017,7 @@ export function createStorageFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pwcsName])=>{
-                const path = readWide(pwcsName >>> 0, MAX_PATH);
+                const path = readWide(wholeAddress(pwcsName), MAX_PATH);
                 if (path === null)
                 {
                     return STG_E_INVALIDNAME;
@@ -2053,7 +2056,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const refused = checkCreateMode('StgCreateDocfileOnILockBytes', grfMode >>> 0);
                 if (refused !== S_OK)
                 {
@@ -2077,7 +2080,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const refused = checkDocfileMode('StgOpenStorageOnILockBytes', grfMode >>> 0);
                 if (refused !== S_OK)
                 {
@@ -2121,7 +2124,7 @@ export function createStorageFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hGlobal, fDeleteOnRelease, pplkbyt])=>{
-                const out = pplkbyt >>> 0;
+                const out = wholeAddress(pplkbyt);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
@@ -2151,7 +2154,7 @@ export function createStorageFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(phglobal >>> 0, lockBytes?.handle?.() ?? 0);
+                writeU32(wholeAddress(phglobal), lockBytes?.handle?.() ?? 0);
                 return lockBytes ? S_OK : E_INVALIDARG;
             },
         },
@@ -2169,7 +2172,7 @@ export function createStorageFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hGlobal, fDeleteOnRelease, ppstm])=>{
-                const out = ppstm >>> 0;
+                const out = wholeAddress(ppstm);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
@@ -2184,7 +2187,7 @@ export function createStorageFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pstm, phglobal])=>{
-                const out = phglobal >>> 0;
+                const out = wholeAddress(phglobal);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
@@ -2216,7 +2219,8 @@ export function createStorageFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const written = writeToStream(pStm >>> 0, host.readMemory(rclsid >>> 0, GUID_SIZE));
+                const written = writeToStream(pStm >>> 0, host.readMemory(wholeAddress(rclsid),
+                    GUID_SIZE));
                 /** @param {number} count */
                 const check = count=>(count === GUID_SIZE ? S_OK : STG_E_ACCESSDENIED);
                 return typeof written === 'number' ? check(written) : written.then(check);
@@ -2237,7 +2241,7 @@ export function createStorageFunctions(host){
                     {
                         return STG_E_READFAULT;
                     }
-                    host.writeMemory(pclsid >>> 0, read);
+                    host.writeMemory(wholeAddress(pclsid), read);
                     return S_OK;
                 };
                 return bytes instanceof Promise ? bytes.then(store) : store(bytes);
@@ -2294,8 +2298,8 @@ export function createStorageFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pPStm, pStm])=>{
-                const object = pPStm >>> 0;
-                const stream = pStm >>> 0;
+                const object = wholeAddress(pPStm);
+                const stream = wholeAddress(pStm);
                 if (object === 0 || stream === 0)
                 {
                     return E_INVALIDARG;
@@ -2338,7 +2342,7 @@ export function createStorageFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pStm, iidInterface, ppvObj])=>{
-                const out = ppvObj >>> 0;
+                const out = wholeAddress(ppvObj);
                 if (out === 0)
                 {
                     return E_POINTER;
@@ -2396,7 +2400,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 if ((stgfmt >>> 0) !== STGFMT_STORAGE && (stgfmt >>> 0) !== STGFMT_DOCFILE)
                 {
                     diverge('StgCreateStorageEx', `format ${stgfmt >>> 0} is not made; `
@@ -2407,7 +2411,7 @@ export function createStorageFunctions(host){
                 {
                     return E_NOINTERFACE;
                 }
-                if ((options >>> 0) !== 0 && readU32((options >>> 0) + 4) > 512)
+                if ((options >>> 0) !== 0 && readU32(wholeAddress(options) + 4) > 512)
                 {
                     diverge('StgCreateStorageEx', 'a larger sector is asked for and 512 is used');
                 }
@@ -2434,8 +2438,8 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_INVALIDPOINTER;
                 }
-                writeU32(out >>> 0, 0);
-                const format = stgfmt >>> 0;
+                writeU32(wholeAddress(out), 0);
+                const format = wholeAddress(stgfmt);
                 if (format !== STGFMT_STORAGE && format !== STGFMT_DOCFILE
                     && format !== STGFMT_ANY)
                 {

@@ -26,6 +26,7 @@ import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import { readDouble, readSingle, returningDouble, returningSingle } from './float.js';
 import { EDOM, ERANGE } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} UcrtMathHost
@@ -236,7 +237,7 @@ export function createUcrtMathFunctions(host){
         const x = readSingle([bits], 0);
         const whole = Number.isFinite(x) ? Math.trunc(x) : x;
         scratch.setFloat32(0, whole, true);
-        host.writeMemory(out >>> 0, new Uint8Array(scratch.buffer.slice(0, 4)));
+        host.writeMemory(wholeAddress(out), new Uint8Array(scratch.buffer.slice(0, 4)));
         return Number.isNaN(x) ? x : Number.isFinite(x) ? x - whole : copySign(0, x);
     }, ONE_FLOAT);
 

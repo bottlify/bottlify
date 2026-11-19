@@ -23,6 +23,7 @@ import { after } from '../user32/controls.js';
 import { decodeJpeg } from '../../media/internal/jpeg.js';
 import { isPng, readPng } from '../d3dx9/png.js';
 import { decodeGifFrames, isGif } from '../../media/internal/gif.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IPICTURE = '{7BF80980-BF32-101A-8BBB-00AA00300CAB}';
 export const IID_IPICTUREDISP = '{7BF80981-BF32-101A-8BBB-00AA00300CAB}';
@@ -138,15 +139,17 @@ const toHimetric = value=>Math.round(value * HIMETRIC_PER_INCH / PIXELS_PER_INCH
 export function createPictureObjects(host){
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>
-        host.writeMemory(address >>> 0, new Uint8Array(new Uint32Array([value >>> 0]).buffer));
+        host.writeMemory(wholeAddress(address),
+            new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     /** @param {number} address @param {number} value */
     const writeU16 = (address, value)=>
-        host.writeMemory(address >>> 0, new Uint8Array(new Uint16Array([value & 0xffff]).buffer));
+        host.writeMemory(wholeAddress(address),
+            new Uint8Array(new Uint16Array([value & 0xffff]).buffer));
     /**
      * Guest memory holding `bytes` while `use` runs, given back after; null
      * when there is none.
@@ -636,7 +639,7 @@ export function createPictureObjects(host){
     /** @param {number} address @returns {string} */
     const readWide = address=>{
         let text = '';
-        for (let at = address >>> 0; text.length < 256; at += 2)
+        for (let at = wholeAddress(address); text.length < 256; at += 2)
         {
             const [low, high] = host.readMemory(at, 2);
             if ((low | high) === 0)
@@ -693,7 +696,7 @@ export function createPictureObjects(host){
                     const view = new DataView(variant.buffer);
                     view.setUint16(0, id === 3 ? VT_I2 : VT_I4, true);
                     view.setInt32(8, value | 0, true);
-                    host.writeMemory(result >>> 0, variant);
+                    host.writeMemory(wholeAddress(result), variant);
                     return S_OK;
                 }
                 if ((flags & DISPATCH_PROPERTYPUT) !== 0 && id === 2)
@@ -736,7 +739,7 @@ export function createPictureObjects(host){
                 {
                     return E_POINTER;
                 }
-                host.writeMemory(out >>> 0, CLSID_STDPICTURE_BYTES);
+                host.writeMemory(wholeAddress(out), CLSID_STDPICTURE_BYTES);
                 return S_OK;
             } },
         { name: 'IsDirty', argBytes: 4, invoke: ()=>S_FALSE },
@@ -792,8 +795,8 @@ export function createPictureObjects(host){
                 {
                     return E_FAIL;
                 }
-                writeU32(out >>> 0, SAVED_HEADER + bytes.length);
-                writeU32((out >>> 0) + 4, 0);
+                writeU32(wholeAddress(out), SAVED_HEADER + bytes.length);
+                writeU32(wholeAddress(out) + 4, 0);
                 return S_OK;
             } },
     ]);

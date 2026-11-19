@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * dbghelp — the debug help library, on a machine with no symbol files.
  *
@@ -96,7 +98,7 @@ export function createDbghelpFunctions(host){
     const readU32 = address=>{
         try
         {
-            const bytes = host.readMemory(address >>> 0, 4);
+            const bytes = host.readMemory(wholeAddress(address), 4);
             if (bytes.length < 4)
             {
                 return null;
@@ -111,7 +113,7 @@ export function createDbghelpFunctions(host){
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
-        host.writeMemory(address >>> 0, Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
+        host.writeMemory(wholeAddress(address), Uint8Array.of(value & 0xff, value >>> 8 & 0xff,
             value >>> 16 & 0xff, value >>> 24 & 0xff));
     };
 
@@ -126,7 +128,7 @@ export function createDbghelpFunctions(host){
      * @param {number} sizeOut @param {number} sectionOut  0 where not asked for
      */
     const directoryEntry = (base, mapped, entry, sizeOut, sectionOut)=>{
-        const at = base >>> 0;
+        const at = wholeAddress(base);
         if (sectionOut)
         {
             writeU32(sectionOut, 0);
@@ -190,7 +192,7 @@ export function createDbghelpFunctions(host){
 
     /** @param {number} address */
     const moduleBase = address=>{
-        const at = address >>> 0;
+        const at = wholeAddress(address);
         const module = host.modules()
             .find(each=>at >= each.base >>> 0 && at < (each.base >>> 0) + (each.size >>> 0));
         return module ? module.base >>> 0 : 0;
@@ -239,7 +241,7 @@ export function createDbghelpFunctions(host){
         {
             return fail(0, ERROR_INVALID_PARAMETER);
         }
-        const at = frameAddress >>> 0;
+        const at = wholeAddress(frameAddress);
         const field = (/** @type {number} */ offset)=>readU32(at + offset) ?? 0;
         let pc = field(layout.AddrPC);
         let frame = field(layout.AddrFrame);
@@ -319,7 +321,7 @@ export function createDbghelpFunctions(host){
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
                 const files = host.files;
-                const given = host.readCString(pointer >>> 0).replace(/\//g, '\\');
+                const given = host.readCString(wholeAddress(pointer)).replace(/\//g, '\\');
                 const absolute = /^[A-Za-z]:\\/.test(given) ? given
                     : `${(files.currentDirectory?.() ?? 'C:\\').replace(/\\$/, '')}\\${given}`;
                 const parts = absolute.split('\\');
@@ -378,7 +380,7 @@ export function createDbghelpFunctions(host){
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     new Uint8Array(Uint16Array.from(`${searchPath}\0`, c=>c.charCodeAt(0)).buffer));
                 return 1;
             },
@@ -538,7 +540,7 @@ export function createDbghelpFunctions(host){
             quadwords: [1],
             /** @param {number[]} args */
             handler: ([, address, high, info])=>{
-                const at = address >>> 0;
+                const at = wholeAddress(address);
                 const module = (high >>> 0) === 0 ? host.modules().find(each=>
                     at >= each.base >>> 0 && at < (each.base >>> 0) + (each.size >>> 0)) : null;
                 if (!module || (info >>> 0) === 0)
@@ -548,7 +550,8 @@ export function createDbghelpFunctions(host){
                 const out = new DataView(new ArrayBuffer(12));
                 out.setUint32(0, module.base >>> 0, true);
                 out.setUint32(MODULE64.ImageSize - MODULE64.BaseOfImage, module.size >>> 0, true);
-                host.writeMemory((info >>> 0) + MODULE64.BaseOfImage, new Uint8Array(out.buffer));
+                host.writeMemory(wholeAddress(info) + MODULE64.BaseOfImage,
+                    new Uint8Array(out.buffer));
                 return 1;
             },
         },
@@ -616,7 +619,7 @@ export function createDbghelpFunctions(host){
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
                 const kept = text.slice(0, (size >>> 0) - 1);
-                host.writeMemory(output >>> 0,
+                host.writeMemory(wholeAddress(output),
                     Uint8Array.from(`${kept}\0`, c=>c.charCodeAt(0) & 0xff));
                 return kept.length;
             },

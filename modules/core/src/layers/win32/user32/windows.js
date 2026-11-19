@@ -1134,7 +1134,7 @@ export function createWindowFunctions(host){
      * @returns {any | null}
      */
     const classOf = (pointer, unicode = false, instance = 0, asking = 'create')=>{
-        const value = pointer >>> 0;
+        const value = wholeAddress(pointer);
         if (value === 0)
         {
             return null;
@@ -1891,7 +1891,7 @@ export function createWindowFunctions(host){
                 {
                     if (answer.bytes)
                     {
-                        host.writeMemory(lParam >>> 0, answer.bytes);
+                        host.writeMemory(wholeAddress(lParam), answer.bytes);
                     }
                     return answer.result ?? 0;
                 }
@@ -3034,7 +3034,7 @@ export function createWindowFunctions(host){
      */
     const setFocus = (hwnd, thread)=>{
         const before = focusWindow();
-        const target = hwnd >>> 0;
+        const target = wholeAddress(hwnd);
         const on = thread ?? host.callerThread?.();
         const WS_POPUP_CHILD = WS_CHILD | 0x80000000;
         if (target === 0)
@@ -3771,7 +3771,7 @@ export function createWindowFunctions(host){
      * @returns {number | null}
      */
     const windowFilter = hwnd=>{
-        const value = hwnd >>> 0;
+        const value = wholeAddress(hwnd);
         if (value === 0)
         {
             return ANY_WINDOW;
@@ -4231,7 +4231,7 @@ export function createWindowFunctions(host){
         }
         try
         {
-            host.writeMemory(out >>> 0, new Uint8Array(width));
+            host.writeMemory(wholeAddress(out), new Uint8Array(width));
             return true;
         }
         catch {
@@ -5990,7 +5990,7 @@ export function createWindowFunctions(host){
      * @param {number} request
      */
     const trackMouseEvent = request=>{
-        const at = request >>> 0;
+        const at = wholeAddress(request);
         if (at === 0 || readU32(host, at) !== TRACKMOUSEEVENT_SIZE)
         {
             host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -6153,7 +6153,7 @@ export function createWindowFunctions(host){
         const hit = (entry.message >>> 0) >= WM_MOUSEMOVE ? HTCLIENT : entry.wParam & 0xffff;
         return andThen(send(record.hwnd, WM_MOUSEACTIVATE, top.hwnd,
             ((entry.message & 0xffff) << 16 | hit) >>> 0, thread), answer=>{
-            const how = answer >>> 0;
+            const how = wholeAddress(answer);
             const eaten = how === MA_ACTIVATEANDEAT || how === MA_NOACTIVATEANDEAT;
             if (how === MA_NOACTIVATE || how === MA_NOACTIVATEANDEAT)
             {
@@ -6453,7 +6453,7 @@ export function createWindowFunctions(host){
                 // screen, or in the parent's client area for a child -- if it
                 // moved, and its size if that or the window's state changed.
                 const word = (message.lParam >>> 0) === 0 ? null
-                    : host.readMemory((message.lParam >>> 0) + L.WINDOWPOS.flags, 4);
+                    : host.readMemory(wholeAddress(message.lParam) + L.WINDOWPOS.flags, 4);
                 const flags = word ? (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) : 0;
                 const client = geometry.clientRect(record);
                 const parent = isChild(record) ? live(record.parent) : null;
@@ -6986,7 +6986,7 @@ export function createWindowFunctions(host){
             return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
                 rect.height, parent, id, 0, 0], false, thread), hwnd=>{
                 host.release?.(name);
-                return hwnd >>> 0;
+                return wholeAddress(hwnd);
             });
         },
         show: (hwnd, command)=>/** @type {any} */ (table).ShowWindow.handler([hwnd, command]),
@@ -7910,11 +7910,12 @@ export function createWindowFunctions(host){
         let asked = 0;
         if ((recipients >>> 0) !== 0)
         {
-            const bytes = host.readMemory(recipients >>> 0, 4);
+            const bytes = host.readMemory(wholeAddress(recipients), 4);
             asked = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
             const reached = asked === 0 ? BSM_APPLICATIONS
                 : asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS);
-            host.writeMemory(recipients >>> 0, Uint8Array.of(reached & 0xff, reached >>> 8 & 0xff,
+            host.writeMemory(wholeAddress(recipients), Uint8Array.of(reached & 0xff,
+                reached >>> 8 & 0xff,
                 reached >>> 16 & 0xff, reached >>> 24 & 0xff));
         }
         if (asked !== 0 && (asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS)) === 0)
@@ -7987,7 +7988,7 @@ export function createWindowFunctions(host){
         const [hwnd, message, wParam, lParam] = args;
         // What a 64-bit poster passed that the dwords do not say (`wideOf`).
         const wide = wideOf(args, 2, 3);
-        const target = hwnd >>> 0;
+        const target = wholeAddress(hwnd);
         if (target === HWND_BROADCAST)
         {
             for (const each of broadcastTargets())
@@ -8181,7 +8182,7 @@ export function createWindowFunctions(host){
     const postToThread = (args, unicode)=>{
         const [thread, message, wParam, lParam] = args;
         const wide = wideOf(args, 2, 3);
-        const id = thread >>> 0;
+        const id = wholeAddress(thread);
         const known = host.threadExists ? host.threadExists(id) : id !== 0;
         if (!known)
         {
@@ -8947,7 +8948,7 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([info])=>{
                 const view = (info >>> 0) === 0 ? null
-                    : new DataView(host.readMemory(info >>> 0, 20).slice().buffer);
+                    : new DataView(host.readMemory(wholeAddress(info), 20).slice().buffer);
                 if (!view || view.getUint32(0, true) !== 20)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -9364,7 +9365,7 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     new Uint8Array(Uint32Array.of(record.displayAffinity ?? 0).buffer));
                 return 1;
             },
@@ -9410,17 +9411,18 @@ export function createWindowFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, layered?.key ?? 0, true);
-                    host.writeMemory(key >>> 0, bytes);
+                    host.writeMemory(wholeAddress(key), bytes);
                 }
                 if ((alpha >>> 0) !== 0)
                 {
-                    host.writeMemory(alpha >>> 0, new Uint8Array([(layered?.alpha ?? 0) & 0xff]));
+                    host.writeMemory(wholeAddress(alpha),
+                        new Uint8Array([(layered?.alpha ?? 0) & 0xff]));
                 }
                 if ((flags >>> 0) !== 0)
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, layered?.flags ?? 0, true);
-                    host.writeMemory(flags >>> 0, bytes);
+                    host.writeMemory(wholeAddress(flags), bytes);
                 }
                 return 1;
             },
@@ -10027,8 +10029,8 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([count, handles, waitAll, timeout, wakeMask, inputAvailable, alertable])=>{
                 const total = count >>> 0;
-                const wait = timeout >>> 0;
-                const mask = wakeMask >>> 0;
+                const wait = wholeAddress(timeout);
+                const mask = wholeAddress(wakeMask);
                 const waiter = threadIdOf(host.callerThread?.());
                 hasQueue(host.callerThread?.());
                 const input = ()=>((inputAvailable

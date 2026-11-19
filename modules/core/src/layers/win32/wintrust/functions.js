@@ -20,6 +20,7 @@ import { parseCertificate } from '../crypto/x509.js';
 import { TRUST, verifyAuthenticode } from './authenticode.js';
 import { defaultTrustedRoots } from './roots.js';
 import { msiSubject, readSubject } from './subject.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -112,7 +113,7 @@ const CHAIN_PARA_SIZE = 16;
 export function createWintrustFunctions(host){
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     };
 
@@ -120,7 +121,7 @@ export function createWintrustFunctions(host){
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -344,7 +345,7 @@ export function createWintrustFunctions(host){
             writeU32(data + WTD.STATE_DATA, 0);
             return TRUST.OK;
         }
-        const guid = host.readMemory(action >>> 0, 16);
+        const guid = host.readMemory(wholeAddress(action), 16);
         if (!guid.every((byte, i)=>byte === WINTRUST_ACTION_GENERIC_VERIFY_V2[i]))
         {
             host.divergence?.('WinVerifyTrust',
@@ -465,7 +466,7 @@ export function createWintrustFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([name, flags])=>{
-                const path = host.fullPath(host.readWideString(name >>> 0, WHOLE_NAME * 2));
+                const path = host.fullPath(host.readWideString(wholeAddress(name), WHOLE_NAME * 2));
                 const stat = host.files.stat(path);
                 if (!stat || stat.isDirectory)
                 {

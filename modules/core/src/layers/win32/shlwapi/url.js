@@ -26,6 +26,7 @@ import { dword, u32 } from './text.js';
 import { applyScheme, escapeUrl, hashData, parseUrl, urlPart, URL_ESCAPE_AS_UTF8 }
     from './url-parts.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -841,7 +842,7 @@ export function createUrlFunctions(host, { A, W }){
 
     /** @param {number} address */
     const countAt = address=>((address >>> 0) === 0 || !host.readMemory
-        ? null : u32(host.readMemory(address >>> 0, 4)));
+        ? null : u32(host.readMemory(wholeAddress(address), 4)));
 
     /**
      * An answer into a buffer the caller counts the room of: written, with
@@ -856,15 +857,15 @@ export function createUrlFunctions(host, { A, W }){
     const answer = (width, text, buffer, count, room, success = S_OK)=>{
         if (text.length < room && (buffer >>> 0) !== 0)
         {
-            host.writeMemory(buffer >>> 0, width.sz(text));
-            host.writeMemory(count >>> 0, dword(text.length));
+            host.writeMemory(wholeAddress(buffer), width.sz(text));
+            host.writeMemory(wholeAddress(count), dword(text.length));
             return success;
         }
         if (text.length < room)
         {
             return E_INVALIDARG;
         }
-        host.writeMemory(count >>> 0, dword(text.length + 1));
+        host.writeMemory(wholeAddress(count), dword(text.length + 1));
         return E_POINTER;
     };
 
@@ -893,11 +894,11 @@ export function createUrlFunctions(host, { A, W }){
         const room = /** @type {number} */ (countAt(count));
         if (text.length >= room)
         {
-            host.writeMemory(count >>> 0, dword(text.length + 1));
+            host.writeMemory(wholeAddress(count), dword(text.length + 1));
             return E_POINTER;
         }
-        host.writeMemory(buffer >>> 0, width.sz(text));
-        host.writeMemory(count >>> 0, dword(text.length));
+        host.writeMemory(wholeAddress(buffer), width.sz(text));
+        host.writeMemory(wholeAddress(count), dword(text.length));
         return success;
     };
 
@@ -927,7 +928,7 @@ export function createUrlFunctions(host, { A, W }){
                 width.char);
             if (((flags >>> 0) & URL_UNESCAPE_INPLACE) !== 0)
             {
-                host.writeMemory(pointer >>> 0, width.sz(result));
+                host.writeMemory(wholeAddress(pointer), width.sz(result));
                 return S_OK;
             }
             const room = countAt(count);
@@ -1067,8 +1068,8 @@ export function createUrlFunctions(host, { A, W }){
             }
             if (kind === 'empty')
             {
-                host.writeMemory(buffer >>> 0, width.sz(''));
-                host.writeMemory(count >>> 0, dword(0));
+                host.writeMemory(wholeAddress(buffer), width.sz(''));
+                host.writeMemory(wholeAddress(count), dword(0));
                 return width.wide ? S_OK : S_FALSE;
             }
             return counted(width, text, buffer, count, S_OK);
@@ -1086,7 +1087,7 @@ export function createUrlFunctions(host, { A, W }){
             {
                 return E_INVALIDARG;
             }
-            host.writeMemory(out >>> 0, hash(encodeAnsi(url), size >>> 0));
+            host.writeMemory(wholeAddress(out), hash(encodeAnsi(url), size >>> 0));
             return S_OK;
         }),
 
@@ -1108,8 +1109,9 @@ export function createUrlFunctions(host, { A, W }){
                 {
                     return S_OK;
                 }
-                host.writeMemory(out >>> 0, hash(host.readMemory(input >>> 0, length >>> 0),
-                    size >>> 0));
+                host.writeMemory(wholeAddress(out), hash(host.readMemory(wholeAddress(input),
+                    length >>> 0),
+                size >>> 0));
                 return S_OK;
             },
         },
@@ -1131,7 +1133,7 @@ export function createUrlFunctions(host, { A, W }){
             const result = parseUrl(url);
             if (result === null)
             {
-                host.writeMemory((parsed >>> 0) + 4, dword(0));
+                host.writeMemory(wholeAddress(parsed) + 4, dword(0));
                 return URL_E_INVALID_SYNTAX;
             }
             const suffix = result.protocolLength + 1;
@@ -1141,7 +1143,7 @@ export function createUrlFunctions(host, { A, W }){
             fields.set(dword((input >>> 0) + suffix * width.unit), 8);
             fields.set(dword(url.length - suffix), 12);
             fields.set(dword(result.number), 16);
-            host.writeMemory((parsed >>> 0) + 4, fields);
+            host.writeMemory(wholeAddress(parsed) + 4, fields);
             return S_OK;
         }),
 
@@ -1221,7 +1223,7 @@ export function createUrlFunctions(host, { A, W }){
                     host.divergence?.('UrlFixupW', 'a mistyped scheme is not mended: the URL is'
                         + ' copied as it is');
                 }
-                host.writeMemory(out >>> 0, W.sz(url.slice(0, (room >>> 0) - 1)));
+                host.writeMemory(wholeAddress(out), W.sz(url.slice(0, (room >>> 0) - 1)));
                 return url.length < (room >>> 0) ? S_FALSE : E_POINTER;
             },
         },

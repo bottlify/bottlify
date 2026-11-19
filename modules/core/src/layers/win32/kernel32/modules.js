@@ -21,6 +21,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -445,11 +446,11 @@ export function createModuleFunctions(host){
                 bytes[at * 2] = kept.charCodeAt(at) & 0xff;
                 bytes[at * 2 + 1] = kept.charCodeAt(at) >> 8;
             }
-            host.writeMemory(buffer >>> 0, bytes);
+            host.writeMemory(wholeAddress(buffer), bytes);
         }
         else
         {
-            host.writeMemory(buffer >>> 0, encodeAnsi(kept));
+            host.writeMemory(wholeAddress(buffer), encodeAnsi(kept));
         }
         // A whole path clears the last error, as Windows' does.
         host.setLastError(fits ? 0 : ERROR_INSUFFICIENT_BUFFER);
@@ -489,7 +490,7 @@ export function createModuleFunctions(host){
         }
         if (!wide)
         {
-            return writeString(buffer >>> 0, size >>> 0, text);
+            return writeString(wholeAddress(buffer), size >>> 0, text);
         }
         const kept = text.slice(0, (size >>> 0) - 1);
         const bytes = new Uint8Array((kept.length + 1) * 2);
@@ -498,7 +499,7 @@ export function createModuleFunctions(host){
             bytes[at * 2] = kept.charCodeAt(at) & 0xff;
             bytes[at * 2 + 1] = kept.charCodeAt(at) >> 8;
         }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), bytes);
         return kept.length;
     };
 
@@ -527,7 +528,7 @@ export function createModuleFunctions(host){
                 host.setLastError(ERROR_INVALID_HANDLE);
                 return 0;
             }
-            const at = address >>> 0;
+            const at = wholeAddress(address);
             const read = (/** @type {number} */ where)=>new DataView(
                 host.readMemory?.(where, 4).slice().buffer ?? new ArrayBuffer(4))
                 .getUint32(0, true);
@@ -615,11 +616,11 @@ export function createModuleFunctions(host){
         {
             const out = new DataView(new ArrayBuffer(fits * handleSize));
             bases.slice(0, fits).forEach((base, at)=>out.setUint32(at * handleSize, base, true));
-            host.writeMemory(handles >>> 0, new Uint8Array(out.buffer));
+            host.writeMemory(wholeAddress(handles), new Uint8Array(out.buffer));
         }
         const total = new DataView(new ArrayBuffer(4));
         total.setUint32(0, bases.length * handleSize, true);
-        host.writeMemory(needed >>> 0, new Uint8Array(total.buffer));
+        host.writeMemory(wholeAddress(needed), new Uint8Array(total.buffer));
         return 1;
     };
 
@@ -675,7 +676,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>((name >>> 0) === 0 ? noName()
-                : load(host.readCString(name >>> 0, WHOLE_NAME))),
+                : load(host.readCString(wholeAddress(name), WHOLE_NAME))),
         },
 
         /**
@@ -695,7 +696,7 @@ export function createModuleFunctions(host){
                 {
                     return noName();
                 }
-                return load(host.readCString(name >>> 0, WHOLE_NAME), flags >>> 0);
+                return load(host.readCString(wholeAddress(name), WHOLE_NAME), flags >>> 0);
             },
         },
         LoadLibraryExW: {
@@ -707,7 +708,7 @@ export function createModuleFunctions(host){
                 {
                     return noName();
                 }
-                return load(host.readWideString(name >>> 0, WHOLE_NAME * 2), flags >>> 0);
+                return load(host.readWideString(wholeAddress(name), WHOLE_NAME * 2), flags >>> 0);
             },
         },
 
@@ -725,7 +726,8 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>{
-                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, WHOLE_NAME);
+                dllDirectory = (path >>> 0) === 0 ? null : host.readCString(wholeAddress(path),
+                    WHOLE_NAME);
                 return 1;
             },
         },
@@ -763,7 +765,7 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 const directory = (path >>> 0) === 0 ? ''
-                    : host.readWideString(path >>> 0, MAX_NAME * 2);
+                    : host.readWideString(wholeAddress(path), MAX_NAME * 2);
                 if (!/^([a-z]:\\|\\\\)/i.test(directory))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -795,7 +797,7 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 dllDirectory = (path >>> 0) === 0 ? null
-                    : host.readWideString(path >>> 0, MAX_NAME * 2);
+                    : host.readWideString(wholeAddress(path), MAX_NAME * 2);
                 return 1;
             },
         },
@@ -909,7 +911,7 @@ export function createModuleFunctions(host){
 
                 const ordinal = isOrdinal(name >>> 0) ? name >>> 0 : null;
                 const wanted = ordinal !== null ? `#${ordinal}`
-                    : host.readCString(name >>> 0, WHOLE_NAME);
+                    : host.readCString(wholeAddress(name), WHOLE_NAME);
                 /** @param {{ address: number } | { error: number }} found */
                 const answer = found=>{
                     const address = 'address' in found ? found.address : 0;
@@ -936,7 +938,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>((name >>> 0) === 0 ? noName()
-                : load(host.readWideString(name >>> 0, MAX_NAME * 2))),
+                : load(host.readWideString(wholeAddress(name), MAX_NAME * 2))),
         },
 
         /**
@@ -984,7 +986,7 @@ export function createModuleFunctions(host){
                 out.setUint32(0, module.base, true);
                 out.setUint32(4, read(optional + 56), true);
                 out.setUint32(8, entry === 0 ? 0 : module.base + entry, true);
-                host.writeMemory(info >>> 0, new Uint8Array(out.buffer));
+                host.writeMemory(wholeAddress(info), new Uint8Array(out.buffer));
                 return 1;
             },
         },

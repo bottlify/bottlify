@@ -1940,6 +1940,12 @@ test('a 64-bit caller finds an address zero-extended in RAX, any other dword sig
     assert.equal(r.get('rax'), 0x90000000n, 'an address the handler computed with | 0 too');
     dispatcher.dispatch(4);
     assert.equal(r.get('rax'), 0x1000n);
+    // strrchr into a string the program keeps past 4 GiB: the handler answers
+    // the address it was handed whole, and RAX holds all of it.
+    dispatcher.register(5, { name: 'X!Within', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x1_4000_3010 });
+    dispatcher.dispatch(5);
+    assert.equal(r.get('rax'), 0x1_4000_3010n);
 });
 
 test('a size past a dword reaches its handler as the largest dword, never as its low half', ()=>{

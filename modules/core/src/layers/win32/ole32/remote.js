@@ -51,6 +51,7 @@ import {
     IID_ICLASSFACTORY, IID_ITYPEINFO, IID_IUNKNOWN, argumentBytes, createInterfaceCatalog,
     marshalReply, marshalRequest, unmarshalReply, unmarshalRequest,
 } from '../oleaut32/marshal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 /**
@@ -572,11 +573,11 @@ export function createRemoting(host){
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, Uint8Array.of(
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
 
     /**

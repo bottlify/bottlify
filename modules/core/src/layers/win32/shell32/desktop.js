@@ -17,6 +17,7 @@
  */
 
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const E_FAIL = 0x80004005 | 0;
 
@@ -141,8 +142,8 @@ export function createDesktopFunctions(host){
             }
             const packed = (kernel32?.GetVersion?.handler([]) ?? 0) >>> 0;
             const { caption, text } = aboutBox(
-                (app >>> 0) === 0 ? '' : read(app >>> 0),
-                (other >>> 0) === 0 ? '' : read(other >>> 0),
+                (app >>> 0) === 0 ? '' : read(wholeAddress(app)),
+                (other >>> 0) === 0 ? '' : read(wholeAddress(other)),
                 { major: packed & 0xff, minor: packed >>> 8 & 0xff, build: packed >>> 16 });
             const allocate = /** @type {(bytes: number) => number} */ (host.allocate);
             const free = /** @type {(address: number) => void} */ (host.free);
@@ -317,7 +318,7 @@ export function createDesktopFunctions(host){
                 {
                     return 0;
                 }
-                const held = host.readMemory(state >>> 0, 4);
+                const held = host.readMemory(wholeAddress(state), 4);
                 let bits = (held[0] | held[1] << 8 | held[2] << 16 | held[3] << 24) >>> 0;
                 for (const [flag, bit, on] of SETTINGS)
                 {
@@ -326,7 +327,7 @@ export function createDesktopFunctions(host){
                         bits = on ? (bits | 1 << bit) >>> 0 : (bits & ~(1 << bit)) >>> 0;
                     }
                 }
-                host.writeMemory(state >>> 0, dword(bits));
+                host.writeMemory(wholeAddress(state), dword(bits));
                 return 0;
             },
         },

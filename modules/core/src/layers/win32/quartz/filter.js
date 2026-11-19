@@ -32,6 +32,7 @@ import {
     IBASE_FILTER_SLOTS, IID_IBASE_FILTER, IID_IMEDIA_FILTER, IID_IMEM_ALLOCATOR,
     IID_IMEM_INPUT_PIN, IID_IPERSIST, IID_IPIN, IMEDIA_FILTER_SLOTS, IPIN_SLOTS, VTABLE,
 } from './interfaces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -299,10 +300,10 @@ export function mediaType(fields){
  */
 export function createFilterBase(host){
     /** @param {number} address */
-    const guidAt = address=>formatGuid(host.readMemory(address >>> 0, 16));
+    const guidAt = address=>formatGuid(host.readMemory(wholeAddress(address), 16));
 
     /** @param {number} self @param {number} slot */
-    const entryOf = (self, slot)=>host.readU32((host.readU32(self >>> 0) + slot * 4) >>> 0);
+    const entryOf = (self, slot)=>host.readU32((host.readU32(wholeAddress(self)) + slot * 4) >>> 0);
 
     /**
      * A method of one of the program's objects, on the thread the program is in.
@@ -477,7 +478,7 @@ export function createFilterBase(host){
 
     /** @param {number} address @returns {MediaType} */
     const readMediaType = address=>{
-        const bytes = host.readMemory(address >>> 0, MEDIA_TYPE.BYTES);
+        const bytes = host.readMemory(wholeAddress(address), MEDIA_TYPE.BYTES);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
         const formatBytes = view.getUint32(MEDIA_TYPE.FORMAT_BYTES, true);
         const format = view.getUint32(MEDIA_TYPE.FORMAT, true);
@@ -516,7 +517,7 @@ export function createFilterBase(host){
             view.setUint32(MEDIA_TYPE.FORMAT_BYTES, type.format.length, true);
             view.setUint32(MEDIA_TYPE.FORMAT, block, true);
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** A media type in a block of task memory of its own, as CreateMediaType makes one. @param {MediaType} type */
@@ -585,12 +586,13 @@ export function createFilterBase(host){
                 let given = 0;
                 while (given < (count >>> 0) && s.position < s.items.length)
                 {
-                    host.writeMemory((out >>> 0) + given * 4, dword(give(s.items[s.position++])));
+                    host.writeMemory(wholeAddress(out) + given * 4,
+                        dword(give(s.items[s.position++])));
                     given++;
                 }
                 if ((fetched >>> 0) !== 0)
                 {
-                    host.writeMemory(fetched >>> 0, dword(given));
+                    host.writeMemory(wholeAddress(fetched), dword(given));
                 }
                 return given === (count >>> 0) ? S_OK : S_FALSE;
             },
@@ -609,7 +611,7 @@ export function createFilterBase(host){
                 {
                     return E_POINTER;
                 }
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     dword(enumerator(iid, source, give, s.position, owner, [...s.items])));
                 return S_OK;
             },
@@ -770,7 +772,7 @@ export function createFilterBase(host){
             {
                 return VFW_E_NOT_STOPPED;
             }
-            const wanted = (given >>> 0) === 0 ? null : readMediaType(given >>> 0);
+            const wanted = (given >>> 0) === 0 ? null : readMediaType(wholeAddress(given));
             /** @type {MediaType[]} */
             const candidates = wanted && !partial(wanted) ? [wanted]
                 : [...pin.spec.types?.(pin) ?? [], ...await peerTypes(peer >>> 0)]
@@ -825,7 +827,7 @@ export function createFilterBase(host){
             {
                 return VFW_E_NOT_STOPPED;
             }
-            const type = readMediaType(given >>> 0);
+            const type = readMediaType(wholeAddress(given));
             if (!await pinAccepts(pin, type))
             {
                 return VFW_E_TYPE_NOT_ACCEPTED;
@@ -867,7 +869,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(pin.peer));
+            host.writeMemory(wholeAddress(out), dword(pin.peer));
             if (pin.peer === 0)
             {
                 return VFW_E_NOT_CONNECTED;
@@ -883,7 +885,7 @@ export function createFilterBase(host){
             }
             if (!pin.type)
             {
-                host.writeMemory(out >>> 0, new Uint8Array(MEDIA_TYPE.BYTES));
+                host.writeMemory(wholeAddress(out), new Uint8Array(MEDIA_TYPE.BYTES));
                 return VFW_E_NOT_CONNECTED;
             }
             writeMediaType(out >>> 0, pin.type);
@@ -900,7 +902,7 @@ export function createFilterBase(host){
             info.set(dword(pin.spec.direction === 'output' ? PINDIR_OUTPUT : PINDIR_INPUT),
                 PIN_INFO.DIRECTION);
             info.set(wideInline(pin.spec.name, MAX_NAME), PIN_INFO.NAME);
-            host.writeMemory(out >>> 0, info);
+            host.writeMemory(wholeAddress(out), info);
             return S_OK;
         },
         /** HRESULT QueryDirection(PIN_DIRECTION *pPinDir) */
@@ -909,7 +911,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0,
+            host.writeMemory(wholeAddress(out),
                 dword(pin.spec.direction === 'output' ? PINDIR_OUTPUT : PINDIR_INPUT));
             return S_OK;
         },
@@ -926,7 +928,7 @@ export function createFilterBase(host){
                 return E_OUTOFMEMORY;
             }
             host.writeMemory(at, text);
-            host.writeMemory(out >>> 0, dword(at));
+            host.writeMemory(wholeAddress(out), dword(at));
             return S_OK;
         },
         /** HRESULT QueryAccept(const AM_MEDIA_TYPE *pmt) */
@@ -935,7 +937,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            return await pinAccepts(pin, readMediaType(given >>> 0)) ? S_OK : S_FALSE;
+            return await pinAccepts(pin, readMediaType(wholeAddress(given))) ? S_OK : S_FALSE;
         },
         /** HRESULT EnumMediaTypes(IEnumMediaTypes **ppEnum) */
         EnumMediaTypes: (pin, [out])=>{
@@ -943,7 +945,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(enumerator(IID_IENUM_MEDIA_TYPES,
+            host.writeMemory(wholeAddress(out), dword(enumerator(IID_IENUM_MEDIA_TYPES,
                 ()=>pin.spec.types?.(pin) ?? [], createMediaType)));
             return S_OK;
         },
@@ -1007,7 +1009,7 @@ export function createFilterBase(host){
                 pin.allocator = await host.createInstance(
                     '{1E651CC0-B199-11D0-8212-00C04FC32C45}', IID_IMEM_ALLOCATOR);
             }
-            host.writeMemory(out >>> 0, dword(pin.allocator));
+            host.writeMemory(wholeAddress(out), dword(pin.allocator));
             if (pin.allocator === 0)
             {
                 return VFW_E_NO_ALLOCATOR;
@@ -1056,7 +1058,7 @@ export function createFilterBase(host){
             for (; done < (count | 0); done++)
             {
                 answer = await memInputMethods.Receive(pin,
-                    [host.readU32((samples >>> 0) + done * 4)]);
+                    [host.readU32(wholeAddress(samples) + done * 4)]);
                 if (answer !== S_OK)
                 {
                     break;
@@ -1064,7 +1066,7 @@ export function createFilterBase(host){
             }
             if ((processed >>> 0) !== 0)
             {
-                host.writeMemory(processed >>> 0, dword(done));
+                host.writeMemory(wholeAddress(processed), dword(done));
             }
             return answer;
         },
@@ -1079,7 +1081,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(filter.clsid)));
+            host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(filter.clsid)));
             return S_OK;
         },
         Stop: filter=>changeState(filter, STATE_STOPPED),
@@ -1102,7 +1104,7 @@ export function createFilterBase(host){
             }
             const answer = await filterClass.get(filter.clsid)?.stateAnswer?.(filter, timeout >>> 0)
                 ?? S_OK;
-            host.writeMemory(out >>> 0, dword(filter.state));
+            host.writeMemory(wholeAddress(out), dword(filter.state));
             return answer;
         },
         /** HRESULT SetSyncSource(IReferenceClock *pClock) */
@@ -1125,7 +1127,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(filter.clock));
+            host.writeMemory(wholeAddress(out), dword(filter.clock));
             if (filter.clock !== 0)
             {
                 await addRef(filter.clock);
@@ -1138,7 +1140,8 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(enumerator(IID_IENUM_PINS, ()=>[...filter.pins],
+            host.writeMemory(wholeAddress(out), dword(enumerator(IID_IENUM_PINS,
+                ()=>[...filter.pins],
                 handPin, 0, filter)));
             return S_OK;
         },
@@ -1148,9 +1151,9 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            const wanted = host.readWideString(id >>> 0, NAME_BYTES * 4);
+            const wanted = host.readWideString(wholeAddress(id), NAME_BYTES * 4);
             const pin = filter.pins.find(each=>(each.spec.id ?? each.spec.name) === wanted);
-            host.writeMemory(out >>> 0, dword(pin ? handPin(pin) : 0));
+            host.writeMemory(wholeAddress(out), dword(pin ? handPin(pin) : 0));
             return pin ? S_OK : VFW_E_NOT_FOUND;
         },
         /** HRESULT QueryFilterInfo(FILTER_INFO *pInfo) */
@@ -1162,7 +1165,7 @@ export function createFilterBase(host){
             const info = new Uint8Array(FILTER_INFO_BYTES);
             info.set(wideInline(filter.name, MAX_NAME), 0);
             info.set(dword(filter.graph), NAME_BYTES);
-            host.writeMemory(out >>> 0, info);
+            host.writeMemory(wholeAddress(out), info);
             if (filter.graph !== 0)
             {
                 await addRef(filter.graph);
@@ -1172,7 +1175,8 @@ export function createFilterBase(host){
         /** HRESULT JoinFilterGraph(IFilterGraph *pGraph, LPCWSTR pName) */
         JoinFilterGraph: (filter, [graph, name])=>{
             filter.graph = graph >>> 0;
-            filter.name = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
+            filter.name = (name >>> 0) === 0 ? '' : host.readWideString(wholeAddress(name),
+                NAME_BYTES);
             return S_OK;
         },
         QueryVendorInfo: ()=>E_NOTIMPL,
@@ -1266,10 +1270,10 @@ export function createFilterBase(host){
                 const record = /** @type {any} */ (pin.object).interfaceFor(id);
                 if (!record)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return E_NOINTERFACE;
                 }
-                host.writeMemory(out >>> 0, dword(host.publish(/** @type {any} */ (pin.object),
+                host.writeMemory(wholeAddress(out), dword(host.publish(/** @type {any} */ (pin.object),
                     id)));
                 if (owner)
                 {

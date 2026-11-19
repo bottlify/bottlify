@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The IP address strings ntdll writes and reads (ip2string.h): IPv4 in dotted
  * decimal, IPv6 in RFC 4291's text with its longest run of zero groups as
@@ -488,7 +490,7 @@ export function createIpStringFunctions(host){
             {
                 return ((buffer >>> 0) - width(wide).unit) >>> 0;
             }
-            const text = format(host.readMemory(address >>> 0, size));
+            const text = format(host.readMemory(wholeAddress(address), size));
             width(wide).write(buffer >>> 0, text);
             return ((buffer >>> 0) + text.length * width(wide).unit) >>> 0;
         },
@@ -547,7 +549,7 @@ export function createIpStringFunctions(host){
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            host.writeMemory(address >>> 0, read.bytes);
+            host.writeMemory(wholeAddress(address), read.bytes);
             return STATUS_SUCCESS;
         },
     });
@@ -562,12 +564,12 @@ export function createIpStringFunctions(host){
                 return STATUS_ACCESS_VIOLATION;
             }
             const text = width(wide).read(string >>> 0);
-            const read = parseIpv6(text, host.readMemory(address >>> 0, 16).slice());
+            const read = parseIpv6(text, host.readMemory(wholeAddress(address), 16).slice());
             if (read.end !== null)
             {
                 putDword(terminator >>> 0, (string >>> 0) + read.end * width(wide).unit);
             }
-            host.writeMemory(address >>> 0, read.bytes);
+            host.writeMemory(wholeAddress(address), read.bytes);
             return read.error ? STATUS_INVALID_PARAMETER : STATUS_SUCCESS;
         },
     });
@@ -594,13 +596,13 @@ export function createIpStringFunctions(host){
             }
             // The address is written before the port is read: a bad port
             // leaves it there, and the port untouched.
-            host.writeMemory(address >>> 0, read.bytes);
+            host.writeMemory(wholeAddress(address), read.bytes);
             const number = read.end === text.length ? 0 : portAt(text, read.end);
             if (number === null)
             {
                 return STATUS_INVALID_PARAMETER;
             }
-            host.writeMemory(port >>> 0, Uint8Array.of(number >> 8, number & 0xff));
+            host.writeMemory(wholeAddress(port), Uint8Array.of(number >> 8, number & 0xff));
             return STATUS_SUCCESS;
         },
     });
@@ -619,8 +621,8 @@ export function createIpStringFunctions(host){
             const bracketed = text.startsWith('[');
             const inner = bracketed ? text.slice(1) : text;
             // The address is stored as it is read, whatever comes after it.
-            const read = parseIpv6(inner, host.readMemory(address >>> 0, 16).slice());
-            host.writeMemory(address >>> 0, read.bytes);
+            const read = parseIpv6(inner, host.readMemory(wholeAddress(address), 16).slice());
+            host.writeMemory(wholeAddress(address), read.bytes);
             if (read.error || read.prefixed || read.end === null)
             {
                 return STATUS_INVALID_PARAMETER;
@@ -657,7 +659,7 @@ export function createIpStringFunctions(host){
                 return STATUS_INVALID_PARAMETER;
             }
             putDword(scope >>> 0, scopeId >>> 0);
-            host.writeMemory(port >>> 0, Uint8Array.of(number >> 8, number & 0xff));
+            host.writeMemory(wholeAddress(port), Uint8Array.of(number >> 8, number & 0xff));
             return STATUS_SUCCESS;
         },
     });

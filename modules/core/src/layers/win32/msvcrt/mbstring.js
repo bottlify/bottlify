@@ -27,7 +27,7 @@ import {
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import {
     SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
     toHalfWidth, jisLevel,
@@ -541,7 +541,8 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
-                const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
+                const source = width.get(new DataView(host.readMemory(wholeAddress(from),
+                    width.size)
                     .slice().buffer), 0);
                 const text = readNarrowUnits(source);
                 if ((destination >>> 0) === 0)
@@ -552,7 +553,8 @@ export function createWideFunctions(host){
                 const converted = text.slice(0, room);
                 const ended = converted.length < room;
                 writeWide(destination, converted, ended);
-                host.writeMemory(from >>> 0, width.bytes(ended ? 0 : source + converted.length));
+                host.writeMemory(wholeAddress(from),
+                    width.bytes(ended ? 0 : source + converted.length));
                 return converted.length;
             },
         },
@@ -570,7 +572,8 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
-                const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
+                const source = width.get(new DataView(host.readMemory(wholeAddress(from),
+                    width.size)
                     .slice().buffer), 0);
                 const text = readWide(source);
                 const room = (destination >>> 0) === 0 ? text.length + 1 : count >>> 0;
@@ -581,7 +584,7 @@ export function createWideFunctions(host){
                     if ((destination >>> 0) !== 0)
                     {
                         writeNarrow(destination, converted.slice(0, refused), false);
-                        host.writeMemory(from >>> 0, width.bytes(source + refused * 2));
+                        host.writeMemory(wholeAddress(from), width.bytes(source + refused * 2));
                     }
                     host.errno?.(EILSEQ);
                     return -1;
@@ -592,7 +595,7 @@ export function createWideFunctions(host){
                 }
                 const ended = converted.length < room;
                 writeNarrow(destination, converted, ended);
-                host.writeMemory(from >>> 0,
+                host.writeMemory(wholeAddress(from),
                     width.bytes(ended ? 0 : source + converted.length * 2));
                 return converted.length;
             },
@@ -865,7 +868,7 @@ export function createMultiByteFunctions(narrow, host){
                 {
                     return -1;
                 }
-                return host.readMemory(text >>> 0, 1)[0] === 0 ? 0 : 1;
+                return host.readMemory(wholeAddress(text), 1)[0] === 0 ? 0 : 1;
             },
         },
         ...narrow.strlen ? { _mbstrlen: narrow.strlen } : {},

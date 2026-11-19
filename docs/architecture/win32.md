@@ -76,11 +76,16 @@ a VARIANT (a pointer to the caller's copy there). `IStream::Seek` is
 runs `tools/checks/check-wide-arguments.mjs`, which holds each entry to the signature comment
 above it.
 
-A dword argument reaches the handler as its slot's low half. An address the handler hands on or
-keeps rather than reads - a module's instance, a parameter for a thread or a window procedure -
-says so with `addresses`, the dwords that carry one, and is handed over whole when a 64-bit
-program keeps it past 4 GiB (`CreateThread` is `{ argBytes: 24, addresses: [2, 3] }`). The same
-check holds each of those dwords to an address of the signature.
+A dword argument reaches the handler as its slot's low half; an address reaches it whole. The
+dwords that carry one are the function's `addresses` (`CreateThread` is `{ argBytes: 24,
+addresses: [2, 3] }`), which the bridge joins to their high half when a 64-bit program keeps the
+address past 4 GiB. A spec that does not declare them gets them from its signature comment:
+`common/pointer-arguments.js`, written by `tools/checks/check-pointer-arguments.mjs` from every
+comment the layers carry, is declared on each function when the layer is built
+(`declareAddresses`), a C++ member's `this` among them. So a handler keeps an address with
+`wholeAddress`, never `>>> 0`, and memory takes it whole. An answer typed an address is written
+into RAX whole as well, past 4 GiB too. The same check holds each declared dword to an address
+of the signature.
 
 ## One call, from the program to JS and back
 

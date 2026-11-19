@@ -35,6 +35,7 @@ import { createPerfFunctions } from './perf.js';
 import {
     WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes,
 } from './tokens.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -242,7 +243,7 @@ const mapAccess = (access, mapping)=>{
             mapped |= mapping[at];
         }
     });
-    return mapped >>> 0;
+    return wholeAddress(mapped);
 };
 
 /**
@@ -280,7 +281,7 @@ export function createServiceFunctions(host){
     /** @param {number} address @param {number} maxLength */
     const ansiAt = (address, maxLength)=>((address >>> 0) === 0
         ? null
-        : host.readCString(address >>> 0, maxLength));
+        : host.readCString(wholeAddress(address), maxLength));
 
     /** @param {number} address @param {number} maxLength @returns {string | null} */
     const wideAt = (address, maxLength)=>{
@@ -289,7 +290,7 @@ export function createServiceFunctions(host){
             return null;
         }
         let text = '';
-        for (let at = address >>> 0; text.length < maxLength; at += 2)
+        for (let at = wholeAddress(address); text.length < maxLength; at += 2)
         {
             const unit = host.readMemory(at, 2);
             const code = unit[0] | unit[1] << 8;
@@ -317,7 +318,7 @@ export function createServiceFunctions(host){
             return null;
         }
         const names = [];
-        let at = address >>> 0;
+        let at = wholeAddress(address);
         for (;;)
         {
             const name = /** @type {string} */ (reader(wide)(at, MAX_TEXT));
@@ -889,7 +890,7 @@ export function createServiceFunctions(host){
             }
             /** @type {{ name: string, main: number }[]} */
             const entries = [];
-            for (let at = table >>> 0; entries.length < 64; at += 8)
+            for (let at = wholeAddress(table); entries.length < 64; at += 8)
             {
                 const view = new DataView(Uint8Array.from(host.readMemory(at, 8)).buffer);
                 const [text, main] = [view.getUint32(0, true), view.getUint32(4, true)];
@@ -1013,7 +1014,7 @@ export function createServiceFunctions(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([service, level, buffer, size, needed])=>{
-            const kind = level >>> 0;
+            const kind = wholeAddress(level);
             if (kind !== SERVICE_CONFIG_DESCRIPTION && kind !== SERVICE_CONFIG_FAILURE_ACTIONS
                 && kind !== SERVICE_CONFIG_PRESHUTDOWN_INFO
                 && kind !== SERVICE_CONFIG_DELAYED_AUTO_START_INFO)
@@ -1234,8 +1235,8 @@ export function createServiceFunctions(host){
             {
                 return fail(ERROR_INVALID_ADDRESS);
             }
-            const types = typeMask >>> 0;
-            const states = stateMask >>> 0;
+            const types = wholeAddress(typeMask);
+            const states = wholeAddress(stateMask);
             if ((types & (SERVICE_DRIVER | SERVICE_WIN32)) === 0
                 || (types & ~(SERVICE_DRIVER | SERVICE_WIN32 | SERVICE_INTERACTIVE_PROCESS)) !== 0
                 || states === 0 || states > SERVICE_STATE_ALL)
@@ -1275,7 +1276,7 @@ export function createServiceFunctions(host){
                 room -= costOf(rest[fitting]);
                 fitting++;
             }
-            const base = buffer >>> 0;
+            const base = wholeAddress(buffer);
             let strings = base + fitting * record;
             rest.slice(0, fitting).forEach((entry, at)=>{
                 const out = new Uint8Array(record);
@@ -1560,7 +1561,7 @@ export function createServiceFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([service, information, descriptor])=>{
-                const asked = information >>> 0;
+                const asked = wholeAddress(information);
                 const object = holding(service, 'service',
                     ((asked & 4) !== 0 ? WRITE_DAC : 0) | ((asked & 3) !== 0 ? WRITE_OWNER : 0));
                 if (typeof object === 'number')

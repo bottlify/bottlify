@@ -38,6 +38,7 @@ import { WM_CREATE, WM_SETFOCUS, WM_KILLFOCUS, WM_SETFONT, WM_KEYDOWN, WM_GETTEX
 import { notifyWindow } from './notify.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { readText as readString, writeText as writeString } from './strings.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const COMBOBOXEX_CLASS = 'ComboBoxEx32';
@@ -204,9 +205,10 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
     const ITEM = itemLayout(pointer);
 
     /** @param {number} address */
-    const i32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer).getInt32(0, true);
+    const i32 = address=>new DataView(host.readMemory(wholeAddress(address),
+        4).buffer).getInt32(0, true);
     /** @param {number} address @param {number} value */
-    const setI32 = (address, value)=>host.writeMemory(address >>> 0,
+    const setI32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(new Int32Array([value | 0]).buffer));
     /** A pointer-wide field: its low half what counts, the high half its sign's. */
     const setPointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
@@ -715,7 +717,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
         const on = ()=>call('DefSubclassProc', [hwnd, message, wParam, lParam]);
         switch (message >>> 0){
             case WM_KEYDOWN: {
-                const key = wParam >>> 0;
+                const key = wholeAddress(wParam);
                 if (control && (key === VK_RETURN || key === VK_ESCAPE))
                 {
                     return after(endEdit(control, key === VK_RETURN ? CBENF_RETURN : CBENF_ESCAPE,
@@ -801,7 +803,7 @@ export function createComboBoxExProcedure(host, tk, images, subclassing){
     const drawItem = (record, address)=>{
         const held = state(record);
         const draw = host.draw;
-        const view = new DataView(host.readMemory(address >>> 0, 48).buffer);
+        const view = new DataView(host.readMemory(wholeAddress(address), 48).buffer);
         const index = view.getInt32(8, true);
         const itemState = view.getUint32(16, true);
         const hdc = view.getUint32(24, true);

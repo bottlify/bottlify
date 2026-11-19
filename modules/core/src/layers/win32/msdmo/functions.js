@@ -21,6 +21,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -153,10 +154,10 @@ export function listDmos(registry){
 /** @param {MsdmoHost} host */
 export function createMsdmoFunctions(host){
     /** @param {number} address */
-    const guidAt = address=>formatGuid(host.readMemory(address >>> 0, 16));
+    const guidAt = address=>formatGuid(host.readMemory(wholeAddress(address), 16));
     /** @param {number} address @param {number} count */
     const typesAt = (address, count)=>((address >>> 0) === 0 || count === 0 ? []
-        : partialTypes(host.readMemory(address >>> 0, count * PARTIAL_TYPE_BYTES)));
+        : partialTypes(host.readMemory(wholeAddress(address), count * PARTIAL_TYPE_BYTES)));
 
     /** @param {string} clsid */
     const objectKey = clsid=>`${ROOT}\\${clsid}`;
@@ -244,7 +245,7 @@ export function createMsdmoFunctions(host){
                             while (given < (count >>> 0) && state.position < clsids.length)
                             {
                                 const clsid = clsids[state.position++];
-                                host.writeMemory((clsidsOut >>> 0) + given * 16,
+                                host.writeMemory(wholeAddress(clsidsOut) + given * 16,
                                     /** @type {Uint8Array} */ (parseGuid(clsid)));
                                 if ((namesOut >>> 0) !== 0)
                                 {
@@ -255,13 +256,13 @@ export function createMsdmoFunctions(host){
                                         return E_OUTOFMEMORY;
                                     }
                                     host.writeMemory(at, text);
-                                    host.writeMemory((namesOut >>> 0) + given * 4, dword(at));
+                                    host.writeMemory(wholeAddress(namesOut) + given * 4, dword(at));
                                 }
                                 given++;
                             }
                             if ((fetched >>> 0) !== 0)
                             {
-                                host.writeMemory(fetched >>> 0, dword(given));
+                                host.writeMemory(wholeAddress(fetched), dword(given));
                             }
                             return given === (count >>> 0) ? S_OK : S_FALSE;
                         },
@@ -291,7 +292,8 @@ export function createMsdmoFunctions(host){
                             {
                                 return E_POINTER;
                             }
-                            host.writeMemory(out >>> 0, dword(enumerator(clsids, state.position)));
+                            host.writeMemory(wholeAddress(out), dword(enumerator(clsids,
+                                state.position)));
                             return S_OK;
                         },
                     },
@@ -375,7 +377,7 @@ export function createMsdmoFunctions(host){
                 host.registry.create(key);
                 // No name is an empty one: the object is still registered.
                 host.registry.set(key, '', wide((name >>> 0) === 0 ? ''
-                    : host.readWideString(name >>> 0, NAME_BYTES * 4)), false);
+                    : host.readWideString(wholeAddress(name), NAME_BYTES * 4)), false);
                 host.registry.set(key, INPUT_TYPES,
                     pairBytes(typesAt(inTypes, inCount >>> 0)), true);
                 host.registry.set(key, OUTPUT_TYPES,
@@ -450,7 +452,7 @@ export function createMsdmoFunctions(host){
                         || !host.registry.get(objectKey(clsid), KEYED))
                     && fits(typesOf(clsid, INPUT_TYPES), wantIn)
                     && fits(typesOf(clsid, OUTPUT_TYPES), wantOut));
-                host.writeMemory(out >>> 0, dword(enumerator(clsids)));
+                host.writeMemory(wholeAddress(out), dword(enumerator(clsids)));
                 return S_OK;
             },
         },
@@ -468,7 +470,7 @@ export function createMsdmoFunctions(host){
                 {
                     return E_FAIL;
                 }
-                host.writeMemory(out >>> 0, wide(name.slice(0, NAME_UNITS - 1)));
+                host.writeMemory(wholeAddress(out), wide(name.slice(0, NAME_UNITS - 1)));
                 return S_OK;
             },
         },
@@ -498,11 +500,11 @@ export function createMsdmoFunctions(host){
                     const count = Math.min(types.length, asked >>> 0);
                     if ((to >>> 0) !== 0 && count > 0)
                     {
-                        host.writeMemory(to >>> 0, pairBytes(types.slice(0, count)));
+                        host.writeMemory(wholeAddress(to), pairBytes(types.slice(0, count)));
                     }
                     if ((given >>> 0) !== 0)
                     {
-                        host.writeMemory(given >>> 0, dword(count));
+                        host.writeMemory(wholeAddress(given), dword(count));
                     }
                 };
                 give(typesOf(id, INPUT_TYPES), inAsked, inGiven, inTypes);
@@ -555,10 +557,10 @@ export function createMsdmoFunctions(host){
                 if (made !== S_OK)
                 {
                     host.free(type);
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return made;
                 }
-                host.writeMemory(out >>> 0, dword(type));
+                host.writeMemory(wholeAddress(out), dword(type));
                 return S_OK;
             },
         },
@@ -596,7 +598,7 @@ export function createMsdmoFunctions(host){
                     host.free(type);
                     return copied;
                 }
-                host.writeMemory(out >>> 0, dword(type));
+                host.writeMemory(wholeAddress(out), dword(type));
                 return S_OK;
             },
         },

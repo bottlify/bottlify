@@ -21,6 +21,7 @@
 import { createComObject } from '../ole32/objects.js';
 import { canonicalGuid } from '../ole32/guid.js';
 import { UIA_IDS } from './ids.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057;
@@ -57,7 +58,7 @@ const NUMBERS = new Map(UIA_IDS.map(([type, guid, id])=>[`${type}:${guid}`, id])
 /** @param {UiaHost} host */
 export function createUiaFunctions(host){
     /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>host.writeMemory(at >>> 0,
+    const putU32 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
 
     /** The kinds UiaLookupId was asked a GUID of that the table does not hold. */
@@ -65,7 +66,7 @@ export function createUiaFunctions(host){
 
     /** A GUID in guest memory as its canonical text. @param {number} at */
     const guidAt = at=>{
-        const raw = host.readMemory(at >>> 0, 16);
+        const raw = host.readMemory(wholeAddress(at), 16);
         const view = new DataView(raw.buffer, raw.byteOffset, 16);
         const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>value
             .toString(16).toUpperCase().padStart(digits, '0');
@@ -150,7 +151,7 @@ export function createUiaFunctions(host){
                 view.setUint16(0, VT_I4, true);
                 view.setUint32(8, /** @type {any} */ (object).state.hwnd, true);
             }
-            host.writeMemory(out >>> 0, variant);
+            host.writeMemory(wholeAddress(out), variant);
             return S_OK;
         } },
         /** HRESULT get_HostRawElementProvider(IRawElementProviderSimple **pRetVal): none above. */

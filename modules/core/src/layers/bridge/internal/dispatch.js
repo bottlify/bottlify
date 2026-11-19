@@ -47,7 +47,9 @@ import { isDriven } from './drive.js';
  *     gives such an argument as low + high * 2^32 where its high half names
  *     an address (not zero, below 2^21), and as its dword otherwise, so a
  *     process in 4 GiB sees what it always saw. A handler that declares one
- *     must not cut it with `>>> 0` or `| 0`.
+ *     must not cut it with `>>> 0` or `| 0`. The win32 layer declares each
+ *     function's from its signature comment where its spec does not
+ *     (`declareAddresses`).
  * @property {number[]} [sizes]  The dwords that carry a `size_t` / `SIZE_T`: a
  *     64-bit caller's is eight bytes, and one past a dword is handed as the
  *     largest dword (0xFFFFFFFF) - a request no handler can meet, which it
@@ -360,7 +362,7 @@ const ADDRESS_HIGH = 2 ** 21;
  *
  * @param {number[] | null} addresses @param {any[]} args @param {number[]} high
  */
-const wholeAddresses = (addresses, args, high)=>{
+export const wholeAddresses = (addresses, args, high)=>{
     if (addresses === null)
     {
         return;
@@ -492,8 +494,9 @@ export const zeroExtendsOf = fn=>fn.returns === 'pointer' || fn.returns === 'u32
 /**
  * RAX as a 64-bit call's answer leaves it, as the function's type has it: a
  * bigint whole; a quadword answered the 32-bit way, its high half for EDX
- * (`high`), the two halves whole; an address zero-extended; any other dword
- * sign-extended - a handle of -1 is INVALID_HANDLE_VALUE whole.
+ * (`high`), the two halves whole; an address zero-extended, or whole where
+ * the handler answered one past 4 GiB; any other dword sign-extended - a
+ * handle of -1 is INVALID_HANDLE_VALUE whole.
  *
  * @param {number | bigint} result @param {number | null} high @param {boolean} zeroExtends
  * @returns {bigint}
@@ -507,8 +510,18 @@ export function longAnswer(result, high, zeroExtends){
     {
         return BigInt(high) << 32n | BigInt(result >>> 0);
     }
-    return zeroExtends ? BigInt(result >>> 0) : BigInt.asUintN(64, BigInt(result | 0));
+    return zeroExtends ? BigInt(unsignedAddress(result)) : BigInt.asUintN(64, BigInt(result | 0));
 }
+
+/**
+ * An answer typed an address or an unsigned dword, as a number RAX takes
+ * zero-extended: a dword by its low 32 bits, whatever sign it was computed
+ * with, and an address past 4 GiB a handler answered whole as it is.
+ *
+ * @param {number} result
+ */
+export const unsignedAddress = result=>(result >= 2 ** 32 && result < 2 ** 53 ? result
+    : result >>> 0);
 
 /**
  * @param {Object} deps

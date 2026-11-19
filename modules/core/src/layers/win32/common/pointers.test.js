@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    forwarded, paramsOf, pointerArg, pointerWidth, wholeAddress, wholeAnswer, wideOf, wideParams,
+    declareAddresses, forwarded, paramsOf, pointerArg, pointerWidth, wholeAddress, wholeAnswer,
+    wideOf, wideParams,
 } from './pointers.js';
 
 test('a 32-bit pointer is a dword', ()=>{
@@ -93,4 +94,41 @@ test('an argument handed on to a routine: whole from a 64-bit caller, by its typ
     assert.equal(forwarded(args, 1, true), -1);
     assert.equal(forwarded(args, 1), 0xffffffffffffffffn);
     assert.equal(forwarded(args, 2), 0x123456789n);
+});
+
+test('each function is declared the address arguments its signature names', ()=>{
+    const handler = ()=>0;
+    const own = { argBytes: 8, handler, addresses: [1] };
+    const shared = { argBytes: 12, handler };
+    /** @type {Record<string, Record<string, any>>} */
+    const libraries = {
+        'A.dll': {
+            CreateFileA: { argBytes: 28, handler },
+            Quad: { argBytes: 16, handler, quadwords: [0] },
+            Float: { argBytes: 8, handler, floats: { 1: 'f32' } },
+            ByValue: { argBytes: 24, handler, structs: { 1: 4 } },
+            Short: { argBytes: 4, handler },
+            Own: own,
+            Member: { convention: 'thiscall', argBytes: 8, handler },
+            Unlisted: { argBytes: 8, handler },
+            Data: { data: ()=>new Uint8Array(4) },
+            First: shared,
+        },
+        'B.dll': { Second: shared },
+    };
+    declareAddresses(libraries, {
+        CreateFileA: [0, 3], Quad: [0, 1, 2], Float: [0, 1], ByValue: [0, 2, 5], Short: [0, 1],
+        Own: [0], First: [2], Second: [0],
+    });
+    const a = libraries['A.dll'];
+    assert.deepEqual(a.CreateFileA.addresses, [0, 3]);
+    assert.deepEqual(a.Quad.addresses, [2], 'a quadword\'s halves are none');
+    assert.deepEqual(a.Float.addresses, [0], 'a float is none');
+    assert.deepEqual(a.ByValue.addresses, [0, 5], 'a structure\'s dwords are none');
+    assert.deepEqual(a.Short.addresses, [0], 'none past the arguments');
+    assert.deepEqual(own.addresses, [1], 'its own declaration stays');
+    assert.deepEqual(a.Member.addresses, [0], 'a member\'s this');
+    assert.equal(a.Unlisted.addresses, undefined);
+    assert.equal(a.Data.addresses, undefined);
+    assert.deepEqual(/** @type {any} */ (shared).addresses, [2], 'one function: its first name');
 });

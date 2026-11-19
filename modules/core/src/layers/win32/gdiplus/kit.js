@@ -14,7 +14,7 @@
  * GDI+ answers a pointer it does not recognise.
  */
 
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /** GpStatus (gdiplustypes.h). */
 export const Status = Object.freeze({
@@ -56,9 +56,9 @@ export function createKit(host){
     };
 
     /** @param {number} address @param {Uint8Array} bytes */
-    const write = (address, bytes)=>host.writeMemory(address >>> 0, bytes);
+    const write = (address, bytes)=>host.writeMemory(wholeAddress(address), bytes);
     /** @param {number} address @param {number} length */
-    const read = (address, length)=>host.readMemory(address >>> 0, length).slice();
+    const read = (address, length)=>host.readMemory(wholeAddress(address), length).slice();
     /** @param {number} address @param {number} length */
     const view = (address, length)=>new DataView(read(address, length).buffer);
 

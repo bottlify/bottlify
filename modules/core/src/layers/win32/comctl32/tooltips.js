@@ -23,6 +23,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TOOLTIPS_CLASS = 'tooltips_class32';
@@ -136,13 +137,13 @@ export function createTooltipProcedure(host, tk, resources){
     };
     /** @param {number} at */
     const read32 = at=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number} value */
     const write32 = (at, value)=>{
         const v = value >>> 0;
-        host.writeMemory(at >>> 0,
+        host.writeMemory(wholeAddress(at),
             Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
     /**
@@ -154,10 +155,10 @@ export function createTooltipProcedure(host, tk, resources){
     const readText = (address, wide)=>{
         if (!wide)
         {
-            return host.readCString(address >>> 0, MAX_TEXT);
+            return host.readCString(wholeAddress(address), MAX_TEXT);
         }
         let text = '';
-        for (let at = address >>> 0; text.length < MAX_TEXT; at += 32)
+        for (let at = wholeAddress(address); text.length < MAX_TEXT; at += 32)
         {
             const bytes = host.readMemory(at, 32);
             for (let i = 0; i < 32; i += 2)
@@ -188,7 +189,7 @@ export function createTooltipProcedure(host, tk, resources){
         if (!wide)
         {
             const bytes = encodeAnsi(`${clipped}\0`);
-            host.writeMemory(address >>> 0,
+            host.writeMemory(wholeAddress(address),
                 bytes.length > ANSI_COPY ? bytes.slice(0, ANSI_COPY) : bytes);
             return;
         }
@@ -198,7 +199,7 @@ export function createTooltipProcedure(host, tk, resources){
             bytes[i * 2] = clipped.charCodeAt(i) & 0xff;
             bytes[i * 2 + 1] = clipped.charCodeAt(i) >>> 8;
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {any} record */
@@ -528,7 +529,7 @@ export function createTooltipProcedure(host, tk, resources){
                 return 1;
             }
             case TTM.SETDELAYTIME: {
-                const which = wParam >>> 0;
+                const which = wholeAddress(wParam);
                 const time = (lParam & 0xffff) === 0xffff || (lParam | 0) < 0 ? -1
                     : lParam & 0xffff;
                 if (which === TTDT_AUTOMATIC)

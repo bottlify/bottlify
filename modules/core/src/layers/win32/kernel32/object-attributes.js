@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * What a native call's OBJECT_ATTRIBUTES says, and the Win32 name it gives.
  *
@@ -64,7 +66,7 @@ export function readObjectAttributes(readMemory, pointer, pointerSize = 4){
         return null;
     }
     const size = pointerSize === 8 ? 48 : 24;
-    const bytes = readMemory(pointer >>> 0, size);
+    const bytes = readMemory(wholeAddress(pointer), size);
     const view = new DataView(bytes.buffer, bytes.byteOffset, size);
     /** @param {number} at */
     const word = at=>(pointerSize === 8 ? Number(view.getBigUint64(at, true) & 0xffffffffn)

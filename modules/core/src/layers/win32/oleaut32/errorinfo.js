@@ -17,6 +17,7 @@
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { readGuid, writeGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The two interfaces. */
 export const IID_ICREATEERRORINFO = '{22F03340-547D-101B-8E65-08002B2BD119}';
@@ -80,7 +81,7 @@ export function createErrorInfoObjects(host){
         name, argBytes: 8,
         /** @param {{ state: ErrorInfoState }} object @param {number[]} args */
         invoke: (object, [text])=>{
-            set(object.state, (text >>> 0) === 0 ? null : readWide(text >>> 0));
+            set(object.state, (text >>> 0) === 0 ? null : readWide(wholeAddress(text)));
             return S_OK;
         },
     });
@@ -98,7 +99,7 @@ export function createErrorInfoObjects(host){
             }
             const text = get(object.state);
             const bstr = text === null ? 0 : host.allocateBstr(text);
-            writeU32(out >>> 0, bstr);
+            writeU32(wholeAddress(out), bstr);
             return text !== null && bstr === 0 ? E_OUTOFMEMORY : S_OK;
         },
     });
@@ -155,7 +156,7 @@ export function createErrorInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, object.state.helpContext);
+                writeU32(wholeAddress(out), object.state.helpContext);
                 return S_OK;
             } },
     ]);

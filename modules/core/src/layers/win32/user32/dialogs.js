@@ -56,6 +56,7 @@ import {
     DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
     WM_SETTEXT, after,
 } from './controls.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** DLGTEMPLATE, the fixed part before the variable-length names. */
 const DLGTEMPLATE = Object.freeze({
@@ -1264,7 +1265,7 @@ export function createDialogFunctions(options){
      * @param {number} instance @param {number} name
      */
     const templateAddress = (instance, name, wide = false)=>{
-        const raw = name >>> 0;
+        const raw = wholeAddress(name);
         const key = raw < MAX_INTEGER_RESOURCE ? raw : readText(host, raw, wide, MAX_RESOURCE_NAME);
         const found = /** @type {{ rva: number } | null} */ (
             host.findResource?.(instance >>> 0, RT_DIALOG, key) ?? null);
@@ -1618,7 +1619,7 @@ export function createDialogFunctions(options){
                     return 0;
                 }
                 const control = controlOf(hwnd, id);
-                return writeString(out >>> 0, control?.title ?? '', room);
+                return writeString(wholeAddress(out), control?.title ?? '', room);
             },
         },
 
@@ -1656,8 +1657,9 @@ export function createDialogFunctions(options){
                     : null;
                 if ((translatedOut >>> 0) !== 0)
                 {
-                    host.writeMemory(translatedOut >>> 0, Uint8Array.of(value === null ? 0 : 1,
-                        0, 0, 0));
+                    host.writeMemory(wholeAddress(translatedOut),
+                        Uint8Array.of(value === null ? 0 : 1,
+                            0, 0, 0));
                 }
                 return value ?? 0;
             },

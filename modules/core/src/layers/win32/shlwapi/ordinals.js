@@ -18,6 +18,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { GUID_NULL, parseGuid } from '../ole32/guid.js';
 import { dword, u32 } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Each is [ordinal, name]: the number a program imports the function by.
@@ -267,12 +268,12 @@ export function createOrdinalFunctions(host){
     const readBytes = (address, length)=>(host.readMemory
         ? host.readMemory(address, length) : new Uint8Array(length));
     /** @param {number} address */
-    const readU32 = address=>u32(readBytes(address >>> 0, 4));
+    const readU32 = address=>u32(readBytes(wholeAddress(address), 4));
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, dword(value));
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), dword(value));
     /** @param {number} address */
     const wideAt = address=>((address >>> 0) === 0 || !host.readWideString ? null
-        : host.readWideString(address >>> 0, 0x10000));
+        : host.readWideString(wholeAddress(address), 0x10000));
 
     /**
      * A handle of another process brought into this one, or this one's own
@@ -319,7 +320,7 @@ export function createOrdinalFunctions(host){
      * @param {number} info
      */
     const fdsa = info=>{
-        const bytes = readBytes(info >>> 0, 16);
+        const bytes = readBytes(wholeAddress(info), 16);
         return {
             count: u32(bytes, FDSA.count), mem: u32(bytes, FDSA.mem), room: u32(bytes, FDSA.room),
             inc: bytes[FDSA.inc], size: bytes[FDSA.size], flags: bytes[FDSA.flags],
@@ -407,7 +408,7 @@ export function createOrdinalFunctions(host){
                 return 0;
             }
             const cut = text.slice(0, (room | 0) - 1);
-            host.writeMemory(buffer >>> 0, wide ? utf16z(cut) : encodeAnsi(`${cut}\0`));
+            host.writeMemory(wholeAddress(buffer), wide ? utf16z(cut) : encodeAnsi(`${cut}\0`));
             return cut.length + 1;
         },
     });
@@ -473,7 +474,7 @@ export function createOrdinalFunctions(host){
                 writeU32(countAt, 0);
                 return E_NOT_SUFFICIENT_BUFFER;
             }
-            host.writeMemory(buffer >>> 0, wide ? utf16z(text) : encodeAnsi(`${text}\0`));
+            host.writeMemory(wholeAddress(buffer), wide ? utf16z(text) : encodeAnsi(`${text}\0`));
             writeU32(countAt, text.length);
             return S_OK;
         },
@@ -762,7 +763,7 @@ export function createOrdinalFunctions(host){
                 {
                     if ((clsid >>> 0) !== 0)
                     {
-                        host.writeMemory(clsid >>> 0, new Uint8Array(16));
+                        host.writeMemory(wholeAddress(clsid), new Uint8Array(16));
                     }
                     return E_FAIL;
                 }
@@ -838,13 +839,13 @@ export function createOrdinalFunctions(host){
                         [mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0])) >>> 0;
                     if (view)
                     {
-                        host.writeMemory(view, readBytes(data >>> 0, size >>> 0).slice());
+                        host.writeMemory(view, readBytes(wholeAddress(data), size >>> 0).slice());
                         await kernel32('UnmapViewOfFile', [view]);
                     }
                 }
                 if (await isSelf(process))
                 {
-                    return mapping >>> 0;
+                    return wholeAddress(mapping);
                 }
                 const self = await kernel32('GetCurrentProcessId', []);
                 return (await duplicate(mapping, self, process, 0, DUPLICATE_CLOSE_SOURCE)) >>> 0;
@@ -874,7 +875,7 @@ export function createOrdinalFunctions(host){
                 }
                 const view = await kernel32('MapViewOfFile', [local, FILE_MAP_ALL_ACCESS, 0, 0, 0]);
                 await kernel32('CloseHandle', [local]);
-                return view >>> 0;
+                return wholeAddress(view);
             },
         },
 
@@ -999,7 +1000,7 @@ export function createOrdinalFunctions(host){
                 // Read as the arrays they are: one past what is mapped faults
                 // at once, as Windows' walk would when it got there.
                 const count = Math.max(0, length | 0);
-                const list = new DataView(readBytes(keys >>> 0, count * 4).slice().buffer);
+                const list = new DataView(readBytes(wholeAddress(keys), count * 4).slice().buffer);
                 for (let at = 0; at < count; at++)
                 {
                     if (list.getInt32(at * 4, true) === (key | 0))
@@ -1030,7 +1031,7 @@ export function createOrdinalFunctions(host){
                 bytes.set(dword(blocks), FDSA.room);
                 bytes[FDSA.inc] = (inc & 0xff) || 1;
                 bytes[FDSA.size] = size & 0xff;
-                host.writeMemory(info >>> 0, bytes.subarray(0, 15));
+                host.writeMemory(wholeAddress(info), bytes.subarray(0, 15));
                 return 1;
             },
         },
@@ -1092,7 +1093,7 @@ export function createOrdinalFunctions(host){
                     (state.count - at) * state.size).slice();
                 host.writeMemory(mem + (at + 1) * state.size, tail);
                 host.writeMemory(mem + at * state.size,
-                    readBytes(block >>> 0, state.size).slice());
+                    readBytes(wholeAddress(block), state.size).slice());
                 writeU32(info + FDSA.count, state.count + 1);
                 return at;
             },
@@ -1108,7 +1109,7 @@ export function createOrdinalFunctions(host){
                 {
                     return 0;
                 }
-                const at = where >>> 0;
+                const at = wholeAddress(where);
                 const tail = readBytes(state.mem + (at + 1) * state.size,
                     (state.count - at - 1) * state.size).slice();
                 host.writeMemory(state.mem + at * state.size, tail);
@@ -1176,12 +1177,12 @@ export function createOrdinalFunctions(host){
             /** @param {number[]} args */
             handler: ([text, guid])=>{
                 const bytes = (text >>> 0) === 0 ? null
-                    : parseGuid(host.readCString(text >>> 0, 64));
+                    : parseGuid(host.readCString(wholeAddress(text), 64));
                 if (bytes === null || (guid >>> 0) === 0)
                 {
                     return 0;
                 }
-                host.writeMemory(guid >>> 0, bytes);
+                host.writeMemory(wholeAddress(guid), bytes);
                 return 1;
             },
         },
@@ -1192,12 +1193,12 @@ export function createOrdinalFunctions(host){
             /** @param {number[]} args */
             handler: ([text, guid])=>{
                 const bytes = (text >>> 0) === 0 || !host.readWideString ? null
-                    : parseGuid(host.readWideString(text >>> 0, 64 * 2));
+                    : parseGuid(host.readWideString(wholeAddress(text), 64 * 2));
                 if (bytes === null || (guid >>> 0) === 0)
                 {
                     return 0;
                 }
-                host.writeMemory(guid >>> 0, bytes);
+                host.writeMemory(wholeAddress(guid), bytes);
                 return 1;
             },
         },
@@ -1232,13 +1233,13 @@ export function createOrdinalFunctions(host){
                     {
                         variant.set(dword(rest[next++] ?? 0), 12);
                     }
-                    host.writeMemory((variants >>> 0) + (total - 1 - at) * VARIANT_SIZE,
+                    host.writeMemory(wholeAddress(variants) + (total - 1 - at) * VARIANT_SIZE,
                         variant.subarray(0, WIDE_VARIANTS.has(type) ? 16 : 12));
                 }
                 const head = new Uint8Array(16);
                 head.set(dword(total ? variants : 0), 0);
                 head.set(dword(total), 8);
-                host.writeMemory(params >>> 0, head);
+                host.writeMemory(wholeAddress(params), head);
                 return S_OK;
             },
         },
@@ -1295,7 +1296,7 @@ export function createOrdinalFunctions(host){
                 {
                     return 0;
                 }
-                const guid = readBytes(clsid >>> 0, 16);
+                const guid = readBytes(wholeAddress(clsid), 16);
                 const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
                     value.toString(16).toUpperCase().padStart(digits, '0');
                 const view = new DataView(guid.slice().buffer);

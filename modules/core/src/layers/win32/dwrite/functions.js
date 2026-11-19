@@ -27,6 +27,7 @@ import { createRenderTargets } from './render-target.js';
 import { FONT_STYLE, SIMULATION, familiesOf, localized, matching, readFace } from './fonts.js';
 import { FontFormatError, analyzeFile, openTypeTag, tagText } from './sfnt.js';
 import { GLYPH_COUNT, SYSTEM_FAMILIES, UNITS_PER_EM, createSystemFace } from './system.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -112,11 +113,11 @@ export function createDwriteFunctions(host){
             bytes[i * 2] = text.charCodeAt(i) & 0xff;
             bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
         }
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at @param {number} count */
     const readU16s = (at, count)=>{
-        const bytes = host.readMemory(at >>> 0, count * 2);
+        const bytes = host.readMemory(wholeAddress(at), count * 2);
         return Array.from({ length: count }, (_, i)=>bytes[i * 2] | bytes[i * 2 + 1] << 8);
     };
 
@@ -447,7 +448,7 @@ export function createDwriteFunctions(host){
     descriptors.numberSubstitution = { id: IID.NUMBER_SUBSTITUTION, methods: [] };
 
     /** A key a program passes, copied. @param {number} at @param {number} size */
-    const keyAt = (at, size)=>host.readMemory(at >>> 0, size >>> 0).slice();
+    const keyAt = (at, size)=>host.readMemory(wholeAddress(at), size >>> 0).slice();
     const createStream = async(/** @type {Uint8Array} */ key, /** @type {number} */ out)=>{
         if ((out >>> 0) === 0)
         {
@@ -673,7 +674,7 @@ export function createDwriteFunctions(host){
             m.underlinePosition, m.underlineThickness, m.strikethroughPosition,
             m.strikethroughThickness].forEach((value, i)=>view.setUint16(i * 2, value & 0xffff,
             true));
-        host.writeMemory(at >>> 0, bytesOut);
+        host.writeMemory(wholeAddress(at), bytesOut);
     };
     /**
      * DWRITE_GLYPH_METRICS of each glyph, 28 bytes each; glyph numbers past the
@@ -700,7 +701,7 @@ export function createDwriteFunctions(host){
                 g.advanceHeight, g.bottomSideBearing, g.verticalOriginY].forEach((value, k)=>
                 view.setInt32(i * 28 + k * 4, value, true));
         });
-        host.writeMemory(out >>> 0, data);
+        host.writeMemory(wholeAddress(out), data);
         return S_OK;
     };
     /** A half rounded away from zero, as C's round(). @param {number} value */
@@ -768,7 +769,7 @@ export function createDwriteFunctions(host){
             {
                 if ((out >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(n * 2));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(n * 2));
                 }
                 return E_INVALIDARG;
             }
@@ -776,7 +777,7 @@ export function createDwriteFunctions(host){
             {
                 return S_OK;
             }
-            const read = host.readMemory(codes >>> 0, n * 4);
+            const read = host.readMemory(wholeAddress(codes), n * 4);
             const view = new DataView(read.buffer, read.byteOffset, read.byteLength);
             const glyphs = new Uint8Array(n * 2);
             for (let i = 0; i < n; i++)
@@ -785,7 +786,7 @@ export function createDwriteFunctions(host){
                 glyphs[i * 2] = glyph & 0xff;
                 glyphs[i * 2 + 1] = glyph >> 8;
             }
-            host.writeMemory(out >>> 0, glyphs);
+            host.writeMemory(wholeAddress(out), glyphs);
             return S_OK;
         } },
         /**
@@ -873,7 +874,7 @@ export function createDwriteFunctions(host){
                 const ppem = pixelsPerEm(f32(em), f32(ppd), transform);
                 if (!(f32(em) > 0) || !(f32(ppd) > 0) || !(ppem > 0))
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(20));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(20));
                     return E_INVALIDARG;
                 }
                 const face = o.state.face;
@@ -1194,7 +1195,7 @@ export function createDwriteFunctions(host){
 
     /** LOGFONTW: its weight, italic and face name. @param {number} at */
     const readLogFont = at=>{
-        const raw = host.readMemory(at >>> 0, 92);
+        const raw = host.readMemory(wholeAddress(at), 92);
         const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
         let name = '';
         for (let i = 0; i < 32; i++)
@@ -1228,7 +1229,7 @@ export function createDwriteFunctions(host){
         {
             view.setUint16(28 + i * 2, family.charCodeAt(i), true);
         }
-        host.writeMemory(at >>> 0, raw);
+        host.writeMemory(wholeAddress(at), raw);
     };
     /**
      * The font a device context holds as GDI realized it: its LOGFONT's weight
@@ -1296,7 +1297,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            host.writeMemory(out >>> 0, new Uint8Array(92));
+            host.writeMemory(wholeAddress(out), new Uint8Array(92));
             putU32s(systemAt, [0]);
             const font = (fontPointer >>> 0) === 0 ? null : host.objectAt(fontPointer >>> 0);
             if (!font?.state?.font)
@@ -1315,7 +1316,7 @@ export function createDwriteFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            host.writeMemory(out >>> 0, new Uint8Array(92));
+            host.writeMemory(wholeAddress(out), new Uint8Array(92));
             const face = faceAt(facePointer);
             if (!face)
             {
@@ -1796,7 +1797,7 @@ export function createDwriteFunctions(host){
 
     /** A GUID in guest memory, as the canonical text. @param {number} at */
     function guidAt(at){
-        const raw = host.readMemory(at >>> 0, 16);
+        const raw = host.readMemory(wholeAddress(at), 16);
         const view = new DataView(raw.buffer, raw.byteOffset, 16);
         const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>value
             .toString(16).toUpperCase().padStart(digits, '0');

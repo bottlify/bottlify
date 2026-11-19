@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * A call made in another process: what a parent's VirtualAllocEx,
  * ReadProcessMemory or SuspendThread on its child becomes. The parent sends
@@ -201,7 +203,7 @@ export function takeAnswer(answer, into, host){
         const address = into[index];
         if (bytes && address !== null && address !== undefined && address !== 0)
         {
-            host.writeMemory(address >>> 0, bytes);
+            host.writeMemory(wholeAddress(address), bytes);
         }
     });
     if (answer.error !== null)

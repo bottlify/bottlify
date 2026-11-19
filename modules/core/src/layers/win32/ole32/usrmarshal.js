@@ -36,6 +36,7 @@ import { GUID_NULL, formatGuid, readGuid } from './guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
@@ -187,15 +188,15 @@ const after = (value, then)=>(value instanceof Promise ? value.then(then) : then
  */
 export function createUserMarshalFunctions(host){
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address */
     const readU16 = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU16 = (address, value)=>host.writeMemory(wholeAddress(address),
         Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
     /**
      * Consecutive words from `address`, written at once.
@@ -207,7 +208,7 @@ export function createUserMarshalFunctions(host){
         const bytes = new Uint8Array(words.length * 4);
         const view = new DataView(bytes.buffer);
         words.forEach((word, index)=>view.setUint32(index * 4, word >>> 0, true));
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return (address + bytes.length) >>> 0;
     };
     /** @param {number} address @param {number} value */

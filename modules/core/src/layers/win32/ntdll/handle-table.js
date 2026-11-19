@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The Rtl handle tables: fixed-size records a program allocates from one
  * reservation and names by index.
@@ -45,14 +47,14 @@ const STATUS_SUCCESS = 0;
 export function createHandleTableFunctions(host){
     /** @param {number} address */
     const read = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const write = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -78,7 +80,7 @@ export function createHandleTableFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([count, size, table])=>{
-                host.writeMemory(table >>> 0, new Uint8Array(TABLE_SIZE));
+                host.writeMemory(wholeAddress(table), new Uint8Array(TABLE_SIZE));
                 write(table + MAX_HANDLE_COUNT, count);
                 write(table + HANDLE_SIZE, size);
                 return 0;
@@ -195,7 +197,7 @@ export function createHandleTableFunctions(host){
                 {
                     host.free(reserved);
                 }
-                host.writeMemory(table >>> 0, new Uint8Array(TABLE_SIZE));
+                host.writeMemory(wholeAddress(table), new Uint8Array(TABLE_SIZE));
                 return STATUS_SUCCESS;
             },
         },

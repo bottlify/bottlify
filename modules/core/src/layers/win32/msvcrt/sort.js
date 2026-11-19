@@ -20,6 +20,7 @@
  */
 
 import { EINVAL } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The key qsort sorted as msvcrt.dll's own sort orders is carried under in
@@ -51,14 +52,14 @@ export function createSortFunctions(host){
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** Two elements exchanged in place. @param {number} a @param {number} b @param {number} width */
@@ -317,7 +318,7 @@ export function createSortFunctions(host){
                     return found;
                 }
                 const end = (base + count * width) >>> 0;
-                host.writeMemory(end, host.readMemory(key >>> 0, width >>> 0).slice());
+                host.writeMemory(end, host.readMemory(wholeAddress(key), width >>> 0).slice());
                 writeU32(num, count + 1);
                 return end;
             });

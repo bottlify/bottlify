@@ -28,6 +28,7 @@
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { createDescriptorCodec } from './descriptors.js';
 import { probedNatives } from '../ntdll/probe.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -683,7 +684,7 @@ export const wideTextAt = (readMemory, pointer, limit)=>{
     let text = '';
     for (let at = 0; at < limit; at++)
     {
-        const unit = readMemory((pointer >>> 0) + at * 2, 2);
+        const unit = readMemory(wholeAddress(pointer) + at * 2, 2);
         const code = unit[0] | unit[1] << 8;
         if (code === 0)
         {
@@ -885,12 +886,12 @@ export function createTokenFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            const head = host.readMemory(sid >>> 0, 8);
+            const head = host.readMemory(wholeAddress(sid), 8);
             if (head[0] !== 1 || head[1] > 15)
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            const body = host.readMemory(sid >>> 0, 8 + 4 * head[1]);
+            const body = host.readMemory(wholeAddress(sid), 8 + 4 * head[1]);
             const view = new DataView(body.buffer, body.byteOffset, body.length);
             const authority = view.getUint16(2) * 2 ** 32 + view.getUint32(4);
             let text = `S-1-${authority >= 2 ** 32 ? `0x${authority.toString(16)}` : authority}`;
@@ -901,7 +902,7 @@ export function createTokenFunctions(host){
             const memory = encodeText(text, wide);
             const block = host.allocate(memory.length);
             host.writeMemory(block, memory);
-            writeDword(out >>> 0, block);
+            writeDword(wholeAddress(out), block);
             host.setLastError(ERROR_SUCCESS);
             return 1;
         },
@@ -1081,15 +1082,16 @@ export function createTokenFunctions(host){
     };
 
     /** @param {number} address @returns {number} */
-    const readDword = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readDword = address=>new DataView(host.readMemory(wholeAddress(address),
+        4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @returns {number} */
     const readWord = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} address @param {number} value */
-    const writeWord = (address, value)=>host.writeMemory(address >>> 0,
+    const writeWord = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array([value & 0xff, value >>> 8 & 0xff]));
 
     /** A SID in guest memory, laid out, or null when it is not one. @param {number} sid */
@@ -1098,8 +1100,9 @@ export function createTokenFunctions(host){
         {
             return null;
         }
-        const head = host.readMemory(sid >>> 0, 2);
-        return head[0] === 1 && head[1] <= 15 ? host.readMemory(sid >>> 0, 8 + 4 * head[1]).slice()
+        const head = host.readMemory(wholeAddress(sid), 2);
+        return head[0] === 1 && head[1] <= 15 ? host.readMemory(wholeAddress(sid),
+            8 + 4 * head[1]).slice()
             : null;
     };
 
@@ -1115,7 +1118,7 @@ export function createTokenFunctions(host){
         {
             return null;
         }
-        const head = host.readMemory(descriptor >>> 0, 4);
+        const head = host.readMemory(wholeAddress(descriptor), 4);
         return head[SD.REVISION] === SECURITY_DESCRIPTOR_REVISION
             && ((head[2] | head[3] << 8) & SE_SELF_RELATIVE) === 0 ? descriptor >>> 0 : null;
     };
@@ -1134,7 +1137,7 @@ export function createTokenFunctions(host){
         {
             return null;
         }
-        const at = descriptor >>> 0;
+        const at = wholeAddress(descriptor);
         if (host.readMemory(at, 1)[0] !== SECURITY_DESCRIPTOR_REVISION)
         {
             return null;
@@ -1175,8 +1178,8 @@ export function createTokenFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            writeDword(out >>> 0, held.part(slot));
-            writeDword(defaulted >>> 0, (held.control & bit) !== 0 ? 1 : 0);
+            writeDword(wholeAddress(out), held.part(slot));
+            writeDword(wholeAddress(defaulted), (held.control & bit) !== 0 ? 1 : 0);
             return 1;
         },
     });
@@ -1202,16 +1205,17 @@ export function createTokenFunctions(host){
                 return fail(ERROR_INVALID_PARAMETER);
             }
             const isPresent = (held.control & presentBit) !== 0;
-            writeDword(present >>> 0, isPresent ? 1 : 0);
+            writeDword(wholeAddress(present), isPresent ? 1 : 0);
             if (isPresent)
             {
                 if ((out >>> 0) !== 0)
                 {
-                    writeDword(out >>> 0, held.part(slot));
+                    writeDword(wholeAddress(out), held.part(slot));
                 }
                 if ((defaulted >>> 0) !== 0)
                 {
-                    writeDword(defaulted >>> 0, (held.control & defaultedBit) !== 0 ? 1 : 0);
+                    writeDword(wholeAddress(defaulted),
+                        (held.control & defaultedBit) !== 0 ? 1 : 0);
                 }
             }
             return 1;
@@ -1250,7 +1254,7 @@ export function createTokenFunctions(host){
      *             at: number, next: number }[] | null}
      */
     const acesOf = acl=>{
-        const head = host.readMemory(acl >>> 0, ACL.HEADER);
+        const head = host.readMemory(wholeAddress(acl), ACL.HEADER);
         if (!ACL_REVISIONS.has(head[ACL.REVISION]))
         {
             return null;
@@ -1265,7 +1269,7 @@ export function createTokenFunctions(host){
             {
                 return null;
             }
-            const ace = host.readMemory((acl >>> 0) + at, 4);
+            const ace = host.readMemory(wholeAddress(acl) + at, 4);
             const aceSize = ace[2] | ace[3] << 8;
             if (aceSize < 8 || at + aceSize > size)
             {
@@ -1273,7 +1277,7 @@ export function createTokenFunctions(host){
             }
             const type = ace[0];
             const flags = ace[1];
-            const mask = readDword((acl >>> 0) + at + 4);
+            const mask = readDword(wholeAddress(acl) + at + 4);
             const sid = type <= SYSTEM_ALARM_ACE_TYPE ? sidAt((acl >>> 0) + at + 8) : null;
             aces.push({ type, flags, mask, sid, at, next: at + aceSize });
             at += aceSize;
@@ -1303,12 +1307,12 @@ export function createTokenFunctions(host){
         }
         const at = aces.length === 0 ? ACL.HEADER : aces[aces.length - 1].next;
         const aceSize = 8 + bytes.length;
-        if (at + aceSize > readWord((acl >>> 0) + ACL.SIZE))
+        if (at + aceSize > readWord(wholeAddress(acl) + ACL.SIZE))
         {
             return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
         }
-        host.writeMemory((acl >>> 0) + at, aceBytes(type, flags & 0xff, mask, bytes));
-        writeWord((acl >>> 0) + ACL.COUNT, aces.length + 1);
+        host.writeMemory(wholeAddress(acl) + at, aceBytes(type, flags & 0xff, mask, bytes));
+        writeWord(wholeAddress(acl) + ACL.COUNT, aces.length + 1);
         raiseRevision(acl, revision);
         return 1;
     };
@@ -1322,9 +1326,9 @@ export function createTokenFunctions(host){
      * @param {number} acl @param {number} revision
      */
     const raiseRevision = (acl, revision)=>{
-        if ((revision >>> 0) > host.readMemory(acl >>> 0, 1)[0] && (revision >>> 0) <= 0xff)
+        if ((revision >>> 0) > host.readMemory(wholeAddress(acl), 1)[0] && (revision >>> 0) <= 0xff)
         {
-            host.writeMemory(acl >>> 0, new Uint8Array([revision >>> 0]));
+            host.writeMemory(wholeAddress(acl), new Uint8Array([revision >>> 0]));
         }
     };
 
@@ -1342,7 +1346,7 @@ export function createTokenFunctions(host){
                 mapped |= mapping[at];
             }
         });
-        return mapped >>> 0;
+        return wholeAddress(mapped);
     };
 
     /**
@@ -1356,7 +1360,7 @@ export function createTokenFunctions(host){
             return null;
         }
         return wide ? wideTextAt(host.readMemory, pointer, limit)
-            : host.readCString(pointer >>> 0, limit);
+            : host.readCString(wholeAddress(pointer), limit);
     };
 
     /** @param {boolean} wide */
@@ -1375,7 +1379,7 @@ export function createTokenFunctions(host){
             }
             const block = host.allocate(sid.length);
             host.writeMemory(block, sid);
-            writeDword(out >>> 0, block);
+            writeDword(wholeAddress(out), block);
             host.setLastError(ERROR_SUCCESS);
             return 1;
         },
@@ -1401,10 +1405,10 @@ export function createTokenFunctions(host){
             }
             const block = host.allocate(descriptor.length);
             host.writeMemory(block, descriptor);
-            writeDword(out >>> 0, block);
+            writeDword(wholeAddress(out), block);
             if ((size >>> 0) !== 0)
             {
-                writeDword(size >>> 0, descriptor.length);
+                writeDword(wholeAddress(size), descriptor.length);
             }
             host.setLastError(ERROR_SUCCESS);
             return 1;
@@ -1430,8 +1434,8 @@ export function createTokenFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            writeDword(out >>> 0, value);
-            writeDword((out >>> 0) + 4, 0);
+            writeDword(wholeAddress(out), value);
+            writeDword(wholeAddress(out) + 4, 0);
             host.setLastError(ERROR_SUCCESS);
             return 1;
         },
@@ -1477,21 +1481,21 @@ export function createTokenFunctions(host){
             if (readDword(nameSize) <= found.name.length
                 || readDword(domainSize) <= found.domain.length)
             {
-                writeDword(nameSize >>> 0, found.name.length + 1);
-                writeDword(domainSize >>> 0, found.domain.length + 1);
+                writeDword(wholeAddress(nameSize), found.name.length + 1);
+                writeDword(wholeAddress(domainSize), found.domain.length + 1);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
             if ((name >>> 0) !== 0)
             {
-                host.writeMemory(name >>> 0, encodeText(found.name, wide));
+                host.writeMemory(wholeAddress(name), encodeText(found.name, wide));
             }
             if ((domain >>> 0) !== 0)
             {
-                host.writeMemory(domain >>> 0, encodeText(found.domain, wide));
+                host.writeMemory(wholeAddress(domain), encodeText(found.domain, wide));
             }
-            writeDword(nameSize >>> 0, found.name.length);
-            writeDword(domainSize >>> 0, found.domain.length);
-            writeDword(use >>> 0, found.use);
+            writeDword(wholeAddress(nameSize), found.name.length);
+            writeDword(wholeAddress(domainSize), found.domain.length);
+            writeDword(wholeAddress(use), found.use);
             return 1;
         },
     });
@@ -1530,17 +1534,17 @@ export function createTokenFunctions(host){
             if (readDword(sidSize) < bytes.length || readDword(domainSize) <= found.domain.length
                 || (sid >>> 0) === 0 || (domain >>> 0) === 0)
             {
-                writeDword(sidSize >>> 0, bytes.length);
-                writeDword(domainSize >>> 0, found.domain.length + 1);
+                writeDword(wholeAddress(sidSize), bytes.length);
+                writeDword(wholeAddress(domainSize), found.domain.length + 1);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(sid >>> 0, bytes);
-            host.writeMemory(domain >>> 0, encodeText(found.domain, wide));
-            writeDword(sidSize >>> 0, bytes.length);
-            writeDword(domainSize >>> 0, found.domain.length);
+            host.writeMemory(wholeAddress(sid), bytes);
+            host.writeMemory(wholeAddress(domain), encodeText(found.domain, wide));
+            writeDword(wholeAddress(sidSize), bytes.length);
+            writeDword(wholeAddress(domainSize), found.domain.length);
             if ((use >>> 0) !== 0)
             {
-                writeDword(use >>> 0, found.use);
+                writeDword(wholeAddress(use), found.use);
             }
             host.setLastError(ERROR_SUCCESS);
             return 1;
@@ -1622,7 +1626,7 @@ export function createTokenFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            writeDword(out >>> 0, 0);
+            writeDword(wholeAddress(out), 0);
             const total = count >>> 0;
             if (total === 0 && (old >>> 0) === 0)
             {
@@ -1644,10 +1648,11 @@ export function createTokenFunctions(host){
                 {
                     return ERROR_INVALID_ACL;
                 }
-                revision = host.readMemory(old >>> 0, 1)[0];
+                revision = host.readMemory(wholeAddress(old), 1)[0];
                 for (const ace of aces)
                 {
-                    const bytes = host.readMemory((old >>> 0) + ace.at, ace.next - ace.at).slice();
+                    const bytes = host.readMemory(wholeAddress(old) + ace.at,
+                        ace.next - ace.at).slice();
                     if ((ace.flags & INHERITED_ACE) !== 0)
                     {
                         inherited.push(bytes);
@@ -1730,7 +1735,7 @@ export function createTokenFunctions(host){
             }
             const block = host.allocate(acl.length);
             host.writeMemory(block, acl);
-            writeDword(out >>> 0, block);
+            writeDword(wholeAddress(out), block);
             return ERROR_SUCCESS;
         },
     });
@@ -1758,7 +1763,7 @@ export function createTokenFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        writeDword(out >>> 0, host.handles.open('token', { process: process >>> 0 }));
+        writeDword(wholeAddress(out), host.handles.open('token', { process: process >>> 0 }));
         return ERROR_SUCCESS;
     };
 
@@ -1779,11 +1784,11 @@ export function createTokenFunctions(host){
         }
         if ((returnLength >>> 0) !== 0)
         {
-            writeDword(returnLength >>> 0, 4);
+            writeDword(wholeAddress(returnLength), 4);
         }
         if ((previous >>> 0) !== 0)
         {
-            writeDword(previous >>> 0, 0);
+            writeDword(wholeAddress(previous), 0);
         }
         return ERROR_SUCCESS;
     };
@@ -1926,7 +1931,7 @@ export function createTokenFunctions(host){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        writeDword(out >>> 0, host.handles.open('token', token));
+        writeDword(wholeAddress(out), host.handles.open('token', token));
         return ERROR_SUCCESS;
     };
 
@@ -1968,14 +1973,14 @@ export function createTokenFunctions(host){
         }
         if (readDword(privilegesLength) < PRIVILEGE_SET_EMPTY)
         {
-            writeDword(privilegesLength >>> 0, PRIVILEGE_SET_EMPTY);
+            writeDword(wholeAddress(privilegesLength), PRIVILEGE_SET_EMPTY);
             return { code: ERROR_INSUFFICIENT_BUFFER };
         }
         if ((privileges >>> 0) !== 0)
         {
-            host.writeMemory(privileges >>> 0, new Uint8Array(PRIVILEGE_SET_EMPTY));
+            host.writeMemory(wholeAddress(privileges), new Uint8Array(PRIVILEGE_SET_EMPTY));
         }
-        const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
+        const map = [0, 4, 8, 12].map(offset=>readDword(wholeAddress(mapping) + offset));
         const wanted = mapGeneric(desired >>> 0, map);
         const control = held.control;
         const dacl = held.part(SD.DACL);
@@ -2043,8 +2048,8 @@ export function createTokenFunctions(host){
         {
             return fail(verdict.code);
         }
-        writeDword(granted >>> 0, verdict.granted ?? 0);
-        writeDword(status >>> 0, verdict.ok ? 1 : 0);
+        writeDword(wholeAddress(granted), verdict.granted ?? 0);
+        writeDword(wholeAddress(status), verdict.ok ? 1 : 0);
         if (!verdict.ok)
         {
             host.setLastError(ERROR_ACCESS_DENIED);
@@ -2062,8 +2067,8 @@ export function createTokenFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [mask, mapping])=>{
-            const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
-            writeDword(mask >>> 0, mapGeneric(readDword(mask >>> 0), map));
+            const map = [0, 4, 8, 12].map(offset=>readDword(wholeAddress(mapping) + offset));
+            writeDword(wholeAddress(mask), mapGeneric(readDword(wholeAddress(mask)), map));
             return 0;
         },
     };
@@ -2188,13 +2193,13 @@ export function createTokenFunctions(host){
                     }
                     if ((needed >>> 0) !== 0)
                     {
-                        writeDword(needed >>> 0, bytes.length);
+                        writeDword(wholeAddress(needed), bytes.length);
                     }
                     if ((length >>> 0) < bytes.length)
                     {
                         return STATUS_BUFFER_TOO_SMALL;
                     }
-                    host.writeMemory(descriptor >>> 0, bytes);
+                    host.writeMemory(wholeAddress(descriptor), bytes);
                     return STATUS_SUCCESS;
                 },
             },
@@ -2225,8 +2230,9 @@ export function createTokenFunctions(host){
                         return verdict.code === ERROR_INSUFFICIENT_BUFFER
                             ? STATUS_BUFFER_TOO_SMALL : statusOf(verdict.code);
                     }
-                    writeDword(granted >>> 0, verdict.granted ?? 0);
-                    writeDword(status >>> 0, verdict.ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
+                    writeDword(wholeAddress(granted), verdict.granted ?? 0);
+                    writeDword(wholeAddress(status),
+                        verdict.ok ? STATUS_SUCCESS : STATUS_ACCESS_DENIED);
                     return STATUS_SUCCESS;
                 },
             },
@@ -2259,13 +2265,13 @@ export function createTokenFunctions(host){
                     let level = 0;
                     if ((attributes >>> 0) !== 0)
                     {
-                        const qos = readDword((attributes >>> 0) + 20);
+                        const qos = readDword(wholeAddress(attributes) + 20);
                         if (qos !== 0)
                         {
                             level = readDword(qos + 4);
                         }
                     }
-                    writeDword(out >>> 0, host.handles.open('token', {
+                    writeDword(wholeAddress(out), host.handles.open('token', {
                         ...token,
                         impersonationLevel: (type >>> 0) === TOKEN_IMPERSONATION ? level >>> 0
                             : undefined,
@@ -2295,7 +2301,7 @@ export function createTokenFunctions(host){
                 }
                 const bytes = new Uint8Array(SD.SIZE);
                 bytes[SD.REVISION] = SECURITY_DESCRIPTOR_REVISION;
-                host.writeMemory(descriptor >>> 0, bytes);
+                host.writeMemory(wholeAddress(descriptor), bytes);
                 return 1;
             },
         },
@@ -2326,8 +2332,8 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeWord(control >>> 0, held.control);
-                writeDword(revision >>> 0, SECURITY_DESCRIPTOR_REVISION);
+                writeWord(wholeAddress(control), held.control);
+                writeDword(wholeAddress(revision), SECURITY_DESCRIPTOR_REVISION);
                 return 1;
             },
         },
@@ -2432,7 +2438,7 @@ export function createTokenFunctions(host){
                 bytes[ACL.REVISION] = revision >>> 0;
                 bytes[ACL.SIZE] = size & 0xff;
                 bytes[ACL.SIZE + 1] = size >>> 8;
-                host.writeMemory(acl >>> 0, bytes);
+                host.writeMemory(wholeAddress(acl), bytes);
                 return 1;
             },
         },
@@ -2534,7 +2540,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const added = host.readMemory(list >>> 0, size).slice();
+                const added = host.readMemory(wholeAddress(list), size).slice();
                 let count = 0;
                 for (let at = 0; at < size; count++)
                 {
@@ -2546,16 +2552,16 @@ export function createTokenFunctions(host){
                     at += aceSize;
                 }
                 const end = aces.length === 0 ? ACL.HEADER : aces[aces.length - 1].next;
-                if (end + size > readWord((acl >>> 0) + ACL.SIZE))
+                if (end + size > readWord(wholeAddress(acl) + ACL.SIZE))
                 {
                     return fail(ERROR_ALLOTTED_SPACE_EXCEEDED);
                 }
                 const at = (index >>> 0) >= aces.length ? end
                     : (index >>> 0) === 0 ? ACL.HEADER : aces[(index >>> 0) - 1].next;
-                const moved = host.readMemory((acl >>> 0) + at, end - at).slice();
-                host.writeMemory((acl >>> 0) + at, added);
-                host.writeMemory((acl >>> 0) + at + size, moved);
-                writeWord((acl >>> 0) + ACL.COUNT, aces.length + count);
+                const moved = host.readMemory(wholeAddress(acl) + at, end - at).slice();
+                host.writeMemory(wholeAddress(acl) + at, added);
+                host.writeMemory(wholeAddress(acl) + at + size, moved);
+                writeWord(wholeAddress(acl) + ACL.COUNT, aces.length + count);
                 raiseRevision(acl, revision);
                 return 1;
             },
@@ -2588,7 +2594,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, (acl >>> 0) + aces[index >>> 0].at);
+                writeDword(wholeAddress(out), (acl >>> 0) + aces[index >>> 0].at);
                 return 1;
             },
         },
@@ -2611,9 +2617,10 @@ export function createTokenFunctions(host){
                 }
                 const gone = aces[index >>> 0];
                 const end = aces[aces.length - 1].next;
-                const moved = host.readMemory((acl >>> 0) + gone.next, end - gone.next).slice();
-                host.writeMemory((acl >>> 0) + gone.at, moved);
-                writeWord((acl >>> 0) + ACL.COUNT, aces.length - 1);
+                const moved = host.readMemory(wholeAddress(acl) + gone.next,
+                    end - gone.next).slice();
+                host.writeMemory(wholeAddress(acl) + gone.at, moved);
+                writeWord(wholeAddress(acl) + ACL.COUNT, aces.length - 1);
                 return 1;
             },
         },
@@ -2663,12 +2670,12 @@ export function createTokenFunctions(host){
                         if ((out >>> 0) !== 0)
                         {
                             const offset = view.getUint32(slot, true);
-                            writeDword(out >>> 0, offset === 0 ? 0 : block + offset);
+                            writeDword(wholeAddress(out), offset === 0 ? 0 : block + offset);
                         }
                     });
                 if ((descriptor >>> 0) !== 0)
                 {
-                    writeDword(descriptor >>> 0, block);
+                    writeDword(wholeAddress(descriptor), block);
                 }
                 return ERROR_SUCCESS;
             },
@@ -2730,13 +2737,13 @@ export function createTokenFunctions(host){
                 }
                 if ((needed >>> 0) !== 0)
                 {
-                    writeDword(needed >>> 0, bytes.length);
+                    writeDword(wholeAddress(needed), bytes.length);
                 }
                 if ((length >>> 0) < bytes.length || (descriptor >>> 0) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(descriptor >>> 0, bytes);
+                host.writeMemory(wholeAddress(descriptor), bytes);
                 return 1;
             },
         },
@@ -2965,7 +2972,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, host.handles.open('token', {
+                writeDword(wholeAddress(out), host.handles.open('token', {
                     process: token.process,
                     impersonationLevel: level >>> 0,
                 }));
@@ -2995,7 +3002,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, host.handles.open('token', {
+                writeDword(wholeAddress(out), host.handles.open('token', {
                     ...token,
                     impersonationLevel: (type >>> 0) === TOKEN_IMPERSONATION ? level >>> 0
                         : undefined,
@@ -3031,14 +3038,15 @@ export function createTokenFunctions(host){
                 const disabled = [];
                 for (let at = 0; at < (disableCount >>> 0); at++)
                 {
-                    const sid = sidAt(readDword((disable >>> 0) + at * SID_AND_ATTRIBUTES_SIZE));
+                    const sid = sidAt(readDword(wholeAddress(disable)
+                        + at * SID_AND_ATTRIBUTES_SIZE));
                     if (sid === null)
                     {
                         return fail(ERROR_INVALID_SID);
                     }
                     disabled.push(sid);
                 }
-                writeDword(out >>> 0, host.handles.open('token', {
+                writeDword(wholeAddress(out), host.handles.open('token', {
                     ...token, disabled: [...token.disabled ?? [], ...disabled],
                 }));
                 return 1;
@@ -3062,7 +3070,8 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, host.handles.open('saferLevel', { level: level >>> 0 }));
+                writeDword(wholeAddress(out), host.handles.open('saferLevel',
+                    { level: level >>> 0 }));
                 return 1;
             },
         },
@@ -3102,10 +3111,10 @@ export function createTokenFunctions(host){
                 if (((flags >>> 0) & SAFER_TOKEN_NULL_IF_EQUAL) !== 0
                     && held.level === SAFER_LEVELID_FULLYTRUSTED)
                 {
-                    writeDword(out >>> 0, 0);
+                    writeDword(wholeAddress(out), 0);
                     return 1;
                 }
-                writeDword(out >>> 0, host.handles.open('token',
+                writeDword(wholeAddress(out), host.handles.open('token',
                     { ...token, saferLevel: held.level }));
                 return 1;
             },
@@ -3236,7 +3245,7 @@ export function createTokenFunctions(host){
                     + answer.sids.reduce((sum, sid)=>sum + sid.length, 0);
                 if ((returnLength >>> 0) !== 0)
                 {
-                    writeDword(returnLength >>> 0, needed);
+                    writeDword(wholeAddress(returnLength), needed);
                 }
                 if ((buffer >>> 0) === 0 || (length >>> 0) < needed)
                 {
@@ -3254,7 +3263,7 @@ export function createTokenFunctions(host){
                     at += answer.sids[index].length;
                 }
                 // A success leaves the last error as it was.
-                host.writeMemory(buffer >>> 0, whole);
+                host.writeMemory(wholeAddress(buffer), whole);
                 return 1;
             },
         },
@@ -3274,10 +3283,10 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const left = host.readMemory(first >>> 0, 8);
+                const left = host.readMemory(wholeAddress(first), 8);
                 const length = 8 + 4 * left[1];
-                const whole = host.readMemory(first >>> 0, length);
-                const other = host.readMemory(second >>> 0, length);
+                const whole = host.readMemory(wholeAddress(first), length);
+                const other = host.readMemory(wholeAddress(second), length);
                 host.setLastError(ERROR_SUCCESS);
                 return whole.every((byte, at)=>byte === other[at]) ? 1 : 0;
             },
@@ -3354,7 +3363,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_NOACCESS);
                 }
-                const view = new DataView(host.readMemory(set >>> 0, 4).slice().buffer);
+                const view = new DataView(host.readMemory(wholeAddress(set), 4).slice().buffer);
                 const count = view.getUint32(0, true);
                 for (let at = 0; at < count; at++)
                 {
@@ -3363,7 +3372,7 @@ export function createTokenFunctions(host){
                         .getUint32(0, true);
                     writeDword(attributes, old | SE_PRIVILEGE_USED_FOR_ACCESS);
                 }
-                writeDword(result >>> 0, 1);
+                writeDword(wholeAddress(result), 1);
                 host.setLastError(ERROR_SUCCESS);
                 return 1;
             },
@@ -3417,12 +3426,13 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const length = 8 + 4 * host.readMemory(source >>> 0, 2)[1];
+                const length = 8 + 4 * host.readMemory(wholeAddress(source), 2)[1];
                 if ((room >>> 0) < length)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
+                host.writeMemory(wholeAddress(destination), host.readMemory(wholeAddress(source),
+                    length).slice());
                 return 1;
             },
         },
@@ -3472,7 +3482,7 @@ export function createTokenFunctions(host){
         GetLengthSid: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([sid])=>8 + 4 * host.readMemory(sid >>> 0, 2)[1],
+            handler: ([sid])=>8 + 4 * host.readMemory(wholeAddress(sid), 2)[1],
         },
 
         /**
@@ -3489,7 +3499,7 @@ export function createTokenFunctions(host){
                 {
                     return 0;
                 }
-                const head = host.readMemory(sid >>> 0, 2);
+                const head = host.readMemory(wholeAddress(sid), 2);
                 return head[0] === 1 && head[1] <= 8 ? 1 : 0;
             },
         },
@@ -3513,9 +3523,9 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const length = 8 + 4 * host.readMemory(sid >>> 0, 2)[1];
-                const member = isTokenMember(host.readMemory(sid >>> 0, length));
-                host.writeMemory(out >>> 0, new Uint8Array([member ? 1 : 0, 0, 0, 0]));
+                const length = 8 + 4 * host.readMemory(wholeAddress(sid), 2)[1];
+                const member = isTokenMember(host.readMemory(wholeAddress(sid), length));
+                host.writeMemory(wholeAddress(out), new Uint8Array([member ? 1 : 0, 0, 0, 0]));
                 return 1;
             },
         },

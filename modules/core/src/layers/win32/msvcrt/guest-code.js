@@ -44,6 +44,7 @@ import { COMPILED as INT64_LONG } from './inguest-int64.x64.js';
 import { COMPILED as SCAN } from './inguest-scan.x86.js';
 import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Each function's x86-64 code by its i386, the two compiled from one source:
@@ -288,9 +289,13 @@ function x87Words(fpu){
  * @returns {GuestMemory}
  */
 export function guestMemory(host){
+    const wide = host.pointerSize === 8;
+    // An address as the code computed it: a dword wraps in a 32-bit process,
+    // as the i386 does; a 64-bit one's past 4 GiB is whole (`ptr`).
+    const at = wide ? wholeAddress : (/** @type {number} */ address)=>address >>> 0;
     /** @param {number} address @param {number} length */
     const view = (address, length)=>{
-        const bytes = host.readMemory(address >>> 0, length);
+        const bytes = host.readMemory(at(address), length);
         return new DataView(bytes.buffer, bytes.byteOffset, length);
     };
     // A scalar written goes through one buffer, its bytes copied out by the
@@ -300,21 +305,20 @@ export function guestMemory(host){
     // most of what the call cost.
     const scratch = new Uint8Array(8);
     const scratchView = new DataView(scratch.buffer);
-    const wide = host.pointerSize === 8;
     /** By length, the buffer's first bytes. @type {Record<number, Uint8Array>} */
     const pieces = { 1: scratch.subarray(0, 1), 2: scratch.subarray(0, 2),
         4: scratch.subarray(0, 4), 8: scratch };
     /** @param {number} address @param {1 | 2 | 4 | 8} length @param {(v: DataView) => void} fill */
     const write = (address, length, fill)=>{
         fill(scratchView);
-        host.writeMemory(address >>> 0, pieces[length]);
+        host.writeMemory(at(address), pieces[length]);
     };
     /** @param {number} address */
-    const u8 = address=>host.readMemory(address >>> 0, 1)[0];
+    const u8 = address=>host.readMemory(at(address), 1)[0];
     /** @param {number} address @param {number} value */
     const setU8 = (address, value)=>{
         scratch[0] = value;
-        host.writeMemory(address >>> 0, pieces[1]);
+        host.writeMemory(at(address), pieces[1]);
     };
     return {
         u8,
@@ -346,7 +350,7 @@ export function guestMemory(host){
             // same bytes the ascending one does.
             if ((destination - source >>> 0) >= length)
             {
-                host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
+                host.writeMemory(at(destination), host.readMemory(at(source), length).slice());
                 return;
             }
             for (let i = 0; i < length; i++)
@@ -358,7 +362,7 @@ export function guestMemory(host){
             const length = count >>> 0;
             if ((source - destination >>> 0) >= length)
             {
-                host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
+                host.writeMemory(at(destination), host.readMemory(at(source), length).slice());
                 return;
             }
             for (let i = length - 1; i >= 0; i--)
@@ -369,10 +373,10 @@ export function guestMemory(host){
         fill: (destination, value, count)=>{
             if (host.fillMemory)
             {
-                host.fillMemory(destination >>> 0, value & 0xff, count >>> 0);
+                host.fillMemory(at(destination), value & 0xff, count >>> 0);
                 return;
             }
-            host.writeMemory(destination >>> 0, new Uint8Array(count >>> 0).fill(value & 0xff));
+            host.writeMemory(at(destination), new Uint8Array(count >>> 0).fill(value & 0xff));
         },
         // One thread's reference: the host answers it with nothing else running.
         compareExchange: (address, expected, value)=>{

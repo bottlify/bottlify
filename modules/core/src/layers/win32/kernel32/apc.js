@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { forwarded } from '../common/pointers.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 
 /**
  * Asynchronous procedure calls: routines queued to a thread, run by that thread
@@ -299,7 +299,7 @@ export function createApcs(host){
      * @returns {{ busy: boolean } | number}
      */
     const userApcReserve = handle=>{
-        const value = handle >>> 0;
+        const value = wholeAddress(handle);
         if (value === CURRENT_THREAD || value === CURRENT_PROCESS)
         {
             return STATUS_OBJECT_TYPE_MISMATCH;
@@ -406,7 +406,7 @@ export function createApcs(host){
                             {
                                 return STATUS_ACCESS_VIOLATION;
                             }
-                            host.writeU32(out >>> 0, kernel.handles.open('reserve',
+                            host.writeU32(wholeAddress(out), kernel.handles.open('reserve',
                                 { type: type >>> 0, busy: false }));
                             return STATUS_SUCCESS;
                         },

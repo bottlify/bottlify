@@ -39,6 +39,7 @@
 
 import { EXCEPTION_NONCONTINUABLE, STATUS } from './seh.js';
 import { UNW_FLAG, copyContext, stackOf } from './unwind.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export { STATUS };
 
@@ -310,7 +311,7 @@ const LONG_NAMES = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
 export function createSeh64(host){
     const { unwinder } = host;
     const readU32 = (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} at */
@@ -319,7 +320,7 @@ export function createSeh64(host){
     const writeQuad = (at, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, BigInt(value >>> 0), true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
 
     /** The last top-level filter SetUnhandledExceptionFilter installed. */
@@ -498,7 +499,7 @@ export function createSeh64(host){
             return known;
         }
         // A jmp [rip+disp] thunk: follow it to the import slot and the stub.
-        const bytes = host.readMemory(address >>> 0, 6);
+        const bytes = host.readMemory(wholeAddress(address), 6);
         if (bytes[0] === 0xff && bytes[1] === 0x25)
         {
             const disp = (bytes[2] | bytes[3] << 8 | bytes[4] << 16 | bytes[5] << 24) | 0;
@@ -1304,10 +1305,11 @@ export function createSeh64(host){
                         view.setUint32(index * 8, address >>> 0, true);
                         sum = (sum + address) >>> 0;
                     });
-                    host.writeMemory(out >>> 0, bytes);
+                    host.writeMemory(wholeAddress(out), bytes);
                     if ((hash >>> 0) !== 0)
                     {
-                        host.writeMemory(hash >>> 0, new Uint8Array(Uint32Array.of(sum).buffer));
+                        host.writeMemory(wholeAddress(hash),
+                            new Uint8Array(Uint32Array.of(sum).buffer));
                     }
                     return frames.length;
                 },
@@ -1447,7 +1449,7 @@ export function createSeh64(host){
                         return Disposition.CONTINUE_SEARCH;
                     }
                     const visit = { ...found.visit, handlerData:
-                        readU32((dispatcher >>> 0) + DISPATCHER64.HANDLER_DATA) };
+                        readU32(wholeAddress(dispatcher) + DISPATCHER64.HANDLER_DATA) };
                     if (found.unwinding)
                     {
                         return scopeTable.unwind(visit, found.pass, found.unwinding)
@@ -1568,7 +1570,7 @@ export function createSeh64(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([code, flags, count, argsPtr])=>{
-                    const from = argsPtr >>> 0;
+                    const from = wholeAddress(argsPtr);
                     const total = from === 0 ? 0 : Math.min(count >>> 0, 15);
                     /** @type {number[]} */
                     const parameters = [];

@@ -16,6 +16,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -162,7 +163,7 @@ export function createRenderTargets(t){
         /** HRESULT SetCurrentTransform(DWRITE_MATRIX const*): null for identity */
         { name: 'SetCurrentTransform', argBytes: 8, invoke: (o, [at])=>{
             o.state.transform = (at >>> 0) === 0 ? [1, 0, 0, 1, 0, 0]
-                : Array.from({ length: 6 }, (_, i)=>f32(u32((at >>> 0) + i * 4)));
+                : Array.from({ length: 6 }, (_, i)=>f32(u32(wholeAddress(at) + i * 4)));
             return S_OK;
         } },
         /** HRESULT GetSize(SIZE*) */

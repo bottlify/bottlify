@@ -29,6 +29,7 @@ import {
     BOOL, FLOAT, VOID, RANK, baseOf, buildValue, conversionRank, flattenValue, isNumeric,
     matrixOf, toBase, vectorOf, withBase, scalarCount,
 } from './hlsl-types.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('./hlsl-types.js').Type} Type */
 /** @typedef {import('./hlsl-types.js').Value} Value */
@@ -601,7 +602,7 @@ const BITS = new Map(/** @type {[string, (x: number, from: string) => number][]}
         {
             r = (r << 1) | ((x >>> i) & 1);
         }
-        return r >>> 0;
+        return wholeAddress(r);
     }],
     // From the top: for a negative int the first bit that is not the sign; -1 when none.
     ['firstbithigh', (x, from)=>{

@@ -25,6 +25,7 @@
 import { GUID_NULL, formatGuid, parseGuid } from './guid.js';
 import { FORMATETC_SIZE, STGMEDIUM_SIZE, TYMED, DVASPECT_CONTENT } from './oleutil.js';
 import { publishEnumerator } from './enumerator.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -236,7 +237,7 @@ export function createDataCaches(context){
                 metafile = await gdi(thread, 'GDI32.dll', 'SetWinMetaFileBits',
                     [data.length, at, 0, 0]);
             }
-            return metafile >>> 0;
+            return wholeAddress(metafile);
         }
         if (entry.tymed === TYMED.GDI)
         {
@@ -293,7 +294,7 @@ export function createDataCaches(context){
             info + headerSize + colours * 4, info, DIB_RGB_COLORS]);
         await gdi(thread, 'USER32.dll', 'ReleaseDC', [0, dc]);
         freeScratch();
-        return bitmap >>> 0;
+        return wholeAddress(bitmap);
     };
 
     /**
@@ -1107,7 +1108,7 @@ export function createDataCaches(context){
             }
         }
         const [left, top, right, bottom] = [0, 4, 8, 12]
-            .map(offset=>readI32((bounds >>> 0) + offset));
+            .map(offset=>readI32(wholeAddress(bounds) + offset));
         const data = /** @type {Uint8Array} */ (entry.data);
         try
         {
@@ -1363,7 +1364,7 @@ export function createDataCaches(context){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
+            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
             return S_OK;
         } },
         { name: 'IsDirty', argBytes: 4, invoke: object=>(stateOf(object).dirty ? S_OK : S_FALSE) },

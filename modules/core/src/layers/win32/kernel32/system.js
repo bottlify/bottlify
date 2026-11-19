@@ -34,7 +34,7 @@ import { systemMessage } from './system-messages.js';
 import { compareStrings, decodeAnsi, encodeAnsi } from './locale.js';
 import { THREAD_ERROR_MODES, fromRtlMode, toRtlMode } from './error-mode.js';
 import { STATUS } from '../ntdll/status.js';
-import { highestUserAddress, pointerWidth } from '../common/pointers.js';
+import { highestUserAddress, pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const STATUS_SUCCESS = STATUS.SUCCESS;
 const STATUS_ACCESS_VIOLATION = STATUS.ACCESS_VIOLATION;
@@ -534,7 +534,8 @@ export function createSystemFunctions(host){
             }
             const read = wide ? readWide : (/** @type {number} */ address)=>decodeAnsi(
                 Uint8Array.from(readAnsi(address, MAX_STRING), character=>character.charCodeAt(0)));
-            return compareStrings(read(first >>> 0, MAX_STRING), read(second >>> 0, MAX_STRING),
+            return compareStrings(read(wholeAddress(first), MAX_STRING),
+                read(wholeAddress(second), MAX_STRING),
                 flags) - 2;
         }),
     });
@@ -571,7 +572,7 @@ export function createSystemFunctions(host){
             const allocating = (asked & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0;
             if (allocating && (buffer >>> 0) !== 0)
             {
-                writeDword(buffer >>> 0, 0);
+                writeDword(wholeAddress(buffer), 0);
             }
             if ((asked & (FORMAT_MESSAGE_FROM_STRING | FORMAT_MESSAGE_FROM_HMODULE
                 | FORMAT_MESSAGE_FROM_SYSTEM)) === 0)
@@ -598,8 +599,8 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                format = wide ? readWide(source >>> 0, MAX_STRING)
-                    : decodeAnsi(Uint8Array.from(readAnsi(source >>> 0, MAX_STRING),
+                format = wide ? readWide(wholeAddress(source), MAX_STRING)
+                    : decodeAnsi(Uint8Array.from(readAnsi(wholeAddress(source), MAX_STRING),
                         character=>character.charCodeAt(0)));
             }
             else
@@ -623,7 +624,7 @@ export function createSystemFunctions(host){
 
             const array = (asked & FORMAT_MESSAGE_ARGUMENT_ARRAY) !== 0;
             const list = (argumentsPtr >>> 0) === 0 ? 0
-                : array ? argumentsPtr >>> 0 : readDword(argumentsPtr >>> 0);
+                : array ? argumentsPtr >>> 0 : readDword(wholeAddress(argumentsPtr));
             const room = allocating ? Infinity : (size >>> 0) - 1;
             const { text, error, reads } = formatMessageText(format, {
                 wide,
@@ -639,7 +640,7 @@ export function createSystemFunctions(host){
             });
             if (!array && (argumentsPtr >>> 0) !== 0 && reads > 0)
             {
-                writeDword(argumentsPtr >>> 0, list + reads * 4);
+                writeDword(wholeAddress(argumentsPtr), list + reads * 4);
             }
 
             const unit = wide ? 2 : 1;
@@ -687,7 +688,7 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 put(address, length, true);
-                writeDword(buffer >>> 0, address);
+                writeDword(wholeAddress(buffer), address);
                 return length;
             }
             if (error === ERROR_INSUFFICIENT_BUFFER || length + 1 > (size >>> 0))
@@ -931,7 +932,7 @@ export function createSystemFunctions(host){
             // The family and the model and stepping, as CPUID gives them.
             view.setUint16(layout.LEVEL, PROCESSOR_LEVEL, true);
             view.setUint16(layout.REVISION, PROCESSOR_REVISION, true);
-            host.writeMemory(info >>> 0, bytes);
+            host.writeMemory(wholeAddress(info), bytes);
             return 0;
         },
     });
@@ -1091,7 +1092,7 @@ export function createSystemFunctions(host){
             {
                 bytes[wide ? at * 2 : at] = text.charCodeAt(at);
             }
-            host.writeMemory(buffer >>> 0, bytes);
+            host.writeMemory(wholeAddress(buffer), bytes);
             return WOW64_DIRECTORY.length;
         },
     });
@@ -1117,7 +1118,7 @@ export function createSystemFunctions(host){
             }
             if (kind === 'disable' && (argument >>> 0) !== 0)
             {
-                host.writeMemory(argument >>> 0, Uint8Array.of(1, 0, 0, 0));
+                host.writeMemory(wholeAddress(argument), Uint8Array.of(1, 0, 0, 0));
             }
             if (kind === 'enable' && (argument & 0xff) !== 0)
             {
@@ -1215,17 +1216,17 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 const bytes = logicalProcessors();
-                const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
+                const room = new DataView(host.readMemory(wholeAddress(returned), 4).slice().buffer)
                     .getUint32(0, true);
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
-                host.writeMemory(returned >>> 0, length);
+                host.writeMemory(wholeAddress(returned), length);
                 if (room < bytes.length || (buffer >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(wholeAddress(buffer), bytes);
                 return 1;
             },
         },
@@ -1247,17 +1248,17 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
+                const room = new DataView(host.readMemory(wholeAddress(returned), 4).slice().buffer)
                     .getUint32(0, true);
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
-                host.writeMemory(returned >>> 0, length);
+                host.writeMemory(wholeAddress(returned), length);
                 if (room < bytes.length || (buffer >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(wholeAddress(buffer), bytes);
                 return 1;
             },
         },
@@ -1285,7 +1286,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 const number = processors.processorOf(host.currentThread()) & 0xff;
-                host.writeMemory(out >>> 0, Uint8Array.of(0, 0, number, 0));
+                host.writeMemory(wholeAddress(out), Uint8Array.of(0, 0, number, 0));
                 return 0;
             },
         },
@@ -1318,7 +1319,7 @@ export function createSystemFunctions(host){
                 }
                 /** @param {boolean} under */
                 const say = under=>{
-                    host.writeMemory(answer >>> 0, Uint8Array.of(under ? 1 : 0, 0, 0, 0));
+                    host.writeMemory(wholeAddress(answer), Uint8Array.of(under ? 1 : 0, 0, 0, 0));
                     return 1;
                 };
                 if (current || host.machine64 !== true)
@@ -1353,7 +1354,7 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 /** @param {number} at @param {number} value */
-                const half = (at, value)=>host.writeMemory(at >>> 0,
+                const half = (at, value)=>host.writeMemory(wholeAddress(at),
                     Uint8Array.of(value & 0xff, value >>> 8));
                 /** @param {boolean} under */
                 const say = under=>{
@@ -1407,7 +1408,7 @@ export function createSystemFunctions(host){
                         {
                             return STATUS_ACCESS_VIOLATION;
                         }
-                        host.writeMemory(old >>> 0, Uint8Array.of(0, 0, 0, 0));
+                        host.writeMemory(wholeAddress(old), Uint8Array.of(0, 0, 0, 0));
                         return STATUS_SUCCESS;
                     },
                 },
@@ -1446,7 +1447,7 @@ export function createSystemFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([time])=>{
-                host.writeMemory(time >>> 0, nowAsSystemTime());
+                host.writeMemory(wholeAddress(time), nowAsSystemTime());
                 return 0;
             },
         },
@@ -1463,7 +1464,7 @@ export function createSystemFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([time])=>{
-                host.writeMemory(time >>> 0, nowAsSystemTime());
+                host.writeMemory(wholeAddress(time), nowAsSystemTime());
                 return 0;
             },
         },
@@ -1491,13 +1492,13 @@ export function createSystemFunctions(host){
             handler: ([fileTime, systemTime])=>{
                 // A FILETIME is a signed count: one with the top bit set is
                 // before 1601, and no SYSTEMTIME holds it.
-                const value = readFileTime(fileTime >>> 0);
+                const value = readFileTime(wholeAddress(fileTime));
                 if (value >= 1n << 63n)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(systemTime >>> 0, systemTimeFrom(value));
+                host.writeMemory(wholeAddress(systemTime), systemTimeFrom(value));
                 return 1;
             },
         },
@@ -1507,8 +1508,8 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
-                const left = readFileTime(first >>> 0);
-                const right = readFileTime(second >>> 0);
+                const left = readFileTime(wholeAddress(first));
+                const right = readFileTime(wholeAddress(second));
                 if (left < right)
                 {
                     return -1 >>> 0;
@@ -1670,7 +1671,7 @@ export function createSystemFunctions(host){
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, child && !child.current
                     ? child.exitCode ?? STILL_ACTIVE : STILL_ACTIVE, true);
-                host.writeMemory(code >>> 0, bytes);
+                host.writeMemory(wholeAddress(code), bytes);
                 return 1;
             },
         },
@@ -1712,7 +1713,7 @@ export function createSystemFunctions(host){
                 new DataView(bytes.buffer).setUint32(
                     0, remote && remote.exitCode === null ? remote.process.exitCode ?? 0
                         : target.exitCode ?? STILL_ACTIVE, true);
-                host.writeMemory(code >>> 0, bytes);
+                host.writeMemory(wholeAddress(code), bytes);
                 return 1;
             },
         },
@@ -1840,7 +1841,7 @@ export function createSystemFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, previous, true);
-                    host.writeMemory(old >>> 0, bytes);
+                    host.writeMemory(wholeAddress(old), bytes);
                 }
                 return 1;
             },
@@ -1933,7 +1934,7 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_NOACCESS);
                     return 0;
                 }
-                writeDword(out >>> 0, target.priorityBoostDisabled ? 1 : 0);
+                writeDword(wholeAddress(out), target.priorityBoostDisabled ? 1 : 0);
                 return 1;
             },
         },
@@ -1964,7 +1965,7 @@ export function createSystemFunctions(host){
                 {
                     executionStates.set(key, asked);
                 }
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 
@@ -2021,9 +2022,9 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const head = readAnsi(first >>> 0, MAX_STRING);
-                const tail = readAnsi(second >>> 0, MAX_STRING);
-                writeAnsi((first >>> 0) + head.length, tail);
+                const head = readAnsi(wholeAddress(first), MAX_STRING);
+                const tail = readAnsi(wholeAddress(second), MAX_STRING);
+                writeAnsi(wholeAddress(first) + head.length, tail);
                 return first >>> 0;
             }),
         },
@@ -2038,14 +2039,15 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const head = readWide(first >>> 0, MAX_STRING);
-                const tail = readWide(second >>> 0, MAX_STRING);
+                const head = readWide(wholeAddress(first), MAX_STRING);
+                const tail = readWide(wholeAddress(second), MAX_STRING);
                 const units = new Uint16Array(tail.length + 1);
                 for (let at = 0; at < tail.length; at++)
                 {
                     units[at] = tail.charCodeAt(at);
                 }
-                host.writeMemory((first >>> 0) + head.length * 2, new Uint8Array(units.buffer));
+                host.writeMemory(wholeAddress(first) + head.length * 2,
+                    new Uint8Array(units.buffer));
                 return first >>> 0;
             }),
         },
@@ -2068,9 +2070,9 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const text = readAnsi(source >>> 0, MAX_STRING).slice(0, room - 1);
-                writeAnsi(destination >>> 0, text);
-                return destination >>> 0;
+                const text = readAnsi(wholeAddress(source), MAX_STRING).slice(0, room - 1);
+                writeAnsi(wholeAddress(destination), text);
+                return wholeAddress(destination);
             }),
         },
 
@@ -2090,14 +2092,14 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const text = readWide(source >>> 0, MAX_STRING).slice(0, room - 1);
+                const text = readWide(wholeAddress(source), MAX_STRING).slice(0, room - 1);
                 const units = new Uint16Array(text.length + 1);
                 for (let at = 0; at < text.length; at++)
                 {
                     units[at] = text.charCodeAt(at);
                 }
-                host.writeMemory(destination >>> 0, new Uint8Array(units.buffer));
-                return destination >>> 0;
+                host.writeMemory(wholeAddress(destination), new Uint8Array(units.buffer));
+                return wholeAddress(destination);
             }),
         },
 
@@ -2113,7 +2115,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
-                : readAnsi(text >>> 0, MAX_STRING).length)),
+                : readAnsi(wholeAddress(text), MAX_STRING).length)),
             ...lstrCode((at, trap, top)=>lstrlenCode(1, at, trap, top),
                 top=>lstrlenLongCode(1, top)),
         },
@@ -2124,7 +2126,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
-                : readWide(text >>> 0, MAX_STRING).length)),
+                : readWide(wholeAddress(text), MAX_STRING).length)),
             ...lstrCode((at, trap, top)=>lstrlenCode(2, at, trap, top),
                 top=>lstrlenLongCode(2, top)),
         },
@@ -2145,8 +2147,8 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                writeAnsi(destination >>> 0, readAnsi(source >>> 0, MAX_STRING));
-                return destination >>> 0;
+                writeAnsi(wholeAddress(destination), readAnsi(wholeAddress(source), MAX_STRING));
+                return wholeAddress(destination);
             }),
             ...lstrCode((at, trap, top)=>lstrcpyCode(1, at, trap, top),
                 top=>lstrcpyLongCode(1, top)),
@@ -2162,14 +2164,14 @@ export function createSystemFunctions(host){
                 {
                     return 0;
                 }
-                const text = readWide(source >>> 0, MAX_STRING);
+                const text = readWide(wholeAddress(source), MAX_STRING);
                 const units = new Uint16Array(text.length + 1);
                 for (let at = 0; at < text.length; at++)
                 {
                     units[at] = text.charCodeAt(at);
                 }
-                host.writeMemory(destination >>> 0, new Uint8Array(units.buffer));
-                return destination >>> 0;
+                host.writeMemory(wholeAddress(destination), new Uint8Array(units.buffer));
+                return wholeAddress(destination);
             }),
             ...lstrCode((at, trap, top)=>lstrcpyCode(2, at, trap, top),
                 top=>lstrcpyLongCode(2, top)),

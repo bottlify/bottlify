@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * urlmon - the URL moniker library Internet Explorer ships with the system.
  *
@@ -132,7 +134,7 @@ export function createUrlmonFunctions(host){
             [...text].forEach((char, index)=>view.setUint16(index * 2, char.charCodeAt(0), true));
             writeMemory(at, bytes);
         }
-        return at >>> 0;
+        return wholeAddress(at);
     };
 
     /** The Internet features as this process set them; the defaults until then. */
@@ -221,11 +223,11 @@ export function createUrlmonFunctions(host){
                 }
                 writeU32(out, 0);
                 const data = (buffer >>> 0) !== 0 && (size >>> 0) !== 0 && readMemory
-                    ? readMemory(buffer >>> 0, Math.min(size >>> 0, SNIFFED)) : null;
+                    ? readMemory(wholeAddress(buffer), Math.min(size >>> 0, SNIFFED)) : null;
                 const offered = (proposed >>> 0) !== 0 && readWideString
-                    ? readWideString(proposed >>> 0) : '';
+                    ? readWideString(wholeAddress(proposed)) : '';
                 const extension = (url >>> 0) !== 0 && readWideString
-                    ? urlExtension(readWideString(url >>> 0)) : '';
+                    ? urlExtension(readWideString(wholeAddress(url))) : '';
                 const registered = extension ? contentType?.(extension) ?? null : null;
                 const found = (data && sniffMime(data)) || offered || registered
                     || (data ? textOrBinary(data) : null);

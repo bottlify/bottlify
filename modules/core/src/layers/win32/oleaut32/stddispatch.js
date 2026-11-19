@@ -20,6 +20,7 @@
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { readGuid, GUID_NULL } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
@@ -85,7 +86,7 @@ export function createStdDispatchObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 1);
+                writeU32(wholeAddress(out), 1);
                 return S_OK;
             } },
         { name: 'GetTypeInfo', argBytes: 16,
@@ -95,12 +96,12 @@ export function createStdDispatchObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 if ((index >>> 0) !== 0)
                 {
                     return DISP_E_BADINDEX;
                 }
-                writeU32(out >>> 0, state.typeInfo);
+                writeU32(wholeAddress(out), state.typeInfo);
                 return callMethod(state.typeInfo, TYPEINFO_ADDREF, []).then(()=>S_OK);
             } },
         { name: 'GetIDsOfNames', argBytes: 24,
@@ -147,17 +148,17 @@ export function createStdDispatchObjects(host){
                 if (asked === IID_IUNKNOWN)
                 {
                     adapter.addRef();
-                    writeU32(out >>> 0, host.publish(adapter, IID_IUNKNOWN));
+                    writeU32(wholeAddress(out), host.publish(adapter, IID_IUNKNOWN));
                     return S_OK;
                 }
                 if (asked !== IID_IDISPATCH)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                     return E_NOINTERFACE;
                 }
                 const pointer = host.publish(adapter, IID_IDISPATCH);
                 return callMethod(adapter.state.outer, 1, []).then(()=>{
-                    writeU32(out >>> 0, pointer);
+                    writeU32(wholeAddress(out), pointer);
                     return S_OK;
                 });
             } },

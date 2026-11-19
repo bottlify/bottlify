@@ -27,6 +27,7 @@
  */
 
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -298,7 +299,7 @@ export function createWin9xFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                return handle >>> 0;
+                return wholeAddress(handle);
             },
         },
 

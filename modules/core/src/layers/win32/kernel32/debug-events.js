@@ -28,6 +28,7 @@
 import { DEBUG_ATTACH, DEBUG_BREAK, askChild, childThread } from './cross-process.js';
 import { untagged } from './handle-tags.js';
 import { dueInMs, readLargeInteger } from './due-time.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** dwDebugEventCode (winbase.h). */
 export const DEBUG_EVENT = /** @type {const} */ ({
@@ -166,7 +167,7 @@ export function debuggeeFor(flags, objectOf = ()=>({ killOnClose: true })){
  * @returns {DebugReport[]}
  */
 export function attachEvents({ mainThreadId, image, ntdll, libraries, threads }){
-    const threadId = mainThreadId >>> 0;
+    const threadId = wholeAddress(mainThreadId);
     return [
         { code: DEBUG_EVENT.CREATE_PROCESS, threadId, base: image.base, start: image.start },
         ...ntdll ? [{ code: DEBUG_EVENT.LOAD_DLL, threadId, base: ntdll }] : [],
@@ -459,7 +460,7 @@ export function createDebuggerFunctions(host){
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -663,7 +664,7 @@ export function createDebuggerFunctions(host){
         {
             host.divergence?.('NtWaitForDebugEvent', 'an alertable wait is not ended by an APC');
         }
-        return waitOn(object, timeoutAt(timeout), state=>host.writeMemory(out >>> 0, state),
+        return waitOn(object, timeoutAt(timeout), state=>host.writeMemory(wholeAddress(out), state),
             { woken: STATUS_SUCCESS, expired: STATUS_TIMEOUT, win32: false });
     };
 
@@ -771,7 +772,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_SEM_TIMEOUT);
                         return 0;
                     }
-                    return waitOn(object, timeout >>> 0, state=>host.writeMemory(out >>> 0,
+                    return waitOn(object, timeout >>> 0, state=>host.writeMemory(wholeAddress(out),
                         /** @type {Uint8Array} */ (convertStateChange(state))),
                     { woken: 1, expired: 0, win32: true });
                 },
@@ -794,7 +795,7 @@ export function createDebuggerFunctions(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([processId, threadId, status])=>{
-                    let value = status >>> 0;
+                    let value = wholeAddress(status);
                     if (value === DBG_REPLY_LATER
                         && (host.windows?.major ?? 0) >= 10 && (host.windows?.build ?? 0) >= 16299)
                     {
@@ -1150,7 +1151,7 @@ export function createDebuggerFunctions(host){
                             {
                                 return STATUS_UNSUCCESSFUL;
                             }
-                            host.writeMemory(out >>> 0, event);
+                            host.writeMemory(wholeAddress(out), event);
                             return STATUS_SUCCESS;
                         },
                     },

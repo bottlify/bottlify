@@ -6,6 +6,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { DEVICE, STATEBLOCK_APPLY, TEXTURE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXSprite: textured rectangles queued between Begin and End and drawn on
@@ -71,7 +72,8 @@ const SAMPLER_STATES = [[5, 2], [6, 2], [7, 2], [1, 3], [2, 3]];
 export function createSprites(host){
     const { u32, putU32s, method } = createDeviceCalls(host);
     /** @param {number} at @param {number} count */
-    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(at >>> 0, count * 4)
+    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(wholeAddress(at),
+        count * 4)
         .slice().buffer));
     const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 
@@ -234,7 +236,7 @@ export function createSprites(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     new Uint8Array(Float32Array.from(object.state.transform).buffer));
                 return D3D_OK;
             } },

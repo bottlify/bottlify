@@ -32,6 +32,7 @@ import { bestDriver, driversOf } from './drivers.js';
 import { CATALOG_STORE } from '../sfc/functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * setupapi — INF files, cabinets and file queues: how an installer that
@@ -386,21 +387,22 @@ export function createSetupapiFunctions(host){
     const writeReserved = (at, value)=>{
         const bytes = new Uint8Array(sizes.reserved);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** Terminated, in the ANSI page. @param {string} text */
     const ansi = text=>encodeAnsi(`${text}\0`);
     /** @param {number} address */
-    const text = address=>((address >>> 0) === 0 ? null : host.readCString(address >>> 0, 4096));
+    const text = address=>((address >>> 0) === 0 ? null : host.readCString(wholeAddress(address),
+        4096));
     /**
      * A string argument in the call's width: UTF-16 for a W call.
      *
@@ -665,12 +667,12 @@ export function createSetupapiFunctions(host){
         view.setUint32(4, handle >>> 0, true);
         view.setUint32(8, section, true);
         view.setUint32(12, line, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {number} address */
     const readContext = address=>{
-        const view = new DataView(host.readMemory(address >>> 0, 16).slice().buffer);
+        const view = new DataView(host.readMemory(wholeAddress(address), 16).slice().buffer);
         return {
             handle: view.getUint32(4, true),
             section: view.getUint32(8, true),
@@ -704,7 +706,7 @@ export function createSetupapiFunctions(host){
         {
             return fail(ERROR_INSUFFICIENT_BUFFER);
         }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), bytes);
         return 1;
     };
 
@@ -1166,10 +1168,10 @@ export function createSetupapiFunctions(host){
 
     /** A GUID from guest memory, as lower-case text; null for none. @param {number} pointer */
     const guidAt = pointer=>((pointer >>> 0) === 0 ? null
-        : guidText(host.readMemory(pointer >>> 0, 16).slice()).toLowerCase());
+        : guidText(host.readMemory(wholeAddress(pointer), 16).slice()).toLowerCase());
 
     /** @param {number} address @param {string} guid  Braced. */
-    const writeGuid = (address, guid)=>host.writeMemory(address >>> 0, guidBytes(guid));
+    const writeGuid = (address, guid)=>host.writeMemory(wholeAddress(address), guidBytes(guid));
 
     /** A GUID's sixteen bytes. @param {string} guid  Braced. */
     const guidBytes = guid=>{
@@ -1215,8 +1217,8 @@ export function createSetupapiFunctions(host){
 
     /** A DEVPROPKEY at an address: its format, braced and lower case, and its id. @param {number} address */
     const propKeyAt = address=>({
-        fmtid: guidText(host.readMemory(address >>> 0, 16).slice()).toLowerCase(),
-        pid: readU32((address >>> 0) + 16),
+        fmtid: guidText(host.readMemory(wholeAddress(address), 16).slice()).toLowerCase(),
+        pid: readU32(wholeAddress(address) + 16),
     });
 
     /** UTF-16, terminated. @param {string} value */
@@ -1468,7 +1470,7 @@ export function createSetupapiFunctions(host){
         {
             return CR_BUFFER_SMALL;
         }
-        host.writeMemory(buffer >>> 0, encodeIn(strings, wide));
+        host.writeMemory(wholeAddress(buffer), encodeIn(strings, wide));
         return CR_SUCCESS;
     };
 
@@ -1608,7 +1610,7 @@ export function createSetupapiFunctions(host){
                 }
                 const { fmtid, pid } = propKeyAt(keyPointer);
                 const bytes = removing ? new Uint8Array(0)
-                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                    : host.readMemory(wholeAddress(buffer), size >>> 0).slice();
                 const error = on.write(found.target, fmtid, pid, type >>> 0, bytes);
                 return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
             },
@@ -1650,7 +1652,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(buffer >>> 0, value.data);
+                host.writeMemory(wholeAddress(buffer), value.data);
                 return fail(ERROR_SUCCESS, 1);
             },
         },
@@ -1938,8 +1940,9 @@ export function createSetupapiFunctions(host){
         {
             return null;
         }
-        const type = readU32((info >>> 0) + 4);
-        return driverLists.get(owner)?.lists.get(type)?.[readU32((info >>> 0) + 8) - 1] ?? null;
+        const type = readU32(wholeAddress(info) + 4);
+        const index = readU32(wholeAddress(info) + 8) - 1;
+        return driverLists.get(owner)?.lists.get(type)?.[index] ?? null;
     };
 
     /**
@@ -1969,7 +1972,7 @@ export function createSetupapiFunctions(host){
             view.setBigUint64(v1, driver.date, true);
             view.setBigUint64(v1 + 8, driver.version, true);
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return fail(ERROR_SUCCESS, 1);
     };
 
@@ -2211,7 +2214,7 @@ export function createSetupapiFunctions(host){
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
-        const type = keyType >>> 0;
+        const type = wholeAddress(keyType);
         if (((scope >>> 0) !== DICS_FLAG_GLOBAL && (scope >>> 0) !== DICS_FLAG_CONFIGSPECIFIC)
             || (type !== DIREG_DEV && type !== DIREG_DRV && !(both && type === DIREG_BOTH)))
         {
@@ -3257,7 +3260,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(buffer >>> 0,
+                host.writeMemory(wholeAddress(buffer),
                     Uint8Array.from(fields, field=>Number.parseInt(field, 16)));
                 return fail(ERROR_SUCCESS, 1);
             },
@@ -3738,7 +3741,7 @@ export function createSetupapiFunctions(host){
                     {
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
-                    host.writeMemory(buffer >>> 0, encodeIn(source, wide));
+                    host.writeMemory(wholeAddress(buffer), encodeIn(source, wide));
                     const what = compressionOf(data);
                     for (const [pointer, value] of [[sourceSize, data.length],
                         [targetSize, what.target], [type, what.type]])
@@ -3940,7 +3943,8 @@ export function createSetupapiFunctions(host){
                 const unit = wide ? 2 : 1;
                 const bytes = encodeIn(id, wide);
                 const room = (length >>> 0) * unit;
-                host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(room, bytes.length)));
+                host.writeMemory(wholeAddress(buffer), bytes.subarray(0, Math.min(room,
+                    bytes.length)));
                 return room < bytes.length - unit ? CR_BUFFER_SMALL : CR_SUCCESS;
             },
         })),
@@ -4262,7 +4266,7 @@ export function createSetupapiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([spec, search, buffer, size, required])=>{
-                const control = search >>> 0;
+                const control = wholeAddress(search);
                 if (control < INFINFO_INF_SPEC_IS_HINF || control > INFINFO_INF_PATH_LIST_SEARCH)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -4301,7 +4305,7 @@ export function createSetupapiFunctions(host){
                         out.set(bytes, at);
                         at += bytes.length;
                     }
-                    host.writeMemory(buffer >>> 0, out);
+                    host.writeMemory(wholeAddress(buffer), out);
                     host.setLastErrorFor(thread, ERROR_SUCCESS);
                     return 1;
                 };
@@ -4416,13 +4420,13 @@ export function createSetupapiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, notification, param1, param2])=>{
-                const message = notification >>> 0;
+                const message = wholeAddress(notification);
                 if (message === SPFILENOTIFY.NEEDMEDIA)
                 {
-                    const path = text(readU32((param1 >>> 0) + 12)) ?? '';
+                    const path = text(readU32(wholeAddress(param1) + 12)) ?? '';
                     if ((param2 >>> 0) !== 0)
                     {
-                        host.writeMemory(param2 >>> 0, ansi(path.slice(0, MAX_PATH - 1)));
+                        host.writeMemory(wholeAddress(param2), ansi(path.slice(0, MAX_PATH - 1)));
                     }
                     return FILEOP.DOIT;
                 }
@@ -4509,7 +4513,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const view = new DataView(host.readMemory(params >>> 0, 44).slice().buffer);
+                const view = new DataView(host.readMemory(wholeAddress(params), 44).slice().buffer);
                 /** @param {number} index */
                 const field = index=>view.getUint32(index * 4, true);
                 if ((field(0) !== 44 && field(0) !== 48) || field(10) !== 0)
@@ -5065,7 +5069,7 @@ export function createSetupapiFunctions(host){
                             host.setLastErrorFor(thread, ERROR_INSUFFICIENT_BUFFER);
                             return 0;
                         }
-                        host.writeMemory(dest >>> 0, written);
+                        host.writeMemory(wholeAddress(dest), written);
                         if ((component >>> 0) !== 0)
                         {
                             writeU32(component, (dest >>> 0) + target.lastIndexOf('\\') + 1);
@@ -5306,7 +5310,7 @@ export function createSetupapiFunctions(host){
                 {
                     return DPROMPT.BUFFERTOOSMALL;
                 }
-                host.writeMemory(buffer >>> 0, encodeIn(source, wide));
+                host.writeMemory(wholeAddress(buffer), encodeIn(source, wide));
                 return DPROMPT.SUCCESS;
             },
         })),
@@ -5388,7 +5392,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                host.writeMemory((detail >>> 0) + 4, new Uint8Array(size - 4));
+                host.writeMemory(wholeAddress(detail) + 4, new Uint8Array(size - 4));
                 writeGuid(detail + 4, set.classGuid ?? GUID_NULL);
                 return 1;
             },
@@ -5835,7 +5839,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory((detail >>> 0) + 4, path);
+                host.writeMemory(wholeAddress(detail) + 4, path);
                 return fail(ERROR_SUCCESS, 1);
             },
         })),
@@ -5980,7 +5984,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(buffer >>> 0, value.data);
+                host.writeMemory(wholeAddress(buffer), value.data);
                 return fail(ERROR_SUCCESS, 1);
             },
         })),
@@ -6007,7 +6011,7 @@ export function createSetupapiFunctions(host){
                         : ERROR_NO_SUCH_DEVINST);
                 }
                 const bytes = (buffer >>> 0) === 0 ? null
-                    : host.readMemory(buffer >>> 0, size >>> 0).slice();
+                    : host.readMemory(wholeAddress(buffer), size >>> 0).slice();
                 const error = writeProperty(host.registry, key, property >>> 0, bytes, wide);
                 return error === ERROR_SUCCESS ? fail(ERROR_SUCCESS, 1) : fail(error);
             },
@@ -6180,9 +6184,9 @@ export function createSetupapiFunctions(host){
                 const fields = new DataView(new ArrayBuffer(INSTALL_PARAMS_FIELDS));
                 held.words.forEach((word, index)=>fields.setUint32(4 + index * 4, word, true));
                 fields.setUint32(0, installParamsSize(wide), true);
-                host.writeMemory(params >>> 0, new Uint8Array(fields.buffer));
+                host.writeMemory(wholeAddress(params), new Uint8Array(fields.buffer));
                 const path = encodeIn(held.driverPath, wide);
-                host.writeMemory((params >>> 0) + INSTALL_PARAMS_FIELDS, path);
+                host.writeMemory(wholeAddress(params) + INSTALL_PARAMS_FIELDS, path);
                 return fail(ERROR_SUCCESS, 1);
             },
         })),
@@ -6195,11 +6199,13 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(found.error);
                 }
-                const fields = new DataView(host.readMemory(params >>> 0, INSTALL_PARAMS_FIELDS)
+                const fields = new DataView(host.readMemory(wholeAddress(params),
+                    INSTALL_PARAMS_FIELDS)
                     .slice().buffer);
                 found.held.words = Array.from({ length: INSTALL_PARAMS_WORDS },
                     (_, index)=>fields.getUint32(4 + index * 4, true));
-                found.held.driverPath = textOf((params >>> 0) + INSTALL_PARAMS_FIELDS, wide) ?? '';
+                found.held.driverPath = textOf(wholeAddress(params) + INSTALL_PARAMS_FIELDS,
+                    wide) ?? '';
                 return fail(ERROR_SUCCESS, 1);
             },
         })),
@@ -6328,12 +6334,12 @@ export function createSetupapiFunctions(host){
                 field(driver.section, DETAIL.SECTION, LINE_LEN);
                 field(driver.infPath, DETAIL.SECTION + LINE_LEN * unit, MAX_PATH);
                 field(driver.description, DETAIL.SECTION + (LINE_LEN + MAX_PATH) * unit, LINE_LEN);
-                host.writeMemory(detail >>> 0, bytes);
+                host.writeMemory(wholeAddress(detail), bytes);
                 if ((size >>> 0) < needed)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory((detail >>> 0) + fixed, encodeIn(list.slice(0, -1), wide));
+                host.writeMemory(wholeAddress(detail) + fixed, encodeIn(list.slice(0, -1), wide));
                 return fail(ERROR_SUCCESS, 1);
             },
         })),
@@ -6412,8 +6418,8 @@ export function createSetupapiFunctions(host){
                     }
                     return fail(ERROR_SUCCESS, 1);
                 }
-                const type = readU32((info >>> 0) + 4);
-                const index = readU32((info >>> 0) + 8) - 1;
+                const type = readU32(wholeAddress(info) + 4);
+                const index = readU32(wholeAddress(info) + 8) - 1;
                 if (!held || !held.lists.get(type)?.[index])
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -6672,8 +6678,8 @@ export function createSetupapiFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const hive = host.registry;
-                const key = hive?.open(hive.root(HKEY_LOCAL_MACHINE),
-                    `${COMPONENTS_KEY}\\${guidText(host.readMemory(guidPointer >>> 0, 16))}`);
+                const guid = guidText(host.readMemory(wholeAddress(guidPointer), 16));
+                const key = hive?.open(hive.root(HKEY_LOCAL_MACHINE), `${COMPONENTS_KEY}\\${guid}`);
                 if (!key)
                 {
                     return fail(ERROR_FILE_NOT_FOUND);
@@ -6689,8 +6695,8 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                host.writeMemory(dataPointer >>> 0, data);
-                host.writeMemory(exceptionPointer >>> 0, exception);
+                host.writeMemory(wholeAddress(dataPointer), data);
+                host.writeMemory(wholeAddress(exceptionPointer), exception);
                 return fail(ERROR_SUCCESS, 1);
             },
         },
@@ -6718,12 +6724,12 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                const data = host.readMemory(dataPointer >>> 0, dataSize).slice();
+                const data = host.readMemory(wholeAddress(dataPointer), dataSize).slice();
                 const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE),
                     `${COMPONENTS_KEY}\\${guidText(data.subarray(4, 20))}`);
                 hive.setValue(key, 'ComponentData', 3, data);
                 hive.setValue(key, 'ExceptionData', 3,
-                    host.readMemory(exceptionPointer >>> 0, exceptionSize).slice());
+                    host.readMemory(wholeAddress(exceptionPointer), exceptionSize).slice());
                 return fail(ERROR_SUCCESS, 1);
             },
         },
@@ -6738,8 +6744,9 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
+                const guid = guidText(host.readMemory(wholeAddress(guidPointer), 16));
                 const removed = hive.remove(hive.root(HKEY_LOCAL_MACHINE),
-                    `${COMPONENTS_KEY}\\${guidText(host.readMemory(guidPointer >>> 0, 16))}`);
+                    `${COMPONENTS_KEY}\\${guid}`);
                 return removed === 'deleted' ? fail(ERROR_SUCCESS, 1) : fail(ERROR_FILE_NOT_FOUND);
             },
         },

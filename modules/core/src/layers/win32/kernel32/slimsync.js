@@ -5,6 +5,7 @@
  */
 
 import { criticalLayout } from './critical.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Slim reader/writer locks, condition variables and one-time initialisation:
@@ -709,7 +710,7 @@ export function createSlimSync(host, enterCritical, enterSection){
      */
     const sleep = (variable, milliseconds, letGo)=>{
         const thread = host.currentThread();
-        const wait = milliseconds >>> 0;
+        const wait = wholeAddress(milliseconds);
         if (wait === 0)
         {
             letGo();
@@ -999,12 +1000,12 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, context])=>{
-                const once = pointer >>> 0;
+                const once = wholeAddress(pointer);
                 const word = readWord(once);
                 switch (word & 3)
                 {
                     case ONCE_DONE:
-                        writeWord(context >>> 0, word & ~3);
+                        writeWord(wholeAddress(context), word & ~3);
                         return 0;
                     case ONCE_FRESH:
                         writeWord(once, ONCE_RUNNING);
@@ -1024,7 +1025,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, succeeded, context])=>{
-                const value = (context >>> 0) === 0 ? 0 : readWord(context >>> 0);
+                const value = (context >>> 0) === 0 ? 0 : readWord(wholeAddress(context));
                 settle(pointer >>> 0, succeeded !== 0, value);
                 return succeeded !== 0 ? 1 : 0;
             },
@@ -1189,7 +1190,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([pointer, flags, pending, context])=>{
-                const once = pointer >>> 0;
+                const once = wholeAddress(pointer);
                 const asked = flags >>> 0;
                 if ((asked & ~(INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC)) !== 0
                     || asked === (INIT_ONCE_CHECK_ONLY | INIT_ONCE_ASYNC))
@@ -1202,7 +1203,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                 if (state === ONCE_DONE)
                 {
                     writeBool(pending >>> 0, 0);
-                    writeWord(context >>> 0, word & ~3);
+                    writeWord(wholeAddress(context), word & ~3);
                     return 1;
                 }
                 if ((asked & INIT_ONCE_CHECK_ONLY) !== 0)
@@ -1239,7 +1240,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, flags, context])=>{
-                const once = pointer >>> 0;
+                const once = wholeAddress(pointer);
                 const asked = flags >>> 0;
                 const failed = (asked & INIT_ONCE_INIT_FAILED) !== 0;
                 const async = (asked & INIT_ONCE_ASYNC) !== 0;

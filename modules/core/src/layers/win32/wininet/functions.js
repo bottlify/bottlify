@@ -34,6 +34,7 @@ import { parseInternetTime } from './time.js';
 import { createCacheFunctions } from './cache.js';
 import { createFtpFunctions } from './ftp.js';
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -528,12 +529,12 @@ export function createWininetFunctions(host){
 
     /** @param {number} pointer @param {number} [limit] */
     const readText = (pointer, limit = MAX_TEXT)=>
-        pointer === 0 ? '' : host.readCString(pointer >>> 0, limit);
+        pointer === 0 ? '' : host.readCString(wholeAddress(pointer), limit);
 
     /** readText for the wide entry points. @param {number} pointer @param {number} [limit] */
     const readWide = (pointer, limit = MAX_TEXT)=>{
         let text = '';
-        for (let at = pointer >>> 0; at !== 0 && text.length < limit; at += 2)
+        for (let at = wholeAddress(pointer); at !== 0 && text.length < limit; at += 2)
         {
             const [low, high] = host.readMemory(at, 2);
             if ((low | high) === 0)
@@ -572,7 +573,7 @@ export function createWininetFunctions(host){
             return null;
         }
         return wide ? readWide(pointer, length)
-            : decodeAnsi(host.readMemory(pointer >>> 0, length));
+            : decodeAnsi(host.readMemory(wholeAddress(pointer), length));
     };
 
     /**
@@ -589,7 +590,7 @@ export function createWininetFunctions(host){
         {
             bytes[at] = text.charCodeAt(at) & 0xff;
         }
-        host.writeMemory(pointer >>> 0, bytes);
+        host.writeMemory(wholeAddress(pointer), bytes);
     };
 
     /**
@@ -599,7 +600,7 @@ export function createWininetFunctions(host){
      * @param {number} pointer @param {string} text
      */
     const writeAnsi = (pointer, text)=>{
-        host.writeMemory(pointer >>> 0, encodeAnsi(`${text}\0`));
+        host.writeMemory(wholeAddress(pointer), encodeAnsi(`${text}\0`));
     };
 
     /** Writes UTF-16 and its terminator. @param {number} pointer @param {string} text */
@@ -610,7 +611,7 @@ export function createWininetFunctions(host){
             bytes[at * 2] = text.charCodeAt(at) & 0xff;
             bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
         }
-        host.writeMemory(pointer >>> 0, bytes);
+        host.writeMemory(wholeAddress(pointer), bytes);
     };
 
     /** @param {boolean} wide */
@@ -629,7 +630,7 @@ export function createWininetFunctions(host){
      * @returns {number} TRUE or FALSE
      */
     const answerText = (buffer, lengthPointer, text)=>{
-        const capacity = lengthPointer === 0 ? 0 : readDword(lengthPointer >>> 0);
+        const capacity = lengthPointer === 0 ? 0 : readDword(wholeAddress(lengthPointer));
         if (buffer === 0 || capacity < text.length + 1)
         {
             writeDwordIf(lengthPointer >>> 0, text.length + 1);
@@ -648,7 +649,7 @@ export function createWininetFunctions(host){
      * @returns {number} TRUE or FALSE
      */
     const answerWide = (buffer, lengthPointer, text)=>{
-        const capacity = lengthPointer === 0 ? 0 : readDword(lengthPointer >>> 0);
+        const capacity = lengthPointer === 0 ? 0 : readDword(wholeAddress(lengthPointer));
         if (buffer === 0 || capacity < (text.length + 1) * 2)
         {
             writeDwordIf(lengthPointer >>> 0, (text.length + 1) * 2);
@@ -884,11 +885,11 @@ export function createWininetFunctions(host){
         {
             return failHandle(ERROR_INTERNET_UNRECOGNIZED_SCHEME);
         }
-        const count = headersLength >>> 0;
+        const count = wholeAddress(headersLength);
         const headerText = (headers >>> 0) === 0 ? ''
             : count === 0xffffffff ? read(headers)
                 : wide ? readWide(headers, count)
-                    : decodeAnsi(host.readMemory(headers >>> 0, count));
+                    : decodeAnsi(host.readMemory(wholeAddress(headers), count));
         const connection = allocate('connect', session >>> 0, {
             host: cracked.host.text,
             port: cracked.port,
@@ -945,7 +946,7 @@ export function createWininetFunctions(host){
         {
             return failHandle(ERROR_INVALID_PARAMETER);
         }
-        const kind = service >>> 0;
+        const kind = wholeAddress(service);
         if (kind === INTERNET_SERVICE_FTP || kind === INTERNET_SERVICE_GOPHER)
         {
             // A password with no user to go with it is refused before
@@ -1039,9 +1040,9 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const bodyLength = optionalLength >>> 0;
+        const bodyLength = wholeAddress(optionalLength);
         const body = optional !== 0 && bodyLength > 0
-            ? host.readMemory(optional >>> 0, bodyLength)
+            ? host.readMemory(wholeAddress(optional), bodyLength)
             : null;
         return send(handle, request, text, body);
     };
@@ -1068,7 +1069,7 @@ export function createWininetFunctions(host){
         let headerText = '';
         /** @type {Uint8Array[]} */
         const chunks = [];
-        const base = buffersIn >>> 0;
+        const base = wholeAddress(buffersIn);
         if (base !== 0)
         {
             if (readDword(base + INTERNET_BUFFERS.dwStructSize) !== INTERNET_BUFFERS.SIZE)
@@ -1157,7 +1158,7 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const flags = modifiers >>> 0;
+        const flags = wholeAddress(modifiers);
         /** @type {[string, string][]} */
         const list = request.state.headers;
         for (const line of lines)
@@ -1223,12 +1224,12 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_HANDLE);
         }
-        const level = infoLevel >>> 0;
+        const level = wholeAddress(infoLevel);
         const query = level & 0xffff;
         /** The name a level asks for: its own, or the caller's for CUSTOM. */
         const nameOf = ()=>(query === HTTP_QUERY_CUSTOM
             ? reader(wide)(buffer).toLowerCase() : QUERY_HEADERS.get(query));
-        const index = (indexPointer >>> 0) === 0 ? 0 : readDword(indexPointer >>> 0);
+        const index = (indexPointer >>> 0) === 0 ? 0 : readDword(wholeAddress(indexPointer));
 
         // Every branch below either assigns this or returns, so it is a
         // string by the time anything reads it.
@@ -1320,7 +1321,7 @@ export function createWininetFunctions(host){
         }
         if (answered === TRUE && (indexPointer >>> 0) !== 0)
         {
-            writeDword(indexPointer >>> 0, index + 1);
+            writeDword(wholeAddress(indexPointer), index + 1);
         }
         return answered;
     };
@@ -1338,7 +1339,7 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const base = components >>> 0;
+        const base = wholeAddress(components);
         if (readDword(base + URL_COMPONENTS.dwStructSize) !== URL_COMPONENTS.SIZE)
         {
             // A caller that did not set dwStructSize is a caller built against
@@ -1347,8 +1348,8 @@ export function createWininetFunctions(host){
             return fail(ERROR_INVALID_PARAMETER);
         }
 
-        const length = urlLength >>> 0;
-        const address = url >>> 0;
+        const length = wholeAddress(urlLength);
+        const address = wholeAddress(url);
         // Zero means the string is null-terminated; anything else is an
         // explicit length, and the string need not be terminated at all.
         const text = length === 0 ? reader(wide)(address, MAX_TEXT)
@@ -1392,7 +1393,7 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const base = components >>> 0;
+        const base = wholeAddress(components);
         if (readDword(base + URL_COMPONENTS.dwStructSize) !== URL_COMPONENTS.SIZE)
         {
             return fail(ERROR_INVALID_PARAMETER);
@@ -1465,8 +1466,8 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_HANDLE);
         }
-        const out = buffer >>> 0;
-        const length = lengthPointer >>> 0;
+        const out = wholeAddress(buffer);
+        const length = wholeAddress(lengthPointer);
         const text = wide ? answerWide : answerText;
         switch (option >>> 0)
         {
@@ -1610,7 +1611,7 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_HANDLE);
         }
-        const value = ()=>((buffer >>> 0) === 0 ? 0 : readDword(buffer >>> 0));
+        const value = ()=>((buffer >>> 0) === 0 ? 0 : readDword(wholeAddress(buffer)));
         const read = ()=>reader(wide)(buffer >>> 0);
         switch (option >>> 0)
         {
@@ -1733,7 +1734,7 @@ export function createWininetFunctions(host){
             return fail(ERROR_INVALID_PARAMETER);
         }
         writeDwordIf(flagsPointer >>> 0, connectedFlags());
-        const room = nameLength >>> 0;
+        const room = wholeAddress(nameLength);
         if ((name >>> 0) !== 0 && room > 0)
         {
             writer(wide)(name, (online() ? LAN_CONNECTION_NAME : '').slice(0, room - 1));
@@ -1772,12 +1773,12 @@ export function createWininetFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        writeDword(errorPointer >>> 0, 0);
-        if ((buffer >>> 0) !== 0 && readDword(lengthPointer >>> 0) > 0)
+        writeDword(wholeAddress(errorPointer), 0);
+        if ((buffer >>> 0) !== 0 && readDword(wholeAddress(lengthPointer)) > 0)
         {
             writer(wide)(buffer, '');
         }
-        writeDword(lengthPointer >>> 0, 0);
+        writeDword(wholeAddress(lengthPointer), 0);
         return TRUE;
     };
 
@@ -1797,7 +1798,7 @@ export function createWininetFunctions(host){
         const view = new DataView(bytes.buffer);
         [time.year, time.month, time.dayOfWeek, time.day, time.hour, time.minute, time.second, 0]
             .forEach((value, slot)=>view.setUint16(slot * 2, value & 0xffff, true));
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return TRUE;
     };
 
@@ -1823,7 +1824,7 @@ export function createWininetFunctions(host){
         {
             if (found.error === ERROR_NO_MORE_ITEMS)
             {
-                writeDword(sizePointer >>> 0, 0);
+                writeDword(wholeAddress(sizePointer), 0);
             }
             return fail(found.error);
         }
@@ -1831,16 +1832,16 @@ export function createWininetFunctions(host){
         const room = wide ? needed * 2 : needed;
         if ((data >>> 0) === 0)
         {
-            writeDword(sizePointer >>> 0, room);
+            writeDword(wholeAddress(sizePointer), room);
             return TRUE;
         }
-        if (readDword(sizePointer >>> 0) < needed)
+        if (readDword(wholeAddress(sizePointer)) < needed)
         {
-            writeDword(sizePointer >>> 0, room);
+            writeDword(wholeAddress(sizePointer), room);
             return fail(ERROR_INSUFFICIENT_BUFFER);
         }
         writer(wide)(data, found.text);
-        writeDword(sizePointer >>> 0, needed);
+        writeDword(wholeAddress(sizePointer), needed);
         return TRUE;
     };
 
@@ -2035,7 +2036,7 @@ export function createWininetFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const base = buffers >>> 0;
+                const base = wholeAddress(buffers);
                 const buffer = readDword(base + INTERNET_BUFFERS.lpvBuffer);
                 const capacity = readDword(base + INTERNET_BUFFERS.dwBufferLength);
                 const taken = readBody(request, buffer, capacity);
@@ -2073,7 +2074,8 @@ export function createWininetFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(available >>> 0, response.body.length - request.state.readOffset);
+                writeDword(wholeAddress(available),
+                    response.body.length - request.state.readOffset);
                 return TRUE;
             },
         },
@@ -2122,7 +2124,7 @@ export function createWininetFunctions(host){
                 }
                 request.state.readOffset = position;
                 host.setLastError(ERROR_SUCCESS);
-                return position >>> 0;
+                return wholeAddress(position);
             },
         },
 
@@ -2150,7 +2152,8 @@ export function createWininetFunctions(host){
                 const length = count >>> 0;
                 if (length > 0)
                 {
-                    request.state.pending.chunks.push(host.readMemory(buffer >>> 0, length));
+                    request.state.pending.chunks.push(host.readMemory(wholeAddress(buffer),
+                        length));
                 }
                 writeDwordIf(written >>> 0, length);
                 return TRUE;
@@ -2314,7 +2317,7 @@ export function createWininetFunctions(host){
                 {
                     return FALSE;
                 }
-                writeDword(result >>> 0, decision);
+                writeDword(wholeAddress(result), decision);
                 return TRUE;
             },
         },
@@ -2340,14 +2343,14 @@ export function createWininetFunctions(host){
                     return fail(ERROR_NO_MORE_ITEMS);
                 }
                 const needed = entry[0].length + 1;
-                if ((name >>> 0) === 0 || readDword(sizePointer >>> 0) < needed)
+                if ((name >>> 0) === 0 || readDword(wholeAddress(sizePointer)) < needed)
                 {
-                    writeDword(sizePointer >>> 0, needed);
+                    writeDword(wholeAddress(sizePointer), needed);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 writeWide(name, entry[0]);
-                writeDword(sizePointer >>> 0, needed);
-                writeDword(decision >>> 0, entry[1]);
+                writeDword(wholeAddress(sizePointer), needed);
+                writeDword(wholeAddress(decision), entry[1]);
                 return TRUE;
             },
         },
@@ -2415,7 +2418,7 @@ export function createWininetFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const target = handle >>> 0;
+                const target = wholeAddress(handle);
                 if (!handles.has(target))
                 {
                     return fail(ERROR_INVALID_HANDLE);

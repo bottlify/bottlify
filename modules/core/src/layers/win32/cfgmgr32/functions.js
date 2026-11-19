@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * cfgmgr32 — the Configuration Manager's user-mode client: the device tree and
  * the hardware resources (ports, interrupts, memory ranges) each device was
@@ -60,7 +62,7 @@ export function createCfgmgrFunctions(host){
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** CM_Get_Parent, CM_Get_Child and CM_Get_Sibling: the root has no relative. */
@@ -104,7 +106,7 @@ export function createCfgmgrFunctions(host){
                 bytes[at * unit] = ch.charCodeAt(0);
             });
             const room = (length >>> 0) * unit;
-            host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(room, bytes.length)));
+            host.writeMemory(wholeAddress(buffer), bytes.subarray(0, Math.min(room, bytes.length)));
             return room < bytes.length - unit ? CR.BUFFER_SMALL : CR.SUCCESS;
         },
     });
@@ -131,7 +133,7 @@ export function createCfgmgrFunctions(host){
                     return CR.INVALID_FLAG;
                 }
                 const name = (id >>> 0) === 0 || !host.readCString
-                    ? '' : host.readCString(id >>> 0, MAX_DEVICE_ID_LEN);
+                    ? '' : host.readCString(wholeAddress(id), MAX_DEVICE_ID_LEN);
                 if (name !== '' && name.toUpperCase() !== ROOT_ID)
                 {
                     return CR.NO_SUCH_DEVNODE;

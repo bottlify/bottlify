@@ -53,6 +53,7 @@ import { notifyWindow } from './notify.js';
 import { readText, writeText, LPSTR_TEXTCALLBACK } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 import { stripOfBitmapId } from './strips.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -296,13 +297,13 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
 
     /** @param {number} at */
     const read32 = at=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number} value */
     const write32 = (at, value)=>{
         const v = value >>> 0;
-        host.writeMemory(at >>> 0,
+        host.writeMemory(wholeAddress(at),
             Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
 
