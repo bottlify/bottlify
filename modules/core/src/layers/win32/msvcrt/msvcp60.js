@@ -105,13 +105,7 @@ const RES = 12;
 const stringOf = element=>`?$basic_string@${element}U?$char_traits@${element}@std@@`
     + `V?$allocator@${element}@2@@std@@`;
 
-/**
- * @typedef {Object} Msvcp60Host
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(name: string) => number} addressOf  This library's own export, placed.
- * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
- */
+/** @typedef {import('./msvcp60-streams.js').Msvcp60Host} Msvcp60Host */
 
 /**
  * @param {Record<string, any>} crt  msvcrt's table: operator new and delete, malloc,

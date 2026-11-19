@@ -203,10 +203,18 @@ const FOPEN_MODES = new Map([
  */
 
 /**
+ * @typedef {Object} Msvcp60Host  What MSVCP60's host gives it (`createMsvcp60Functions`).
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(name: string) => number} addressOf  This library's own export, placed.
+ * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
+ */
+
+/**
  * @typedef {Object} StreamsContext
  * @property {Record<string, any>} crt  msvcrt's table: new and delete, malloc and free,
  *           and the FILE functions a filebuf reads and writes through.
- * @property {import('./msvcp60.js').Msvcp60Host} host
+ * @property {Msvcp60Host} host
  * @property {(argBytes: number, handler: (args: number[]) => any) => any} thiscall
  * @property {(argBytes: number, handler: (args: number[]) => any) => any} cdecl
  * @property {(name: string, message: string) => never} raise
