@@ -2612,6 +2612,11 @@ test('NtQueryInformationFile answers the name, the size and the position of an o
     assert.equal(memory.dword(out), 3);
 
     assert.equal(query.handler([handle, block, out, 4, 5]) >>> 0, 0xc0000004, 'too short');
+    // A name's record needs its length and a character, aligned, before
+    // anything is written: four bytes are refused, eight hold a part.
+    assert.equal(query.handler([handle, block, out, 4, 9]) >>> 0, 0xc0000004);
+    assert.equal(query.handler([handle, block, out, 8, 9]) >>> 0, 0x80000005);
+    assert.equal(memory.dword(out), name.length * 2, 'the whole name\'s length');
     assert.equal(query.handler([handle, block, out, 0x100, 1]) >>> 0, 0xc0000003,
         'a class NtQueryDirectoryFile answers, not this');
     assert.equal(query.handler([0x999, block, out, 0x100, 9]) >>> 0, 0xc0000008);

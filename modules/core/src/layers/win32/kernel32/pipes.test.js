@@ -1212,6 +1212,57 @@ const R1 = 0x2a80;
 const STATUS_PIPE_BROKEN = 0xc000014b;
 const STATUS_PIPE_DISCONNECTED = 0xc00000b0;
 
+test('FSCTL_PIPE_TRANSCEIVE writes a message and reads the answer through its block', ()=>{
+    const TRANSCEIVE = 0x11c017;
+    const STATUS_INVALID_PIPE_STATE = 0xc00000ad;
+    const STATUS_PIPE_BUSY = 0xc00000ae;
+    const STATUS_INVALID_READ_MODE = 0xc00000b4;
+    const BLOCK = 0x9000;
+    const { p, server, client, write, read } = bounded(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+    p.view.setUint32(STATE, PIPE_READMODE_MESSAGE, true);
+    assert.equal(p.fns.SetNamedPipeHandleState.handler([client, STATE, 0, 0]), 1);
+    const io = { event: 0, apc: 0, context: 0 };
+    /** @param {number} handle */
+    const transceive = handle=>p.pipes.control(handle, TRANSCEIVE, 0x8100, 64, BLOCK, io,
+        0x3000, 4);
+    // The client's end is overlapped: no answer yet, the request pends.
+    assert.deepEqual(transceive(client), { status: STATUS_PENDING, information: 0 });
+    assert.equal(read(server, 10), 1);
+    assert.equal(p.u32(COUNT), 4, 'the message went whole');
+    assert.equal(write(server, 2), 1);
+    assert.deepEqual([p.u32(BLOCK), p.u32(BLOCK + 4)], [0, 2], 'the answer, through the block');
+
+    // An answer already waiting makes the pipe busy, before anything is written.
+    assert.equal(write(server, 1), 1);
+    assert.deepEqual(transceive(client), { status: STATUS_PIPE_BUSY, information: 0 });
+    // A pipe read as bytes has no transaction.
+    const bytes = bounded(PIPE_TYPE_MESSAGE);
+    assert.equal(/** @type {any} */ (bytes.p.pipes.control(bytes.client, TRANSCEIVE, 0x8100, 64,
+        BLOCK, io, 0x3000, 4)).status, STATUS_INVALID_READ_MODE);
+    // A server whose client is gone is in no state for one.
+    const lone = bounded(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+    lone.p.pipes.closed(lone.client, lone.p.handles.get(lone.client)?.object);
+    assert.equal(/** @type {any} */ (lone.p.pipes.control(lone.server, TRANSCEIVE, 0x8100, 64,
+        BLOCK, io, 0x3000, 4)).status, STATUS_INVALID_PIPE_STATE);
+});
+
+test('a pipe end\'s FileStandardInformation: its quotas, what it may read, a deletion pending;'
+    + ' a listening server is in no state to be peeked at', ()=>{
+    const { p, server, client, write } = bounded();
+    assert.equal(write(server, 7), 1);
+    const record = /** @type {Uint8Array} */ (p.pipes.information(client, 5));
+    const view = new DataView(record.buffer);
+    assert.equal(Number(view.getBigUint64(0, true)), 5000 + 6000, 'the two quotas');
+    assert.equal(Number(view.getBigUint64(8, true)), 7, 'the bytes waiting for it');
+    assert.deepEqual([view.getUint32(16, true), record[20], record[21]], [1, 1, 0]);
+
+    const fresh = processOn(new Map());
+    const listening = fresh.fns.CreateNamedPipeA.handler([fresh.putString(NAME_AT, NAME),
+        PIPE_ACCESS_DUPLEX, 0, 1, 512, 512, 0, 0]) >>> 0;
+    assert.deepEqual(fresh.pipes.control(listening, 0x11400c, 0x9000, 64),
+        { status: 0xc00000ad, information: 0 }, 'STATUS_INVALID_PIPE_STATE');
+});
+
 test('a write waits until what is queued up to its end fits the pipe\'s buffer, in order', ()=>{
     const { p, server, client, write, read, waiting, result } = bounded();
     // A read waiting takes its part, and the rest of the write fits.

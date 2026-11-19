@@ -146,6 +146,7 @@ const FILE_PIPE_CONNECTED_STATE = 3;
 const FILE_PIPE_CLOSING_STATE = 4;
 
 /** The FILE_INFORMATION_CLASS values a pipe end answers itself. */
+const FILE_STANDARD_INFORMATION = 5;
 const FILE_NAME_INFORMATION = 9;
 const FILE_PIPE_INFORMATION = 23;
 const FILE_PIPE_LOCAL_INFORMATION = 24;
@@ -2642,6 +2643,61 @@ export function createNamedPipes(host){
         [ERROR_FILE_NOT_FOUND, STATUS.OBJECT_NAME_NOT_FOUND],
         [ERROR_CALL_NOT_IMPLEMENTED, STATUS.NOT_IMPLEMENTED],
     ]);
+    /**
+     * FSCTL_PIPE_TRANSCEIVE: TransactNamedPipe's native request - a message
+     * written whole, then the answer read through the request's block, event
+     * and APC, pending on an end opened for overlapped I/O. An end with no
+     * peer to answer is refused before anything is written: a server that is
+     * listening or cut off, or whose client is gone, is in no state for it, a
+     * client cut off is disconnected; a pipe not read as messages has no
+     * transaction, and an answer already waiting unread makes the pipe busy.
+     *
+     * @param {End} end @param {number} handle @param {number} input
+     * @param {number} inLength @param {number} output @param {number} room
+     * @param {number} block @param {NativeAsync | undefined} io
+     * @returns {{ status: number, information: number } | { parked: any }}
+     */
+    const transceive = (end, handle, input, inLength, output, room, block, io)=>{
+        /** @param {number} status */
+        const refused = status=>({ status, information: 0 });
+        const { instance } = end;
+        if (end.side === 'client' && (end.cut || instance.state === 'disconnected'))
+        {
+            return refused(STATUS_PIPE_DISCONNECTED);
+        }
+        const peer = peerOf(end);
+        if (instance.state !== 'connected' || !peer || peer.closed)
+        {
+            return refused(STATUS.INVALID_PIPE_STATE);
+        }
+        if (!instance.pipe.messages || !end.readMessages)
+        {
+            return refused(STATUS.INVALID_READ_MODE);
+        }
+        if (end.inbox.length > 0)
+        {
+            return refused(STATUS.PIPE_BUSY);
+        }
+        if (block === 0)
+        {
+            return refused(STATUS.ACCESS_VIOLATION);
+        }
+        // The write goes whole and at once; the block it fills is the read's
+        // to answer after it.
+        const wrote = startWrite(end, handle, input, inLength, block, 0, true, 0, { whole: true });
+        if (wrote !== STATUS.SUCCESS)
+        {
+            return refused(/** @type {number} */ (wrote));
+        }
+        const answer = startRead(end, handle, output, room, block, 0, true, io);
+        if (typeof answer !== 'number')
+        {
+            return { parked: answer };
+        }
+        return { status: answer,
+            information: answer === STATUS.PENDING ? 0 : readDword(block + 4) };
+    };
+
     /** Whether a wait through the device that would have waited was said to answer at once. */
     let deviceWaitSaid = false;
     /**
@@ -3144,6 +3200,11 @@ export function createNamedPipes(host){
                 return typeof answer === 'number' ? { status: answer, information: 0 }
                     : { parked: answer };
             }
+            if ((code >>> 0) === FSCTL_PIPE_TRANSCEIVE)
+            {
+                return transceive(end, handle >>> 0, input >>> 0, inLength >>> 0, output >>> 0,
+                    room >>> 0, block >>> 0, io);
+            }
             if ((code >>> 0) !== FSCTL_PIPE_PEEK)
             {
                 host.divergence?.('NtFsControlFile', `pipe control code 0x${(code >>> 0)
@@ -3154,7 +3215,10 @@ export function createNamedPipes(host){
             {
                 return { status: STATUS.BUFFER_TOO_SMALL, information: 0 };
             }
-            if (end.side === 'server' && end.instance.state === 'disconnected')
+            // A server with no client - cut from one, or listening for one -
+            // is in no state to be peeked at.
+            if (end.side === 'server' && (end.instance.state === 'disconnected'
+                || end.instance.state === 'listening'))
             {
                 return { status: STATUS.INVALID_PIPE_STATE, information: 0 };
             }
@@ -3164,8 +3228,10 @@ export function createNamedPipes(host){
                 return { status: why, information: 0 };
             }
             const seen = peekAt(end, (room >>> 0) - PEEK_HEAD);
-            const state = end.instance.state === 'connected' ? FILE_PIPE_CONNECTED_STATE
-                : FILE_PIPE_CLOSING_STATE;
+            // Its peer gone, what is left to read is the pipe closing.
+            const peer = peerOf(end);
+            const state = end.instance.state === 'connected' && peer && !peer.closed
+                ? FILE_PIPE_CONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
             writeDword(output, state);
             writeDword((output >>> 0) + 4, seen.total);
             writeDword((output >>> 0) + 8, seen.count);
@@ -3194,14 +3260,36 @@ export function createNamedPipes(host){
          * @returns {Uint8Array | { status: number } | null}
          */
         information(handle, kind){
+            // The device has no name of a pipe to give.
+            if (deviceOf(handle) && (kind >>> 0) === FILE_NAME_INFORMATION)
+            {
+                return { status: STATUS.INVALID_PARAMETER };
+            }
             const end = endOf(handle);
-            if (!end || ![FILE_NAME_INFORMATION, FILE_PIPE_INFORMATION,
-                FILE_PIPE_LOCAL_INFORMATION].includes(kind >>> 0))
+            if (!end || ![FILE_STANDARD_INFORMATION, FILE_NAME_INFORMATION,
+                FILE_PIPE_INFORMATION, FILE_PIPE_LOCAL_INFORMATION].includes(kind >>> 0))
             {
                 return null;
             }
             const { instance } = end;
             const { pipe } = instance;
+            if ((kind >>> 0) === FILE_STANDARD_INFORMATION)
+            {
+                // The pipe's quotas are its allocation, what the end may read
+                // its end of file; a pipe is deleted as its last end closes, so
+                // its deletion is always pending.
+                if (end.side === 'client' && (end.cut || instance.state === 'disconnected'))
+                {
+                    return { status: STATUS_PIPE_DISCONNECTED };
+                }
+                const bytes = new Uint8Array(24);
+                const view = new DataView(bytes.buffer);
+                view.setBigUint64(0, BigInt(pipe.inSize + pipe.outSize), true);
+                view.setBigUint64(8, BigInt(available(end)), true);
+                view.setUint32(16, 1, true);
+                bytes[20] = 1;
+                return bytes;
+            }
             if ((kind >>> 0) === FILE_NAME_INFORMATION)
             {
                 if (end.side === 'client' && (end.cut || instance.state === 'disconnected'))

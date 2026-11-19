@@ -399,6 +399,26 @@ const FILE_COMPLETION_INFORMATION = 30;
 const FILE_VALID_DATA_LENGTH_INFORMATION = 39;
 /** FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: the completion modes, a ULONG. */
 const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION = 41;
+/** The FILE_INFORMATION_CLASS values of a pipe end. */
+const FILE_PIPE_INFORMATION = 23;
+const FILE_PIPE_LOCAL_INFORMATION = 24;
+/**
+ * The room each class's record needs before the I/O manager asks the file
+ * system anything: a buffer shorter than its fixed part is
+ * STATUS_INFO_LENGTH_MISMATCH whatever the object, a name's record
+ * included (its length and one character, aligned: Wine's ntdll pipe test
+ * finds four bytes refused).
+ *
+ * @type {Map<number, number>}
+ */
+const QUERY_LENGTHS = new Map([
+    [FILE_BASIC_INFORMATION, 40], [FILE_STANDARD_INFORMATION, 24],
+    [FILE_INTERNAL_INFORMATION, 8], [FILE_EA_INFORMATION, 4], [FILE_ACCESS_INFORMATION, 4],
+    [FILE_NAME_INFORMATION, 8], [FILE_POSITION_INFORMATION, 8], [FILE_MODE_INFORMATION, 4],
+    [FILE_ALIGNMENT_INFORMATION, 4], [FILE_NETWORK_OPEN_INFORMATION, 56],
+    [FILE_ATTRIBUTE_TAG_INFORMATION, 8], [FILE_PIPE_INFORMATION, 8],
+    [FILE_PIPE_LOCAL_INFORMATION, 40],
+]);
 /** NtReadFile's and NtWriteFile's two negative offsets: the end, the file pointer. */
 const FILE_WRITE_TO_END_OF_FILE = 0xffffffff;
 const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
@@ -3887,6 +3907,10 @@ export function createFileFunctions(host){
                 }
                 const held = heldKind(handle);
                 const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held ?? '');
+                if (fileObject && (length >>> 0) < (QUERY_LENGTHS.get(kind >>> 0) ?? 0))
+                {
+                    return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                }
                 // A pipe end answers its own classes, then what any file object does.
                 const piped = host.pipes?.information?.(handle >>> 0, kind >>> 0) ?? null;
                 if (piped !== null && !(piped instanceof Uint8Array))
@@ -3918,7 +3942,7 @@ export function createFileFunctions(host){
                 {
                     // A name, alone or at the end of the whole record, is
                     // cut to the room with its length saying all of it.
-                    const fixed = kind >>> 0 === FILE_NAME_INFORMATION ? 4
+                    const fixed = kind >>> 0 === FILE_NAME_INFORMATION ? 8
                         : kind >>> 0 === FILE_ALL_INFORMATION ? ALL_INFORMATION_FIXED : -1;
                     const fits = fixed >= 0 && (length >>> 0) >= fixed;
                     if (fits)

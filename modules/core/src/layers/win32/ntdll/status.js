@@ -117,6 +117,10 @@ export const STATUS = Object.freeze({
     ILLEGAL_FUNCTION: 0xc00000af,
     /** A wait for a pipe instance whose time ran out. */
     IO_TIMEOUT: 0xc00000b5,
+    /** A transaction asked of an end with an answer already waiting unread. */
+    PIPE_BUSY: 0xc00000ae,
+    /** A transaction asked of a pipe not read as messages. */
+    INVALID_READ_MODE: 0xc00000b4,
     /** A name that cannot be spelled for its object: an unnamed pipe's. */
     OBJECT_PATH_INVALID: 0xc0000039,
     CANCELLED: 0xc0000120,
@@ -285,6 +289,8 @@ const TO_DOS_ERROR = new Map([
     [STATUS.PIPE_NOT_AVAILABLE, ERROR.PIPE_BUSY],
     [STATUS.ILLEGAL_FUNCTION, ERROR.INVALID_FUNCTION],
     [STATUS.IO_TIMEOUT, ERROR.SEM_TIMEOUT],
+    [STATUS.PIPE_BUSY, ERROR.PIPE_BUSY],
+    [STATUS.INVALID_READ_MODE, ERROR.BAD_PIPE],
     [STATUS.OBJECT_PATH_INVALID, ERROR.BAD_PATHNAME],
     [STATUS.CANCELLED, ERROR.OPERATION_ABORTED],
     [STATUS.NOT_A_REPARSE_POINT, ERROR.NOT_A_REPARSE_POINT],
