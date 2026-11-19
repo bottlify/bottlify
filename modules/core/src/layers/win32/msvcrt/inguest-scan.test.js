@@ -213,6 +213,32 @@ test('what a program asks of sscanf, in the guest: every case answered there', (
     }
 });
 
+test('a percent sign matched and a conversion suppressed take no slot: a place just past the '
+    + 'slots a format stores through is no part of the list', ()=>{
+    /** @type {[string, string, number][]} input, format, the slots it stores through */
+    const cases = [['50% 7 9', '50%% %*d %d', 1], ['a 1 2', '%*c %d %d', 2],
+        ['100%100%5', '%d%%%*d%%%d', 2], [`${'%'.repeat(40)}3`, `${'%%'.repeat(40)}%d`, 1]];
+    for (const slotBytes of [4, 8])
+    {
+        for (const [input, format, slots] of cases)
+        {
+            const before = memoryOf(format, input, ()=>5, slotBytes);
+            // The last place stored through is the first bytes past the slots.
+            const view = new DataView(before.buffer);
+            view.setUint32(LIST - DATA + slotBytes * (slots - 1), LIST + slotBytes * slots, true);
+            const guestMemory = before.slice();
+            const hostMemory = before.slice();
+            const helpers = helpersOf(guestMemory, slotBytes);
+            const answer = sources.scanList(/** @type {any} */ (helpers), INPUT, FORMAT, LIST);
+            assert.equal(helpers.wasHanded(), false, `${input} by ${format}: in the guest`);
+            assert.equal(answer, slots, `${input} by ${format}: every conversion assigned`);
+            assert.equal(answer, hostOf(hostMemory, slotBytes).sscanf([INPUT, FORMAT,
+                ...placesOf(before, slotBytes)]), `${input} by ${format}: the answer`);
+            assert.deepEqual(guestMemory, hostMemory, `${input} by ${format}: memory`);
+        }
+    }
+});
+
 test('sscanf\'s x86 and x86-64 answer and store as its JavaScript, under a control word of'
     + ' either precision', ()=>{
     /** The host's scanner, as a stand-in: an answer of its own, nothing written. */

@@ -3159,6 +3159,16 @@ class FunctionCompiler {
                 return { where: 'var', type: v.type, v };
             }
         }
+        // A pointer's 32 bits, `p >>> 0` or `p | 0`: the variable's own dword.
+        if (node.type === 'BinaryExpression' && (node.operator === '>>>' || node.operator === '|')
+            && node.left.type === 'Identifier' && this.fold(node.right) === 0)
+        {
+            const v = this.lookupLocal(node.left.name);
+            if (v !== undefined && !('constant' in v) && v.pointer === true)
+            {
+                return { where: 'var', type: node.operator === '|' ? 'i32' : 'u32', v };
+            }
+        }
         return null;
     }
 
