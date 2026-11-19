@@ -34,7 +34,7 @@
  * hear nothing from would not be handled at all.
  */
 
-import { parseWave } from './wave.js';
+import { expandG711, parseWave } from './wave.js';
 import { MAX_PERIOD } from './timers.js';
 import { SOUND_ADAPTER_NAME, SOUND_DEVICE_INTERFACE } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
@@ -536,35 +536,15 @@ export function judgeWaveFormat(header, direct){
     return answer(WAVERR_BADFORMAT);
 }
 
-/**
- * One G.711 byte as the 16-bit sample it stands for: A-law's or mu-law's
- * eight-bit logarithmic code expanded (ITU-T G.711), which the mapper does
- * for a stream of either before the device sees it.
- *
- * @param {number} byte @param {boolean} alaw
- */
-export function expandG711(byte, alaw){
-    if (alaw)
-    {
-        const code = byte ^ 0x55;
-        const exponent = (code >> 4) & 7;
-        const mantissa = code & 0x0f;
-        const magnitude = exponent === 0 ? (mantissa << 4) + 8
-            : ((mantissa << 4) + 0x108) << (exponent - 1);
-        return (code & 0x80) !== 0 ? magnitude : -magnitude;
-    }
-    const code = ~byte & 0xff;
-    const exponent = (code >> 4) & 7;
-    const magnitude = ((((code & 0x0f) << 3) + 0x84) << exponent) - 0x84;
-    return (code & 0x80) !== 0 ? -magnitude : magnitude;
-}
-
 /** PlaySound's flags: where the sound is, and whether the call waits for it. */
 const SND_ASYNC = 0x0001;
 const SND_MEMORY = 0x0004;
 const SND_LOOP = 0x0008;
+const SND_NOSTOP = 0x0010;
 const SND_FILENAME = 0x00020000;
 const SND_RESOURCE = 0x00040004;
+/** SND_ALIAS (0x10000) with the bit that says the name is a predefined id. */
+const SND_ALIAS_ID = 0x00110000;
 
 /** MMTIME's wType values. Milliseconds is 1, not 0 -- zero is no unit at all. */
 const TIME_MS = 0x0001;
@@ -616,6 +596,13 @@ const MMTIME_SIZE = 12;
  *           fails to load its driver, as on a machine without one.
  * @property {(key: number) => boolean} [keyDown]
  *           Whether a virtual key is held now: a film's break key.
+ * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
+ *           A whole file, its name resolved as the file calls resolve one;
+ *           null when there is none. Absent, PlaySound finds no file.
+ * @property {(module: number, name: number | string, type: string) =>
+ *               Uint8Array | null} [resource]
+ *           A resource's bytes from a module, the program's own for 0; null
+ *           when the module carries none of that name.
  */
 
 
@@ -644,12 +631,13 @@ const utf16 = text=>{
 
 /**
  * Which ordinal is which export, for a program that links WINMM.dll by number.
- * Windows exports PlaySoundA a second time as ordinal 2, with no name.
+ * Ordinal 2 is PlaySound, the name the call had before the A and W forms:
+ * the same address GetProcAddress gives for that name.
  *
  * @type {Readonly<Record<number, string>>}
  */
 export const WINMM_ORDINALS = Object.freeze({
-    2: 'PlaySoundA',
+    2: 'PlaySound',
 });
 
 /**
@@ -1187,33 +1175,37 @@ export function createWinmmFunctions(host){
     };
 
     /**
-     * PlaySound's body, shared with sndPlaySound: null stops what is playing,
-     * a WAVE image in memory replaces it. Waiting for the sound to finish --
-     * what a call without SND_ASYNC does -- is not done, and is reported.
+     * The WAVE image a file name stands for, read as mmioOpen opens a sound:
+     * the name as given, and a name with no extension of its own as a `.wav`
+     * of that name when there is no file by the bare name. A name that ends
+     * in a dot has an empty extension and is not given one.
      *
-     * @param {number} sound @param {number} flags
+     * @param {string} name
+     * @returns {Promise<Uint8Array | null>}
      */
-    const playSound = (sound, flags)=>{
-        if ((sound >>> 0) === 0)
+    const soundFile = async name=>{
+        if (!host.readFile || name === '')
         {
-            stopSound();
-            return 1;
+            return null;
         }
-        // SND_RESOURCE includes the SND_MEMORY bit, so it is told apart first.
-        if ((flags & SND_RESOURCE) === SND_RESOURCE || (flags & SND_MEMORY) === 0)
-        {
-            host.divergence?.('PlaySound', (flags & SND_RESOURCE) === SND_RESOURCE
-                ? 'a resource is not played'
-                : (flags & SND_FILENAME) !== 0 ? 'a file is not played'
-                    : 'a registry alias is not played');
-            return 0;
-        }
-        // The RIFF header carries the image's own length, so the whole of it
-        // can be read without the caller saying how much there is.
-        const head = host.readMemory(sound >>> 0, 8);
-        const wave = parseWave(host.readMemory(sound >>> 0, 8 + u32(head, 4)));
+        const found = await host.readFile(name);
+        const leaf = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
+        return found ?? (leaf.includes('.') ? null : await host.readFile(`${name}.wav`));
+    };
+
+    /**
+     * Plays a WAVE image as PlaySound's one sound, replacing what was playing.
+     * Waiting for the sound to finish -- what a call without SND_ASYNC does --
+     * is not done, and is reported.
+     *
+     * @param {Uint8Array} image @param {number} flags
+     */
+    const startSound = (image, flags)=>{
+        const wave = parseWave(image);
         if (!wave)
         {
+            host.divergence?.('PlaySound', 'a sound in an encoding no built-in codec decodes'
+                + ' is not played');
             return 0;
         }
         stopSound();
@@ -1233,6 +1225,60 @@ export function createWinmmFunctions(host){
             loop: (flags & SND_LOOP) !== 0,
         };
         return 1;
+    };
+
+    /**
+     * PlaySound's body, shared with sndPlaySound and both widths: null stops
+     * what is playing; SND_MEMORY plays a WAVE image in memory, SND_RESOURCE
+     * a WAVE resource of `module` (the program's own for none), SND_FILENAME
+     * a file. A name with neither flag is an alias of a system sound first
+     * and a file name after, as is a name with SND_ALIAS; the system sounds
+     * are not looked up here, so such a name is played only as a file, and
+     * that is reported. A sound that is not found plays nothing and answers
+     * FALSE; the default sound it would play without SND_NODEFAULT is not
+     * played either.
+     *
+     * @param {number} sound @param {number} module @param {number} flags
+     * @param {boolean} wide
+     * @returns {number | Promise<number>}
+     */
+    const playSound = (sound, module, flags, wide)=>{
+        if ((sound >>> 0) === 0)
+        {
+            stopSound();
+            return 1;
+        }
+        if ((flags & SND_NOSTOP) !== 0 && playing)
+        {
+            return 0;
+        }
+        // SND_RESOURCE includes the SND_MEMORY bit, so it is told apart first.
+        if ((flags & SND_RESOURCE) === SND_RESOURCE)
+        {
+            const name = (sound >>> 0) < 0x10000 ? sound >>> 0
+                : (wide ? wideAt(sound, 260) : ansiAt(sound, 260));
+            const image = host.resource?.(module >>> 0, name, 'WAVE') ?? null;
+            return image ? startSound(image, flags) : 0;
+        }
+        if ((flags & SND_MEMORY) !== 0)
+        {
+            // The RIFF header carries the image's own length, so the whole of
+            // it can be read without the caller saying how much there is.
+            const head = host.readMemory(sound >>> 0, 8);
+            return startSound(host.readMemory(sound >>> 0, 8 + u32(head, 4)), flags);
+        }
+        if ((flags & SND_ALIAS_ID) === SND_ALIAS_ID)
+        {
+            host.divergence?.('PlaySound', 'a system sound named by its alias id is not played');
+            return 0;
+        }
+        const name = wide ? wideAt(sound, 260) : ansiAt(sound, 260);
+        if ((flags & SND_FILENAME) === 0)
+        {
+            host.divergence?.('PlaySound', 'a system sound\'s alias is not looked up in the'
+                + ' registry; the name is played as a file');
+        }
+        return soundFile(name).then(image=>(image ? startSound(image, flags) : 0));
     };
 
     const table = {
@@ -1750,36 +1796,35 @@ export function createWinmmFunctions(host){
         PlaySoundA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
+            handler: ([sound, module, flags])=>playSound(sound, module, flags >>> 0, false),
         },
         sndPlaySoundA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([sound, flags])=>playSound(sound, flags >>> 0),
+            handler: ([sound, flags])=>playSound(sound, 0, flags >>> 0, false),
         },
         /** BOOL PlaySound(LPCSTR, HMODULE, DWORD): PlaySoundA under the name it had first. */
         PlaySound: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
+            handler: ([sound, module, flags])=>playSound(sound, module, flags >>> 0, false),
         },
 
         /**
          * BOOL PlaySoundW(LPCWSTR, HMODULE, DWORD) and
          * BOOL sndPlaySoundW(LPCWSTR, UINT)
          *
-         * The same calls: a sound is played only from a WAVE image in
-         * memory, and no name -- the one thing the width is about -- is read.
+         * The same calls, the name read in UTF-16.
          */
         PlaySoundW: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
+            handler: ([sound, module, flags])=>playSound(sound, module, flags >>> 0, true),
         },
         sndPlaySoundW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([sound, flags])=>playSound(sound, flags >>> 0),
+            handler: ([sound, flags])=>playSound(sound, 0, flags >>> 0, true),
         },
 
         /**

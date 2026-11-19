@@ -882,8 +882,8 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
     assert.equal(winmm.PlaySoundA.handler([0, 0, 0]), 1);
     assert.equal(mixer.diagnostics().tracks, 0, 'null stops what is playing');
 
-    assert.equal(winmm.PlaySoundA.handler([0x800, 0, 0x00020000]), 0);
-    assert.equal(diverged.length, 1, 'a file is refused out loud, not silently');
+    assert.equal(await winmm.PlaySoundA.handler([0x800, 0, 0x00020000]), 0,
+        'a build that cannot read files finds no sound file');
     assert.equal(winmm.PlaySoundA.argBytes, 12);
     assert.equal(winmm.sndPlaySoundA.argBytes, 8);
 
@@ -900,6 +900,80 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
     assert.equal(winmm.PlaySound.handler([0, 0, 0]), 1);
     assert.equal(mixer.diagnostics().tracks, 0);
     assert.equal(winmm.PlaySound.argBytes, 12);
+});
+
+test('PlaySound plays a file by name, a bare name as its .wav, and a WAVE resource', async()=>{
+    // wave.c test_PlaySound: SND_FILENAME, SND_ALIAS falling back to the file,
+    // a name without an extension, one ending in a dot, and SND_RESOURCE.
+    const { createMixer } = await import('../../audio/output/mixer.js');
+    const memory = new Uint8Array(0x20000);
+    const mixer = createMixer({ sampleRate: 48000 });
+    const text = (/** @type {string} */ s)=>[...s].map(c=>c.charCodeAt(0));
+    const le32 = (/** @type {number} */ v)=>[v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff,
+        v >>> 24 & 0xff];
+    const fmt = [1, 0, 1, 0, ...le32(8000), ...le32(16000), 2, 0, 16, 0];
+    const body = [...text('WAVE'), ...text('fmt '), ...le32(16), ...fmt,
+        ...text('data'), ...le32(4), 1, 2, 3, 4];
+    const sound = new Uint8Array([...text('RIFF'), ...le32(body.length), ...body]);
+    /** @type {string[]} */
+    const asked = [];
+    /** @type {any[]} */
+    const resources = [];
+    /** @type {string[]} */
+    const diverged = [];
+    const winmm = /** @type {any} */ (createWinmmFunctions({
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        now: ()=>0,
+        output: ()=>mixer,
+        /** @param {string} path */
+        readFile: async path=>{
+            asked.push(path);
+            return path === 'C:\\T\\mysound.wav' ? sound : null;
+        },
+        /** @param {number} module @param {number | string} name @param {string} type */
+        resource: (module, name, type)=>{
+            resources.push([module, name, type]);
+            return name === 'TEST_WAV' ? sound : null;
+        },
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+    })).table;
+    const SND_ASYNC = 1;
+    const SND_NODEFAULT = 2;
+    const SND_FILENAME = 0x20000;
+    const SND_ALIAS = 0x10000;
+    const SND_RESOURCE = 0x40004;
+    // A name is a pointer above 0xFFFF; below it is an integer resource id.
+    /** @param {string} name */
+    const named = name=>{
+        memory.fill(0, 0x10100, 0x10200);
+        memory.set(text(name), 0x10100);
+        return 0x10100;
+    };
+    const play = (/** @type {string} */ name, /** @type {number} */ flags)=>
+        winmm.PlaySoundA.handler([named(name), 0, flags | SND_ASYNC | SND_NODEFAULT]);
+
+    assert.equal(await play('C:\\T\\mysound.wav', SND_FILENAME), 1, 'a file by name');
+    assert.equal(mixer.diagnostics().tracks, 1);
+    assert.equal(await play('C:\\T\\mysound.wav', SND_ALIAS), 1,
+        'an alias that names no system sound is played as a file');
+    assert.ok(diverged.some(line=>line.includes('registry')), 'and the lookup it skipped is said');
+    assert.equal(await play('C:\\T\\mysound', SND_FILENAME), 1, 'a bare name is its .wav');
+    assert.deepEqual(asked.slice(-2), ['C:\\T\\mysound', 'C:\\T\\mysound.wav']);
+    assert.equal(await play('C:\\T\\mysound.', SND_FILENAME), 0,
+        'a name ending in a dot is not given an extension');
+    assert.equal(asked.at(-1), 'C:\\T\\mysound.');
+
+    assert.equal(winmm.PlaySoundA.handler([named('TEST_WAV'), 0x400000,
+        SND_RESOURCE | SND_ASYNC]), 1, 'a WAVE resource of the module named');
+    assert.deepEqual(resources.at(-1), [0x400000, 'TEST_WAV', 'WAVE']);
+    assert.equal(winmm.PlaySoundA.handler([7, 0, SND_RESOURCE | SND_ASYNC]), 0,
+        'an integer resource name the module lacks');
+    assert.deepEqual(resources.at(-1), [0, 7, 'WAVE']);
+    winmm.PlaySoundA.handler([0, 0, 0]);
 });
 
 test('the timer reports the periods timeSetEvent accepts', ()=>{
@@ -1259,7 +1333,8 @@ test('joyConfigChanged takes the notice: no joystick has settings to reread', ()
 
 test('waveOutOpen judges a format by Windows\' rules, through the mapper or straight to the device',
     async()=>{
-        const { judgeWaveFormat, expandG711 } = await import('./functions.js');
+        const { judgeWaveFormat } = await import('./functions.js');
+        const { expandG711 } = await import('./wave.js');
         /** @param {number} tag @param {number} channels @param {number} bits @param {number} [valid] */
         const format = (tag, channels, bits, valid = bits)=>{
             const bytes = new Uint8Array(40);

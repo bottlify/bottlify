@@ -48,8 +48,50 @@ test('PCM comes out as it went in, past an odd-sized chunk and its pad byte', ()
 
 test('what is not a WAVE, or is a format nothing decodes, is refused', ()=>{
     assert.equal(parseWave(new Uint8Array([1, 2, 3])), null);
-    const mulaw = [...le16(7), ...le16(1), ...le32(8000), ...le32(8000), ...le16(1), ...le16(8)];
-    assert.equal(parseWave(riff([...chunk('fmt ', mulaw), ...chunk('data', [1, 2])])), null);
+    // GSM 6.10: a codec Windows carries as an ACM driver and this build does not.
+    const gsm = [...le16(0x31), ...le16(1), ...le32(8000), ...le32(1625), ...le16(65), ...le16(0)];
+    assert.equal(parseWave(riff([...chunk('fmt ', gsm), ...chunk('data', [1, 2])])), null);
+    const pcm12 = [...le16(1), ...le16(1), ...le32(8000), ...le32(16000), ...le16(2), ...le16(12)];
+    assert.equal(parseWave(riff([...chunk('fmt ', pcm12), ...chunk('data', [1, 2])])), null,
+        'PCM of a width the mixer does not take');
+});
+
+test('A-law and mu-law are expanded to 16-bit samples', ()=>{
+    /** @param {number} tag */
+    const g711 = tag=>[...le16(tag), ...le16(1), ...le32(8000), ...le32(8000), ...le16(1),
+        ...le16(8)];
+    const mulaw = parseWave(riff([...chunk('fmt ', g711(7)), ...chunk('data', [0xff, 0x80])]));
+    assert.ok(mulaw);
+    assert.deepEqual(mulaw.format, { sampleRate: 8000, channels: 1, bitsPerSample: 16 });
+    assert.deepEqual([...new Int16Array(mulaw.pcm.slice().buffer)], [0, 32124]);
+    const alaw = parseWave(riff([...chunk('fmt ', g711(6)), ...chunk('data', [0xd5, 0x55])]));
+    assert.ok(alaw);
+    assert.deepEqual([...new Int16Array(alaw.pcm.slice().buffer)], [8, -8]);
+});
+
+test('IMA ADPCM is decoded block by block, and a short block at the end is dropped', ()=>{
+    // One mono block of 8 bytes: the first sample and step index, then four
+    // bytes of codes -- eight samples after the first.
+    const fmt = [...le16(0x11), ...le16(1), ...le32(8000), ...le32(4000), ...le16(8),
+        ...le16(4), ...le16(2), ...le16(9)];
+    const block = [...le16(100), 0, 0, 0, 0, 0, 0];
+    const wave = parseWave(riff([...chunk('fmt ', fmt), ...chunk('data', [...block, 1, 2])]));
+    assert.ok(wave);
+    assert.deepEqual(wave.format, { sampleRate: 8000, channels: 1, bitsPerSample: 16 });
+    const samples = new Int16Array(wave.pcm.slice().buffer);
+    assert.equal(samples.length, 9, 'one whole block of nine samples');
+    // A zero code still adds an eighth of the step, which is 7 at index 0.
+    assert.deepEqual([...samples.subarray(0, 3)], [100, 100, 100]);
+});
+
+test('24-bit PCM and 32-bit float are handed on as they are', ()=>{
+    const pcm24 = [...le16(1), ...le16(1), ...le32(8000), ...le32(24000), ...le16(3), ...le16(24)];
+    const deep = parseWave(riff([...chunk('fmt ', pcm24), ...chunk('data', [1, 2, 3])]));
+    assert.deepEqual(deep?.format, { sampleRate: 8000, channels: 1, bitsPerSample: 24 });
+    const float = [...le16(3), ...le16(1), ...le32(8000), ...le32(32000), ...le16(4), ...le16(32)];
+    const real = parseWave(riff([...chunk('fmt ', float), ...chunk('data', [0, 0, 0x80, 0x3f])]));
+    assert.deepEqual(real?.format, { sampleRate: 8000, channels: 1, bitsPerSample: 32,
+        float: true });
 });
 
 /**

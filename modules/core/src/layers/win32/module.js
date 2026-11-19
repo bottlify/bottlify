@@ -2440,6 +2440,24 @@ export function createWin32Module(){
                 // since the last look, read as MCI reads it: GetAsyncKeyState,
                 // whose low bit a tap between two looks leaves set.
                 keyDown: key=>((config?.asyncKeyState?.(key) ?? 0) & 0x8001) !== 0,
+                // A sound PlaySound or MCI names: a file found as the file calls
+                // find one, or a resource of a loaded module.
+                // A name no path can be made of names no file.
+                readFile: path=>{
+                    try
+                    {
+                        return readVolumeFile(filesystem.resolve(path).path || path);
+                    }
+                    catch (e){
+                        void e;
+                        return null;
+                    }
+                },
+                resource: (module, name, type)=>{
+                    const entry = modules.findResource?.(module, type, name) ?? null;
+                    const base = modules.moduleBase?.(module) ?? module;
+                    return entry ? readMemory(base + entry.rva, entry.size) : null;
+                },
                 // The guest's clock, never the host's. A frame loop that timed an
                 // interval with one and read it with another would disagree with
                 // itself about how long its own frame took.

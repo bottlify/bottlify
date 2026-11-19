@@ -114,6 +114,12 @@ event, an error. Neither stops the program.
   buffer at Play, not as the cursor reaches it. A buffer whose last reference goes does not
   release its effects: a program's own DMO keeps one reference more than on Windows.
 - No capture: recording answers `DSERR_NODRIVER`.
+- PlaySound plays a WAVE file, resource or image in memory of PCM (8 to 32 bits, or float),
+  A-law, mu-law, Microsoft or IMA ADPCM; GSM and MPEG audio, which Windows decodes through ACM
+  codecs this build does not have, answer FALSE. A system sound's alias (`SystemAsterisk`, an id
+  with `SND_ALIAS_ID`) is not looked up in the registry: an alias is played only as a file of
+  that name, and the default sound is never played. A call without `SND_ASYNC` returns at once
+  instead of when the sound ends. Each is said once.
 - WASAPI (`IMMDevice::Activate` for `IAudioClient`) plays in shared mode only, as XAudio2's
   redistributable and FMOD do on Vista and later: exclusive mode answers
   `AUDCLNT_E_EXCLUSIVE_MODE_NOT_ALLOWED`, as on a machine whose user has not allowed it, and a
