@@ -100,6 +100,7 @@ export function accessibleSpan(pageState, address, length, write){
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]  A write
  *           through the memory layer's own protection (`writeThroughProtection`).
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose counts are eight bytes
  * @property {PageState} pageState  VirtualQuery's answer for a page (heap.js PAGE_STATE).
  * @property {(handle: number, right: number) => import('./process-target.js').ProcessTarget}
  *     processTarget
@@ -113,12 +114,19 @@ export function accessibleSpan(pageState, address, length, write){
  * @param {ProcessMemoryHost} host
  */
 export function createProcessMemory(host){
-    /** @param {number} address @param {number} value */
+    /**
+     * A count out: a SIZE_T, eight bytes in a 64-bit process. Written as a
+     * dword there, its upper half stayed whatever the caller's variable held
+     * and a reader comparing the count with what it asked saw no read at all.
+     *
+     * @param {number} address @param {number} value
+     */
     const writeCount = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, new Uint8Array([value & 0xff, value >>> 8 & 0xff,
-                value >>> 16 & 0xff, value >>> 24 & 0xff]));
+            const bytes = new Uint8Array(host.pointerSize === 8 ? 8 : 4);
+            new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+            host.writeMemory(address, bytes);
         }
     };
 

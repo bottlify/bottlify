@@ -211,6 +211,7 @@ function fakeHost(){
  * @param {Object} [options]
  * @param {string[]} [options.interfaces]  Which IIDs the class answers to.
  * @param {boolean} [options.taskAllocator]  Whether the process has an IMalloc to give.
+ * @param {4 | 8} [options.pointerSize]  8 for a 64-bit process.
  */
 function setup({ interfaces = [IID_TEST], taskAllocator = true, pointerSize = 4 } = {}){
     const host = fakeHost();

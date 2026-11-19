@@ -2786,17 +2786,17 @@ export function createOleFunctions(host){
     };
 
     /**
+     * MULTI_QI in this process's layout: the interface asked for and the
+     * pointer found, each a pointer wide, then the answer.
+     */
+    const multi = width.size === 8 ? { itf: 8, hr: 16, size: 24 } : { itf: 4, hr: 8, size: 12 };
+    /**
      * What the moniker classes reach of the rest of COM: activation, the
      * running object table, docfiles and the volume, all as this layer's own
      * exports answer them.
      *
      * @type {import('./monikers.js').MonikerEnv}
      */
-    /**
-     * MULTI_QI in this process's layout: the interface asked for and the
-     * pointer found, each a pointer wide, then the answer.
-     */
-    const multi = width.size === 8 ? { itf: 8, hr: 16, size: 24 } : { itf: 4, hr: 8, size: 12 };
     const monikerEnv = {
         pointerSize: width.size,
         readMemory: host.readMemory,
