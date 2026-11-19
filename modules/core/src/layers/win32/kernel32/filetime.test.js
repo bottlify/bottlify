@@ -7,8 +7,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createFileTimeFunctions, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
+    createFileTimeFunctions, fileAttributes, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
 } from './filetime.js';
+
+test('a file is archived until a program clears it, a reparse point too; a directory is not', ()=>{
+    const ARCHIVE = 0x20;
+    const DIRECTORY = 0x10;
+    const REPARSE_POINT = 0x400;
+    assert.equal(fileAttributes({ isDirectory: false }), ARCHIVE);
+    assert.equal(fileAttributes({ isDirectory: false, reparseTag: 0xa000000c }),
+        ARCHIVE | REPARSE_POINT, 'a symbolic link to a file');
+    assert.equal(fileAttributes({ isDirectory: true, reparseTag: 0xa0000003 }),
+        DIRECTORY | REPARSE_POINT, 'a junction');
+    assert.equal(fileAttributes({ isDirectory: false, attributes: 0x2 }), 0x2,
+        'what a program set, as set');
+});
 
 function setup(){
     const bytes = new Uint8Array(0x1000);

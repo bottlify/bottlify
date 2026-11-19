@@ -29,6 +29,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import { msToFileTime } from './filetime.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -75,6 +76,13 @@ const FILE_FS_DEVICE_INFORMATION = 4;
 const FILE_FS_ATTRIBUTE_INFORMATION = 5;
 const FILE_FS_FULL_SIZE_INFORMATION = 7;
 const VOLUME_FIXED = 18;
+/**
+ * When the volume was made, as FileFsVolumeInformation answers it: nothing
+ * here has a date of its own, so the start of the DOS calendar, which the
+ * files a program found on the drive carry too - the volume is no younger
+ * than anything on it (decisions.md A276).
+ */
+const VOLUME_CREATED_MS = Date.UTC(1980, 0, 1);
 const ATTRIBUTE_FIXED = 12;
 /** FILE_FS_DEVICE_INFORMATION's device types and characteristics. */
 const FILE_DEVICE_CD_ROM = 2;
@@ -938,8 +946,12 @@ export function createDriveFunctions(host){
                 // SupportsObjects, then the label.
                 const label = encodeWide(facts.label);
                 const bytes = record(VOLUME_FIXED + label.length, view=>{
+                    // A disc's descriptor dates are not kept: it says none.
+                    view.setBigUint64(0, facts.disc ? 0n : msToFileTime(VOLUME_CREATED_MS), true);
                     view.setUint32(8, facts.serial, true);
                     view.setUint32(12, label.length, true);
+                    // SupportsObjects stays 0: the volume keeps no object ids,
+                    // as its attribute flags say, though NTFS answers 1 (A276).
                 });
                 bytes.set(label, VOLUME_FIXED);
                 return { bytes, fixed: VOLUME_FIXED };

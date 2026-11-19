@@ -377,6 +377,9 @@ test('a privilege is looked up by its fixed number and granted on the process to
     bytes.set([...'SeNoSuchPrivilege\0'].map(c=>c.charCodeAt(0)), NAME);
     assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 0);
     assert.equal(errors.at(-1), 1313, 'ERROR_NO_SUCH_PRIVILEGE');
+    bytes.set([...'SeCreateSymbolicLinkPrivilege\0'].map(c=>c.charCodeAt(0)), NAME);
+    assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 1, 'a Windows 7 name');
+    assert.equal(dword(LUID), 35);
 
     assert.equal(fns.OpenProcessToken.handler([0xffffffff, 0x28, TOKEN_OUT]), 1);
     const token = dword(TOKEN_OUT);

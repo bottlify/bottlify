@@ -2549,8 +2549,17 @@ loader.c 945-950). Revisit if the engine can place memory outside the arena. *20
 **A275. A symbolic link is set by FSCTL_SET_REPARSE_POINT without SeCreateSymbolicLinkPrivilege.**
 On Windows the I/O manager refuses IO_REPARSE_TAG_SYMLINK with STATUS_PRIVILEGE_NOT_HELD unless the
 caller's token holds the privilege enabled, which an administrator enables and an ordinary user does
-not have. The run's token does not carry it and LookupPrivilegeValue does not name it, so a program
+not have. The run's token does not carry it, so a program
 setting a link through the control would always be refused; here the control takes the link as an
 elevated caller's would (`kernel32/reparse.js`), and CreateSymbolicLink still answers
 ERROR_PRIVILEGE_NOT_HELD as before. Revisit when the token carries its privileges and the run
 says whether it is elevated. *2026-11-19.*
+
+**A276. The NTFS volume says it keeps no object ids, and was made at the start of the DOS calendar.**
+FileFsVolumeInformation on NTFS answers SupportsObjects 1 and the volume's creation time. The volume
+here keeps no object ids (FSCTL_CREATE_OR_GET_OBJECT_ID and its kin are not answered), so it says
+SupportsObjects 0, as its FILE_FS_ATTRIBUTE_INFORMATION flags already leave FILE_SUPPORTS_OBJECT_IDS
+out: a program that looked would otherwise ask for what is not there (Wine's ntdll file.c 4899 fails
+by this). Nothing here has a date of its own, so the volume was made on 1 January 1980, the date the
+files found on the drive carry, no younger than anything on it (`kernel32/drives.js`). Revisit when
+the volume keeps object ids. *2026-11-19.*

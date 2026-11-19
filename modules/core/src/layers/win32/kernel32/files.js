@@ -46,7 +46,7 @@ import { fullPathName } from '../ntdll/paths.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
 import {
     FSCTL_DELETE_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT,
-    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, reparseRequest,
+    IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, namesDirectory, reparseRequest,
 } from './reparse.js';
 
 /** Codes this surface reports through the last-error slot. */
@@ -593,6 +593,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => void} setCurrentDirectory
  * @property {(path: string) => boolean} [writeProtected]
  *           Whether the path is on read-only media, a disc.
+ * @property {(path: string) => string} [finalPath]
+ *           The path as the volume spells it, every junction on the way
+ *           taken. Absent, a path is its own final name.
  * @property {(path: string, attributes: number | null) => boolean} [setAttributes]
  *           Records the attributes a program set on a name; `null` forgets
  *           them. Absent, SetFileAttributes changes nothing a later call sees.
@@ -1216,8 +1219,14 @@ export function createFileFunctions(host){
             {
                 return { error: ERROR_FILE_NOT_FOUND };
             }
+            const link = tag === IO_REPARSE_TAG_SYMLINK ? files.reparseOf?.(at) : null;
             at = `${path.slice(0, 2)}${SEPARATOR}${here.junction}`;
             here = files.stat(at);
+            // A link naming a directory (a separator last) reaches no file.
+            if (link && namesDirectory(link.data) && here?.exists && !here.isDirectory)
+            {
+                return { error: ERROR_INVALID_NAME };
+            }
         }
         return { error: ERROR_CANT_RESOLVE_FILENAME };
     };
@@ -1511,16 +1520,10 @@ export function createFileFunctions(host){
 
     /** @param {number} address @param {DirectoryEntry} entry */
     const writeWideFindData = (address, entry)=>{
+        // The same head as the ANSI form's, the reparse tag in it; the names
+        // after it are twice as wide.
         const data = new Uint8Array(WIN32_FIND_DATAW.SIZE);
-        const view = new DataView(data.buffer);
-        view.setUint32(WIN32_FIND_DATAW.dwFileAttributes, attributesOf(entry), true);
-        const time = msToFileTime(entry.modified ?? 0);
-        view.setBigUint64(WIN32_FIND_DATAW.ftCreationTime, time, true);
-        view.setBigUint64(WIN32_FIND_DATAW.ftLastAccessTime, time, true);
-        view.setBigUint64(WIN32_FIND_DATAW.ftLastWriteTime, time, true);
-        const size = entry.size ?? 0;
-        view.setUint32(WIN32_FIND_DATAW.nFileSizeHigh, high(size), true);
-        view.setUint32(WIN32_FIND_DATAW.nFileSizeLow, low(size), true);
+        data.set(findDataHead(entry).subarray(0, WIN32_FIND_DATAW.cFileName));
         data.set(utf16(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAW.cFileName);
         host.writeMemory(address, data);
     };
@@ -3652,6 +3655,17 @@ export function createFileFunctions(host){
     };
 
     /**
+     * An open file's number on its volume, GetFileInformationByHandle's and
+     * FileInternalInformation's: the same for the same file under any of its
+     * names, which is what comparing two handles asks. A file keeps its
+     * number across renames, so the open file keeps it once asked: the
+     * volume is not walked again on every query.
+     *
+     * @param {any} file @returns {number}
+     */
+    const numberOf = file=>(file.volumeNumber ??= files.fileId(file.path));
+
+    /**
      * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
      * lays it out; null for a class this keeps nothing for. The volume keeps
      * one time per file, the last write, and every time answers with it, as
@@ -3685,10 +3699,6 @@ export function createFileFunctions(host){
         const mode = modeOf(file);
         const access = handle !== 0 ? rightsOf(handle)
             : (file.read ? FILE_GENERIC_READ : 0) | (file.write ? FILE_GENERIC_WRITE : 0);
-        // A file's number on its volume, GetFileInformationByHandle's: the
-        // same for the same file under any of its names, which is what
-        // comparing two handles asks.
-        const index = files.fileId(file.path);
         switch (kind)
         {
             case FILE_BASIC_INFORMATION:
@@ -3710,7 +3720,7 @@ export function createFileFunctions(host){
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
             case FILE_INTERNAL_INFORMATION:
-                return record(8, view=>view.setBigUint64(0, BigInt(index), true));
+                return record(8, view=>view.setBigUint64(0, BigInt(numberOf(file)), true));
             case FILE_EA_INFORMATION:
                 return new Uint8Array(4);
             case FILE_ACCESS_INFORMATION:
@@ -4763,8 +4773,9 @@ export function createFileFunctions(host){
 
     /**
      * GetFinalPathNameByHandle in either width. The name is the one the file
-     * was opened by -- a volume's names are its own spelling, with no links
-     * to resolve -- in the namespace the flags ask for: the drive's
+     * was opened by as the volume spells it, every junction on its way taken
+     * (a hard link is a name of its own and stays) - in the namespace the
+     * flags ask for: the drive's
      * (`\\?\C:\...`), the volume's device (`\Device\HarddiskVolumeN\...`,
      * the drives numbered from C as QueryDosDevice names them), or none (the
      * path below the root). A volume GUID path is not one this answers.
@@ -4775,11 +4786,12 @@ export function createFileFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([handle, buffer, room, flags])=>{
-            const path = handlePath(handle);
-            if (path === null)
+            const opened = handlePath(handle);
+            if (opened === null)
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
+            const path = files.finalPath?.(opened) ?? opened;
             const volumeName = (flags >>> 0) & 0x7;
             if (((flags >>> 0) & ~0xf) !== 0 || (volumeName !== VOLUME_NAME_DOS
                 && volumeName !== VOLUME_NAME_NT && volumeName !== VOLUME_NAME_NONE))
@@ -4913,7 +4925,12 @@ export function createFileFunctions(host){
                 : [['.', directory.path], ['..', /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent]]
                     .map(([dot, of])=>({ ...holder, name: dot, isDirectory: true, size: 0,
                         identity: of }));
-            const entries = [...dots, ...files.list(directory.path, '*') ?? []]
+            // A handle whose own name is a reparse point was opened as the
+            // point (one opened through it stands on what it names): it holds
+            // nothing of its own, and what it stands for is listed through
+            // its name, not through its handle.
+            const held = holder?.reparseTag ? [] : files.list(directory.path, '*') ?? [];
+            const entries = [...dots, ...held]
                 .filter(entry=>isNameInExpression(pattern === '' ? '*' : pattern, entry.name));
             directory.listing = { pattern, entries, next: 0, first: true };
         }
