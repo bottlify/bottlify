@@ -345,9 +345,11 @@ const NORMAL_BASE_PRIORITY = 8;
  *           The machine's Windows, for the two fields the process block does
  *           not hold: the suite and the product type, which Windows keeps in
  *           the page the kernel shares with every process. Absent, the default.
- * @property {(handle: number) => string | null} [objectName]  The name a handle's
- *           object has in the object namespace (a file's under
- *           `\Device\HarddiskVolume1`), or null for one nothing keeps a name for
+ * @property {(handle: number) => string | null | { status: number }} [objectName]  The
+ *           name a handle's object has in the object namespace (a file's under
+ *           `\Device\HarddiskVolume1`), null for one nothing keeps a name for, or
+ *           the status of an object whose name cannot be spelled (a pipe made with
+ *           none: STATUS_OBJECT_PATH_INVALID)
  * @property {(handle: number) => string | null} [handleType]  What a handle
  *           names, or null when it names nothing. Without it NtQueryObject
  *           answers every handle as invalid.
@@ -597,6 +599,10 @@ export function createQueryFunctions(host){
      */
     const objectNameOf = (handle, buffer, length, returnLength)=>{
         const name = host.objectName?.(handle) ?? null;
+        if (name !== null && typeof name === 'object')
+        {
+            return name.status;
+        }
         if (name === null)
         {
             host.divergence?.('NtQueryObject', `the name of a ${host.handleType?.(handle)}`

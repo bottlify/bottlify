@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIPE_CLIENT, createNamedPipes, isPipeName } from './pipes.js';
+import { PIPE_CLIENT, createNamedPipes, isPipeName, pipeDeviceOf } from './pipes.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
@@ -854,6 +854,100 @@ test('NtCreateNamedPipeFile makes the instance CreateNamedPipe makes, by its nat
 
     const opened = p.pipes.open('\\\\.\\pipe\\test\\pipe', GENERIC_READ, 0);
     assert.ok('handle' in opened, 'CreateFile finds it by the Win32 name');
+});
+
+test('the pipe device: itself, and its root under which pipes are named and waited for', ()=>{
+    const STATUS = { SUCCESS: 0, INVALID_PARAMETER: 0xc000000d, NAME_INVALID: 0xc0000033,
+        NAME_NOT_FOUND: 0xc0000034, PIPE_NOT_AVAILABLE: 0xc00000ac,
+        ILLEGAL_FUNCTION: 0xc00000af, PIPE_DISCONNECTED: 0xc00000b0,
+        NOT_SUPPORTED: 0xc00000bb, IO_TIMEOUT: 0xc00000b5 };
+    const FILE_OPEN = 1;
+    const FILE_CREATE = 2;
+    const FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+    const OUT = 0x800;
+    const ATTRIBUTES = 0x820;
+    const STRING = 0x840;
+    const TEXT = 0x880;
+    const WAIT = 0x900;
+    assert.equal(pipeDeviceOf('\\Device\\NamedPipe'), 'device');
+    assert.equal(pipeDeviceOf('\\??\\PIPE'), 'device', 'its link');
+    assert.equal(pipeDeviceOf('\\Device\\NamedPipe\\'), 'root');
+    assert.equal(pipeDeviceOf('\\??\\pipe\\'), 'root');
+    assert.equal(pipeDeviceOf('\\Device\\NamedPipe\\a'), null, 'a pipe\'s name');
+
+    const p = processOn(new Map());
+    const create = /** @type {any} */ (p.fns.CreateNamedPipeW).natives.NtCreateNamedPipeFile;
+    /** @param {number} root @param {string} name */
+    const attributes = (root, name)=>{
+        p.putWide(TEXT, name);
+        p.view.setUint16(STRING, name.length * 2, true);
+        p.view.setUint16(STRING + 2, name.length * 2 + 2, true);
+        p.view.setUint32(STRING + 4, name === '' ? 0 : TEXT, true);
+        p.view.setUint32(ATTRIBUTES, 24, true);
+        p.view.setUint32(ATTRIBUTES + 4, root, true);
+        p.view.setUint32(ATTRIBUTES + 8, STRING, true);
+        return ATTRIBUTES;
+    };
+    /** @param {number} root @param {string} name @param {number} [disposition] */
+    const make = (root, name, disposition = FILE_CREATE)=>{
+        const status = create.handler([OUT, RW, attributes(root, name), 0, 3, disposition,
+            FILE_SYNCHRONOUS_IO_NONALERT, 0, 0, 0, 3, 256, 256, 0]) >>> 0;
+        return { status, handle: p.u32(OUT) };
+    };
+    /** @param {number} root @param {string} name */
+    const open = (root, name)=>/** @type {any} */ (p.pipes.nativeOpen({ root, name }, RW, 0x20,
+        FILE_OPEN));
+
+    const device = /** @type {any} */ (open(0, '\\Device\\NamedPipe')).handle;
+    const root = /** @type {any} */ (open(0, '\\Device\\NamedPipe\\')).handle;
+    assert.ok(device && root, 'both open as handles of their own');
+    assert.equal(make(device, 'test3\\pipe').status, STATUS.NAME_INVALID,
+        'the device names nothing under it');
+    assert.equal(/** @type {any} */ (p.pipes.nativeOpen({ root: device, name: '' }, RW, 0x20,
+        FILE_CREATE))?.status, STATUS.INVALID_PARAMETER, 'only an open of what is there');
+
+    // Under the root a name is a pipe's, the Win32 name's pipe.
+    const named = make(root, 'test3\\pipe');
+    assert.equal(named.status, STATUS.SUCCESS);
+    assert.ok('handle' in p.pipes.open('\\\\.\\pipe\\test3\\pipe', GENERIC_READ, 0));
+    assert.equal(p.pipes.objectName(named.handle), '\\Device\\NamedPipe\\test3\\pipe');
+
+    // No name under the root is a pipe of its own: none opens it by name, and
+    // its server's own empty name opens its client, once.
+    const unnamed = make(root, '');
+    assert.equal(unnamed.status, STATUS.SUCCESS);
+    assert.equal(p.pipes.objectName(unnamed.handle), null, 'no name to spell');
+    assert.equal(make(root, '', FILE_OPEN).status, STATUS.NAME_NOT_FOUND);
+    assert.ok('handle' in /** @type {any} */ (open(unnamed.handle, '')), 'its own client');
+    assert.equal(open(unnamed.handle, '')?.status, STATUS.PIPE_NOT_AVAILABLE, 'taken');
+    assert.equal(open(unnamed.handle, 'a')?.status, STATUS.NAME_INVALID);
+
+    // The device carries no bytes, and its controls are none of an end's.
+    assert.equal(p.pipes.read(device, 0x1000, 4, 0, true), STATUS.INVALID_PARAMETER);
+    assert.equal(p.pipes.write(root, 0x1000, 4, 0, true), STATUS.INVALID_PARAMETER);
+    /** @param {number} handle @param {number} code */
+    const control = (handle, code)=>/** @type {any} */ (p.pipes.control(handle, code, 0, 0))
+        .status >>> 0;
+    assert.equal(control(device, 0x110000), STATUS.NOT_SUPPORTED, 'FSCTL_PIPE_ASSIGN_EVENT');
+    assert.equal(control(device, 0x110004), STATUS.PIPE_DISCONNECTED, 'FSCTL_PIPE_DISCONNECT');
+    assert.equal(control(root, 0x110008), STATUS.ILLEGAL_FUNCTION, 'FSCTL_PIPE_LISTEN');
+    assert.equal(control(device, 0x11400c), STATUS.INVALID_PARAMETER, 'FSCTL_PIPE_PEEK');
+
+    // FSCTL_PIPE_WAIT: no function of the device; under the root, by name.
+    /** @param {number} handle @param {string} name */
+    const wait = (handle, name)=>{
+        p.view.setBigInt64(WAIT, 0n, true);
+        p.view.setUint32(WAIT + 8, name.length * 2, true);
+        p.view.setUint8(WAIT + 12, 1);
+        p.putWide(WAIT + 14, name);
+        return /** @type {any} */ (p.pipes.control(handle, 0x110018, 0, 0, 0, undefined, WAIT,
+            14 + name.length * 2)).status >>> 0;
+    };
+    assert.equal(wait(device, 'nonexistent_pipe'), STATUS.ILLEGAL_FUNCTION);
+    assert.equal(wait(root, 'nonexistent_pipe'), STATUS.NAME_NOT_FOUND);
+    assert.equal(wait(root, 'test3\\pipe'), STATUS.IO_TIMEOUT, 'none listens, no time to wait');
+    assert.equal(make(root, 'test3\\pipe', FILE_OPEN).status, STATUS.SUCCESS);
+    assert.equal(wait(root, 'TEST3\\PIPE'), STATUS.SUCCESS, 'an instance listens, in any case');
 });
 
 test('NtCreateNamedPipeFile: the sharing is the direction, the access the server\'s rights', ()=>{

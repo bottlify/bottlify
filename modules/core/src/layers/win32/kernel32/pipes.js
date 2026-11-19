@@ -194,6 +194,52 @@ export const pipeNameOf = name=>{
 };
 
 /**
+ * Which of the pipe device's own names a name is: `\Device\NamedPipe` (or
+ * `\??\pipe`, its link) is the device itself, under which no name is a
+ * pipe's; `\Device\NamedPipe\` (or `\??\pipe\`) is the device's root
+ * directory, under which every name is one. Null for any other name.
+ *
+ * @param {string} name
+ * @returns {'device' | 'root' | null}
+ */
+export const pipeDeviceOf = name=>{
+    const named = /^\\(?:(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe|Device\\NamedPipe)(\\?)$/i
+        .exec(name);
+    return named ? (named[1] === '' ? 'device' : 'root') : null;
+};
+
+/** The pipe device's controls past the ones an end answers (winioctl.h). */
+const FSCTL_PIPE_ASSIGN_EVENT = 0x110000;
+const FSCTL_PIPE_QUERY_EVENT = 0x110010;
+const FSCTL_PIPE_TRANSCEIVE = 0x11c017;
+const FSCTL_PIPE_WAIT = 0x110018;
+const FSCTL_PIPE_IMPERSONATE = 0x11001c;
+const FSCTL_PIPE_SET_CLIENT_PROCESS = 0x110020;
+const FSCTL_PIPE_QUERY_CLIENT_PROCESS = 0x110024;
+const FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE = 0x110030;
+
+/**
+ * What the device answers a control meant for an end: none is an end's, so
+ * the requests that need a connection find none, the ones only a server
+ * makes are no function of it, and the event controls of LAN Manager are not
+ * supported (Wine's ntdll pipe test, subtest_empty_name_pipe_operations).
+ *
+ * @type {Map<number, number>}
+ */
+const DEVICE_CONTROLS = new Map([
+    [FSCTL_PIPE_ASSIGN_EVENT, STATUS.NOT_SUPPORTED],
+    [FSCTL_PIPE_DISCONNECT, STATUS.PIPE_DISCONNECTED],
+    [FSCTL_PIPE_LISTEN, STATUS.ILLEGAL_FUNCTION],
+    [FSCTL_PIPE_QUERY_EVENT, STATUS.NOT_SUPPORTED],
+    [FSCTL_PIPE_TRANSCEIVE, STATUS.PIPE_DISCONNECTED],
+    [FSCTL_PIPE_IMPERSONATE, STATUS.ILLEGAL_FUNCTION],
+    [FSCTL_PIPE_SET_CLIENT_PROCESS, STATUS.NOT_SUPPORTED],
+    [FSCTL_PIPE_QUERY_CLIENT_PROCESS, STATUS.INVALID_PARAMETER],
+    [FSCTL_PIPE_PEEK, STATUS.INVALID_PARAMETER],
+    [FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE, STATUS.INVALID_PARAMETER],
+]);
+
+/**
  * What a process gives the pipes to finish its operations with.
  *
  * @typedef {Object} PipeHost
@@ -487,7 +533,27 @@ export function createNamedPipes(host){
         try
         {
             const object = host.handles.resolve(handle >>> 0, 'pipe');
-            return object?.standIn ? null : object;
+            return object?.standIn || object?.device ? null : object;
+        }
+        catch {
+            return null;
+        }
+    };
+    /**
+     * The pipe device a handle opens, 'device' or 'root' (`pipeDeviceOf`);
+     * null for any other handle.
+     *
+     * @param {number} handle
+     * @returns {'device' | 'root' | null}
+     */
+    const deviceOf = handle=>{
+        if ((host.handles.typeOf?.(handle >>> 0) ?? 'pipe') !== 'pipe')
+        {
+            return null;
+        }
+        try
+        {
+            return host.handles.resolve(handle >>> 0, 'pipe')?.device ?? null;
         }
         catch {
             return null;
@@ -1300,9 +1366,10 @@ export function createNamedPipes(host){
      * @param {{ direction: number, messages: boolean, readMessages: boolean,
      *     nowait: boolean, overlapped: boolean, maxInstances: number, outSize: number,
      *     inSize: number, timeoutMs: number, disposition: 'create' | 'open' | 'either',
-     *     inherit: boolean, access: number, alerts?: boolean }} asked  `access`: what
-     *     the server handle was asked for, its rights (`access.js`, the pipe kind);
-     *     `alerts`: FILE_SYNCHRONOUS_IO_ALERT, a queued routine ends its waits
+     *     inherit: boolean, access: number, alerts?: boolean, key?: string }} asked
+     *     `access`: what the server handle was asked for, its rights (`access.js`,
+     *     the pipe kind); `alerts`: FILE_SYNCHRONOUS_IO_ALERT, a queued routine ends
+     *     its waits; `key`: the run's key of a pipe made with no name, empty `name`
      * @returns {{ handle: number } | { error: number }}  a Win32 error
      */
     const makeInstance = (name, asked)=>{
@@ -1318,7 +1385,7 @@ export function createNamedPipes(host){
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
-        const key = keyOf(name);
+        const key = asked.key ?? keyOf(name);
         let pipe = pipeAt(key);
         if (pipe)
         {
@@ -1432,6 +1499,18 @@ export function createNamedPipes(host){
         {
             return { error: ERROR_PIPE_BUSY };
         }
+        return connectClient(instance, access, flags, attributes);
+    };
+
+    /**
+     * A client end of one instance that listens, the way it may carry bytes.
+     *
+     * @param {Instance} instance @param {number} access @param {number} flags
+     * @param {number} attributes
+     * @returns {{ handle: number } | { error: number }}
+     */
+    const connectClient = (instance, access, flags, attributes)=>{
+        const { pipe } = instance;
         const asked = access >>> 0;
         const reads = (asked & (GENERIC_READ | FILE_READ_DATA)) !== 0;
         const writes = (asked & (GENERIC_WRITE | FILE_WRITE_DATA)) !== 0;
@@ -1866,7 +1945,9 @@ export function createNamedPipes(host){
         const standIn = end ? null : standInOf(handle);
         if (!end && !standIn)
         {
-            return null;
+            // The pipe device carries no bytes of its own.
+            return deviceOf(handle) === null ? null
+                : native ? STATUS.INVALID_PARAMETER : fail(ERROR_INVALID_PARAMETER);
         }
         if (routine === 0)
         {
@@ -1911,7 +1992,9 @@ export function createNamedPipes(host){
         const standIn = end ? null : standInOf(handle);
         if (!end && !standIn)
         {
-            return null;
+            // The pipe device carries no bytes of its own.
+            return deviceOf(handle) === null ? null
+                : native ? STATUS.INVALID_PARAMETER : fail(ERROR_INVALID_PARAMETER);
         }
         if (routine === 0)
         {
@@ -2559,8 +2642,79 @@ export function createNamedPipes(host){
         [ERROR_FILE_NOT_FOUND, STATUS.OBJECT_NAME_NOT_FOUND],
         [ERROR_CALL_NOT_IMPLEMENTED, STATUS.NOT_IMPLEMENTED],
     ]);
+    /** Whether a wait through the device that would have waited was said to answer at once. */
+    let deviceWaitSaid = false;
+    /**
+     * A control asked of the pipe device rather than an end. FSCTL_PIPE_WAIT
+     * waits for an instance of a pipe named under the root - none by that
+     * name is STATUS_OBJECT_NAME_NOT_FOUND, one that listens a success, a
+     * time-out of zero with none listening STATUS_IO_TIMEOUT - and is no
+     * function of the device itself, under which nothing is named; the
+     * controls meant for an end answer as `DEVICE_CONTROLS` says.
+     *
+     * @param {'device' | 'root'} device @param {number} code
+     * @param {number} input @param {number} inLength
+     * @returns {{ status: number, information: number }}
+     */
+    const deviceControl = (device, code, input, inLength)=>{
+        /** @param {number} status */
+        const answer = status=>({ status, information: 0 });
+        if (code !== FSCTL_PIPE_WAIT)
+        {
+            const status = DEVICE_CONTROLS.get(code);
+            if (status === undefined)
+            {
+                host.divergence?.('NtFsControlFile', `pipe device control code 0x${code
+                    .toString(16)} is not answered`);
+                return answer(STATUS.INVALID_DEVICE_REQUEST);
+            }
+            return answer(status);
+        }
+        if (device === 'device')
+        {
+            return answer(STATUS.ILLEGAL_FUNCTION);
+        }
+        // FILE_PIPE_WAIT_FOR_BUFFER: Timeout, NameLength, TimeoutSpecified, Name.
+        const NAME_AT = 14;
+        if (inLength < NAME_AT)
+        {
+            return answer(STATUS.INVALID_PARAMETER);
+        }
+        const head = new DataView(host.readMemory(input, NAME_AT).slice().buffer);
+        const nameBytes = head.getUint32(8, true);
+        if (nameBytes % 2 !== 0 || NAME_AT + nameBytes > inLength)
+        {
+            return answer(STATUS.INVALID_PARAMETER);
+        }
+        const raw = host.readMemory(input + NAME_AT, nameBytes);
+        let name = '';
+        for (let at = 0; at + 1 < raw.length; at += 2)
+        {
+            name += String.fromCharCode(raw[at] | (raw[at + 1] << 8));
+        }
+        const pipe = pipeAt(keyOf(`\\\\.\\pipe\\${name}`));
+        if (!pipe)
+        {
+            return answer(STATUS.OBJECT_NAME_NOT_FOUND);
+        }
+        if ([...pipe.instances].some(one=>one.state === 'listening'))
+        {
+            return answer(STATUS.SUCCESS);
+        }
+        const timed = head.getUint8(12) !== 0;
+        if ((!timed || head.getBigInt64(0, true) !== 0n) && !deviceWaitSaid)
+        {
+            deviceWaitSaid = true;
+            host.divergence?.('NtFsControlFile', 'FSCTL_PIPE_WAIT on the pipe device '
+                + 'does not wait for an instance to listen: STATUS_IO_TIMEOUT at once');
+        }
+        return answer(STATUS.IO_TIMEOUT);
+    };
+
     /** Whether a create relative to a directory handle was said to be refused. */
     let rootSaid = false;
+    /** Numbers the pipes made with no name under the device's root. */
+    let unnamedCount = 0;
 
     /**
      * The native calls over the same pipes, which ntdll publishes.
@@ -2594,26 +2748,43 @@ export function createNamedPipes(host){
                 writeDword(out, 0);
                 const given = readObjectAttributes(host.readMemory, attributes,
                     host.pointerSize === 8 ? 8 : 4);
-                if (given === null || given.name === null)
+                if (given === null)
                 {
                     return STATUS.OBJECT_NAME_INVALID;
                 }
+                const name = given.name ?? '';
+                /** @type {string | null} */
+                let pipeName;
                 if (given.root !== 0)
                 {
-                    if (!rootSaid)
+                    // Under the device's root a name is a pipe's, and no name
+                    // at all is a pipe of its own that no name opens; the
+                    // device itself makes nothing by a name under it.
+                    const under = deviceOf(given.root);
+                    if (under === null)
                     {
-                        rootSaid = true;
-                        host.divergence?.('NtCreateNamedPipeFile', 'a name relative to a '
-                            + 'directory handle is refused: the pipe device opens as no directory');
+                        if (!rootSaid)
+                        {
+                            rootSaid = true;
+                            host.divergence?.('NtCreateNamedPipeFile', 'a name relative to a '
+                                + 'handle other than the pipe device\'s is refused');
+                        }
+                        return STATUS.OBJECT_PATH_NOT_FOUND;
                     }
-                    return STATUS.OBJECT_PATH_NOT_FOUND;
+                    if (under === 'device')
+                    {
+                        return STATUS.OBJECT_NAME_INVALID;
+                    }
+                    pipeName = name === '' ? null : `\\\\.\\pipe\\${name}`;
                 }
-                const pipeName = pipeNameOf(given.name);
-                if (pipeName === null)
+                else
                 {
-                    return /^\\(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe\\$|^\\Device\\NamedPipe\\$/i
-                        .test(given.name) ? STATUS.OBJECT_NAME_INVALID
-                        : STATUS.OBJECT_PATH_NOT_FOUND;
+                    pipeName = pipeNameOf(name);
+                    if (pipeName === null)
+                    {
+                        return pipeDeviceOf(name) ? STATUS.OBJECT_NAME_INVALID
+                            : STATUS.OBJECT_PATH_NOT_FOUND;
+                    }
                 }
                 // Which way bytes go is what clients may share the pipe for:
                 // reading makes it outbound, writing inbound. The server
@@ -2634,7 +2805,15 @@ export function createNamedPipes(host){
                 const count = maxInstances >>> 0;
                 const due = (timeout >>> 0) === 0 ? 0n
                     : readLargeInteger(host.readMemory, timeout >>> 0);
-                const made = makeInstance(pipeName, {
+                // A pipe made with no name is one of its own: nothing opens
+                // it by a name, so asking to open one finds none.
+                if (pipeName === null && asked === 'open')
+                {
+                    return STATUS.OBJECT_NAME_NOT_FOUND;
+                }
+                const made = makeInstance(pipeName ?? '', {
+                    // Keyed outside the names' keys (`keyOf`), so no name reaches it.
+                    ...pipeName === null ? { key: `unnamed:${++unnamedCount}` } : {},
                     direction: ((sharing & FILE_SHARE_WRITE) !== 0 ? PIPE_ACCESS_INBOUND : 0)
                         | ((sharing & FILE_SHARE_READ) !== 0 ? PIPE_ACCESS_OUTBOUND : 0),
                     messages: (type >>> 0) !== 0,
@@ -2725,6 +2904,88 @@ export function createNamedPipes(host){
         writeEx: (handle, buffer, length, overlapped, routine)=>
             write(handle, buffer, length, 0, false, overlapped, routine),
         open,
+        /**
+         * NtCreateFile of a name the pipe device answers, null for one it
+         * does not. The device and its root (`pipeDeviceOf`) open as handles
+         * of their own, through which pipes are made and waited for. A pipe's
+         * name - absolute, or relative to the root - opens a client end of an
+         * instance that listens; an empty name relative to a server end opens
+         * a client of that very instance, or finds it taken
+         * (STATUS_PIPE_NOT_AVAILABLE), and any other name there is invalid.
+         * Only an open of what is there is asked: another disposition is an
+         * invalid parameter.
+         *
+         * @param {{ root: number, name: string }} given  the object attributes' name
+         * @param {number} access @param {number} options  NtCreateFile's
+         * @param {number} disposition
+         * @returns {{ handle: number } | { error: number } | { status: number } | null}
+         */
+        nativeOpen(given, access, options, disposition){
+            const flags = ((options >>> 0) & FILE_SYNCHRONOUS_IO) === 0 ? FILE_FLAG_OVERLAPPED : 0;
+            /** @type {'device' | 'root' | null} */
+            let device = null;
+            /** @type {string | null} */
+            let pipeName = null;
+            /** @type {Instance | null} */
+            let instance = null;
+            if (given.root !== 0)
+            {
+                const under = deviceOf(given.root);
+                const end = under ? null : endOf(given.root);
+                if (under)
+                {
+                    if (given.name === '')
+                    {
+                        device = under;
+                    }
+                    else if (under === 'root')
+                    {
+                        pipeName = `\\\\.\\pipe\\${given.name}`;
+                    }
+                    else
+                    {
+                        return { status: STATUS.OBJECT_NAME_INVALID };
+                    }
+                }
+                else if (end?.side === 'server')
+                {
+                    if (given.name !== '')
+                    {
+                        return { status: STATUS.OBJECT_NAME_INVALID };
+                    }
+                    instance = end.instance;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            else
+            {
+                device = pipeDeviceOf(given.name);
+                pipeName = device ? null : pipeNameOf(given.name);
+                if (!device && pipeName === null)
+                {
+                    return null;
+                }
+            }
+            if ((disposition >>> 0) !== FILE_OPEN && (disposition >>> 0) !== FILE_OPEN_IF)
+            {
+                return { status: STATUS.INVALID_PARAMETER };
+            }
+            if (device)
+            {
+                return { handle: host.handles.open('pipe', { device },
+                    mappedAccess('pipe', access >>> 0)) };
+            }
+            if (instance)
+            {
+                return instance.state === 'listening'
+                    ? connectClient(instance, access, flags, 0)
+                    : { status: STATUS.PIPE_NOT_AVAILABLE };
+            }
+            return open(/** @type {string} */ (pipeName), access, flags);
+        },
         query,
         cancel,
         closed,
@@ -2851,9 +3112,16 @@ export function createNamedPipes(host){
          * @param {number} handle @param {number} code @param {number} output
          * @param {number} room @param {number} [block]  the IO_STATUS_BLOCK
          * @param {NativeAsync} [io]  the event, APC and context the call was given
+         * @param {number} [input]  the request's input buffer
+         * @param {number} [inLength]  its length
          * @returns {{ status: number, information: number } | { parked: any } | null}
          */
-        control(handle, code, output, room, block = 0, io = undefined){
+        control(handle, code, output, room, block = 0, io = undefined, input = 0, inLength = 0){
+            const device = deviceOf(handle);
+            if (device)
+            {
+                return deviceControl(device, code >>> 0, input >>> 0, inLength >>> 0);
+            }
             const end = endOf(handle);
             if (!end)
             {
@@ -3079,6 +3347,28 @@ export function createNamedPipes(host){
         },
 
         /** Whether a handle is a pipe end. @param {number} handle */
+        /**
+         * A pipe end's name under the pipe device, as the object namespace
+         * spells it (`\Device\NamedPipe\name`); null for a pipe made with
+         * no name, undefined for a handle that is no pipe end.
+         *
+         * @param {number} handle
+         * @returns {string | null | undefined}
+         */
+        objectName(handle){
+            const end = endOf(handle);
+            if (!end)
+            {
+                return undefined;
+            }
+            const { name } = end.instance.pipe;
+            if (!name)
+            {
+                return null;
+            }
+            const prefix = PREFIXES.find(one=>name.toLowerCase().startsWith(one)) ?? PREFIXES[0];
+            return `\\Device\\NamedPipe\\${name.slice(prefix.length)}`;
+        },
         isPipe: (/** @type {number} */ handle)=>endOf(handle) !== null
             || standInOf(handle) !== null,
 

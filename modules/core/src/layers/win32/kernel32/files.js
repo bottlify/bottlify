@@ -40,7 +40,7 @@ import { overlappedLayout, overlappedPosition, overlappedResult } from '../commo
 import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
-import { isPipeName, pipeNameOf } from './pipes.js';
+import { isPipeName } from './pipes.js';
 import { isNameInExpression, win32Expression } from './name-expression.js';
 import { fullPathName } from '../ntdll/paths.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
@@ -2837,18 +2837,17 @@ export function createFileFunctions(host){
         {
             return STATUS_INVALID_PARAMETER;
         }
-        // A pipe's name opens a client end, with the rights asked and no more.
+        // What the pipe device answers - itself, a pipe's name, a server's
+        // own instance - opens there, with the rights asked and no more.
         const given = givenName(attributes >>> 0);
-        const pipeName = given && given.root === 0 && host.pipes ? pipeNameOf(given.name) : null;
-        if (pipeName !== null && host.pipes)
+        const client = given && host.pipes
+            ? host.pipes.nativeOpen(given, access >>> 0, options >>> 0, disposition >>> 0) : null;
+        if (client)
         {
-            if ((disposition >>> 0) !== FILE_OPEN && (disposition >>> 0) !== FILE_OPEN_IF)
+            if ('status' in client)
             {
-                return STATUS_INVALID_PARAMETER;
+                return client.status;
             }
-            const client = host.pipes.open(pipeName, access >>> 0,
-                ((options >>> 0) & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) === 0
-                    ? FILE_FLAG_OVERLAPPED : 0);
             if ('error' in client)
             {
                 return NATIVE_FAILURES[client.error] ?? STATUS_UNSUCCESSFUL;
@@ -3799,7 +3798,8 @@ export function createFileFunctions(host){
                     host.resetEvent?.(event >>> 0);
                 }
                 const piped = host.pipes?.control(handle, code, output, room, block,
-                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 });
+                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 },
+                    input >>> 0, inLength >>> 0);
                 if (piped)
                 {
                     if ('parked' in piped)

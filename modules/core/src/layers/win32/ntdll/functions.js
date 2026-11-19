@@ -233,6 +233,9 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           SystemProcessorBrandString answers.
  * @property {(handle: number) => string | null} [namedObjectName]  The Win32 name
  *     a kernel object was made or opened by, null for one made with none.
+ * @property {(handle: number) => string | null | undefined} [pipeName]  A pipe end's
+ *     name under the pipe device (`\Device\NamedPipe\name`), null for a pipe made
+ *     with no name, undefined for a handle that is no pipe end.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
  * @property {import('./query.js').QueryHost['askChild']} [askChild]
  * @property {import('./query.js').QueryHost['debugState']} [debugState]
@@ -636,6 +639,16 @@ export function createNtdllFunctions(host){
                 {
                     const name = host.namedObjectName(handle);
                     return name === null ? '' : nativeNameOf(name, INTERACTIVE_SESSION);
+                }
+                // A pipe's name is under its device; one made with none has
+                // no name to spell.
+                if (type === 'pipe' && host.pipeName)
+                {
+                    const name = host.pipeName(handle);
+                    if (name !== undefined)
+                    {
+                        return name === null ? { status: STATUS.OBJECT_PATH_INVALID } : name;
+                    }
                 }
                 if ((type !== 'file' && type !== 'directory')
                     || !kernel32.GetFinalPathNameByHandleW)

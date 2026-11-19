@@ -100,7 +100,8 @@ export function readObjectAttributes(readMemory, pointer, pointerSize = 4){
             read.invalid = STATUS_DATATYPE_MISALIGNMENT;
             return read;
         }
-        const units = readMemory(at, length);
+        // An empty name may have no buffer at all: nothing is read of it.
+        const units = length === 0 ? new Uint8Array(0) : readMemory(at, length);
         let name = '';
         for (let unit = 0; unit + 1 < units.length; unit += 2)
         {

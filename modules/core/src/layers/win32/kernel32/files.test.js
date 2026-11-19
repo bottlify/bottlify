@@ -2216,15 +2216,23 @@ test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only 
     assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
 });
 
-test('NtCreateFile opens a pipe\'s client end by its native name, with the rights asked', ()=>{
-    /** @type {[string, number, number][]} */
+test('NtCreateFile opens what the pipe device answers there, with the rights asked', ()=>{
+    /** @type {[string, number, number, number][]} */
     const opens = [];
     const { fns, memory, handles } = setup({ pipes: {
-        /** @param {string} name @param {number} access @param {number} flags */
-        open: (name, access, flags)=>{
-            opens.push([name, access, flags]);
-            return name.endsWith('busy') ? { error: 231 }
-                : { handle: handles.open('pipe', {}, access) };
+        /**
+         * @param {{ root: number, name: string }} given @param {number} access
+         * @param {number} options @param {number} disposition
+         */
+        nativeOpen: (given, access, options, disposition)=>{
+            if (!/pipe/i.test(given.name))
+            {
+                return null;
+            }
+            opens.push([given.name, access, options, disposition]);
+            return given.name.endsWith('busy') ? { error: 231 }
+                : given.name.endsWith('gone') ? { status: 0xc0000033 }
+                    : { handle: handles.open('pipe', {}, access) };
         },
         isPipe: ()=>false,
     } });
@@ -2234,11 +2242,10 @@ test('NtCreateFile opens a pipe\'s client end by its native name, with the right
     const open = (name, options)=>native.handler([NT_HANDLE, SYNCHRONIZE,
         objectAttributes(memory, name), NT_STATUS, 0, 0, 3, FILE_OPEN, options, 0, 0]) >>> 0;
     assert.equal(open('\\??\\pipe\\game', 0x20), 0);
-    assert.deepEqual(opens.at(-1), ['\\\\.\\pipe\\game', SYNCHRONIZE, 0],
-        'a synchronous end, asked nothing more');
-    assert.equal(open('\\Device\\NamedPipe\\game', 0), 0);
-    assert.equal(opens.at(-1)?.[2], 0x40000000, 'no synchronous option: overlapped');
-    assert.equal(open('\\??\\pipe\\busy', 0), 0xc00000ac, 'STATUS_PIPE_NOT_AVAILABLE');
+    assert.deepEqual(opens.at(-1), ['\\??\\pipe\\game', SYNCHRONIZE, 0x20, FILE_OPEN],
+        'the name, the rights, the options and the disposition, as given');
+    assert.equal(open('\\??\\pipe\\busy', 0), 0xc00000ac, 'a Win32 error as its status');
+    assert.equal(open('\\??\\pipe\\gone', 0), 0xc0000033, 'a status as it is');
 
     // FileAccessInformation is the handle's rights; a process handle is the wrong object.
     const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
