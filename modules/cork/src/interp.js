@@ -497,6 +497,22 @@ export class BlockMemory {
     }
 
     /**
+     * A locked quadword's read, as `loadLocked` reads the narrower ones: one
+     * load where it is aligned, plain where not.
+     *
+     * @param {number} address @returns {bigint}
+     */
+    loadQword(address){
+        if (this.inaccessible(address, 8))
+        {
+            throw this.fault(address, 8, true);
+        }
+        const at = this.ramBase + address;
+        return (at & 7) === 0 ? BigInt.asUintN(64, Atomics.load(this.words64, at >>> 3))
+            : this.view.getBigUint64(at, true);
+    }
+
+    /**
      * `cmpxchg8b`'s qword: one compare-and-swap where it is aligned, a plain
      * read and write where not. Answers what memory held.
      *

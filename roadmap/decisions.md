@@ -2531,3 +2531,19 @@ handler answers a quadword. Pointer-sized integers (`ULONG_PTR`, `UINT_PTR`, `DW
 `uintptr_t`, `WPARAM`) are decided by meaning: GetClassLongPtr's value may be an address and is
 declared one.
 *2026-11-18.*
+
+**A274. A locked access across two aligned quadwords (a split lock), and `lock cmpxchg16b`, are
+not indivisible between executors.** A `lock`-prefixed read-modify-write or an `xchg` with memory is one wasm atomic on an
+address aligned to its width, and a compare-and-swap of the aligned quadword holding it where it
+lies across its own alignment inside one. Across two quadwords no wasm atomic covers it; it is a
+plain read-modify-write, at both widths and in every tier, and two executors changing such a value
+at once can lose a change. Hardware makes it indivisible by locking the bus, which Windows 11
+already penalises; a compiler aligns what it locks, and no program was found to lock a packed
+field across a quadword. `cmpxchg16b` swaps sixteen bytes, which no wasm atomic does either: a
+64-bit program's own lock-free list with a counted head (two quadwords swapped at once) can lose a
+change on several executors; the system's lists (`InterlockedPushEntrySList`) are the engine's own
+and are not affected. What makes both right: one lock word every executor takes around such an
+access (it excludes the other such accesses, the only writers a program has at that address).
+Temporary: it stands until that word is in the shared layout (the owner's board, card x13). On one
+executor nothing can be lost.
+*2026-11-19.*

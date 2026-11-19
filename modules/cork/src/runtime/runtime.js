@@ -28,7 +28,7 @@
 
 import { TIER_SLOT, enterRegion } from '../emit/region.js';
 import { RANGE, SHAPE } from '../emit/x87.js';
-import { HELD, MADE, PRECISION } from '../emit/memory.js';
+import { HELD, MADE, PRECISION, RARE } from '../emit/memory.js';
 import { keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { resetBlockCounts } from './block-profile.js';
@@ -119,7 +119,7 @@ export function createCorkRuntime(env){
     let missesInserted = 0;
     /** @type {Record<number, keyof typeof untranslatedBy>} */
     const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
-        [RANGE]: 'range', [MADE]: 'made' };
+        [RANGE]: 'range', [MADE]: 'made', [RARE]: 'rare' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
@@ -241,8 +241,9 @@ export function createCorkRuntime(env){
                     heldAt = view().getUint32(layout.eip, true);
                     heldStores = counts.codeStores;
                 }
+                // A rare case is no candidate either: the block it left has its entry.
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
-                    code >>> 8 === HELD);
+                    code >>> 8 === HELD || code >>> 8 === RARE);
             }
             // Looked at whatever the run left by: a rep that stored into code and
             // ran out of budget on a later page in bulk leaves by the budget, and

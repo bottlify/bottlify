@@ -232,7 +232,7 @@ export function createDiagnostics(state){
     // checked for (SHAPE). One count read alone mixes them, and the held ones
     // land on addresses that are translated, which reads as a link not made.
     const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, range: 0, made: 0,
-        other: 0 };
+        rare: 0, other: 0 };
     /** @type {Record<string, number>} */
     const refused = {};
     /** @type {Record<string, number>} why an instruction was left out, with its block */

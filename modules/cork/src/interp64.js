@@ -91,6 +91,108 @@ class WindowMemory {
 }
 
 /**
+ * Whether the instruction is one the atomic variant makes indivisible: a
+ * `lock` prefix on a memory form, or `xchg` with a memory operand. Not
+ * `cmpxchg16b`: no host access swaps sixteen bytes at once, and it runs plain.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ */
+const isLocked = instruction=>instruction.memory === true && instruction.op !== 'cmpxchg16b'
+    && (instruction.prefixes.lock === true || instruction.op === 'xchg');
+
+/**
+ * The memory a locked instruction's one attempt sees (`evaluateLocked`): its
+ * operand read as one load, the value it would store kept for the swap.
+ */
+class LockedAccess64 {
+    /** @param {WindowMemory} memory */
+    constructor(memory){
+        this.memory = memory;
+        this.address = -1n;
+        this.size = 0;
+        this.old = 0n;
+        this.value = 0n;
+        this.wrote = false;
+    }
+
+    /** @param {bigint} address @param {number} size @returns {bigint} */
+    read(address, size){
+        if (this.address < 0n && size <= 8)
+        {
+            const at = this.memory.place(address, size);
+            const block = /** @type {BlockMemory} */ (this.memory.memory);
+            this.address = address;
+            this.size = size;
+            this.old = size === 8 ? block.loadQword(at) : BigInt(block.loadLocked(at, size) >>> 0);
+            return this.old;
+        }
+        return address === this.address && size === this.size ? this.old
+            : this.memory.read(address, size);
+    }
+
+    /** @param {bigint} address @param {number} size @param {bigint} value */
+    write(address, size, value){
+        if (address === this.address && size === this.size)
+        {
+            this.value = value;
+            this.wrote = true;
+            return;
+        }
+        this.memory.write(address, size, value);
+    }
+
+    /** Whether memory still held what the attempt read, the value it made now there. */
+    swap(){
+        if (this.address < 0n)
+        {
+            return true;
+        }
+        const at = Number(this.address);
+        const block = /** @type {BlockMemory} */ (this.memory.memory);
+        const next = this.wrote ? this.value : this.old;
+        return this.size === 8
+            ? block.exchangeQword(at, this.old, BigInt.asUintN(64, next)) === this.old
+            : block.exchangeLocked(at, this.size, Number(this.old), Number(next & 0xffffffffn));
+    }
+}
+
+/**
+ * A locked instruction in the atomic variant, as the 32-bit tier's
+ * (`lockedStep`): the model run over the value memory holds, its result
+ * swapped in only if memory still holds that, and the instruction again -
+ * registers and flags as they were - if another executor's store came between.
+ *
+ * @param {import('./decode/decoder.js').Instruction} instruction
+ * @param {BlockState64} state
+ */
+function evaluateLocked(instruction, state){
+    const memory = state.memory;
+    const registers = state.r.slice();
+    const { rip, rflags, retired } = state;
+    for (;;)
+    {
+        const access = new LockedAccess64(memory);
+        state.memory = /** @type {any} */ (access);
+        try
+        {
+            evaluate64(instruction, state);
+        }
+        finally
+        {
+            state.memory = memory;
+        }
+        if (access.swap())
+        {
+            return;
+        }
+        state.r.set(registers);
+        state.rip = rip;
+        state.rflags = rflags;
+        state.retired = retired;
+    }
+}
+
+/**
  * A `State64` over cork's 64-bit state block.
  */
 class BlockState64 {
@@ -227,13 +329,17 @@ class BlockState64 {
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
  *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'],
- *     zeroReadsBelow?: number, readThrough?: [number, number][] }} what  `zeroReadsBelow`
- *     and `readThrough` as `blockState`'s
+ *     zeroReadsBelow?: number, readThrough?: [number, number][], atomic?: boolean }} what
+ *     `zeroReadsBelow`, `readThrough` and `atomic` as `blockState`'s
  */
 export function blockState64(what){
     const { memory, ram, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0,
-        readThrough = [] } = what;
+        readThrough = [], atomic = false } = what;
     const state = new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports, ram);
+    if (state.blockMemory instanceof BlockMemory)
+    {
+        state.blockMemory.atomic = atomic;
+    }
     state.blockMemory.zeroReadsBelow = zeroReadsBelow;
     state.blockMemory.readThrough = readThrough;
     return state;
@@ -295,7 +401,15 @@ export function interpret64(state, budget, options = {}){
                 throw new Unsupported(instruction.reason, at);
             }
             const fallthrough = at + instruction.length;
-            evaluate64(instruction, state);
+            if (/** @type {{ atomic?: boolean }} */ (memory).atomic === true
+                && isLocked(instruction))
+            {
+                evaluateLocked(instruction, state);
+            }
+            else
+            {
+                evaluate64(instruction, state);
+            }
             jumped = Number(state.rip) !== fallthrough;
             runStart = jumped;
             if (state.trapped.length > 0)

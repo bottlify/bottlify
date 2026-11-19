@@ -31,7 +31,7 @@ import { SIMD } from '../wasm/simd.js';
 import { I32, I64 } from './flags.js';
 import { Exit, Local, MMX_HELD, MMX_TOP, MMX_WRITTEN_SHIFT, keepsFlags } from './region.js';
 import { accessAddress, prepare, readAddress, readOp, writeOp, writeReg } from './integer.js';
-import { checkAccess, noteStore, ram, ramAt } from './memory.js';
+import { checkAccess, noteStore, ram, ramAt, RARE } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
 import { atState } from './bases.js';
 
@@ -676,7 +676,7 @@ function emitForm(e, instruction, flagsLive){
                 atState(e.context, b).load('i32', { offset: e.layout.mxcsr }).i32const(0x6000)
                     .op(I32.and);
                 e.openGuard('rounded', EMPTY);
-                e.exitBefore(e.current.eip, Exit.UNTRANSLATED);
+                e.exitBefore(e.current.eip, Exit.UNTRANSLATED, RARE);
                 e.close();
             }
             prepareAddress(e, src);

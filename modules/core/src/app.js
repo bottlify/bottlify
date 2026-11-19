@@ -5504,7 +5504,7 @@ async function buildApp(options){
             // Nothing runs there all the same: a call through a null pointer
             // faults, as on Windows, rather than sliding through the zeroes.
             noExecuteBelow: 0x10000,
-            executors: long ? 1 : options.cpu?.cores ?? 1,
+            executors: options.cpu?.cores ?? 1,
             bits: processBits,
             // An image past 4 GiB: the wide window, its RAM the whole of it.
             ...programLoaded.wide === undefined ? {} : { window: programLoaded.wide.window,

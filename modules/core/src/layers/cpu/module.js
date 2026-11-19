@@ -515,7 +515,7 @@ export function createCpuModule(){
                 // for each (`processorsFor`).
                 executors: Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)),
                 // 64 for an x86-64 process (`roadmap/x64.md`): cork's long-mode
-                // state block and interpreter, on one executor.
+                // state block and interpreter.
                 bits: config?.bits === 64 ? /** @type {64} */ (64) : /** @type {32} */ (32),
                 // An image past 4 GiB: the wide window it runs over and the block its code lies in.
                 ...(config?.bits === 64 && config?.window ? { window: config.window,
@@ -523,11 +523,16 @@ export function createCpuModule(){
                     ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
             };
             state.memorySize = settings.memorySize;
-            if (settings.bits === 64)
-            {
-                settings.executors = 1;
-            }
             state.store = settings.cork?.store ?? null;
+            // A wide window's RAM is a memory64 memory of its own, which the
+            // executors' shared layout does not span yet: said, as below.
+            if (settings.executors > 1 && settings.bits === 64 && settings.window)
+            {
+                state.executorsRefused = `${settings.executors} asked, 1 run: `
+                    + 'a program past 4 GiB (the wide window) runs on one executor';
+                settings.executors = 1;
+                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+            }
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
             // cross-origin isolated has none: the program then runs on one, as

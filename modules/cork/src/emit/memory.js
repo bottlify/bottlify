@@ -57,6 +57,17 @@ export const PRECISION = 2;
 export const MADE = 5;
 
 /**
+ * The vector of an untranslated exit before an instruction whose rare case the
+ * region leaves to the interpreter - a jump or a call at 64 bits whose target
+ * lies past 4 GiB, a quadword made a float under a rounding control other than
+ * nearest: back to the host, which runs the instruction. Bare, the exit made a
+ * block that begins with such an instruction no entry (through the hash it
+ * would find itself), and every import thunk of a 64-bit program, `jmp
+ * [rip+slot]`, ran interpreted.
+ */
+export const RARE = 6;
+
+/**
  * Whether an instruction that only reads is left untested, its address wrapped
  * into RAM (`wrapIntoRam`): not under `precise`, nor `checkReads`, where a page
  * the program cannot read faults.

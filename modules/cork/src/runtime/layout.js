@@ -257,7 +257,7 @@ export const WRAP_SLACK = 2 * PAGE;
  *     a field only past one, so one processor's layout, and its translations, are
  *     what they were;
  *     `ramBase`: `PAGE` (the default) or 0;
- *     `bits`: 64 for long mode's state block (`longLayout`), one executor's;
+ *     `bits`: 64 for long mode's state block (`longLayout`);
  *     `tablesAt`: where the tables lie, a multiple of `PAGE`, when not past RAM -- inside
  *     the guest's space, in a range the host keeps from it, so the memory need not reach
  *     past RAM's end to hold them;
@@ -305,12 +305,12 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
     const state = ramBase === 0 ? LOW_STATE : 0;
     if (bits === 64)
     {
-        if (processors > 1)
+        if (processors > 1 && window !== WINDOW)
         {
-            throw new Error('cork: long mode runs on one executor so far');
+            throw new Error('cork: a wide window runs on one executor so far');
         }
         return window === WINDOW
-            ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor)
+            ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors)
             : wideLayout(window, ramSize, hashSlots, codeBase);
     }
     const fields = {
@@ -382,7 +382,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
  * @param {number} hashSlots @param {number} [tablesAt] @param {number} [ramFloor]
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor){
+function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors = 1){
     // The last page of the 4 GiB window is never RAM: translated code finds a
     // store window that crosses 4 GiB by that page's INACCESSIBLE flag alone.
     if (ramSize > (ramFloor === undefined ? 2 ** 32 - 4096 : 2 ** 32))
@@ -417,6 +417,10 @@ function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor){
         tables: tablesAt ?? ramBase + ramSize,
         ...ramFloor === undefined ? {} : { ramFloor, wrap: state + WRAP_WORD },
         hashShift: 32 - Math.log2(hashSlots),
+        // As the 32-bit layout's: the word another executor asks through and the
+        // processor this one is, only where others run beside it.
+        ...processors > 1
+            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }

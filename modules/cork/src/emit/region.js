@@ -56,7 +56,7 @@ import { emitInstruction, profileCall } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion, ramAlways, readsWrapped, registersChanged, HOST_OPS, MADE,
+    planLoop, planRegion, ramAlways, readsWrapped, registersChanged, HOST_OPS, MADE, RARE,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
@@ -597,7 +597,7 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.zeroPage = true;
     }
-    if (atomic && width.bits === 32)
+    if (atomic)
     {
         context.atomic = true;
     }
@@ -5536,7 +5536,7 @@ export class RegionEmitter {
      * @param {number} eip @param {number} kind @param {number} [vector]
      */
     exitBefore(eip, kind, vector = 0){
-        if (kind === Exit.UNTRANSLATED && vector !== MADE
+        if (kind === Exit.UNTRANSLATED && vector !== MADE && vector !== RARE
             && this.blockRetired - this.blockCarried === 1)
         {
             // The block's first instruction is the other executor's: the
@@ -5546,8 +5546,9 @@ export class RegionEmitter {
             // `out`, the block would leave through the hash for its own
             // start and tail-call itself forever. A fault's exit is not
             // counted here: a block that may fault first still runs when it
-            // does not. Nor a call left to be made as it was (`MADE`), which goes
-            // to the host and not through the hash: the host runs the call.
+            // does not. Nor a call left to be made as it was (`MADE`) or an
+            // instruction's rare case (`RARE`), which go to the host and not
+            // through the hash: the host runs the instruction.
             this.leaving.add(this.blockIndex);
         }
         this.blockRetired--;

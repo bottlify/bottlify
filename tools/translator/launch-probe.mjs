@@ -878,9 +878,23 @@ async function main(){
     // no entry: a loop running interpreted shows here before anywhere else.
     if (cork?.exitsByTarget?.length)
     {
+        // A barren target with its first bytes: which instruction the translator
+        // would not take is read off them, with no second run to peek at it.
+        const bytesAt = (/** @type {number} */ address)=>{
+            try
+            {
+                return ` [${[...app.debug.read(address >>> 0, 12)]
+                    .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')}]`;
+            }
+            catch {
+                return ' [unreadable]';
+            }
+        };
         console.log(`  untranslated exits by target: ${cork.exitsByTarget.slice(0, 16)
             .map((/** @type {any} */ { address, count, reason })=>
-                `${(address >>> 0).toString(16)} x${count} ${reason}`).join(', ')}`);
+                `${(address >>> 0).toString(16)} x${count} ${reason}`
+                    + `${String(reason).startsWith('barren') ? bytesAt(address) : ''}`)
+            .join(', ')}`);
     }
     if (cork?.shapeMissesByTarget?.length)
     {

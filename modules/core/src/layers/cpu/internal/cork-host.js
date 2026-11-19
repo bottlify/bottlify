@@ -310,10 +310,9 @@ export function createCorkHost(config){
     // Long mode: the 64-bit block, the shared runtime's regions at its width and
     // the long-mode interpreter.
     const long = bits === 64;
-    if (long && (executors !== 1 || typeof engine?.interpret64 !== 'function'))
+    if (long && typeof engine?.interpret64 !== 'function')
     {
-        throw new Error('cpu: a 64-bit process runs on one executor of an engine with'
-            + ' a long-mode interpreter');
+        throw new Error('cpu: a 64-bit process runs on an engine with a long-mode interpreter');
     }
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
@@ -1707,6 +1706,7 @@ export function createCorkHost(config){
             rdtsc: readTsc,
             zeroReadsBelow,
             readThrough,
+            atomic: corkConfig?.atomic === true,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
                 invalidate(at, size, true);

@@ -116,7 +116,7 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
         /** @param {number} port @param {number} size @param {number} value */
         write: (port, size, value)=>writes.push([port, size, value]),
     };
-    const state = blockState64({ memory, ram, layout, ports,
+    const state = blockState64({ memory, ram, layout, ports, atomic: config.atomic === true,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
     return { layout, memory, ram, high, codeHigh, state, runner, writes,
         view: new DataView(memory.buffer) };

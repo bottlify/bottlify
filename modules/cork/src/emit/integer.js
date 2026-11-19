@@ -36,7 +36,7 @@ import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
     stackLow, windowAddress,
-    wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged,
+    wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged, RARE,
 } from './memory.js';
 import { CALL_HASH, CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
@@ -44,7 +44,7 @@ import { emitSimd } from './simd.js';
 import { SIMD } from '../wasm/simd.js';
 import { atState, atTables, intoState, intoTables } from './bases.js';
 import { ANY_TOP, slotOf } from '../runtime/entries.js';
-import { emitLocked, isLocked } from './locked.js';
+import { emitLocked, emitLockedLong, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
 const I32_EXTRA = Object.freeze({
@@ -731,8 +731,8 @@ export function emitInstruction(e, instruction, flagsLive){
     }
     if (e.context.atomic === true && isLocked(instruction))
     {
-        // Long mode runs on one executor: its locked forms are the plain ones.
-        return !isLong(e) && emitLocked(e, instruction, flagsLive);
+        return isLong(e) ? emitLockedLong(e, instruction, flagsLive)
+            : emitLocked(e, instruction, flagsLive);
     }
     switch (op)
     {
@@ -855,9 +855,10 @@ export function emitInstruction(e, instruction, flagsLive){
             // host's clock): the low word to eax, the high word to edx.
             e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
-            b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
-            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
-                .localSet(registerLocal(e, 2));
+            b.localGet(Local.t64).op(I64.wrap);
+            writeReg(e, 0, 4, false);
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+            writeReg(e, 2, 4, false);
             return true;
         case 'mov':
             if (dst.kind === 'seg')
@@ -1412,7 +1413,7 @@ export function emitInstruction(e, instruction, flagsLive){
                     outsideBlock(e);
                     e.openGuard('far', EMPTY);
                     addStack(e, 8);
-                    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+                    e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE);
                     e.close();
                 }
                 profileCall(e, instruction.eip);
@@ -1860,7 +1861,7 @@ function nearTarget(e, instruction){
     b.localTee(LONG_WIDE);
     outsideBlock(e);
     e.openGuard('far', EMPTY);
-    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+    e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE);
     e.close();
     b.localGet(LONG_WIDE).op(I64.wrap);
 }
