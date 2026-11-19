@@ -591,7 +591,8 @@ export function createWin32Module(){
              * Every event goes to the debugger with the whole process stopped
              * until it is continued, as Windows' debug object freezes a
              * debuggee for each event it holds: the threads alive as it is
-             * reported are suspended once and resumed once by its answer.
+             * reported are frozen once and thawed once by its answer, their
+             * suspend counts as they were (`freezeThread`).
              * Events reported together - an attach's - hold the process until
              * the last is continued, and a thread made meanwhile is stopped by
              * its own CREATE_THREAD.
@@ -600,10 +601,11 @@ export function createWin32Module(){
                 /** @param {any} report @returns {Promise<number>} */
                 report: report=>{
                     const held = kernel.threads().filter((/** @type {any} */ thread)=>
-                        kernel.suspendThread(thread) !== null);
+                        thread.state !== kernel.ThreadState?.TERMINATED);
+                    held.forEach((/** @type {any} */ thread)=>kernel.freezeThread(thread));
                     return Promise.resolve(/** @type {any} */ (config.debugger).report(report))
                         .finally(()=>held.forEach((/** @type {any} */ thread)=>
-                            kernel.resumeThread(thread)));
+                            kernel.thawThread(thread)));
                 },
             } : null;
             // The thread and process blocks a handler reads, at that width.

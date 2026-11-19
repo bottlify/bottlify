@@ -913,6 +913,21 @@ test('a suspended thread keeps its state and gets no turn until resumed as often
     assert.equal(sched.resume(a), 0, 'resuming a thread nobody suspended changes nothing');
 });
 
+test('a frozen thread gets no turn, and its suspend count is the one SuspendThread made', ()=>{
+    const { sched } = scheduler();
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    sched.freeze(a);
+    assert.equal(sched.runOnce().ran.name, 'b', 'frozen');
+    assert.equal(sched.suspend(a), 0, 'the freeze is not counted');
+    assert.equal(sched.resume(a), 1);
+    assert.equal(sched.resume(a), 0, 'nor taken away by a resume');
+    assert.equal(sched.runOnce().ran.name, 'b', 'still frozen');
+    sched.thaw(a);
+    assert.equal(sched.runOnce().ran.name, 'a');
+});
+
 test('the registers of the thread on this executor\'s processor are read off it, not off what it'
     + ' saved last', ()=>{
     // A .NET runtime's collector, on another executor, read a thread parked
