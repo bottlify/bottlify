@@ -8,7 +8,7 @@
 // changing the source, never edit this file.
 
 /** The SHA-256 of the interp-wasm.c this module was built from. */
-export const SOURCE_SHA256 = 'bac8f239dde2b679ca6ea26c0cbcc16ad36df3fcbb42e17a731c184af12652ff';
+export const SOURCE_SHA256 = '6bf4bb223357a874b790cca60bf833cb099a0c9acf7260cfadcc94c2a1765b3d';
 
 /** The compiler that built it. */
 export const COMPILER = 'Ubuntu clang version 18.1.3 (1ubuntu1)';

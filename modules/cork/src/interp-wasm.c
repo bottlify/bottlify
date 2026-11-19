@@ -74,9 +74,47 @@ enum
 /* A page watched for writes (PageFlag.WATCH): a store there is left to the
  * JavaScript tier, which marks the page written; the next is a store as any. */
 #define WATCH 4u
-#define NONE 0xffffffffu
 
+/*
+ * Guest memory. Every access goes through these, and an instruction's bytes
+ * through `fetched`: the memory is the module's own, from `ram`, in every
+ * build but the wide window's, whose guest RAM is a second memory this source
+ * cannot name (see the build script).
+ */
 static u8 *ram;
+/* A guest address, and a quadword taken as one: within 4 GiB its low half is it. */
+typedef u32 ga;
+#define GA(a) ((u32)(a))
+/* No address: what a store that reached no translated code leaves. */
+#define NOWHERE ((ga)~(ga)0)
+#define guest8(a) (ram[a])
+#define guest16(a) (*(u16 *)(ram + (a)))
+#define guest32(a) (*(u32 *)(ram + (a)))
+#define guest64(a) (*(u64 *)(ram + (a)))
+#define setGuest8(a, v) (ram[a] = (v))
+#define setGuest16(a, v) (*(u16 *)(ram + (a)) = (v))
+#define setGuest32(a, v) (*(u32 *)(ram + (a)) = (v))
+#define setGuest64(a, v) (*(u64 *)(ram + (a)) = (v))
+/* The same `d` bytes past `a`, in an access whose check covered them: the sum does not wrap. */
+#define guest16Past(a, d) (*(u16 *)(ram + (a) + (d)))
+#define guest32Past(a, d) (*(u32 *)(ram + (a) + (d)))
+#define guest64Past(a, d) (*(u64 *)(ram + (a) + (d)))
+#define setGuest16Past(a, d, v) (*(u16 *)(ram + (a) + (d)) = (v))
+#define setGuest32Past(a, d, v) (*(u32 *)(ram + (a) + (d)) = (v))
+#define setGuest64Past(a, d, v) (*(u64 *)(ram + (a) + (d)) = (v))
+/* `bytes` copied as a memmove copies them, and filled with one byte. */
+static inline void guestCopy(ga to, ga from, u32 bytes)
+{
+    __builtin_memmove(ram + to, ram + from, bytes);
+}
+static inline void guestFill(ga to, u32 byte, u32 bytes)
+{
+    __builtin_memset(ram + to, (int)byte, bytes);
+}
+/* The bytes of the instruction at `a`, fifteen at most, where a decoder reads them. */
+static inline const u8 *fetched(ga a) { return ram + a; }
+/* Where the instruction whose bytes `p` are lies. */
+#define fetchedAt(p) ((u64)(u32)((p) - ram))
 static u8 *pageFlags;
 static u8 *codeRanges;
 #ifdef LONG
@@ -247,17 +285,17 @@ static inline void setRegOf(u32 r, u32 size, u32 rex, u64 v)
     else if (size == 2) setReg16(r, v);
     else setReg8(r, rex, v);
 }
-static inline u64 load(u32 a, u32 size)
+static inline u64 load(ga a, u32 size)
 {
-    return size == 8 ? *(u64 *)(ram + a) : size == 4 ? *(u32 *)(ram + a)
-        : size == 2 ? *(u16 *)(ram + a) : ram[a];
+    return size == 8 ? guest64(a) : size == 4 ? guest32(a)
+        : size == 2 ? guest16(a) : guest8(a);
 }
-static inline void store(u32 a, u32 size, u64 v)
+static inline void store(ga a, u32 size, u64 v)
 {
-    if (size == 8) *(u64 *)(ram + a) = v;
-    else if (size == 4) *(u32 *)(ram + a) = (u32)v;
-    else if (size == 2) *(u16 *)(ram + a) = (u16)v;
-    else ram[a] = (u8)v;
+    if (size == 8) setGuest64(a, v);
+    else if (size == 4) setGuest32(a, (u32)v);
+    else if (size == 2) setGuest16(a, (u16)v);
+    else setGuest8(a, (u8)v);
 }
 #else
 static const u32 MASKS[3] = { 0xff, 0xffff, 0xffffffff };
@@ -278,18 +316,18 @@ static inline void setRegOf(u32 r, u32 size, u32 v)
 }
 static inline u32 load(u32 a, u32 size)
 {
-    return size == 4 ? *(u32 *)(ram + a) : size == 2 ? *(u16 *)(ram + a) : ram[a];
+    return size == 4 ? guest32(a) : size == 2 ? guest16(a) : guest8(a);
 }
 static inline void store(u32 a, u32 size, u32 v)
 {
-    if (size == 4) *(u32 *)(ram + a) = v;
-    else if (size == 2) *(u16 *)(ram + a) = (u16)v;
-    else ram[a] = (u8)v;
+    if (size == 4) setGuest32(a, v);
+    else if (size == 2) setGuest16(a, (u16)v);
+    else setGuest8(a, (u8)v);
 }
 #endif
 
 /* Whether an access of `size` bytes at `a` touches a page with any of `flags`. */
-static inline u32 touches(u32 a, u32 size, u32 flags)
+static inline u32 touches(ga a, u32 size, u32 flags)
 {
     u32 f = pageFlags[a >> 12];
     if ((a & 0xfff) > 0x1000 - size) f |= pageFlags[(a + size - 1) >> 12];
@@ -297,7 +335,7 @@ static inline u32 touches(u32 a, u32 size, u32 flags)
 }
 
 /* Whether the byte lies in a page's translated code, as the emitter's codeHit asks. */
-static inline u32 codeHit(u32 a)
+static inline u32 codeHit(ga a)
 {
     if ((pageFlags[a >> 12] & HAS_CODE) == 0) return 0;
     u32 granule = (a & 0xfff) >> 5;
@@ -310,7 +348,7 @@ static inline u32 codeHit(u32 a)
  * goes: going up to the page's end, going down to its start, and none when
  * the element at `a` crosses the page's end.
  */
-static inline u32 pageRoom(u32 a, u32 size, u32 down)
+static inline u32 pageRoom(ga a, u32 size, u32 down)
 {
     u32 offset = a & 0xfff, shift = SIZE_INDEX(size);
     if (!down) return (0x1000 - offset) >> shift;
@@ -328,7 +366,7 @@ static u32 repeatBulk(u32 kind, u32 size, u32 down)
 {
     u64 to64 = regs[7], from64 = regs[6], count = regs[1];
     if ((to64 >> 32) != 0 || (kind == 0xa4 && (from64 >> 32) != 0)) return 0;
-    u32 to = (u32)to64, from = (u32)from64;
+    ga to = GA(to64), from = GA(from64);
     u32 n = pageRoom(to, size, down);
     if (count < n) n = (u32)count;
     if (kind == 0xa4)
@@ -338,21 +376,21 @@ static u32 repeatBulk(u32 kind, u32 size, u32 down)
     }
     u32 bytes = n << SIZE_INDEX(size);
     if (n == 0 || (pageFlags[to >> 12] & (INACCESSIBLE | HAS_CODE | WATCH)) != 0) return 0;
-    u32 low = down ? to + size - bytes : to;
+    ga low = down ? to + size - bytes : to;
     if (kind == 0xa4)
     {
         if ((pageFlags[from >> 12] & INACCESSIBLE) != 0
             || (down ? from - to : to - from) - 1 < bytes - 1) return 0;
-        __builtin_memmove(ram + low, ram + (down ? from + size - bytes : from), bytes);
+        guestCopy(low, down ? from + size - bytes : from, bytes);
         regs[6] = down ? from64 - bytes : from64 + bytes;
     }
     else
     {
         u64 v = regOf(0, size, 0), b = v & 0xff;
         if (v == b * (MASKS[SIZE_INDEX(size)] / 0xff))
-            __builtin_memset(ram + low, (int)b, bytes);
+            guestFill(low, (u32)b, bytes);
         else
-            for (u32 a = low; a != low + bytes; a += size) store(a, size, v);
+            for (ga a = low; a != low + bytes; a += size) store(a, size, v);
     }
     regs[7] = down ? to64 - bytes : to64 + bytes;
     regs[1] -= n;
@@ -363,7 +401,7 @@ static void passBulk(u32 kind, u32 size, u32 down, u32 stopOnEqual)
 {
     u64 to64 = regs[7], from64 = regs[6], count = regs[1];
     if ((to64 >> 32) != 0 || (kind == 0xa6 && (from64 >> 32) != 0)) return;
-    u32 to = (u32)to64, from = (u32)from64;
+    ga to = GA(to64), from = GA(from64);
     u32 n = pageRoom(to, size, down);
     if (count < n) n = (u32)count;
     if (kind == 0xa6)
@@ -373,9 +411,10 @@ static void passBulk(u32 kind, u32 size, u32 down, u32 stopOnEqual)
     }
     if (n < 2 || (pageFlags[to >> 12] & INACCESSIBLE) != 0
         || (kind == 0xa6 && (pageFlags[from >> 12] & INACCESSIBLE) != 0)) return;
-    u32 step = down ? (u32)-(i32)size : size, apart = from - to;
+    ga step = down ? (ga)0 - size : size, apart = from - to;
     u64 value = regOf(0, size, 0);
-    u32 k = 0, a = to;
+    u32 k = 0;
+    ga a = to;
     for (; k < n - 1; k++, a += step)
     {
         u64 other = kind == 0xa6 ? load(a + apart, size) : value;
@@ -416,14 +455,14 @@ static u32 repeatBulk(u32 kind, u32 size, u32 down)
     {
         if ((pageFlags[from >> 12] & INACCESSIBLE) != 0
             || (down ? from - to : to - from) - 1 < bytes - 1) return 0;
-        __builtin_memmove(ram + low, ram + (down ? from + size - bytes : from), bytes);
+        guestCopy(low, down ? from + size - bytes : from, bytes);
         regs[6] = down ? from - bytes : from + bytes;
     }
     else
     {
         u32 v = regOf(0, size), b = v & 0xff;
         if (v == (size == 4 ? b * 0x01010101u : size == 2 ? b * 0x0101u : b))
-            __builtin_memset(ram + low, (int)b, bytes);
+            guestFill(low, (u32)b, bytes);
         else
             for (u32 a = low; a != low + bytes; a += size) store(a, size, v);
     }
@@ -746,7 +785,7 @@ static double f80ToF64(u64 low, u32 high)
     return (high & 0x8000) ? -v : v;
 }
 
-static void writeF80(u32 at, double v)
+static void writeF80(ga at, double v)
 {
     u64 word = bitsOf(v), fraction = word & 0x000fffffffffffffull, mantissa;
     u32 rawExponent = (u32)(word >> 52) & 0x7ff, signExponent = (u32)(word >> 63) << 15;
@@ -767,8 +806,8 @@ static void writeF80(u32 at, double v)
         mantissa = fraction << 11 | SIGN64;
         signExponent |= rawExponent + 15360;
     }
-    *(u64 *)(ram + at) = mantissa;
-    *(u16 *)(ram + at + 8) = (u16)signExponent;
+    setGuest64(at, mantissa);
+    setGuest16Past(at, 8, (u16)signExponent);
 }
 
 /* How the x87 helper ended: done, left unexecuted, faulted (#GP), or done with
@@ -776,7 +815,7 @@ static void writeF80(u32 at, double v)
 enum { X_DONE = 0, X_LEAVE, X_FAULT, X_FLAGS };
 static u32 xFlags;
 /* A store into translated code, for the run to end after it. */
-static u32 xWrite;
+static ga xWrite;
 static u32 xWriteSize;
 /* The physical registers holding a quadword fild's integer, unwritten since, and
  * the integers. Taken from the block at every run's start and left there at its
@@ -863,10 +902,10 @@ static inline double arith(u32 kind, double a0, double c0, u32 t1, u32 control, 
     return r;
 }
 
-static inline double loadF32(u32 at, u32 *status)
+static inline double loadF32(ga at, u32 *status)
 {
     F32 v;
-    v.u = *(u32 *)(ram + at);
+    v.u = guest32(at);
     if (precise && (v.u & 0x7fffffff) > 0x7f800000 && (v.u & 0x400000) == 0)
     {
         *status |= S_IE;
@@ -875,9 +914,9 @@ static inline double loadF32(u32 at, u32 *status)
     return (double)v.f;
 }
 
-static inline double loadF64(u32 at, u32 *status)
+static inline double loadF64(ga at, u32 *status)
 {
-    u32 low = *(u32 *)(ram + at), high = *(u32 *)(ram + at + 4), h = high & 0x7fffffff;
+    u32 low = guest32(at), high = guest32Past(at, 4), h = high & 0x7fffffff;
     if (precise && (h > 0x7ff00000 || (h == 0x7ff00000 && low != 0)) && (h & 0x80000) == 0)
     {
         *status |= S_IE;
@@ -911,7 +950,7 @@ static u64 eaWide;
 #endif
 #define X_READ(a, size) do { X_WINDOW(size); \
         if (touches((a), (size), INACCESSIBLE)) { code = X_FAULT; goto done; } } while (0)
-#define X_WRITE(a, size) do { u32 _a = (a); X_WINDOW(size); \
+#define X_WRITE(a, size) do { ga _a = (a); X_WINDOW(size); \
         if (touches(_a, (size), INACCESSIBLE | HAS_CODE | WATCH)) \
         { \
             if (touches(_a, (size), INACCESSIBLE)) { code = X_FAULT; goto done; } \
@@ -931,7 +970,7 @@ static u32 xAddr32;
  * bytes -- and the segment's base is added last, to an address the
  * address-size prefix cut to 32 bits. Its low half is answered, the whole in
  * eaWide. */
-static inline u32 memoryOperand(const u8 *p, u32 *at, u64 seg, u32 extra)
+static inline ga memoryOperand(const u8 *p, u32 *at, u64 seg, u32 extra)
 {
     u32 len = *at, modrm = p[len++], mod = modrm >> 6, rm = modrm & 7, b = (xRex & 1) << 3;
     u64 ea;
@@ -950,7 +989,7 @@ static inline u32 memoryOperand(const u8 *p, u32 *at, u64 seg, u32 extra)
     {
         ea = (u64)(i64)*(i32 *)(p + len);
         len += 4;
-        ea += (u64)(u32)(p - ram) + len + extra;
+        ea += fetchedAt(p) + len + extra;
     }
     else ea = regs[rm | b];
     if (mod == 1)
@@ -966,7 +1005,7 @@ static inline u32 memoryOperand(const u8 *p, u32 *at, u64 seg, u32 extra)
     if (xAddr32) ea = (u32)ea;
     *at = len;
     eaWide = ea + seg;
-    return (u32)eaWide;
+    return GA(eaWide);
 }
 #else
 /* The memory operand of the modrm byte at p[*at], below 0xc0: its address with
@@ -1097,11 +1136,12 @@ static u32 x87(const u8 *p)
     u32 len, key, lock, escape = prefixed(p, &len, &seg, &key, &lock);
     if (key >= 2 || lock) return X_LEAVE;
     u32 top = *x87TopAt & 7, empty = *x87EmptyAt, status = *x87StatusAt, control = *x87ControlAt;
-    u32 modrm = p[len], ea = 0;
+    u32 modrm = p[len];
+    ga ea = 0;
     if (modrm < 0xc0) ea = MEMORY_OPERAND(p, &len, seg, 0);
     else len += 1;
     xLen = len;
-    xWrite = NONE;
+    xWrite = NOWHERE;
     u32 code = X_DONE, e = escape & 7, g = (modrm >> 3) & 7, i = modrm & 7, t1, pops = 0;
     /* What the instruction does to the exact integers, as exactWrites has it: the
      * registers it writes and pops, the ones it made exact, and whether it is a
@@ -1121,8 +1161,8 @@ static u32 x87(const u8 *p)
             t1 = GUARD(1, 0);
             if (e == 0) { X_READ(ea, 4); c0 = loadF32(ea, &status); }
             else if (e == 4) { X_READ(ea, 8); c0 = loadF64(ea, &status); }
-            else if (e == 2) { X_READ(ea, 4); c0 = (double)*(i32 *)(ram + ea); }
-            else { X_READ(ea, 2); c0 = (double)*(i16 *)(ram + ea); }
+            else if (e == 2) { X_READ(ea, 4); c0 = (double)(i32)guest32(ea); }
+            else { X_READ(ea, 2); c0 = (double)(i16)guest16(ea); }
             if (g == 2 || g == 3)
             {
                 status = compareBits(status, ST(0), c0, 1, t1);
@@ -1144,8 +1184,8 @@ static u32 x87(const u8 *p)
             else
             {
                 X_READ(ea, 10);
-                u32 high = *(u16 *)(ram + ea + 8);
-                u64 low = *(u64 *)(ram + ea);
+                u32 high = guest16Past(ea, 8);
+                u64 low = guest64(ea);
                 /* No IE for a signalling NaN in this format (the SDM's FLD). */
                 v = f80ToF64(low, high);
             }
@@ -1157,14 +1197,14 @@ static u32 x87(const u8 *p)
         {
             /* fild m32int, m16int, m64int */
             double v;
-            if (e == 3) { X_READ(ea, 4); v = (double)*(i32 *)(ram + ea); }
-            else if (g == 0) { X_READ(ea, 2); v = (double)*(i16 *)(ram + ea); }
-            else { X_READ(ea, 8); v = (double)*(i64 *)(ram + ea); }
+            if (e == 3) { X_READ(ea, 4); v = (double)(i32)guest32(ea); }
+            else if (g == 0) { X_READ(ea, 2); v = (double)(i16)guest16(ea); }
+            else { X_READ(ea, 8); v = (double)(i64)guest64(ea); }
             t1 = GUARD(0, 1);
             PUSH_ST(OR_INDEFINITE(v, t1));
             if (g == 5 && !t1)
             {
-                exactShadow[top] = *(i64 *)(ram + ea);
+                exactShadow[top] = (i64)guest64(ea);
                 xm = 1u << top;
             }
             break;
@@ -1185,12 +1225,12 @@ static u32 x87(const u8 *p)
                 X_WRITE(ea, 4);
                 F32 f;
                 f.f = (float)v;
-                *(u32 *)(ram + ea) = f.u;
+                setGuest32(ea, f.u);
             }
             else if (e == 5)
             {
                 X_WRITE(ea, 8);
-                *(u64 *)(ram + ea) = bitsOf(v);
+                setGuest64(ea, bitsOf(v));
             }
             else
             {
@@ -1222,23 +1262,23 @@ static u32 x87(const u8 *p)
             }
             else bits = (u64)(i64)r;
             X_WRITE(ea, size);
-            if (size == 8) *(u64 *)(ram + ea) = bits;
-            else if (size == 4) *(u32 *)(ram + ea) = (u32)bits;
-            else *(u16 *)(ram + ea) = (u16)bits;
+            if (size == 8) setGuest64(ea, bits);
+            else if (size == 4) setGuest32(ea, (u32)bits);
+            else setGuest16(ea, (u16)bits);
             if (g != 2) POP_ST();
             break;
         }
         case 015:
             X_READ(ea, 2);
-            control = *(u16 *)(ram + ea);
+            control = guest16(ea);
             break;
         case 017:
             X_WRITE(ea, 2);
-            *(u16 *)(ram + ea) = (u16)control;
+            setGuest16(ea, (u16)control);
             break;
         case 057:
             X_WRITE(ea, 2);
-            *(u16 *)(ram + ea) = (u16)((status & ~0x3800u) | top << 11);
+            setGuest16(ea, (u16)((status & ~0x3800u) | top << 11));
             relaxedReads += !precise;
             break;
         default:
@@ -2001,19 +2041,19 @@ static void packedShift(V128 *d, u32 kind, u32 element, u32 amount)
         X_ALIGNED(width); \
         X_READ(ea, (width)); \
         (v).q[0] = 0; (v).q[1] = 0; \
-        if ((width) == 16) { (v).q[0] = *(u64 *)(ram + ea); (v).q[1] = *(u64 *)(ram + ea + 8); } \
-        else if ((width) == 8) (v).q[0] = *(u64 *)(ram + ea); \
-        else if ((width) == 4) (v).w[0] = *(u32 *)(ram + ea); \
-        else (v).h[0] = *(u16 *)(ram + ea); \
+        if ((width) == 16) { (v).q[0] = guest64(ea); (v).q[1] = guest64Past(ea, 8); } \
+        else if ((width) == 8) (v).q[0] = guest64(ea); \
+        else if ((width) == 4) (v).w[0] = guest32(ea); \
+        else (v).h[0] = guest16(ea); \
     } while (0)
 /* The W operand: the xmm register or `width` bytes of memory. */
 #define LOAD_W(v, width) do { if (mem) LOAD_M(v, width); else getXmm(&(v), rm); } while (0)
 #define STORE_M(v, width) do { \
         X_ALIGNED(width); \
         X_WRITE(ea, (width)); \
-        if ((width) == 16) { *(u64 *)(ram + ea) = (v).q[0]; *(u64 *)(ram + ea + 8) = (v).q[1]; } \
-        else if ((width) == 8) *(u64 *)(ram + ea) = (v).q[0]; \
-        else *(u32 *)(ram + ea) = (v).w[0]; \
+        if ((width) == 16) { setGuest64(ea, (v).q[0]); setGuest64Past(ea, 8, (v).q[1]); } \
+        else if ((width) == 8) setGuest64(ea, (v).q[0]); \
+        else setGuest32(ea, (v).w[0]); \
     } while (0)
 
 /*
@@ -2054,7 +2094,7 @@ static inline u32 mmxForm(u32 op2)
  * same; the high unpacks from the high doublewords moved down, the packs from
  * both operands in one register's two quadwords.
  */
-static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, u32 ea, u32 imm, u32 *len)
+static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, ga ea, u32 imm, u32 *len)
 {
     u32 code = X_DONE;
     V128 a, b;
@@ -2063,8 +2103,8 @@ static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, u32 ea, u32 imm, u32 *len)
     /* The source: the mm register, or `width` bytes of memory zero-extended. */
 #define MM_SOURCE(v, width) do { \
         if (mem) { X_READ(ea, (width)); \
-            (v).q[0] = (width) == 8 ? *(u64 *)(ram + ea) : (width) == 4 ? *(u32 *)(ram + ea) \
-                : *(u16 *)(ram + ea); } \
+            (v).q[0] = (width) == 8 ? guest64(ea) : (width) == 4 ? guest32(ea) \
+                : guest16(ea); } \
         else (v).q[0] = getMm(rm); \
         (v).q[1] = 0; \
     } while (0)
@@ -2072,13 +2112,13 @@ static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, u32 ea, u32 imm, u32 *len)
     {
     case 0x6e:
         /* movd mm, r/m32 */
-        if (mem) { X_READ(ea, 4); a.q[0] = *(u32 *)(ram + ea); }
+        if (mem) { X_READ(ea, 4); a.q[0] = guest32(ea); }
         else a.q[0] = (u32)regs[rm];
         setMm(reg, a.q[0]);
         break;
     case 0x7e:
         /* movd r/m32, mm */
-        if (mem) { X_WRITE(ea, 4); *(u32 *)(ram + ea) = (u32)getMm(reg); }
+        if (mem) { X_WRITE(ea, 4); setGuest32(ea, (u32)getMm(reg)); }
         else regs[rm] = (u32)getMm(reg);
         break;
     case 0x6f:
@@ -2089,7 +2129,7 @@ static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, u32 ea, u32 imm, u32 *len)
     case 0x7f: case 0xe7:
         /* movq mm/m64, mm; movntq m64, mm */
         if (op2 == 0xe7 && !mem) { code = X_LEAVE; break; }
-        if (mem) { X_WRITE(ea, 8); *(u64 *)(ram + ea) = getMm(reg); }
+        if (mem) { X_WRITE(ea, 8); setGuest64(ea, getMm(reg)); }
         else setMm(rm, getMm(reg));
         break;
     case 0x70:
@@ -2124,7 +2164,7 @@ static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, u32 ea, u32 imm, u32 *len)
     {
         /* pinsrw mm, r32/m16, imm8 */
         u32 v;
-        if (mem) { X_READ(ea, 2); v = *(u16 *)(ram + ea); }
+        if (mem) { X_READ(ea, 2); v = guest16(ea); }
         else v = regs[rm];
         *len += 1;
         a.q[0] = getMm(reg);
@@ -2197,11 +2237,12 @@ static u32 sse(const u8 *p)
         /* emms: every register empty, the top at zero */
         *x87EmptyAt = 0xff;
         *x87TopAt = 0;
-        xWrite = NONE;
+        xWrite = NOWHERE;
         xLen = len + 1;
         return X_DONE;
     }
-    u32 op2 = p[len++], modrm = p[len], ea = 0, mem = modrm < 0xc0, reg = (modrm >> 3) & 7;
+    u32 op2 = p[len++], modrm = p[len], mem = modrm < 0xc0, reg = (modrm >> 3) & 7;
+    ga ea = 0;
     u32 rm = modrm & 7;
 #ifdef LONG
     /* REX.R and REX.B reach XMM8-15 and the further general registers; an `mm`
@@ -2216,7 +2257,7 @@ static u32 sse(const u8 *p)
 #endif
     if (mem) ea = MEMORY_OPERAND(p, &len, seg, extra);
     else len += 1;
-    xWrite = NONE;
+    xWrite = NOWHERE;
     u32 code = X_DONE;
     V128 a, b;
     /* The immediate, for the forms that have one, after the addressing bytes. */
@@ -2236,7 +2277,7 @@ static u32 sse(const u8 *p)
         {
             /* movq xmm, r/m64: the high quadword zeroed */
             a.q[1] = 0;
-            if (mem) { X_READ(ea, 8); a.q[0] = *(u64 *)(ram + ea); }
+            if (mem) { X_READ(ea, 8); a.q[0] = guest64(ea); }
             else a.q[0] = regs[rm];
             setXmm(reg, &a);
             goto done;
@@ -2245,7 +2286,7 @@ static u32 sse(const u8 *p)
         {
             /* movq r/m64, xmm */
             getXmm(&a, reg);
-            if (mem) { X_WRITE(ea, 8); *(u64 *)(ram + ea) = a.q[0]; }
+            if (mem) { X_WRITE(ea, 8); setGuest64(ea, a.q[0]); }
             else regs[rm] = a.q[0];
             goto done;
         }
@@ -2253,7 +2294,7 @@ static u32 sse(const u8 *p)
         {
             /* cvtsi2ss, cvtsi2sd r/m64: rounded once, by MXCSR */
             i64 v;
-            if (mem) { X_READ(ea, 8); v = *(i64 *)(ram + ea); }
+            if (mem) { X_READ(ea, 8); v = (i64)guest64(ea); }
             else v = (i64)regs[rm];
             getXmm(&a, reg);
             if (key == 2) a.w[0] = narrow(quadwordRounded(v, 24));
@@ -2375,7 +2416,7 @@ static u32 sse(const u8 *p)
         /* cvtsi2ss, cvtsi2sd */
         if (key < 2) { code = X_LEAVE; break; }
         i32 v;
-        if (mem) { X_READ(ea, 4); v = *(i32 *)(ram + ea); }
+        if (mem) { X_READ(ea, 4); v = (i32)guest32(ea); }
         else v = (i32)regs[rm];
         getXmm(&a, reg);
         if (key == 2) a.w[0] = narrow((double)v);
@@ -2529,7 +2570,7 @@ static u32 sse(const u8 *p)
         if (key != 1) { code = X_LEAVE; break; }
         a.q[0] = 0;
         a.q[1] = 0;
-        if (mem) { X_READ(ea, 4); a.w[0] = *(u32 *)(ram + ea); }
+        if (mem) { X_READ(ea, 4); a.w[0] = guest32(ea); }
         else a.w[0] = regs[rm];
         setXmm(reg, &a);
         break;
@@ -2659,8 +2700,8 @@ static u32 sse(const u8 *p)
             if (reg < 5) code = X_LEAVE;
             break;
         }
-        if (reg == 2) { X_READ(ea, 4); *mxcsrAt = *(u32 *)(ram + ea); }
-        else if (reg == 3) { X_WRITE(ea, 4); *(u32 *)(ram + ea) = *mxcsrAt; }
+        if (reg == 2) { X_READ(ea, 4); *mxcsrAt = guest32(ea); }
+        else if (reg == 3) { X_WRITE(ea, 4); setGuest32(ea, *mxcsrAt); }
         else code = X_LEAVE;
         break;
     case 0xc2:
@@ -2684,7 +2725,7 @@ static u32 sse(const u8 *p)
         if (key != 1) { code = X_LEAVE; break; }
         {
             u32 v;
-            if (mem) { X_READ(ea, 2); v = *(u16 *)(ram + ea); }
+            if (mem) { X_READ(ea, 2); v = guest16(ea); }
             else v = regs[rm];
             imm = p[len];
             len += 1;
@@ -2910,14 +2951,14 @@ static u32 runInteger(u32 budget)
         start = rip;
         /* As runInteger's, and code whose fifteen bytes could reach 2^32 is the
          * host's to fetch. */
-        u32 at = (u32)rip;
+        ga at = GA(rip);
         if (rip > WINDOW - 16 || (pageFlags[at >> 12] & (INACCESSIBLE | NO_EXECUTE))
             || ((at & 0xfff) > 0xff0 && (pageFlags[(at + 15) >> 12] & (INACCESSIBLE | NO_EXECUTE))))
         {
             code = W_UNSUPPORTED;
             break;
         }
-        const u8 *p = ram + at;
+        const u8 *p = fetched(at);
         u32 operand16 = 0, addr32 = 0, rex = 0, hasSeg = 0, rep = 0, lock = 0, len = 0, op;
         u64 seg = 0;
         /* REX counts only right before the opcode: a prefix after it voids it.
@@ -2983,9 +3024,10 @@ static u32 runInteger(u32 budget)
             } \
         } while (0)
 #define READ_CHECK(a, size) do { u64 _a = (a); \
-            if (_a > WINDOW - (size) || touches((u32)_a, (size), INACCESSIBLE)) FAULT(13); } while (0)
-        u32 codeWrite = NONE, codeWriteSize = 0;
-#define WRITE_CHECK(a, size) do { u64 _w = (a); u32 _a = (u32)_w; \
+            if (_a > WINDOW - (size) || touches(GA(_a), (size), INACCESSIBLE)) FAULT(13); } while (0)
+        ga codeWrite = NOWHERE;
+        u32 codeWriteSize = 0;
+#define WRITE_CHECK(a, size) do { u64 _w = (a); ga _a = GA(_w); \
             if (_w > WINDOW - (size)) FAULT(13); \
             if (touches(_a, (size), INACCESSIBLE | HAS_CODE | WATCH)) \
             { \
@@ -2995,10 +3037,10 @@ static u32 runInteger(u32 budget)
             } } while (0)
 #define RM_READ(size, out) do { \
             if (isReg) out = regOf((u32)ea, size, rex); \
-            else { READ_CHECK(ea, size); out = load((u32)ea, size); } } while (0)
+            else { READ_CHECK(ea, size); out = load(GA(ea), size); } } while (0)
 #define RM_WRITE(size, v) do { u64 _v = (v); \
             if (isReg) setRegOf((u32)ea, size, rex, _v); \
-            else { WRITE_CHECK(ea, size); store((u32)ea, size, _v); } } while (0)
+            else { WRITE_CHECK(ea, size); store(GA(ea), size, _v); } } while (0)
         /* An immediate of an operand's size: a quadword's is four bytes, sign-extended. */
 #define IMM(size, out) do { \
             if ((size) == 1) { out = p[len]; len += 1; } \
@@ -3007,15 +3049,15 @@ static u32 runInteger(u32 budget)
             else { out = (u64)(i64)*(i32 *)(p + len); len += 4; } } while (0)
 #define IMM_BYTES(size) ((size) == 8 ? 4 : (size))
 #define PUSH(v) do { u64 _v = (v), _at = regs[4] - 8; \
-            WRITE_CHECK(_at, 8); *(u64 *)(ram + (u32)_at) = _v; regs[4] = _at; } while (0)
+            WRITE_CHECK(_at, 8); setGuest64(GA(_at), _v); regs[4] = _at; } while (0)
 #define POP(out) do { u64 _at = regs[4]; \
-            READ_CHECK(_at, 8); out = *(u64 *)(ram + (u32)_at); regs[4] = _at + 8; } while (0)
+            READ_CHECK(_at, 8); out = guest64(GA(_at)); regs[4] = _at + 8; } while (0)
         /* A stack operation's width: a quadword, a word with the operand-size prefix. */
         u32 stack = operand16 ? 2 : 8;
 #define PUSH_AT(v, width) do { u64 _v = (v), _at = regs[4] - (width); \
-            WRITE_CHECK(_at, width); store((u32)_at, width, _v); regs[4] = _at; } while (0)
+            WRITE_CHECK(_at, width); store(GA(_at), width, _v); regs[4] = _at; } while (0)
 #define POP_AT(out, width) do { u64 _at = regs[4]; \
-            READ_CHECK(_at, width); out = load((u32)_at, width); regs[4] = _at + (width); } while (0)
+            READ_CHECK(_at, width); out = load(GA(_at), width); regs[4] = _at + (width); } while (0)
 
         u64 target = 0, rel = 0, fa = 0, fb = 0;
         u32 jumped = 0, helper, cc = 0;
@@ -3240,7 +3282,7 @@ static u32 runInteger(u32 budget)
                 setRegOf((u32)ea, stack, rex, v);
                 break;
             }
-            u32 a = (u32)ea;
+            ga a = GA(ea);
             if (ea > WINDOW - stack || touches(a, stack, INACCESSIBLE))
             {
                 regs[4] = before;
@@ -3320,12 +3362,12 @@ static u32 runInteger(u32 budget)
             if (op < 0xa2)
             {
                 READ_CHECK(a, size);
-                setRegOf(0, size, rex, load((u32)a, size));
+                setRegOf(0, size, rex, load(GA(a), size));
             }
             else
             {
                 WRITE_CHECK(a, size);
-                store((u32)a, size, regOf(0, size, rex));
+                store(GA(a), size, regOf(0, size, rex));
             }
             break;
         }
@@ -3353,7 +3395,7 @@ static u32 runInteger(u32 budget)
                     u64 from = regs[6], to = regs[7];
                     READ_CHECK(from, size);
                     WRITE_CHECK(to, size);
-                    store((u32)to, size, load((u32)from, size));
+                    store(GA(to), size, load(GA(from), size));
                     regs[6] = from + step;
                     regs[7] = to + step;
                 }
@@ -3361,14 +3403,14 @@ static u32 runInteger(u32 budget)
                 {
                     u64 to = regs[7];
                     WRITE_CHECK(to, size);
-                    store((u32)to, size, regOf(0, size, rex));
+                    store(GA(to), size, regOf(0, size, rex));
                     regs[7] = to + step;
                 }
                 else if (kind == 0xac)
                 {
                     u64 from = regs[6];
                     READ_CHECK(from, size);
-                    setRegOf(0, size, rex, load((u32)from, size));
+                    setRegOf(0, size, rex, load(GA(from), size));
                     regs[6] = from + step;
                 }
                 else
@@ -3378,15 +3420,15 @@ static u32 runInteger(u32 budget)
                     {
                         READ_CHECK(regs[6], size);
                         READ_CHECK(regs[7], size);
-                        a = load((u32)regs[6], size);
-                        b = load((u32)regs[7], size);
+                        a = load(GA(regs[6]), size);
+                        b = load(GA(regs[7]), size);
                         regs[6] += step;
                     }
                     else
                     {
                         READ_CHECK(regs[7], size);
                         a = regOf(0, size, rex);
-                        b = load((u32)regs[7], size);
+                        b = load(GA(regs[7]), size);
                     }
                     regs[7] += step;
                     u64 r = (a - b) & MASKS[s];
@@ -3397,7 +3439,7 @@ static u32 runInteger(u32 budget)
                 if (!repeat) break;
                 regs[1] -= 1;
                 if (done) break;
-                if (codeWrite != NONE)
+                if (codeWrite != NOWHERE)
                 {
                     if (regs[1] != 0)
                     {
@@ -3545,7 +3587,7 @@ static u32 runInteger(u32 budget)
             u64 at = regs[5], v;
             if (operand16) LEAVE(W_UNSUPPORTED);
             READ_CHECK(at, 8);
-            v = *(u64 *)(ram + (u32)at);
+            v = guest64(GA(at));
             regs[4] = at + 8;
             regs[5] = v;
             break;
@@ -3964,7 +4006,7 @@ static u32 runInteger(u32 budget)
                 b = regOf(greg, size, rex);
                 r = (a + b) & MASKS[s];
                 if (isReg) { setRegOf(greg, size, rex, a); setRegOf((u32)ea, size, rex, r); }
-                else { WRITE_CHECK(ea, size); setRegOf(greg, size, rex, a); store((u32)ea, size, r); }
+                else { WRITE_CHECK(ea, size); setRegOf(greg, size, rex, a); store(GA(ea), size, r); }
                 RECORD(L_ADD, s, r, a, b, 0);
                 break;
             }
@@ -3978,20 +4020,20 @@ static u32 runInteger(u32 budget)
                 if (isReg || ext != 1 || operand16 || atomic) LEAVE(W_UNSUPPORTED);
                 if (half == 8 && (ea & 15) != 0) FAULT(13);
                 READ_CHECK(ea, half * 2);
-                low = load((u32)ea, half);
-                high = load((u32)ea + half, half);
+                low = load(GA(ea), half);
+                high = load(GA(ea) + half, half);
                 WRITE_CHECK(ea, half * 2);
                 FOLD();
                 if (low == regOf(0, half, rex) && high == regOf(2, half, rex))
                 {
-                    store((u32)ea, half, regs[3]);
-                    store((u32)ea + half, half, regs[1]);
+                    store(GA(ea), half, regs[3]);
+                    store(GA(ea) + half, half, regs[1]);
                     fl |= ZF;
                 }
                 else
                 {
-                    store((u32)ea, half, low);
-                    store((u32)ea + half, half, high);
+                    store(GA(ea), half, low);
+                    store(GA(ea) + half, half, high);
                     setRegOf(0, half, rex, low);
                     setRegOf(2, half, rex, high);
                     fl &= ~ZF;
@@ -4024,7 +4066,7 @@ static u32 runInteger(u32 budget)
                 lk = 0;
                 fl = (fl & ~ARITH) | xFlags;
             }
-            if (xWrite != NONE)
+            if (xWrite != NOWHERE)
             {
                 codeWrite = xWrite;
                 codeWriteSize = xWriteSize;
@@ -4072,7 +4114,7 @@ static u32 runInteger(u32 budget)
         {
             rip += len;
         }
-        if (codeWrite != NONE)
+        if (codeWrite != NOWHERE)
         {
             exitValue = codeWrite;
             exitSize = codeWriteSize;
@@ -4143,7 +4185,7 @@ static u32 runInteger(u32 budget)
             code = W_UNSUPPORTED;
             break;
         }
-        const u8 *p = ram + eip;
+        const u8 *p = fetched(eip);
         u32 opsize = 4, seg = 0, hasSeg = 0, rep = 0, lock = 0, len = 0, op;
         for (;;)
         {
@@ -4185,7 +4227,8 @@ static u32 runInteger(u32 budget)
         } while (0)
 #define READ_CHECK(a, size) do { if (touches((a), (size), INACCESSIBLE)) FAULT(13); } while (0)
         /* A store's page test: a fault before it, a note of translated code for after it. */
-        u32 codeWrite = NONE, codeWriteSize = 0;
+        ga codeWrite = NOWHERE;
+        u32 codeWriteSize = 0;
 #define WRITE_CHECK(a, size) do { u32 _a = (a); \
             if (touches(_a, (size), INACCESSIBLE | HAS_CODE | WATCH)) \
             { \
@@ -4204,7 +4247,7 @@ static u32 runInteger(u32 budget)
             else if ((size) == 2) { out = *(u16 *)(p + len); len += 2; } \
             else { out = *(u32 *)(p + len); len += 4; } } while (0)
 #define PUSH(v) do { u32 _v = (v), _at = regs[4] - 4; \
-            WRITE_CHECK(_at, 4); *(u32 *)(ram + _at) = _v; regs[4] = _at; } while (0)
+            WRITE_CHECK(_at, 4); setGuest32(_at, _v); regs[4] = _at; } while (0)
 
         u32 target = 0, jumped = 0, helper;
         /* Shared by the paths that join below: a branch's offset and condition, and a
@@ -4298,7 +4341,7 @@ static u32 runInteger(u32 budget)
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 at = regs[4];
             READ_CHECK(at, 4);
-            u32 v = *(u32 *)(ram + at);
+            u32 v = guest32(at);
             regs[4] = at + 4;
             regs[op & 7] = v;
             break;
@@ -4309,7 +4352,7 @@ static u32 runInteger(u32 budget)
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 esp = regs[4], at = esp - 32;
             if (touches(at, 32, INACCESSIBLE | HAS_CODE | WATCH)) LEAVE(W_UNSUPPORTED);
-            for (u32 i = 0; i < 8; i++) *(u32 *)(ram + esp - 4 * (i + 1)) = i == 4 ? esp : regs[i];
+            for (u32 i = 0; i < 8; i++) setGuest32Past(esp, -4 * (i + 1), i == 4 ? esp : regs[i]);
             regs[4] = at;
             break;
         }
@@ -4318,7 +4361,7 @@ static u32 runInteger(u32 budget)
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 at = regs[4];
             if (touches(at, 32, INACCESSIBLE)) LEAVE(W_UNSUPPORTED);
-            for (u32 i = 0; i < 8; i++) if (i != 3) regs[7 - i] = *(u32 *)(ram + at + 4 * i);
+            for (u32 i = 0; i < 8; i++) if (i != 3) regs[7 - i] = guest32Past(at, 4 * i);
             regs[4] = at + 32;
             break;
         }
@@ -4446,7 +4489,7 @@ static u32 runInteger(u32 budget)
             if (greg != 0 || opsize != 4 || !isReg) LEAVE(W_UNSUPPORTED);
             u32 at = regs[4];
             READ_CHECK(at, 4);
-            u32 v = *(u32 *)(ram + at);
+            u32 v = guest32(at);
             regs[4] = at + 4;
             regs[ea] = v;
             break;
@@ -4480,7 +4523,7 @@ static u32 runInteger(u32 budget)
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 at = regs[4];
             READ_CHECK(at, 4);
-            u32 v = *(u32 *)(ram + at), w = 0xcd5 | DF | (1u << 11) | (1u << 14) | (1u << 18) | (1u << 21);
+            u32 v = guest32(at), w = 0xcd5 | DF | (1u << 11) | (1u << 14) | (1u << 18) | (1u << 21);
             regs[4] = at + 4;
             lk = 0;
             fl = (fl & ~w) | (v & w) | 2;
@@ -4586,7 +4629,7 @@ static u32 runInteger(u32 budget)
                 if (!repeat) break;
                 regs[1] -= 1;
                 if (done) break;
-                if (codeWrite != NONE)
+                if (codeWrite != NOWHERE)
                 {
                     if (regs[1] != 0)
                     {
@@ -4705,7 +4748,7 @@ static u32 runInteger(u32 budget)
         {
             u32 at = regs[4], extra = 0;
             READ_CHECK(at, 4);
-            target = *(u32 *)(ram + at);
+            target = guest32(at);
             if (op == 0xc2) IMM(2, extra);
             regs[4] = at + 4 + extra;
             jumped = 1;
@@ -4725,7 +4768,7 @@ static u32 runInteger(u32 budget)
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 at = regs[5];
             READ_CHECK(at, 4);
-            u32 v = *(u32 *)(ram + at);
+            u32 v = guest32(at);
             regs[4] = at + 4;
             regs[5] = v;
             break;
@@ -5125,7 +5168,7 @@ static u32 runInteger(u32 budget)
                 lk = 0;
                 fl = (fl & ~ARITH) | xFlags;
             }
-            if (xWrite != NONE)
+            if (xWrite != NOWHERE)
             {
                 codeWrite = xWrite;
                 codeWriteSize = xWriteSize;
@@ -5173,7 +5216,7 @@ static u32 runInteger(u32 budget)
         {
             eip += len;
         }
-        if (codeWrite != NONE)
+        if (codeWrite != NOWHERE)
         {
             exitValue = codeWrite;
             exitSize = codeWriteSize;
@@ -5204,13 +5247,13 @@ static u32 foldedStep(void)
 #ifdef LONG
     u64 rip = *ripField;
     xFlagsExact = 1;
-    u32 x = x87(ram + (u32)rip);
+    u32 x = x87(fetched(GA(rip)));
     xFlagsExact = 0;
     if (x == X_DONE) *ripField = rip + xLen;
 #else
     u32 eip = *eipField;
     xFlagsExact = 1;
-    u32 x = x87(ram + eip);
+    u32 x = x87(fetched(eip));
     xFlagsExact = 0;
     if (x == X_DONE) *eipField = eip + xLen;
 #endif
