@@ -199,6 +199,21 @@ test('the kernel debugger is absent and the system range starts at 2 GiB', ()=>{
         STATUS.ACCESS_VIOLATION, 'nowhere to put it');
 });
 
+test('SystemFileCacheInformation is whole, or its three ULONGs to a buffer short of it', ()=>{
+    // Wine's info.c test_query_cache: Windows 7 gives a short buffer the head.
+    const host = fakeHost();
+    const fns = createNtdllFunctions(host);
+    const view = new DataView(host.bytes.buffer);
+    for (const [given, answer, told] of [[128, STATUS.SUCCESS, 36], [36, STATUS.SUCCESS, 36],
+        [35, STATUS.SUCCESS, 12], [12, STATUS.SUCCESS, 12], [11, STATUS.INFO_LENGTH_MISMATCH, 12]])
+    {
+        view.setUint32(0x110, 0xdeadbeef, true);
+        assert.equal(fns.NtQuerySystemInformation.handler([21, 0x100, given, 0x110]), answer,
+            `${given} bytes`);
+        assert.equal(view.getUint32(0x110, true), told, `${given} bytes told`);
+    }
+});
+
 test('SystemProcessorBrandString is CPUID\'s 48 bytes and a terminator', ()=>{
     const host = fakeHost();
     const fns = createNtdllFunctions({ ...host, processorName: 'Test CPU @ 1.00GHz' });

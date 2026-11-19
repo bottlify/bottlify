@@ -397,7 +397,10 @@ const NORMAL_BASE_PRIORITY = 8;
  * (`exact`) or given as much as fits (`partial`) - a structure Windows copies
  * a prefix of.
  *
- * @typedef {{ read: () => Uint8Array, exact?: boolean, partial?: boolean }} SystemClass
+ * @typedef {{ read: () => Uint8Array, exact?: boolean, partial?: boolean, head?: number }}
+ *     SystemClass  `head`: the bytes a buffer short of the whole is given, as Windows 7
+ *     answers a short one (SYSTEM_CACHE_INFORMATION's three ULONGs); shorter than that,
+ *     the head's length is the one told.
  */
 
 /**
@@ -951,8 +954,10 @@ export function createQueryFunctions(host){
                 const other = host.systemClasses?.[infoClass >>> 0];
                 if (other)
                 {
-                    const bytes = other.read();
+                    const whole = other.read();
                     const given = length >>> 0;
+                    const short = other.head !== undefined && given < whole.length;
+                    const bytes = short ? whole.subarray(0, other.head) : whole;
                     const fits = other.partial ? given <= bytes.length
                         : other.exact ? given === bytes.length : given >= bytes.length;
                     if (!fits)

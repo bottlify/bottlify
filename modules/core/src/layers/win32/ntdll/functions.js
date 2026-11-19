@@ -99,6 +99,8 @@ const CRT_EXPORTS = [
 const IMAGE_DOS_SIGNATURE = 0x5a4d;
 /** NtQuerySystemInformation's classes answered here, past query.js's own. */
 const SYSTEM_KERNEL_DEBUGGER_INFORMATION = 35;
+/** SYSTEM_CACHE_INFORMATION, which NtSetSystemInformation sizes too. */
+const SYSTEM_FILECACHE_INFORMATION = 21;
 const SYSTEM_RANGE_START_INFORMATION = 50;
 const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX = 107;
 const SYSTEM_CPU_INFORMATION = 1;
@@ -675,6 +677,14 @@ export function createNtdllFunctions(host){
                 // present - the machine is not being debugged.
                 [SYSTEM_KERNEL_DEBUGGER_INFORMATION]: { read: ()=>Uint8Array.of(0, 1) },
                 ...processorClasses(),
+                // SYSTEM_CACHE_INFORMATION: the system file cache's sizes and
+                // working set. The engine keeps no cache of its own, so every
+                // figure is zero; a buffer short of the whole is given its
+                // first three ULONGs, as Windows 7 gives them. Its 32-bit
+                // layout only.
+                .../** @type {Record<number, import('./query.js').SystemClass>} */ (
+                    host.pointerSize === 8 ? {} : { [SYSTEM_FILECACHE_INFORMATION]: { head: 12,
+                        read: ()=>new Uint8Array(36) } }),
                 [SYSTEM_PROCESSOR_BRAND_STRING]: { read: ()=>{
                     const name = host.processorName ?? PROCESSOR_NAME;
                     const bytes = new Uint8Array(BRAND_STRING_BYTES + 1);
