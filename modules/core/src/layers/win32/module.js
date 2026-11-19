@@ -1595,6 +1595,7 @@ export function createWin32Module(){
             // CreateFile hand their handles and names on to them.
             const mailslots = createMailslots({
                 kernel,
+                pointerSize,
                 handles,
                 readMemory,
                 writeMemory,
@@ -3084,6 +3085,7 @@ export function createWin32Module(){
             // are its, answered as statuses (`native`).
             const threadPool = createThreadPool({
                 kernel,
+                pointerSize,
                 // A timer's due time and a wait's time-out are read
                 // from the caller's FILETIME, against the wall clock.
                 readMemory,
@@ -3916,6 +3918,7 @@ export function createWin32Module(){
                         registry: hive,
                     }),
                     ...createDriveFunctions({
+                        pointerSize,
                         readCString, readWideString, readMemory, writeMemory,
                         setLastError: setError,
                         drives: ()=>filesystem.drives(),
@@ -4486,6 +4489,7 @@ export function createWin32Module(){
 
                 // The adapters behind the sockets: one, on the network they reach.
                 'IPHLPAPI.dll': createIphlpapiFunctions({
+                    pointerSize,
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                     // MIB tables the caller frees with FreeMibTable.
                     allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc

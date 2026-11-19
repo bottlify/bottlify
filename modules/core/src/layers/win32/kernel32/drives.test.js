@@ -623,6 +623,15 @@ test('a volume is described the same by its handle, natively and by its root', (
     assert.equal(dword(bytes, 0x41c), 512);
     assert.equal(query.handler([0x44, 0x300, 0x400, 8, 4]), 0, 'FileFsDeviceInformation');
     assert.equal(dword(bytes, 0x400), 7, 'FILE_DEVICE_DISK');
+
+    // A 64-bit process's IO_STATUS_BLOCK: Information eight bytes in.
+    const wide = setup(['C'], {}, { handles, pointerSize: 8 });
+    const wideQuery = /** @type {any} */ (wide.fns.GetVolumeInformationByHandleW)
+        .natives.NtQueryVolumeInformationFile;
+    wide.bytes.fill(0xef, 0x300, 0x314);
+    assert.equal(wideQuery.handler([0x44, 0x300, 0x400, 8, 4]), 0);
+    assert.deepEqual([0, 4, 8, 12, 16].map(at=>dword(wide.bytes, 0x300 + at)),
+        [0, 0, 8, 0, 0xefefefef]);
     assert.equal(query.handler([0x44, 0x300, 0x400, 50, 2]) >>> 0, 0xc0000003);
     assert.equal(query.handler([0x45, 0x300, 0x400, 50, 1]) >>> 0, 0xc0000008);
     // A pipe is on the pipe device, which keeps nothing a volume does.

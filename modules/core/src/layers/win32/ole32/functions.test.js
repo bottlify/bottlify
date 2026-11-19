@@ -211,9 +211,11 @@ function fakeHost(){
  * @param {Object} [options]
  * @param {string[]} [options.interfaces]  Which IIDs the class answers to.
  * @param {boolean} [options.taskAllocator]  Whether the process has an IMalloc to give.
+ * @param {4 | 8} [options.pointerSize]  8 for a 64-bit process.
  */
-function setup({ interfaces = [IID_TEST], taskAllocator = true } = {}){
+function setup({ interfaces = [IID_TEST], taskAllocator = true, pointerSize = 4 } = {}){
     const host = fakeHost();
+    /** @type {any} */ (host).pointerSize = pointerSize;
     if (taskAllocator)
     {
         host.taskAllocator = createTaskAllocator({
@@ -1102,7 +1104,8 @@ function withGuestCalls(options){
     view.setUint32(GUEST_OBJECT, GUEST_VTABLE, true);
     for (let slot = 0; slot < 5; slot++)
     {
-        view.setUint32(GUEST_VTABLE + slot * 4, METHOD_BASE + slot * 0x10, true);
+        view.setUint32(GUEST_VTABLE + slot * (options?.pointerSize ?? 4),
+            METHOD_BASE + slot * 0x10, true);
     }
     /** @type {{ slot: number, args: number[] }[]} */
     const calls = [];
@@ -1188,6 +1191,47 @@ test('CoCreateInstanceEx makes the object once and asks it for every interface i
         [[CREATED, S_OK], [0, 0x80004002], [CREATED, S_OK]]);
         assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 16], [IID_ARG, RESULTS + 28]],
             'the first interface is the one it was made with, the rest asked of it');
+    });
+
+test('a 64-bit process\'s MULTI_QI holds its interface eight bytes in and its answer at 16',
+    async()=>{
+        const { fns, host, view } = withGuestCalls({ pointerSize: 8 });
+        await fns.CoRegisterClassObject.handler([GUEST_CLSID_ARG, GUEST_OBJECT, 1, 0, 0x1400]);
+        view.setUint32(CREATED, GUEST_VTABLE, true);
+        /** @type {number[][]} */
+        const asked = [];
+        /** @param {number} entry @param {number[]} args */
+        const call = async(entry, args)=>{
+            const slot = (entry - METHOD_BASE) / 0x10;
+            if (slot === 3)
+            {
+                view.setUint32(args[3], CREATED, true);
+                return S_OK;
+            }
+            if (slot === 0)
+            {
+                asked.push(args.slice(1));
+                if (args[1] === IID_OTHER_ARG)
+                {
+                    return 0x80004002;
+                }
+                view.setUint32(args[2], CREATED, true);
+            }
+            return S_OK;
+        };
+        /** @type {any} */ (host).call = call;
+        const RESULTS = 0x7000;
+        host.bytes.fill(0, RESULTS, RESULTS + 48);
+        [IID_ARG, IID_OTHER_ARG].forEach((iid, index)=>{
+            view.setUint32(RESULTS + index * 24, iid, true);
+            view.setUint32(RESULTS + index * 24 + 16, 0xbeef, true);
+        });
+        assert.equal(await fns.CoCreateInstanceEx.handler([GUEST_CLSID_ARG, 0, 1, 0, 2,
+            RESULTS]), 0x00080012, 'CO_S_NOTALLINTERFACES');
+        assert.deepEqual([0, 1].map(index=>[host.u32(RESULTS + index * 24 + 8),
+            host.u32(RESULTS + index * 24 + 16)]), [[CREATED, S_OK], [0, 0x80004002]]);
+        assert.equal(host.u32(RESULTS + 4), 0, 'the IID\'s upper half is not the interface');
+        assert.deepEqual(asked, [[IID_OTHER_ARG, RESULTS + 32]]);
     });
 
 test('a single-threaded apartment keeps one message filter and hands back the one replaced',

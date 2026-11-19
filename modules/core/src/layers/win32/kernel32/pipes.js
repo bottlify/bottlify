@@ -842,8 +842,8 @@ export function createNamedPipes(host){
      * @param {boolean} [skipPort]  finished in its own call on a handle that skips the port
      */
     function finishNative(owner, handle, block, io, thread, status, count, skipPort = false){
-        owner.writeMemory(block, dwordBytes(status));
-        owner.writeMemory(block + 4, dwordBytes(count));
+        overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)),
+            overlappedLayout(owner.pointerSize), block, status, count);
         if (io.event !== 0)
         {
             owner.setEvent?.(io.event);
@@ -965,8 +965,8 @@ export function createNamedPipes(host){
         }
         if (op.native)
         {
-            owner.writeMemory(op.out, dwordBytes(status));
-            owner.writeMemory(op.out + 4, dwordBytes(count));
+            overlappedResult((at, value)=>owner.writeMemory(at, dwordBytes(value)),
+                overlappedLayout(owner.pointerSize), op.out, status, count);
             // The thread is woken with the answer first: the APC queued
             // after must wait for its next alertable wait, not end this one.
             owner.kernel.wake(op.thread, status);
@@ -1738,8 +1738,7 @@ export function createNamedPipes(host){
             }
             if (native)
             {
-                writeDword(out, status);
-                writeDword(out + 4, count);
+                overlappedResult(writeDword, layout, out, status, count);
                 return status;
             }
             writeDwordIf(out, count);
@@ -1948,8 +1947,7 @@ export function createNamedPipes(host){
                 // its packet, as its read does (`startRead`).
                 host.posted?.(handle, written, STATUS.SUCCESS, io.context);
             }
-            writeDword(out, STATUS.SUCCESS);
-            writeDword(out + 4, written);
+            overlappedResult(writeDword, layout, out, STATUS.SUCCESS, written);
             return STATUS.SUCCESS;
         }
         // The last error is left as it was, as WriteFile and ReadFile leave
@@ -2003,8 +2001,7 @@ export function createNamedPipes(host){
             const count = into(got);
             if (native)
             {
-                writeDword(out, got.status);
-                writeDword(out + 4, count);
+                overlappedResult(writeDword, layout, out, got.status, count);
                 return got.status;
             }
             writeDwordIf(out, count);
@@ -2054,8 +2051,7 @@ export function createNamedPipes(host){
         }
         if (native)
         {
-            writeDword(out, STATUS.SUCCESS);
-            writeDword(out + 4, count);
+            overlappedResult(writeDword, layout, out, STATUS.SUCCESS, count);
             return STATUS.SUCCESS;
         }
         writeDwordIf(out, count);
@@ -2923,7 +2919,7 @@ export function createNamedPipes(host){
             return { parked: answer };
         }
         return { status: answer,
-            information: answer === STATUS.PENDING ? 0 : readDword(block + 4) };
+            information: answer === STATUS.PENDING ? 0 : readDword(block + layout.internalHigh) };
     };
 
     /** Whether a wait through the device with an absolute time-out was said. */

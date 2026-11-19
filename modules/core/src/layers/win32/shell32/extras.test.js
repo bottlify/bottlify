@@ -15,7 +15,7 @@ import { createShellExtras } from './extras.js';
  * @param {string[]} [paths]
  * @param {Record<string, { handler: (args: number[]) => any }>} [table]
  */
-function machine(paths = [], table = {}){
+function machine(paths = [], table = {}, pointerSize = 4){
     const memory = new Uint8Array(0x100000);
     let heap = 0x10000;
     const narrow = (/** @type {number} */ at)=>{
@@ -67,6 +67,7 @@ function machine(paths = [], table = {}){
     /** @type {any[]} */
     const published = [];
     const extras = createShellExtras({
+        pointerSize,
         readMemory: (at, length)=>memory.subarray(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
         readCString: at=>narrow(at),
@@ -234,6 +235,21 @@ test('a stock icon is in the shell\'s library, and an id out of range is no icon
             `cbSize ${size}`);
     }
     assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, 0]), 0x80070057 | 0);
+});
+
+test('a 64-bit process\'s SHSTOCKICONINFO has its handle eight bytes wide at offset 8', async()=>{
+    const m = machine([], {}, 8);
+    const info = 0x5000;
+    m.memory.fill(0x23, info, info + 0x240);
+    m.memory.set([536 & 0xff, 536 >>> 8, 0, 0], info);
+    assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, info]), 0x80070057 | 0,
+        'the 32-bit size is not this process\'s');
+    m.memory.set([544 & 0xff, 544 >>> 8, 0, 0], info);
+    assert.equal(await m.extras.SHGetStockIconInfo.handler([3, 0, info]), 0);
+    assert.deepEqual([m.u32(info + 8), m.u32(info + 12)], [0, 0], 'hIcon whole');
+    assert.equal(m.u32(info + 16) | 0, -1, 'no system image index');
+    assert.equal(m.u32(info + 20), 3);
+    assert.equal(m.wide(info + 24), 'C:\\WINDOWS\\system32\\shell32.dll');
 });
 
 test('the process\'s app id is the one set, and a window\'s property store keeps values', async()=>{

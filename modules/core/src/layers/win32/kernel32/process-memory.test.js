@@ -27,13 +27,14 @@ const PAGE_GUARD = 0x100;
  *
  * @param {number[]} protections
  */
-function processOf(protections){
+function processOf(protections, pointerSize = 4){
     const bytes = new Uint8Array(protections.length * 0x1000);
     /** @type {number[]} */
     const errors = [];
     /** @type {number[]} */
     const patched = [];
     const memory = createProcessMemory({
+        pointerSize,
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         patchMemory: (address, data)=>{
@@ -193,4 +194,22 @@ test('the child answers its own copies over its own pages', ()=>{
     assert.equal(view.getUint32(0x900, true), 0);
     assert.equal(write.handler([0x1000, 0x800, 4, 4, 1, 0x900]), 0xc0000005,
         'WriteProcessMemory\'s refusal of read-only memory');
+});
+
+test('a 64-bit process is told its counts whole, a SIZE_T eight bytes wide', ()=>{
+    // A crash handler compares the count with what it asked: with only the
+    // low dword written, the upper half was what its variable held before.
+    const { memory, native, bytes, view } = processOf([PAGE_READWRITE, PAGE_READWRITE], 8);
+    bytes.set([1, 2, 3, 4], 0x100);
+    const count = 0x800;
+    view.setBigUint64(count, 0xccccccccccccccccn, true);
+    assert.equal(memory.ReadProcessMemory.handler([SELF, 0x100, 0x1100, 4, count]), 1);
+    assert.equal(view.getBigUint64(count, true), 4n);
+    assert.deepEqual([...bytes.subarray(0x1100, 0x1104)], [1, 2, 3, 4]);
+    view.setBigUint64(count, 0xccccccccccccccccn, true);
+    assert.equal(memory.WriteProcessMemory.handler([SELF, 0x1200, 0x100, 4, count]), 1);
+    assert.equal(view.getBigUint64(count, true), 4n);
+    view.setBigUint64(count, 0xccccccccccccccccn, true);
+    assert.equal(native.read([SELF, 0x100, 0x1100, 2, count]), 0);
+    assert.equal(view.getBigUint64(count, true), 2n);
 });

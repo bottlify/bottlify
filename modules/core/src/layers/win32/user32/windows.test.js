@@ -10,7 +10,7 @@ import { createMessageQueue } from './messages.js';
 import {
     DEVMODEA, DM_PELSHEIGHT, DM_PELSWIDTH, MSG, RECT, WNDCLASSA, WNDCLASSEXA,
 } from './structs.js';
-import { createWindowFunctions, endEllipsis, watchDispatch } from './windows.js';
+import { createWindowFunctions, endEllipsis, lowLevelLayout, watchDispatch } from './windows.js';
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { intersectAreas } from './paint.js';
@@ -8209,3 +8209,19 @@ test('another thread disabling a window leaves its focus where it was', ()=>{
     caller.current = maker;
     assert.equal(fns.GetFocus.handler(), hwnd);
 });
+
+test('a 64-bit process\'s low-level hook structures hold dwExtraInfo on an eight-byte boundary',
+    ()=>{
+        // winuser.h under _WIN64: MSLLHOOKSTRUCT is 32 bytes with dwExtraInfo at
+        // 24, KBDLLHOOKSTRUCT 24 bytes with it at 16; a 32-bit process's are 24
+        // and 20 bytes, the fields one after another.
+        const mouse = new Uint8Array(new Uint32Array([10, 20, 0x780000, 1, 99, 0xfeed]).buffer);
+        const keys = new Uint8Array(new Uint32Array([0x41, 0x1e, 0x10, 99, 0xfeed]).buffer);
+        assert.equal(lowLevelLayout(14, mouse, false), mouse);
+        assert.equal(lowLevelLayout(13, keys, false), keys);
+        /** @param {Uint8Array} bytes */
+        const dwords = bytes=>[...new Uint32Array(bytes.slice().buffer)];
+        assert.deepEqual(dwords(lowLevelLayout(14, mouse, true)),
+            [10, 20, 0x780000, 1, 99, 0, 0xfeed, 0]);
+        assert.deepEqual(dwords(lowLevelLayout(13, keys, true)), [0x41, 0x1e, 0x10, 99, 0xfeed, 0]);
+    });

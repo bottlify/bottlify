@@ -2197,6 +2197,7 @@ export function createShellFunctions(host){
             readCString: host.readCString, readWideString: host.readWideString,
             allocate: host.allocate, free: host.free, library: host.library,
             publish: host.publish, divergence: host.divergence,
+            pointerSize: host.pointerSize,
         }, {
             /** @returns {Record<string, { handler: (args: number[]) => any }>} */
             get table(){

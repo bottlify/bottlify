@@ -17,6 +17,7 @@
  * @property {(name: string, fn: { argBytes: number, handler: Function }) => number} register
  *           Puts a host function behind a guest address: the loop's trap.
  * @property {(bytes: number) => number} allocate
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  *           Guest memory for what a program is handed as a handle, which on
  *           Windows is an address too, and 0 when there is none.
  * @property {(bytes: number) => number} [allocateCode]

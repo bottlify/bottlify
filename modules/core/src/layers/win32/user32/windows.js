@@ -337,6 +337,29 @@ const lowLevelMessage = (kind, message)=>{
 };
 
 /**
+ * A low-level hook's structure as its process lays it out. The structures are
+ * put together as a 32-bit process's, dwords one after another with
+ * dwExtraInfo last; in a 64-bit process dwExtraInfo is a ULONG_PTR on an
+ * eight-byte boundary - 24 bytes into an MSLLHOOKSTRUCT of 32, 16 into a
+ * KBDLLHOOKSTRUCT of 24 - its upper half zero.
+ *
+ * @param {number} type  WH_MOUSE_LL or WH_KEYBOARD_LL
+ * @param {Uint8Array} bytes @param {boolean} wide
+ */
+export const lowLevelLayout = (type, bytes, wide)=>{
+    if (!wide)
+    {
+        return bytes;
+    }
+    const extraFrom = bytes.length - 4;
+    const extraAt = type === WH_MOUSE_LL ? 24 : 16;
+    const laid = new Uint8Array(extraAt + 8);
+    laid.set(bytes.subarray(0, extraFrom));
+    laid.set(bytes.subarray(extraFrom), extraAt);
+    return laid;
+};
+
+/**
  * The MSLLHOOKSTRUCT or KBDLLHOOKSTRUCT a device's message is shown to a
  * low-level hook with. A keyboard hook is told which shift, control or alt:
  * the right shift by its scan code, the right control and alt by the
@@ -4005,7 +4028,7 @@ export function createWindowFunctions(host){
         }
         const call = host.call;
         const allocate = host.allocate;
-        const bytes = structure();
+        const bytes = lowLevelLayout(type, structure(), host.pointerSize === 8);
         /** @param {unknown} who */
         const run = who=>{
             const at = allocate(bytes.length);

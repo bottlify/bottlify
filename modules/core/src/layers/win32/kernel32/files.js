@@ -384,7 +384,8 @@ const FILE_INFO = Object.freeze({ BASIC: 0, RENAME: 3, DISPOSITION: 4, ALLOCATIO
 /**
  * Their least sizes on a 32-bit process: FILE_BASIC_INFO's four LARGE_INTEGERs
  * and a DWORD, padded; FILE_RENAME_INFO's flag word, root handle, name length
- * and first character.
+ * and first character - 24 bytes in a 64-bit process, whose root handle is
+ * eight bytes at offset 8 (`renameLayout`).
  *
  * @type {Map<number, number>}
  */
@@ -893,6 +894,16 @@ export function createFileFunctions(host){
      */
     const statusBlock = (block, status, information)=>
         overlappedResult(writeDword, layout, block, status, information >>> 0);
+    /**
+     * FILE_RENAME_INFO and FILE_LINK_INFORMATION in this process's layout: a
+     * flag word, RootDirectory a handle wide on its own boundary, then the
+     * name's length and the name.
+     */
+    const renameLayout = layout.word === 8 ? { root: 8, length: 16, name: 20, size: 24 }
+        : { root: 4, length: 8, name: 12, size: 16 };
+    /** @param {number} type  a FILE_INFO class @returns {number | undefined} its least size */
+    const leastSize = type=>(type === FILE_INFO.RENAME || type === FILE_INFO.RENAME_EX
+        ? renameLayout.size : FILE_INFO_SIZES.get(type));
     const files = withSystemLibraries(host.files, host.systemLibraries,
         { programs: host.systemPrograms });
 
@@ -2955,15 +2966,18 @@ export function createFileFunctions(host){
      * @returns {{ root: number, name: string } | null}
      */
     const givenName = attributes=>{
-        const root = readDword(attributes + 4);
-        const string = readDword(attributes + 8);
+        // RootDirectory and ObjectName follow Length, each a pointer wide and
+        // Length padded to one; a UNICODE_STRING's Buffer lies a pointer in.
+        const word = layout.word;
+        const root = readDword(attributes + word);
+        const string = readDword(attributes + 2 * word);
         if (string === 0)
         {
             return null;
         }
         const descriptor = host.readMemory(string, 8);
         const length = descriptor[0] | (descriptor[1] << 8);
-        const buffer = readDword(string + 4);
+        const buffer = readDword(string + word);
         const raw = buffer === 0 || length === 0 ? new Uint8Array(0)
             : host.readMemory(buffer, length & ~1);
         let name = '';
@@ -4479,14 +4493,16 @@ export function createFileFunctions(host){
                 // file on the volume.
                 if ((kind >>> 0) === FILE_COMPLETION_INFORMATION)
                 {
-                    if ((length >>> 0) < 8)
+                    // FILE_COMPLETION_INFORMATION: the port and the key, each a
+                    // pointer wide.
+                    if ((length >>> 0) < 2 * layout.word)
                     {
                         return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     const held = host.handles.typeOf?.(handle >>> 0) ?? '';
                     const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held);
                     const bound = fileObject && host.ports?.bind?.(handle >>> 0,
-                        readDword(from >>> 0), readDword((from >>> 0) + 4));
+                        readDword(from >>> 0), readDword((from >>> 0) + layout.word));
                     // A handle no port takes is refused before any I/O: the
                     // status block is left as it was.
                     return bound === 'synchronous' ? STATUS_INVALID_PARAMETER
@@ -4503,7 +4519,7 @@ export function createFileFunctions(host){
                 if ((kind >>> 0) === FILE_LINK_INFORMATION
                     || (kind >>> 0) === FILE_LINK_INFORMATION_EX)
                 {
-                    if ((length >>> 0) < 16)
+                    if ((length >>> 0) < renameLayout.size)
                     {
                         return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
@@ -4521,7 +4537,7 @@ export function createFileFunctions(host){
                         `information class ${kind >>> 0} is not kept`);
                     return settled(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
                 }
-                const size = type !== undefined ? /** @type {number} */ (FILE_INFO_SIZES.get(type))
+                const size = type !== undefined ? /** @type {number} */ (leastSize(type))
                     : (kind >>> 0) === FILE_MODE_SET ? 4 : 8;
                 if ((length >>> 0) < size)
                 {
@@ -4573,9 +4589,12 @@ export function createFileFunctions(host){
                 }
                 const error = informationError(file, what, /** @type {number} */ (type), bytes,
                     // A bare name with no root renames the file where it is.
-                    asked=>(view.getUint32(4, true) === 0 && !asked.includes(SEPARATOR)
-                        ? renameTarget(file.path, asked)
-                        : resolveNative(view.getUint32(4, true), asked).path ?? null),
+                    asked=>{
+                        const root = view.getUint32(renameLayout.root, true);
+                        return root === 0 && !asked.includes(SEPARATOR)
+                            ? renameTarget(file.path, asked)
+                            : resolveNative(root, asked).path ?? null;
+                    },
                     handle >>> 0);
                 /** @param {InformationError} code */
                 const answer = code=>settled(block >>> 0, typeof code !== 'number' ? code.status
@@ -4759,7 +4778,7 @@ export function createFileFunctions(host){
             if (mask !== 0)
             {
                 const units = readDword(mask) & 0xffff;
-                const buffer = readDword(mask + 4);
+                const buffer = readDword(mask + layout.word);
                 const raw = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, units & ~1);
                 pattern = '';
                 for (let at = 0; at + 1 < raw.length; at += 2)
@@ -4971,13 +4990,14 @@ export function createFileFunctions(host){
             case FILE_INFO.RENAME_EX: {
                 const replace = type === FILE_INFO.RENAME ? bytes[0] !== 0
                     : (view.getUint32(0, true) & FILE_RENAME_FLAG_REPLACE_IF_EXISTS) !== 0;
-                const nameBytes = view.getUint32(8, true);
-                if (12 + nameBytes > bytes.length || nameBytes === 0)
+                const first = renameLayout.name;
+                const nameBytes = view.getUint32(renameLayout.length, true);
+                if (first + nameBytes > bytes.length || nameBytes === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
                 let asked = '';
-                for (let at = 12; at + 1 < 12 + nameBytes; at += 2)
+                for (let at = first; at + 1 < first + nameBytes; at += 2)
                 {
                     asked += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
                 }
@@ -5031,14 +5051,15 @@ export function createFileFunctions(host){
         const view = new DataView(record.buffer);
         const flags = extended ? view.getUint32(0, true)
             : record[0] !== 0 ? FILE_LINK_REPLACE_IF_EXISTS : 0;
-        const root = view.getUint32(4, true);
-        const nameBytes = view.getUint32(8, true);
-        if (nameBytes === 0 || 12 + nameBytes > record.length)
+        const first = renameLayout.name;
+        const root = view.getUint32(renameLayout.root, true);
+        const nameBytes = view.getUint32(renameLayout.length, true);
+        if (nameBytes === 0 || first + nameBytes > record.length)
         {
             return STATUS_INVALID_PARAMETER;
         }
         let asked = '';
-        for (let at = 12; at + 1 < 12 + nameBytes; at += 2)
+        for (let at = first; at + 1 < first + nameBytes; at += 2)
         {
             asked += String.fromCharCode(record[at] | record[at + 1] << 8);
         }
@@ -5113,7 +5134,7 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_INVALID_HANDLE);
         }
-        const size = FILE_INFO_SIZES.get(type);
+        const size = leastSize(type);
         if (size === undefined)
         {
             return fail(ERROR_INVALID_PARAMETER);

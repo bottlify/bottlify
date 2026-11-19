@@ -582,6 +582,7 @@ export function createSpawnFunctions(host){
     /** Reading and writing a process's memory, this one or a child's. */
     const processMemory = createProcessMemory({
         readMemory: host.readMemory,
+        pointerSize: host.pointerSize,
         writeMemory: host.writeMemory,
         ...host.patchMemory ? { patchMemory: host.patchMemory } : {},
         // Without VirtualQuery's answers every mapped page is taken as
