@@ -69,6 +69,22 @@ const DISPINFO = Object.freeze({ lpszText: 12, szText: 16 });
 
 const TTF_IDISHWND = 0x0001;
 const TTS_NOPREFIX = 0x02;
+const TTS_BALLOON = 0x40;
+const WS_POPUP = 0x80000000;
+const WS_CHILD = 0x40000000;
+const WS_CLIPSIBLINGS = 0x04000000;
+const WS_MAXIMIZE = 0x01000000;
+const WS_BORDER = 0x00800000;
+const WS_DLGFRAME = 0x00400000;
+const WS_EX_TOOLWINDOW = 0x00000080;
+/** The space between a tip's text and its frame, inside the margins TTM_SETMARGIN sets. */
+const TEXT_MARGIN = 2;
+/** A balloon's: wider, and its stem above the text. */
+const BALLOON_MARGIN = 10;
+const BALLOON_STEM = 13;
+/** A title's icon: the small icon size; TTI_NONE is a title with none. */
+const SMALL_ICON = 16;
+const TTI_NONE = 0;
 const TTDT_AUTOMATIC = 0;
 const TTDT_RESHOW = 1;
 const TTDT_AUTOPOP = 2;
@@ -231,13 +247,34 @@ export function createTooltipProcedure(host, tk, resources){
 
     /**
      * Whether a TOOLINFO of this spelling is one the control takes: the wide
-     * one is checked against the sizes this version knows, the ANSI one is
-     * read as version 1 whatever its size says.
+     * one is checked against the sizes its version knows (version 6 knows
+     * the third, with lpReserved), the ANSI one is read as version 1 whatever
+     * its size says.
      *
-     * @param {number} info @param {boolean} wide
+     * @param {number} info @param {boolean} wide @param {number} [version]
      */
-    const acceptable = (info, wide)=>info >>> 0 !== 0
-        && (!wide || read32(info + TOOLINFO.cbSize) <= TOOLINFO.V2);
+    const acceptable = (info, wide, version = 5)=>info >>> 0 !== 0
+        && (!wide || read32(info + TOOLINFO.cbSize) <= (version >= 6 ? TOOLINFO.V3 : TOOLINFO.V2));
+
+    /**
+     * The room a title takes beside and above a version 5 tip's text: its
+     * icon's column, when it has one, and its row, a line of the tip's font
+     * or the icon, whichever is taller. The title's length does not count:
+     * the row is as wide as the tip.
+     *
+     * @param {any} record @param {any} held @returns {[number, number]}
+     */
+    const titleRoom = (record, held)=>{
+        if (held.title === '')
+        {
+            return [0, 0];
+        }
+        const icon = held.icon !== TTI_NONE ? SMALL_ICON + TEXT_MARGIN : 0;
+        const { hdc } = host.contextOn(record);
+        const line = hdc !== 0 && host.draw ? host.draw.measure(hdc, 'M').height : SMALL_ICON;
+        host.endPaint(record, hdc);
+        return [icon, Math.max(line, held.icon !== TTI_NONE ? SMALL_ICON : 0) + TEXT_MARGIN];
+    };
 
     /** @param {any} record @param {number} info @param {boolean} wide @returns {Tool} */
     const readTool = (record, info, wide)=>({
@@ -361,6 +398,15 @@ export function createTooltipProcedure(host, tk, resources){
         switch (message.message)
         {
             case WM_CREATE:
+                // A tip is a bordered popup of its own whatever it was made as:
+                // never a child, maximised or captioned, and a tool window; a
+                // balloon draws its own outline (Wine's tooltips tests,
+                // test_create_tooltip).
+                record.style = (((record.style & ~(WS_CHILD | WS_MAXIMIZE | WS_BORDER
+                    | WS_DLGFRAME)) | WS_POPUP | WS_BORDER | WS_CLIPSIBLINGS)
+                    & ~((record.style & TTS_BALLOON) !== 0 ? WS_BORDER : 0)) >>> 0;
+                record.exStyle = (record.exStyle | WS_EX_TOOLWINDOW) >>> 0;
+                host.frameChanged?.(record);
                 return tk.common(record, message, thread);
             case WM_GETTEXTLENGTH:
             case WM_GETTEXT:
@@ -371,7 +417,7 @@ export function createTooltipProcedure(host, tk, resources){
                 return 0;
             case TTM.ADDTOOLA:
             case TTM.ADDTOOLW: {
-                if (!acceptable(lParam, wide))
+                if (!acceptable(lParam, wide, record.controlsVersion ?? 5))
                 {
                     return 0;
                 }
@@ -380,7 +426,8 @@ export function createTooltipProcedure(host, tk, resources){
             }
             case TTM.DELTOOLA:
             case TTM.DELTOOLW: {
-                const index = !acceptable(lParam, wide) ? -1 : find(record, lParam);
+                const index = !acceptable(lParam, wide, record.controlsVersion ?? 5) ? -1
+                    : find(record, lParam);
                 if (index >= 0)
                 {
                     held.tools.splice(index, 1);
@@ -409,7 +456,8 @@ export function createTooltipProcedure(host, tk, resources){
             }
             case TTM.SETTOOLINFOA:
             case TTM.SETTOOLINFOW: {
-                const index = !acceptable(lParam, wide) ? -1 : find(record, lParam);
+                const index = !acceptable(lParam, wide, record.controlsVersion ?? 5) ? -1
+                    : find(record, lParam);
                 if (index >= 0)
                 {
                     held.tools[index] = readTool(record, lParam, wide);
@@ -554,8 +602,32 @@ export function createTooltipProcedure(host, tk, resources){
             case TTM.RELAYEVENT:
             case TTM.WINDOWFROMPOINT:
             case TTM.GETBUBBLESIZE:
-            case TTM.ADJUSTRECT:
                 return 0;
+            case TTM.ADJUSTRECT: {
+                // The text's rectangle and the tip's window around it differ by
+                // the frame and the text's own margin: TRUE grows a text
+                // rectangle to its window, FALSE shrinks a window to its text.
+                // Common Controls 5 also counts the margins TTM_SETMARGIN set
+                // and a title's row and icon; version 6 counts neither.
+                if (lParam >>> 0 === 0)
+                {
+                    return 0;
+                }
+                const frame = (record.style & WS_BORDER) !== 0 ? 1 : 0;
+                const balloon = (record.style & TTS_BALLOON) !== 0;
+                const classic = (record.controlsVersion ?? 5) < 6;
+                const title = classic ? titleRoom(record, held) : [0, 0];
+                const sides = held.margin.map((/** @type {number} */ side,
+                    /** @type {number} */ at)=>(classic ? side : 0) + frame + (balloon
+                    ? BALLOON_MARGIN + (at === 1 ? BALLOON_STEM : 0) : TEXT_MARGIN)
+                    + (at === 0 ? title[0] : at === 1 ? title[1] : 0));
+                const sign = wParam !== 0 ? 1 : -1;
+                const rect = [0, 4, 8, 12].map(at=>read32(lParam + at) | 0);
+                [rect[0] - sign * sides[0], rect[1] - sign * sides[1],
+                    rect[2] + sign * sides[2], rect[3] + sign * sides[3]]
+                    .forEach((value, index)=>write32(lParam + index * 4, value));
+                return 1;
+            }
             default:
                 return tk.common(record, message, thread);
         }

@@ -19,6 +19,7 @@ import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventState
     releaseMutexCode, waitOneCode } from './wait-one.js';
 import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
 import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
+import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -40,6 +41,9 @@ import { COMPILED as SEMAPHORE_LONG } from './semaphore-guest.x64.js';
  * @typedef {{ register: (name: string, fn: { argBytes: number, handler: Function }) => number }}
  *     PollBuilder
  */
+
+/** The console's own handles (`console.js`), which duplicate as themselves. */
+const CONSOLE_HANDLES = new Set([HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR]);
 
 /** Waits with this timeout never give up. */
 const INFINITE = 0xffffffff;
@@ -171,6 +175,8 @@ const DUPLICATE_SAME_ACCESS = 0x00000002;
  *           Whether winsock holds a socket by this number, which the handle
  *           flags are kept for as for a kernel object's.
  * @property {(node: any) => void} [retainNode]
+ * @property {(node: any) => void} [closeNode]  gives a hold back, closing the node
+ *           with the last
  *           One more hold on an open file's node, given back when the handle
  *           that holds it is closed: what a duplicate of a file or mapping
  *           handle takes, so closing its source leaves the file open.
@@ -1514,6 +1520,14 @@ export function createThreadingFunctions(host){
                     ]));
                     return 1;
                 }
+                // The console's own handles are the console wherever they are
+                // held: a duplicate is the same handle, as Windows 7 hands a
+                // console handle (a pseudo value) back.
+                if (CONSOLE_HANDLES.has(source >>> 0) && target !== 0)
+                {
+                    host.writeMemory(target >>> 0, new Uint8Array([source >>> 0, 0, 0, 0]));
+                    return 1;
+                }
                 const held = object(source >>> 0);
                 const kind = kindOf(source >>> 0);
                 if (!held || target === 0 || kind === null)
@@ -1540,9 +1554,16 @@ export function createThreadingFunctions(host){
                 // duplicate onto a mutex is a real handle onto it, the same
                 // as the one DuplicateHandle was given.
                 host.namedObjects.reference(held);
+                // A handle protected from close is not closed by
+                // DUPLICATE_CLOSE_SOURCE either: both stay, as on Windows.
                 const closesSource = (options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0
-                    && !pseudo(source);
-                if (held.node && (kind === 'file' || kind === 'mapping') && !closesSource)
+                    && !pseudo(source)
+                    && ((handleFlags.get(untagged(source >>> 0)) ?? 0)
+                        & HANDLE_FLAG_PROTECT_FROM_CLOSE) === 0;
+                // Into another process, an open file is that process's own open
+                // of it, which its table makes (`adoptFile`); here, one more hold.
+                if (held.node && (kind === 'mapping' || (kind === 'file' && !into))
+                    && !closesSource)
                 {
                     host.retainNode?.(held.node);
                 }
@@ -1552,7 +1573,19 @@ export function createThreadingFunctions(host){
                 {
                     held.retain();
                 }
-                const duplicate = (into ?? kernel.handles).open(kind, held, rights.granted);
+                // Within the process, a duplicate that closes its source takes
+                // the source's slot, the first free one, as Windows hands it.
+                const reused = closesSource && !into && Boolean(kernel.handles.adopt)
+                    && kernel.handles.close(source >>> 0) !== null
+                    && kernel.handles.adopt(source >>> 0, kind, held, rights.granted);
+                const duplicate = reused ? source >>> 0
+                    : (into ?? kernel.handles).open(kind, held, rights.granted);
+                // A file the other process could not open as its own.
+                if (duplicate === 0)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
                 if (!into)
                 {
                     handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
@@ -1564,10 +1597,16 @@ export function createThreadingFunctions(host){
                 ]));
                 // A pseudo-handle cannot be closed: duplicating one and closing
                 // the source leaves both usable, as it does on Windows.
-                if (closesSource)
+                if (closesSource && !reused)
                 {
                     kernel.handles.close(source >>> 0);
                     host.namedObjects.forget(held);
+                    // The other process opened the file as its own: this
+                    // process's hold goes with its handle.
+                    if (into && kind === 'file' && held.node)
+                    {
+                        host.closeNode?.(held.node);
+                    }
                 }
                 return 1;
             },

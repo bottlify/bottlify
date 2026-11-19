@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
+import { createConsoleFunctions } from './kernel32/console.js';
 import { createThreadingFunctions, listProcesses } from './kernel32/threading.js';
 import { createFiberFunctions } from './kernel32/fibers.js';
 import { createFiberLocalStorage } from './kernel32/fls.js';
@@ -840,11 +840,24 @@ export function createWin32Module(){
                         return null;
                     }
                 },
+                // An open file comes here as this process's own open of it
+                // (`adoptFile`), sharing the other's file pointer.
                 open: (/** @type {string} */ type, /** @type {any} */ object,
                     /** @type {number | null} */ access = null)=>
-                    kernel.handles.open(type, object, access),
+                {
+                    const mine = type === 'file' ? adoptFile(object) : object;
+                    return mine ? kernel.handles.open(type, mine, access) : 0;
+                },
                 access: (/** @type {number} */ handle)=>kernel.handles.access(handle),
-                close: (/** @type {number} */ handle)=>kernel.handles.close(handle),
+                close: (/** @type {number} */ handle)=>{
+                    const type = kernel.handles.typeOf(handle);
+                    const closed = kernel.handles.close(handle);
+                    if (type === 'file' && closed?.node)
+                    {
+                        volume.close(closed.node);
+                    }
+                    return closed;
+                },
             };
             system?.processTables?.set(processId, table);
             // Only its own: a later process may have been given the same id.
@@ -1175,27 +1188,38 @@ export function createWin32Module(){
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
-            // A child whose parent handed it files for its output and error
-            // writes there, at the position it shares with the parent's handle,
-            // rather than to the console.
-            /** @type {{ output?: { path: string, position: number },
-             *           error?: { path: string, position: number } } | undefined} */
-            const standardFiles = config?.standardFiles;
-            /** @param {number} handle @param {string} text */
-            const sink = (handle, text)=>{
-                const file = handle === HANDLE_STDOUT ? standardFiles?.output
-                    : handle === HANDLE_STDERR ? standardFiles?.error : undefined;
-                // The parent's own open file, handed on: written on the terms
-                // it was opened with, whatever another open would be refused.
-                const node = file && volume.open(file.path, { write: true, inherited: true });
-                if (!file || !node)
+            /**
+             * Another process's open file, as this process's own open of it:
+             * the same file on the terms that open agreed, admitted without
+             * checking them again (the volume's `inherited`), its file pointer
+             * the other's, as one file object's handles share it on Windows.
+             * Null when the file cannot be opened here.
+             *
+             * @param {any} open  the other process's handle object
+             * @returns {any}
+             */
+            const adoptFile = open=>{
+                const node = open?.terms && typeof open.path === 'string'
+                    ? volume.open(open.path, { ...open.terms, inherited: true }) : null;
+                if (!node)
                 {
-                    toConsole(handle, text);
-                    return;
+                    return null;
                 }
-                file.position += volume.write(node, file.position, encodeAnsi(text));
-                volume.close(node);
+                const mine = Object.create(open);
+                mine.node = node;
+                Object.defineProperty(mine, 'position', { enumerable: true,
+                    get: ()=>open.position,
+                    set: (/** @type {number} */ at)=>{
+                        open.position = at;
+                    } });
+                return mine;
             };
+            // What a process writes to its console's handles. A file its
+            // parent handed it as a standard handle is a handle it inherited
+            // (`adoptFile`), which its GetStdHandle answers and WriteFile
+            // writes; what reaches here is the console's.
+            /** @param {number} handle @param {string} text */
+            const sink = (handle, text)=>toConsole(handle, text);
             // The registry is the run's: the first process's, handed to every
             // process after it rather than copied into each, so a key a parent
             // writes is there for its child the moment it is written, and the
@@ -1289,6 +1313,8 @@ export function createWin32Module(){
              */
             const threadCalls = createThreadCalls({
                 long: pointerSize === 8,
+                // Its fibre-local block, before its libraries read it.
+                starting: ()=>fiberStorage.threadStarts(),
                 register: (name, fn)=>bridge.register(name, fn),
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
@@ -1325,22 +1351,37 @@ export function createWin32Module(){
                     other !== thread && other.state !== 'terminated');
                 // Its running fiber's fibre-local values are called back
                 // first, on the thread, as a C runtime frees a thread's data in
-                // that callback (`kernel32/fls.js`); not for the process's end.
-                // Its own call has returned by now, so each is called as the
-                // loader calls a DllMain below: on the thread's resting stack.
+                // that callback (`kernel32/fls.js`), and the block is let go
+                // once the libraries are told. Its own call has returned by
+                // now, so each is called as the loader calls a DllMain below:
+                // on the thread's resting stack. The process's end does the
+                // same in detachAndEnd.
                 const fibreLocal = others ? fiberStorage.current() : 0;
                 if (fibreLocal !== 0)
                 {
                     const teb = thread.tebAddress >>> 0;
-                    return Promise.resolve().then(()=>fiberStorage.release(fibreLocal, { teb,
-                        call: (entry, args)=>callGuarded({ entry, args, thread, failed: 0,
-                            report: exception=>config?.divergence?.('FlsCallback',
-                                `exception 0x${exception} freeing a thread's fibre-local`
-                                + ' values at its end, taken by the loader') }) }))
-                        .then(()=>tellAndEnd(thread, code, others) ?? 0);
+                    return callFibreLocalBack(fibreLocal, thread)
+                        .then(()=>tellAndEnd(thread, code, others) ?? 0)
+                        .then(ended=>{
+                            fiberStorage.forget(fibreLocal, teb);
+                            return ended;
+                        });
                 }
                 return tellAndEnd(thread, code, others);
             };
+            /**
+             * A thread's fibre-local values called back at its end, on it, the
+             * block kept for its libraries' DllMain to read NULL in.
+             *
+             * @param {number} block @param {any} thread
+             * @returns {Promise<void>}
+             */
+            const callFibreLocalBack = (block, thread)=>Promise.resolve().then(()=>
+                fiberStorage.release(block, { teb: thread.tebAddress >>> 0, keep: true,
+                    call: (entry, args)=>callGuarded({ entry, args, thread, failed: 0,
+                        report: exception=>config?.divergence?.('FlsCallback',
+                            `exception 0x${exception} freeing a thread's fibre-local`
+                            + ' values at its end, taken by the loader') }) }));
             /**
              * endThread's rest, once the fibre-local values are called back.
              *
@@ -1513,9 +1554,44 @@ export function createWin32Module(){
             const inheritedObjects = only=>[...handleFlags].flatMap(([handle, flags])=>{
                 const type = (flags & 1) !== 0 && (only === null || only.includes(handle))
                     ? kernel.handles.typeOf(handle) : null;
+                if (type === 'file')
+                {
+                    return [inheritedFile(handle)];
+                }
                 return type !== null && INHERITED_KINDS.has(type)
                     ? [{ handle, type, object: kernel.handles.resolve(handle) }] : [];
             });
+            /**
+             * An open file a child inherits: Windows duplicates the handle into
+             * the child at CreateProcess, so a parent that closes its own at
+             * once leaves the file open. A hold is taken here and kept until the
+             * child has the file open as its own (`adoptFile`), or never starts
+             * (`dropUnclaimed`), as a pipe end's is.
+             *
+             * @param {number} handle
+             * @returns {import('./kernel32/pipes.js').InheritedEnd & { access: number | null }}
+             */
+            const inheritedFile = handle=>{
+                const open = kernel.handles.resolve(handle);
+                if (open?.node)
+                {
+                    volume.retain(open.node);
+                }
+                /** @type {import('./kernel32/pipes.js').InheritedEnd & { access: number | null }} */
+                const entry = { handle, type: 'file', object: open,
+                    access: kernel.handles.access?.(handle) ?? null, held: true,
+                    drop(){
+                        if (entry.held)
+                        {
+                            entry.held = false;
+                            if (open?.node)
+                            {
+                                volume.close(open.node);
+                            }
+                        }
+                    } };
+                return entry;
+            };
             const pipes = createNamedPipes({
                 pointerSize,
                 kernel,
@@ -1582,12 +1658,31 @@ export function createWin32Module(){
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
                     pipes.adopted(inherited.handle, inherited.object, inherited);
+                    // Inheritable again, as GetHandleInformation reads it.
+                    handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
+                }
+                // The parent's open file, under its number and rights: the
+                // reference its CreateProcess took is this handle's.
+                else if (inherited.type === 'file')
+                {
+                    const mine = adoptFile(inherited.object);
+                    if (mine && kernel.handles.adopt(inherited.handle, 'file', mine,
+                        inherited.access ?? null))
+                    {
+                        handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
+                    }
+                    else if (mine)
+                    {
+                        volume.close(mine.node);
+                    }
+                    // The hold its parent's CreateProcess kept until now.
+                    /** @type {any} */ (inherited).drop?.();
                 }
                 // An object inherited is inheritable again, as the parent's was.
                 else if (INHERITED_KINDS.has(inherited.type)
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
-                    handleFlags.set(inherited.handle, 1);
+                    handleFlags.set(inherited.handle, /** @type {any} */ (inherited).flags ?? 1);
                 }
             }
 
@@ -3255,7 +3350,12 @@ export function createWin32Module(){
                         kernel.exitThread(thread, code);
                     }
                 }
-                return tellDetach(attached, self).then(()=>{
+                // The ending thread's fibre-local values are called back before
+                // the images hear DLL_PROCESS_DETACH, as at a thread's end.
+                const fibreLocal = self ? fiberStorage.current() : 0;
+                const calledBack = fibreLocal !== 0 ? callFibreLocalBack(fibreLocal, self)
+                    : Promise.resolve();
+                return calledBack.then(()=>tellDetach(attached, self)).then(()=>{
                     exitCode = code;
                     processEnded();
                     return 0;
@@ -3635,6 +3735,8 @@ export function createWin32Module(){
                         isSocket: handle=>sockets.isValid(handle),
                         /** @param {any} node */
                         retainNode: node=>volume.retain(node),
+                        /** @param {any} node */
+                        closeNode: node=>volume.close(node),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
                         /** @param {number} bytes */
                         allocate: bytes=>heap.allocate(bytes),
@@ -3930,6 +4032,9 @@ export function createWin32Module(){
                     }),
                     ...createMappingFunctions({
                         readMemory,
+                        // A child's views, unmapped where the child runs.
+                        processTarget,
+                        askChild,
                         pointerSize,
                         machine64,
                         pipes,
@@ -4020,6 +4125,8 @@ export function createWin32Module(){
                         list: (path, pattern)=>volume.list(path, pattern),
                         /** @param {string} path @param {number} modified */
                         setModified: (path, modified)=>filesystem.setModified(path, modified),
+                        /** @param {string} path */
+                        fileId: path=>volume.fileId(path),
                     }),
                     ...createConsoleIoFunctions({
                         readMemory,
@@ -4121,9 +4228,6 @@ export function createWin32Module(){
                         park: ()=>bridge.park(),
                         handleType: (/** @type {number} */ handle)=>
                             kernel.handles.typeOf?.(handle) ?? null,
-                        standardFile: (/** @type {number} */ handle)=>Boolean(
-                            handle === HANDLE_STDOUT ? standardFiles?.output
-                                : handle === HANDLE_STDERR ? standardFiles?.error : undefined),
                         resolveHandle: (/** @type {number} */ handle,
                             /** @type {string | undefined} */ type)=>
                             kernel.handles.resolve(handle, type),
@@ -4145,6 +4249,17 @@ export function createWin32Module(){
                         inheritedHandles: only=>[...pipes.inherited(only),
                             ...inheritedObjects(only)],
                         inheritable: handle=>void handleFlags.set(handle, 1),
+                        standardHandle: which=>/** @type {any} */ (libraries['KERNEL32.dll'])
+                            .GetStdHandle.handler([which]),
+                        // The open files and pipe ends among these, inheritable or
+                        // not, each with its flags: duplicates a console child takes.
+                        duplicates: asked=>asked.flatMap(handle=>{
+                            const type = kernel.handles.typeOf(handle);
+                            const flags = handleFlags.get(handle) ?? 0;
+                            const found = type === 'file' ? [inheritedFile(handle)]
+                                : pipes.inherited([handle], true);
+                            return found.map(one=>Object.assign(one, { flags }));
+                        }),
                         kernel,
                         processId,
                         readMemory,
@@ -4233,6 +4348,7 @@ export function createWin32Module(){
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
                         pointerSize,
+                        inheritable: handle=>void handleFlags.set(handle, 1),
                         divergence: config?.divergence,
                         // Asked when called: the table is assembled by then.
                         environmentVariable: name=>Object.entries(/** @type {any} */ (
@@ -4301,8 +4417,12 @@ export function createWin32Module(){
                         ports: {
                             /** @param {number} overlapped */
                             offsetOf: overlapped=>ports.offsetOf(overlapped),
-                            /** @param {number} file @param {number} n @param {number} overlapped */
-                            completed: (file, n, overlapped)=>ports.completed(file, n, overlapped),
+                            /**
+                             * @param {number} file @param {number} n @param {number} overlapped
+                             * @param {number} [status] @param {{ port?: boolean }} [skip]
+                             */
+                            completed: (file, n, overlapped, status, skip)=>
+                                ports.completed(file, n, overlapped, status, skip),
                             /** @param {number} handle @param {any} object */
                             closed: (handle, object)=>ports.closed(handle, object),
                             /** @param {number} file @param {number} port @param {number} key */
@@ -7381,6 +7501,7 @@ export function createWin32Module(){
                             libraries['ntdll.dll']?.NtQueryInformationProcess,
                         NtQueryInformationThread:
                             libraries['ntdll.dll']?.NtQueryInformationThread,
+                        NtUnmapViewOfSection: libraries['ntdll.dll']?.NtUnmapViewOfSection,
                         [DEBUG_ATTACH]: { handler: debugAttached },
                         [DEBUG_BREAK]: { handler: breakIn },
                         .../** @type {any} */ (libraries['KERNEL32.dll'])?.[VIRTUAL_MEMORY]

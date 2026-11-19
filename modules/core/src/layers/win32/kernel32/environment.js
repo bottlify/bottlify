@@ -22,7 +22,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
-import { startupInfoBytes } from './startup-info.js';
+import { STARTF_USESTDHANDLES, STARTUPINFO, startupInfoBytes } from './startup-info.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -459,7 +459,26 @@ export function createEnvironmentFunctions(host){
                     desktop: record?.desktop == null ? 0 : write(record.desktop),
                     title: record?.title == null ? 0 : write(record.title),
                 };
-                host.writeMemory(info >>> 0, startupInfoBytes(record, strings));
+                const bytes = startupInfoBytes(record, strings);
+                const view = new DataView(bytes.buffer);
+                if ((view.getUint32(STARTUPINFO.FLAGS, true) & STARTF_USESTDHANDLES) === 0)
+                {
+                    // No standard handles were handed: the ANSI form answers
+                    // INVALID_HANDLE_VALUE for each, the wide form leaves the
+                    // caller's fields as they were (Wine's process.c
+                    // test_StdHandleInheritance, as Windows answers).
+                    if (wide)
+                    {
+                        host.writeMemory(info >>> 0, bytes.subarray(0, STARTUPINFO.STD_INPUT));
+                        return 0;
+                    }
+                    for (const at of [STARTUPINFO.STD_INPUT, STARTUPINFO.STD_OUTPUT,
+                        STARTUPINFO.STD_ERROR])
+                    {
+                        view.setUint32(at, 0xffffffff, true);
+                    }
+                }
+                host.writeMemory(info >>> 0, bytes);
                 return 0;
             },
         };

@@ -107,6 +107,24 @@ export function reparseTarget(tag, data, path){
 }
 
 /**
+ * Whether a symbolic link's buffer names its place with a separator last:
+ * a name for a directory, which a file reached through it is not.
+ *
+ * @param {Uint8Array | null} data
+ */
+export function namesDirectory(data){
+    if (!data || data.length < HEADER + 12)
+    {
+        return false;
+    }
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const at = view.getUint16(HEADER, true);
+    const length = view.getUint16(HEADER + 2, true);
+    const last = HEADER + 12 + at + length - 2;
+    return length >= 2 && last + 2 <= data.length && view.getUint16(last, true) === 0x5c;
+}
+
+/**
  * A mount point's buffer for a junction kept without one (a session's from
  * before buffers were kept): the substitute name, then the printed one.
  *

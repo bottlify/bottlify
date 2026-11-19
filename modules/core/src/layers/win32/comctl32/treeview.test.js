@@ -24,6 +24,7 @@ import {
     TVN_GETDISPINFOA, TVN_ITEMEXPANDINGA, TVN_ITEMEXPANDEDA,
     TVM_SETTEXTCOLOR, TVM_GETTEXTCOLOR, TVM_SETBKCOLOR, TVM_GETBKCOLOR, TVM_GETLINECOLOR,
     TVM_SETSCROLLTIME, TVM_GETSCROLLTIME, TVM_GETITEMSTATE, TVN_ITEMCHANGINGW, TVN_ITEMCHANGEDW,
+    TVM_SORTCHILDREN,
 } from './treeview.js';
 
 /**
@@ -573,6 +574,33 @@ test('DELETEITEM removes a subtree and TVI_ROOT clears the whole tree', async()=
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_DELETEITEM, 0, TVI_ROOT]), 1);
     assert.equal(context.fns.SendMessageA.handler([tree, TVM_GETCOUNT, 0, 0]), 0);
 });
+
+test('DELETEITEM of no item clears the tree, and SORTCHILDREN orders an item\'s children only',
+    async()=>{
+        const context = setup();
+        await context.makeHost();
+        const tree = await context.tree(0);
+        const send = (/** @type {number} */ message, /** @type {number} */ wParam,
+            /** @type {number} */ lParam)=>context.fns.SendMessageA.handler([tree, message, wParam,
+            lParam]);
+        assert.equal(await send(TVM_SORTCHILDREN, 0, 0), 0, 'an empty tree');
+        context.insert(tree, TVI_ROOT, { text: 'stale' });
+        await send(TVM_DELETEITEM, 0, 0);
+        assert.equal(send(TVM_GETCOUNT, 0, 0), 0, 'no item is every item');
+        const root = context.insert(tree, TVI_ROOT, { text: 'root' });
+        assert.equal(await send(TVM_SORTCHILDREN, 0, root), 0, 'no children');
+        const wasp = context.insert(tree, root, { text: 'Wasp' });
+        const caribou = context.insert(tree, root, { text: 'caribou' });
+        const vacuum = context.insert(tree, wasp, { text: 'Vacuum' });
+        context.insert(tree, wasp, { text: 'Ocelot' });
+        assert.equal(await send(TVM_SORTCHILDREN, 0, TVI_ROOT), 1, 'answered, nothing sorted');
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CHILD, root), wasp);
+        assert.equal(await send(TVM_SORTCHILDREN, 1, root), 1);
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CHILD, root), caribou, 'without case');
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_NEXT, caribou), wasp);
+        assert.equal(send(TVM_GETNEXTITEM, TVGN_CHILD, wasp), vacuum,
+            'the grandchildren keep their order whatever wParam');
+    });
 
 test('every item deleted is told to the parent, children first, and on destroy too', async()=>{
     // The notification is where a program frees what an item's lParam holds;

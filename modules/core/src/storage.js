@@ -759,6 +759,12 @@ export function opfsSession(key, directory){
                         }
                         continue;
                     }
+                    // A record of the file changed, its number or its attributes,
+                    // not its bytes: the links entry below carries it.
+                    if (change.kind === 'named')
+                    {
+                        continue;
+                    }
                     const path = /** @type {string} */ (change.path);
                     const file = byPath.get(path);
                     if (file && !held.has(file))

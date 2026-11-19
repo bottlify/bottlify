@@ -847,28 +847,26 @@ test('ReadProcessMemory of this process where nothing is mapped is ERROR_PARTIAL
     assert.equal(host.errors.at(-1), 299);
 });
 
-test('a STARTUPINFO\'s output and error files are handed to the child, the parent\'s own', ()=>{
-    // winetest hands each test its log this way and reads what the test wrote.
-    const host = fakeHost({ files: ['C:\\App\\test.exe'] });
-    const fns = createSpawnFunctions(host);
+test('a STARTUPINFO\'s files the child inherits are its standard handles, nothing apart', ()=>{
+    // winetest hands each test its log this way and reads what the test wrote:
+    // the log is a handle the child inherits, the parent's own open file.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\test.exe'] }));
     const log = { path: 'C:\\App\\log.txt', node: {}, read: true, write: true, position: 12 };
-    const file = host.kernel.handles.open('file', log);
+    host.inheritedHandles = ()=>[{ handle: 0x30, type: 'file', object: log }];
+    const fns = createSpawnFunctions(host);
     const startup = 0x400;
     host.view.setUint32(startup + 44, 0x100, true); // STARTF_USESTDHANDLES
-    host.view.setUint32(startup + 60, file, true);
-    host.view.setUint32(startup + 64, file, true);
+    host.view.setUint32(startup + 60, 0x30, true);
+    host.view.setUint32(startup + 64, 0x34, true);
 
     assert.equal(fns.CreateProcessA.handler(
         [0, putAnsi(host, 0x100, 'test.exe --list'), 0, 0, 1, 0, 0, 0, startup, 0]), 1);
-    const { standardFiles } = pending(host);
-    assert.equal(standardFiles.output, log, 'the same open file, so its position is shared');
-    assert.equal(standardFiles.error, log);
-
-    host.view.setUint32(startup + 44, 0, true);
-    assert.equal(fns.CreateProcessA.handler(
-        [0, putAnsi(host, 0x100, 'test.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
-    assert.equal(host.requests.at(-1).standardFiles, undefined,
-        'without the flag the child keeps the console');
+    const request = pending(host);
+    assert.deepEqual(request.standardHandles, { input: 0, output: 0x30, error: 0x34 },
+        'the inherited file is its output; a handle it does not inherit names nothing there');
+    assert.equal(request.inheritedHandles[0].object, log,
+        'the same open file, so its position is shared');
+    assert.equal('standardFiles' in request, false, 'no second way of handing a file');
 });
 
 test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', ()=>{
@@ -880,17 +878,54 @@ test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', (
     const fns = createSpawnFunctions(host);
     const startup = 0x400;
     host.view.setUint32(startup + 44, 0x100, true); // STARTF_USESTDHANDLES
-    host.view.setUint32(startup + 56, 0x90, true);  // not inherited: the console stays
+    host.view.setUint32(startup + 56, 0x90, true);  // not inherited: names nothing there
     host.view.setUint32(startup + 60, 0x8c, true);
     host.view.setUint32(startup + 64, 0x94, true);
     assert.equal(fns.CreateProcessA.handler(
         [0, putAnsi(host, 0x100, 'dxinfo.exe'), 0, 0, 1, 0, 0, 0, startup, 0]), 1);
-    assert.deepEqual(pending(host).standardHandles, { output: 0x8c, error: 0x94 });
+    // Wine's test_StdHandleInheritance: a handle the child does not inherit
+    // is copied all the same, dangling there.
+    assert.deepEqual(pending(host).standardHandles, { input: 0x90, output: 0x8c, error: 0x94 });
 
     assert.equal(fns.CreateProcessA.handler(
         [0, putAnsi(host, 0x100, 'dxinfo.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
-    assert.equal(host.requests.at(-1).standardHandles, undefined,
-        'bInheritHandles FALSE: nothing is inherited, the console stays');
+    assert.deepEqual(host.requests.at(-1).standardHandles, { input: 0, output: 0, error: 0 },
+        'bInheritHandles FALSE: nothing is inherited, and the STARTUPINFO\'s handles are NULL');
+});
+
+test('without STARTF_USESTDHANDLES a child takes its parent\'s standard handles it inherits', ()=>{
+    // Wine's process.c test_StdHandleInheritance: a parent that redirects its
+    // own output (SetStdHandle) and starts a child inheriting handles hands
+    // the child that output.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    host.inheritedHandles = ()=>[{ handle: 0x8c, type: 'file', object: {} }];
+    host.standardHandle = (/** @type {number} */ which)=>(which === -11 ? 0x8c : 0x90);
+    const fns = createSpawnFunctions(host);
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'child.exe'), 0, 0, 1, 0, 0, 0, 0, 0]), 1);
+    assert.deepEqual(pending(host).standardHandles, { input: 0x90, output: 0x8c, error: 0x90 },
+        'its output, inherited; its input and error copied all the same, dangling there');
+});
+
+test('a child that inherits nothing is handed duplicates of its parent\'s standard handles,'
+    + ' for a console program to take', ()=>{
+    // Wine's test_StdHandleInheritance, nothing_cui: a console child started
+    // without bInheritHandles holds its parent's standard handles, each as
+    // the parent's flags have it; a window program none (decided where it
+    // starts, by its image's subsystem: app.js handedDown).
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    const log = { path: 'C:\\App\\log.txt' };
+    host.standardHandle = (/** @type {number} */ which)=>(which === -11 ? 0x8c : 2);
+    host.duplicates = (/** @type {number[]} */ handles)=>handles.includes(0x8c)
+        ? [{ handle: 0x8c, type: 'file', object: log, flags: 2 }] : [];
+    const fns = createSpawnFunctions(host);
+    assert.equal(fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    const request = pending(host);
+    assert.equal(request.standardHandles, undefined, 'the child\'s subsystem decides');
+    assert.deepEqual(request.consoleHandles, { input: 2, output: 0x8c, error: 2 });
+    assert.deepEqual(request.inheritedHandles.map((/** @type {any} */ one)=>
+        [one.handle, one.object, one.flags, one.consoleOnly]), [[0x8c, log, 2, true]]);
 });
 
 test('a job list names the jobs a child is made in: a handle of no job, or a job that refuses it,'

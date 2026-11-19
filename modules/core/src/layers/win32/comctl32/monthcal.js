@@ -255,17 +255,17 @@ export const isDate = time=>time.month >= 1 && time.month <= 12 && time.day >= 1
     && dayNumber(time.year, time.month, time.day) <= LAST_DATE;
 
 /** @param {Time} time */
-const isTimeOfDay = time=>time.hour < 24 && time.minute < 60 && time.second < 60;
+export const isTimeOfDay = time=>time.hour < 24 && time.minute < 60 && time.second < 60;
 
 /** @param {Time} time */
 const dayOf = time=>dayNumber(time.year, time.month, time.day);
 
 /** @param {Time} a @param {Time} b  The order of two moments, to the millisecond. */
-const compareTimes = (a, b)=>dayOf(a) - dayOf(b) || a.hour - b.hour || a.minute - b.minute
+export const compareTimes = (a, b)=>dayOf(a) - dayOf(b) || a.hour - b.hour || a.minute - b.minute
     || a.second - b.second || a.ms - b.ms;
 
 /** @param {Time} time @returns {Time} the same, its weekday the date's */
-const withWeekday = time=>({ ...time, dow: weekdayOf(time.year, time.month, time.day) });
+export const withWeekday = time=>({ ...time, dow: weekdayOf(time.year, time.month, time.day) });
 
 /** @param {number} year @param {number} month  A month's index, to count months by. */
 const monthIndex = (year, month)=>year * 12 + month - 1;
@@ -274,7 +274,44 @@ const monthIndex = (year, month)=>year * 12 + month - 1;
 const monthAt = index=>({ year: Math.floor(index / 12), month: index % 12 + 1 });
 
 /** @returns {Time} */
-const noTime = ()=>({ year: 0, month: 0, dow: 0, day: 0, hour: 0, minute: 0, second: 0, ms: 0 });
+export const noTime = ()=>({ year: 0, month: 0, dow: 0, day: 0, hour: 0, minute: 0, second: 0,
+    ms: 0 });
+
+/**
+ * MCM_SETRANGE's and DTM_SETRANGE's rule: the limits named replace both - a
+ * limit not named is cleared - each a date, its time of day `clock`'s when it
+ * is not one. Two limits the wrong way round are taken the right way.
+ *
+ * @param {[Time, Time]} given  The array the program handed in.
+ * @param {[boolean, boolean]} named  Whether GDTR_MIN and GDTR_MAX are set.
+ * @param {Time} clock  The time of day a limit without one takes.
+ * @param {(time: Time) => boolean} [valid]  What a limit must be: a day the
+ *     calendar holds, unless the control says otherwise.
+ * @returns {{ min: Time | null, max: Time | null, given: [Time, Time] } | null}
+ *     the limits, and the array as it is to be written back (a limit's time of
+ *     day filled in); null when a named limit is not a date.
+ */
+export const takeRange = (given, named, clock, valid = isDate)=>{
+    if (named.some((on, at)=>on && !valid(given[at])))
+    {
+        return null;
+    }
+    /** @type {[Time, Time]} */
+    const limits = [given[0], given[1]];
+    named.forEach((on, at)=>{
+        if (on && !isTimeOfDay(limits[at]))
+        {
+            limits[at] = { ...limits[at], hour: clock.hour, minute: clock.minute,
+                second: clock.second };
+        }
+    });
+    let [low, high] = limits;
+    if (named[0] && named[1] && compareTimes(high, low) < 0)
+    {
+        [low, high] = [high, low];
+    }
+    return { min: named[0] ? low : null, max: named[1] ? high : null, given: limits };
+};
 
 /**
  * A picture's month and year as pieces of their own, the text between them
@@ -328,6 +365,44 @@ export const titlePieces = picture=>{
 };
 
 /**
+ * The names a date is written with, in the user's locale: what
+ * GetLocaleInfoW answers, en-US's where it answers nothing.
+ *
+ * @param {(type: number, fallback: string) => string} localeText
+ * @returns {import('../kernel32/datetime-format.js').CalendarNames
+ *     & { shortestDays: string[] }}
+ */
+export const calendarNames = localeText=>{
+    const week = (/** @type {number} */ first, /** @type {readonly string[]} */ english)=>
+        [6, 0, 1, 2, 3, 4, 5].map((at, day)=>localeText(first + at, english[day]));
+    return {
+        days: week(LOCALE_SDAYNAME1, DAYS),
+        shortDays: week(LOCALE_SABBREVDAYNAME1, DAYS.map(day=>day.slice(0, 3))),
+        shortestDays: week(LOCALE_SSHORTESTDAYNAME1, DAYS.map(day=>day.slice(0, 2))),
+        months: MONTHS.map((month, at)=>localeText(LOCALE_SMONTHNAME1 + at, month)),
+        shortMonths: MONTHS.map((month, at)=>localeText(LOCALE_SABBREVMONTHNAME1 + at,
+            month.slice(0, 3))),
+        genitive: null,
+        am: 'AM',
+        pm: 'PM',
+        era: 'A.D.',
+    };
+};
+
+/**
+ * The local clock now, as GetLocalTime reads it.
+ *
+ * @param {CalendarSources} sources
+ * @returns {Time}
+ */
+export const localNow = sources=>{
+    const date = new Date(sources.localTime?.() ?? Date.now());
+    return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, dow: date.getUTCDay(),
+        day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(),
+        second: date.getUTCSeconds(), ms: date.getUTCMilliseconds() };
+};
+
+/**
  * Builds the window procedure of a month calendar.
  *
  * @param {import('../user32/controls.js').ControlHost} host
@@ -345,23 +420,7 @@ export function createMonthCalProcedure(host, tk, sources = {}){
     const localeText = (type, fallback)=>sources.localeText?.(type) || fallback;
 
     /** The names a date is written with, in the user's locale. */
-    const names = ()=>{
-        const week = (/** @type {number} */ first, /** @type {readonly string[]} */ english)=>
-            [6, 0, 1, 2, 3, 4, 5].map((at, day)=>localeText(first + at, english[day]));
-        const months = MONTHS.map((month, at)=>localeText(LOCALE_SMONTHNAME1 + at, month));
-        return {
-            days: week(LOCALE_SDAYNAME1, DAYS),
-            shortDays: week(LOCALE_SABBREVDAYNAME1, DAYS.map(day=>day.slice(0, 3))),
-            shortestDays: week(LOCALE_SSHORTESTDAYNAME1, DAYS.map(day=>day.slice(0, 2))),
-            months,
-            shortMonths: MONTHS.map((month, at)=>localeText(LOCALE_SABBREVMONTHNAME1 + at,
-                month.slice(0, 3))),
-            genitive: null,
-            am: 'AM',
-            pm: 'PM',
-            era: 'A.D.',
-        };
-    };
+    const names = ()=>calendarNames(localeText);
 
     /** The locale's first day of the week, Monday 0. */
     const localeFirstDay = ()=>{
@@ -369,13 +428,8 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         return day >= 0 && day <= 6 ? day : 6;
     };
 
-    /** The local clock now, as GetLocalTime reads it. @returns {Time} */
-    const now = ()=>{
-        const date = new Date(sources.localTime?.() ?? Date.now());
-        return { year: date.getUTCFullYear(), month: date.getUTCMonth() + 1, dow: date.getUTCDay(),
-            day: date.getUTCDate(), hour: date.getUTCHours(), minute: date.getUTCMinutes(),
-            second: date.getUTCSeconds(), ms: date.getUTCMilliseconds() };
-    };
+    /** The local clock now, as GetLocalTime reads it. */
+    const now = ()=>localNow(sources);
 
     /** @param {any} record */
     const state = record=>{
@@ -467,7 +521,7 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         {
             return held.metrics;
         }
-        const calendarNames = names();
+        const written = names();
         const picture = localeText(LOCALE_SYEARMONTH, 'MMMM, yyyy');
         /** @type {(text: string) => { width: number, height: number }} */
         let measure = text=>({ width: text.length * 8, height: 16 });
@@ -484,11 +538,11 @@ export function createMonthCalProcedure(host, tk, sources = {}){
             const text = measure('0');
             const row = text.height + 2;
             const digits = measure('00').width;
-            const dayNames = calendarNames.shortestDays.map(name=>measure(name).width);
+            const dayNames = written.shortestDays.map(name=>measure(name).width);
             const button = row;
-            const widestTitle = Math.max(...calendarNames.months.map((month, at)=>
+            const widestTitle = Math.max(...written.months.map((month, at)=>
                 measure(renderDate(picture, { year: 2000, month: at + 1, day: 1, weekday: 0,
-                    hour: 0, minute: 0, second: 0 }, { ...calendarNames })).width));
+                    hour: 0, minute: 0, second: 0 }, { ...written })).width));
             const columns = (record.style & MCS_WEEKNUMBERS) !== 0 ? 8 : 7;
             const day = Math.max(digits + 6, ...dayNames.map(width=>width + 4),
                 Math.ceil((widestTitle + 2 * button + 4 * text.width) / columns));
@@ -504,13 +558,13 @@ export function createMonthCalProcedure(host, tk, sources = {}){
                     if (piece.kind !== 'year')
                     {
                         const rendered = renderDate(piece.picture, { year: 2000, month, day: 1,
-                            weekday: 0, hour: 0, minute: 0, second: 0 }, calendarNames);
+                            weekday: 0, hour: 0, minute: 0, second: 0 }, written);
                         titleWidths.set(rendered, measure(rendered).width);
                     }
                 }
             }
             held.metrics = {
-                key, row, day, width, height, today, button, picture, names: calendarNames,
+                key, row, day, width, height, today, button, picture, names: written,
                 weeks: columns === 8 ? day : 0, titleWidths, digitWidth: text.width,
             };
             return held.metrics;
@@ -1009,27 +1063,22 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         {
             return 0;
         }
-        const limits = [readTime(address), readTime(address + 16)];
-        const named = [GDTR_MIN, GDTR_MAX].map(flag=>(flags & flag) !== 0);
-        if (named.some((on, at)=>on && !isDate(limits[at])))
+        const given = /** @type {[Time, Time]} */ ([readTime(address), readTime(address + 16)]);
+        const named = /** @type {[boolean, boolean]} */ (
+            [GDTR_MIN, GDTR_MAX].map(flag=>(flags & flag) !== 0));
+        const taken = takeRange(given, named, held.today);
+        if (!taken)
         {
             return 0;
         }
-        named.forEach((on, at)=>{
-            if (on && !isTimeOfDay(limits[at]))
+        taken.given.forEach((limit, at)=>{
+            if (limit !== given[at])
             {
-                limits[at] = { ...limits[at], hour: held.today.hour, minute: held.today.minute,
-                    second: held.today.second };
-                writeTime(address + at * 16, limits[at]);
+                writeTime(address + at * 16, limit);
             }
         });
-        let [low, high] = limits;
-        if (named[0] && named[1] && compareTimes(high, low) < 0)
-        {
-            [low, high] = [high, low];
-        }
-        held.min = named[0] ? low : null;
-        held.max = named[1] ? high : null;
+        held.min = taken.min;
+        held.max = taken.max;
         host.invalidate(record);
         return 1;
     };

@@ -545,6 +545,19 @@ test('addModule joins a library LoadLibrary mapped after the process started', (
     assert.equal(memory.view.getUint32(loadOrder[1] + LDR_ENTRY.SIZE_OF_IMAGE, true), 0x2000);
 });
 
+test('a module whose thread-local storage the loader set up reads TlsIndex -1, others 0', ()=>{
+    // Wine's loader.c check_tls_index: ntdll 0, a library with TLS -1.
+    const memory = guest();
+    const blocks = build(memory, {
+        modules: [{ name: 'ntdll.dll', base: 0x77000000, size: 0x1000 }],
+    });
+    blocks.addModule({ name: 'tls.dll', base: 0x10000000, size: 0x2000 });
+    blocks.hasThreadLocals(0x10000000);
+    blocks.hasThreadLocals(0x12345678);
+    assert.equal(memory.view.getInt16(blocks.entryOf(0x77000000) + LDR_ENTRY.TLS_INDEX, true), 0);
+    assert.equal(memory.view.getInt16(blocks.entryOf(0x10000000) + LDR_ENTRY.TLS_INDEX, true), -1);
+});
+
 /**
  * A quadword field of a 64-bit block, as a number: its high half must be
  * zero, every address lying below 4 GiB.

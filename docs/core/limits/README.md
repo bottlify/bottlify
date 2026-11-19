@@ -79,6 +79,11 @@ event, an error. Neither stops the program.
 - The month calendar (`SysMonthCal32`) shows only its month view: a click on a title's month or
   year offers no menu or spinner, MCM_SETCURRENTVIEW takes only MCMV_MONTH, MCN_VIEWCHANGE is not
   sent, and "today" is the clock when the calendar was made, not moved on at midnight.
+- The date and time picker (`SysDateTimePick32`) drops its calendar down until a day is chosen,
+  the button or F4 is pressed again, Escape or Enter is pressed or DTM_CLOSEMONTHCAL comes - not
+  when the focus moves elsewhere. Its DTS_UPDOWN arrows are drawn in the control, not an up-down
+  child; callback fields (X) are written as they stand, with no DTN_FORMAT or DTN_FORMATQUERY, and
+  DTM_GETDATETIMEPICKERINFO and DTM_GETIDEALSIZE are not answered; each is said once.
 - The extended combo box (`ComboBoxEx32`) keeps its items' images, indents and values, but its
   combo box's list shows only their text, in the ANSI code page: user32's combo box draws an
   owner-drawn item's string itself rather than asking its parent with WM_DRAWITEM.

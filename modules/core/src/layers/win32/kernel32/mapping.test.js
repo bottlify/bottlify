@@ -25,7 +25,8 @@ const FILE_MAP_READ = 0x0004;
  *   the tests that are about named mappings. Every other test passes nothing
  *   and every pointer reads as the empty name, which is no name at all.
  */
-function setup(names = {}){
+/** @param {Record<number, string>} [names] @param {Record<string, any>} [extra] */
+function setup(names = {}, extra = {}){
     const bytes = new Uint8Array(0x100000);
     /** Where a view was placed by address, so a second one there is refused. */
     const placed = new Set();
@@ -121,6 +122,7 @@ function setup(names = {}){
                 holds--;
             },
         },
+        ...extra,
     });
 
     const fileHandle = nextHandle;
@@ -758,6 +760,52 @@ test('a native section maps a view that must fit inside it, and unmaps it once',
     assert.equal(create(0x3452, 0), 0);
     assert.equal(basicInformation(at, dword(bytes, 0x200)).size, 0x4000,
         'the page file\'s section is whole pages');
+});
+
+test('a native unmap names a view by any address in it, through a handle to this process'
+    + ' or in a child where the child runs', async()=>{
+    const SELF = 0x80;
+    const CHILD = 0x84;
+    const DENIED = 0x88;
+    /** @type {any[]} */
+    const asked = [];
+    const child = { id: 0x700 };
+    const at = setup({}, {
+        /** @param {number} handle @param {number} right */
+        processTarget: (handle, right)=>{
+            assert.equal(right, 0x0008, 'PROCESS_VM_OPERATION');
+            return handle === CURRENT_PROCESS || handle === SELF ? { here: true }
+                : handle === CHILD ? { child } : handle === DENIED ? { error: 5 } : { error: 6 };
+        },
+        /** @param {any} record @param {any} call */
+        askChild: (record, call)=>{
+            asked.push([record, call]);
+            return Promise.resolve({ result: 0, error: null, outs: [] });
+        },
+    });
+    const { fns, bytes } = at;
+    const { NtCreateSection, NtMapViewOfSection, NtUnmapViewOfSection } =
+        fns.CreateFileMappingW.natives;
+    bytes.set([0, 0x20, 0, 0, 0, 0, 0, 0], 0x210);
+    assert.equal(NtCreateSection.handler([0x200, 0, 0, 0x210, PAGE_READWRITE, SEC_COMMIT, 0]), 0);
+    const section = dword(bytes, 0x200);
+    /** @param {number} process */
+    const map = process=>{
+        bytes.fill(0, 0x220, 0x228);
+        return NtMapViewOfSection.handler(
+            [section, process, 0x220, 0, 0, 0, 0x224, 1, 0, PAGE_READWRITE]);
+    };
+    assert.equal(map(SELF), 0, 'a handle OpenProcess gave for this process maps here');
+    const view = dword(bytes, 0x220);
+    assert.equal(NtUnmapViewOfSection.handler([SELF, view + 0x1050]), 0,
+        'an address inside the view names it');
+    assert.equal(NtUnmapViewOfSection.handler([SELF, view]), 0xc0000019, 'and it is gone');
+    assert.equal(map(DENIED), 0xc0000022, 'a handle without the right is refused');
+    assert.equal(map(0x99), 0xc0000008, 'a handle naming no process');
+    assert.equal(NtUnmapViewOfSection.handler([DENIED, view]), 0xc0000022);
+    assert.equal(await NtUnmapViewOfSection.handler([CHILD, 0x5000]), 0, 'the child answers');
+    assert.deepEqual(asked, [[child, { call: 'NtUnmapViewOfSection',
+        args: [CURRENT_PROCESS, 0x5000] }]]);
 });
 
 test('NtOpenSection opens a section by its object name, and refuses physical memory', ()=>{

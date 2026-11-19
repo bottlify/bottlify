@@ -32,6 +32,7 @@ import { ringPacing } from './ring-pacing.js';
 import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
+import { handedFiles } from '../system/inherited-files.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {
@@ -75,25 +76,6 @@ const sendFrames = port=>{
     return (/** @type {{ pixels: Uint8Array }} */ frame)=>port.postMessage(
         { type: 'frame', ...frame, frameIndex: ++frameIndex }, [frame.pixels.buffer]);
 };
-
-/**
- * The files the parent handed this process as its output and error: named by
- * path, at the position the parent's open file holds, which a write here
- * reads and moves across the link.
- *
- * @param {Record<string, { path: string }> | undefined} named
- * @param {(target: string, method: string, args: any[]) => any} ask
- */
-const standardFilesOf = (named, ask)=>named && Object.fromEntries(Object.entries(named)
-    .map(([which, { path }])=>[which, {
-        path,
-        get position(){
-            return ask('standard', 'position', [which]);
-        },
-        set position(at){
-            ask('standard', 'setPosition', [which, at]);
-        },
-    }]));
 
 /**
  * What a report reads, as data that crosses to another thread; where reading
@@ -252,7 +234,11 @@ export async function serveProcess(start){
         app = await createApp({
             ...options,
             spareMemories: memories,
-            standardFiles: standardFilesOf(options.standardFiles, ask),
+            // The open files it inherited, at the position the parent's opens
+            // hold, which a read or write here reads and moves across the link.
+            inheritedFiles: handedFiles(options.inheritedFiles,
+                handle=>ask('inherited', 'position', [handle]),
+                (handle, at)=>ask('inherited', 'setPosition', [handle, at])),
             graphics: { ...options.graphics, worker: graphics ? portEnd(graphics) : undefined,
                 display: display ? sendFrames(display) : undefined },
             system,

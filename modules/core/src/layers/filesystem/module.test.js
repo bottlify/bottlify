@@ -772,3 +772,23 @@ test('the writable layer says what it holds, and on a page file holds no more th
         fs.close(reading);
         await paged.dispose();
     });
+
+test('a directory renamed keeps its number, and the numbers go out and back with the links',
+    async()=>{
+        const fs = await volume();
+        const game = fs.fileId('C:\\Game');
+        const setup = fs.fileId('C:\\Game\\Setup.EXE');
+        fs.rename('C:\\Game', 'C:\\Moved');
+        assert.equal(fs.fileId('C:\\Moved'), game, 'the directory, remade, is the same file');
+        assert.equal(fs.fileId('C:\\Moved\\Setup.EXE'), setup, 'and so is what it held');
+        assert.equal(fs.pathOfFileId('C:\\', setup), 'C:\\Moved\\Setup.EXE');
+        assert.equal(fs.pathOfFileId('D:\\', setup), null, 'a number is its own volume\'s');
+
+        const links = fs.exportLinks();
+        const again = await volume();
+        again.apply(fs.export(), { saved: true });
+        again.applyLinks(links, { saved: true });
+        assert.equal(again.fileId('C:\\Moved\\Setup.EXE'), setup, 'the next run, the same number');
+        assert.equal(fs.export(undefined, { everyName: true }).filter((/** @type {any} */ file)=>
+            /Setup/.test(file.path)).length, 1, 'a number exports no file of its own');
+    });

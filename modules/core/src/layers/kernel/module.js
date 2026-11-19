@@ -186,7 +186,6 @@ export function createKernelModule(){
              *          refreshClock: (() => void) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
              *          mutexWords: any, eventWords: any, semaphoreWords: any,
-             *          directory: Map<number, any> | null,
              *          unwake: (() => void) | null }}
              */
             const state = {
@@ -213,8 +212,6 @@ export function createKernelModule(){
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
-                // The run's directory of processes, which outlives this one (`settleRecords`).
-                directory: config?.processDirectory ?? null,
             };
             /** @param {string} entry */
             const noteResume = entry=>{
@@ -1241,12 +1238,13 @@ export function createKernelModule(){
                         ? state.handles.open(type, object, access) : 0,
                     /**
                      * An object under a number chosen elsewhere: an inherited
-                     * handle keeps its parent's.
+                     * handle keeps its parent's number and rights.
                      *
                      * @param {number} handle @param {string} type @param {any} object
+                     * @param {number | null} [access]
                      */
-                    adopt: (handle, type, object)=>live()
-                        ? state.handles.adopt(handle, type, object) : false,
+                    adopt: (handle, type, object, access)=>live()
+                        ? state.handles.adopt(handle, type, object, access) : false,
                     /**
                      * The rights a handle was granted, null for all of them.
                      *
@@ -1360,9 +1358,9 @@ export function createKernelModule(){
                         // A child that outlived the process that made it (a
                         // grandchild its parent left suspended and the root
                         // resumed) ends after this machine is gone: its exit
-                        // is the event `settleRecords` left, set where it
-                        // stands, and whoever waits on it is woken by its own
-                        // scheduler.
+                        // event, settled where it stood when the machine went
+                        // (`settleAll`), is set there, and whoever waits on it
+                        // is woken by its own scheduler.
                         (live() && state.sync.owns(record.exited) ? state.sync : SETTLED_EVENTS)
                             .setEvent(record.exited);
                     },
@@ -1407,9 +1405,12 @@ export function createKernelModule(){
             if (current)
             {
                 current.disposed = true;
-                settleRecords(current);
                 // What another process of the run still holds of this one's
-                // objects keeps their state and nothing of this machine.
+                // objects keeps their state and nothing of this machine. A
+                // record in the run's directory keeps its exit event so: the
+                // same object, settled where it stands, so a thread of another
+                // process already queued on it is still queued on what the
+                // child's end sets.
                 current.sync?.settleAll(ourThread(current), current.scheduler?.all() ?? []);
                 current.unwake?.();
             }
@@ -1419,9 +1420,9 @@ export function createKernelModule(){
 }
 
 /**
- * Where an event `settleRecords` left is set: no machine's, and nothing waits
- * on this table itself - every thread waiting on such an event is woken by its
- * own scheduler (`sync.js`).
+ * Where an exit event a gone process made is set: no machine's, and nothing
+ * waits on this table itself - every thread waiting on such an event is woken
+ * by its own scheduler (`sync.js`).
  */
 const SETTLED_EVENTS = createSyncObjects({ scheduler: {
     block(){
@@ -1430,28 +1431,6 @@ const SETTLED_EVENTS = createSyncObjects({ scheduler: {
     wake(){},
     onTimeout(){},
 } });
-
-/**
- * A process's records stay in the run's directory after it is gone - another
- * process opens one by id and waits on its exit - but an exit event this
- * kernel made writes its guest word through this process's memory, so a record
- * holding it held the whole memory of every process that ever ended (a COM
- * server started per assembly, 560 MB each). Each is left as it stands, an
- * event of no process: its state, and nothing of this one.
- *
- * @param {any} state
- */
-function settleRecords(state){
-    for (const record of state.directory?.values() ?? [])
-    {
-        const exited = record.exited;
-        if (exited && state.sync?.owns(exited))
-        {
-            record.exited = { kind: exited.kind, name: exited.name,
-                manualReset: exited.manualReset, signalled: exited.signalled, waiters: [] };
-        }
-    }
-}
 
 /**
  * Whether a thread is this process's: a thread of another process on this

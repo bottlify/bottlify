@@ -610,6 +610,10 @@ test('a volume is described the same by its handle, natively and by its root', (
     assert.equal(dword(bytes, 0x304), 12 + system.length * 2);
     const label = ansiAt(bytes, 0x200);
     assert.equal(query.handler([0x44, 0x300, 0x400, 50, 1]), 0, 'FileFsVolumeInformation');
+    assert.equal(new DataView(bytes.buffer).getBigUint64(0x400, true),
+        BigInt(Date.UTC(1980, 0, 1)) * 10000n + 116444736000000000n,
+        'made at the start of the DOS calendar, no younger than its files');
+    assert.equal(bytes[0x410], 0, 'no object ids kept');
     assert.equal(dword(bytes, 0x408), dword(bytes, 0x280), 'the serial');
     assert.equal(dword(bytes, 0x40c), label.length * 2);
     assert.equal(wideAt(bytes, 0x412, label.length), label);

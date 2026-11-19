@@ -7,8 +7,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createFileTimeFunctions, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
+    createFileTimeFunctions, fileAttributes, BY_HANDLE_FILE_INFORMATION, TIME_ZONE_INFORMATION,
 } from './filetime.js';
+
+test('a file is archived until a program clears it, a reparse point too; a directory is not', ()=>{
+    const ARCHIVE = 0x20;
+    const DIRECTORY = 0x10;
+    const REPARSE_POINT = 0x400;
+    assert.equal(fileAttributes({ isDirectory: false }), ARCHIVE);
+    assert.equal(fileAttributes({ isDirectory: false, reparseTag: 0xa000000c }),
+        ARCHIVE | REPARSE_POINT, 'a symbolic link to a file');
+    assert.equal(fileAttributes({ isDirectory: true, reparseTag: 0xa0000003 }),
+        DIRECTORY | REPARSE_POINT, 'a junction');
+    assert.equal(fileAttributes({ isDirectory: false, attributes: 0x2 }), 0x2,
+        'what a program set, as set');
+});
 
 function setup(){
     const bytes = new Uint8Array(0x1000);
@@ -34,6 +47,7 @@ function setup(){
             }
             return file;
         },
+        fileId: path=>(path === file.path ? 64 : 65),
         stat: path=>path === file.path
             ? { exists: true, isDirectory: false, size: 0x1234,
                 modified: stamped.at(-1)?.modified ?? Date.UTC(1980, 0, 1) }
@@ -462,6 +476,7 @@ test('a directory lists by handle as many entries as fit, then goes on, then has
             errors.push(code);
         },
         resolveHandle: ()=>folder,
+        fileId: path=>64 + path.length,
         stat: ()=>({ exists: true, isDirectory: true, size: 0 }),
         list: ()=>[{ name: 'SAVE.DAT', isDirectory: false, size: 5000 },
             { name: 'DATA', isDirectory: true, size: 0 }],

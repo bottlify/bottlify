@@ -58,8 +58,10 @@
   ended, its id, parent and exit status remain and its PEB address does not. `SetThreadContext` replaces
   another thread's registers where it next runs, after the wait it may be in, as Windows does at its
   return to user mode; the calling thread's own and the x87 state of a 32-bit context are not
-  replaced. Not yet: `OpenThread` of a child's
-  thread the parent was not told of, and reading another process's TEB. Any process of the
+  replaced. `NtUnmapViewOfSection` on a child's handle unmaps the view there, named by any address
+  inside it. Not yet: `OpenThread` of a child's thread the parent was not told of, mapping a view
+  into a child (`NtMapViewOfSection` on its handle is refused, said once), and unmapping a child's
+  image. Any process of the
   run opens another by its id (`OpenProcess`) wherever each of them runs: a wait on that handle
   ends with the other's exit and `GetExitCodeProcess` reads its code; nothing else of it is asked
   across a link. A call made in a
@@ -137,8 +139,19 @@
   pipes, overlapped reads and connects completed through their event and completion port, and a
   pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's
   number. A child on the engine's thread inherits its parent's inheritable events, mutexes,
-  semaphores, waitable timers, processes and threads the same way; a child in a worker of its own
-  inherits only pipe ends. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
+  semaphores, waitable timers, processes and threads the same way, and its open files: the
+  child opens the file as its own on the terms the parent's open agreed, sharing the parent's file
+  pointer, and the file stays open until the last of their handles closes, as it does for a file
+  `DuplicateHandle` puts into another process of the run. A child in a worker of its own
+  inherits pipe ends and open files: a file there is opened on the same terms, its pointer the
+  parent's open's, read and moved across the link on each read and write, and the parent's hold
+  on it lasts until that child ends. A file handed as a standard handle is one of these, so it
+  must be inheritable, as on Windows. A child's standard handles are the ones its STARTUPINFO names with
+  `STARTF_USESTDHANDLES`, or else its parent's own, copied as they are when it inherits handles
+  (one it does not inherit names nothing there) and NULL when it inherits none; a console child
+  that inherits nothing is handed duplicates of its parent's standard handles, a window program
+  none, and a window program or a `DETACHED_PROCESS` child has no console handles. `CONIN$` and
+  `CONOUT$` open as the console's own standard handles, which duplicate as themselves. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
   Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails

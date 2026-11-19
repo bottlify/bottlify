@@ -70,6 +70,7 @@ export const CROSS_CALLS = new Set([
     VIRTUAL_READ, VIRTUAL_WRITE,
     'SuspendThread', 'ResumeThread', 'GetThreadContext', 'SetThreadContext',
     'CreateThread', 'GetExitCodeThread', 'NtQueryInformationProcess', 'NtQueryInformationThread',
+    'NtUnmapViewOfSection',
     DEBUG_ATTACH, DEBUG_BREAK,
 ]);
 

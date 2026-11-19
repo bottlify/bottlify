@@ -253,6 +253,21 @@ test('a save after the first writes only what changed, and drops what was remove
     assert.deepEqual(back.registry, { a: 2 });
 });
 
+test('a file\'s record changed alone writes the links entry, not the file', async()=>{
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    const config = { path: 'C:\\config.cfg', bytes: new Uint8Array([1]) };
+    await store.save({ files: [config], registry: null });
+    const before = disk.writes();
+    const links = [{ owner: config.path, names: [], attributes: 0x21 }];
+    await store.save({ files: [config], registry: null, links },
+        [{ kind: 'named', path: config.path }]);
+    assert.equal(disk.writes() - before, 1, 'the links entry alone');
+    const back = await store.load();
+    assert.deepEqual(back.files.map(file=>file.path), [config.path], 'the file still there');
+    assert.deepEqual(back.links, links);
+});
+
 test('a run that read its session back saves only what changed at its first save', async()=>{
     const disk = fakeDirectory();
     const big = { path: 'C:\\big.save', bytes: bytes(1 << 20, 3) };

@@ -23,6 +23,8 @@
  * host carries no pointer size).
  */
 
+import { stableSort } from './stable-sort.js';
+
 /**
  * @typedef {Object} DataHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -239,40 +241,17 @@ export function createDataStructureFunctions(host){
     };
 
     /**
-     * A stable merge sort over the array as it stands, the comparator the
-     * program's: called with two items and the program's word, it answers
-     * below, at or above zero.
+     * The array sorted by the program's comparator, called with two items
+     * and the program's word; equal items keep their order.
      *
-     * @param {number[]} values @param {number} compare @param {number} lParam
-     * @returns {Promise<number[]>}
+     * @param {number} dpa @param {number} compare @param {number} lParam
      */
-    const mergeSort = async(values, compare, lParam)=>{
-        if (values.length < 2)
-        {
-            return values;
-        }
-        const middle = values.length >> 1;
-        const left = await mergeSort(values.slice(0, middle), compare, lParam);
-        const right = await mergeSort(values.slice(middle), compare, lParam);
-        /** @type {number[]} */
-        const merged = [];
-        let i = 0;
-        let j = 0;
-        while (i < left.length && j < right.length)
-        {
-            const order = (await call(compare, [left[i], right[j], lParam])) | 0;
-            merged.push(order <= 0 ? left[i++] : right[j++]);
-        }
-        return [...merged, ...left.slice(i), ...right.slice(j)];
-    };
-
-    /** @param {number} dpa @param {number} compare @param {number} lParam */
     const sort = async(dpa, compare, lParam)=>{
         if (dpa === 0 || compare === 0)
         {
             return 0;
         }
-        writeItems(dpa, await mergeSort(items(dpa), compare, lParam));
+        writeItems(dpa, await stableSort(items(dpa), (a, b)=>call(compare, [a, b, lParam])));
         return 1;
     };
 

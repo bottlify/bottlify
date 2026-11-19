@@ -17,8 +17,12 @@
  * it is made, and whenever it is sent WM_SIZE, which is how a parent tells
  * it the parent's size changed.
  *
- * What is not here: icons in a part, owner-drawn parts, tips, the size grip
- * and NM_CLICK.
+ * An owner-drawn part (SBT_OWNERDRAW) keeps the value it was given instead of
+ * a text and is drawn by the parent, told WM_DRAWITEM with that value; a
+ * click or double click with either button tells the parent NM_CLICK,
+ * NM_RCLICK, NM_DBLCLK or NM_RDBLCLK with the part under the mouse.
+ *
+ * What is not here: icons in a part, tips and the size grip.
  */
 
 import {
@@ -27,6 +31,8 @@ import {
     after,
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { readText as readString } from './strings.js';
+import { notifyWindow } from './notify.js';
 
 /** The class name a program creates the control by. */
 export const STATUSBAR_CLASS = 'msctls_statusbar32';
@@ -44,6 +50,22 @@ export const CCS_NOPARENTALIGN = 0x0008;
 export const SBT_NOBORDERS = 0x0100;
 export const SBT_POPOUT = 0x0200;
 export const SBT_OWNERDRAW = 0x1000;
+
+/** The mouse notifications, off NM_FIRST (0). */
+export const NM_CLICK = -2 >>> 0;
+export const NM_DBLCLK = -3 >>> 0;
+export const NM_RCLICK = -5 >>> 0;
+export const NM_RDBLCLK = -6 >>> 0;
+
+const WM_NOTIFY = 0x004e;
+const WM_DRAWITEM = 0x002b;
+const WM_LBUTTONUP = 0x0202;
+const WM_LBUTTONDBLCLK = 0x0203;
+const WM_RBUTTONUP = 0x0205;
+const WM_RBUTTONDBLCLK = 0x0206;
+/** The mouse messages a bar tells its parent of, and how. */
+const MOUSE_NOTIFICATIONS = new Map([[WM_LBUTTONUP, NM_CLICK], [WM_RBUTTONUP, NM_RCLICK],
+    [WM_LBUTTONDBLCLK, NM_DBLCLK], [WM_RBUTTONDBLCLK, NM_RDBLCLK]]);
 /** The part SB_SETTEXT names for simple mode's text. */
 export const SB_SIMPLEID = 0xff;
 
@@ -79,7 +101,7 @@ const DT_SINGLELINE = 0x0020;
  * @typedef {import('../user32/controls.js').ControlHost} ControlHost
  * @typedef {import('../user32/controls.js').ControlMessage} ControlMessage
  * @typedef {import('../user32/controls.js').Rect} Rect
- * @typedef {{ right: number, text: string, type: number }} Part
+ * @typedef {{ right: number, text: string, type: number, data?: number }} Part
  */
 
 /**
@@ -91,6 +113,7 @@ const DT_SINGLELINE = 0x0020;
  *     => number | Promise<number>}
  */
 export function createStatusBarProcedure(host, tk){
+    const pointer = host.pointerSize ?? 4;
     /**
      * @param {any} record
      * @returns {{ parts: Part[], simple: boolean, simplePart: Part, minHeight: number,
@@ -107,28 +130,15 @@ export function createStatusBarProcedure(host, tk){
         return held;
     };
 
-    /** @param {number} address @param {boolean} wide */
-    const readText = (address, wide)=>{
-        if (address === 0)
-        {
-            return '';
-        }
-        if (!wide)
-        {
-            return host.readCString(address, 1024);
-        }
-        let text = '';
-        for (let at = address; text.length < 1024; at += 2)
-        {
-            const [low, high] = host.readMemory(at, 2);
-            if ((low | high) === 0)
-            {
-                break;
-            }
-            text += String.fromCharCode(low | high << 8);
-        }
-        return text;
-    };
+    /**
+     * A part's text as a program hands it in: a control character other
+     * than a tab is kept as a space (Wine's status tests, test_status_control).
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const readText = (address, wide)=>(address === 0 ? ''
+        : Array.from(readString(host, address, wide), character=>
+            (character < ' ' && character !== '\t' ? ' ' : character)).join(''));
 
     /** @param {number} address @param {string} text @param {boolean} wide */
     const writeText = (address, text, wide)=>host.writeMemory(address, wide
@@ -240,8 +250,89 @@ export function createStatusBarProcedure(host, tk){
         draw.fill(hdc, tk.clientRect(record), held.background === CLR_DEFAULT
             ? tk.color(COLOR_3DFACE) : held.background);
         const rects = partRects(record);
-        (held.simple ? [held.simplePart] : held.parts)
-            .forEach((part, index)=>paintPart(hdc, part, rects[index]));
+        const parts = held.simple ? [held.simplePart] : held.parts;
+        parts.forEach((part, index)=>paintPart(hdc, part, rects[index]));
+        return parts.reduce((/** @type {number | Promise<number>} */ done, part, index)=>
+            ((part.type & SBT_OWNERDRAW) === 0 ? done
+                : after(done, ()=>drawItem(record, hdc, held.simple ? SB_SIMPLEID : index,
+                    rects[index], part.data ?? 0))), 0);
+    };
+
+    /**
+     * WM_DRAWITEM to the parent for an owner-drawn part: its index, the bar's
+     * context and the part's rectangle, and the value the part was given.
+     *
+     * @param {any} record @param {number} hdc @param {number} index @param {Rect} rect
+     * @param {number} data
+     */
+    const drawItem = (record, hdc, index, rect, data)=>{
+        const to = notifyWindow(record);
+        const size = 4 * 5 + pointer * 3 + 16;
+        const block = to !== 0 ? host.allocate?.(size) ?? 0 : 0;
+        if (block === 0)
+        {
+            return 0;
+        }
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        const put = (/** @type {number} */ at, /** @type {number} */ value, wide = false)=>{
+            view.setUint32(at, value >>> 0, true);
+            return at + (wide ? pointer : 4);
+        };
+        let at = put(0, 0);
+        at = put(at, record.id);
+        at = put(at, index);
+        at = put(at, 0);
+        at = put(at, 0);
+        if (pointer === 8)
+        {
+            at += 4;
+        }
+        at = put(at, record.hwnd, true);
+        at = put(at, hdc, true);
+        [rect.left, rect.top, rect.right, rect.bottom].forEach((value, side)=>
+            view.setInt32(at + side * 4, value, true));
+        put(at + 16, data, true);
+        host.writeMemory(block, bytes);
+        return after(host.send(to, WM_DRAWITEM, record.id, block), ()=>{
+            host.release?.(block);
+            return 0;
+        });
+    };
+
+    /**
+     * NM_CLICK and its kin: NMMOUSE with the part under the mouse, the point
+     * in the bar's client area.
+     *
+     * @param {any} record @param {number} code @param {number} lParam @param {unknown} thread
+     */
+    const tellMouse = (record, code, lParam, thread)=>{
+        const held = state(record);
+        const to = notifyWindow(record);
+        const header = pointer * 2 + 4 + (pointer === 8 ? 4 : 0);
+        const size = header + pointer * 2 + 8 + pointer;
+        const block = to !== 0 ? host.allocate?.(size) ?? 0 : 0;
+        if (block === 0)
+        {
+            return 0;
+        }
+        const point = { x: (lParam << 16) >> 16, y: lParam >> 16 };
+        const rects = partRects(record);
+        const found = rects.findIndex(rect=>point.x >= rect.left && point.x < rect.right);
+        const item = held.simple ? SB_SIMPLEID : found < 0 ? -1 : found;
+        const bytes = new Uint8Array(size);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, record.hwnd, true);
+        view.setUint32(pointer, record.id, true);
+        view.setUint32(pointer * 2, code, true);
+        view.setUint32(header, item >>> 0, true);
+        view.setInt32(header + pointer * 2, point.x, true);
+        view.setInt32(header + pointer * 2 + 4, point.y, true);
+        host.writeMemory(block, bytes);
+        return after(host.send(to, WM_NOTIFY, record.id, block, thread), ()=>{
+            host.release?.(block);
+            return 0;
+        });
     };
 
     /** @param {Part} part */
@@ -260,10 +351,7 @@ export function createStatusBarProcedure(host, tk){
             case WM_SIZE:
                 return place(record);
             case WM_PAINT:
-                return tk.painting(record, (/** @type {number} */ hdc)=>{
-                    paintBar(record, hdc);
-                    return 0;
-                });
+                return tk.painting(record, (/** @type {number} */ hdc)=>paintBar(record, hdc));
             case WM_SETTEXT:
                 (held.simple ? held.simplePart : held.parts[0]).text
                     = readText(lParam, record.unicode);
@@ -288,8 +376,9 @@ export function createStatusBarProcedure(host, tk){
                     return 0;
                 }
                 part.type = wParam & 0xff00;
-                part.text = (part.type & SBT_OWNERDRAW) !== 0 ? ''
-                    : readText(lParam, message.message === SB_SETTEXTW);
+                const owned = (part.type & SBT_OWNERDRAW) !== 0;
+                part.text = owned ? '' : readText(lParam, message.message === SB_SETTEXTW);
+                part.data = owned ? lParam : 0;
                 host.invalidate(record);
                 return 1;
             }
@@ -299,6 +388,11 @@ export function createStatusBarProcedure(host, tk){
                 if (!part)
                 {
                     return 0;
+                }
+                // An owner-drawn part answers with its value, not a text.
+                if ((part.type & SBT_OWNERDRAW) !== 0)
+                {
+                    return part.data ?? 0;
                 }
                 if (lParam !== 0)
                 {
@@ -365,6 +459,13 @@ export function createStatusBarProcedure(host, tk){
                 host.invalidate(record);
                 return previous;
             }
+            case WM_LBUTTONUP:
+            case WM_RBUTTONUP:
+            case WM_LBUTTONDBLCLK:
+            case WM_RBUTTONDBLCLK:
+                return after(tellMouse(record, /** @type {number} */ (
+                    MOUSE_NOTIFICATIONS.get(message.message >>> 0)), lParam, thread),
+                ()=>tk.common(record, message, thread));
             default:
                 return tk.common(record, message, thread);
         }

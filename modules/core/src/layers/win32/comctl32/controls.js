@@ -33,6 +33,7 @@ import { REBAR_CLASS, REBAR_ATOM, createRebarProcedure } from './rebar.js';
 import { PAGER_CLASS, PAGER_ATOM, createPagerProcedure } from './pager.js';
 import { MONTHCAL_CLASS, MONTHCAL_ATOM, createMonthCalProcedure } from './monthcal.js';
 import { COMBOBOXEX_CLASS, COMBOBOXEX_ATOM, createComboBoxExProcedure } from './comboex.js';
+import { DATETIMEPICK_CLASS, DATETIMEPICK_ATOM, createDateTimePickProcedure } from './datetime.js';
 
 /** The face colour's brush, as a class's background names it: the index plus one. */
 const FACE_BACKGROUND = 15 + 1;
@@ -52,7 +53,8 @@ const FACE_BACKGROUND = 15 + 1;
  *     A module's bitmap resources, which a toolbar takes its images from,
  *     comctl32's subclassing, which an up-down control hooks its buddy with,
  *     gdi32's SetBkMode, which a list view paints its items under, and the
- *     local clock and the user's locale a month calendar reads.
+ *     local clock and the user's locale a month calendar and a date and time
+ *     picker read.
  * @returns {{ name: string, procedure: any, atom: number,
  *     windowExtra?: number, background?: number }[]}
  */
@@ -124,6 +126,11 @@ export function createCommonControls(host, toolkit, images, resources){
             name: MONTHCAL_CLASS,
             atom: MONTHCAL_ATOM,
             procedure: createMonthCalProcedure(host, toolkit, resources),
+        },
+        {
+            name: DATETIMEPICK_CLASS,
+            atom: DATETIMEPICK_ATOM,
+            procedure: createDateTimePickProcedure(host, toolkit, resources),
         },
         {
             name: COMBOBOXEX_CLASS,

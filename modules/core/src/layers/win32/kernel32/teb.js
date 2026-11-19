@@ -162,7 +162,8 @@ export const LDR_ENTRY = Object.freeze({
     FULL_DLL_NAME: 0x24,
     BASE_DLL_NAME: 0x2c,
     FLAGS: 0x34,
-    // LoadCount, TlsIndex (0: no TLS slot is the module's) and the rest of
+    // LoadCount, TlsIndex (0: no TLS of the module's, -1: TLS the loader set
+    // up, `hasThreadLocals`) and the rest of
     // Windows 7's entry, to LoadTime: zero. A program walking the list reads
     // them - a later Windows' DdagNode at 0x50, null where it has none - so
     // the names' characters start after them, not over them.
@@ -695,6 +696,22 @@ export function createProcessBlocks(options){
          * @param {number} base
          */
         entryOf: base=>entries.get(base >>> 0) ?? 0,
+        /**
+         * A module with thread-local storage the loader set up: its entry's
+         * TlsIndex reads -1, as Windows (since Vista, which allocates static
+         * TLS dynamically) leaves it for every such module; 0 is a module
+         * with none (Wine's loader.c check_tls_index).
+         *
+         * @param {number} base
+         */
+        hasThreadLocals: base=>{
+            const entry = entries.get(base >>> 0);
+            // The i386 entry's field; the x86-64 entry is laid out without it yet.
+            if (entry !== undefined && 'TLS_INDEX' in entryFields)
+            {
+                writeMemory(entry + entryFields.TLS_INDEX, new Uint8Array([0xff, 0xff]));
+            }
+        },
 
         /**
          * A block for one thread, with its own thread-local array and its own

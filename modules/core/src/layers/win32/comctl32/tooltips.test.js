@@ -21,6 +21,10 @@ const TTM_GETDELAYTIME = WM_USER + 21;
 const TTM_SETMAXTIPWIDTH = WM_USER + 24;
 const TTM_GETMAXTIPWIDTH = WM_USER + 25;
 const TTM_ADDTOOLW = WM_USER + 50;
+const TTM_SETMARGIN = WM_USER + 26;
+const TTM_SETTITLEA = WM_USER + 32;
+const TTM_ADJUSTRECT = WM_USER + 31;
+const WM_CREATE = 0x0001;
 const TTM_GETTEXTW = WM_USER + 56;
 const TTS_NOPREFIX = 0x02;
 // Above the first 64 KiB: a text pointer below it is a resource id.
@@ -48,6 +52,9 @@ function tooltip(){
         },
         release: ()=>{},
         sysColor: (/** @type {number} */ index)=>index,
+        contextOn: ()=>({ hdc: 0x77 }),
+        endPaint: ()=>{},
+        draw: { measure: ()=>({ width: 8, height: 13, ascent: 10 }) },
         // The tool's window answers by copying into the buffer it is handed.
         send: (/** @type {number} */ hwnd, /** @type {number} */ message,
             /** @type {number} */ wParam, /** @type {number} */ lParam)=>
@@ -143,4 +150,71 @@ test('the delays come from the double-click time, and the width is the program\'
     assert.equal(t.send(TTM_GETDELAYTIME, 1, 0), 100, 'reshow');
     assert.equal(t.send(TTM_SETMAXTIPWIDTH, 0, 200), -1, 'no width before');
     assert.equal(t.send(TTM_GETMAXTIPWIDTH, 0, 0), 200);
+});
+
+test('version 6 knows the third TOOLINFO, with lpReserved', ()=>{
+    const t = tooltip();
+    Object.assign(t.record, { controlsVersion: 6 });
+    assert.equal(t.send(TTM_ADDTOOLW, 0, t.info(48, 3, 0)), 1);
+    assert.equal(t.send(TTM_ADDTOOLW, 0, t.info(49, 4, 0)), 0, 'past version 3');
+});
+
+test('a tip is made a bordered popup tool window whatever it was made as', ()=>{
+    const t = tooltip();
+    Object.assign(t.record, { style: (0xffffffff & ~0x40) >>> 0, exStyle: 0 });
+    t.send(WM_CREATE, 0, 0);
+    assert.equal(t.record.style >>> 0, 0xbebfffbf, 'no child, maximise or caption; popup, border');
+    assert.equal(/** @type {any} */ (t.record).exStyle & 0x80, 0x80, 'WS_EX_TOOLWINDOW');
+    Object.assign(t.record, { style: 0xffffffff, exStyle: 0 });
+    t.send(WM_CREATE, 0, 0);
+    assert.equal(t.record.style >>> 0, 0xbe3fffff, 'a balloon has no border');
+});
+
+test('TTM_ADJUSTRECT grows a text rectangle to its window and shrinks a window to its text',
+    ()=>{
+        const t = tooltip();
+        t.record.style = 0x00800000;
+        const rect = (/** @type {number[]} */ values)=>values.forEach((value, at)=>
+            t.view.setInt32(BUFFER + at * 4, value, true));
+        const read = ()=>[0, 4, 8, 12].map(at=>t.view.getInt32(BUFFER + at, true));
+        rect([0, 0, 100, 100]);
+        assert.equal(t.send(TTM_ADJUSTRECT, 1, BUFFER), 1);
+        assert.deepEqual(read(), [-3, -3, 103, 103], 'the frame and the text margin');
+        assert.equal(t.send(TTM_ADJUSTRECT, 0, BUFFER), 1);
+        assert.deepEqual(read(), [0, 0, 100, 100], 'and back');
+        [10, 20, 30, 40].forEach((value, at)=>t.view.setInt32(INFO + at * 4, value, true));
+        t.send(TTM_SETMARGIN, 0, INFO);
+        assert.equal(t.send(TTM_ADJUSTRECT, 1, BUFFER), 1);
+        assert.deepEqual(read(), [-13, -23, 133, 143], 'with the margins TTM_SETMARGIN set');
+        assert.equal(t.send(TTM_ADJUSTRECT, 1, 0), 0, 'no rectangle');
+    });
+
+test('version 6 adjusts by the frame and the text margin only, not the margins or a title', ()=>{
+    const t = tooltip();
+    Object.assign(t.record, { style: 0x00800000, controlsVersion: 6 });
+    const read = ()=>[0, 4, 8, 12].map(at=>t.view.getInt32(BUFFER + at, true));
+    [100, 100, 100, 100].forEach((value, at)=>t.view.setInt32(INFO + at * 4, value, true));
+    t.send(TTM_SETMARGIN, 0, INFO);
+    t.ansi(TEXT, 'A very long title');
+    t.send(TTM_SETTITLEA, 1, TEXT);
+    t.bytes.fill(0, BUFFER, BUFFER + 16);
+    assert.equal(t.send(TTM_ADJUSTRECT, 1, BUFFER), 1);
+    assert.deepEqual(read(), [-3, -3, 3, 3]);
+});
+
+test('version 5 counts a title\'s icon column and row, whatever the title\'s length', ()=>{
+    const t = tooltip();
+    t.record.style = 0x00800000;
+    const read = ()=>[0, 4, 8, 12].map(at=>t.view.getInt32(BUFFER + at, true));
+    const adjusted = (/** @type {string} */ title)=>{
+        t.ansi(TEXT, title);
+        t.send(TTM_SETTITLEA, 1, TEXT);
+        t.bytes.fill(0, BUFFER, BUFFER + 16);
+        t.send(TTM_ADJUSTRECT, 1, BUFFER);
+        return read();
+    };
+    // The icon (16) and a gap (2) beside, the taller of the font's line (13)
+    // and the icon above, and its gap.
+    assert.deepEqual(adjusted('A very long title'), [-21, -21, 3, 3]);
+    assert.deepEqual(adjusted('Short'), [-21, -21, 3, 3]);
 });

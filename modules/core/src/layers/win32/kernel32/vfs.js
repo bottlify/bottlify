@@ -308,19 +308,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
     });
 
     /**
-     * The attributes programs set, by name folded to one case as the volume
-     * folds it. The filesystem below keeps no attribute bits, and read-only
-     * is not decoration: a program marks a file read-only and expects the
-     * delete and the write it did not mean to allow to be refused. Kept for
-     * the life of the process, following a name through a rename, a delete
-     * and a directory's removal.
-     *
-     * @type {Map<string, number>}
-     */
-    const recorded = new Map();
-    /** @param {string} path */
-    const keyOf = path=>path.toLowerCase();
-    /**
      * A file with more than one name says how many and what it is known by;
      * one with its own alone says nothing of either.
      *
@@ -329,32 +316,14 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
      */
     const linked = entry=>(entry.links > 1 ? { links: entry.links, identity: entry.identity } : {});
 
-    /** @param {string} path */
-    const setBy = path=>{
-        const attributes = recorded.get(keyOf(path));
-        return attributes === undefined ? {} : { attributes };
-    };
     /**
-     * Moves what was recorded under one name, and under every name below it,
-     * to another; with no destination, forgets it.
+     * The attributes a program set on the file, which the volume keeps for
+     * every name it has; none recorded leaves it as the volume reports it.
      *
-     * @param {string} from @param {string | null} to
+     * @param {any} entry
      */
-    const carry = (from, to)=>{
-        const key = keyOf(from);
-        for (const [name, attributes] of [...recorded])
-        {
-            if (name !== key && !name.startsWith(`${key}\\`))
-            {
-                continue;
-            }
-            recorded.delete(name);
-            if (to !== null)
-            {
-                recorded.set(keyOf(to) + name.slice(key.length), attributes);
-            }
-        }
-    };
+    const setBy = entry=>(typeof entry.attributes === 'number'
+        ? { attributes: entry.attributes } : {});
 
     /**
      * The watches FindFirstChangeNotification set, each a directory, whether
@@ -521,13 +490,12 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
     };
 
     /**
-     * What follows a name moved: its open files and recorded attributes go
-     * with it, and the watches are told.
+     * What follows a name moved: the watches are told. Its attributes are the
+     * volume's, and go with it there.
      *
      * @param {string} from @param {string} to
      */
     const moved = (from, to)=>{
-        carry(from, to);
         if (watches.size > 0)
         {
             const kind = attempt(()=>fs.stat(to), null)?.directory
@@ -550,7 +518,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             return entry
                 ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
                     modified: entry.modified ?? 0, ...linked(entry), ...marks(entry),
-                    ...setBy(path) }
+                    ...setBy(entry) }
                 : null;
         },
 
@@ -568,18 +536,10 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             }
             changed(path, CHANGE_ATTRIBUTES, FILE_ACTION_MODIFIED);
             // The attributes are the file's: every name it has shows them.
-            for (const name of attempt(()=>fs.namesOf?.(path), null) ?? [path])
-            {
-                if (attributes === null)
-                {
-                    recorded.delete(keyOf(name));
-                }
-                else
-                {
-                    recorded.set(keyOf(name), attributes >>> 0);
-                }
-            }
-            return true;
+            return attempt(()=>{
+                fs.setAttributes(path, attributes === null ? null : attributes >>> 0);
+                return true;
+            }, false);
         },
 
         /**
@@ -619,6 +579,66 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
         },
 
         /**
+         * Holds the directory at `path` open on `access` and `share`: its
+         * number, or the volume's code for why not - SHARING_VIOLATION when
+         * the opens already there do not allow it.
+         *
+         * @param {string} path
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} access
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} share
+         * @returns {{ token: number } | { error: string }}
+         */
+        holdDirectory(path, access, share){
+            try
+            {
+                return { token: fs.holdDirectory(path, access, share) };
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return { error: error.code };
+            }
+        },
+
+        /** @param {number} token */
+        releaseDirectory(token){
+            fs.releaseDirectory(token);
+        },
+
+        /**
+         * The number of the file at `path` on its volume, the same under
+         * every name and across renames: 0 for a path that names nothing.
+         *
+         * @param {string} path @returns {number}
+         */
+        fileId(path){
+            return attempt(()=>fs.fileId(path), 0);
+        },
+
+        /**
+         * The path `path` reaches as its volume spells it, every junction on
+         * the way taken: itself where it names nothing.
+         *
+         * @param {string} path @returns {string}
+         */
+        finalPath(path){
+            return attempt(()=>fs.finalPath(path), path);
+        },
+
+        /**
+         * Where the file numbered `id` is on the volume `path` is on: null
+         * for a number no file there has.
+         *
+         * @param {string} path @param {number} id @returns {string | null}
+         */
+        pathOfFileId(path, id){
+            return attempt(()=>fs.pathOfFileId(path, id), null);
+        },
+
+        /**
          * Gives the file at `existing` the further name `path`: null when it
          * did, or the volume's code for why not -- NOT_SAME_DEVICE across
          * drives, ACCESS_DENIED for a directory, ALREADY_EXISTS for a name
@@ -640,11 +660,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                     throw error;
                 }
                 return error.code;
-            }
-            const attributes = recorded.get(keyOf(existing));
-            if (attributes !== undefined)
-            {
-                recorded.set(keyOf(path), attributes);
             }
             changed(path, CHANGE_FILE_NAME, FILE_ACTION_ADDED);
             return null;
@@ -893,7 +908,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 {
                     fs.deleteFile(path);
                 }
-                carry(path, null);
                 changed(path, entry.directory ? CHANGE_DIR_NAME : CHANGE_FILE_NAME,
                     FILE_ACTION_REMOVED);
                 return true;
@@ -1090,7 +1104,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 modified: entry.modified ?? 0,
                 ...linked(entry),
                 ...marks(entry),
-                ...setBy(`${path.replace(/\\$/, '')}\\${entry.name}`),
+                ...setBy(entry),
             })), []),
 
         /**

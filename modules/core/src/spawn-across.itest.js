@@ -34,7 +34,8 @@ const cstring = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 
 /**
  * A parent that hands its child a file as the child's output: it creates
- * C:\App\out.txt, starts child.exe with STARTF_USESTDHANDLES and the file as
+ * C:\App\out.txt inheritable, as an installer redirecting a tool's output
+ * does, starts child.exe inheriting handles with STARTF_USESTDHANDLES and the file as
  * hStdOutput and hStdError, waits for it, writes "P" through its own handle
  * and reads the file back from the start. The exit code is the bytes read,
  * plus 0x100 when the last is the parent's "P" and 0x200 when the first is
@@ -50,6 +51,8 @@ function buildOutputParent(){
             path: cstring('C:\\App\\out.txt'), child: cstring('C:\\App\\child.exe'),
             startup: [...le32(startupSize), ...new Array(startupSize - 4).fill(0)],
             info: new Array(16).fill(0), mark: cstring('P'), count: [0, 0, 0, 0],
+            // SECURITY_ATTRIBUTES: nLength 12, no descriptor, bInheritHandle.
+            inheritable: [...le32(12), ...le32(0), ...le32(1)],
             buffer: new Array(16).fill(0),
         },
         codeSize: 0x200,
@@ -59,7 +62,7 @@ function buildOutputParent(){
             const bytes = [
                 // STARTF_USESTDHANDLES
                 0xc7, 0x05, ...le32(at('startup') + 44), ...le32(0x100),
-                ...push(0), ...push(0x80), ...push(2), ...push(0), ...push(3),
+                ...push(0), ...push(0x80), ...push(2), ...push(at('inheritable')), ...push(3),
                 ...push(0xc0000000), ...push(at('path')), ...call('CreateFileA'),
                 0x89, 0xc3,                                                   // mov ebx, eax
                 0xa3, ...le32(at('startup') + 60),                           // hStdOutput
@@ -88,9 +91,14 @@ function buildOutputParent(){
     });
 }
 
-/** A child that writes "child" to its standard output and exits 0. */
-function buildOutputChild(){
+/**
+ * A child that writes "child" to its standard output and exits 0.
+ *
+ * @param {2 | 3} [subsystem]  its image's: a console program unless 2
+ */
+function buildOutputChild(subsystem = 3){
     return buildExe({
+        subsystem,
         imports: { 'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'] },
         data: { text: cstring('child'), count: [0, 0, 0, 0] },
         codeSize: 0x40,
@@ -127,6 +135,70 @@ for (const [where, options] of /** @type {[string, any][]} */ ([
         const code = await app.run({ timeoutMs: 120_000 });
         assert.equal(code, 0x306, 'the file reads "childP": the child first, the parent after');
         assert.equal(console.join('').includes('child'), false, 'nothing went to the console');
+    });
+}
+
+/**
+ * A parent that points its own output at C:\App\out.txt (SetStdHandle, the
+ * file not inheritable) and starts child.exe inheriting nothing: a console
+ * child is handed a duplicate of that output, which shares the parent's file
+ * pointer. Exits with the parent's position after the child: 5 when the
+ * child's "child" went into the file, 0 when it went nowhere.
+ */
+function buildRedirectingParent(){
+    const startupSize = 68;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateFileA', 'SetStdHandle', 'CreateProcessA',
+            'WaitForSingleObject', 'SetFilePointer', 'ExitProcess'] },
+        data: {
+            path: cstring('C:\\App\\out.txt'), child: cstring('C:\\App\\child.exe'),
+            startup: [...le32(startupSize), ...new Array(startupSize - 4).fill(0)],
+            info: new Array(16).fill(0),
+        },
+        codeSize: 0x100,
+        code: ({ iat, at })=>{
+            const call = (/** @type {string} */ name)=>[0xff, 0x15, ...le32(iat(name))];
+            const push = (/** @type {number} */ value)=>[0x68, ...le32(value)];
+            const bytes = [
+                ...push(0), ...push(0x80), ...push(2), ...push(0), ...push(3),
+                ...push(0xc0000000), ...push(at('path')), ...call('CreateFileA'),
+                0x89, 0xc3,                                                   // mov ebx, eax
+                0x53, ...push(0xfffffff5), ...call('SetStdHandle'),          // STD_OUTPUT_HANDLE
+                ...push(at('info')), ...push(at('startup')), ...push(0), ...push(0), ...push(0),
+                ...push(0), ...push(0), ...push(0), ...push(at('child')), ...push(0),
+                ...call('CreateProcessA'),
+                ...push(0xffffffff), 0xff, 0x35, ...le32(at('info')),
+                ...call('WaitForSingleObject'),
+                ...push(1), ...push(0), ...push(0), 0x53, ...call('SetFilePointer'), // FILE_CURRENT
+                0x50, ...call('ExitProcess'),
+            ];
+            return bytes.concat(new Array(0x100 - bytes.length).fill(0xcc));
+        },
+    });
+}
+
+for (const [where, options] of /** @type {[string, any][]} */ ([
+    ['in its parent\'s place', {}],
+    ['in a worker of its own', { concurrency: 2 }],
+]))
+{
+    test(`a console child ${where} inheriting nothing writes into its parent's own output; a`
+        + ' window program has none', { timeout: 120000 }, async t=>{
+        // Wine's process.c test_StdHandleInheritance, nothing_cui and
+        // nothing_gui: which one is decided by the child's image's subsystem.
+        for (const [subsystem, expected] of /** @type {[2 | 3, number][]} */ ([[3, 5], [2, 0]]))
+        {
+            const app = await createApp({
+                executable: buildRedirectingParent(),
+                imagePath: 'C:\\App\\parent.exe',
+                files: [{ path: 'C:\\App\\child.exe', bytes: buildOutputChild(subsystem) }],
+                ...options,
+            });
+            t.after(()=>app.dispose());
+            assert.equal(await app.run({ timeoutMs: 120_000 }), expected,
+                subsystem === 3 ? 'the console child wrote "child" where the parent\'s position is'
+                    : 'the window program had no output to write to');
+        }
     });
 }
 

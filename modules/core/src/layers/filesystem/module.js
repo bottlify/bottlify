@@ -362,7 +362,8 @@ export function createFilesystemModule(){
              * @param {string} key @param {any} change
              */
             const changed = (key, change)=>{
-                if (!quiet)
+                // A record of the file changed, not its bytes: nothing to hand out.
+                if (!quiet && change.kind !== 'named')
                 {
                     touched.set(`${key}:${change.path}`,
                         { key, path: change.path, generation: ++generation });
@@ -806,6 +807,52 @@ export function createFilesystemModule(){
                 },
 
                 /**
+                 * The number of the file at `path` on its volume, the same
+                 * under every name and across renames (the tree's `fileId`).
+                 *
+                 * @param {string} path @returns {number}
+                 */
+                fileId(path){
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const { tree, components } = locate(path);
+                    return tree.fileId(components);
+                },
+
+                /**
+                 * The full path `path` reaches, as the volume spells it, every
+                 * junction on the way taken; the last name is not followed.
+                 *
+                 * @param {string} path @returns {string}
+                 */
+                finalPath(path){
+                    if (!live())
+                    {
+                        return path;
+                    }
+                    const { tree, drive, components } = locate(path);
+                    return formatPath(drive, tree.finalPath(components));
+                },
+
+                /**
+                 * Where the file numbered `id` is on the volume `path` is on,
+                 * as a full path: null for a number no file there has.
+                 *
+                 * @param {string} path @param {number} id @returns {string | null}
+                 */
+                pathOfFileId(path, id){
+                    if (!live())
+                    {
+                        return null;
+                    }
+                    const { tree, drive } = locate(path);
+                    const components = tree.pathOfId(id);
+                    return components ? formatPath(drive, components) : null;
+                },
+
+                /**
                  * Every name the file at `path` has, as full paths: its own
                  * alone unless it is linked.
                  *
@@ -910,6 +957,39 @@ export function createFilesystemModule(){
                     }
                 },
 
+                /**
+                 * Holds the directory at `path` open on `access` and `share`,
+                 * as CreateFile with FILE_FLAG_BACKUP_SEMANTICS opens one:
+                 * its number, or SHARING_VIOLATION thrown when the opens
+                 * already there do not allow it (NOT_FOUND for no directory).
+                 *
+                 * @param {string} path
+                 * @param {import('./internal/handles.js').AccessFlags} access
+                 * @param {import('./internal/handles.js').AccessFlags} share
+                 * @returns {number}
+                 */
+                holdDirectory(path, access, share){
+                    const where = locate(path);
+                    const entry = where.tree.stat(where.components);
+                    if (!entry?.directory)
+                    {
+                        throw fsError(ErrorCode.NOT_FOUND, `No directory at "${path}"`);
+                    }
+                    return state.files.holdDirectory({ key: where.key, path: entry.path,
+                        access: { read: !!access.read, write: !!access.write,
+                            delete: !!access.delete },
+                        share: { read: !!share.read, write: !!share.write,
+                            delete: !!share.delete } });
+                },
+
+                /** @param {number} token */
+                releaseDirectory(token){
+                    if (live())
+                    {
+                        state.files.releaseDirectory(token);
+                    }
+                },
+
                 /** @param {string} path @returns {boolean} whether any process holds it open */
                 isOpen: path=>live() && state.files.isOpen(locate(path).key),
 
@@ -995,6 +1075,22 @@ export function createFilesystemModule(){
                 },
 
                 /**
+                 * Sets the attribute bits of the file or directory at `path`,
+                 * or forgets them with null: kept on the volume for every name
+                 * of the file, and in the session.
+                 *
+                 * @param {string} path @param {number | null} attributes
+                 */
+                setAttributes(path, attributes){
+                    if (!live())
+                    {
+                        return;
+                    }
+                    const at = locate(path);
+                    at.tree.setAttributes(at.components, attributes);
+                },
+
+                /**
                  * The reparse point at `path` as it was set, null for none.
                  *
                  * @param {string} path
@@ -1039,6 +1135,9 @@ export function createFilesystemModule(){
                                     formatPath(key, splitComponents(path))),
                                 ...record.junction ? { junction: true } : {},
                                 ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.id !== undefined ? { id: record.id } : {},
+                                ...record.attributes !== undefined
+                                    ? { attributes: record.attributes } : {},
                                 ...record.target
                                     ? { target: formatPath(key, splitComponents(record.target)) }
                                     : {} });
@@ -1074,6 +1173,9 @@ export function createFilesystemModule(){
                                 names: names.map(at=>at.components.join('\\')),
                                 ...record.junction ? { junction: true } : {},
                                 ...record.reparse ? { reparse: record.reparse } : {},
+                                ...record.id !== undefined ? { id: record.id } : {},
+                                ...record.attributes !== undefined
+                                    ? { attributes: record.attributes } : {},
                                 ...target && target.tree === owner.tree
                                     ? { target: target.components.join('\\') } : {} }]);
                         }
@@ -1227,6 +1329,11 @@ export function createFilesystemModule(){
                                 `${from} cannot be moved into itself, to ${to}`);
                         }
                         this.createDirectory(to);
+                        if (locate(from).tree === locate(to).tree)
+                        {
+                            locate(from).tree.carryFile(locate(from).components,
+                                locate(to).components);
+                        }
                         for (const child of this.list(from))
                         {
                             this.rename(`${from}\\${child.name}`, `${to}\\${child.name}`);

@@ -112,3 +112,15 @@ test('a handle adopted at a number keeps it, and fresh ones step past it', ()=>{
     const third = table.open('event', 'c');
     assert.deepEqual([first, second, third], [0x40, 0x44, 0x4c]);
 });
+
+test('a closed number adopted again is not handed out a second time, and keeps its rights', ()=>{
+    // DuplicateHandle with DUPLICATE_CLOSE_SOURCE puts the duplicate in the
+    // source's slot: the number goes back from the free list it was put on.
+    const table = createHandleTable({ limit: 0x44 });
+    const a = table.open('file', 'a');
+    table.open('file', 'b');
+    table.close(a);
+    assert.equal(table.adopt(a, 'file', 'a again', 0x80000000), true);
+    assert.equal(table.access(a), 0x80000000);
+    assert.throws(()=>table.open('event', 'c'), /exhausted/, 'the slot is taken, not free');
+});

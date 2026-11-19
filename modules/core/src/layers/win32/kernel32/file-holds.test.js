@@ -135,6 +135,8 @@ async function setup(){
             retain: node=>volume.retain(node),
             /** @param {any} node */
             close: node=>volume.close(node),
+            /** @param {any} node @param {string} kind */
+            section: (node, kind)=>volume.section(node, kind),
         },
     });
 
@@ -263,4 +265,113 @@ test('a duplicate that closes its source holds the file once, not twice', async(
 
     assert.equal(fns.CloseHandle.handler([dword(DUPLICATE)]), 1);
     assert.equal(openFiles(), 0);
+});
+
+/**
+ * CreateFileA on `path` as the setup's bytes hold it.
+ *
+ * @param {Awaited<ReturnType<typeof setup>>} machine @param {string} path
+ * @param {number} access @param {number} share @param {number} disposition @param {number} flags
+ */
+const createFile = ({ fns, bytes }, path, access, share, disposition, flags)=>{
+    [...path, '\0'].forEach((ch, at)=>{
+        bytes[NAME + at] = ch.charCodeAt(0);
+    });
+    return fns.CreateFileA.handler([NAME, access, share, 0, disposition, flags, 0]);
+};
+
+/** @param {Awaited<ReturnType<typeof setup>>} machine @param {string} name @param {string} path */
+const byName = ({ fns, bytes }, name, path)=>{
+    [...path, '\0'].forEach((ch, at)=>{
+        bytes[NAME + at] = ch.charCodeAt(0);
+    });
+    return fns[name].handler([NAME, 0]);
+};
+
+const DELETE = 0x00010000;
+const FILE_SHARE_DELETE = 4;
+const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+const FILE_FLAG_DELETE_ON_CLOSE = 0x04000000;
+const ERROR_SHARING_VIOLATION = 32;
+
+test('a directory\'s opens share and refuse as a file\'s, and RemoveDirectory is settled against'
+    + ' them', async()=>{
+    const machine = await setup();
+    const { fns, errors } = machine;
+    assert.equal(byName(machine, 'CreateDirectoryA', 'C:\\dir'), 1);
+    const held = createFile(machine, 'C:\\dir', DELETE, 0, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS);
+    assert.notEqual(held, INVALID_HANDLE_VALUE);
+    assert.equal(byName(machine, 'RemoveDirectoryA', 'C:\\dir'), 0,
+        'held without sharing deletion');
+    assert.equal(errors.at(-1), ERROR_SHARING_VIOLATION);
+    assert.equal(createFile(machine, 'C:\\dir', DELETE, FILE_SHARE_DELETE, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS), INVALID_HANDLE_VALUE, 'a second open the first refuses');
+    assert.equal(errors.at(-1), ERROR_SHARING_VIOLATION);
+    assert.equal(fns.CloseHandle.handler([held]), 1);
+    assert.equal(byName(machine, 'RemoveDirectoryA', 'C:\\dir'), 1, 'let go, it goes');
+});
+
+test('a directory opened to delete on close goes with the last open of it, and only empty',
+    async()=>{
+        const machine = await setup();
+        const { fns } = machine;
+        assert.equal(byName(machine, 'CreateDirectoryA', 'C:\\dir'), 1);
+        const closing = createFile(machine, 'C:\\dir', DELETE, FILE_SHARE_DELETE, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_DELETE_ON_CLOSE);
+        const other = createFile(machine, 'C:\\dir', DELETE, FILE_SHARE_DELETE, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS);
+        assert.notEqual(other, INVALID_HANDLE_VALUE);
+        assert.equal(fns.CloseHandle.handler([closing]), 1);
+        assert.notEqual(byName(machine, 'GetFileAttributesA', 'C:\\dir'), INVALID_HANDLE_VALUE,
+            'another open still holds it');
+        assert.equal(fns.CloseHandle.handler([other]), 1);
+        assert.equal(byName(machine, 'GetFileAttributesA', 'C:\\dir'), INVALID_HANDLE_VALUE);
+
+        assert.equal(byName(machine, 'CreateDirectoryA', 'C:\\full'), 1);
+        fns.CloseHandle.handler([createFile(machine, 'C:\\full\\in', GENERIC_WRITE, 0, 2, 0)]);
+        const full = createFile(machine, 'C:\\full', DELETE, 0, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_DELETE_ON_CLOSE);
+        assert.equal(fns.CloseHandle.handler([full]), 1);
+        assert.notEqual(byName(machine, 'GetFileAttributesA', 'C:\\full'), INVALID_HANDLE_VALUE,
+            'something in it: it stays');
+        assert.notEqual(createFile(machine, 'C:\\full', GENERIC_READ, 0, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS), INVALID_HANDLE_VALUE, 'and is no longer pending');
+    });
+
+test('a file a section maps is not deleted, and delete-on-close is the open\'s', async()=>{
+    const machine = await setup();
+    const { fns, bytes } = machine;
+    const set = /** @type {any} */ (fns.CreateFileW).natives.NtSetInformationFile;
+    const INFO = 0x2400;
+    const file = createFile(machine, PATH, GENERIC_READ | GENERIC_WRITE | DELETE, 0, OPEN_EXISTING,
+        0);
+    const mapping = fns.CreateFileMappingA.handler([file, 0, PAGE_READONLY, 0, 0, 0]);
+    bytes[INFO] = 1;
+    assert.equal(set.handler([file, 0x2300, INFO, 1, 13]) >>> 0, 0xc0000121,
+        'STATUS_CANNOT_DELETE while the section maps it');
+    assert.equal(fns.CloseHandle.handler([mapping]), 1);
+    assert.equal(set.handler([file, 0x2300, INFO, 1, 13]), 0, 'and deletable once it does not');
+    bytes[INFO] = 0;
+    assert.equal(set.handler([file, 0x2300, INFO, 1, 13]), 0, 'then not deleted after all');
+    assert.equal(fns.CloseHandle.handler([file]), 1);
+    assert.notEqual(byName(machine, 'GetFileAttributesA', PATH), INVALID_HANDLE_VALUE);
+
+    // Clearing the disposition does not undo FILE_FLAG_DELETE_ON_CLOSE;
+    // FileDispositionInformationEx's FILE_DISPOSITION_ON_CLOSE does.
+    const closing = createFile(machine, PATH, GENERIC_WRITE | DELETE, 0, OPEN_EXISTING,
+        FILE_FLAG_DELETE_ON_CLOSE);
+    assert.equal(set.handler([closing, 0x2300, INFO, 1, 13]), 0);
+    bytes.set([8, 0, 0, 0], INFO);
+    assert.equal(set.handler([closing, 0x2300, INFO, 4, 64]), 0, 'FILE_DISPOSITION_ON_CLOSE');
+    assert.equal(fns.CloseHandle.handler([closing]), 1);
+    assert.notEqual(byName(machine, 'GetFileAttributesA', PATH), INVALID_HANDLE_VALUE,
+        'its delete-on-close cleared');
+    const again = createFile(machine, PATH, GENERIC_WRITE | DELETE, 0, OPEN_EXISTING,
+        FILE_FLAG_DELETE_ON_CLOSE);
+    bytes[INFO] = 0;
+    assert.equal(set.handler([again, 0x2300, INFO, 1, 13]), 0);
+    assert.equal(fns.CloseHandle.handler([again]), 1);
+    assert.equal(byName(machine, 'GetFileAttributesA', PATH), INVALID_HANDLE_VALUE,
+        'a cleared disposition leaves delete-on-close');
 });

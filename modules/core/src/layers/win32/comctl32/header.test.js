@@ -25,6 +25,8 @@ function header(answer = 0){
     let heap = 0x11000;
     /** @type {{ code: number, item: number, text: string }[]} */
     const heard = [];
+    /** @type {[number, number][]} the accessibility events raised, and their child */
+    const events = [];
     const procedure = createHeaderProcedure(/** @type {any} */ ({
         readMemory: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.slice(at, at + n),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
@@ -39,6 +41,12 @@ function header(answer = 0){
         release: ()=>{},
         clientSize: ()=>({ width: 300, height: 18 }),
         invalidate: ()=>{},
+        winEvent: (/** @type {number} */ event, /** @type {number} */ hwnd,
+            /** @type {number} */ object, /** @type {number} */ child)=>
+        {
+            events.push([event, child]);
+            return 0;
+        },
         send: (/** @type {number} */ hwnd, /** @type {number} */ message,
             /** @type {number} */ wParam, /** @type {number} */ lParam)=>
         {
@@ -75,7 +83,7 @@ function header(answer = 0){
         view.setInt32(ITEM + HDITEM.iOrder, order, true);
         return ITEM;
     };
-    return { send, item, view, bytes, heard, record };
+    return { send, item, view, bytes, heard, record, events };
 }
 
 test('items keep their index while the display order lays them out', async()=>{
@@ -133,3 +141,18 @@ test('a change is told before and after, in the parent\'s spelling, and refused 
         refusing.send(HDM.GETITEMA, 0, at);
         assert.equal(refusing.view.getInt32(at + HDITEM.cxy, true), 50, 'the width is kept');
     });
+
+test('accessibility hears of an item made, an item gone and the order changed', async()=>{
+    const h = header();
+    await h.send(0x0001, 0, 0);
+    h.send(HDM.INSERTITEMA, 0, h.item(HDI_WIDTH, 40, 0));
+    h.send(HDM.INSERTITEMA, 1, h.item(HDI_WIDTH, 40, 0));
+    assert.deepEqual(h.events, [[0x8000, 1], [0x8000, 2]], 'EVENT_OBJECT_CREATE, index plus one');
+    h.events.length = 0;
+    h.view.setInt32(ARRAY, 1, true);
+    h.view.setInt32(ARRAY + 4, 0, true);
+    assert.equal(h.send(HDM.SETORDERARRAY, 2, ARRAY), 1);
+    assert.equal(h.send(HDM.DELETEITEM, 0, 0), 1);
+    assert.deepEqual(h.events, [[0x8004, 0], [0x8001, 1]],
+        'EVENT_OBJECT_REORDER for the control, EVENT_OBJECT_DESTROY for the item');
+});

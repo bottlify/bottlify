@@ -3274,8 +3274,10 @@ export function createNamedPipes(host){
             }
             if (device)
             {
-                return { handle: host.handles.open('pipe', { device },
-                    mappedAccess('pipe', access >>> 0)) };
+                // The mode it was opened in is FileModeInformation's.
+                return { handle: host.handles.open('pipe', { device,
+                    mode: (options >>> 0) & FILE_SYNCHRONOUS_IO },
+                mappedAccess('pipe', access >>> 0)) };
             }
             if (instance)
             {
@@ -3667,11 +3669,14 @@ export function createNamedPipes(host){
          * child's handle is taken here, held until the child claims it
          * (`claimInherited`) or never starts (`dropUnclaimed`).
          *
-         * @param {number[] | null} only
+         * With `every`, those `only` names whether inheritable or not: the
+         * standard handles a console child is handed duplicates of.
+         *
+         * @param {number[] | null} only @param {boolean} [every]
          * @returns {InheritedEnd[]}
          */
-        inherited(only){
-            return [...inheritable].filter(([handle, on])=>on
+        inherited(only, every = false){
+            return [...inheritable].filter(([handle, on])=>(on || every)
                 && (only === null || only.includes(handle)))
                 .flatMap(([handle])=>{
                     const end = endOf(handle);

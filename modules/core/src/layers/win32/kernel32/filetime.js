@@ -337,7 +337,8 @@ const FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
  * alone: a directory set to it is just a directory.
  *
  * A reparse point - a junction, a symbolic link, a tag of a program's own -
- * has the reparse-point bit, whatever else it is.
+ * has the reparse-point bit, whatever else it is: a file one beside the
+ * archive bit it carries as any file does.
  *
  * @param {{ isDirectory: boolean, readOnly?: boolean, hidden?: boolean,
  *           attributes?: number, junction?: string, reparseTag?: number }
@@ -359,7 +360,9 @@ export function fileAttributes(entry){
     {
         return kind | hidden | media;
     }
-    return (kind || FILE_ATTRIBUTE_ARCHIVE) | hidden;
+    // A file is archived until a program clears it; a directory is not, a
+    // reparse point or not.
+    return (entry?.isDirectory ? kind : kind | FILE_ATTRIBUTE_ARCHIVE) | hidden;
 }
 
 /**
@@ -379,6 +382,8 @@ export function fileAttributes(entry){
  *     attributes?: number, identity?: string }[]} [list]
  *           A directory's entries, for a listing by handle. Absent, a directory
  *           lists only its dots.
+ * @property {(path: string) => number} fileId
+ *           The file's number on its volume, the same under every name.
  */
 
 /** FILE_ID_BOTH_DIR_INFO up to its name, and the boundary each entry starts on. */
@@ -576,7 +581,7 @@ export function createFileTimeFunctions(host){
             const own = entry.name === '.' ? file.path
                 : entry.name === '..' ? file.path.replace(/\\[^\\]*$/, '')
                     : `${file.path}\\${entry.name}`;
-            view.setUint32(96, fileIndex(entry.identity ?? own), true);
+            view.setUint32(96, host.fileId(entry.identity ?? own), true);
             [...entry.name].forEach((unit, at)=>view.setUint16(ID_BOTH_DIR_FIXED + at * 2,
                 unit.charCodeAt(0), true));
             records.push({ start, record });
@@ -807,7 +812,9 @@ export function createFileTimeFunctions(host){
                 }
                 const entry = host.stat(file.path);
                 const size = entry?.size ?? 0;
-                const index = fileIndex(entry?.identity ?? file.path);
+                // Kept on the open file once asked, as NtQueryInformationFile
+                // keeps it: a file's number stays across renames.
+                const index = file.volumeNumber ??= host.fileId(file.path);
 
                 const data = new Uint8Array(BY_HANDLE_FILE_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
@@ -1163,25 +1170,4 @@ export function createFileTimeFunctions(host){
             },
         },
     };
-}
-
-/**
- * A stable file index for a path.
- *
- * Windows takes this from the filesystem's own record. There is no such record
- * here, so it is derived from the path -- which gives the one property a caller
- * actually uses: two handles onto the same file report the same index, and two
- * different files almost never do.
- *
- * @param {string} path
- */
-export function fileIndex(path){
-    let hash = 2166136261;
-    const text = path.toLowerCase();
-    for (let at = 0; at < text.length; at++)
-    {
-        hash ^= text.charCodeAt(at);
-        hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
 }

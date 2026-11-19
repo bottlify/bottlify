@@ -173,6 +173,8 @@ export function assemble(parts){
  * @param {boolean} [options.largeAddressAware]  A 32-bit image linked /LARGEADDRESSAWARE:
  *        given addresses past 2 GiB.
  * @param {boolean} [options.dynamicBase]  Linked for ASLR (DLL characteristics DYNAMIC_BASE).
+ * @param {2 | 3} [options.subsystem]  2: a window program (/SUBSYSTEM:WINDOWS); a console
+ *        program, 3, otherwise.
  * @param {32 | 64} [options.bits]  64: an x86-64 image (PE32+), its import
  *        tables, thread-local directory and callbacks eight bytes a pointer.
  * @param {{ id: number, text: string }} [options.manifest]
@@ -537,7 +539,7 @@ export function buildExe(options){
     head.u32(0); // win32 version
     head.u32(sizeOfImage).u32(HEADERS_SIZE);
     head.u32(0); // checksum
-    head.u16(3); // subsystem: console
+    head.u16(options.subsystem ?? 3); // subsystem: console unless asked
     head.u16(options.dynamicBase ? 0x40 : 0); // dll characteristics
     head.pointer(0x100000, pointer).pointer(0x1000, pointer); // stack reserve / commit
     head.pointer(0x100000, pointer).pointer(0x1000, pointer); // heap reserve / commit

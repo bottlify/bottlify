@@ -176,6 +176,11 @@ export const PRIVILEGES = new Map([
     ['SeUndockPrivilege', 25], ['SeSyncAgentPrivilege', 26],
     ['SeEnableDelegationPrivilege', 27], ['SeManageVolumePrivilege', 28],
     ['SeImpersonatePrivilege', 29], ['SeCreateGlobalPrivilege', 30],
+    // Named from Windows Vista on (the last from Windows 7): every Windows the
+    // engine stands for knows them, whether or not a token holds them.
+    ['SeTrustedCredManAccessPrivilege', 31], ['SeRelabelPrivilege', 32],
+    ['SeIncreaseWorkingSetPrivilege', 33], ['SeTimeZonePrivilege', 34],
+    ['SeCreateSymbolicLinkPrivilege', 35],
 ]);
 /** The same, by the name folded: Windows finds a privilege whatever its case. */
 const PRIVILEGES_FOLDED = new Map([...PRIVILEGES]
