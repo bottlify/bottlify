@@ -45,7 +45,8 @@
 - With `concurrency` 1 a child started with `CreateProcess` takes turns with its parent on one
   thread; with 2 or 4 they run at once (`concurrency` in [api.md](../api.md)). Either way a parent
   reaches into its child: its memory (`VirtualAllocEx`, `VirtualFreeEx`, `VirtualProtectEx`,
-  `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms), its first
+  `VirtualQueryEx`, `ReadProcessMemory`, `WriteProcessMemory` and ntdll's forms, each copy going
+  through the pages' protection on both sides as Windows' does), its first
   thread (`SuspendThread`, `ResumeThread`, `GetThreadContext`, `SetThreadContext`), and a thread it makes there with
   `CreateRemoteThread`, which it waits on and reads the exit code of. A wait on a
   child's thread is answered within a few milliseconds of its end, asked of the child until
@@ -54,7 +55,7 @@
   another thread's registers where it next runs, after the wait it may be in, as Windows does at its
   return to user mode; the calling thread's own and the x87 state of a 32-bit context are not
   replaced. Not yet: `OpenThread` of a child's
-  thread the parent was not told of, and reading another process's TEB or PEB. Any process of the
+  thread the parent was not told of, and reading another process's TEB. Any process of the
   run opens another by its id (`OpenProcess`) wherever each of them runs: a wait on that handle
   ends with the other's exit and `GetExitCodeProcess` reads its code; nothing else of it is asked
   across a link. A call made in a

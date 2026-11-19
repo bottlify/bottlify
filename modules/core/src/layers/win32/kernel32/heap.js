@@ -338,8 +338,9 @@ export const TABLES = Symbol('tables');
 export const HEAP_USER_INFO = Symbol('heap user info');
 export const GLOBAL_MEMORY = Symbol('global memory');
 /**
- * VirtualQuery's state and protection of a page, for the calls that ask the
- * same question of the same pages - IsBadWritePtr - without a buffer in the
+ * VirtualQuery's state and protection of a page, and where the run of pages
+ * answered alike ends, for the calls that ask the same question of the same
+ * pages - IsBadWritePtr, a copy between processes - without a buffer in the
  * guest. Carried under a symbol, so no export is made of it.
  */
 export const PAGE_STATE = Symbol('page state');
@@ -4327,10 +4328,14 @@ export function createHeapFunctions(host){
             commitGuard: page=>virtualAlloc(page, PAGE_SIZE, MEM_COMMIT,
                 PAGE_READWRITE | PAGE_GUARD, null) !== 0,
         },
-        /** @param {number} address @returns {{ state: number, protect: number }} */
+        /**
+         * @param {number} address
+         * @returns {{ state: number, protect: number, end: number }}  `end`: where
+         *          the run of pages with this answer stops
+         */
         [PAGE_STATE]: address=>{
             const answer = regionAnswer(address);
-            return { state: answer[4], protect: answer[5] };
+            return { state: answer[4], protect: answer[5], end: answer[0] + answer[3] };
         },
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
         VirtualAllocEx: inProcess('VirtualAlloc', 20),

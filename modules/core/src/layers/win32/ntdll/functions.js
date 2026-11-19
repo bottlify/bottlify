@@ -204,6 +204,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @property {(library: string, name: string) => number} [exportAddress]  Where a
  *           system library's export was placed, 0 for none.
  * @property {() => number} teb  The running thread's block.
+ * @property {() => number} [processBlock]  The process block, whichever thread runs
+ *           or none: a call its parent makes in it runs between its threads' turns.
  * @property {() => any} [currentThread]
  * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
  *           answered by another process leaves after its thread stopped running.
@@ -614,6 +616,7 @@ export function createNtdllFunctions(host){
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             teb: host.teb,
+            ...host.processBlock ? { processBlock: host.processBlock } : {},
             arena: host.arena,
             version: host.windows,
             handleType: host.handleType,

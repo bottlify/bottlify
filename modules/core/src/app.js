@@ -5267,6 +5267,7 @@ async function buildApp(options){
      * slots from linear address zero and up.
      *
      * @type {{
+     *     peb: number,
      *     createThreadBlock: (thread: { id: number, stackBase: number,
      *         stackLimit: number,
      *         locals?: import('./layers/win32/kernel32/teb.js').ThreadLocal[] })
@@ -6131,6 +6132,9 @@ async function buildApp(options){
             // process's to keep.
             system: options.system,
             processId: options.processId,
+            // The process block, made once the image is placed: what a call
+            // its parent makes in it reads with no thread of its own running.
+            processBlock: ()=>threadBlocks?.peb ?? 0,
             standardFiles: options.standardFiles,
             // The handles a parent's CreateProcess handed down (pipe ends):
             // the ends themselves on this thread, stand-ins of them across.

@@ -6,6 +6,7 @@
 
 import { STATUS } from './status.js';
 import { RELEASE_PART, memoryBasicInformation } from '../kernel32/heap.js';
+import { VIRTUAL_MEMORY } from '../kernel32/process-memory.js';
 
 /**
  * The native virtual-memory calls, over kernel32's.
@@ -82,8 +83,7 @@ const ERROR_INVALID_ADDRESS = 487;
 
 /** The kernel32 entries these are built over. */
 export const MEMORY_ENTRIES = Object.freeze(['VirtualAllocEx', 'VirtualAlloc2',
-    'VirtualFreeEx', 'VirtualProtectEx', 'VirtualQueryEx', 'ReadProcessMemory',
-    'WriteProcessMemory', 'GetLastError']);
+    'VirtualFreeEx', 'VirtualProtectEx', 'VirtualQueryEx', 'GetLastError']);
 
 /**
  * @param {MemoryHost} host
@@ -473,23 +473,27 @@ export function createMemoryFunctions(host){
         /**
          * NTSTATUS NtReadVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress,
          *     PVOID Buffer, SIZE_T BufferSize, PSIZE_T NumberOfBytesRead)
+         *
+         * kernel32's copy (`process-memory.js`), whose status this is: as
+         * far as both sides' pages allow, STATUS_PARTIAL_COPY short of all.
          */
         NtReadVirtualMemory: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>settled(kernel32.ReadProcessMemory.handler(args),
-                (read, error)=>(read ? STATUS.SUCCESS : failure(error))),
+            handler: args=>/** @type {any} */ (kernel32)[VIRTUAL_MEMORY].read(args),
         },
 
         /**
          * NTSTATUS NtWriteVirtualMemory(HANDLE ProcessHandle, PVOID BaseAddress,
          *     const void *Buffer, SIZE_T BufferSize, PSIZE_T NumberOfBytesWritten)
+         *
+         * Through the target pages' protection as they are: unlike
+         * WriteProcessMemory nothing is made writable for it.
          */
         NtWriteVirtualMemory: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>settled(kernel32.WriteProcessMemory.handler(args),
-                (wrote, error)=>(wrote ? STATUS.SUCCESS : failure(error))),
+            handler: args=>/** @type {any} */ (kernel32)[VIRTUAL_MEMORY].write(args),
         },
 
         /**

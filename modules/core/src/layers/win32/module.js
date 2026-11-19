@@ -37,6 +37,7 @@ import {
 } from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { DEBUG_ATTACH, DEBUG_BREAK, serveCall } from './kernel32/cross-process.js';
+import { VIRTUAL_MEMORY } from './kernel32/process-memory.js';
 import { CURRENT_PROCESS, createProcessTarget } from './kernel32/process-target.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions, imageBits } from './kernel32/system.js';
@@ -4153,6 +4154,10 @@ export function createWin32Module(){
                         pointerSize,
                         patchMemory: (address, bytes)=>
                             writeThroughProtection(/** @type {any} */ (memory), address, bytes),
+                        // The pages as VirtualQuery answers them (heap.js), read
+                        // when asked: kernel32's table is still being built.
+                        pageState: address=>/** @type {any} */ (libraries['KERNEL32.dll'])[
+                            PAGE_STATE](address),
                         startup: ()=>config?.startup ?? null,
                         divergence: config?.divergence,
                         nativePath: nativePathOf,
@@ -6730,6 +6735,7 @@ export function createWin32Module(){
                 exportAddress: (/** @type {string} */ library, /** @type {string} */ name)=>
                     /** @type {any} */ (modules.find(library))?.addressOf?.(name) ?? 0,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                processBlock: ()=>config?.processBlock?.() ?? 0,
                 currentThread: ()=>kernel.currentThread(),
                 lastErrorOf,
                 arena,
@@ -7334,7 +7340,9 @@ export function createWin32Module(){
                         NtQueryInformationProcess:
                             libraries['ntdll.dll']?.NtQueryInformationProcess,
                         [DEBUG_ATTACH]: { handler: debugAttached },
-                        [DEBUG_BREAK]: { handler: breakIn } }),
+                        [DEBUG_BREAK]: { handler: breakIn },
+                        .../** @type {any} */ (libraries['KERNEL32.dll'])?.[VIRTUAL_MEMORY]
+                            ?.served }),
                     allocate: bytes=>allocator.allocate(bytes),
                     free: address=>{
                         allocator.free(address);

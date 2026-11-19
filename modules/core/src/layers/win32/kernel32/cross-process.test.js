@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { serveCall, takeAnswer, askChild, after, childThread, isChildThread, threadArg,
-    threadEnd }
+    threadEnd, VIRTUAL_READ }
     from './cross-process.js';
 
 /**
@@ -62,23 +62,23 @@ function childOf(calls){
 }
 
 test('a call is made in the child over its own buffers, and its writes come back', ()=>{
-    // WriteProcessMemory's source and ReadProcessMemory's destination are the
-    // parent's: the child sees copies of its own, and only bytes go back.
+    // A write's source and a read's destination are the parent's: the child
+    // sees copies of its own, and only bytes go back.
     const { child, host } = childOf({
-        ReadProcessMemory: ([, base, into, count, read], self)=>{
+        [VIRTUAL_READ]: ([base, into, count, read], self)=>{
             self.memory.set([1, 2, 3].slice(0, count), into);
             new DataView(self.memory.buffer).setUint32(read, count, true);
             void base;
-            return 1;
+            return 0;
         },
     });
-    const answer = serveCall({ call: 'ReadProcessMemory',
-        args: [0xffffffff, 0x4000, { out: 3 }, 3, { out: 4 }] }, host);
-    assert.equal(answer.result, 1);
+    const answer = serveCall({ call: VIRTUAL_READ,
+        args: [0x4000, { out: 3 }, 3, { out: 4 }] }, host);
+    assert.equal(answer.result, 0);
     assert.equal(answer.error, null, 'a call that set no error says so');
-    assert.deepEqual([...answer.outs[2] ?? []], [1, 2, 3]);
-    assert.deepEqual([...answer.outs[4] ?? []], [3, 0, 0, 0]);
-    assert.deepEqual([answer.outs[0], answer.outs[1], answer.outs[3]], [null, null, null]);
+    assert.deepEqual([...answer.outs[1] ?? []], [1, 2, 3]);
+    assert.deepEqual([...answer.outs[3] ?? []], [3, 0, 0, 0]);
+    assert.deepEqual([answer.outs[0], answer.outs[2]], [null, null]);
     assert.deepEqual(child.freed, [0x800], 'the scratch is given back');
 });
 

@@ -10,6 +10,7 @@ import {
     createSpawner, createSpawnFunctions, isRedistributableInstaller, writeThroughProtection,
 } from './spawn.js';
 import { createProcessTable } from '../../kernel/internal/processes.js';
+import { VIRTUAL_READ, VIRTUAL_WRITE } from './cross-process.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -571,10 +572,11 @@ function askingHost(answer){
 
 test('a write into a child is made in the child, and its answer comes back to the caller',
     async()=>{
-        // A launcher hollowing its child: the bytes cross, the call is the
-        // child's own WriteProcessMemory on itself, through its protection.
-        const { host, asked, caller, errorsFor } = askingHost(()=>({ result: 1, error: 0,
-            outs: [null, null, null, null, new Uint8Array([3, 0, 0, 0])] }));
+        // A launcher hollowing its child: the bytes cross, the write is made
+        // in the child over its own pages, made writable there where they
+        // only execute (`process-memory.js`).
+        const { host, asked, caller, errorsFor } = askingHost(()=>({ result: 0, error: null,
+            outs: [null, null, null, null, null, new Uint8Array([3, 0, 0, 0])] }));
         const fns = createSpawnFunctions(host);
         fns.CreateProcessA.handler(
             [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, CREATE_SUSPENDED, 0, 0, 0, 0x300]);
@@ -586,12 +588,13 @@ test('a write into a child is made in the child, and its answer comes back to th
         host.bytes[0x400] = 0xff;
         assert.equal(await written, 1);
         assert.equal(asked[0].record, child);
-        assert.deepEqual(asked[0].call.call, 'WriteProcessMemory');
-        const [process, base, data, size, out] = asked[0].call.args;
-        assert.deepEqual([process, base, [...data.in], size, out],
-            [CURRENT_PROCESS, 0x401000, [0x90, 0xcc, 0x90], 3, { out: 4 }]);
+        assert.deepEqual(asked[0].call.call, VIRTUAL_WRITE);
+        const [base, data, have, size, lift, out] = asked[0].call.args;
+        assert.deepEqual([base, [...data.in], have, size, lift, out],
+            [0x401000, [0x90, 0xcc, 0x90], 3, 3, 1, { out: 4 }]);
         assert.equal(host.view.getUint32(0x500, true), 3, 'the count the child wrote');
-        assert.deepEqual(errorsFor, [[caller, 0]], 'the error set on the thread that asked');
+        assert.deepEqual(errorsFor, [], 'nothing set on the thread that asked');
+        void caller;
     });
 
 test('a child the run cannot reach is refused, and a handle that is none is invalid', ()=>{
@@ -649,9 +652,12 @@ test('a write into this process goes through code that only executes, and puts i
 
     const host = fakeHost();
     /** @type {any} */ (host).patchMemory = (/** @type {number} */ address)=>address === 0x600;
+    // The page at 0x0 is committed and writable, the one at 0x1000 not there.
+    /** @type {any} */ (host).pageState = (/** @type {number} */ page)=>(page === 0
+        ? { state: 0x1000, protect: 0x04, end: 0x1000 } : { state: 0x10000, protect: 0 });
     const fns = createSpawnFunctions(host);
     assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x600, 0x400, 4, 0]), 1);
-    assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x900, 0x400, 4, 0]), 0);
+    assert.equal(fns.WriteProcessMemory.handler([CURRENT_PROCESS, 0x1900, 0x400, 4, 0]), 0);
     assert.equal(host.errors.at(-1), 998, 'ERROR_NOACCESS');
 });
 
@@ -799,8 +805,8 @@ test('an ordinary child is still held pending for the replacement', ()=>{
 });
 
 test('ReadProcessMemory reads this process, and a child\'s memory in the child', async()=>{
-    const { host, asked } = askingHost(call=>({ result: 1, error: 0, outs: [null, null,
-        new Uint8Array([0x22, 0x33]).subarray(0, call.args[2].out), null,
+    const { host, asked } = askingHost(call=>({ result: 0, error: null, outs: [null,
+        new Uint8Array([0x22, 0x33]).subarray(0, call.args[1].out), null,
         new Uint8Array([2, 0, 0, 0])] }));
     const fns = createSpawnFunctions(host);
     host.bytes.set([5, 6, 7, 8], 0x400);
@@ -813,7 +819,8 @@ test('ReadProcessMemory reads this process, and a child\'s memory in the child',
     const child = host.kernel.processes.all()[0];
     assert.equal(await fns.ReadProcessMemory.handler([child.handle, 0x401001, 0x800, 2, 0x700]),
         1);
-    assert.deepEqual(asked[0].call.args, [CURRENT_PROCESS, 0x401001, { out: 2 }, 2, { out: 4 }]);
+    assert.deepEqual(asked[0].call, { call: VIRTUAL_READ,
+        args: [0x401001, { out: 2 }, 2, { out: 4 }] });
     assert.deepEqual([...host.bytes.slice(0x800, 0x802)], [0x22, 0x33]);
     assert.equal(host.view.getUint32(0x700, true), 2);
     assert.equal(fns.ReadProcessMemory.argBytes, 20);

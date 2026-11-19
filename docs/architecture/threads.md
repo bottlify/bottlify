@@ -108,7 +108,10 @@ turns with its parent on the parent's thread. A call a parent makes in its child
 (`VirtualAllocEx`, `ReadProcessMemory`, `SuspendThread` on its thread and the like) is sent to the
 child and made there with its own kernel32, between its turns, whichever way it runs
 ([`kernel32/cross-process.js`](../../modules/core/src/layers/win32/kernel32/cross-process.js)); only
-bytes cross. The other way, a child its parent started with `DEBUG_PROCESS` reports its debug
+bytes cross. A copy of memory between them is one copy for both libraries' calls
+([`kernel32/process-memory.js`](../../modules/core/src/layers/win32/kernel32/process-memory.js)):
+the child reads or writes its own pages through their protection, the parent its side, and the
+process block a call made between the child's turns reads is the child's, no thread of it running. The other way, a child its parent started with `DEBUG_PROCESS` reports its debug
 events to the parent as values - its start (the process, every library mapped with it, the loader's
 breakpoint), a library loaded or unloaded, a thread made or ended, `OutputDebugString`, an exception
 first and, unhandled, again - and the whole child stops, its threads frozen (their suspend counts

@@ -36,11 +36,11 @@
 import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
-import { askChild, childThread } from './cross-process.js';
+import { childThread } from './cross-process.js';
+import { createProcessMemory } from './process-memory.js';
 import { debuggeeFor } from './debug-events.js';
 import { grantedAccess } from './access.js';
-import { PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE, createProcessTarget }
-    from './process-target.js';
+import { createProcessTarget } from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 
 /** Codes this surface reports. */
@@ -50,15 +50,12 @@ const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_ACCESS_DENIED = 5;
 const ERROR_INVALID_PARAMETER = 87;
-/** ReadProcessMemory of a range nothing is at. */
-const ERROR_PARTIAL_COPY = 299;
 const ERROR_DIRECTORY = 267;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
 const ERROR_OBJECT_NAME_EXISTS = 5010;
-const ERROR_NOACCESS = 998;
 /** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
 const PROCESS_NAME_NATIVE = 1;
 /** CreateProcess's flag saying the environment block is UTF-16. */
@@ -539,6 +536,8 @@ export function createSpawner(host){
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]
  *           Writes into this process through the pages' protection
  *           (`writeThroughProtection`); false when not all of it is mapped.
+ * @property {import('./process-memory.js').PageState} [pageState]  VirtualQuery's
+ *           answer for a page, which a copy between processes goes through.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose STARTUPINFO and
  *           PROCESS_INFORMATION hold eight-byte handles; absent, 4.
  */
@@ -575,40 +574,20 @@ export function createSpawnFunctions(host){
     const processTarget = createProcessTarget({ kernel,
         processId: ()=>(host.processId ?? 0x1000) >>> 0 });
 
-    /**
-     * A memory call on the process a handle names: `here` for this one, the
-     * same call made in a child where it runs (`cross-process.js`) for a
-     * child, ERROR_INVALID_HANDLE for a handle that names no process,
-     * ERROR_ACCESS_DENIED for one without `right` or a child the run cannot
-     * reach.
-     *
-     * @param {number} handle @param {number} right
-     * @param {import('./cross-process.js').CrossCall} call
-     * @param {(number | null)[]} into
-     * @param {() => number} here
-     */
-    const onProcess = (handle, right, call, into, here)=>{
-        const target = processTarget(handle, right);
-        if ('error' in target)
-        {
-            host.setLastError(target.error);
-            return 0;
-        }
-        if ('here' in target)
-        {
-            return here();
-        }
-        const asked = host.currentThread && host.setLastErrorFor ? askChild({
-            askChild: host.askChild, writeMemory: host.writeMemory,
-            currentThread: host.currentThread, setLastErrorFor: host.setLastErrorFor,
-        }, target.child, call, into) : null;
-        if (asked === null)
-        {
-            host.setLastError(ERROR_ACCESS_DENIED);
-            return 0;
-        }
-        return asked;
-    };
+    /** Reading and writing a process's memory, this one or a child's. */
+    const processMemory = createProcessMemory({
+        readMemory: host.readMemory,
+        writeMemory: host.writeMemory,
+        ...host.patchMemory ? { patchMemory: host.patchMemory } : {},
+        // Without VirtualQuery's answers every mapped page is taken as
+        // writable: a read of one that is not there still finds that out.
+        pageState: host.pageState ?? (()=>({ state: 0x1000, protect: 0x04 })),
+        processTarget,
+        setLastError: host.setLastError,
+        ...host.askChild ? { askChild: host.askChild } : {},
+        ...host.currentThread ? { currentThread: host.currentThread } : {},
+        ...host.setLastErrorFor ? { setLastErrorFor: host.setLastErrorFor } : {},
+    });
 
     /** @param {number} address */
     const readDword = address=>{
@@ -1200,110 +1179,7 @@ export function createSpawnFunctions(host){
             },
         },
 
-        /**
-         * BOOL WriteProcessMemory(HANDLE hProcess, LPVOID lpBaseAddress,
-         *   LPCVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesWritten)
-         *
-         * Against the running process this writes memory. Against a child it
-         * cannot, because the child's image is not mapped -- so the write is
-         * kept as a patch and replayed at the address it names once the PE is
-         * there. That is what makes CREATE_SUSPENDED, a write, and ResumeThread
-         * work without a second address space ever existing.
-         *
-         * The bytes are copied out rather than kept as a view: the machine they
-         * came from is torn down before they are used.
-         */
-        WriteProcessMemory: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([handle, base, buffer, size, written])=>{
-                const count = size >>> 0;
-                const bytes = count === 0
-                    ? new Uint8Array(0)
-                    : host.readMemory(buffer >>> 0, count).slice();
-                // Nothing written until it is: a refused handle says 0.
-                if ((written >>> 0) !== 0)
-                {
-                    writeDword(written >>> 0, 0);
-                }
-                // Written where the child runs, through its own protection.
-                return onProcess(handle, PROCESS_VM_WRITE | PROCESS_VM_OPERATION,
-                    { call: 'WriteProcessMemory', args: [CURRENT_PROCESS, base >>> 0,
-                        { in: bytes }, count, (written >>> 0) === 0 ? 0 : { out: 4 }] },
-                    [null, null, null, null, written >>> 0], ()=>{
-                        if (!host.patchMemory)
-                        {
-                            host.writeMemory(base >>> 0, bytes);
-                        }
-                        else if (!host.patchMemory(base >>> 0, bytes))
-                        {
-                            host.setLastError(ERROR_NOACCESS);
-                            return 0;
-                        }
-                        if ((written >>> 0) !== 0)
-                        {
-                            writeDword(written >>> 0, count);
-                        }
-                        host.setLastError(ERROR_SUCCESS);
-                        return 1;
-                    });
-            },
-        },
-
-        /**
-         * BOOL ReadProcessMemory(HANDLE hProcess, LPCVOID lpBaseAddress,
-         *   LPVOID lpBuffer, SIZE_T nSize, SIZE_T *lpNumberOfBytesRead)
-         *
-         * Against the running process this reads memory; against a child the
-         * same read is made in the child, where it runs. A range that leaves
-         * mapped memory is ERROR_PARTIAL_COPY, what Windows says of memory it
-         * cannot read.
-         */
-        ReadProcessMemory: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([handle, base, buffer, size, read])=>{
-                const count = size >>> 0;
-                const from = base >>> 0;
-                if ((read >>> 0) !== 0)
-                {
-                    writeDword(read >>> 0, 0);
-                }
-                return onProcess(handle, PROCESS_VM_READ, { call: 'ReadProcessMemory',
-                    args: [CURRENT_PROCESS, from, (buffer >>> 0) === 0 ? 0 : { out: count },
-                        count, (read >>> 0) === 0 ? 0 : { out: 4 }] },
-                [null, null, buffer >>> 0, null, read >>> 0], ()=>{
-                    // A range that leaves mapped memory is ERROR_PARTIAL_COPY, not
-                    // a fault: a crash handler walks stacks through here, reading
-                    // wherever a frame pointer leads.
-                    /** @type {Uint8Array | null} */
-                    let bytes;
-                    try
-                    {
-                        bytes = count === 0 ? new Uint8Array(0)
-                            : host.readMemory(from, count).slice();
-                    }
-                    catch (e){
-                        void e;
-                        bytes = null;
-                    }
-                    if (bytes === null)
-                    {
-                        host.setLastError(ERROR_PARTIAL_COPY);
-                        return 0;
-                    }
-                    if (count > 0)
-                    {
-                        host.writeMemory(buffer >>> 0, bytes);
-                    }
-                    if ((read >>> 0) !== 0)
-                    {
-                        writeDword(read >>> 0, count);
-                    }
-                    return 1;
-                });
-            },
-        },
+        ...processMemory,
 
         /**
          * BOOL QueryFullProcessImageNameA/W(HANDLE hProcess, DWORD dwFlags,

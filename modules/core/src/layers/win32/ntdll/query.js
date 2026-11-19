@@ -332,8 +332,11 @@ const NORMAL_BASE_PRIORITY = 8;
  * @typedef {Object} QueryHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {() => number} teb  The running thread's block, which is the only
- *           route to the process block a program would take itself.
+ * @property {() => number} teb  The running thread's block, the route to the
+ *           process block a program would take itself.
+ * @property {() => number} [processBlock]  The process block, where no thread runs:
+ *           a call a parent makes in its child (`cross-process.js`) runs between
+ *           the child's turns, a suspended child's first thread never having run.
  * @property {{ base: number, size: number }} arena  The memory the process has.
  * @property {import('../kernel32/versions.js').WindowsVersion} [version]
  *           The machine's Windows, for the two fields the process block does
@@ -595,6 +598,11 @@ export function createQueryFunctions(host){
 
     /** @returns {number} the process block, or zero when there is none yet */
     const peb = ()=>{
+        const block = host.processBlock?.() ?? 0;
+        if (block !== 0)
+        {
+            return block >>> 0;
+        }
         const teb = host.teb() >>> 0;
         return teb === 0 ? 0 : readU32(teb + TEB.PEB);
     };

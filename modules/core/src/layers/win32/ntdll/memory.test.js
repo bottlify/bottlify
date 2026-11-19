@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryFunctions } from './memory.js';
 import { RELEASE_PART } from '../kernel32/heap.js';
+import { VIRTUAL_MEMORY } from '../kernel32/process-memory.js';
 
 const SELF = 0xffffffff;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
@@ -48,8 +49,8 @@ function setup(answers = {}, lastError = 0, more = {}){
             VirtualFreeEx: recorder('VirtualFreeEx', 1),
             VirtualProtectEx: recorder('VirtualProtectEx', 1),
             VirtualQueryEx: recorder('VirtualQueryEx', 28),
-            ReadProcessMemory: recorder('ReadProcessMemory', 1),
-            WriteProcessMemory: recorder('WriteProcessMemory', 1),
+            [VIRTUAL_MEMORY]: { read: recorder('read', 0).handler,
+                write: recorder('write', 0).handler },
             FlushInstructionCache: recorder('FlushInstructionCache', 1),
             GetWriteWatch: recorder('GetWriteWatch', 0),
             ResetWriteWatch: recorder('ResetWriteWatch', 0),
@@ -173,15 +174,15 @@ test('NtQueryVirtualMemory answers basic information and nothing else', ()=>{
         STATUS_INFO_LENGTH_MISMATCH);
 });
 
-test('NtReadVirtualMemory and NtWriteVirtualMemory are kernel32\'s, answered as statuses', ()=>{
-    const { fns, calls } = setup();
-    assert.equal(fns.NtWriteVirtualMemory.handler([SELF, 0x10000, 0x300, 16, 0x100]), 0);
-    assert.deepEqual(calls.at(-1), { name: 'WriteProcessMemory',
-        args: [SELF, 0x10000, 0x300, 16, 0x100] });
-    const partial = setup({ ReadProcessMemory: 0 }, 299);
-    assert.equal(partial.fns.NtReadVirtualMemory.handler([0x44, 0x10000, 0x300, 16, 0]),
-        STATUS_PARTIAL_COPY);
-});
+test('NtReadVirtualMemory and NtWriteVirtualMemory are kernel32\'s native copy and its status',
+    ()=>{
+        const { fns, calls } = setup();
+        assert.equal(fns.NtWriteVirtualMemory.handler([SELF, 0x10000, 0x300, 16, 0x100]), 0);
+        assert.deepEqual(calls.at(-1), { name: 'write', args: [SELF, 0x10000, 0x300, 16, 0x100] });
+        const partial = setup({ read: STATUS_PARTIAL_COPY });
+        assert.equal(partial.fns.NtReadVirtualMemory.handler([0x44, 0x10000, 0x300, 16, 0]),
+            STATUS_PARTIAL_COPY);
+    });
 
 test('the instruction cache and write watches are kernel32\'s, answered as statuses', ()=>{
     const { fns, calls } = setup();
@@ -240,8 +241,7 @@ test('a call answered later by another process answers its status then, from its
         assert.equal(freed.view.getUint32(0x104, true), 0x5000);
 
         running = caller;
-        errors.set(caller, 299);
-        const partial = setup({ ReadProcessMemory: later(0) }, 0, more);
+        const partial = setup({ read: later(STATUS_PARTIAL_COPY) }, 0, more);
         assert.equal(await partial.fns.NtReadVirtualMemory.handler([0x44, 0, 0, 0, 0]),
             STATUS_PARTIAL_COPY);
     });
