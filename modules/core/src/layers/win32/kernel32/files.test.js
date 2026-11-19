@@ -150,7 +150,8 @@ function fakeFiles(){
             const node = nodes.get(path);
             return node
                 ? { exists: true, isDirectory: node.directory, size: node.data.length,
-                    ...attributes.has(path) ? { attributes: attributes.get(path) } : {} }
+                    ...attributes.has(path) ? { attributes: attributes.get(path) } : {},
+                    .../** @type {any} */ (node).link ?? {} }
                 : null;
         },
         /** @param {string} path @param {number | null} value */
@@ -576,6 +577,34 @@ test('a write whose file is still being fetched parks, then reports its count', 
     assert.equal(memory.dword(OUT_COUNT), 2);
 });
 
+test('a request on a file bound to a completion port cannot also ask for an APC', ()=>{
+    /** @type {Set<number>} */
+    const bound = new Set();
+    /** @type {number[]} */
+    const queued = [];
+    const { files, fns, open } = setup({
+        ports: { offsetOf: ()=>0, completed: ()=>false, closed: ()=>{},
+            bound: (/** @type {number} */ file)=>bound.has(file) },
+        queueApc: (/** @type {any} */ thread, /** @type {number} */ routine)=>queued.push(routine),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    bound.add(handle);
+    for (const call of [natives.NtReadFile, natives.NtWriteFile])
+    {
+        assert.equal(call.handler([handle, 0, 0x4000, 0, 0x500, BUFFER, 4, 0, 0]) >>> 0,
+            0xc000000d, 'STATUS_INVALID_PARAMETER');
+    }
+    assert.deepEqual(queued, [], 'nothing done, nothing queued');
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, 0x500, BUFFER, 4, 0, 0]), 0,
+        'without an APC it reads');
+    bound.delete(handle);
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0x4000, 0, 0x500, BUFFER, 2, 0, 0]), 0,
+        'unbound, the APC is queued');
+    assert.deepEqual(queued, [0x4000]);
+});
+
 test('NtReadFile and NtWriteFile move bytes where ByteOffset says, and fill the block', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
@@ -823,6 +852,27 @@ test('a copy overwrites unless the caller says not to', ()=>{
         [at(NAME, 'C:\\GAME\\A.DAT'), at(NAME2, 'C:\\GAME\\B.DAT'), 0]), 1);
     assert.equal(files.text('C:\\GAME\\B.DAT'), 'source',
         'and the whole file, not part of it');
+});
+
+test('a copy goes through a symbolic link at either end, the link left as it is', ()=>{
+    const { error, files, fns, at } = setup();
+    files.put('C:\\GAME\\TARGET.DAT', 'target');
+    files.put('C:\\GAME\\LINK.DAT', '');
+    /** @type {any} */ (files.nodes.get('C:\\GAME\\LINK.DAT')).link =
+        { reparseTag: 0xa000000c, junction: 'GAME\\TARGET.DAT' };
+    files.put('C:\\GAME\\NEW.DAT', 'new');
+
+    assert.equal(fns.CopyFileA.handler(
+        [at(NAME, 'C:\\GAME\\LINK.DAT'), at(NAME2, 'C:\\GAME\\COPY.DAT'), 0]), 1);
+    assert.equal(files.text('C:\\GAME\\COPY.DAT'), 'target', 'what the link names');
+
+    assert.equal(fns.CopyFileA.handler(
+        [at(NAME, 'C:\\GAME\\NEW.DAT'), at(NAME2, 'C:\\GAME\\LINK.DAT'), 1]), 0);
+    assert.equal(error.code, ERROR_FILE_EXISTS, 'the link is there');
+    assert.equal(fns.CopyFileA.handler(
+        [at(NAME, 'C:\\GAME\\NEW.DAT'), at(NAME2, 'C:\\GAME\\LINK.DAT'), 0]), 1);
+    assert.equal(files.text('C:\\GAME\\TARGET.DAT'), 'new', 'written where it points');
+    assert.equal(files.text('C:\\GAME\\LINK.DAT'), '', 'the link itself untouched');
 });
 
 test('a copy from a bundle\'s file waits for its blocks and copies the whole of it', async()=>{
@@ -2216,6 +2266,25 @@ test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only 
     assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
 });
 
+test('CreateFile opens the pipe device by its Win32 name, as its native name opens', ()=>{
+    /** @type {[string, number, number][]} */
+    const opens = [];
+    const { fns, at, handles } = setup({ pipes: {
+        /** @param {{ root: number, name: string }} given @param {number} access @param {number} options */
+        nativeOpen: (given, access, options)=>{
+            opens.push([given.name, access, options]);
+            return { handle: handles.open('pipe', {}, access) };
+        },
+        isPipe: ()=>false,
+    } });
+    const device = fns.CreateFileA.handler([at(NAME, '\\\\.\\pipe'), 0, 0, 0, OPEN_EXISTING, 0, 0]);
+    assert.notEqual(device >>> 0, 0xffffffff);
+    assert.deepEqual(opens.at(-1), ['\\??\\pipe', 0x00100080, 0x20],
+        'the device, with SYNCHRONIZE and FILE_READ_ATTRIBUTES, opened for synchronous I/O');
+    fns.CreateFileA.handler([at(NAME, '\\\\.\\PIPE\\'), 0, 0, 0, OPEN_EXISTING, 0x40000000, 0]);
+    assert.deepEqual(opens.at(-1), ['\\??\\pipe\\', 0x00100080, 0], 'its root, overlapped');
+});
+
 test('NtCreateFile opens what the pipe device answers there, with the rights asked', ()=>{
     /** @type {[string, number, number, number][]} */
     const opens = [];
@@ -2682,6 +2751,58 @@ test('NtQueryInformationFile answers the name, the size and the position of an o
     assert.equal(control.handler([0xffffffff, 0, 0, 0, 0, 0]) >>> 0, 0xc0000008,
         'no block to write is not a fault');
 });
+
+test('NtQueryEaFile: a file has none, said without the block; another object is a mismatch', ()=>{
+    const { memory, files, fns, open } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abc');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ);
+    const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryEaFile;
+    memory.putDword(0x300, 0xdeadbeef);
+    memory.bytes.fill(0xcc, 0x400, 0x410);
+    assert.equal(query.handler([handle, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000052,
+        'STATUS_NO_EAS_ON_FILE');
+    assert.equal(memory.dword(0x300) >>> 0, 0xdeadbeef, 'the block untouched');
+    assert.deepEqual([...memory.bytes.subarray(0x400, 0x409)], [0, 0, 0, 0, 0, 0, 0, 0, 0xcc],
+        'the buffer cleared to its length');
+    assert.equal(query.handler([0xffffffff, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000024,
+        'the process\'s pseudo-handle');
+    assert.equal(query.handler([0xdead, 0x300, 0x400, 8, 1, 0, 0, 0, 0]) >>> 0, 0xc0000008);
+});
+
+test('a file opens by the number FileInternalInformation answers, from any folder of its drive',
+    ()=>{
+        const { memory, files, fns, open } = setup();
+        files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+        files.nodes.set('C:\\GAME\\LEVELS', { data: new Uint8Array(0), directory: true });
+        files.put('C:\\GAME\\LEVELS\\ONE.MAP', 'map');
+        const native = /** @type {any} */ (fns.CreateFileW).natives;
+        const query = native.NtQueryInformationFile;
+        const save = open('C:\\GAME\\LEVELS\\ONE.MAP', OPEN_EXISTING, GENERIC_READ);
+        assert.equal(query.handler([save, 0x300, 0x400, 8, 6]), 0, 'FileInternalInformation');
+        const low = memory.dword(0x400);
+        assert.equal(memory.dword(0x404), 0);
+        fns.CloseHandle.handler([save]);
+
+        assert.equal(native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ, objectAttributes(memory,
+            '\\??\\C:\\GAME'), NT_STATUS, 0, 0, 3, FILE_OPEN, FILE_DIRECTORY_FILE, 0, 0]), 0);
+        const folder = memory.dword(NT_HANDLE);
+        /** @param {number[]} id @param {number} root */
+        const byId = (id, root)=>{
+            objectAttributes(memory, '');
+            id.forEach((value, at)=>memory.putDword(NT_NAME + at * 4, value));
+            memory.putDword(NT_STRING, id.length * 4 | id.length * 4 << 16);
+            memory.putDword(NT_ATTRIBUTES + 4, root);
+            return native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ, NT_ATTRIBUTES,
+                NT_STATUS, 0, 0, 3, FILE_OPEN, 0x2000, 0, 0]) >>> 0;
+        };
+        assert.equal(byId([low, 0], folder), 0, 'found below the root handle\'s folder');
+        const opened = memory.dword(NT_HANDLE);
+        assert.equal(fns.ReadFile.handler([opened, BUFFER, 3, OUT_COUNT, 0]), 1);
+        assert.equal(memory.dword(OUT_COUNT), 3, 'the same file: its three bytes');
+        assert.equal(byId([low, 1], folder), 0xc000000d, 'a number no file has');
+        assert.equal(byId([low, 0, 0, 0], folder), 0xc000000d, 'an object id: none kept');
+        assert.equal(byId([low, 0], 0), 0xc0000008, 'a number needs a volume to be on');
+    });
 
 test('NtQueryInformationFile answers the mode, times, access and the whole record', ()=>{
     const { memory, files, fns, open } = setup();

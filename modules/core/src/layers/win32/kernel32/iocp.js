@@ -996,6 +996,14 @@ export function createIoCompletionPorts(host){
         },
 
         /**
+         * Whether a handle's completions go to a port: a request on such a
+         * file cannot also ask for an APC, its completion being the port's.
+         *
+         * @param {number} file
+         */
+        bound: file=>Boolean(associations.get(file >>> 0)?.port),
+
+        /**
          * Binds a file handle to a port under a key: what CreateIoCompletionPort
          * does with an existing port, and NtSetInformationFile's
          * FileCompletionInformation, which is the same binding.

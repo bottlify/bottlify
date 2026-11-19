@@ -433,6 +433,28 @@ test('overlapped: a connect and a read pend, then complete through the event and
         assert.equal(p.pipes.skipsPortOnSuccess(client), false);
     });
 
+test('a native peek done at once posts to the port; a skipping handle skips a warning too', ()=>{
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+    const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+    p.bound.add(server);
+    p.write(client, 'testdata');
+    const io = { event: 0, apc: 0, context: 0x700 };
+    const peeked = /** @type {any} */ (p.pipes.control(server, 0x11400c, 0x600, 32, 0x700, io));
+    assert.deepEqual(peeked, { status: 0, information: 16 + 8 });
+    assert.deepEqual(p.packets.at(-1), { file: server, transferred: 24, overlapped: 0x700,
+        status: 0 }, 'its packet, the call\'s ApcContext the value');
+
+    assert.equal(p.fns.SetFileCompletionNotificationModes.handler([server, 1]), 1);
+    const before = p.packets.length;
+    assert.equal(p.pipes.read(server, 0x600, 1, 0x700, true, 0, io) >>> 0, 0x80000005,
+        'part of the message, at once');
+    assert.equal(p.packets.length, before, 'skipped as a success would be');
+    /** @type {any} */ (p.pipes.control(server, 0x11400c, 0x600, 32, 0x700, io));
+    assert.equal(p.packets.length, before, 'a peek too');
+});
+
 test('an overlapped part of a message completes with STATUS_BUFFER_OVERFLOW', ()=>{
     const p = processOn(new Map());
     const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
@@ -730,6 +752,29 @@ test('NtFlushBuffersFile waits for the reader to take everything; a cut client i
     assert.equal(p.pipes.flushNative(server, BLOCK), 0, 'the server end is done');
     assert.equal(p.pipes.flushNative(0x9999, BLOCK), null);
 });
+
+test('an end\'s handle is signalled by each request done without an event, unless it skips that',
+    ()=>{
+        const p = processOn(new Map());
+        const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+        const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+        const BLOCK = COUNT + 0x40;
+        const io = { event: 0, apc: 0, context: 0 };
+        const signal = p.pipes.waitable(client);
+        assert.equal(p.pipes.read(client, BUFFER, 16, BLOCK, true, 0, io), 0x103, 'pending');
+        assert.equal(signal.signalled, false);
+        assert.equal(p.pipes.write(client, BUFFER, 1, BLOCK, true, 0, 0, io), 0,
+            'a write done at once');
+        assert.equal(signal.signalled, true, 'signals the handle');
+
+        const natives = /** @type {any} */ (p.pipes).completionModes;
+        assert.equal(natives.set(client, 2), 0, 'FILE_SKIP_SET_EVENT_ON_HANDLE');
+        assert.equal(signal.signalled, false, 'the setting is a request, and it skips');
+        p.write(server, 'data');
+        assert.equal(signal.signalled, false, 'the pending read done: never signalled');
+        assert.equal(p.pipes.write(client, BUFFER, 1, BLOCK, true, 0, 0, io), 0);
+        assert.equal(signal.signalled, false);
+    });
 
 test('a synchronous native read that waited signals its event and queues its APC after waking',
     ()=>{
@@ -1042,7 +1087,29 @@ test('the pipe device: itself, and its root under which pipes are named and wait
     assert.equal(wait(device, 'nonexistent_pipe'), STATUS.ILLEGAL_FUNCTION);
     assert.equal(wait(root, 'nonexistent_pipe'), STATUS.NAME_NOT_FOUND);
     assert.equal(wait(root, 'test3\\pipe'), STATUS.IO_TIMEOUT, 'none listens, no time to wait');
+
+    // With time to wait it waits, its block written however it ends.
+    const BLOCK = 0x9f0;
+    /** @param {bigint} timeout @param {boolean} timed */
+    const waitFor = (timeout, timed)=>{
+        p.view.setBigInt64(WAIT, timeout, true);
+        p.view.setUint32(WAIT + 8, 20, true);
+        p.view.setUint8(WAIT + 12, timed ? 1 : 0);
+        p.putWide(WAIT + 14, 'test3\\pipe');
+        p.view.setUint32(BLOCK, 0xdeadbeef, true);
+        return /** @type {any} */ (p.pipes.control(root, 0x110018, 0, 0, BLOCK, undefined, WAIT,
+            34));
+    };
+    const parked = waitFor(-10_000_000n, true);
+    assert.equal(parked.parked, 'parked', 'a second to wait: the thread waits');
+    assert.deepEqual(p.blocked.at(-1)?.timed, { deadline: 1000, result: STATUS.IO_TIMEOUT });
+    p.timeouts.forEach(handler=>handler(p.blocked.at(-1)?.thread));
+    assert.equal(p.u32(BLOCK) >>> 0, STATUS.IO_TIMEOUT, 'ran out: said in its block');
+
+    assert.equal(waitFor(0n, false).parked, 'parked', 'no time-out given: the pipe\'s own');
     assert.equal(make(root, 'test3\\pipe', FILE_OPEN).status, STATUS.SUCCESS);
+    assert.equal(p.woken.at(-1)?.result, STATUS.SUCCESS, 'an instance listening wakes it');
+    assert.equal(p.u32(BLOCK), STATUS.SUCCESS);
     assert.equal(wait(root, 'TEST3\\PIPE'), STATUS.SUCCESS, 'an instance listens, in any case');
 });
 

@@ -4302,6 +4302,8 @@ export function createWin32Module(){
                             closed: (handle, object)=>ports.closed(handle, object),
                             /** @param {number} file @param {number} port @param {number} key */
                             bind: (file, port, key)=>ports.bind(file, port, key),
+                            /** @param {number} file */
+                            bound: file=>ports.bound(file),
                         },
                     }),
                 },
