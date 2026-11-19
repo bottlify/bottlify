@@ -225,7 +225,9 @@ flowchart TD
   of that name; a path finds only the module read from that file, so a second file of a loaded
   module's name is a module of its own (the .NET Framework loads a mixed assembly's native image
   so while the assembly is loaded).
-- **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
+- **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first (one
+  loaded at run time holds the libraries its import table names, and gives them back when it is
+  unloaded, as Windows counts a dependency; the program's own imports stay for the run), its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. Every image's TLS is supported, a library's loaded at run time too: a slot, a
   copy of its block in every thread (those already running when it is loaded included), and TLS

@@ -157,34 +157,47 @@ test('an import bound through a forwarder loads the library it names', { timeout
         assert.equal(await run(t, program, { 's.dll': source(), 'f.dll': forwarder() }), 7);
     });
 
-test('a library loaded at run time has an import through a forwarder bound',
-    { timeout: 60_000 }, async t=>{
-        // user.dll imports f.dll!func; s.dll is loaded for it when it is.
-        const user = buildExe({
-            dll: true,
-            imageBase: 0x13000000,
-            imports: { 'f.dll': ['func'] },
-            exports: [{ name: 'call', offset: DLL_MAIN.length }],
-            code: ({ iat })=>[...DLL_MAIN, 0xff, 0x25, ...u32(iat('func'))],
-        });
-        const program = buildExe({
-            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetProcAddress', 'ExitProcess'] },
-            data: { user: cString('user.dll'), call: cString('call') },
-            code: ({ iat, at })=>checked(({ bytes, call, fail })=>{
-                bytes.push(0x68, ...u32(at('user')));
-                call('LoadLibraryA');
-                bytes.push(0x85, 0xc0);
-                fail(JZ, 10);
-                bytes.push(0x68, ...u32(at('call')), 0x50);
-                call('GetProcAddress');
-                bytes.push(0xff, 0xd0, 0x83, 0xf8, 7); // call eax; cmp eax, 7
-                fail(JNZ, 11);
-            }, iat),
-            codeSize: 0x80,
-        });
-        assert.equal(await run(t, program,
-            { 's.dll': source(), 'f.dll': forwarder(), 'user.dll': user }), 1);
+test('a library loaded at run time has an import through a forwarder bound, and what it'
+    + ' brought goes with it', { timeout: 60_000 }, async t=>{
+    // user.dll imports f.dll!func; s.dll is loaded for it when it is.
+    // Freed, user.dll gives back f.dll, which gives back s.dll.
+    const user = buildExe({
+        dll: true,
+        imageBase: 0x13000000,
+        imports: { 'f.dll': ['func'] },
+        exports: [{ name: 'call', offset: DLL_MAIN.length }],
+        code: ({ iat })=>[...DLL_MAIN, 0xff, 0x25, ...u32(iat('func'))],
     });
+    const program = buildExe({
+        imports: { 'KERNEL32.dll': ['LoadLibraryA', 'GetProcAddress', 'FreeLibrary',
+            'GetModuleHandleA', 'ExitProcess'] },
+        data: { user: cString('user.dll'), call: cString('call'), f: cString('f.dll'),
+            s: cString('s.dll') },
+        code: ({ iat, at })=>checked(({ bytes, call, fail })=>{
+            bytes.push(0x68, ...u32(at('user')));
+            call('LoadLibraryA');
+            bytes.push(0x85, 0xc0);
+            fail(JZ, 10);
+            bytes.push(0x89, 0xc6); // mov esi, eax
+            bytes.push(0x68, ...u32(at('call')), 0x50);
+            call('GetProcAddress');
+            bytes.push(0xff, 0xd0, 0x83, 0xf8, 7); // call eax; cmp eax, 7
+            fail(JNZ, 11);
+            bytes.push(0x56);
+            call('FreeLibrary');
+            for (const [name, check] of [['f', 12], ['s', 13]])
+            {
+                bytes.push(0x68, ...u32(at(String(name))));
+                call('GetModuleHandleA');
+                bytes.push(0x85, 0xc0);
+                fail(JNZ, Number(check));
+            }
+        }, iat),
+        codeSize: 0x100,
+    });
+    assert.equal(await run(t, program,
+        { 's.dll': source(), 'f.dll': forwarder(), 'user.dll': user }), 1);
+});
 
 test('a forwarder that leads back to itself is ERROR_BAD_EXE_FORMAT', { timeout: 60_000 },
     async t=>{

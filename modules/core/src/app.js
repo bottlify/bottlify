@@ -7228,17 +7228,28 @@ async function buildApp(options){
      * @param {string} dll
      * @param {string | null} name
      * @param {number | null} ordinal
+     * @param {any} [holder]  The library loaded at run time that imports it.
      */
-    const resolveImport = (dll, name, ordinal)=>{
+    const resolveImport = (dll, name, ordinal, holder = null)=>{
         const module = moduleUnderContext(dll);
         if (!module)
         {
             return null;
         }
         markLoaded(module);
-        module.pinned = true;
-        // Bound, a forwarded import pins where it leads as well: pinned
-        // modules hold what they forward to (`holdOn`).
+        // A library loaded at run time holds what it imports from, given
+        // back when it is unloaded, as Windows counts a dependency; the
+        // program's own imports, and an engine library, stay for the run.
+        if (holder && typeof module.references === 'number')
+        {
+            holdOn(holder, module);
+        }
+        else
+        {
+            module.pinned = true;
+        }
+        // A forwarded import's target is held by the library that forwards
+        // to it, pinned where that one is (`holdOn`).
         const found = /** @type {{ address: number, module: any } | { error: number }} */ (
             exportOf(module, name, ordinal, null));
         return 'error' in found ? null : watched(dll, name, ordinal, found.address);
@@ -7309,10 +7320,13 @@ async function buildApp(options){
                 return { error: ERROR_MOD_NOT_FOUND };
             }
             // The load's own reference is the forwarding module's hold.
-            (module.holds ??= new Set()).add(loaded);
+            holdingSet(module).add(loaded);
             return next(loaded);
         });
     };
+
+    /** What a module holds loaded (`holdOn`). @param {any} holder @returns {Set<any>} */
+    const holdingSet = holder=>(holder.holds ??= new Set());
 
     /**
      * Records that `holder` keeps `held` loaded, taking a reference on it once:
@@ -7331,7 +7345,7 @@ async function buildApp(options){
             held.pinned = true;
             return;
         }
-        const holds = (holder.holds ??= new Set());
+        const holds = holdingSet(holder);
         if (!holds.has(held))
         {
             holds.add(held);
@@ -7577,8 +7591,10 @@ async function buildApp(options){
      * callbacks and then its DllMain of the detach, on the thread that asked
      * and with lpvReserved NULL, and unloads it -- its thread-local slot and
      * every thread's copy of its block are given back, a library read off the
-     * volume is unmapped and forgotten, one of ours stops being loaded. A
-     * library something imports is pinned and never unloaded.
+     * volume is unmapped and forgotten, one of ours stops being loaded, and
+     * what it held (its imports and forwarders' targets, `holdOn`) is given
+     * back after. A library the program itself imports is pinned and never
+     * unloaded.
      *
      * @param {any} held
      * @returns {number | Promise<number>}
@@ -8008,7 +8024,13 @@ async function buildApp(options){
                                 }
                                 else
                                 {
-                                    brought.push(byBase.get(got));
+                                    // Its load's reference is this library's hold.
+                                    const dependencyHeld = byBase.get(got);
+                                    brought.push(dependencyHeld);
+                                    if (dependencyHeld && dependencyHeld !== held)
+                                    {
+                                        holdingSet(held).add(dependencyHeld);
+                                    }
                                 }
                             }
                         }
@@ -8051,7 +8073,10 @@ async function buildApp(options){
                                 }
                             }
                         }
-                        loader.bind(mapped, resolveImport, missingImport);
+                        loader.bind(mapped, (/** @type {string} */ dll,
+                            /** @type {string | null} */ imported,
+                            /** @type {number | null} */ ordinal)=>
+                            resolveImport(dll, imported, ordinal, held), missingImport);
                         // Both tables, and in this order: the delay-load pass
                         // adds to what the first one recorded rather than
                         // replacing it.
