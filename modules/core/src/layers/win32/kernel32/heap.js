@@ -2483,6 +2483,15 @@ export function createHeapFunctions(host){
             const existing = allocator.blockContaining(requested);
             const offset = existing ? page - existing.address : 0;
             // A placeholder holds no pages until an allocation replaces it.
+            // A loaded image's pages are its own, committed with it: a commit
+            // over one is refused as over a view of a file (Wine's
+            // kernel32:loader, test_Loader).
+            if (acting === MEM_COMMIT && (!existing || existing.owner !== VIRTUAL)
+                && imageAt(page))
+            {
+                host.setLastError(ERROR_ACCESS_DENIED);
+                return 0;
+            }
             if (!existing || existing.owner !== VIRTUAL || placeholders.has(existing.address)
                     || existing.capacity - offset < needed)
             {

@@ -2876,7 +2876,7 @@ export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
             sizeOfHeaders: 0,
             sections: [{ name: '.rsrc', virtualAddress: directory.address,
                 virtualSize: directory.size, rawSize: directory.size, rawOffset: 0,
-                readable: true, writable: false, executable: false }],
+                readable: true, writable: false, executable: false, characteristics: 0x40000040 }],
         }, RT_VERSION, 1);
         if (!found)
         {

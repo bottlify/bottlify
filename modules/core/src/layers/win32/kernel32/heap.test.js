@@ -1312,6 +1312,18 @@ test('a loaded image answers each section\'s protection, and keeps what VirtualP
             0, 'past the image\'s end');
     });
 
+test('a commit over a loaded image is refused with ERROR_ACCESS_DENIED', ()=>{
+    // Wine's kernel32:loader test_Loader: an image's pages are its own, as a
+    // view's are; a commit over them is no reservation's.
+    const { host, errors } = recording();
+    const allocator = createHeapAllocator(host.arena);
+    const own = createHeapFunctions({ ...host, allocator });
+    const base = allocator.allocate(0x2000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(base, imageHeaders(0x2000, [[0x1000, 0x1000, 0x60000020]]));
+    assert.equal(own.VirtualAlloc.handler([base, 0x1000, MEM_COMMIT, 0x02]), 0);
+    assert.equal(errors.at(-1), 5);
+});
+
 test('an image loaded again where one was answers its own sections, not the protections given'
     + ' the one before', ()=>{
     // Wine's kernel32:loader writes one DLL over and over, a section's

@@ -10,6 +10,7 @@ import { STATUS, toDosError } from '../ntdll/status.js';
 import { mapImage } from '../../loader/internal/image.js';
 import { imageKind, relocateImage } from '../../loader/internal/pe.js';
 import { copyOnWrite, sectionRights, viewProtection } from './view-rights.js';
+import { sectionProtection } from './image-protection.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -161,8 +162,7 @@ export function imageViewAt(laid, address){
 
 /**
  * An image's sections as a view of it holds them, each with the protection
- * Windows maps it with: code read and executed, data written as the
- * process's own copy, the rest read-only.
+ * its characteristics give it, as a loaded image's (`sectionProtection`).
  *
  * @param {import('../../loader/internal/pe.js').PeImage} image
  * @returns {{ start: number, end: number, protect: number }[]}
@@ -173,8 +173,7 @@ export function imageSections(image){
         start: section.virtualAddress,
         end: section.virtualAddress + Math.ceil((section.virtualSize || section.rawSize)
             / alignment) * alignment,
-        protect: section.executable ? section.writable ? 0x80 : 0x20
-            : section.writable ? 0x08 : section.readable ? 0x02 : 0x01,
+        protect: sectionProtection(section.characteristics),
     }));
 }
 

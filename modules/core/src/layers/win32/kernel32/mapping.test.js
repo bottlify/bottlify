@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMappingFunctions, imageRefusal } from './mapping.js';
+import { createMappingFunctions, imageRefusal, imageSections } from './mapping.js';
 import { imageKind } from '../../loader/internal/pe.js';
 import { imageWriteCopy, protectionWithin, sectionRights, viewProtection }
     from './view-rights.js';
@@ -799,4 +799,18 @@ test('NtOpenSection opens a section by its object name, and refuses physical mem
     assert.equal(open('\\BaseNamedObjects\\Nothing'), STATUS_OBJECT_NAME_NOT_FOUND);
     assert.equal(NtOpenSection.handler([0, 0x4, 0x400]), STATUS_ACCESS_VIOLATION);
     assert.equal(NtOpenSection.argBytes, 12);
+});
+
+test('an image view\'s sections take the protection a loaded image\'s do', ()=>{
+    // Wine's kernel32:loader (test_image_mapping): a section only executed is
+    // PAGE_EXECUTE, not PAGE_EXECUTE_READ, mapped as a view as loaded.
+    /** @param {number} characteristics */
+    const of = characteristics=>imageSections(/** @type {any} */ ({ sectionAlignment: 0x1000,
+        sections: [{ virtualAddress: 0x1000, virtualSize: 0x10, rawSize: 0x200,
+            characteristics }] }))[0].protect;
+    assert.equal(of(0x20000000), 0x10, 'executed only');
+    assert.equal(of(0x60000020), 0x20, 'read and executed');
+    assert.equal(of(0xc0000040), 0x08, 'written: copy-on-write');
+    assert.equal(of(0xd0000040), 0x04, 'shared: written through');
+    assert.equal(of(0x00000040), 0x01, 'none');
 });
