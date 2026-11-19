@@ -206,6 +206,7 @@ const PROGRAMS = [
     { name: 'crt64', source: 'crt64.c', cxx: false, x64: true },
     { name: 'win64', source: 'win64.c', cxx: false, x64: true },
     { name: 'locks64', source: 'locks64.c', cxx: false, x64: true },
+    { name: 'low64', source: 'low64.c', cxx: false, x64: true },
     { name: 'seh64', source: 'seh64.c', cxx: false, x64: true,
         guestHandler: 'via_guest_handler' },
     { name: 'float64', source: 'float64.c', cxx: false, x64: true },
