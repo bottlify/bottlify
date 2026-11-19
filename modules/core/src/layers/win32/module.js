@@ -1116,7 +1116,7 @@ export function createWin32Module(){
                 /** @param {number} handle @param {string} [type] */
                 resolve: (handle, type)=>kernel.handles.resolve(handle, type),
                 /** The rights a handle holds, null for every one. @param {number} handle */
-                access: handle=>kernel.handles.access(handle),
+                access: handle=>kernel.handles.access?.(handle) ?? null,
                 /** @param {number} handle */
                 close: handle=>kernel.handles.close(handle),
                 /** @param {number} handle */
