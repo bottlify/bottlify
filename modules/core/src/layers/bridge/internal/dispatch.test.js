@@ -2241,3 +2241,25 @@ test('a 64-bit call hands each argument\'s high dword beside it, for a pointer p
     dispatcher.dispatch(1);
     assert.deepEqual(seen, [[0x40001234, 5, 1, 0]]);
 });
+
+test('a function is checked when it is registered and its record made at its first call', ()=>{
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 4n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Add', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    assert.equal(/** @type {any} */ (dispatcher).functions[1], undefined,
+        'no record until it is called');
+    assert.equal(dispatcher.lookup(1)?.name, 'X!Add', 'its declaration is there to look up');
+    assert.throws(()=>dispatcher.register(1, { name: 'X!Again', ...STDCALL, argBytes: 0,
+        handler: ()=>0 }), /already implemented/, 'an id taken before its first call');
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Bad', ...STDCALL, argBytes: 8,
+        quadwords: [1], handler: ()=>0 }), /quadwords/, 'a broken declaration refused at once');
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[3, 4]]);
+    const made = /** @type {{ calls: number } | undefined} */ (
+        /** @type {any} */ (dispatcher).functions.at(1));
+    assert.equal(made?.calls, 1, 'made, and counting');
+    assert.equal(dispatcher.diagnostics().implemented, 1);
+});

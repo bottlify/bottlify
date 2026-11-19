@@ -744,6 +744,13 @@ class Dispatcher {
         // Indexed by trap id: the cpu hands them out in sequence from zero.
         /** @type {(Entry | undefined)[]} */
         this.functions = [];
+        /**
+         * Functions registered and not yet called, by id: their records are
+         * made at their first call (`entry`).
+         *
+         * @type {any[]}
+         */
+        this.pending = [];
         this.implemented = 0;
         /**
          * Frames by depth of nesting, reused: a guest callback can trap into
@@ -1464,7 +1471,7 @@ class Dispatcher {
      * @param {number} id
      */
     cross(id){
-        const entry = this.functions[id];
+        const entry = this.entry(id);
         if (entry === undefined)
         {
             throw new Error(`bridge: trap ${id} has no implementation`);
@@ -1837,10 +1844,91 @@ class Dispatcher {
      * @param {HostFunction} fn
      */
     register(id, fn){
-        if (this.functions[id] !== undefined)
+        if (this.functions[id] !== undefined || this.pending[id] !== undefined)
         {
             throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
         }
+        // Checked now, made when first called (`entry`): a process registers
+        // every export of every system library, and calls a few hundred.
+        const { hook } = this.shape(fn);
+        this.pending[id] = fn;
+        this.implemented++;
+        if (hook)
+        {
+            this.hooksByName.set(fn.name, id);
+            this.entry(id);
+        }
+    }
+
+    /**
+     * A function's record, made from its declaration the first time it is
+     * asked for, and undefined for an id nothing registered.
+     *
+     * @param {number} id
+     */
+    entry(id){
+        /** @type {Entry | undefined} */
+        const ready = this.functions[id];
+        if (ready !== undefined)
+        {
+            return ready;
+        }
+        const fn = this.pending[id];
+        if (fn === undefined)
+        {
+            return undefined;
+        }
+        this.pending[id] = undefined;
+        const { site, registerArgs, cleanup, stackWords, hook, quadwords, floats, structs,
+            addresses, sizes, words } = this.shape(fn);
+        /** @type {Entry} */
+        const made = this.functions[id] = {
+            fn,
+            name: fn.name,
+            handler: fn.handler,
+            registerArgs,
+            stackWords,
+            cleanup,
+            saved: fn.saved ?? 0,
+            forwards: fn.forwards === true,
+            hook,
+            target: fn.target ?? 0,
+            site,
+            trampoline: fn.trampoline ?? 0,
+            resume: fn.resume ?? 0,
+            stackAdjust: fn.stackAdjust ?? 0,
+            registers: site
+                ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
+                : null,
+            hookStats: hook
+                ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
+            readsError: this.errorReader && fn.lastError !== false,
+            quadwords,
+            addresses,
+            sizes,
+            zeroExtends: zeroExtendsOf(fn),
+            longSlots: quadwords || floats || structs
+                ? longSlotsOf(words, quadwords, floats, structs) : null,
+            args: argumentArray(site ? 8 : stackWords + registerArgs),
+            kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
+            chainCount: 0,
+            writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
+            sinkRevision: -1,
+            sinkOn: true,
+            calls: 0,
+            sampledMs: 0,
+            sampledCalls: 0,
+        };
+        return made;
+    }
+
+    /**
+     * What a function's declaration says of its call, checked: thrown where it
+     * does not hold together, at registration, not at its first call.
+     *
+     * @param {any} fn
+     */
+    shape(fn){
         const site = fn.site === true;
         // A site hook marshals nothing through a convention: its eight
         // registers come straight off the pushad block, not off a
@@ -1908,53 +1996,13 @@ class Dispatcher {
             throw new Error(`bridge: ${fn.name}'s sizes ${sizes.join(', ')} are not dwords`
                 + ' of its arguments that hold one value each');
         }
-        this.functions[id] = {
-            fn,
-            name: fn.name,
-            handler: fn.handler,
-            registerArgs,
-            stackWords,
-            cleanup,
-            saved: fn.saved ?? 0,
-            forwards: fn.forwards === true,
-            hook,
-            target: fn.target ?? 0,
-            site,
-            trampoline: fn.trampoline ?? 0,
-            resume: fn.resume ?? 0,
-            stackAdjust: fn.stackAdjust ?? 0,
-            registers: site
-                ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
-                : null,
-            hookStats: hook
-                ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
-            readsError: this.errorReader && fn.lastError !== false,
-            quadwords,
-            addresses,
-            sizes,
-            zeroExtends: zeroExtendsOf(fn),
-            longSlots: quadwords || floats || structs
-                ? longSlotsOf(words, quadwords, floats, structs) : null,
-            args: argumentArray(site ? 8 : stackWords + registerArgs),
-            kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
-            chainCount: 0,
-            writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
-            sinkRevision: -1,
-            sinkOn: true,
-            calls: 0,
-            sampledMs: 0,
-            sampledCalls: 0,
-        };
-        if (hook)
-        {
-            this.hooksByName.set(fn.name, id);
-        }
-        this.implemented++;
+        return { site, registerArgs, cleanup, stackWords, hook, quadwords, floats, structs,
+            addresses, sizes, words };
     }
 
     /** @param {number} id */
     lookup(id){
-        return this.functions[id]?.fn ?? null;
+        return this.functions[id]?.fn ?? this.pending[id] ?? null;
     }
 
     /**
@@ -2189,14 +2237,17 @@ class Dispatcher {
         this.ringSkip.clear();
         /** @type {string[]} */
         const skipped = [];
-        this.functions.forEach((entry, id)=>{
-            const bare = entry?.name.slice(entry.name.indexOf('!') + 1) ?? '';
-            if (entry && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
+        const length = Math.max(this.functions.length, this.pending.length);
+        for (let id = 0; id < length; id++)
+        {
+            const name = this.functions[id]?.name ?? this.pending[id]?.name;
+            const bare = name?.slice(name.indexOf('!') + 1) ?? '';
+            if (name && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
             {
                 this.ringSkip.add(id);
-                skipped.push(entry.name);
+                skipped.push(name);
             }
-        });
+        }
         return skipped;
     }
 

@@ -308,7 +308,23 @@ export function synthesiseModule({ name, base, exports, entryPoint, long = false
         exportDirectoryRva,
         entryPointRva,
         dataRva,
+        ...lookupsOf(table),
+    };
+}
+
+/**
+ * A module's two lookups over its export table, made outside the function that
+ * built its bytes: a closure made there would hold every variable of that
+ * function, the image's bytes among them, for as long as the module lives -
+ * every engine library's bytes a second time in each process's heap.
+ *
+ * @param {Map<string, { address: number, ordinal: number }>} table
+ */
+function lookupsOf(table){
+    return {
+        /** @param {string} exported */
         addressOf: exported=>table.get(exported)?.address ?? null,
+        /** @param {string} exported */
         ordinalOf: exported=>table.get(exported)?.ordinal ?? null,
     };
 }
