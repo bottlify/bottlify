@@ -14,7 +14,7 @@ import { WINDOWS_VERSIONS } from './versions.js';
 
 /** Guest memory as a flat array, with a bump allocator over it. */
 function guest(){
-    const bytes = new Uint8Array(0x20000);
+    const bytes = new Uint8Array(0x40000);
     let next = 0x1000;
     return {
         bytes,
@@ -454,6 +454,10 @@ test('the modules given at build time are all three lists, in order, walkable fr
             modules[index].name);
         assert.equal(readUnicodeString(memory, entry + LDR_ENTRY.FULL_DLL_NAME),
             modules[index].path ?? modules[index].name);
+        // Past the names' descriptors the entry goes on, its names after
+        // it: a program reading TlsIndex reads 0, not a name's characters.
+        assert.equal(memory.view.getUint16(entry + LDR_ENTRY.TLS_INDEX, true), 0, 'TlsIndex');
+        assert.equal(memory.view.getUint16(entry + LDR_ENTRY.LOAD_COUNT, true), 0, 'LoadCount');
     }
 
     // The same entries, reached through either of the other two orderings --

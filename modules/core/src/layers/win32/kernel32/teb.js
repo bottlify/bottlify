@@ -144,7 +144,12 @@ export const LDR_ENTRY = Object.freeze({
     FULL_DLL_NAME: 0x24,
     BASE_DLL_NAME: 0x2c,
     FLAGS: 0x34,
-    SIZE: 0x38,
+    // LoadCount, TlsIndex (0: no TLS slot is the module's), HashLinks and
+    // TimeDateStamp: zero. A program walking the list reads them, so the
+    // names' characters start after them, not over them.
+    LOAD_COUNT: 0x38,
+    TLS_INDEX: 0x3a,
+    SIZE: 0x48,
 });
 
 /**
