@@ -229,6 +229,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *     a kernel object was made or opened by, null for one made with none.
  * @property {import('./query.js').QueryHost['processOf']} [processOf]
  * @property {import('./query.js').QueryHost['askChild']} [askChild]
+ * @property {import('./query.js').QueryHost['debugState']} [debugState]
+ * @property {import('./query.js').QueryHost['openDebugObject']} [openDebugObject]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {Record<string | symbol, any>} [advapi32]
  *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
@@ -653,6 +655,8 @@ export function createNtdllFunctions(host){
             },
             processOf: host.processOf,
             askChild: host.askChild,
+            debugState: host.debugState,
+            openDebugObject: host.openDebugObject,
             divergence: host.divergence,
             processes: host.processes,
             imagePath: host.imagePath,

@@ -351,6 +351,18 @@ export const PAGE_STATE = Symbol('page state');
  * next guard page.
  */
 export const GUARD_PAGES = Symbol('guard pages');
+/**
+ * Told by the loader that an image was mapped and bound at a base: its
+ * copy-on-write pages are watched from then on, so the first write to one
+ * makes it the process's own, read-write, as on Windows (`decisions.md` A248).
+ */
+export const IMAGE_MAPPED = Symbol('image mapped');
+/**
+ * NtFreeVirtualMemory's MEM_RELEASE of whole pages inside one allocation:
+ * the pages go and what is left either side is an allocation of its own,
+ * as Windows splits it. Answers 1, or 0 with the last error set.
+ */
+export const RELEASE_PART = Symbol('release part');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
@@ -1482,16 +1494,19 @@ export function createHeapFunctions(host){
     const replaced = new Set();
 
     /**
-     * The protections VirtualProtect gave a loaded image's pages, by the
-     * image's base, with what tells that image from one mapped at the same
-     * base after it is gone: the arena block the loader took for it (a new
-     * load is a new block, its headers the same or not - a program that
-     * writes one DLL file over and over with only a section's
-     * characteristics changed loads each at the same base with the same
-     * stamp), and the header fields for an image mapped as a region.
+     * The protections a loaded image's pages were given - by VirtualProtect,
+     * or by the first write to a copy-on-write page (`watch`, armed when the
+     * loader maps it) - by the image's base, with what tells that image from
+     * one mapped at the same base after it is gone: the arena block the
+     * loader took for it (a new load is a new block, its headers the same or
+     * not - a program that writes one DLL file over and over with only a
+     * section's characteristics changed loads each at the same base with the
+     * same stamp), and the header fields for an image mapped as a region.
      *
-     * @type {Map<number, { holder: object | null, stamp: string,
-     *     pages: Map<number, number> }>}
+     * @typedef {{ holder: object | null, stamp: string, pages: Map<number, number>,
+     *     watch?: { take: (address: number, length: number) => number[] } | null,
+     *     copied?: Set<number> }} ImageRecord
+     * @type {Map<number, ImageRecord>}
      */
     const imageProtections = new Map();
 
@@ -1502,7 +1517,7 @@ export function createHeapFunctions(host){
      *
      * @param {number} page
      * @returns {{ base: number, layout: NonNullable<ReturnType<typeof imageLayout>>,
-     *     holder: object | null, changed: Map<number, number> | null } | null}
+     *     holder: object | null, kept: ImageRecord | null } | null}
      */
     const imageAt = page=>{
         const block = allocator.blockContaining(page);
@@ -1520,8 +1535,73 @@ export function createHeapFunctions(host){
         }
         const holder = block ?? null;
         const kept = imageProtections.get(base);
-        return { base, layout, holder, changed: kept && kept.holder === holder
-            && kept.stamp === imageStamp(base) ? kept.pages : null };
+        return { base, layout, holder, kept: kept && kept.holder === holder
+            && kept.stamp === imageStamp(base) ? kept : null };
+    };
+
+    /**
+     * The record of an image's own protections, made when first needed.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image
+     * @returns {ImageRecord}
+     */
+    const imageRecord = image=>{
+        if (!image.kept)
+        {
+            image.kept = { holder: image.holder, stamp: imageStamp(image.base), pages: new Map() };
+            imageProtections.set(image.base, image.kept);
+        }
+        return image.kept;
+    };
+
+    /**
+     * The copy-on-write pages of an image written since the last look become
+     * the process's own, read-write (`writtenCopy`), as `takeCopies` makes a
+     * view's. Only [from, to) is looked at.
+     *
+     * @param {NonNullable<ReturnType<typeof imageAt>>} image
+     * @param {number} from @param {number} to
+     */
+    const takeImageCopies = (image, from, to)=>{
+        const watch = image.kept?.watch;
+        if (!watch || to <= from)
+        {
+            return;
+        }
+        for (const number of watch.take(from, to - from))
+        {
+            const page = number * PAGE_SIZE;
+            const now = imagePageProtection(image, page);
+            const record = /** @type {ImageRecord} */ (image.kept);
+            if (copyOnWrite(now))
+            {
+                record.pages.set(page, writtenCopy(now));
+                (record.copied ??= new Set()).add(page);
+            }
+        }
+    };
+
+    /**
+     * The loader mapped and bound an image at `base`: where it has
+     * copy-on-write pages, their writes are watched from now on - the
+     * loader's own writes before this are its making, as Windows' are.
+     *
+     * @param {number} base
+     */
+    const imageMapped = base=>{
+        if (host.pointerSize === 8)
+        {
+            return;
+        }
+        const image = imageAt(base);
+        if (!image || !image.layout.runs.some(run=>copyOnWrite(run.protect)))
+        {
+            return;
+        }
+        // A new mapping at the base: what an earlier one was given is gone.
+        imageProtections.delete(image.base);
+        image.kept = null;
+        imageRecord(image).watch = host.watchWrites?.(image.base, image.layout.size) ?? null;
     };
 
     /**
@@ -1539,7 +1619,7 @@ export function createHeapFunctions(host){
      *
      * @param {NonNullable<ReturnType<typeof imageAt>>} image @param {number} page
      */
-    const imagePageProtection = (image, page)=>image.changed?.get(page)
+    const imagePageProtection = (image, page)=>image.kept?.pages.get(page)
         ?? image.layout.runs.find(run=>page - image.base < run.to)?.protect ?? PAGE_NOACCESS;
 
     /**
@@ -1551,11 +1631,33 @@ export function createHeapFunctions(host){
      * @returns {[number, number, number, number, number, number, number]}
      */
     const imageAnswer = (image, page)=>{
+        // The writes found are taken as a view's are (`regionAnswer`): through
+        // a copy-on-write run in doubling steps, and at a copy-on-write page
+        // that ends any other run; never the rest of the image.
+        let taken = page + PAGE_SIZE;
+        takeImageCopies(image, page, taken);
         const protect = imagePageProtection(image, page);
+        const copying = copyOnWrite(protect);
         const end = image.base + image.layout.size;
         let to = page + PAGE_SIZE;
-        while (to < end && imagePageProtection(image, to) === protect)
+        while (to < end)
         {
+            if (copying && to >= taken)
+            {
+                const ahead = Math.min(end, to + Math.max(PAGE_SIZE, to - page));
+                takeImageCopies(image, taken, ahead);
+                taken = ahead;
+            }
+            let next = imagePageProtection(image, to);
+            if (next !== protect && !copying && copyOnWrite(next))
+            {
+                takeImageCopies(image, to, to + PAGE_SIZE);
+                next = imagePageProtection(image, to);
+            }
+            if (next !== protect)
+            {
+                break;
+            }
             to += PAGE_SIZE;
         }
         return [page, image.base, IMAGE_ALLOCATION_PROTECT, to - page, MEM_COMMIT, protect,
@@ -2381,6 +2483,15 @@ export function createHeapFunctions(host){
             const existing = allocator.blockContaining(requested);
             const offset = existing ? page - existing.address : 0;
             // A placeholder holds no pages until an allocation replaces it.
+            // A loaded image's pages are its own, committed with it: a commit
+            // over one is refused as over a view of a file (Wine's
+            // kernel32:loader, test_Loader).
+            if (acting === MEM_COMMIT && (!existing || existing.owner !== VIRTUAL)
+                && imageAt(page))
+            {
+                host.setLastError(ERROR_ACCESS_DENIED);
+                return 0;
+            }
             if (!existing || existing.owner !== VIRTUAL || placeholders.has(existing.address)
                     || existing.capacity - offset < needed)
             {
@@ -2510,6 +2621,96 @@ export function createHeapFunctions(host){
         watched.delete(address);
         placeholders.delete(address);
         replaced.delete(address);
+    };
+
+    /**
+     * Splits a reservation at page boundaries into allocations of their own,
+     * each keeping what its pages were: their commit, protections, guards,
+     * write watch and contents, none of it handed over again (the allocator's
+     * block is given up and taken back in parts, in place).
+     *
+     * @param {number} base @param {number[]} cuts  inside it, ascending
+     */
+    const splitReservation = (base, cuts)=>{
+        const block = /** @type {NonNullable<ReturnType<typeof allocator.block>>} */ (
+            allocator.block(base));
+        const end = base + block.capacity;
+        const was = {
+            decommitted: decommitted.get(base) ?? [],
+            committed: committed.get(base) ?? [],
+            unreadable: unreadable.get(base),
+            protection: protections.get(base),
+            watch: watched.get(base),
+        };
+        allocator.free(base);
+        const bounds = [base, ...cuts, end];
+        for (let index = 0; index + 1 < bounds.length; index++)
+        {
+            const from = bounds[index];
+            const to = bounds[index + 1];
+            allocator.allocateAt(from, to - from, { owner: VIRTUAL, reserving: true });
+            /** @param {{ from: number, to: number }[]} ranges */
+            const cut = ranges=>ranges.filter(range=>range.from < to && range.to > from)
+                .map(range=>({ from: Math.max(range.from, from), to: Math.min(range.to, to) }));
+            const gone = cut(was.decommitted);
+            if (gone.length > 0)
+            {
+                decommitted.set(from, gone);
+            }
+            else
+            {
+                decommitted.delete(from);
+            }
+            committed.set(from, cut(was.committed));
+            const closed = createPageRuns();
+            for (const run of was.unreadable?.within(from, to) ?? [])
+            {
+                closed.set(run.from, run.to, true);
+            }
+            if (closed.size > 0)
+            {
+                unreadable.set(from, closed);
+            }
+            else
+            {
+                unreadable.delete(from);
+            }
+            const pages = createPageRuns();
+            for (const run of was.protection?.pages.within(from, to) ?? [])
+            {
+                pages.set(run.from, run.to, run.value);
+            }
+            protections.set(from, { allocation: was.protection?.allocation ?? PAGE_NOACCESS,
+                pages });
+            if (was.watch)
+            {
+                watched.set(from, was.watch);
+            }
+        }
+    };
+
+    /**
+     * MEM_RELEASE of [address, address + size) in whole pages, inside the one
+     * allocation that holds it (`RELEASE_PART`): the pages are given back and
+     * the allocation is what is left either side, each part its own.
+     *
+     * @param {number} address @param {number} size
+     * @returns {number}
+     */
+    const releasePart = (address, size)=>{
+        const block = allocator.blockContaining(address);
+        const from = (address & ~(PAGE_SIZE - 1)) >>> 0;
+        const to = roundUp(address + size, PAGE_SIZE);
+        if (!block || block.owner !== VIRTUAL || placeholders.has(block.address)
+            || to > block.address + block.capacity || size === 0)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        const end = block.address + block.capacity;
+        splitReservation(block.address, [from, to].filter(at=>at > block.address && at < end));
+        release(from, to);
+        return 1;
     };
 
     /**
@@ -3639,13 +3840,21 @@ export function createHeapFunctions(host){
                             ? ERROR_INVALID_ADDRESS : ERROR_INVALID_PARAMETER);
                         return 0;
                     }
+                    // What was written under the old protection is settled
+                    // first, and a page already copied asked to be
+                    // copy-on-write again is read-write, as a view's is.
+                    takeImageCopies(image, first, end);
                     writeDword(oldProtect >>> 0, imagePageProtection(image, first));
-                    const changed = image.changed ?? new Map();
-                    imageProtections.set(image.base,
-                        { holder: image.holder, stamp: imageStamp(image.base), pages: changed });
+                    const record = imageRecord(image);
+                    const given = imageWriteCopy(protect >>> 0);
                     for (let page = first; page < end; page += PAGE_SIZE)
                     {
-                        changed.set(page, imageWriteCopy(protect >>> 0));
+                        record.pages.set(page,
+                            record.copied?.has(page) ? writtenCopy(given) : given);
+                    }
+                    if (copyOnWrite(given) && record.watch === undefined)
+                    {
+                        record.watch = host.watchWrites?.(image.base, image.layout.size) ?? null;
                     }
                     return 1;
                 }
@@ -4110,6 +4319,8 @@ export function createHeapFunctions(host){
             return info ?? { value: undefined, flags: 0 };
         },
         [GLOBAL_MEMORY]: globals,
+        [IMAGE_MAPPED]: imageMapped,
+        [RELEASE_PART]: releasePart,
         [GUARD_PAGES]: {
             touch: touchGuard,
             /** @param {number} page @returns {boolean} */

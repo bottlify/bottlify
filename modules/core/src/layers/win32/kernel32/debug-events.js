@@ -436,7 +436,11 @@ export function createDebuggerFunctions(host){
             if (result === 0)
             {
                 child.debugged = null;
+                return result;
             }
+            // Attached, its NoDebugInherit is set, and stays so after a
+            // detach (ProcessDebugFlags).
+            child.noDebugInherit = true;
             return result;
         });
     };

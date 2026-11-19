@@ -2260,8 +2260,10 @@ image's own headers; `VirtualProtect` of its pages is kept and handed back, a se
 writable protection kept as its copy-on-write form. A view's copy-on-write page reads
 `PAGE_READWRITE` (`PAGE_EXECUTE_READWRITE`) once it is written, as on Windows: the view is
 watched from its first such page by the engine's page marks, which every store tests anyway, and
-the write is found where a protection is read; where the engine cannot tell writes (no write
-watch), and on a loaded image's own pages, the page still reads its copy-on-write protection. What a
+the write is found where a protection is read; a loaded image's own pages the same way, watched
+from when the loader has mapped and bound it (its own writes before that are its making, as
+Windows' loader's are), in a 32-bit process. Where the engine cannot tell writes (no write
+watch), and on a 64-bit image, the page still reads its copy-on-write protection. What a
 program can tell apart only by faulting is not reproduced: a closed page faults where the processor
 can close it, and so does a `PAGE_GUARD` page until its first touch, which takes the guard away
 and is a stack's growth inside the thread's stack reservation and `STATUS_GUARD_PAGE_VIOLATION`

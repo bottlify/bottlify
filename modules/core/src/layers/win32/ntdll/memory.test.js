@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMemoryFunctions } from './memory.js';
+import { RELEASE_PART } from '../kernel32/heap.js';
 
 const SELF = 0xffffffff;
 const STATUS_ACCESS_VIOLATION = 0xc0000005;
@@ -55,6 +56,7 @@ function setup(answers = {}, lastError = 0, more = {}){
             ...answers.K32GetMappedFileNameW
                 ? { K32GetMappedFileNameW: recorder('K32GetMappedFileNameW', 0) } : {},
             GetLastError: { argBytes: 0, handler: ()=>lastError },
+            ...answers.releasePart ? { [RELEASE_PART]: answers.releasePart } : {},
         },
         ...more,
     });
@@ -125,8 +127,11 @@ const oneAllocation = (view, base, span)=>(/** @type {number[]} */ [, where, buf
 test('NtFreeVirtualMemory releases a whole allocation, named by a page of its base', ()=>{
     /** @type {DataView} */
     let dataView;
+    /** @type {number[][]} */
+    const parts = [];
     const { fns, view, calls } = setup({ VirtualQueryEx: oneAllocation(()=>dataView,
-        0x10000, 0x4000) });
+        0x10000, 0x4000), releasePart: (/** @type {number} */ at, /** @type {number} */ size)=>
+        parts.push([at, size]) && 1 });
     dataView = view;
     /** @param {number} base @param {number} size @param {number} type */
     const free = (base, size, type)=>{
@@ -141,7 +146,13 @@ test('NtFreeVirtualMemory releases a whole allocation, named by a page of its ba
     assert.equal(free(0x11001, 0, 0x8000), 0xc000009f, 'STATUS_FREE_VM_NOT_AT_BASE');
     assert.equal(view.getUint32(0x104, true), 0, 'nothing reported');
     assert.equal(free(0x10000, 0x4000, 0x8000), 0, 'its size is all of it');
-    assert.equal(free(0x10000, 0x2000, 0x8000), 0xc000001a, 'STATUS_UNABLE_TO_FREE_VM');
+    assert.equal(free(0x10000, 0x5000, 0x8000), 0xc000001a,
+        'STATUS_UNABLE_TO_FREE_VM: past the allocation\'s end');
+    assert.equal(free(0x11001, 0xfff, 0x8000), 0, 'a part: the pages it reaches');
+    assert.deepEqual(parts, [[0x11000, 0x1000]], 'split where it lies');
+    assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
+        [0x11000, 0x1000]);
+    assert.equal(free(0x10000, 0x5000, 0x4000), 0xc000001a, 'a decommit past it too');
     assert.equal(free(0x10ffe, 0, 0x4000), 0, 'a decommit of no size, from its base too');
     assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
         [0x10000, 0x4000]);

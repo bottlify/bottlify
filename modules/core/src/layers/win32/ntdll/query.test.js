@@ -317,6 +317,63 @@ test('there is no debugger, and the answer says so rather than declining', ()=>{
     assert.equal(host.view.getUint32(BUFFER, true), 0);
 });
 
+test('the debug classes answer what the debugger records, this process\'s and a child\'s', ()=>{
+    // Wine's ntdll info.c test_query_process_debug_port, _object_handle and
+    // _flags: a debuggee's port is -1 and its debug object is opened for the
+    // asker; ProcessDebugFlags is clear for DEBUG_ONLY_THIS_PROCESS or an
+    // attach, and stays clear after a detach.
+    const PORT = 7;
+    const OBJECT = 30;
+    const FLAGS = 31;
+    const object = { killOnClose: true };
+    const child = { debugged: { object }, noDebugInherit: true };
+    /** @type {any[]} */
+    const opened = [];
+    const host = {
+        ...fakeHost(),
+        debugState: (/** @type {any} */ asked)=>(asked
+            ? { debugged: Boolean(asked.debugged), object: asked.debugged?.object ?? null,
+                inherit: !asked.noDebugInherit }
+            : { debugged: false, object: null, inherit: true }),
+        openDebugObject: (/** @type {any} */ made)=>{
+            opened.push(made);
+            return 0x44;
+        },
+        processOf: (/** @type {number} */ handle)=>(handle === 0x40 ? child : null),
+    };
+    const fns = createQueryFunctions(host);
+    /** @param {number} handle @param {number} infoClass @param {number} [length] */
+    const ask = (handle, infoClass, length = 4)=>{
+        host.view.setUint32(BUFFER, 0xdeadbeef, true);
+        host.view.setUint32(RETURN_LENGTH, 0xdeadbeef, true);
+        const status = Number(fns.NtQueryInformationProcess.handler([handle, infoClass, BUFFER,
+            length, RETURN_LENGTH])) >>> 0;
+        return [status, host.view.getUint32(BUFFER, true),
+            host.view.getUint32(RETURN_LENGTH, true)];
+    };
+
+    assert.deepEqual(ask(-1, PORT), [STATUS.SUCCESS, 0, 4], 'no debugger: no port');
+    assert.deepEqual(ask(-1, OBJECT), [0xc0000353, 0, 4]);
+    assert.deepEqual(ask(-1, FLAGS), [STATUS.SUCCESS, 1, 4]);
+    assert.deepEqual(ask(0x40, PORT), [STATUS.SUCCESS, 0xffffffff, 4], 'a debuggee\'s');
+    assert.deepEqual(ask(0x40, OBJECT), [STATUS.SUCCESS, 0x44, 4]);
+    assert.deepEqual(opened, [object], 'its debug object, opened here');
+    assert.deepEqual(ask(0x40, FLAGS), [STATUS.SUCCESS, 0, 4]);
+    child.debugged = /** @type {any} */ (null);
+    assert.deepEqual(ask(0x40, FLAGS), [STATUS.SUCCESS, 0, 4], 'a detach leaves it set');
+    assert.deepEqual(ask(0x40, PORT), [STATUS.SUCCESS, 0, 4]);
+
+    // The probe comes first, the length after, and neither writes anything.
+    assert.deepEqual(ask(-1, OBJECT, 5), [STATUS.INFO_LENGTH_MISMATCH, 0xdeadbeef, 0xdeadbeef]);
+    /** @param {number[]} args */
+    const status = args=>Number(fns.NtQueryInformationProcess.handler(args)) >>> 0;
+    assert.equal(status([-1, OBJECT, BUFFER + 1, 1, 0]), STATUS.DATATYPE_MISALIGNMENT);
+    assert.equal(status([0, FLAGS, 0, 0, 0]), STATUS.INFO_LENGTH_MISMATCH,
+        'no handle: the length first');
+    assert.equal(status([0, FLAGS, 0, 4, 0]),
+        STATUS.INVALID_HANDLE);
+});
+
 test('argument sizes match what the guest compiled against', ()=>{
     const fns = createQueryFunctions(fakeHost());
 

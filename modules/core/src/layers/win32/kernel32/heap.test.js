@@ -9,8 +9,8 @@ import { createWriteClock } from '../../cpu/internal/write-clock.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    GUARD_PAGES, TABLES, arenaRegion, createAddressIndex, createHeapAllocator,
-    createHeapFunctions,
+    GUARD_PAGES, IMAGE_MAPPED, RELEASE_PART, TABLES, arenaRegion, createAddressIndex,
+    createHeapAllocator, createHeapFunctions,
 } from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
@@ -627,6 +627,34 @@ test('VirtualFree releases whole reservations only', ()=>{
     assert.equal(fns.VirtualFree.handler([address, PAGE_SIZE, MEM_DECOMMIT]), 1);
     assert.equal(fns.VirtualFree.handler([address, 0, MEM_RELEASE]), 1);
     assert.equal(fns.VirtualFree.handler([address, 0, MEM_RELEASE]), 0, 'released once, no more');
+});
+
+test('a release of part of an allocation splits it, what is left keeping its pages', ()=>{
+    // Wine's ntdll virtual.c test_NtFreeVirtualMemory: the pages released
+    // go, each side is an allocation of its own, committed, protected and
+    // holding what it held.
+    const { fns, host } = recording();
+    const base = fns.VirtualAlloc.handler([0, 0x10000, MEM_COMMIT | MEM_RESERVE, 0x04]);
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, PAGE_SIZE, 0x02, base]), 1);
+    host.bytes[base + 0x2000] = 0x5a;
+    const part = /** @type {any} */ (fns)[RELEASE_PART];
+    assert.equal(part(base + 0x1000, PAGE_SIZE), 1);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, 0x100, MBI.SIZE]), MBI.SIZE);
+        const view = new DataView(host.bytes.buffer);
+        return [MBI.AllocationBase, MBI.RegionSize, MBI.State, MBI.Protect]
+            .map(field=>view.getUint32(0x100 + field, true));
+    };
+    assert.deepEqual(query(base), [base, PAGE_SIZE, 0x1000, 0x04], 'its own allocation');
+    assert.equal(query(base + 0x1000)[2], 0x10000, 'the released page is free');
+    assert.deepEqual(query(base + 0x2000), [base + 0x2000, PAGE_SIZE, 0x1000, 0x04]);
+    assert.deepEqual(query(base + 0x3000), [base + 0x2000, PAGE_SIZE, 0x1000, 0x02],
+        'its protection kept');
+    assert.equal(host.bytes[base + 0x2000], 0x5a, 'and what it held');
+    assert.equal(fns.VirtualFree.handler([base, 0, MEM_RELEASE]), 1, 'the first part, whole');
+    assert.equal(fns.VirtualFree.handler([base + 0x2000, 0, MEM_RELEASE]), 1, 'the rest');
+    assert.equal(part(base, 0x20000), 0, 'nothing allocated there any more');
 });
 
 test('VirtualAlloc at a chosen address only succeeds where we already have it', ()=>{
@@ -1284,6 +1312,18 @@ test('a loaded image answers each section\'s protection, and keeps what VirtualP
             0, 'past the image\'s end');
     });
 
+test('a commit over a loaded image is refused with ERROR_ACCESS_DENIED', ()=>{
+    // Wine's kernel32:loader test_Loader: an image's pages are its own, as a
+    // view's are; a commit over them is no reservation's.
+    const { host, errors } = recording();
+    const allocator = createHeapAllocator(host.arena);
+    const own = createHeapFunctions({ ...host, allocator });
+    const base = allocator.allocate(0x2000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(base, imageHeaders(0x2000, [[0x1000, 0x1000, 0x60000020]]));
+    assert.equal(own.VirtualAlloc.handler([base, 0x1000, MEM_COMMIT, 0x02]), 0);
+    assert.equal(errors.at(-1), 5);
+});
+
 test('an image loaded again where one was answers its own sections, not the protections given'
     + ' the one before', ()=>{
     // Wine's kernel32:loader writes one DLL over and over, a section's
@@ -1313,6 +1353,63 @@ test('an image loaded again where one was answers its own sections, not the prot
     const second = load(0x20000020);
     assert.equal(second, first, 'the same base');
     assert.equal(protection(second + 0x1000), 0x10, 'its own section, PAGE_EXECUTE');
+});
+
+test('a loaded image\'s copy-on-write page written after its mapping is the process\'s own,'
+    + ' read-write', ()=>{
+    // Wine's kernel32:loader (test_section_access): a write to a writable
+    // section of a loaded DLL turns its page from PAGE_WRITECOPY to
+    // PAGE_READWRITE, that page only; the loader's own writes before the
+    // image is mapped are its making.
+    /** @type {Set<number>} */
+    const marks = new Set();
+    /** @type {number[][]} */
+    const watched = [];
+    const host = {
+        ...fakeHost({ base: 0x10000, size: 0x40000 }),
+        /** @param {number} from @param {number} length */
+        watchWrites: (from, length)=>{
+            watched.push([from, length]);
+            marks.clear();
+            return { take: (/** @type {number} */ address, /** @type {number} */ bytes)=>{
+                const pages = [...marks].filter(page=>page >= address >>> 12
+                    && page < Math.ceil((address + bytes) / PAGE_SIZE));
+                pages.forEach(page=>marks.delete(page));
+                return pages;
+            } };
+        },
+    };
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    const buffer = allocator.allocate(0x100);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} address */
+    const query = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+        return [MBI.RegionSize, MBI.Protect].map(field=>view.getUint32(buffer + field, true));
+    };
+    const base = allocator.allocate(0x5000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(base, imageHeaders(0x5000, [[0x1000, 0x1000, 0x60000020],
+        [0x2000, 0x3000, 0xc0000040]]));
+    marks.add((base + 0x2000) >>> 12);
+    /** @type {any} */ (fns)[IMAGE_MAPPED](base);
+    assert.deepEqual(watched, [[base, 0x5000]], 'watched from its mapping');
+    assert.deepEqual(query(base + 0x2000), [0x3000, 0x08], 'the loader\'s writes are no copy');
+
+    marks.add((base + 0x3000) >>> 12);
+    assert.deepEqual(query(base + 0x2000), [0x1000, 0x08]);
+    assert.deepEqual(query(base + 0x3000), [0x1000, 0x04], 'written: its own copy');
+    assert.deepEqual(query(base + 0x4000), [0x1000, 0x08]);
+    assert.equal(fns.VirtualProtect.handler([base + 0x3000, 1, 0x08, buffer + 0x40]), 1);
+    assert.equal(view.getUint32(buffer + 0x40, true), 0x04, 'the old protection, the copy\'s');
+    assert.deepEqual(query(base + 0x3000), [0x1000, 0x04], 'a copy stays read-write');
+    assert.deepEqual(query(base + 0x1000), [0x1000, 0x20], 'code is no copy');
+
+    // An image with nothing copy-on-write is not watched.
+    const plain = allocator.allocate(0x2000, { alignment: 0x10000, owner: 'image' });
+    host.writeMemory(plain, imageHeaders(0x2000, [[0x1000, 0x1000, 0x60000020]]));
+    /** @type {any} */ (fns)[IMAGE_MAPPED](plain);
+    assert.equal(watched.length, 1);
 });
 
 test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reaching the image there',

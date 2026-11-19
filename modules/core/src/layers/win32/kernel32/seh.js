@@ -1319,6 +1319,12 @@ export function createSeh(host){
              * last-chance handler is where it writes its own crash report, and
              * declining to run it is declining the only account of the failure
              * anybody gets.
+             *
+             * Under a debugger - the process has a debug port, whatever the
+             * process block's BeingDebugged says - the exception is the
+             * debugger's second chance: no filter runs and the answer is
+             * EXCEPTION_CONTINUE_SEARCH (Wine's kernel32 debugger.c
+             * test_unhandled_exception_filter).
              */
             UnhandledExceptionFilter: {
                 argBytes: 4,
@@ -1332,6 +1338,10 @@ export function createSeh(host){
                     }
                     catch (e){
                         host.trace?.(`last chance: not traced (${String(e)})`);
+                    }
+                    if (debugging())
+                    {
+                        return EXCEPTION_CONTINUE_SEARCH;
                     }
                     if (topLevelFilter === 0)
                     {

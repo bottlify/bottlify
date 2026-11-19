@@ -2876,7 +2876,7 @@ export function versionResourceOf(filesystem, path, blocks = null, tries = 4){
             sizeOfHeaders: 0,
             sections: [{ name: '.rsrc', virtualAddress: directory.address,
                 virtualSize: directory.size, rawSize: directory.size, rawOffset: 0,
-                readable: true, writable: false, executable: false }],
+                readable: true, writable: false, executable: false, characteristics: 0x40000040 }],
         }, RT_VERSION, 1);
         if (!found)
         {
@@ -4841,7 +4841,8 @@ const TRACED_KEPT = 200;
  *     terminate?: (request: any, code: number) => boolean,
  *     askChild?: (request: any, call: any) => Promise<any> | null,
  *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
- *         .DebugReport) => Promise<number>, debugged?: () => boolean },
+ *         .DebugReport) => Promise<number>, debugged?: () => boolean,
+ *         object?: () => any, noInherit?: () => boolean },
  *     suspended?: boolean,
  *     othersRunning?: () => boolean,
  *     com?: { table: any, process: unknown },
@@ -8125,6 +8126,9 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
+                    // Mapped and bound: its copy-on-write pages are the
+                    // program's to write from here on (A248).
+                    win32.imageMapped(base);
                     // The callbacks LdrRegisterDllNotification registered, after it
                     // is mapped and bound and before any of its code runs.
                     await tellNotified(LDR_DLL_NOTIFICATION_REASON_LOADED, held, asked);
@@ -8504,6 +8508,7 @@ async function buildApp(options){
     const image = loader.load(options.executable, { resolveImport, missing: missingImport,
         bits: processBits,
         ...long || programLoaded.moved ? { base: programLoaded.imageBase } : {} });
+    win32.imageMapped(image.base);
 
     // An executable exports too: a library a program ships imports from the
     // program that loads it, by name or by ordinal, and is bound to those
@@ -8573,6 +8578,7 @@ async function buildApp(options){
     {
         loader.bind(library.mapped, resolveImport, missingImport);
         loader.bindDelayed(library.mapped, resolveImport, missingImport);
+        win32.imageMapped(library.base);
         // Bound and written: the guest's copy is the image from here on, and
         // holding the file and the mapped image beside it was each library
         // twice over in the engine's heap for the life of the process.
@@ -13806,7 +13812,9 @@ export async function createApp(options){
                         // its start or since it attached (`debug-events.js`).
                         debugger: { report: (/** @type {any} */ report)=>
                             parent.debugEvent(request, report),
-                        debugged: ()=>Boolean(request.debugged) },
+                        debugged: ()=>Boolean(request.debugged),
+                        object: ()=>request.debugged?.object ?? null,
+                        noInherit: ()=>Boolean(request.noDebugInherit) },
                         audio: sound.options,
                     });
                     sound.announce(child);

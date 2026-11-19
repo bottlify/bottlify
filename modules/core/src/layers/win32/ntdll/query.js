@@ -128,6 +128,14 @@ const THREAD_STATE_RUNNING = 2;
 const THREAD_STATE_WAITING = 5;
 const PROCESS_BASIC_INFORMATION = 0;
 const PROCESS_DEBUG_PORT = 7;
+/** A handle to the debug object that debugs a process; its NoDebugInherit, inverted. */
+const PROCESS_DEBUG_OBJECT_HANDLE = 30;
+const PROCESS_DEBUG_FLAGS = 31;
+/** A process has no debug port: no debugger hears it. */
+const STATUS_PORT_NOT_SET = 0xc0000353;
+/** The debug classes, each a ULONG or a HANDLE: answered from the debugger's record. */
+const DEBUG_CLASSES = new Set([PROCESS_DEBUG_PORT, PROCESS_DEBUG_OBJECT_HANDLE,
+    PROCESS_DEBUG_FLAGS]);
 const PROCESS_EXECUTE_FLAGS = 0x22;
 /** The image's path, a UNICODE_STRING and the characters after it: native, Win32. */
 const PROCESS_IMAGE_FILE_NAME = 27;
@@ -359,9 +367,19 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => OpenHandle[]} [openHandles]  The handles this process holds,
  *           what SystemHandleInformation lists; without it the class is unknown.
  * @property {number} [processId]  This process's id, the owner of its handles.
+ * @property {(child: any) => DebugState} [debugState]  Whether a debugger hears
+ *           a process, through which debug object, and whether a process it
+ *           starts is debugged with it (NoDebugInherit clear): this process's
+ *           for null, else a child's, from its debugger's record of it.
+ * @property {(object: any) => number} [openDebugObject]  A handle to a debug
+ *           object, opened in this process.
  * @property {Record<number, SystemClass>} [systemClasses]  More classes of
  *           NtQuerySystemInformation, answered by the family whose state they
  *           read (the clock's and the zone's in time.js).
+ */
+
+/**
+ * @typedef {{ debugged: boolean, object: any, inherit: boolean }} DebugState
  */
 
 /**
@@ -614,6 +632,62 @@ export function createQueryFunctions(host){
             });
         }
         return recorded(child, wanted, buffer, length, returned);
+    };
+
+    /**
+     * A debug class of a process (`DEBUG_CLASSES`), answered as the kernel
+     * answers it, from the record its debugger keeps (`debugState`) - this
+     * process's own for null - and never from what would suit a program that
+     * asks: ProcessDebugPort is -1 while a debugger hears the process, else 0;
+     * ProcessDebugObjectHandle a new handle to its debug object, else 0 and
+     * STATUS_PORT_NOT_SET; ProcessDebugFlags 1 unless the process was started
+     * with DEBUG_ONLY_THIS_PROCESS or attached to, which a detach does not
+     * undo. The kernel probes before anything (Wine's ntdll info.c
+     * test_query_process_debug_port, _object_handle, _flags): a misaligned
+     * buffer is STATUS_DATATYPE_MISALIGNMENT, one it cannot reach, or a
+     * return length it cannot, STATUS_ACCESS_VIOLATION; then the length,
+     * which must be a ULONG's.
+     *
+     * @param {any} child @param {number} wanted
+     * @param {number} buffer @param {number} length @param {number} returned
+     */
+    const debugInformation = (child, wanted, buffer, length, returned)=>{
+        if (length > 0 && buffer % 4 !== 0)
+        {
+            return STATUS.DATATYPE_MISALIGNMENT;
+        }
+        // A probe changes nothing: what is there is written back.
+        if (length > 0)
+        {
+            host.writeMemory(buffer, host.readMemory(buffer, length));
+        }
+        if (returned !== 0)
+        {
+            host.writeMemory(returned, host.readMemory(returned, 4));
+        }
+        if (length !== 4)
+        {
+            return STATUS.INFO_LENGTH_MISMATCH;
+        }
+        const state = /** @type {NonNullable<QueryHost['debugState']>} */ (host.debugState)(child);
+        writeU32If(returned, 4);
+        if (wanted === PROCESS_DEBUG_PORT)
+        {
+            writeU32If(buffer, state.debugged ? 0xffffffff : 0);
+            return STATUS.SUCCESS;
+        }
+        if (wanted === PROCESS_DEBUG_FLAGS)
+        {
+            writeU32If(buffer, state.inherit ? 1 : 0);
+            return STATUS.SUCCESS;
+        }
+        if (!state.debugged || !state.object || !host.openDebugObject)
+        {
+            writeU32If(buffer, 0);
+            return STATUS_PORT_NOT_SET;
+        }
+        writeU32If(buffer, host.openDebugObject(state.object));
+        return STATUS.SUCCESS;
     };
 
     /**
@@ -978,7 +1052,8 @@ export function createQueryFunctions(host){
                 if ((handle >>> 0) === 0)
                 {
                     const fixed = new Map([[PROCESS_BASIC_INFORMATION, PROCESS_BASIC.SIZE],
-                        [PROCESS_DEBUG_PORT, 4], [PROCESS_EXECUTE_FLAGS, 4]]);
+                        [PROCESS_DEBUG_PORT, 4], [PROCESS_DEBUG_OBJECT_HANDLE, 4],
+                        [PROCESS_DEBUG_FLAGS, 4], [PROCESS_EXECUTE_FLAGS, 4]]);
                     const named = wanted === PROCESS_IMAGE_FILE_NAME
                         || wanted === PROCESS_IMAGE_FILE_NAME_WIN32;
                     if (!fixed.has(wanted) && !named)
@@ -990,6 +1065,11 @@ export function createQueryFunctions(host){
                 }
                 const child = (handle >>> 0) === CURRENT_PROCESS ? null
                     : host.processOf?.(handle >>> 0) ?? null;
+                if (DEBUG_CLASSES.has(wanted) && host.debugState)
+                {
+                    return debugInformation(child && !child.current ? child : null, wanted,
+                        buffer >>> 0, length >>> 0, returnLength >>> 0);
+                }
                 if (child && !child.current)
                 {
                     return childInformation(child, wanted, buffer >>> 0, length >>> 0,
@@ -1023,6 +1103,8 @@ export function createQueryFunctions(host){
                 }
                 if (wanted === PROCESS_DEBUG_PORT || wanted === PROCESS_EXECUTE_FLAGS)
                 {
+                    // Without the debugger's record no debugger is known: the
+                    // port is none, as it is for a process nothing debugs.
                     writeU32If(returnLength >>> 0, 4);
                     if ((length >>> 0) < 4 || buffer === 0)
                     {

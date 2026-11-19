@@ -468,6 +468,9 @@ export function createSpawner(host){
                 childThread(made, made.threadId));
             // A child its parent debugs reports to it (`debug-events.js`).
             made.debugged = debuggeeFor(flags, host.debugObject);
+            // DEBUG_ONLY_THIS_PROCESS sets its NoDebugInherit, which only
+            // ProcessDebugFlags tells, and which a detach leaves set.
+            made.noDebugInherit = made.debugged?.onlyThis === true;
             // Whether it asked to break away from its parent's jobs.
             made.breakaway = (flags & CREATE_BREAKAWAY_FROM_JOB) !== 0;
             // A child starts where Windows starts it: in the directory asked

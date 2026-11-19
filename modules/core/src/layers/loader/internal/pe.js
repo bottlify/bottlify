@@ -49,6 +49,7 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {boolean} readable
  * @property {boolean} writable
  * @property {boolean} executable
+ * @property {number} characteristics  The header's IMAGE_SCN_* bits.
  */
 
 /**
@@ -219,6 +220,7 @@ function parseHeaders(bytes, wide){
             readable: (characteristics & SECTION_MEM_READ) !== 0,
             writable: (characteristics & SECTION_MEM_WRITE) !== 0,
             executable: (characteristics & SECTION_MEM_EXECUTE) !== 0,
+            characteristics,
         });
     }
 
