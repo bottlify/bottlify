@@ -44,6 +44,7 @@ import { OBJ_INHERIT, readObjectAttributes } from './object-attributes.js';
 import { readLargeInteger } from './due-time.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 import { allows, mappedAccess } from './access.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -554,7 +555,7 @@ export function createNamedPipes(host){
         return result;
     };
     /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>host.writeMemory(address >>> 0, Uint8Array.of(
+    const writeDword = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
     /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
@@ -576,7 +577,7 @@ export function createNamedPipes(host){
     };
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /**
@@ -594,7 +595,7 @@ export function createNamedPipes(host){
             return;
         }
         // The low bit asks that no packet go to a port; the handle is the rest.
-        const event = (readDword((overlapped >>> 0) + layout.event) & ~1) >>> 0;
+        const event = (readDword(wholeAddress(overlapped) + layout.event) & ~1) >>> 0;
         if (event !== 0)
         {
             host.resetEvent?.(event);
@@ -652,8 +653,8 @@ export function createNamedPipes(host){
     };
     /** @param {number} pointer @param {boolean} wide */
     const nameAt = (pointer, wide)=>((pointer >>> 0) === 0 ? null
-        : wide ? host.readWideString(pointer >>> 0, NAME_BYTES)
-            : host.readCString(pointer >>> 0, NAME_BYTES / 2));
+        : wide ? host.readWideString(wholeAddress(pointer), NAME_BYTES)
+            : host.readCString(wholeAddress(pointer), NAME_BYTES / 2));
     /** The run's key for a pipe's name. @param {string} name */
     const keyOf = name=>{
         const prefix = PREFIXES.find(one=>name.toLowerCase().startsWith(one)) ?? PREFIXES[0];
@@ -666,7 +667,7 @@ export function createNamedPipes(host){
     };
     /** What a security attributes block says of inheritance. @param {number} attributes */
     const inheritsBy = attributes=>(attributes >>> 0) !== 0
-        && readDword((attributes >>> 0) + 8) !== 0;
+        && readDword(wholeAddress(attributes) + 8) !== 0;
 
     /**
      * The pipes this process's threads wait on for an instance, by name: a
@@ -907,7 +908,8 @@ export function createNamedPipes(host){
      */
     const doneAtOnce = (end, handle, overlapped, io)=>{
         const event = io ? io.event
-            : (overlapped >>> 0) === 0 ? 0 : readDword((overlapped >>> 0) + layout.event) & ~1;
+            : (overlapped >>> 0) === 0 ? 0 : readDword(wholeAddress(overlapped) + layout.event)
+                & ~1;
         if (end.signal && event === 0
             && ((ctx.modes.get(handle >>> 0) ?? 0) & FILE_SKIP_SET_EVENT_ON_HANDLE) === 0)
         {
@@ -1565,8 +1567,8 @@ export function createNamedPipes(host){
         {
             return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
         }
-        const mode = openMode >>> 0;
-        const kind = pipeMode >>> 0;
+        const mode = wholeAddress(openMode);
+        const kind = wholeAddress(pipeMode);
         const made = makeInstance(name ?? '', {
             direction: mode & (PIPE_ACCESS_INBOUND | PIPE_ACCESS_OUTBOUND),
             messages: (kind & PIPE_TYPE_MESSAGE) !== 0,
@@ -1626,7 +1628,7 @@ export function createNamedPipes(host){
      */
     const connectClient = (instance, access, flags, attributes)=>{
         const { pipe } = instance;
-        const asked = access >>> 0;
+        const asked = wholeAddress(access);
         const reads = (asked & (GENERIC_READ | FILE_READ_DATA)) !== 0;
         const writes = (asked & (GENERIC_WRITE | FILE_WRITE_DATA)) !== 0;
         const outbound = (pipe.openMode & PIPE_ACCESS_OUTBOUND) !== 0;
@@ -1760,7 +1762,7 @@ export function createNamedPipes(host){
         {
             if (got.bytes.length > 0)
             {
-                host.writeMemory(buffer >>> 0, got.bytes);
+                host.writeMemory(wholeAddress(buffer), got.bytes);
             }
             return answerNow(got.status, got.bytes.length);
         }
@@ -1859,7 +1861,7 @@ export function createNamedPipes(host){
         // nothing at all on a byte one.
         /** @type {Entry | null} */
         const entry = count > 0 || messages ? { bytes: count === 0 ? new Uint8Array(0)
-            : host.readMemory(buffer >>> 0, count).slice(), at: 0 } : null;
+            : host.readMemory(wholeAddress(buffer), count).slice(), at: 0 } : null;
         let written = count;
         let waits = false;
         if (entry && end.nowait && count > 0)
@@ -1983,7 +1985,7 @@ export function createNamedPipes(host){
             const count = got.bytes?.length ?? 0;
             if (count > 0)
             {
-                host.writeMemory(buffer >>> 0, /** @type {Uint8Array} */ (got.bytes));
+                host.writeMemory(wholeAddress(buffer), /** @type {Uint8Array} */ (got.bytes));
             }
             return count;
         };
@@ -2036,7 +2038,7 @@ export function createNamedPipes(host){
             return native ? STATUS.ACCESS_VIOLATION : fail(ERROR_NOACCESS);
         }
         const got = /** @type {PipesAcross} */ (host.across).write(standIn.id,
-            count === 0 ? new Uint8Array(0) : host.readMemory(buffer >>> 0, count).slice());
+            count === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count).slice());
         if (got.status !== STATUS.SUCCESS)
         {
             return native ? got.status : fail(got.status === STATUS_PIPE_CLOSING ? ERROR_NO_DATA
@@ -2274,8 +2276,8 @@ export function createNamedPipes(host){
         if (!end.canWrite || !peer || peer.closed || peer.inbox.length === 0
             || blocked(end, true) !== null)
         {
-            host.writeMemory(block >>> 0, dwordBytes(STATUS.SUCCESS));
-            host.writeMemory((block >>> 0) + 4, dwordBytes(0));
+            host.writeMemory(wholeAddress(block), dwordBytes(STATUS.SUCCESS));
+            host.writeMemory(wholeAddress(block) + 4, dwordBytes(0));
             return STATUS.SUCCESS;
         }
         /** @type {Op} */
@@ -2534,7 +2536,7 @@ export function createNamedPipes(host){
                 [...text].forEach((ch, at)=>{
                     bytes[wide ? at * 2 : at] = ch.charCodeAt(0);
                 });
-                host.writeMemory(user >>> 0, bytes.subarray(0,
+                host.writeMemory(wholeAddress(user), bytes.subarray(0,
                     Math.min(bytes.length, (room >>> 0) * (wide ? 2 : 1))));
             }
             return 1;
@@ -3088,7 +3090,7 @@ export function createNamedPipes(host){
                 // Which way bytes go is what clients may share the pipe for:
                 // reading makes it outbound, writing inbound. The server
                 // handle's access is its rights only.
-                const sharing = share >>> 0;
+                const sharing = wholeAddress(share);
                 if (sharing === 0 || (sharing & ~(FILE_SHARE_READ | FILE_SHARE_WRITE)) !== 0)
                 {
                     return STATUS.INVALID_PARAMETER;
@@ -3101,7 +3103,7 @@ export function createNamedPipes(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const count = maxInstances >>> 0;
+                const count = wholeAddress(maxInstances);
                 const due = (timeout >>> 0) === 0 ? 0n
                     : readLargeInteger(host.readMemory, timeout >>> 0);
                 // A pipe made with no name is one of its own: nothing opens
@@ -3137,7 +3139,7 @@ export function createNamedPipes(host){
                 if ((status >>> 0) !== 0)
                 {
                     writeDword(status, STATUS.SUCCESS);
-                    writeDword((status >>> 0) + 4, FILE_CREATED);
+                    writeDword(wholeAddress(status) + 4, FILE_CREATED);
                 }
                 return STATUS.SUCCESS;
             },
@@ -3362,7 +3364,7 @@ export function createNamedPipes(host){
                 const bytes = got.bytes ?? new Uint8Array(0);
                 if ((buffer >>> 0) !== 0 && bytes.length > 0)
                 {
-                    host.writeMemory(buffer >>> 0, bytes);
+                    host.writeMemory(wholeAddress(buffer), bytes);
                 }
                 writeDwordIf(copiedOut, bytes.length);
                 writeDwordIf(total, got.total ?? 0);
@@ -3388,7 +3390,7 @@ export function createNamedPipes(host){
             const seen = peekAt(end, (buffer >>> 0) === 0 ? 0 : size);
             if (seen.bytes.length > 0)
             {
-                host.writeMemory(buffer >>> 0, seen.bytes);
+                host.writeMemory(wholeAddress(buffer), seen.bytes);
             }
             writeDwordIf(copiedOut, seen.bytes.length);
             writeDwordIf(total, seen.total);
@@ -3478,12 +3480,12 @@ export function createNamedPipes(host){
             const state = end.instance.state === 'connected' && peer && !peer.closed
                 ? FILE_PIPE_CONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
             writeDword(output, state);
-            writeDword((output >>> 0) + 4, seen.total);
-            writeDword((output >>> 0) + 8, seen.count);
-            writeDword((output >>> 0) + 12, seen.length);
+            writeDword(wholeAddress(output) + 4, seen.total);
+            writeDword(wholeAddress(output) + 8, seen.count);
+            writeDword(wholeAddress(output) + 12, seen.length);
             if (seen.bytes.length > 0)
             {
-                host.writeMemory((output >>> 0) + PEEK_HEAD, seen.bytes);
+                host.writeMemory(wholeAddress(output) + PEEK_HEAD, seen.bytes);
             }
             // Only a message cut short overflows: a byte pipe's peek takes what fits.
             const whole = end.instance.pipe.messages ? seen.length : seen.bytes.length;
@@ -3624,8 +3626,8 @@ export function createNamedPipes(host){
             {
                 return STATUS_PIPE_DISCONNECTED;
             }
-            const readMode = readDword(from >>> 0);
-            const completion = readDword((from >>> 0) + 4);
+            const readMode = readDword(wholeAddress(from));
+            const completion = readDword(wholeAddress(from) + 4);
             if (readMode > 1 || completion > 1 || (readMode === 1 && !end.instance.pipe.messages))
             {
                 return STATUS.INVALID_PARAMETER;
@@ -3780,6 +3782,6 @@ const dwordBytes = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
 
 /** @param {PipeHost} host @param {number} address */
 const readFrom = (host, address)=>{
-    const bytes = host.readMemory(address >>> 0, 4);
+    const bytes = host.readMemory(wholeAddress(address), 4);
     return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
 };

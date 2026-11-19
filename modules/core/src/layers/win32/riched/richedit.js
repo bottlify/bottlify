@@ -19,6 +19,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The classes, as riched32 (1.0), riched20 (2.0 and 3.0) and msftedit (4.1) name them. */
 export const RICHEDIT_CLASSES = ['RichEdit', 'RichEdit20A', 'RichEdit20W', 'RICHEDIT50W'];
@@ -286,7 +287,7 @@ export function createRichEditControls(host, toolkit){
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
@@ -445,8 +446,8 @@ export function createRichEditControls(host, toolkit){
                 // SETTEXTEX { DWORD flags; UINT codepage } -- an installer
                 // hands its licence this way, RTF or plain; unanswered, the
                 // box stayed empty.
-                const flags = readU32(wParam >>> 0);
-                const codePage = readU32((wParam >>> 0) + 4);
+                const flags = readU32(wholeAddress(wParam));
+                const codePage = readU32(wholeAddress(wParam) + 4);
                 const text = (lParam >>> 0) === 0 ? '' : textAt(lParam >>> 0, codePage);
                 place(record, text, (flags & ST_SELECTION) !== 0);
                 return 1;

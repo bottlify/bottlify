@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * oleacc — Active Accessibility, as far as a framework links it: MFC imports
  * the two calls a window answers WM_GETOBJECT with, and a library that does
@@ -41,7 +43,7 @@ export function createOleaccFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 said('CreateStdAccessibleObject');
                 return E_NOTIMPL;
             },
@@ -58,7 +60,7 @@ export function createOleaccFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 said('AccessibleObjectFromWindow');
                 return E_NOTIMPL;
             },

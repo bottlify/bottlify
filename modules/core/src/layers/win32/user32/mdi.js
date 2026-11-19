@@ -32,6 +32,7 @@
 
 import { readU32, writeU32s } from './structs.js';
 import { frameOf } from './frame.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WM_CREATE = 0x0001;
 const WM_DESTROY = 0x0002;
@@ -201,7 +202,7 @@ export function createMdi(options){
     const childOf = args=>{
         const [exStyle, className, title, style, x, y, width, height, parent, menu, instance,
             params] = args;
-        const client = parent >>> 0;
+        const client = wholeAddress(parent);
         const state = clients.get(client);
         if (!state || (exStyle & WS_EX_MDICHILD) === 0)
         {
@@ -219,7 +220,7 @@ export function createMdi(options){
         const room = sizeOf(client);
         const placed = (x >>> 0) !== CW_USEDEFAULT;
         const sized = (width >>> 0) !== CW_USEDEFAULT;
-        let id = menu >>> 0;
+        let id = wholeAddress(menu);
         if (id === 0)
         {
             id = state.firstChild;
@@ -423,7 +424,7 @@ export function createMdi(options){
      * @returns {any}
      */
     const defFrame = ([, clientArg, message, wParam, lParam], thread)=>{
-        const client = clientArg >>> 0;
+        const client = wholeAddress(clientArg);
         const state = clients.get(client);
         if (!state)
         {
@@ -455,7 +456,7 @@ export function createMdi(options){
      * @returns {any}
      */
     const defChild = ([hwnd, message, wParam, lParam], thread)=>{
-        const child = hwnd >>> 0;
+        const child = wholeAddress(hwnd);
         const client = parentOf(child);
         const state = clients.get(client);
         if (!state)

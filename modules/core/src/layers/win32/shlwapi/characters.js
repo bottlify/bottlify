@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The shell's character helpers: what class a character is of, text moved
  * between a code page and UTF-16, and a menu label's mnemonic taken out.
@@ -110,8 +112,8 @@ export function createCharacterFunctions(host, { A, W }){
             {
                 through.handler(args(page, source, block, needed));
                 const kept = host.readMemory(block, ((room | 0) - 1) * to.unit).slice();
-                host.writeMemory(destination >>> 0, kept);
-                host.writeMemory((destination >>> 0) + kept.length, new Uint8Array(to.unit));
+                host.writeMemory(wholeAddress(destination), kept);
+                host.writeMemory(wholeAddress(destination) + kept.length, new Uint8Array(to.unit));
                 return room | 0;
             }
             finally
@@ -156,7 +158,7 @@ export function createCharacterFunctions(host, { A, W }){
                 const bracketed = text[at - 1] === '(' && text[at + 2] === ')';
                 const stripped = bracketed ? text.slice(0, at - 1) + text.slice(at + 3)
                     : text.slice(0, at) + text.slice(at + 1);
-                host.writeMemory(label >>> 0, width.sz(stripped));
+                host.writeMemory(wholeAddress(label), width.sz(stripped));
                 return width.wide ? mnemonic.charCodeAt(0) : width.bytes(mnemonic)[0];
             }
             return 0;
@@ -219,7 +221,8 @@ export function createCharacterFunctions(host, { A, W }){
                 const text = A.read(source) ?? '';
                 if ((destination >>> 0) !== 0 && (room | 0) > 0)
                 {
-                    host.writeMemory(destination >>> 0, A.sz(text.slice(0, (room | 0) - 1)));
+                    host.writeMemory(wholeAddress(destination), A.sz(text.slice(0,
+                        (room | 0) - 1)));
                 }
                 return 1;
             },
@@ -240,7 +243,7 @@ export function createCharacterFunctions(host, { A, W }){
                 if ((destination >>> 0) !== 0 && (room | 0) > 0)
                 {
                     const kept = narrow.subarray(0, (room | 0) - 1);
-                    host.writeMemory(destination >>> 0, Uint8Array.from([...kept, 0]));
+                    host.writeMemory(wholeAddress(destination), Uint8Array.from([...kept, 0]));
                 }
                 const back = [...narrow].map(byte=>A.char(byte)).join('');
                 return back === text ? 1 : 0;

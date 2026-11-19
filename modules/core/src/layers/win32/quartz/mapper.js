@@ -23,6 +23,7 @@ import { createComObject } from '../ole32/objects.js';
 import { describe } from './describe.js';
 import { formatGuid } from '../ole32/guid.js';
 import { CLSID_LEGACY_AM_FILTER_CATEGORY, encodeFilterData } from '../devenum/devenum.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -105,7 +106,7 @@ const wide = text=>{
 export function createFilterMapper(host, store, devices){
     const { readGuid, guidBytes } = devices;
     /** A pointer to a GUID, GUID_NULL for none. @param {number} address */
-    const guidAt = address=>((address >>> 0) === 0 ? GUID_NULL : readGuid(address >>> 0));
+    const guidAt = address=>((address >>> 0) === 0 ? GUID_NULL : readGuid(wholeAddress(address)));
     /** A GUID passed by value as four dwords. @param {number[]} words */
     const guidOf = words=>{
         const bytes = new Uint8Array(16);
@@ -231,9 +232,9 @@ export function createFilterMapper(host, store, devices){
             {
                 return E_POINTER;
             }
-            const filter = readGuid(clsid >>> 0);
+            const filter = readGuid(wholeAddress(clsid));
             const name = (instance >>> 0) === 0 ? filter
-                : host.readWideString(instance >>> 0, NAME_BYTES);
+                : host.readWideString(wholeAddress(instance), NAME_BYTES);
             return store.unregister(categoryOf(category), name) ? S_OK : NOT_REGISTERED;
         },
         /**
@@ -250,14 +251,14 @@ export function createFilterMapper(host, store, devices){
             {
                 return E_INVALIDARG;
             }
-            const filterClass = readGuid(clsid >>> 0);
+            const filterClass = readGuid(wholeAddress(clsid));
             /** @type {RegisteredFilter} */
             const filter = {
                 category: categoryOf(category),
                 instance: (instance >>> 0) === 0 ? filterClass
-                    : host.readWideString(instance >>> 0, NAME_BYTES),
+                    : host.readWideString(wholeAddress(instance), NAME_BYTES),
                 clsid: filterClass,
-                name: host.readWideString(name >>> 0, NAME_BYTES),
+                name: host.readWideString(wholeAddress(name), NAME_BYTES),
                 merit: registration.merit,
                 pins: registration.pins,
                 properties: new Map(),
@@ -265,7 +266,7 @@ export function createFilterMapper(host, store, devices){
             store.register(filter);
             if ((moniker >>> 0) !== 0)
             {
-                host.writeMemory(moniker >>> 0, dword(devices.monikerFor(filter)));
+                host.writeMemory(wholeAddress(moniker), dword(devices.monikerFor(filter)));
             }
             return S_OK;
         },
@@ -288,7 +289,7 @@ export function createFilterMapper(host, store, devices){
                 inputNeeded: inputNeeded !== 0, inputs: readTypePairs(inputs, inputCount),
                 outputNeeded: outputNeeded !== 0, outputs: readTypePairs(outputs, outputCount),
             });
-            host.writeMemory(out >>> 0, dword(devices.enumerate(filters)));
+            host.writeMemory(wholeAddress(out), dword(devices.enumerate(filters)));
             return S_OK;
         },
         /** HRESULT GetICreateDevEnum(ICreateDevEnum **ppEnum) */
@@ -299,7 +300,7 @@ export function createFilterMapper(host, store, devices){
             }
             const object = createComObject('{62BE5D10-60EB-11D0-BD3B-00A0C911CE86}',
                 devices.systemDeviceEnum());
-            host.writeMemory(out >>> 0, dword(host.publish(object,
+            host.writeMemory(wholeAddress(out), dword(host.publish(object,
                 '{29840822-5B84-11D0-BD3B-00A0C911CE86}')));
             return S_OK;
         },
@@ -325,12 +326,12 @@ export function createFilterMapper(host, store, devices){
                 host.writeMemory(block, guidBytes(filter.clsid));
                 host.writeMemory(block + 16, dword(block + REGFILTER_BYTES));
                 host.writeMemory(block + REGFILTER_BYTES, name);
-                host.writeMemory((out >>> 0) + given * 4, dword(block));
+                host.writeMemory(wholeAddress(out) + given * 4, dword(block));
                 given++;
             }
             if ((fetched >>> 0) !== 0)
             {
-                host.writeMemory(fetched >>> 0, dword(given));
+                host.writeMemory(wholeAddress(fetched), dword(given));
             }
             return given === (count >>> 0) ? S_OK : S_FALSE;
         },
@@ -348,7 +349,7 @@ export function createFilterMapper(host, store, devices){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(regEnumerator(state.reg, state.at)));
+            host.writeMemory(wholeAddress(out), dword(regEnumerator(state.reg, state.at)));
             return S_OK;
         },
     };
@@ -370,7 +371,7 @@ export function createFilterMapper(host, store, devices){
             const clsid = guidOf([a, b, c, d]);
             store.register({
                 category: CLSID_LEGACY_AM_FILTER_CATEGORY, instance: clsid, clsid,
-                name: host.readWideString(name >>> 0, NAME_BYTES), merit: merit >>> 0,
+                name: host.readWideString(wholeAddress(name), NAME_BYTES), merit: merit >>> 0,
                 pins: legacy(clsid)?.pins ?? [], properties: new Map(),
             });
             return S_OK;
@@ -385,7 +386,8 @@ export function createFilterMapper(host, store, devices){
             {
                 return VFW_E_NOT_FOUND;
             }
-            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
+            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(wholeAddress(name),
+                NAME_BYTES);
             filter.pins = filter.pins.filter(pin=>pin.name !== pinName);
             filter.pins.push({ name: pinName, renderer: rendered !== 0, output: output !== 0,
                 zero: zero !== 0, many: many !== 0, types: [] });
@@ -394,7 +396,8 @@ export function createFilterMapper(host, store, devices){
         /** HRESULT RegisterPinType(CLSID clsFilter, LPCWSTR strName, CLSID clsMajorType, CLSID clsSubType) */
         RegisterPinType: (state, [a, b, c, d, name, ...types])=>{
             const filter = legacy(guidOf([a, b, c, d]));
-            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
+            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(wholeAddress(name),
+                NAME_BYTES);
             const pin = filter?.pins.find(one=>one.name === pinName);
             if (!pin)
             {
@@ -415,7 +418,8 @@ export function createFilterMapper(host, store, devices){
             {
                 return VFW_E_NOT_FOUND;
             }
-            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(name >>> 0, NAME_BYTES);
+            const pinName = (name >>> 0) === 0 ? '' : host.readWideString(wholeAddress(name),
+                NAME_BYTES);
             filter.pins = filter.pins.filter(pin=>pin.name !== pinName);
             return S_OK;
         },
@@ -437,7 +441,7 @@ export function createFilterMapper(host, store, devices){
                 merit, render: rest[8] !== 0, inputNeeded: inputNeeded !== 0, inputs,
                 outputNeeded: rest[9] !== 0, outputs,
             });
-            host.writeMemory(out >>> 0, dword(regEnumerator(filters, 0)));
+            host.writeMemory(wholeAddress(out), dword(regEnumerator(filters, 0)));
             return S_OK;
         },
     };
@@ -464,13 +468,13 @@ export function createFilterMapper(host, store, devices){
                 return E_POINTER;
             }
             const word = (/** @type {number} */ offset)=>(offset + 4 <= (bytes >>> 0)
-                ? host.readU32((data >>> 0) + offset) : 0);
+                ? host.readU32(wholeAddress(data) + offset) : 0);
             if (word(0) !== 2 || (bytes >>> 0) < 16)
             {
                 return E_INVALIDARG;
             }
             const guid = (/** @type {number} */ offset)=>(offset === 0 || offset + 16 > (bytes >>> 0)
-                ? GUID_NULL : readGuid((data >>> 0) + offset));
+                ? GUID_NULL : readGuid(wholeAddress(data) + offset));
             /** @type {{ flags: number, instances: number, types: [string, string][] }[]} */
             const pins = [];
             let at = 16;
@@ -526,7 +530,7 @@ export function createFilterMapper(host, store, devices){
             host.writeMemory(base, block);
             parsedCell ||= host.allocate(4);
             host.writeMemory(parsedCell, dword(base));
-            host.writeMemory(out >>> 0, dword(parsedCell));
+            host.writeMemory(wholeAddress(out), dword(parsedCell));
             return S_OK;
         },
         /** HRESULT CreateFilterData(REGFILTER2 *prf2, BYTE **prgbFilterData, ULONG *pcb) */
@@ -543,8 +547,8 @@ export function createFilterMapper(host, store, devices){
             const block = encodeFilterData(registration);
             const copy = host.allocate(block.length);
             host.writeMemory(copy, block);
-            host.writeMemory(out >>> 0, dword(copy));
-            host.writeMemory(size >>> 0, dword(block.length));
+            host.writeMemory(wholeAddress(out), dword(copy));
+            host.writeMemory(wholeAddress(size), dword(block.length));
             return S_OK;
         },
     };

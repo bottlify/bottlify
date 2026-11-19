@@ -57,7 +57,7 @@
 
 import { EXCEPTION_NONCONTINUABLE } from '../kernel32/seh.js';
 import { Disposition } from '../kernel32/seh64.js';
-import { pointerIo } from '../common/pointers.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 /** The exception code every C++ throw raises: 0xE0 followed by "msc". */
 export const EH_EXCEPTION_NUMBER = 0xe06d7363;
@@ -159,7 +159,7 @@ const WALK_LIMIT = 4096;
 export function createTableReader(readMemory){
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = readMemory(at >>> 0, 4);
+        const bytes = readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     return {
@@ -167,14 +167,14 @@ export function createTableReader(readMemory){
         /** @param {number} at */
         i32: at=>u32(at) | 0,
         /** @param {number} at */
-        u8: at=>readMemory(at >>> 0, 1)[0],
+        u8: at=>readMemory(wholeAddress(at), 1)[0],
         /**
          * A compressed unsigned number at `at`: its value and its length.
          *
          * @param {number} at
          */
         compressed(at){
-            const bytes = readMemory(at >>> 0, 5);
+            const bytes = readMemory(wholeAddress(at), 5);
             const first = bytes[0];
             if ((first & 1) === 0)
             {
@@ -291,7 +291,7 @@ export function readFuncInfo3(read, imageBase, info){
  * @returns {CxxFunction}
  */
 export function readFuncInfo4(read, imageBase, info, begin){
-    let cursor = info >>> 0;
+    let cursor = wholeAddress(info);
     const unsigned = ()=>{
         const { value, length } = read.compressed(cursor);
         cursor += length;
@@ -419,7 +419,7 @@ export function readFuncInfo4(read, imageBase, info, begin){
     {
         cursor = ipMap;
         const count = Math.min(unsigned(), 1 << 20);
-        let ip = begin >>> 0;
+        let ip = wholeAddress(begin);
         for (let index = 0; index < count; index++)
         {
             ip = ip + unsigned() >>> 0;

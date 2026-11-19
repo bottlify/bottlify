@@ -29,6 +29,7 @@ import { WM_CREATE, WM_PAINT, COLOR_3DFACE, after } from '../user32/controls.js'
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { readText } from './strings.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const PAGER_CLASS = 'SysPager';
@@ -215,11 +216,11 @@ export function createPagerProcedure(host, tk){
 
     /** @param {number} address */
     const u32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const setU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     /** A pointer field: its low half is the address. @param {number} address */
     const pointerAt = address=>u32(address);

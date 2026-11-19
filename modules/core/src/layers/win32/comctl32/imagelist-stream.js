@@ -25,6 +25,7 @@
 
 import { createImageListIcons } from './imagelist-icon.js';
 import { createImageLists } from './imagelist.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** ILHEAD's fields and its packed size. */
 const ILHEAD = Object.freeze({
@@ -352,9 +353,9 @@ export function createImageListStreams(host, lists){
                 {
                     return 0;
                 }
-                const image = await readDib(stream >>> 0, thread);
+                const image = await readDib(wholeAddress(stream), thread);
                 const masked = (fields.flags & ILC_MASK) !== 0;
-                const mask = image && masked ? await readDib(stream >>> 0, thread) : null;
+                const mask = image && masked ? await readDib(wholeAddress(stream), thread) : null;
                 if (!image || (masked && !mask))
                 {
                     return 0;

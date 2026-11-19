@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * A program's IStream, read and written through its own vtable: GDI+ loads
  * an image from where the stream stands and saves one there, as Windows'
@@ -25,7 +27,7 @@ const CHUNK = 0x10000;
 /** @param {StreamHost} host */
 export function createGuestStreams(host){
     /** @param {number} address */
-    const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const u32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /**
      * The method in `slot` of the stream's vtable, its HRESULT.

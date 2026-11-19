@@ -16,6 +16,7 @@
 
 import { u32 } from './text.js';
 import { formatToString } from '../msvcrt/format.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -270,7 +271,7 @@ export function createStringFunctions(host, { A, W }){
     const writeCut = (width, address, text, room)=>{
         if (room > 0)
         {
-            host.writeMemory(address >>> 0, width.sz(text.slice(0, room - 1)));
+            host.writeMemory(wholeAddress(address), width.sz(text.slice(0, room - 1)));
         }
     };
 
@@ -306,7 +307,7 @@ export function createStringFunctions(host, { A, W }){
         {
             return E_FAIL;
         }
-        const head = host.readMemory(strret >>> 0, 8);
+        const head = host.readMemory(wholeAddress(strret), 8);
         const kind = u32(head, 0);
         const field = u32(head, STRRET_UNION);
         /** @type {string | null} */
@@ -430,9 +431,9 @@ export function createStringFunctions(host, { A, W }){
             const text = width.read(source);
             if ((destination >>> 0) !== 0 && text !== null)
             {
-                host.writeMemory(destination >>> 0, width.sz(text));
+                host.writeMemory(wholeAddress(destination), width.sz(text));
             }
-            return destination >>> 0;
+            return wholeAddress(destination);
         }), returns: 'pointer' },
 
         /**
@@ -449,7 +450,7 @@ export function createStringFunctions(host, { A, W }){
                 writeCut(width, destination, (room | 0) > 1 ? width.read(source) ?? '' : '',
                     room | 0);
             }
-            return destination >>> 0;
+            return wholeAddress(destination);
         }), returns: 'pointer' },
 
         /** PWSTR StrCatW(PWSTR psz1, PCWSTR psz2): psz2 appended to psz1. */
@@ -458,9 +459,10 @@ export function createStringFunctions(host, { A, W }){
             const tail = width.read(source);
             if (head !== null && tail !== null)
             {
-                host.writeMemory((destination >>> 0) + head.length * width.unit, width.sz(tail));
+                host.writeMemory(wholeAddress(destination) + head.length * width.unit,
+                    width.sz(tail));
             }
-            return destination >>> 0;
+            return wholeAddress(destination);
         }), returns: 'pointer' },
 
         /**
@@ -476,7 +478,7 @@ export function createStringFunctions(host, { A, W }){
                 writeCut(width, (destination >>> 0) + head.length * width.unit, tail,
                     (size | 0) - head.length);
             }
-            return destination >>> 0;
+            return wholeAddress(destination);
         }, { returns: 'pointer' }),
 
         /** PSTR StrDupA(PCSTR pszSrch): a copy the caller LocalFrees. */
@@ -501,7 +503,7 @@ export function createStringFunctions(host, { A, W }){
             {
                 host.writeMemory(block, W.sz(/** @type {string} */ (text)));
             }
-            host.writeMemory(out >>> 0, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+            host.writeMemory(wholeAddress(out), Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
                 block >>> 16 & 0xff, block >>> 24 & 0xff));
             return text === null ? E_INVALIDARG : block === 0 ? E_OUTOFMEMORY : S_OK;
         }),
@@ -587,7 +589,7 @@ export function createStringFunctions(host, { A, W }){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, Uint8Array.of(0, 0, 0, 0));
+                host.writeMemory(wholeAddress(out), Uint8Array.of(0, 0, 0, 0));
                 const scratch = host.allocate(0x2000);
                 if (!scratch)
                 {
@@ -602,7 +604,8 @@ export function createStringFunctions(host, { A, W }){
                     }
                     const alloc = host.library?.('OLEAUT32.dll')?.SysAllocString;
                     const bstr = alloc ? /** @type {number} */ (alloc.handler([scratch])) >>> 0 : 0;
-                    host.writeMemory(out >>> 0, Uint8Array.of(bstr & 0xff, bstr >>> 8 & 0xff,
+                    host.writeMemory(wholeAddress(out), Uint8Array.of(bstr & 0xff,
+                        bstr >>> 8 & 0xff,
                         bstr >>> 16 & 0xff, bstr >>> 24 & 0xff));
                     return bstr ? S_OK : E_OUTOFMEMORY;
                 }
@@ -681,7 +684,7 @@ export function createStringFunctions(host, { A, W }){
                 at--;
             }
             const text = (width.read(source) ?? '').slice(0, room - at - 1);
-            host.writeMemory((destination >>> 0) + at * width.unit, width.sz(text));
+            host.writeMemory(wholeAddress(destination) + at * width.unit, width.sz(text));
             return at + text.length;
         }),
 
@@ -693,10 +696,10 @@ export function createStringFunctions(host, { A, W }){
         ...both('StrCpyNX', 12, (width, [destination, source, count])=>{
             if ((destination >>> 0) === 0 || (count | 0) <= 0)
             {
-                return destination >>> 0;
+                return wholeAddress(destination);
             }
             const text = (width.read(source) ?? '').slice(0, (count | 0) - 1);
-            host.writeMemory(destination >>> 0, width.sz(text));
+            host.writeMemory(wholeAddress(destination), width.sz(text));
             return (destination >>> 0) + text.length * width.unit;
         }, { returns: 'pointer' }),
 
@@ -712,7 +715,7 @@ export function createStringFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory(destination >>> 0, width.sz(text));
+            host.writeMemory(wholeAddress(destination), width.sz(text));
             return text.length + 1;
         }),
         SHUnicodeToUnicode: one(W, 12, (width, [source, destination, count])=>{
@@ -721,7 +724,7 @@ export function createStringFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory(destination >>> 0, width.sz(text));
+            host.writeMemory(wholeAddress(destination), width.sz(text));
             return text.length + 1;
         }),
 
@@ -758,15 +761,15 @@ export function createStringFunctions(host, { A, W }){
          */
         StrFormatByteSizeA: { ...one(A, 12, (width, [size, buffer, room])=>{
             writeCut(width, buffer, byteSize(BigInt(size >>> 0)), room >>> 0);
-            return buffer >>> 0;
+            return wholeAddress(buffer);
         }), returns: 'pointer' },
         StrFormatByteSizeW: one(W, 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
-            return buffer >>> 0;
+            return wholeAddress(buffer);
         }, { quadwords: [0], returns: 'pointer' }),
         StrFormatByteSize64A: one(A, 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, byteSize(int64(low, high)), room >>> 0);
-            return buffer >>> 0;
+            return wholeAddress(buffer);
         }, { quadwords: [0], returns: 'pointer' }),
 
         /**
@@ -794,7 +797,7 @@ export function createStringFunctions(host, { A, W }){
          */
         ...both('StrFormatKBSize', 16, (width, [low, high, buffer, room])=>{
             writeCut(width, buffer, kbSize(int64(low, high)), room >>> 0);
-            return buffer >>> 0;
+            return wholeAddress(buffer);
         }, { quadwords: [0], returns: 'pointer' }),
 
         /**
@@ -859,11 +862,11 @@ export function createStringFunctions(host, { A, W }){
             const tail = width.read(back);
             if (head === null || tail === null || (count | 0) <= 0)
             {
-                return front >>> 0;
+                return wholeAddress(front);
             }
-            host.writeMemory((front >>> 0) + head.length * width.unit,
+            host.writeMemory(wholeAddress(front) + head.length * width.unit,
                 width.sz(tail.slice(0, (count | 0) - 1)));
-            return front >>> 0;
+            return wholeAddress(front);
         }, { returns: 'pointer' }),
 
         /**
@@ -937,7 +940,7 @@ export function createStringFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory(text >>> 0, width.sz(string.slice(from, to)));
+            host.writeMemory(wholeAddress(text), width.sz(string.slice(from, to)));
             return 1;
         }),
 
@@ -953,7 +956,7 @@ export function createStringFunctions(host, { A, W }){
             {
                 return E_INVALIDARG;
             }
-            host.writeMemory(out >>> 0, Uint8Array.of(0, 0, 0, 0));
+            host.writeMemory(wholeAddress(out), Uint8Array.of(0, 0, 0, 0));
             const scratch = host.allocate(0x2000);
             if (!scratch)
             {
@@ -976,7 +979,7 @@ export function createStringFunctions(host, { A, W }){
                     return E_OUTOFMEMORY;
                 }
                 host.writeMemory(block, width.sz(text));
-                host.writeMemory(out >>> 0, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+                host.writeMemory(wholeAddress(out), Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
                     block >>> 16 & 0xff, block >>> 24 & 0xff));
                 return S_OK;
             }
@@ -1032,7 +1035,8 @@ export function createStringFunctions(host, { A, W }){
             /** @param {number[]} args */
             handler: (/** @type {number[]} */ [destination, room, format, list])=>{
                 const words = (list >>> 0) === 0 || !host.readMemory ? []
-                    : [...new Uint32Array(host.readMemory(list >>> 0, 4 * 32).slice().buffer)];
+                    : [...new Uint32Array(host.readMemory(wholeAddress(list),
+                        4 * 32).slice().buffer)];
                 return handler([destination, room, format, ...words]);
             },
         };
@@ -1057,7 +1061,7 @@ export function createStringFunctions(host, { A, W }){
                 }
                 if ((room | 0) < 0)
                 {
-                    host.writeMemory(destination >>> 0, width.sz(''));
+                    host.writeMemory(wholeAddress(destination), width.sz(''));
                     return -1;
                 }
                 writeCut(width, destination, text, room | 0);

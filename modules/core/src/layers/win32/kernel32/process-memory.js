@@ -25,6 +25,7 @@
 import { PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE }
     from './process-target.js';
 import { VIRTUAL_READ, VIRTUAL_WRITE, askChild } from './cross-process.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_SUCCESS = 0;
 const STATUS_PARTIAL_COPY = 0x8000000d;
@@ -259,7 +260,7 @@ export function createProcessMemory(host){
      */
     const nativeRead = ([handle, base, buffer, size, read])=>{
         const count = size >>> 0;
-        const to = buffer >>> 0;
+        const to = wholeAddress(buffer);
         // No more is asked of a child than the caller has room for.
         const room = count === 0 ? 0 : accessibleSpan(host.pageState, to, count, true);
         return onTarget(handle, PROCESS_VM_READ, ()=>readHere(base >>> 0, to, count, read >>> 0),

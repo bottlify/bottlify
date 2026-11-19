@@ -19,7 +19,7 @@
  * about.
  */
 
-import { pointerArg } from '../common/pointers.js';
+import { pointerArg, wholeAddress } from '../common/pointers.js';
 import { createGlobalMemory, MOVEABLE_USER_FLAGS } from './moveable.js';
 import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
@@ -948,7 +948,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
          */
         allocateAt(address, bytes, { owner = null, reserving = false, held = false } = {}){
             const capacity = Math.max(least, roundUp(bytes, least));
-            const start = address >>> 0;
+            const start = wholeAddress(address);
             const end = start + capacity;
             if (start % least !== 0 || start < base || end > base + size)
             {
@@ -2477,9 +2477,9 @@ export function createHeapFunctions(host){
             host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
             return 0;
         }
-        const size = bytes >>> 0;
-        const requested = pointer >>> 0;
-        const protection = protect >>> 0;
+        const size = wholeAddress(bytes);
+        const requested = wholeAddress(pointer);
+        const protection = wholeAddress(protect);
         const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
         const view = (acting === MEM_COMMIT || acting === MEM_RESET) && requested !== 0
             && size !== 0 ? host.viewAt?.(requested) ?? null : null;
@@ -2854,7 +2854,7 @@ export function createHeapFunctions(host){
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const start = pointer >>> 0;
+        const start = wholeAddress(pointer);
         const block = allocator.blockContaining(start);
         if (!block || !placeholders.has(block.address) || block.address !== start
             || roundUp(bytes >>> 0, PAGE_SIZE) !== block.capacity)
@@ -2977,7 +2977,7 @@ export function createHeapFunctions(host){
         }
         const pointerSize = host.pointerSize ?? 4;
         /** @param {number} at */
-        const pointerAt = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+        const pointerAt = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
             .getUint32(0, true);
         for (let index = 0; index < (count >>> 0); index++)
         {
@@ -3077,7 +3077,7 @@ export function createHeapFunctions(host){
             sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, information, length])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (kind === HEAP_ENABLE_TERMINATION_ON_CORRUPTION)
                 {
                     return 1;
@@ -3093,7 +3093,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const value = readDword(information >>> 0);
+                const value = readDword(wholeAddress(information));
                 if (lowFragmentation.has(heap))
                 {
                     if (value === LOW_FRAGMENTATION_HEAP)
@@ -3126,7 +3126,7 @@ export function createHeapFunctions(host){
             sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, information, length, returned])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (!heaps.has(heap))
                 {
                     host.setLastError(ERROR_NOACCESS);
@@ -3139,14 +3139,14 @@ export function createHeapFunctions(host){
                 }
                 if (returned !== 0)
                 {
-                    writeDword(returned >>> 0, 4);
+                    writeDword(wholeAddress(returned), 4);
                 }
                 if ((length >>> 0) < 4 || information === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeDword(information >>> 0,
+                writeDword(wholeAddress(information),
                     lowFragmentation.has(heap) ? LOW_FRAGMENTATION_HEAP : 0);
                 return 1;
             },
@@ -3157,7 +3157,7 @@ export function createHeapFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 // Destroying the process heap takes the CRT's own allocations
                 // with it, so Windows documents it as forbidden rather than
                 // supported-but-fatal.
@@ -3189,13 +3189,13 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: args=>{
                 const [handle, flags] = args;
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (!heaps.has(heap))
                 {
                     return 0;
                 }
                 const whole = wholeSize(args, 2);
-                const size = whole >>> 0;
+                const size = wholeAddress(whole);
                 if (whole !== size || !fits(heap, size, 0))
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
@@ -3226,8 +3226,8 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: args=>{
                 const [handle, flags, pointer, bytes] = args;
-                const heap = handle >>> 0;
-                const address = pointer >>> 0;
+                const heap = wholeAddress(handle);
+                const address = wholeAddress(pointer);
                 // No block to resize is no failure of memory: Windows answers
                 // NULL and clears the last error (Wine's heap test).
                 if (address === 0)
@@ -3262,7 +3262,7 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , pointer])=>{
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 // free(NULL) is a no-op in C and CRT wrappers pass it straight
                 // through, so answering TRUE keeps those wrappers honest.
                 if (address === 0)
@@ -3364,9 +3364,9 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: args=>{
                 const [pointer, bytes, type] = args;
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 const kind = type >>> 0;
-                const size = bytes >>> 0;
+                const size = wholeAddress(bytes);
                 if (wholeSize(args, 1) !== size)
                 {
                     // More than the address space holds: no range of a reservation.
@@ -3455,14 +3455,14 @@ export function createHeapFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([flags, base, bytes, addresses, count, granularity])=>{
-                const address = base >>> 0;
+                const address = wholeAddress(base);
                 const block = watchedRegion(address, bytes >>> 0);
                 if ((flags & ~WRITE_WATCH_FLAG_RESET) !== 0 || !block)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0xffffffff;
                 }
-                const room = (count >>> 0) === 0 ? -1 : readDword(count >>> 0);
+                const room = (count >>> 0) === 0 ? -1 : readDword(wholeAddress(count));
                 if (room === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -3512,9 +3512,9 @@ export function createHeapFunctions(host){
                     }
                 };
                 const stride = wide ? 8 : 4;
-                written.forEach((page, at)=>writeWord((addresses >>> 0) + at * stride, page));
-                writeWord(count >>> 0, written.length);
-                writeDword(granularity >>> 0, PAGE_SIZE);
+                written.forEach((page, at)=>writeWord(wholeAddress(addresses) + at * stride, page));
+                writeWord(wholeAddress(count), written.length);
+                writeDword(wholeAddress(granularity), PAGE_SIZE);
                 return 0;
             },
         },
@@ -3529,7 +3529,7 @@ export function createHeapFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([base, bytes])=>{
-                const address = base >>> 0;
+                const address = wholeAddress(base);
                 const block = watchedRegion(address, bytes >>> 0);
                 if (!block)
                 {
@@ -3693,7 +3693,7 @@ export function createHeapFunctions(host){
                     const data = new Uint8Array(all.length * 4);
                     const view = new DataView(data.buffer);
                     all.forEach((heap, at)=>view.setUint32(at * 4, heap, true));
-                    host.writeMemory(buffer >>> 0, data);
+                    host.writeMemory(wholeAddress(buffer), data);
                 }
                 return all.length;
             },
@@ -3735,7 +3735,7 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , address])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (!heaps.has(heap))
                 {
                     return 0;
@@ -3778,8 +3778,8 @@ export function createHeapFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, entry])=>{
-                const heap = handle >>> 0;
-                const at = entry >>> 0;
+                const heap = wholeAddress(handle);
+                const at = wholeAddress(entry);
                 if (!heaps.has(heap))
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
@@ -3877,8 +3877,8 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , summary])=>{
-                const heap = handle >>> 0;
-                if (summary === 0 || readDword(summary >>> 0) !== HEAP_SUMMARY_SIZE)
+                const heap = wholeAddress(handle);
+                if (summary === 0 || readDword(wholeAddress(summary)) !== HEAP_SUMMARY_SIZE)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -3893,10 +3893,10 @@ export function createHeapFunctions(host){
                 {
                     allocated += allocator.block(address)?.size ?? 0;
                 }
-                writeDword((summary >>> 0) + 4, allocated);
-                writeDword((summary >>> 0) + 8, allocated);
-                writeDword((summary >>> 0) + 12, allocated);
-                writeDword((summary >>> 0) + 16, 0);
+                writeDword(wholeAddress(summary) + 4, allocated);
+                writeDword(wholeAddress(summary) + 8, allocated);
+                writeDword(wholeAddress(summary) + 12, allocated);
+                writeDword(wholeAddress(summary) + 16, 0);
                 return 1;
             },
         },
@@ -3982,7 +3982,7 @@ export function createHeapFunctions(host){
                     // first, and a page already copied asked to be
                     // copy-on-write again is read-write, as a view's is.
                     takeImageCopies(image, first, end);
-                    writeDword(oldProtect >>> 0, imagePageProtection(image, first));
+                    writeDword(wholeAddress(oldProtect), imagePageProtection(image, first));
                     const record = imageRecord(image);
                     const given = imageWriteCopy(protect >>> 0);
                     for (let page = first; page < end; page += PAGE_SIZE)
@@ -3999,7 +3999,7 @@ export function createHeapFunctions(host){
                 const kept = block?.owner === VIRTUAL ? protections.get(block.address) : undefined;
                 const was = block?.owner === VIRTUAL
                     && unreadable.get(block.address)?.get(first) === true;
-                writeDword(oldProtect >>> 0, kept?.pages.get(first)
+                writeDword(wholeAddress(oldProtect), kept?.pages.get(first)
                     ?? (was ? PAGE_NOACCESS
                         : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE));
                 if (block && block.owner === VIRTUAL)
@@ -4087,7 +4087,7 @@ export function createHeapFunctions(host){
                 view.setUint32(MEMORY_BASIC_INFORMATION.State, state, true);
                 view.setUint32(MEMORY_BASIC_INFORMATION.Protect, protect, true);
                 view.setUint32(MEMORY_BASIC_INFORMATION.Type, type, true);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return MEMORY_BASIC_INFORMATION.SIZE;
             },
         },
@@ -4115,7 +4115,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_BAD_LENGTH);
                     return 0;
                 }
-                const records = host.readMemory(entries >>> 0, count * 8).slice();
+                const records = host.readMemory(wholeAddress(entries), count * 8).slice();
                 const view = new DataView(records.buffer);
                 for (let index = 0; index < count; index++)
                 {
@@ -4128,7 +4128,7 @@ export function createHeapFunctions(host){
                             | (shared ? 1 << 15 : 0);
                     view.setUint32(index * 8 + 4, attributes >>> 0, true);
                 }
-                host.writeMemory(entries >>> 0, records);
+                host.writeMemory(wholeAddress(entries), records);
                 return 1;
             },
         },
@@ -4145,7 +4145,7 @@ export function createHeapFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>{
-                const at = address >>> 0;
+                const at = wholeAddress(address);
                 if ((size >>> 0) === 0 || at >= spaceTop()
                     || regionAnswer(at)[4] !== MEM_COMMIT)
                 {
@@ -4236,7 +4236,7 @@ export function createHeapFunctions(host){
                     true);
                 view.setUint32(MEMORYSTATUS.dwTotalVirtual, total, true);
                 view.setUint32(MEMORYSTATUS.dwAvailVirtual, free, true);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 0;
             },
         },
@@ -4283,7 +4283,7 @@ export function createHeapFunctions(host){
                 {
                     view.setUint32(PROCESS_MEMORY_COUNTERS.PrivateUsage, used, true);
                 }
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 1;
             },
         },
@@ -4332,7 +4332,7 @@ export function createHeapFunctions(host){
                 set('PageSize', PAGE_SIZE);
                 set('ProcessCount', counts.processes);
                 set('ThreadCount', counts.threads);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 1;
             },
         },
@@ -4342,7 +4342,7 @@ export function createHeapFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                const header = buffer === 0 ? null : host.readMemory(buffer >>> 0, 4);
+                const header = buffer === 0 ? null : host.readMemory(wholeAddress(buffer), 4);
                 const length = header === null
                     ? 0
                     : new DataView(header.buffer, header.byteOffset, 4).getUint32(0, true);
@@ -4365,7 +4365,7 @@ export function createHeapFunctions(host){
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(free + total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullTotalVirtual, BigInt(total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailVirtual, BigInt(free), true);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 1;
             },
         },
@@ -4553,8 +4553,8 @@ export function createHeapFunctions(host){
                 {
                     // A copy of its own: a reader that answers a view of
                     // guest memory would see the write move under it.
-                    host.writeMemory(destination >>> 0,
-                        host.readMemory(source >>> 0, length >>> 0).slice());
+                    host.writeMemory(wholeAddress(destination),
+                        host.readMemory(wholeAddress(source), length >>> 0).slice());
                 }
                 return 0;
             },
@@ -4565,7 +4565,7 @@ export function createHeapFunctions(host){
             handler: ([destination, length])=>{
                 if ((length >>> 0) !== 0)
                 {
-                    host.fillMemory(destination >>> 0, 0, length >>> 0);
+                    host.fillMemory(wholeAddress(destination), 0, length >>> 0);
                 }
                 return 0;
             },
@@ -4576,7 +4576,7 @@ export function createHeapFunctions(host){
             handler: ([destination, length, fill])=>{
                 if ((length >>> 0) !== 0)
                 {
-                    host.fillMemory(destination >>> 0, fill & 0xff, length >>> 0);
+                    host.fillMemory(wholeAddress(destination), fill & 0xff, length >>> 0);
                 }
                 return 0;
             },

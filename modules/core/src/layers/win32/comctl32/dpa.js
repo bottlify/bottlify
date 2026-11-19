@@ -18,12 +18,13 @@
  * does on Windows: the arrays from the heap a DPA was made on (the process
  * heap unless DPA_CreateEx names one), the allocator through LocalAlloc.
  *
- * The layout is the 32-bit one; a 64-bit process gets these exports too, and
- * its pointer slots would be eight bytes wide (not reached yet: comctl32's
- * host carries no pointer size).
+ * A 64-bit process's arrays are its own layout: the pointer fields and the
+ * DPA's slots eight bytes wide, an int beside a pointer padded to it, as the
+ * SDK's structures are for x86-64.
  */
 
 import { stableSort } from './stable-sort.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} DataHost
@@ -33,12 +34,22 @@ import { stableSort } from './stable-sort.js';
  *           kernel32's handlers, looked up when called.
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
  * @property {() => unknown} [callerThread]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
-/** DPA: count, the pointer block, its heap, how many slots it has, how many it grows by. */
-const DPA = Object.freeze({ COUNT: 0, PTRS: 4, HEAP: 8, CAPACITY: 12, GROW: 16, SIZE: 20 });
-/** DSA: count, the item block, how many items it has room for, an item's size, the growth. */
-const DSA = Object.freeze({ COUNT: 0, ITEMS: 4, CAPACITY: 8, ITEM_SIZE: 12, GROW: 16, SIZE: 20 });
+/**
+ * The arrays' fields by a pointer's width. DPA: count, the pointer block, its
+ * heap, how many slots it has, how many it grows by. DSA: count, the item
+ * block, how many items it has room for, an item's size, the growth.
+ *
+ * @param {4 | 8} pointer
+ */
+const layoutOf = pointer=>({
+    DPA: Object.freeze({ COUNT: 0, PTRS: pointer, HEAP: 2 * pointer, CAPACITY: 3 * pointer,
+        GROW: 3 * pointer + 4, SIZE: pointer === 8 ? 32 : 20 }),
+    DSA: Object.freeze({ COUNT: 0, ITEMS: pointer, CAPACITY: 2 * pointer,
+        ITEM_SIZE: 2 * pointer + 4, GROW: 2 * pointer + 8, SIZE: pointer === 8 ? 32 : 20 }),
+});
 
 const DPA_APPEND = 0x7fffffff;
 const DPA_ERR = -1;
@@ -94,13 +105,17 @@ export const DATA_ORDINALS = Object.freeze({
 
 /** @param {DataHost} host */
 export function createDataStructureFunctions(host){
+    /** A pointer's bytes: a DPA's slot, a pointer field. */
+    const P = host.pointerSize === 8 ? 8 : 4;
+    const { DPA, DSA } = layoutOf(P);
+    const { read: readPtr, write: writePtr } = pointerIo(host, P);
     const read32 = (/** @type {number} */ at)=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     const write32 = (/** @type {number} */ at, /** @type {number} */ value)=>{
         const v = value >>> 0;
-        host.writeMemory(at >>> 0, Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff,
+        host.writeMemory(wholeAddress(at), Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff,
             v >>> 24));
     };
     /** @param {string} name @param {number[]} args */
@@ -112,35 +127,40 @@ export function createDataStructureFunctions(host){
         }
         return handler(args);
     };
-    const processHeap = ()=>kernel('GetProcessHeap', []) >>> 0;
+    const processHeap = ()=>wholeAddress(kernel('GetProcessHeap', []));
+    /** DPASTREAMINFO: the item's place, and the item, a pointer after it. */
+    const INFO_SIZE = 2 * P;
     const call = (/** @type {number} */ entry, /** @type {number[]} */ args)=>
         /** @type {NonNullable<DataHost['call']>} */ (host.call)(entry >>> 0, args,
             host.callerThread?.());
 
     // The DPA in guest memory, read and written a field at a time.
     const count = (/** @type {number} */ dpa)=>read32(dpa + DPA.COUNT) | 0;
-    const ptrs = (/** @type {number} */ dpa)=>read32(dpa + DPA.PTRS);
+    const ptrs = (/** @type {number} */ dpa)=>readPtr(dpa + DPA.PTRS);
     const item = (/** @type {number} */ dpa, /** @type {number} */ index)=>
-        read32(ptrs(dpa) + index * 4);
+        readPtr(ptrs(dpa) + index * P);
     const setItem = (/** @type {number} */ dpa, /** @type {number} */ index,
         /** @type {number} */ value)=>
-        write32(ptrs(dpa) + index * 4, value);
+        writePtr(ptrs(dpa) + index * P, value);
     /** @param {number} dpa @returns {number[]} */
     const items = dpa=>{
         const n = count(dpa);
-        const bytes = host.readMemory(ptrs(dpa), n * 4);
-        return Array.from({ length: n }, (_, i)=>
-            (bytes[i * 4] | bytes[i * 4 + 1] << 8 | bytes[i * 4 + 2] << 16
-                | bytes[i * 4 + 3] << 24) >>> 0);
+        const bytes = host.readMemory(ptrs(dpa), n * P);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, n * P);
+        return Array.from({ length: n }, (_, i)=>view.getUint32(i * P, true)
+            + (P === 8 ? view.getUint32(i * P + 4, true) * 2 ** 32 : 0));
     };
     /** @param {number} dpa @param {number[]} values */
     const writeItems = (dpa, values)=>{
-        const bytes = new Uint8Array(values.length * 4);
+        const bytes = new Uint8Array(values.length * P);
+        const view = new DataView(bytes.buffer);
         values.forEach((v, i)=>{
-            bytes[i * 4] = v & 0xff;
-            bytes[i * 4 + 1] = v >>> 8 & 0xff;
-            bytes[i * 4 + 2] = v >>> 16 & 0xff;
-            bytes[i * 4 + 3] = v >>> 24 & 0xff;
+            const high = P === 8 ? Math.floor(v / 2 ** 32) : 0;
+            view.setUint32(i * P, (v - high * 2 ** 32) >>> 0, true);
+            if (P === 8)
+            {
+                view.setUint32(i * P + 4, high >>> 0, true);
+            }
         });
         if (bytes.length > 0)
         {
@@ -163,30 +183,30 @@ export function createDataStructureFunctions(host){
         }
         const grow = Math.max(1, read32(dpa + DPA.GROW) | 0);
         const wanted = Math.ceil(slots / grow) * grow;
-        const heap = read32(dpa + DPA.HEAP);
+        const heap = readPtr(dpa + DPA.HEAP);
         const old = ptrs(dpa);
-        const block = old === 0
-            ? kernel('HeapAlloc', [heap, HEAP_ZERO_MEMORY, wanted * 4]) >>> 0
-            : kernel('HeapReAlloc', [heap, HEAP_ZERO_MEMORY, old, wanted * 4]) >>> 0;
+        const block = wholeAddress(old === 0
+            ? kernel('HeapAlloc', [heap, HEAP_ZERO_MEMORY, wanted * P])
+            : kernel('HeapReAlloc', [heap, HEAP_ZERO_MEMORY, old, wanted * P]));
         if (block === 0)
         {
             kernel('SetLastError', [ERROR_NOT_ENOUGH_MEMORY]);
             return false;
         }
-        write32(dpa + DPA.PTRS, block);
+        writePtr(dpa + DPA.PTRS, block);
         write32(dpa + DPA.CAPACITY, wanted);
         return true;
     };
 
     /** @param {number} grow @param {number} heap */
     const createDpa = (grow, heap)=>{
-        const on = heap >>> 0 || processHeap();
-        const dpa = kernel('HeapAlloc', [on, HEAP_ZERO_MEMORY, DPA.SIZE]) >>> 0;
+        const on = wholeAddress(heap) || processHeap();
+        const dpa = wholeAddress(kernel('HeapAlloc', [on, HEAP_ZERO_MEMORY, DPA.SIZE]));
         if (dpa === 0)
         {
             return 0;
         }
-        write32(dpa + DPA.HEAP, on);
+        writePtr(dpa + DPA.HEAP, on);
         // A growth of nothing would never grow; the library's own default is eight.
         write32(dpa + DPA.GROW, (grow | 0) > 0 ? grow | 0 : 8);
         return dpa;
@@ -198,7 +218,7 @@ export function createDataStructureFunctions(host){
         {
             return 0;
         }
-        const heap = read32(dpa + DPA.HEAP);
+        const heap = readPtr(dpa + DPA.HEAP);
         const block = ptrs(dpa);
         if (block !== 0)
         {
@@ -220,7 +240,7 @@ export function createDataStructureFunctions(host){
             return DPA_ERR;
         }
         const values = items(dpa);
-        values.splice(at, 0, value >>> 0);
+        values.splice(at, 0, wholeAddress(value));
         writeItems(dpa, values);
         write32(dpa + DPA.COUNT, n + 1);
         return at;
@@ -259,7 +279,7 @@ export function createDataStructureFunctions(host){
     const dsaCount = (/** @type {number} */ dsa)=>read32(dsa + DSA.COUNT) | 0;
     const dsaSize = (/** @type {number} */ dsa)=>read32(dsa + DSA.ITEM_SIZE);
     const dsaItem = (/** @type {number} */ dsa, /** @type {number} */ index)=>
-        read32(dsa + DSA.ITEMS) + index * dsaSize(dsa);
+        readPtr(dsa + DSA.ITEMS) + index * dsaSize(dsa);
     /** @param {number} dsa @param {number} slots */
     const dsaReserve = (dsa, slots)=>{
         const capacity = read32(dsa + DSA.CAPACITY) | 0;
@@ -269,18 +289,18 @@ export function createDataStructureFunctions(host){
         }
         const grow = Math.max(1, read32(dsa + DSA.GROW) | 0);
         const wanted = Math.ceil(slots / grow) * grow;
-        const old = read32(dsa + DSA.ITEMS);
+        const old = readPtr(dsa + DSA.ITEMS);
         const heap = processHeap();
         const bytes = wanted * dsaSize(dsa);
-        const block = old === 0
-            ? kernel('HeapAlloc', [heap, HEAP_ZERO_MEMORY, bytes]) >>> 0
-            : kernel('HeapReAlloc', [heap, HEAP_ZERO_MEMORY, old, bytes]) >>> 0;
+        const block = wholeAddress(old === 0
+            ? kernel('HeapAlloc', [heap, HEAP_ZERO_MEMORY, bytes])
+            : kernel('HeapReAlloc', [heap, HEAP_ZERO_MEMORY, old, bytes]));
         if (block === 0)
         {
             kernel('SetLastError', [ERROR_NOT_ENOUGH_MEMORY]);
             return false;
         }
-        write32(dsa + DSA.ITEMS, block);
+        writePtr(dsa + DSA.ITEMS, block);
         write32(dsa + DSA.CAPACITY, wanted);
         return true;
     };
@@ -291,7 +311,7 @@ export function createDataStructureFunctions(host){
             return 0;
         }
         const heap = processHeap();
-        const block = read32(dsa + DSA.ITEMS);
+        const block = readPtr(dsa + DSA.ITEMS);
         if (block !== 0)
         {
             kernel('HeapFree', [heap, 0, block]);
@@ -349,19 +369,19 @@ export function createDataStructureFunctions(host){
             {
                 if (dest >>> 0 !== 0 && cch > 0)
                 {
-                    host.writeMemory(dest >>> 0, new Uint8Array(unit));
+                    host.writeMemory(wholeAddress(dest), new Uint8Array(unit));
                 }
                 return 0;
             }
-            const length = stringLength(source >>> 0, wide);
+            const length = stringLength(wholeAddress(source), wide);
             if (dest >>> 0 === 0 || cch <= 0)
             {
                 return length + 1;
             }
             const copied = Math.min(length, cch - 1);
             const bytes = new Uint8Array((copied + 1) * unit);
-            bytes.set(host.readMemory(source >>> 0, copied * unit));
-            host.writeMemory(dest >>> 0, bytes);
+            bytes.set(host.readMemory(wholeAddress(source), copied * unit));
+            host.writeMemory(wholeAddress(dest), bytes);
             return copied + 1;
         },
     });
@@ -371,17 +391,17 @@ export function createDataStructureFunctions(host){
         /** @param {number[]} args */
         handler: ([slot, source])=>{
             const unit = wide ? 2 : 1;
-            const old = read32(slot >>> 0);
+            const old = readPtr(wholeAddress(slot));
             if (source >>> 0 === 0)
             {
                 if (old !== 0)
                 {
                     kernel('LocalFree', [old]);
                 }
-                write32(slot >>> 0, 0);
+                writePtr(wholeAddress(slot), 0);
                 return 1;
             }
-            const bytes = (stringLength(source >>> 0, wide) + 1) * unit;
+            const bytes = (stringLength(wholeAddress(source), wide) + 1) * unit;
             const block = old === 0
                 ? kernel('LocalAlloc', [LMEM_ZEROINIT, bytes]) >>> 0
                 : kernel('LocalReAlloc', [old, bytes, LMEM_ZEROINIT | LMEM_MOVEABLE]) >>> 0;
@@ -389,8 +409,8 @@ export function createDataStructureFunctions(host){
             {
                 return 0;
             }
-            host.writeMemory(block, host.readMemory(source >>> 0, bytes));
-            write32(slot >>> 0, block);
+            host.writeMemory(block, host.readMemory(wholeAddress(source), bytes));
+            writePtr(wholeAddress(slot), block);
             return 1;
         },
     });
@@ -399,8 +419,8 @@ export function createDataStructureFunctions(host){
     const stream = {
         /** @param {number} stm @param {number} method @param {number[]} rest */
         invoke: async(stm, method, rest)=>{
-            const vtable = read32(stm);
-            return (await call(read32(vtable + method * 4), [stm, ...rest])) | 0;
+            const vtable = readPtr(stm);
+            return (await call(readPtr(vtable + method * P), [stm, ...rest])) | 0;
         },
         /** @param {number} stm @param {number} origin @param {number} offset */
         seek: async(stm, offset, origin, scratch = 0)=>
@@ -441,8 +461,8 @@ export function createDataStructureFunctions(host){
                     return 0;
                 }
                 const target = into >>> 0
-                    || createDpa(read32((source >>> 0) + DPA.GROW),
-                        read32((source >>> 0) + DPA.HEAP));
+                    || createDpa(read32(wholeAddress(source) + DPA.GROW),
+                        readPtr(wholeAddress(source) + DPA.HEAP));
                 if (target === 0)
                 {
                     return 0;
@@ -475,7 +495,7 @@ export function createDataStructureFunctions(host){
         DPA_GetPtrIndex: {
             argBytes: 8,
             handler: (/** @type {number[]} */ [dpa, pointer])=>
-                dpa >>> 0 === 0 ? DPA_ERR : items(dpa >>> 0).indexOf(pointer >>> 0),
+                dpa >>> 0 === 0 ? DPA_ERR : items(wholeAddress(dpa)).indexOf(wholeAddress(pointer)),
         },
 
         /** int DPA_InsertPtr(HDPA hdpa, int i, void *p) - past the end (or DPA_APPEND) appends. */
@@ -491,7 +511,7 @@ export function createDataStructureFunctions(host){
         DPA_SetPtr: {
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, pointer])=>{
-                const dpa = handle >>> 0;
+                const dpa = wholeAddress(handle);
                 if (dpa === 0 || (index | 0) < 0)
                 {
                     return 0;
@@ -510,7 +530,7 @@ export function createDataStructureFunctions(host){
                     write32(dpa + DPA.COUNT, values.length);
                     writeItems(dpa, values);
                 }
-                setItem(dpa, index | 0, pointer >>> 0);
+                setItem(dpa, index | 0, wholeAddress(pointer));
                 return 1;
             },
         },
@@ -526,7 +546,7 @@ export function createDataStructureFunctions(host){
         DPA_DeleteAllPtrs: {
             argBytes: 4,
             handler: (/** @type {number[]} */ [handle])=>{
-                const dpa = handle >>> 0;
+                const dpa = wholeAddress(handle);
                 if (dpa === 0)
                 {
                     return 0;
@@ -534,9 +554,9 @@ export function createDataStructureFunctions(host){
                 const block = ptrs(dpa);
                 if (block !== 0)
                 {
-                    kernel('HeapFree', [read32(dpa + DPA.HEAP), 0, block]);
+                    kernel('HeapFree', [readPtr(dpa + DPA.HEAP), 0, block]);
                 }
-                write32(dpa + DPA.PTRS, 0);
+                writePtr(dpa + DPA.PTRS, 0);
                 write32(dpa + DPA.CAPACITY, 0);
                 write32(dpa + DPA.COUNT, 0);
                 return 1;
@@ -562,7 +582,7 @@ export function createDataStructureFunctions(host){
             argBytes: 24,
             handler: async(/** @type {number[]} */ [handle, find, start, compare, lParam,
                 options])=>{
-                const dpa = handle >>> 0;
+                const dpa = wholeAddress(handle);
                 if (dpa === 0 || compare >>> 0 === 0)
                 {
                     return DPA_ERR;
@@ -618,8 +638,8 @@ export function createDataStructureFunctions(host){
             argBytes: 24,
             handler: async(/** @type {number[]} */ [destHandle, sourceHandle, flags, compare,
                 merge, lParam])=>{
-                const dest = destHandle >>> 0;
-                const source = sourceHandle >>> 0;
+                const dest = wholeAddress(destHandle);
+                const source = wholeAddress(sourceHandle);
                 if (dest === 0 || source === 0 || compare >>> 0 === 0 || merge >>> 0 === 0)
                 {
                     return 0;
@@ -720,19 +740,19 @@ export function createDataStructureFunctions(host){
         DPA_SaveStream: {
             argBytes: 16,
             handler: async(/** @type {number[]} */ [handle, pfn, stm, data])=>{
-                const dpa = handle >>> 0;
+                const dpa = wholeAddress(handle);
                 if (dpa === 0 || pfn >>> 0 === 0 || stm >>> 0 === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const block = scratch(16 + STREAM_HEADER);
+                const block = scratch(8 + INFO_SIZE + STREAM_HEADER);
                 if (block === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
                 const position = block;
                 const info = block + 8;
-                const header = block + 16;
+                const header = info + INFO_SIZE;
                 try
                 {
                     let result = await stream.seek(stm >>> 0, 0, STREAM_SEEK_CUR, position);
@@ -751,7 +771,7 @@ export function createDataStructureFunctions(host){
                     for (; saved < count(dpa); saved++)
                     {
                         write32(info, saved);
-                        write32(info + 4, item(dpa, saved));
+                        writePtr(info + P, item(dpa, saved));
                         result = (await call(pfn >>> 0, [info, stm, data])) | 0;
                         if (result < 0)
                         {
@@ -789,14 +809,14 @@ export function createDataStructureFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const block = scratch(16 + STREAM_HEADER + 4);
+                const block = scratch(8 + INFO_SIZE + STREAM_HEADER + 4);
                 if (block === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
                 const position = block;
                 const info = block + 8;
-                const header = block + 16;
+                const header = info + INFO_SIZE;
                 const got = header + STREAM_HEADER;
                 try
                 {
@@ -824,16 +844,16 @@ export function createDataStructureFunctions(host){
                     for (; loaded < total; loaded++)
                     {
                         write32(info, loaded);
-                        write32(info + 4, 0);
+                        writePtr(info + P, 0);
                         result = (await call(pfn >>> 0, [info, stm, data])) | 0;
                         if (result < 0)
                         {
                             break;
                         }
-                        setItem(dpa, loaded, read32(info + 4));
+                        setItem(dpa, loaded, readPtr(info + P));
                     }
                     write32(dpa + DPA.COUNT, loaded);
-                    write32(out >>> 0, dpa);
+                    writePtr(wholeAddress(out), dpa);
                     return result < 0 ? result : S_OK;
                 }
                 finally
@@ -852,7 +872,8 @@ export function createDataStructureFunctions(host){
                 {
                     return 0;
                 }
-                const dsa = kernel('HeapAlloc', [processHeap(), HEAP_ZERO_MEMORY, DSA.SIZE]) >>> 0;
+                const dsa = wholeAddress(kernel('HeapAlloc', [processHeap(), HEAP_ZERO_MEMORY,
+                    DSA.SIZE]));
                 if (dsa !== 0)
                 {
                     write32(dsa + DSA.ITEM_SIZE, size | 0);
@@ -870,13 +891,13 @@ export function createDataStructureFunctions(host){
         DSA_GetItem: {
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, dest])=>{
-                const dsa = handle >>> 0;
+                const dsa = wholeAddress(handle);
                 if (dsa === 0 || dest >>> 0 === 0 || (index | 0) < 0
                     || (index | 0) >= dsaCount(dsa))
                 {
                     return 0;
                 }
-                host.writeMemory(dest >>> 0, host.readMemory(dsaItem(dsa, index | 0),
+                host.writeMemory(wholeAddress(dest), host.readMemory(dsaItem(dsa, index | 0),
                     dsaSize(dsa)));
                 return 1;
             },
@@ -887,7 +908,7 @@ export function createDataStructureFunctions(host){
             returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [handle, index])=>{
-                const dsa = handle >>> 0;
+                const dsa = wholeAddress(handle);
                 return dsa !== 0 && (index | 0) >= 0 && (index | 0) < dsaCount(dsa)
                     ? dsaItem(dsa, index | 0) : 0;
             },
@@ -899,7 +920,7 @@ export function createDataStructureFunctions(host){
         DSA_InsertItem: {
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, source])=>{
-                const dsa = handle >>> 0;
+                const dsa = wholeAddress(handle);
                 if (dsa === 0 || (index | 0) < 0 || source >>> 0 === 0)
                 {
                     return DPA_ERR;
@@ -916,7 +937,7 @@ export function createDataStructureFunctions(host){
                     host.writeMemory(dsaItem(dsa, at + 1), host.readMemory(dsaItem(dsa, at),
                         (n - at) * size));
                 }
-                host.writeMemory(dsaItem(dsa, at), host.readMemory(source >>> 0, size));
+                host.writeMemory(dsaItem(dsa, at), host.readMemory(wholeAddress(source), size));
                 write32(dsa + DSA.COUNT, n + 1);
                 return at;
             },
@@ -929,7 +950,7 @@ export function createDataStructureFunctions(host){
         DSA_SetItem: {
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, source])=>{
-                const dsa = handle >>> 0;
+                const dsa = wholeAddress(handle);
                 if (dsa === 0 || (index | 0) < 0 || source >>> 0 === 0)
                 {
                     return 0;
@@ -942,7 +963,7 @@ export function createDataStructureFunctions(host){
                     }
                     write32(dsa + DSA.COUNT, (index | 0) + 1);
                 }
-                host.writeMemory(dsaItem(dsa, index | 0), host.readMemory(source >>> 0,
+                host.writeMemory(dsaItem(dsa, index | 0), host.readMemory(wholeAddress(source),
                     dsaSize(dsa)));
                 return 1;
             },
@@ -952,7 +973,7 @@ export function createDataStructureFunctions(host){
         DSA_DeleteItem: {
             argBytes: 8,
             handler: (/** @type {number[]} */ [handle, index])=>{
-                const dsa = handle >>> 0;
+                const dsa = wholeAddress(handle);
                 const n = dsa === 0 ? 0 : dsaCount(dsa);
                 if (dsa === 0 || (index | 0) < 0 || (index | 0) >= n)
                 {
@@ -974,17 +995,17 @@ export function createDataStructureFunctions(host){
         DSA_DeleteAllItems: {
             argBytes: 4,
             handler: (/** @type {number[]} */ [handle])=>{
-                const dsa = handle >>> 0;
+                const dsa = wholeAddress(handle);
                 if (dsa === 0)
                 {
                     return 0;
                 }
-                const block = read32(dsa + DSA.ITEMS);
+                const block = readPtr(dsa + DSA.ITEMS);
                 if (block !== 0)
                 {
                     kernel('HeapFree', [processHeap(), 0, block]);
                 }
-                write32(dsa + DSA.ITEMS, 0);
+                writePtr(dsa + DSA.ITEMS, 0);
                 write32(dsa + DSA.CAPACITY, 0);
                 write32(dsa + DSA.COUNT, 0);
                 return 1;

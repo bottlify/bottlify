@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * imagehlp's certificate calls: the WIN_CERTIFICATE entries of a PE file's
  * certificate table, which the security directory (data directory 4) locates
@@ -222,7 +224,7 @@ export function createImageCertificateFunctions(host){
                     {
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
-                    host.writeMemory(out >>> 0, certificate.bytes);
+                    host.writeMemory(wholeAddress(out), certificate.bytes);
                     return 1;
                 }),
         },
@@ -244,7 +246,7 @@ export function createImageCertificateFunctions(host){
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    const added = host.readMemory(certificate >>> 0, length).slice();
+                    const added = host.readMemory(wholeAddress(certificate), length).slice();
                     rewrite(file, bytes, table,
                         [...table.certificates.map(one=>one.bytes), added]);
                     if ((indexAt >>> 0) !== 0)

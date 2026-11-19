@@ -28,6 +28,7 @@ import { BASE_SIZE, createCefObjects } from './objects.js';
 import { createCefStrings } from './strings.js';
 import { commandLineMethods, emptyCommandLine, parseCommandLine, splitCommandLine }
     from './command-line.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** cef_app_t's methods after its base. */
 const APP = Object.freeze({ getBrowserProcessHandler: BASE_SIZE + 12 });
@@ -106,7 +107,7 @@ const EXPORTS = Object.freeze([
  */
 export function createLibcefFunctions(host){
     /** @param {number} address */
-    const dword = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const dword = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     const objects = createCefObjects(host);

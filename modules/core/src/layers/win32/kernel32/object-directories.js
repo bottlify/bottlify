@@ -20,6 +20,7 @@ import { STATUS } from '../ntdll/status.js';
 import { nameToWalk, readObjectAttributes, OBJ_OPENIF } from './object-attributes.js';
 import { DIRECTORY, SYMBOLIC_LINK, TYPE_NAMES } from './object-namespace.js';
 import { grantedAccess } from './access.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_BUFFER_TOO_SMALL = STATUS.BUFFER_TOO_SMALL;
 /** A query that wrote what fitted and has more to give. */
@@ -48,11 +49,11 @@ export function createDirectoryNatives(host){
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     };
     /** @param {number} handle @param {string} kind @param {number} access */
@@ -242,7 +243,7 @@ export function createDirectoryNatives(host){
                 {
                     if (room >= ENTRY_BYTES)
                     {
-                        host.writeMemory(buffer >>> 0, new Uint8Array(ENTRY_BYTES));
+                        host.writeMemory(wholeAddress(buffer), new Uint8Array(ENTRY_BYTES));
                     }
                     answer(ENTRY_BYTES);
                     return STATUS.NO_MORE_ENTRIES;
@@ -279,7 +280,7 @@ export function createDirectoryNatives(host){
                 });
                 if (room >= ENTRY_BYTES)
                 {
-                    host.writeMemory(buffer >>> 0, bytes.subarray(0, Math.min(size, room)));
+                    host.writeMemory(wholeAddress(buffer), bytes.subarray(0, Math.min(size, room)));
                 }
                 writeDword(context, start + taken);
                 answer(size);
@@ -348,7 +349,7 @@ export function createDirectoryNatives(host){
                 {
                     writeDword(returned, needed);
                 }
-                const room = readDword(string >>> 0) >>> 16;
+                const room = readDword(wholeAddress(string)) >>> 16;
                 if (room < needed)
                 {
                     return STATUS_BUFFER_TOO_SMALL;
@@ -359,8 +360,8 @@ export function createDirectoryNatives(host){
                     bytes[at * 2] = target.charCodeAt(at) & 0xff;
                     bytes[at * 2 + 1] = target.charCodeAt(at) >>> 8;
                 }
-                host.writeMemory(readDword((string >>> 0) + 4), bytes);
-                host.writeMemory(string >>> 0, Uint8Array.of((needed - 2) & 0xff,
+                host.writeMemory(readDword(wholeAddress(string) + 4), bytes);
+                host.writeMemory(wholeAddress(string), Uint8Array.of((needed - 2) & 0xff,
                     (needed - 2) >>> 8));
                 return STATUS.SUCCESS;
             },

@@ -44,6 +44,7 @@ import {
     MCSC_BACKGROUND, MCSC_TRAILINGTEXT, daysIn, isTimeOfDay, compareTimes, withWeekday,
     noTime, takeRange, calendarNames, localNow,
 } from './monthcal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const DATETIMEPICK_CLASS = 'SysDateTimePick32';
@@ -309,7 +310,7 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
 
     /** @param {number} address @returns {Time} */
     const readTime = address=>{
-        const view = new DataView(host.readMemory(address >>> 0, 16).buffer);
+        const view = new DataView(host.readMemory(wholeAddress(address), 16).buffer);
         const field = (/** @type {number} */ at)=>view.getUint16(at * 2, true);
         return { year: field(0), month: field(1), dow: field(2), day: field(3), hour: field(4),
             minute: field(5), second: field(6), ms: field(7) };
@@ -321,7 +322,7 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
         const view = new DataView(bytes.buffer);
         [time.year, time.month, time.dow, time.day, time.hour, time.minute, time.second, time.ms]
             .forEach((value, at)=>view.setUint16(at * 2, value & 0xffff, true));
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {any} record  The picture the text is written in. */
@@ -645,7 +646,7 @@ export function createDateTimePickProcedure(host, tk, sources = {}){
      */
     const fromCalendar = (record, block, thread)=>{
         const held = state(record);
-        const view = new DataView(host.readMemory(block >>> 0, HEADER).buffer);
+        const view = new DataView(host.readMemory(wholeAddress(block), HEADER).buffer);
         const from = pointer === 8 ? Number(view.getBigUint64(0, true)) : view.getUint32(0, true);
         const code = view.getUint32(2 * pointer, true);
         if (held.calendar === 0 || from !== held.calendar || code !== MCN_SELECT)

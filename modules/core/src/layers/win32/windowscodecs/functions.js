@@ -17,6 +17,7 @@
 import { createCodecs } from './objects.js';
 import { flatten } from './kit.js';
 import { INTERFACES } from './layout.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const E_NOTIMPL = 0x80004001 | 0;
 const S_FALSE = 1;
@@ -96,7 +97,7 @@ export function gdiPixels(host, system){
         return fn ? fn.handler(args) | 0 : 0;
     };
     /** @param {number} at @param {number} bytes */
-    const view = (at, bytes)=>new DataView(host.readMemory(at >>> 0, bytes).slice().buffer);
+    const view = (at, bytes)=>new DataView(host.readMemory(wholeAddress(at), bytes).slice().buffer);
 
     /** @param {number} handle */
     const bitmapOf = handle=>{

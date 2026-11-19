@@ -14,7 +14,7 @@
 
 import { IID_IUNKNOWN, IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { parseGuid } from '../ole32/guid.js';
-import { forwarded } from '../common/pointers.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -133,7 +133,7 @@ export function createUnknownFunctions(host){
         {
             return E_INVALIDARG;
         }
-        host.writeMemory(out >>> 0, dword(held));
+        host.writeMemory(wholeAddress(out), dword(held));
         if (held === 0)
         {
             return absent;
@@ -154,10 +154,10 @@ export function createUnknownFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([slot])=>{
-                const object = (slot >>> 0) === 0 ? 0 : u32(host.readMemory(slot >>> 0, 4));
+                const object = (slot >>> 0) === 0 ? 0 : u32(host.readMemory(wholeAddress(slot), 4));
                 if (object !== 0)
                 {
-                    host.writeMemory(slot >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(slot), dword(0));
                     await callMethod(object, SLOT_RELEASE, [], host.callerThread());
                 }
                 return 0;
@@ -175,7 +175,7 @@ export function createUnknownFunctions(host){
             /** @param {number[]} args */
             handler: async([slot, object])=>{
                 const thread = host.callerThread();
-                const old = u32(host.readMemory(slot >>> 0, 4));
+                const old = u32(host.readMemory(wholeAddress(slot), 4));
                 if (old === (object >>> 0))
                 {
                     return 0;
@@ -184,7 +184,7 @@ export function createUnknownFunctions(host){
                 {
                     await callMethod(object >>> 0, SLOT_ADD_REF, [], thread);
                 }
-                host.writeMemory(slot >>> 0, dword(object >>> 0));
+                host.writeMemory(wholeAddress(slot), dword(object >>> 0));
                 if (old !== 0)
                 {
                     await callMethod(old, SLOT_RELEASE, [], thread);
@@ -208,16 +208,16 @@ export function createUnknownFunctions(host){
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        host.writeMemory(out >>> 0, dword(0));
+                        host.writeMemory(wholeAddress(out), dword(0));
                     }
                     return E_INVALIDARG;
                 }
                 if (!host.publish)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(out), dword(0));
                     return E_OUTOFMEMORY;
                 }
-                host.writeMemory(count >>> 0, dword(1));
+                host.writeMemory(wholeAddress(count), dword(1));
                 const at = count >>> 0;
                 const object = {
                     state: null,
@@ -242,7 +242,7 @@ export function createUnknownFunctions(host){
                     },
                 };
                 const pointer = host.publish(object, IID_IUNKNOWN) >>> 0;
-                host.writeMemory(out >>> 0, dword(pointer));
+                host.writeMemory(wholeAddress(out), dword(pointer));
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
@@ -342,7 +342,7 @@ export function createUnknownFunctions(host){
                 {
                     return E_FAIL;
                 }
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 if ((object >>> 0) === 0)
                 {
                     return E_FAIL;
@@ -600,14 +600,14 @@ export function createUnknownFunctions(host){
                 {
                     return E_POINTER;
                 }
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 if ((iid >>> 0) === 0 || (entries >>> 0) === 0)
                 {
                     return E_NOINTERFACE;
                 }
-                const wanted = host.readMemory(iid >>> 0, 16).slice();
+                const wanted = host.readMemory(wholeAddress(iid), 16).slice();
                 const isUnknown = sameBytes(wanted, IID_IUNKNOWN_BYTES);
-                for (let at = entries >>> 0; ; at += 8)
+                for (let at = wholeAddress(entries); ; at += 8)
                 {
                     const entry = u32(host.readMemory(at, 4));
                     if (entry === 0)
@@ -617,7 +617,7 @@ export function createUnknownFunctions(host){
                     if (isUnknown || sameBytes(host.readMemory(entry, 16), wanted))
                     {
                         const found = ((base >>> 0) + u32(host.readMemory(at + 4, 4))) >>> 0;
-                        host.writeMemory(out >>> 0, dword(found));
+                        host.writeMemory(wholeAddress(out), dword(found));
                         await callMethod(found, SLOT_ADD_REF, [], host.callerThread());
                         return S_OK;
                     }
@@ -661,13 +661,13 @@ export function createUnknownFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([outer, slot])=>{
-                const held = (slot >>> 0) === 0 ? 0 : u32(host.readMemory(slot >>> 0, 4));
+                const held = (slot >>> 0) === 0 ? 0 : u32(host.readMemory(wholeAddress(slot), 4));
                 if (held !== 0 && (outer >>> 0) !== 0)
                 {
                     const thread = host.callerThread();
                     await callMethod(outer >>> 0, SLOT_ADD_REF, [], thread);
                     await callMethod(held, SLOT_RELEASE, [], thread);
-                    host.writeMemory(slot >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(slot), dword(0));
                 }
                 return 0;
             },
@@ -716,7 +716,7 @@ export function createUnknownFunctions(host){
                     {
                         same = await callMethod(persist, SLOT_GET_CLASS_ID, [got], thread) >= 0
                             && sameBytes(host.readMemory(got, 16),
-                                host.readMemory(clsid >>> 0, 16));
+                                host.readMemory(wholeAddress(clsid), 16));
                         await callMethod(persist, SLOT_RELEASE, [], thread);
                     }
                     await callMethod(object, SLOT_RELEASE, [], thread);

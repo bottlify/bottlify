@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The messages only Common Controls 6's button answers (BCM_*): its image
  * list, text margin, split-button part, command-link note and ideal size.
@@ -384,7 +386,7 @@ export function createButtonV6(env){
     /** @param {number} at */
     const readWide = at=>{
         const units = [];
-        for (let offset = at >>> 0; units.length < 0x10000; offset += 2)
+        for (let offset = wholeAddress(at); units.length < 0x10000; offset += 2)
         {
             const pair = env.read(offset, 2);
             const unit = pair[0] | pair[1] << 8;

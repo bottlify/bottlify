@@ -26,7 +26,7 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { cvtDigits } from './format.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { decimalToExtended, extendedDigits } from './ldouble.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
@@ -508,7 +508,7 @@ export function createConversionFunctions(host){
     const writeEnd = (pointer, value)=>{
         if ((pointer >>> 0) !== 0)
         {
-            host.writeMemory(pointer >>> 0, width.bytes(value));
+            host.writeMemory(wholeAddress(pointer), width.bytes(value));
         }
     };
 
@@ -706,7 +706,7 @@ export function createConversionFunctions(host){
         const number = scanned ? scanned.value : 0;
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setFloat64(0, number, true);
-        host.writeMemory(value >>> 0, bytes);
+        host.writeMemory(wholeAddress(value), bytes);
         if (!scanned)
         {
             return 0;
@@ -817,7 +817,7 @@ export function createConversionFunctions(host){
                     bytes[4 + at] = answer.buffer.charCodeAt(at);
                 }
                 bytes[4 + answer.len] = 0;
-                host.writeMemory(out >>> 0, bytes.subarray(0, Math.max(4 + answer.len + 1,
+                host.writeMemory(wholeAddress(out), bytes.subarray(0, Math.max(4 + answer.len + 1,
                     4 + answer.buffer.length)));
                 return answer.ok;
             },

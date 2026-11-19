@@ -26,6 +26,7 @@
  */
 
 import { pathFromFileUrl } from '../shlwapi/path.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -158,14 +159,15 @@ const wide = text=>{
 export function createUrlMonikers(host){
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, new Uint8Array(new Uint32Array([value >>> 0]).buffer));
+            host.writeMemory(wholeAddress(address),
+                new Uint8Array(new Uint32Array([value >>> 0]).buffer));
         }
     };
     /**
@@ -390,7 +392,7 @@ export function createUrlMonikers(host){
     const bindToStorage = async(url, [context, , iidAt, out])=>{
         const thread = host.callerThread();
         writeU32(out, 0);
-        const iid = [...host.readMemory(iidAt >>> 0, 16)].join(',');
+        const iid = [...host.readMemory(wholeAddress(iidAt), 16)].join(',');
         if (iid !== [...iidBytes(IID_ISTREAM)].join(','))
         {
             diverge('IMoniker::BindToStorage', 'a URL moniker binds to a stream alone');
@@ -446,7 +448,7 @@ export function createUrlMonikers(host){
         });
         return [
             method('GetClassID', 1, ([out])=>{
-                host.writeMemory(out >>> 0, iidBytes(CLSID_STD_URL_MONIKER));
+                host.writeMemory(wholeAddress(out), iidBytes(CLSID_STD_URL_MONIKER));
                 return S_OK;
             }),
             method('IsDirty', 0, ()=>S_FALSE),
@@ -540,7 +542,7 @@ export function createUrlMonikers(host){
             { name: 'GetBindResult', argBytes: 20, invoke: (_, [clsid, result, text])=>{
                 if ((clsid >>> 0) !== 0)
                 {
-                    host.writeMemory(clsid >>> 0, new Uint8Array(16));
+                    host.writeMemory(wholeAddress(clsid), new Uint8Array(16));
                 }
                 writeU32(result, 0);
                 writeU32(text, 0);
@@ -559,7 +561,7 @@ export function createUrlMonikers(host){
                 {
                     return E_INVALIDARG;
                 }
-                const url = canonicalUrl(host.readWideString(urlAt >>> 0, 0x8000),
+                const url = canonicalUrl(host.readWideString(wholeAddress(urlAt), 0x8000),
                     urls.get(context >>> 0) ?? null);
                 const pointer = await makeMoniker(url);
                 writeU32(out, pointer);
@@ -771,7 +773,7 @@ export function createUrlMonikers(host){
                 {
                     return E_INVALIDARG;
                 }
-                const url = canonicalUrl(host.readWideString(urlAt >>> 0, 0x8000), null);
+                const url = canonicalUrl(host.readWideString(wholeAddress(urlAt), 0x8000), null);
                 const path = fileUrlPath(url);
                 if (path === null)
                 {

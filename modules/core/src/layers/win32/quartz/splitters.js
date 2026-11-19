@@ -30,6 +30,7 @@ import {
     FORMAT_VIDEO_INFO, FORMAT_WAVE_FORMAT_EX, GUID_NULL, MEDIATYPE_AUDIO, MEDIATYPE_STREAM,
     MEDIATYPE_VIDEO, STATE_STOPPED,
 } from './filter.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -616,7 +617,7 @@ export function createParsers(base, host){
         host.writeMemory(address, bytes);
     };
     /** @param {number} address */
-    const formatAt = address=>formatGuid(host.readMemory(address >>> 0, 16));
+    const formatAt = address=>formatGuid(host.readMemory(wholeAddress(address), 16));
     /**
      * REFERENCE_TIME a unit of a time format is, for a filter's file; undefined
      * for a format it does not speak. TIME_FORMAT_NONE is media time.
@@ -674,7 +675,7 @@ export function createParsers(base, host){
             {
                 return E_POINTER;
             }
-            writeU32(out >>> 0, CAPABILITIES);
+            writeU32(wholeAddress(out), CAPABILITIES);
             return S_OK;
         },
         CheckCapabilities: (pin, [caps])=>{
@@ -682,9 +683,9 @@ export function createParsers(base, host){
             {
                 return E_POINTER;
             }
-            const asked = host.readU32(caps >>> 0);
+            const asked = host.readU32(wholeAddress(caps));
             const have = asked & CAPABILITIES;
-            writeU32(caps >>> 0, have);
+            writeU32(wholeAddress(caps), have);
             if (have === asked)
             {
                 return S_OK;
@@ -705,7 +706,7 @@ export function createParsers(base, host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, guidBytes(TIME_FORMAT_MEDIA_TIME));
+            host.writeMemory(wholeAddress(out), guidBytes(TIME_FORMAT_MEDIA_TIME));
             return S_OK;
         },
         GetTimeFormat: (pin, [out])=>{
@@ -713,7 +714,7 @@ export function createParsers(base, host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, guidBytes(stateOf(filter).format));
+            host.writeMemory(wholeAddress(out), guidBytes(stateOf(filter).format));
             return S_OK;
         },
         IsUsingTimeFormat: (pin, [format])=>{
@@ -787,10 +788,10 @@ export function createParsers(base, host){
                 switch (flags & AM_SEEKING_POSITIONING_BITS)
                 {
                     case AM_SEEKING_ABSOLUTE:
-                        return inward(filter, readQuad(at >>> 0));
+                        return inward(filter, readQuad(wholeAddress(at)));
                     case AM_SEEKING_RELATIVE:
                     case AM_SEEKING_INCREMENTAL:
-                        return now + inward(filter, readQuad(at >>> 0));
+                        return now + inward(filter, readQuad(wholeAddress(at)));
                     default:
                         return now;
                 }
@@ -862,7 +863,7 @@ export function createParsers(base, host){
             }
             const view = new DataView(new ArrayBuffer(8));
             view.setFloat64(0, stateOf(filter).rate, true);
-            host.writeMemory(out >>> 0, new Uint8Array(view.buffer));
+            host.writeMemory(wholeAddress(out), new Uint8Array(view.buffer));
             return S_OK;
         },
         GetPreroll: (pin, [out])=>{
@@ -912,7 +913,7 @@ export function createParsers(base, host){
             {
                 return E_POINTER;
             }
-            writeU32(out >>> 0, value);
+            writeU32(wholeAddress(out), value);
             return S_OK;
         };
         return {

@@ -15,6 +15,7 @@
 
 import { dword, u32 } from './text.js';
 import { formatGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const S_OK = 0;
@@ -306,7 +307,7 @@ export function createRegistryHelpers(host){
         }
         const read = /** @type {(address: number, length: number) => Uint8Array} */ (
             host.readMemory);
-        const room = (sizeOut >>> 0) === 0 ? 0 : u32(read(sizeOut >>> 0, 4));
+        const room = (sizeOut >>> 0) === 0 ? 0 : u32(read(wholeAddress(sizeOut), 4));
         const scratch = host.allocate(8);
         if (!scratch)
         {
@@ -348,11 +349,11 @@ export function createRegistryHelpers(host){
                 const needed = Math.max(stored, length * unit);
                 if ((typeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(typeOut >>> 0, dword(REG_SZ));
+                    host.writeMemory(wholeAddress(typeOut), dword(REG_SZ));
                 }
                 if ((sizeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(sizeOut >>> 0, dword(needed));
+                    host.writeMemory(wholeAddress(sizeOut), dword(needed));
                 }
                 if ((data >>> 0) === 0)
                 {
@@ -364,11 +365,11 @@ export function createRegistryHelpers(host){
                     // was read is taken back, an empty string left.
                     if (room >= stored)
                     {
-                        host.writeMemory(data >>> 0, new Uint8Array(unit));
+                        host.writeMemory(wholeAddress(data), new Uint8Array(unit));
                     }
                     return ERROR_MORE_DATA;
                 }
-                host.writeMemory(data >>> 0, read(expanded, length * unit).slice());
+                host.writeMemory(wholeAddress(data), read(expanded, length * unit).slice());
                 return ERROR_SUCCESS;
             }
             finally
@@ -399,7 +400,7 @@ export function createRegistryHelpers(host){
         handler: ([subKey, value, typeOut, data, sizeOut, ignoreUser, fallback, fallbackSize])=>{
             const read = /** @type {(address: number, length: number) => Uint8Array} */ (
                 host.readMemory);
-            const room = (sizeOut >>> 0) !== 0 ? u32(read(sizeOut >>> 0, 4)) : 0;
+            const room = (sizeOut >>> 0) !== 0 ? u32(read(wholeAddress(sizeOut), 4)) : 0;
             const roots = (ignoreUser | 0) !== 0
                 ? [HKEY_LOCAL_MACHINE] : [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE];
             for (const root of roots)
@@ -411,11 +412,11 @@ export function createRegistryHelpers(host){
                 }
                 if ((typeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(typeOut >>> 0, dword(found.type));
+                    host.writeMemory(wholeAddress(typeOut), dword(found.type));
                 }
                 if ((sizeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(sizeOut >>> 0, dword(found.data.length));
+                    host.writeMemory(wholeAddress(sizeOut), dword(found.data.length));
                 }
                 if ((data >>> 0) === 0)
                 {
@@ -425,14 +426,14 @@ export function createRegistryHelpers(host){
                 {
                     return ERROR_MORE_DATA;
                 }
-                host.writeMemory(data >>> 0, found.data);
+                host.writeMemory(wholeAddress(data), found.data);
                 return ERROR_SUCCESS;
             }
             if ((fallback >>> 0) !== 0 && (fallbackSize >>> 0) !== 0 && (sizeOut >>> 0) !== 0
                 && (data >>> 0) !== 0)
             {
-                host.writeMemory(data >>> 0,
-                    read(fallback >>> 0, Math.min(fallbackSize >>> 0, room)).slice());
+                host.writeMemory(wholeAddress(data),
+                    read(wholeAddress(fallback), Math.min(fallbackSize >>> 0, room)).slice());
                 return ERROR_SUCCESS;
             }
             return ERROR_FILE_NOT_FOUND;
@@ -582,12 +583,12 @@ export function createRegistryHelpers(host){
                 return E_INVALIDARG;
             }
             const read = width === 'W' ? host.readWideString : host.readCString;
-            const sub = (value >>> 0) !== 0 && read ? read(value >>> 0, 0x1000) : '';
-            const path = `${CLSID_SETTINGS}${formatGuid(host.readMemory(guid >>> 0, 16).slice())}`
-                + (sub ? `\\${sub}` : '');
+            const sub = (value >>> 0) !== 0 && read ? read(wholeAddress(value), 0x1000) : '';
+            const named = formatGuid(host.readMemory(wholeAddress(guid), 16).slice());
+            const path = `${CLSID_SETTINGS}${named}` + (sub ? `\\${sub}` : '');
             const key = keyAt((user | 0) !== 0 ? HKEY_CURRENT_USER : HKEY_LOCAL_MACHINE, path,
                 (create | 0) !== 0);
-            host.writeMemory(out >>> 0, dword(key));
+            host.writeMemory(wholeAddress(out), dword(key));
             return key === 0 ? E_FAIL : S_OK;
         },
     });

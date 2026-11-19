@@ -29,6 +29,7 @@
 import { E_INVALIDARG, E_NOT_SUFFICIENT_BUFFER, E_OUTOFMEMORY, E_POINTER, S_OK, drive }
     from './kit.js';
 import { parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const MF_E_ATTRIBUTENOTFOUND = 0xc00d36e6 | 0;
 export const MF_E_INVALIDTYPE = 0xc00d36bd | 0;
@@ -195,7 +196,7 @@ export function createAttributes(kit, host){
             default:
                 break;
         }
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
         const taken = item.vt === TYPE.IUNKNOWN ? kit.addRef(item.value, thread) : undefined;
         return taken ? taken.then(()=>S_OK) : S_OK;
     };
@@ -471,7 +472,7 @@ export function createAttributes(kit, host){
             {
                 return E_NOT_SUFFICIENT_BUFFER;
             }
-            host.writeMemory(buffer >>> 0, encodeWide(item.value));
+            host.writeMemory(wholeAddress(buffer), encodeWide(item.value));
             return S_OK;
         } },
         /** HRESULT GetAllocatedString(REFGUID key, LPWSTR *value, UINT32 *length) */
@@ -513,7 +514,7 @@ export function createAttributes(kit, host){
             }
             if (item.value.length > 0)
             {
-                host.writeMemory(buffer >>> 0, item.value);
+                host.writeMemory(wholeAddress(buffer), item.value);
             }
             if ((written >>> 0) !== 0)
             {
@@ -610,7 +611,7 @@ export function createAttributes(kit, host){
         /** HRESULT SetBlob(REFGUID key, const UINT8 *buffer, UINT32 size) */
         { name: 'SetBlob', argBytes: 16, invoke: setter(TYPE.BLOB, ([, buffer, size])=>
             ((size >>> 0) === 0 ? new Uint8Array(0)
-                : host.readMemory(buffer >>> 0, size >>> 0).slice())) },
+                : host.readMemory(wholeAddress(buffer), size >>> 0).slice())) },
         /** HRESULT SetUnknown(REFGUID key, IUnknown *value) */
         { name: 'SetUnknown', argBytes: 12,
             invoke: setter(TYPE.IUNKNOWN, ([, value])=>value >>> 0) },

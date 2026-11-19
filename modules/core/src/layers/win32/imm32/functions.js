@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * imm32 — the input method, which this build does not have and does not need.
  *
@@ -176,7 +178,7 @@ export function createImmFunctions(host){
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        host.writeMemory(out >>> 0, new Uint8Array(4));
+                        host.writeMemory(wholeAddress(out), new Uint8Array(4));
                     }
                 }
                 return 1;
@@ -227,7 +229,7 @@ export function createImmFunctions(host){
             handler: ([, count])=>{
                 if ((count >>> 0) !== 0)
                 {
-                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
                 return 0;
             },
@@ -326,7 +328,7 @@ export function createImmFunctions(host){
             handler: ([, count])=>{
                 if ((count >>> 0) !== 0)
                 {
-                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
                 return 0;
             },

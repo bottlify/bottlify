@@ -5,6 +5,7 @@
  */
 
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Mailslots: a queue of messages one server handle reads and any number of
@@ -284,7 +285,7 @@ export function createMailslots(host){
         let milliseconds = MAILSLOT_WAIT_FOREVER;
         if ((timeout >>> 0) !== 0)
         {
-            const interval = new DataView(host.readMemory(timeout >>> 0, 8).slice().buffer)
+            const interval = new DataView(host.readMemory(wholeAddress(timeout), 8).slice().buffer)
                 .getBigInt64(0, true);
             milliseconds = interval > 0n ? MAILSLOT_WAIT_FOREVER : Number(-interval / 10000n);
         }
@@ -458,7 +459,7 @@ export function createMailslots(host){
             slot.messages.shift();
             if (next.length > 0)
             {
-                host.writeMemory(buffer >>> 0, next);
+                host.writeMemory(wholeAddress(buffer), next);
             }
             return succeed(caller, next.length);
         }
@@ -534,7 +535,7 @@ export function createMailslots(host){
             return refuse(caller, ERROR_NOACCESS, STATUS_ACCESS_VIOLATION);
         }
         const message = count === 0
-            ? new Uint8Array(0) : host.readMemory(buffer >>> 0, count).slice();
+            ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count).slice();
         /** @type {Slot} */
         const slot = client.slot;
         const answer = succeed(caller, count);
@@ -638,7 +639,7 @@ export function createMailslots(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, maxSize, timeout])=>create(
-                (name >>> 0) === 0 ? null : host.readCString(name >>> 0, WHOLE_NAME),
+                (name >>> 0) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
                 maxSize, timeout),
         },
         /** HANDLE CreateMailslotW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES) */
@@ -646,7 +647,7 @@ export function createMailslots(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, maxSize, timeout])=>create(
-                (name >>> 0) === 0 ? null : host.readWideString(name >>> 0, WHOLE_NAME * 2),
+                (name >>> 0) === 0 ? null : host.readWideString(wholeAddress(name), WHOLE_NAME * 2),
                 maxSize, timeout),
         },
 

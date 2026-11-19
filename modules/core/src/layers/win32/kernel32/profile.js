@@ -37,6 +37,7 @@
 
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { createIniMapping } from './ini-mapping.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Where a profile file with no directory of its own is. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -222,7 +223,7 @@ export function createProfileFunctions(host){
     /** @param {number} pointer @param {number} limit @returns {string | null} */
     const text = (pointer, limit)=>((pointer >>> 0) === 0
         ? null
-        : host.readCString(pointer >>> 0, limit));
+        : host.readCString(wholeAddress(pointer), limit));
 
     /** text for the wide entry points. @param {number} pointer @param {number} limit */
     const wideText = (pointer, limit)=>((pointer >>> 0) === 0
@@ -404,12 +405,12 @@ export function createProfileFunctions(host){
         const whole = names.map(name=>`${name}\0`).join('');
         if (whole.length + 1 + spare <= room)
         {
-            host.writeMemory(buffer >>> 0, encode(`${whole}\0`));
+            host.writeMemory(wholeAddress(buffer), encode(`${whole}\0`));
             return whole.length;
         }
         // Cut two short: one NUL to end the name it cut, one to end the list.
         const kept = room >= 2 ? whole.slice(0, room - 2) : '';
-        host.writeMemory(buffer >>> 0, encode(`${kept}\0\0`.slice(0, room)));
+        host.writeMemory(wholeAddress(buffer), encode(`${kept}\0\0`.slice(0, room)));
         return Math.max(room - 2, 0);
     };
 
@@ -425,7 +426,7 @@ export function createProfileFunctions(host){
             return 0;
         }
         const kept = value.slice(0, room - 1);
-        host.writeMemory(buffer >>> 0, (wide ? encodeWide : encodeAnsi)(`${kept}\0`));
+        host.writeMemory(wholeAddress(buffer), (wide ? encodeWide : encodeAnsi)(`${kept}\0`));
         return kept.length;
     };
 
@@ -581,7 +582,7 @@ export function createProfileFunctions(host){
             // read a number out of, and the default is the answer.
             if (wanted.section === null || wanted.key === null)
             {
-                return fallback >>> 0;
+                return wholeAddress(fallback);
             }
             const found = mappedLookUp(path, lines, wanted.section, wanted.key, '');
             const value = 'value' in found ? found.value : '';
@@ -739,7 +740,7 @@ export function createProfileFunctions(host){
         }
         /** @type {string[]} */
         const entries = [];
-        for (let at = list >>> 0; ;)
+        for (let at = wholeAddress(list); ;)
         {
             const entry = wide
                 ? host.readWideString?.(at, MAX_VALUE * 2) ?? ''
@@ -978,7 +979,7 @@ export function createProfileFunctions(host){
                         host.setLastError?.(ERROR_INVALID_DATA);
                         return 0;
                     }
-                    host.writeMemory(buffer >>> 0, data);
+                    host.writeMemory(wholeAddress(buffer), data);
                     return 1;
                 };
                 return withLines(path, answer);
@@ -1004,7 +1005,7 @@ export function createProfileFunctions(host){
                     host.setLastError?.(ERROR_INVALID_FUNCTION);
                     return 0;
                 }
-                const value = structText(host.readMemory(structure >>> 0, size >>> 0));
+                const value = structText(host.readMemory(wholeAddress(structure), size >>> 0));
                 return putText(pathOf(file), text(section, MAX_NAME), text(key, MAX_NAME), value);
             },
         },

@@ -36,6 +36,7 @@ import {
     ICM_COMPRESS_END, ICINFO_SIZE, ICVERSION, HEADER_SIZE, BI_RGB, BI_BITFIELDS, fourcc,
     infoOf, readHeader, strideOf, coloursOf,
 } from './codecs.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Where the registry lists the drivers, its values `type.handler`. */
 export const DRIVERS32 = 'Software\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32';
@@ -85,7 +86,7 @@ const folded = (/** @type {number} */ code)=>{
         }
         out |= byte << shift;
     }
-    return out >>> 0;
+    return wholeAddress(out);
 };
 
 /** A FOURCC as the four characters the registry names it with. */
@@ -324,7 +325,7 @@ export function createIcm(host){
         {
             if (info >>> 0)
             {
-                writeMemory(info >>> 0, managerInfo(type, handler, ''));
+                writeMemory(wholeAddress(info), managerInfo(type, handler, ''));
             }
             return 0;
         }
@@ -334,11 +335,12 @@ export function createIcm(host){
         }
         if (driver.kind === 'function')
         {
-            writeMemory(info >>> 0, managerInfo(0, 0, ''));
+            writeMemory(wholeAddress(info), managerInfo(0, 0, ''));
             await callDriver(driver, 0, 0, ICM_GETINFO, info, ICINFO_SIZE);
             return 1;
         }
-        writeMemory(info >>> 0, managerInfo(driver.type, driver.handler, driver.file ?? ''));
+        writeMemory(wholeAddress(info), managerInfo(driver.type, driver.handler,
+            driver.file ?? ''));
         return 1;
     };
 
@@ -353,7 +355,7 @@ export function createIcm(host){
         {
             const bytes = infoOf(/** @type {import('./codecs.js').Codec} */ (instance.driver.codec))
                 .subarray(0, Math.min(size >>> 0, ICINFO_SIZE));
-            writeMemory(info >>> 0, bytes);
+            writeMemory(wholeAddress(info), bytes);
             return bytes.length;
         }
         return send(hic, ICM_GETINFO, info, size);
@@ -450,7 +452,7 @@ export function createIcm(host){
             width = source.width;
             height = source.height;
         }
-        const base = readMemory(input >>> 0, HEADER_SIZE).slice();
+        const base = readMemory(wholeAddress(input), HEADER_SIZE).slice();
         /** @param {number} w @param {number} h @param {number} bits @param {number} compression */
         const tryFormat = async(w, h, bits, compression)=>{
             const bytes = base.slice();
@@ -461,7 +463,7 @@ export function createIcm(host){
             view.setUint16(14, bits, true);
             view.setUint32(16, compression, true);
             view.setUint32(20, strideOf(w, bits) * Math.abs(h), true);
-            writeMemory(output >>> 0, bytes);
+            writeMemory(wholeAddress(output), bytes);
             if (compression === BI_BITFIELDS)
             {
                 const masks = new Uint8Array(12);
@@ -469,7 +471,7 @@ export function createIcm(host){
                 maskView.setUint32(0, 0xf800, true);
                 maskView.setUint32(4, 0x07e0, true);
                 maskView.setUint32(8, 0x001f, true);
-                writeMemory((output >>> 0) + HEADER_SIZE, masks);
+                writeMemory(wholeAddress(output) + HEADER_SIZE, masks);
             }
             return await send(hic, ICM_DECOMPRESS_QUERY, input, output) === ICERR_OK;
         };
@@ -507,10 +509,11 @@ export function createIcm(host){
     const setU32 = (at, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(at >>> 0, bytes);
+        writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at */
-    const getU32 = at=>new DataView(readMemory(at >>> 0, 4).slice().buffer).getUint32(0, true);
+    const getU32 = at=>new DataView(readMemory(wholeAddress(at), 4).slice().buffer).getUint32(0,
+        true);
 
     /**
      * COMPVARS: cbSize, dwFlags, hic, fccType, fccHandler, lpbiIn, lpbiOut,
@@ -537,7 +540,7 @@ export function createIcm(host){
         }
         const inSize = (header.size || HEADER_SIZE) + coloursOf(header) * 4;
         const biIn = host.allocate(inSize);
-        writeMemory(biIn, readMemory(info >>> 0, inSize).slice());
+        writeMemory(biIn, readMemory(wholeAddress(info), inSize).slice());
         const outSize = await send(hic, ICM_COMPRESS_GET_FORMAT, biIn, 0);
         if (outSize <= 0)
         {
@@ -615,7 +618,7 @@ export function createIcm(host){
             return 0;
         }
         const length = strideOf(header.width, header.bitCount) * Math.abs(header.height);
-        writeMemory(bitsPrev, readMemory(bits >>> 0, length).slice());
+        writeMemory(bitsPrev, readMemory(wholeAddress(bits), length).slice());
         setU32(pc + COMPVARS.frame, frame + 1);
         if (keyOut >>> 0)
         {
@@ -707,8 +710,9 @@ export function createIcm(host){
             {
                 return 0;
             }
-            const file = flags & ICINSTALL_UNICODE ? host.readWideString(param >>> 0, MAX_PATH * 2)
-                : host.readCString(param >>> 0, MAX_PATH);
+            const file = flags & ICINSTALL_UNICODE ? host.readWideString(wholeAddress(param),
+                MAX_PATH * 2)
+                : host.readCString(wholeAddress(param), MAX_PATH);
             host.drivers.set(DRIVERS32, `${textOf(type)}.${textOf(handler)}`, file);
             return 1;
         }

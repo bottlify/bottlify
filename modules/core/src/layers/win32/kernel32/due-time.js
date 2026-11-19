@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * A due time as Windows gives one: a LARGE_INTEGER in hundreds of nanoseconds,
  * negative for an interval from now and positive for a moment in system time
@@ -37,6 +39,6 @@ export function dueInMs(raw, wallClockMs){
  * @returns {bigint}
  */
 export function readLargeInteger(readMemory, pointer){
-    const bytes = readMemory(pointer >>> 0, 8);
+    const bytes = readMemory(wholeAddress(pointer), 8);
     return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
 }

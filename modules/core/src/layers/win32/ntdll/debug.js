@@ -24,6 +24,7 @@
 import { STATUS } from './status.js';
 import { createRefusals } from '../common/refusal.js';
 import { TEB } from '../kernel32/teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The processor's breakpoint, as DbgBreakPoint raises it. */
 const STATUS_BREAKPOINT = 0x80000003;
@@ -117,7 +118,7 @@ export function createDebugFunctions(host){
     let detached = 0;
 
     /** @param {number} pointer @param {number} value */
-    const writeU32 = (pointer, value)=>host.writeMemory(pointer >>> 0, dword(value));
+    const writeU32 = (pointer, value)=>host.writeMemory(wholeAddress(pointer), dword(value));
 
     /**
      * The argument slots a va_list points at, as many as DbgPrint reads.
@@ -130,7 +131,8 @@ export function createDebugFunctions(host){
         {
             return [];
         }
-        const view = new DataView(host.readMemory(list >>> 0, VARIADIC_SLOTS * 4).slice().buffer);
+        const view = new DataView(host.readMemory(wholeAddress(list),
+            VARIADIC_SLOTS * 4).slice().buffer);
         return Array.from({ length: VARIADIC_SLOTS }, (_, at)=>view.getUint32(at * 4, true));
     };
 
@@ -215,7 +217,7 @@ export function createDebugFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([prefix, , , format, list])=>{
-                const lead = (prefix >>> 0) === 0 ? '' : host.readCString(prefix >>> 0,
+                const lead = (prefix >>> 0) === 0 ? '' : host.readCString(wholeAddress(prefix),
                     DBG_PRINT_LIMIT);
                 const print = host.crt._snprintf;
                 const say = host.kernel32.OutputDebugStringA;
@@ -252,7 +254,7 @@ export function createDebugFunctions(host){
                 }
                 if ((response >>> 0) !== 0 && (most >>> 0) !== 0)
                 {
-                    host.writeMemory(response >>> 0, new Uint8Array(1));
+                    host.writeMemory(wholeAddress(response), new Uint8Array(1));
                 }
                 return 0;
             },

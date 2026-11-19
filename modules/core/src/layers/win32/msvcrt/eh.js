@@ -46,6 +46,7 @@
 
 import { Disposition, EH_UNWINDING, EXCEPTION_EXIT_UNWIND, EXCEPTION_NONCONTINUABLE, RECORD }
     from '../kernel32/seh.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The exception code every C++ throw raises: 0xE0 followed by "msc". */
 export const EH_EXCEPTION_NUMBER = 0xe06d7363;
@@ -167,14 +168,14 @@ export const THREAD_DATA = Object.freeze({
  */
 export function createCxxExceptions(host){
     const readU32 = (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     const readI32 = (/** @type {number} */ at)=>readU32(at) | 0;
     const writeU32 = (/** @type {number} */ at, /** @type {number} */ value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
 
     /**
@@ -564,8 +565,8 @@ export function createCxxExceptions(host){
         const thread = host.currentThread();
         const info = funcInfo(entry.ecx >>> 0);
         const how = { thread, stackAtRest: (entry.esp - 0x10 & ~0xf) >>> 0 };
-        const at = frame >>> 0;
-        const flags = readU32((record >>> 0) + RECORD.FLAGS);
+        const at = wholeAddress(frame);
+        const flags = readU32(wholeAddress(record) + RECORD.FLAGS);
 
         if (!knownMagic(info.magic))
         {
@@ -588,10 +589,10 @@ export function createCxxExceptions(host){
             return Disposition.CONTINUE_SEARCH;
         }
 
-        const code = readU32((record >>> 0) + RECORD.CODE);
-        const parameters = readU32((record >>> 0) + RECORD.PARAMETER_COUNT);
+        const code = readU32(wholeAddress(record) + RECORD.CODE);
+        const parameters = readU32(wholeAddress(record) + RECORD.PARAMETER_COUNT);
         const isCxx = code === EH_EXCEPTION_NUMBER && parameters >= 3
-            && knownMagic(readU32((record >>> 0) + RECORD.INFORMATION));
+            && knownMagic(readU32(wholeAddress(record) + RECORD.INFORMATION));
         const state = stateOf(at);
 
         const translator = readU32(threadData(thread) + THREAD_DATA.TRANSLATOR);
@@ -609,8 +610,8 @@ export function createCxxExceptions(host){
             });
         }
 
-        const object = isCxx ? readU32((record >>> 0) + RECORD.INFORMATION + 4) : 0;
-        const throwInfo = isCxx ? readU32((record >>> 0) + RECORD.INFORMATION + 8) : 0;
+        const object = isCxx ? readU32(wholeAddress(record) + RECORD.INFORMATION + 4) : 0;
+        const throwInfo = isCxx ? readU32(wholeAddress(record) + RECORD.INFORMATION + 8) : 0;
         const catchables = throwInfo === 0 ? 0 : readU32(throwInfo + THROW_INFO.CATCHABLE_TYPES);
         const catchableCount = catchables === 0 ? 0 : Math.min(readU32(catchables), WALK_LIMIT);
 
@@ -692,7 +693,7 @@ export function createCxxExceptions(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([buffer])=>{
-            const at = buffer >>> 0;
+            const at = wholeAddress(buffer);
             const entry = host.registers();
             const frame = readU32(at + 24);
             const info = funcInfo(readU32(at + 40));
@@ -769,8 +770,8 @@ export function createCxxExceptions(host){
                 /** @param {number[]} args */
                 handler: ([object, throwInfo])=>{
                     const thread = host.currentThread();
-                    let thrown = object >>> 0;
-                    let info = throwInfo >>> 0;
+                    let thrown = wholeAddress(object);
+                    let info = wholeAddress(throwInfo);
                     if (info === 0)
                     {
                         const list = caught(thread);
@@ -808,7 +809,7 @@ export function createCxxExceptions(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([record])=>{
-                    const at = record >>> 0;
+                    const at = wholeAddress(record);
                     if (at === 0 || readU32(at + RECORD.CODE) !== EH_EXCEPTION_NUMBER
                         || readU32(at + RECORD.PARAMETER_COUNT) !== 3
                         || !knownMagic(readU32(at + RECORD.INFORMATION)))
@@ -886,8 +887,9 @@ export function createCxxExceptions(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([message, file, line])=>{
-                    host.abort(`Assertion failed: ${host.readCString(message >>> 0, 1024)}, file ${
-                        host.readCString(file >>> 0, 260)}, line ${line >>> 0}`);
+                    const text = host.readCString(wholeAddress(message), 1024);
+                    host.abort(`Assertion failed: ${text}, file ${
+                        host.readCString(wholeAddress(file), 260)}, line ${line >>> 0}`);
                     return host.park();
                 },
             },

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * netapi32's workstation information and the buffers it is handed in.
  *
@@ -55,7 +57,8 @@ export function createWorkstationFunctions(host){
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>
-        host.writeMemory(address >>> 0, new Uint8Array(new Uint32Array([value >>> 0]).buffer));
+        host.writeMemory(wholeAddress(address),
+            new Uint8Array(new Uint32Array([value >>> 0]).buffer));
 
     /**
      * The name a server is given by, its leading backslashes taken off; empty
@@ -69,7 +72,7 @@ export function createWorkstationFunctions(host){
             return '';
         }
         let text = '';
-        for (let at = pointer >>> 0; text.length < 256; at += 2)
+        for (let at = wholeAddress(pointer); text.length < 256; at += 2)
         {
             const [low, high] = host.readMemory(at, 2);
             const unit = low | high << 8;
@@ -103,7 +106,7 @@ export function createWorkstationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                const at = buffer >>> 0;
+                const at = wholeAddress(buffer);
                 if (at !== 0 && buffers.delete(at))
                 {
                     host.release(at);

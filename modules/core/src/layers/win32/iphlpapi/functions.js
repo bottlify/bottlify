@@ -37,6 +37,7 @@
 
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { createIphlpapiTables } from './tables.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const NO_ERROR = 0;
 const ERROR_INVALID_PARAMETER = 87;
@@ -517,12 +518,12 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const filled = interfaceRow(readU32((row >>> 0) + IFROW.INDEX));
+                const filled = interfaceRow(readU32(wholeAddress(row) + IFROW.INDEX));
                 if (!filled)
                 {
                     return ERROR_INVALID_DATA;
                 }
-                host.writeMemory(row >>> 0, filled);
+                host.writeMemory(wholeAddress(row), filled);
                 return NO_ERROR;
             },
         },
@@ -542,9 +543,9 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((table >>> 0) === 0 || readU32(size >>> 0) < INTERFACE_INFO.SIZE)
+                if ((table >>> 0) === 0 || readU32(wholeAddress(size)) < INTERFACE_INFO.SIZE)
                 {
-                    writeU32(size >>> 0, INTERFACE_INFO.SIZE);
+                    writeU32(wholeAddress(size), INTERFACE_INFO.SIZE);
                     return ERROR_INSUFFICIENT_BUFFER;
                 }
                 const record = new Uint8Array(INTERFACE_INFO.SIZE);
@@ -556,7 +557,7 @@ export function createIphlpapiFunctions(host){
                 {
                     view.setUint16(INTERFACE_INFO.NAME + at * 2, name.charCodeAt(at), true);
                 }
-                host.writeMemory(table >>> 0, record);
+                host.writeMemory(wholeAddress(table), record);
                 return NO_ERROR;
             },
         },
@@ -575,12 +576,12 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((info >>> 0) === 0 || readU32(size >>> 0) < ADAPTER_INFO.SIZE)
+                if ((info >>> 0) === 0 || readU32(wholeAddress(size)) < ADAPTER_INFO.SIZE)
                 {
-                    writeU32(size >>> 0, ADAPTER_INFO.SIZE);
+                    writeU32(wholeAddress(size), ADAPTER_INFO.SIZE);
                     return ERROR_BUFFER_OVERFLOW;
                 }
-                host.writeMemory(info >>> 0, adapter(info >>> 0));
+                host.writeMemory(wholeAddress(info), adapter(info >>> 0));
                 return NO_ERROR;
             },
         },
@@ -614,9 +615,9 @@ export function createIphlpapiFunctions(host){
                     rows.sort((a, b)=>a.address - b.address);
                 }
                 const needed = 4 + rows.length * IP_ADDR_ROW;
-                if ((table >>> 0) === 0 || readU32(size >>> 0) < needed)
+                if ((table >>> 0) === 0 || readU32(wholeAddress(size)) < needed)
                 {
-                    writeU32(size >>> 0, needed);
+                    writeU32(wholeAddress(size), needed);
                     return ERROR_INSUFFICIENT_BUFFER;
                 }
                 const bytes = new Uint8Array(needed);
@@ -632,7 +633,7 @@ export function createIphlpapiFunctions(host){
                     view.setUint32(base + 16, 0xffff, true);
                     view.setUint16(base + 22, MIB_IPADDR_PRIMARY, true);
                 });
-                host.writeMemory(table >>> 0, bytes);
+                host.writeMemory(wholeAddress(table), bytes);
                 return NO_ERROR;
             },
         },
@@ -650,7 +651,7 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeU32(count >>> 0, INTERFACES);
+                writeU32(wholeAddress(count), INTERFACES);
                 return NO_ERROR;
             },
         },
@@ -680,12 +681,12 @@ export function createIphlpapiFunctions(host){
                     return ERROR_NO_DATA;
                 }
                 const block = adapterAddresses(flags >>> 0);
-                if ((addresses >>> 0) === 0 || readU32(size >>> 0) < block.size)
+                if ((addresses >>> 0) === 0 || readU32(wholeAddress(size)) < block.size)
                 {
-                    writeU32(size >>> 0, block.size);
+                    writeU32(wholeAddress(size), block.size);
                     return ERROR_BUFFER_OVERFLOW;
                 }
-                host.writeMemory(addresses >>> 0, block.build(addresses >>> 0));
+                host.writeMemory(wholeAddress(addresses), block.build(addresses >>> 0));
                 return NO_ERROR;
             },
         },
@@ -705,7 +706,7 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const named = host.readMemory(row >>> 0, 12);
+                const named = host.readMemory(wholeAddress(row), 12);
                 const view = new DataView(named.buffer, named.byteOffset, 12);
                 const luid = view.getBigUint64(0, true);
                 const index = view.getUint32(8, true);
@@ -715,7 +716,7 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_FILE_NOT_FOUND;
                 }
-                host.writeMemory(row >>> 0, ifRow2(one));
+                host.writeMemory(wholeAddress(row), ifRow2(one));
                 return NO_ERROR;
             },
         },
@@ -743,8 +744,8 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_NOT_ENOUGH_MEMORY;
                 }
-                host.writeMemory(at >>> 0, bytes);
-                writeU32(out >>> 0, at);
+                host.writeMemory(wholeAddress(at), bytes);
+                writeU32(wholeAddress(out), at);
                 return NO_ERROR;
             },
         },
@@ -774,7 +775,7 @@ export function createIphlpapiFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const wanted = host.readMemory(guid >>> 0, 16);
+                const wanted = host.readMemory(wholeAddress(guid), 16);
                 const one = interfaces().find(each=>guidBytes(each.guid)
                     .every((byte, i)=>byte === wanted[i]));
                 if (!one)
@@ -783,7 +784,7 @@ export function createIphlpapiFunctions(host){
                 }
                 const out = new Uint8Array(8);
                 new DataView(out.buffer).setBigUint64(0, luidOf(one), true);
-                host.writeMemory(luid >>> 0, out);
+                host.writeMemory(wholeAddress(luid), out);
                 return NO_ERROR;
             },
         },
@@ -809,14 +810,14 @@ export function createIphlpapiFunctions(host){
                 const own = (host.localAddress?.() ?? 0) >>> 0;
                 if (address >>> 24 === LOOPBACK_NET || (address === own && connected()))
                 {
-                    writeU32(out >>> 0, LOOPBACK_INDEX);
+                    writeU32(wholeAddress(out), LOOPBACK_INDEX);
                     return NO_ERROR;
                 }
                 if (!connected())
                 {
                     return ERROR_NETWORK_UNREACHABLE;
                 }
-                writeU32(out >>> 0, INDEX);
+                writeU32(wholeAddress(out), INDEX);
                 return NO_ERROR;
             },
         },
@@ -843,10 +844,10 @@ export function createIphlpapiFunctions(host){
                 const opened = host.openEvent?.('ip-change') ?? 0;
                 if ((handle >>> 0) !== 0)
                 {
-                    writeU32(handle >>> 0, opened);
+                    writeU32(wholeAddress(handle), opened);
                     if (asynchronous.word === 8)
                     {
-                        writeU32((handle >>> 0) + 4, 0);
+                        writeU32(wholeAddress(handle) + 4, 0);
                     }
                 }
                 pendingChanges.set(overlapped >>> 0, opened);
@@ -870,7 +871,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([overlapped])=>{
-                const at = overlapped >>> 0;
+                const at = wholeAddress(overlapped);
                 const handle = pendingChanges.get(at);
                 if (handle === undefined)
                 {
@@ -901,13 +902,13 @@ export function createIphlpapiFunctions(host){
         IpReleaseAddress: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([map])=>((map >>> 0) === 0 || readU32(map >>> 0) !== INDEX
+            handler: ([map])=>((map >>> 0) === 0 || readU32(wholeAddress(map)) !== INDEX
                 ? ERROR_INVALID_PARAMETER : ERROR_NOT_SUPPORTED),
         },
         IpRenewAddress: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([map])=>((map >>> 0) === 0 || readU32(map >>> 0) !== INDEX
+            handler: ([map])=>((map >>> 0) === 0 || readU32(wholeAddress(map)) !== INDEX
                 ? ERROR_INVALID_PARAMETER : ERROR_NOT_SUPPORTED),
         },
     };

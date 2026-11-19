@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * oledlg - the OLE user interface library: the standard dialogs for inserting,
  * linking, converting and pasting embedded objects, and the verb menu of a
@@ -99,7 +101,7 @@ export function createOledlgFunctions(host){
     const pointer = host.pointerSize ?? 4;
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     /**
@@ -145,7 +147,7 @@ export function createOledlgFunctions(host){
         handler: ([object, , menu, position, , , , , cascade])=>{
             if ((cascade >>> 0) !== 0)
             {
-                host.writeMemory(cascade >>> 0, new Uint8Array(pointer));
+                host.writeMemory(wholeAddress(cascade), new Uint8Array(pointer));
             }
             if ((menu >>> 0) !== 0)
             {

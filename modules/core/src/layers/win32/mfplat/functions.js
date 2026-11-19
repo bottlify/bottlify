@@ -24,6 +24,7 @@ import { deserialize, serialize } from './blob.js';
 import { createByteStreams } from './bytestream.js';
 import { createAsync } from './async.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const MF_E_BAD_STARTUP_VERSION = 0xc00d36e3 | 0;
 const MF_E_BUFFERTOOSMALL = 0xc00d36b1 | 0;
@@ -266,7 +267,7 @@ export function createMfplatFunctions(host){
                     {
                         return MF_E_BUFFERTOOSMALL;
                     }
-                    host.writeMemory(buffer >>> 0, bytes);
+                    host.writeMemory(wholeAddress(buffer), bytes);
                     return S_OK;
                 })());
             } },
@@ -283,7 +284,7 @@ export function createMfplatFunctions(host){
                 {
                     return E_POINTER;
                 }
-                const bytes = Uint8Array.from(host.readMemory(buffer >>> 0, size >>> 0));
+                const bytes = Uint8Array.from(host.readMemory(wholeAddress(buffer), size >>> 0));
                 const items = deserialize(bytes, at=>formatGuid(at));
                 if (!items)
                 {

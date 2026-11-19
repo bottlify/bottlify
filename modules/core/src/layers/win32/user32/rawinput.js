@@ -16,6 +16,7 @@
  */
 
 import { readU32, writeU32s } from './structs.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WM_INPUT = 0x00ff;
 const WM_KEYDOWN = 0x0100;
@@ -220,7 +221,7 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                 writeU32s(host, sizeAt, [size]);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(data >>> 0, bytes);
+            host.writeMemory(wholeAddress(data), bytes);
             return size;
         },
     });
@@ -542,7 +543,7 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                         break;
                     }
                     next(true);
-                    host.writeMemory((data >>> 0) + used, bytes);
+                    host.writeMemory(wholeAddress(data) + used, bytes);
                     used += bytes.length;
                     count++;
                 }
@@ -582,7 +583,7 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(data >>> 0, bytes.subarray(0, size));
+                host.writeMemory(wholeAddress(data), bytes.subarray(0, size));
                 return size;
             },
         },

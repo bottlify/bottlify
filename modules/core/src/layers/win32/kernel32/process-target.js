@@ -14,6 +14,7 @@
  */
 
 import { allows } from './access.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** GetCurrentProcess()'s pseudo-handle. */
 export const CURRENT_PROCESS = 0xffffffff;
@@ -41,7 +42,7 @@ const ERROR_INVALID_HANDLE = 6;
  */
 export function createProcessTarget({ kernel, processId }){
     return (handle, right)=>{
-        const value = handle >>> 0;
+        const value = wholeAddress(handle);
         if (value === CURRENT_PROCESS)
         {
             return { here: true };

@@ -24,6 +24,7 @@ import { publishEnumerator } from './enumerator.js';
 import {
     DATADIR_GET, DVASPECT_CONTENT, FORMATETC_SIZE, SLOT, STGMEDIUM_SIZE, TYMED, createOleUtil,
 } from './oleutil.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -399,9 +400,10 @@ export function createClipboardFunctions(env){
                             {
                                 return E_INVALIDARG;
                             }
-                            const copy = env.readMemory(format >>> 0, FORMATETC_SIZE).slice();
+                            const copy = env.readMemory(wholeAddress(format),
+                                FORMATETC_SIZE).slice();
                             copy.fill(0, 4, 8);
-                            env.writeMemory(out >>> 0, copy);
+                            env.writeMemory(wholeAddress(out), copy);
                             return DATA_S_SAMEFORMATETC;
                         },
                     },

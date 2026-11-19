@@ -662,6 +662,17 @@
    ]
   },
   {
+   "path": "tools/checks/check-pointer-arguments.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "The table of each function's address arguments the win32 layer declares to the bridge is what the signature comments say (--write rewrites it)",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-pointer-arguments.test.js"
+   ]
+  },
+  {
    "path": "tools/checks/check-pointer-writes.mjs",
    "category": "checks",
    "kind": "check",

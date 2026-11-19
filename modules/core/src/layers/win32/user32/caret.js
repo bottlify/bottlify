@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The caret: the flashing mark where typing goes, one per thread.
  *
@@ -214,7 +216,7 @@ export function createCaret(host){
                 const SM_CYBORDER = 6;
                 let across = width | 0;
                 let down = height | 0;
-                const handle = bitmap >>> 0;
+                const handle = wholeAddress(bitmap);
                 if (handle > GRAY_CARET)
                 {
                     const size = host.bitmapSize?.(handle) ?? null;
@@ -340,7 +342,7 @@ export function createCaret(host){
                 const view = new DataView(bytes.buffer);
                 view.setInt32(0, state.x, true);
                 view.setInt32(4, state.y, true);
-                host.writeMemory(point >>> 0, bytes);
+                host.writeMemory(wholeAddress(point), bytes);
                 return 1;
             },
         },

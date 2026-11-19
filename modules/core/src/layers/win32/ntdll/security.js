@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The Rtl forms of the SID, ACL and security descriptor calls, over advapi32's.
  *
@@ -132,12 +134,12 @@ export function createSecurityFunctions(host){
         }
     }
     /** @param {number} at */
-    const dword = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+    const dword = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} at */
     const word = at=>dword(at) & 0xffff;
     /** @param {number} at @param {number} value */
-    const putDword = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
+    const putDword = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(value & 0xff,
         value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
 
     /**
@@ -166,7 +168,7 @@ export function createSecurityFunctions(host){
             const sid = (control & SE_SELF_RELATIVE) === 0 || value === 0 ? value
                 : (descriptor + value) >>> 0;
             putDword(out, sid);
-            host.writeMemory(defaulted >>> 0, Uint8Array.of(sid !== 0
+            host.writeMemory(wholeAddress(defaulted), Uint8Array.of(sid !== 0
                 && (control & defaultedBit) !== 0 ? 1 : 0));
             return STATUS_SUCCESS;
         },

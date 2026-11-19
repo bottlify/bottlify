@@ -32,6 +32,7 @@
  */
 
 import { HAS_FIBER_DATA, TEB } from './teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Where each word of a fiber's record is. The first is the program's: GetFiberData reads it. */
 const FIBER = Object.freeze({
@@ -264,7 +265,7 @@ export function createFiberFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fiber])=>{
-                const at = fiber >>> 0;
+                const at = wholeAddress(fiber);
                 if (at !== 0 && at === current())
                 {
                     return host.exitThread(1);
@@ -303,7 +304,7 @@ export function createFiberFunctions(host){
              * @param {{ restingStack: number, hostReturn: number }} [frame]
              */
             handler: ([target], frame)=>{
-                const to = target >>> 0;
+                const to = wholeAddress(target);
                 const teb = host.teb() >>> 0;
                 const from = current();
                 if (to === 0 || teb === 0 || !frame)

@@ -27,6 +27,7 @@ import { ATTRIBUTES_SLOT, IID_IMFATTRIBUTES, MATCH, MF_E_ATTRIBUTENOTFOUND, MF_E
     createAttributes, matches, sameItem } from './attributes.js';
 import { E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, E_UNEXPECTED, S_FALSE, S_OK, drive }
     from './kit.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const MF_E_BUFFERTOOSMALL = 0xc00d36b1 | 0;
 export const MF_E_UNSUPPORTED_REPRESENTATION = 0xc00d36b7 | 0;
@@ -810,7 +811,7 @@ export function createMfObjects(kit, host){
             }
             if (!host.propVariant)
             {
-                host.writeMemory(out >>> 0, new Uint8Array(16));
+                host.writeMemory(wholeAddress(out), new Uint8Array(16));
                 return S_OK;
             }
             return host.propVariant.copy(out >>> 0, object.state.value);

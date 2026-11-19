@@ -21,6 +21,7 @@ import { SYNCHRONIZE, allows } from './access.js';
 import { floatGroupsOf, writeFloatGroups } from './fpu-context.js';
 import { CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup }
     from './debug-registers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -253,7 +254,7 @@ export function createSyncFunctions(host){
     const sectionTraps = {
         /** @param {number[]} args */
         enter: ([pointer])=>{
-            const section = pointer >>> 0;
+            const section = wholeAddress(pointer);
             const me = host.currentThread().id;
             tally(COUNTERS.ENTERED);
             if (addLockCount(section, 1) === 0)
@@ -271,7 +272,7 @@ export function createSyncFunctions(host){
         },
         /** @param {number[]} args */
         leave: ([pointer])=>{
-            const section = pointer >>> 0;
+            const section = wholeAddress(pointer);
             tally(COUNTERS.LEFT);
             const recursion = readI32(section + cs.RECURSION_COUNT) - 1;
             writeI32(section + cs.RECURSION_COUNT, recursion);
@@ -285,7 +286,7 @@ export function createSyncFunctions(host){
         },
         /** @param {number[]} args */
         tryEnter: ([pointer])=>{
-            const section = pointer >>> 0;
+            const section = wholeAddress(pointer);
             const me = host.currentThread().id;
             const at = section + cs.LOCK_COUNT;
             const free = host.compareExchangeU32 === undefined
@@ -694,7 +695,7 @@ export function createSyncFunctions(host){
             {
                 const bytes = new Uint8Array(8);
                 new DataView(bytes.buffer).setBigInt64(0, value, true);
-                host.writeMemory(address >>> 0, bytes);
+                host.writeMemory(wholeAddress(address), bytes);
             }
         };
         write(creation, now);
@@ -928,7 +929,7 @@ export function createSyncFunctions(host){
                         // DebugInfo, the section's first field, which initialise set to -1.
                         const field = new Uint8Array(handleSize);
                         new DataView(field.buffer).setUint32(0, debug >>> 0, true);
-                        host.writeMemory(pointer >>> 0, field);
+                        host.writeMemory(wholeAddress(pointer), field);
                     }
                 }
                 return 1;
@@ -980,7 +981,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 host.critical.forget(address);
                 host.writeMemory(address, new Uint8Array(cs.SIZE));
                 writeI32(address + cs.LOCK_COUNT, CS_UNLOCKED);
@@ -1040,7 +1041,7 @@ export function createSyncFunctions(host){
                     return WAIT_FAILED;
                 }
                 const view = new DataView(
-                    host.readMemory(handles >>> 0, total * handleSize).slice().buffer);
+                    host.readMemory(wholeAddress(handles), total * handleSize).slice().buffer);
                 /** @type {any[]} */
                 const objects = [];
                 /** Where each of `objects` sits in the caller's handle array. */
@@ -1092,7 +1093,7 @@ export function createSyncFunctions(host){
                 // Zero is a poll: it asks whether the set is ready now and
                 // never blocks, so a program checking is not stopped by the
                 // question.
-                const wait = timeout >>> 0;
+                const wait = wholeAddress(timeout);
                 // An object another process of the run holds is answered there:
                 // its stand-in here says nothing of whether it is signalled.
                 if (wait === 0 && !waitAll && objects.some(target=>target.remote))
@@ -1230,7 +1231,7 @@ export function createSyncFunctions(host){
                         const bytes = new Uint8Array(8);
                         new DataView(bytes.buffer).setBigUint64(0,
                             BigInt(Math.round(ms * 10000)), true);
-                        host.writeMemory(address >>> 0, bytes);
+                        host.writeMemory(wholeAddress(address), bytes);
                     }
                 };
                 write(idle, total - busy);
@@ -1311,7 +1312,7 @@ export function createSyncFunctions(host){
                 }
                 const bytes = new Uint8Array(handleSize + 8);
                 new DataView(bytes.buffer).setUint32(0, processors.threadMask(thread) >>> 0, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -1335,7 +1336,7 @@ export function createSyncFunctions(host){
                     return 0xffffffff;
                 }
                 const previous = thread.idealProcessor ?? 0;
-                const asked = ideal >>> 0;
+                const asked = wholeAddress(ideal);
                 if (asked === MAXIMUM_PROCESSORS)
                 {
                     return previous;
@@ -1365,7 +1366,8 @@ export function createSyncFunctions(host){
             handler: ([handle, out])=>{
                 // The flags it asks for travel in the structure, and the rest comes back.
                 const child = onChildThread(handle, 'GetThreadContext',
-                    [{ inout: host.readMemory(out >>> 0, CONTEXT_BYTES).slice() }], [out >>> 0]);
+                    [{ inout: host.readMemory(wholeAddress(out),
+                        CONTEXT_BYTES).slice() }], [out >>> 0]);
                 if (child !== null)
                 {
                     return child;
@@ -1386,11 +1388,12 @@ export function createSyncFunctions(host){
                 // from the context its exception carries: that is its context.
                 if (!own && handleSize === 4 && thread.debugStop)
                 {
-                    const wanted = host.readMemory(out >>> 0, CONTEXT_BYTES).slice();
-                    const record = host.readMemory(thread.debugStop >>> 0, CONTEXT_BYTES).slice();
+                    const wanted = host.readMemory(wholeAddress(out), CONTEXT_BYTES).slice();
+                    const record = host.readMemory(wholeAddress(thread.debugStop),
+                        CONTEXT_BYTES).slice();
                     record.set(wanted.subarray(0, 4), 0);
                     mergeContextGroups(wanted, record);
-                    host.writeMemory(out >>> 0, wanted);
+                    host.writeMemory(wholeAddress(out), wanted);
                     return 1;
                 }
                 const answer = ()=>{
@@ -1440,7 +1443,7 @@ export function createSyncFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, context])=>{
                 const child = onChildThread(handle, 'SetThreadContext',
-                    [{ in: host.readMemory(context >>> 0, CONTEXT_BYTES).slice() }]);
+                    [{ in: host.readMemory(wholeAddress(context), CONTEXT_BYTES).slice() }]);
                 if (child !== null)
                 {
                     return child;
@@ -1455,17 +1458,18 @@ export function createSyncFunctions(host){
                 // exception's context once continued: that is what is replaced.
                 if (thread !== host.currentThread() && handleSize === 4 && thread.debugStop)
                 {
-                    const record = host.readMemory(thread.debugStop >>> 0, CONTEXT_BYTES).slice();
+                    const record = host.readMemory(wholeAddress(thread.debugStop),
+                        CONTEXT_BYTES).slice();
                     mergeContextGroups(record,
-                        host.readMemory(context >>> 0, CONTEXT_BYTES).slice());
-                    host.writeMemory(thread.debugStop >>> 0, record);
+                        host.readMemory(wholeAddress(context), CONTEXT_BYTES).slice());
+                    host.writeMemory(wholeAddress(thread.debugStop), record);
                     return 1;
                 }
                 // The debug registers are the thread's to keep, its own
                 // included (`debug-registers.js`); a record that names nothing
                 // else is done once they are kept.
                 const head = handleSize === 4
-                    ? host.readMemory(context >>> 0, CONTEXT_DEBUG_BYTES) : null;
+                    ? host.readMemory(wholeAddress(context), CONTEXT_DEBUG_BYTES) : null;
                 const headFlags = head === null ? 0 : new DataView(head.buffer, head.byteOffset,
                     CONTEXT_DEBUG_BYTES).getUint32(0, true);
                 const debug = head === null ? null : debugGroupOf(head, headFlags);
@@ -1486,7 +1490,7 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_ACCESS_DENIED);
                     return 0;
                 }
-                const at = context >>> 0;
+                const at = wholeAddress(context);
                 const apply = ()=>{
                     replaceContext(thread, at);
                     if (debug !== null)
@@ -1549,7 +1553,7 @@ export function createSyncFunctions(host){
                     bytes[6] = (limit >>> 16 & 0xf) | 0x40 | (pages ? 0x80 : 0);
                     bytes[7] = base >>> 24;
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -1609,7 +1613,7 @@ export function createSyncFunctions(host){
                     // A section released while it was suspended may be its now.
                     host.critical.resumed(thread);
                 }
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 

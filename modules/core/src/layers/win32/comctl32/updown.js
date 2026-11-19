@@ -50,6 +50,7 @@ import {
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { EVENT_OBJECT_VALUECHANGE, CHILDID_SELF, raiseEvent } from './winevents.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const UPDOWN_CLASS = 'msctls_updown32';
@@ -467,7 +468,7 @@ export function createUpDownProcedure(host, tk, subclassing){
     const buddyMessage = ([hwnd, message, wParam, lParam, id, data])=>{
         const { call, callerThread } = /** @type {Subclassing} */ (subclassing);
         const control = host.live(data);
-        const key = wParam >>> 0;
+        const key = wholeAddress(wParam);
         if ((message >>> 0) === WM_KEYDOWN && control && (key === VK_UP || key === VK_DOWN))
         {
             return after(act(control, key === VK_UP ? 1 : -1, callerThread?.()), ()=>0);

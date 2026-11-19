@@ -25,6 +25,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WM_CREATE = 0x0001;
 const WM_SETTEXT = 0x000c;
@@ -184,7 +185,7 @@ export function writeText(memory, address, text, room, unicode){
         return 0;
     }
     const clipped = text.slice(0, room - 1);
-    memory.writeMemory(address >>> 0, textBytes(clipped, unicode));
+    memory.writeMemory(wholeAddress(address), textBytes(clipped, unicode));
     return clipped.length;
 }
 
@@ -302,7 +303,7 @@ export function translated(memory, message, toUnicode, call, style = undefined){
             // many of its characters, and copied over unterminated, as
             // EM_GETLINE leaves it; the answer counts what the caller's
             // buffer took.
-            const head = memory.readMemory(message.lParam >>> 0, 2);
+            const head = memory.readMemory(wholeAddress(message.lParam), 2);
             const room = head[0] | head[1] << 8;
             const size = room * 2 + 2;
             return lending(memory, size, ()=>{
@@ -319,7 +320,7 @@ export function translated(memory, message, toUnicode, call, style = undefined){
                     : decodeAnsi(raw);
                 const bytes = textBytes(text.slice(0, room), fromUnicode);
                 const written = bytes.subarray(0, bytes.length - (fromUnicode ? 2 : 1));
-                memory.writeMemory(message.lParam >>> 0, written);
+                memory.writeMemory(wholeAddress(message.lParam), written);
                 return fromUnicode ? written.length / 2 : written.length;
             }));
         }
@@ -396,7 +397,7 @@ function createStruct(memory, address, fromUnicode, toUnicode){
     const { NAME: CREATESTRUCT_NAME, CLASS: CREATESTRUCT_CLASS, SIZE: CREATESTRUCT_SIZE,
         PARAMS: CREATESTRUCT_PARAMS, EXSTYLE: CREATESTRUCT_EXSTYLE }
         = wide ? CREATESTRUCT64 : CREATESTRUCT32;
-    const header = memory.readMemory(address >>> 0, CREATESTRUCT_SIZE);
+    const header = memory.readMemory(wholeAddress(address), CREATESTRUCT_SIZE);
     const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
     const name = view.getUint32(CREATESTRUCT_NAME, true);
     const cls = view.getUint32(CREATESTRUCT_CLASS, true);

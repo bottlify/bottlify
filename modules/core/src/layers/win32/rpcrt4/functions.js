@@ -13,6 +13,7 @@
 import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
 import { createMidl } from './midl.js';
 import { createRuntime } from './runtime.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The RPC statuses. */
 const RPC_S_OK = 0;
@@ -65,7 +66,7 @@ export function createRpcFunctions(host){
     const uuidFromString = (spelled, out)=>{
         if (spelled === null)
         {
-            host.writeMemory(out >>> 0, new Uint8Array(GUID_SIZE));
+            host.writeMemory(wholeAddress(out), new Uint8Array(GUID_SIZE));
             return RPC_S_OK;
         }
         const bytes = spelled.length === UUID_STRING_LENGTH ? parseGuid(`{${spelled}}`) : null;
@@ -73,7 +74,7 @@ export function createRpcFunctions(host){
         {
             return RPC_S_INVALID_STRING_UUID;
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return RPC_S_OK;
     };
 
@@ -84,7 +85,7 @@ export function createRpcFunctions(host){
     const uuidToString = (uuid, out, wide)=>{
         const bytes = (uuid >>> 0) === 0 || !host.readMemory
             ? new Uint8Array(GUID_SIZE)
-            : host.readMemory(uuid >>> 0, GUID_SIZE);
+            : host.readMemory(wholeAddress(uuid), GUID_SIZE);
         const codes = [...formatGuid(bytes).slice(1, -1).toLowerCase(), '\0']
             .map(c=>c.charCodeAt(0));
         const encoded = wide ? new Uint8Array(Uint16Array.from(codes).buffer)
@@ -95,7 +96,7 @@ export function createRpcFunctions(host){
             return RPC_S_OUT_OF_MEMORY;
         }
         host.writeMemory(at, encoded);
-        writeU32(out >>> 0, at);
+        writeU32(wholeAddress(out), at);
         return RPC_S_OK;
     };
 
@@ -105,13 +106,13 @@ export function createRpcFunctions(host){
         {
             return RPC_S_OK;
         }
-        const held = new DataView(host.readMemory(pointer >>> 0, 4).slice().buffer)
+        const held = new DataView(host.readMemory(wholeAddress(pointer), 4).slice().buffer)
             .getUint32(0, true);
         if (held !== 0)
         {
             host.free?.(held);
         }
-        writeU32(pointer >>> 0, 0);
+        writeU32(wholeAddress(pointer), 0);
         return RPC_S_OK;
     };
 
@@ -166,7 +167,7 @@ export function createRpcFunctions(host){
                 crypto.getRandomValues(bytes);
                 bytes[7] = (bytes[7] & 0x0f) | 0x40;
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return RPC_S_OK;
             },
         },
@@ -197,7 +198,7 @@ export function createRpcFunctions(host){
                 view.setUint16(6, Number((ticks >> 48n) & 0x0fffn) | 0x1000, true);
                 bytes[8] = (bytes[8] & 0x3f) | 0x80;
                 bytes[10] |= 0x01;
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return RPC_S_OK;
             },
         },

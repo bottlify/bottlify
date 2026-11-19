@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The DirectPlay session object. Unbound it answers DPERR_UNINITIALIZED, as
  * Windows's does. It knows one connection, TCP/IP, and once bound to it hosts
@@ -123,12 +125,12 @@ const nameBytes = (at, short, long, wide)=>{
  * @returns {import('../ole32/objects.js').ComClassDefinition}
  */
 export function sessionDefinition(host, revisions){
-    const u32 = (/** @type {number} */ at)=>view(host.readMemory(at >>> 0, 4)).getUint32(0, true);
+    const u32 = (/** @type {number} */ at)=>view(host.readMemory(wholeAddress(at), 4)).getUint32(0, true);
     /** @param {number} at @param {number} value */
     const put32 = (at, value)=>{
         const bytes = new Uint8Array(4);
         view(bytes).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at @param {boolean} wide */
     const readString = (at, wide)=>{
@@ -182,7 +184,7 @@ export function sessionDefinition(host, revisions){
         {
             return DPERR_BUFFERTOOSMALL;
         }
-        host.writeMemory(data >>> 0, bytes);
+        host.writeMemory(wholeAddress(data), bytes);
         return DP_OK;
     };
     /** Runs a guest callback per item, stopping when it answers FALSE. */
@@ -230,7 +232,7 @@ export function sessionDefinition(host, revisions){
         v.setUint32(16, 0x10, true);
         v.setUint32(28, 0x10, true);
         v.setUint32(36, 5000, true);
-        host.writeMemory(at >>> 0, caps);
+        host.writeMemory(wholeAddress(at), caps);
         return DP_OK;
     };
     /** @param {number} name a DPNAME, or 0 @param {boolean} wide */
@@ -240,7 +242,7 @@ export function sessionDefinition(host, revisions){
     });
     /** A session description as kept: its strings dropped, its name aside. */
     const keepSession = (/** @type {number} */ desc, /** @type {boolean} */ wide)=>{
-        const kept = host.readMemory(desc >>> 0, DPSESSIONDESC2_SIZE).slice();
+        const kept = host.readMemory(wholeAddress(desc), DPSESSIONDESC2_SIZE).slice();
         sessionName = readString(view(kept).getUint32(48, true), wide);
         view(kept).setUint32(48, 0, true);
         view(kept).setUint32(52, 0, true);
@@ -279,7 +281,7 @@ export function sessionDefinition(host, revisions){
             const id = nextPlayer++;
             players.set(id, {
                 ...readName(name, wide),
-                data: data && size ? host.readMemory(data >>> 0, size >>> 0).slice()
+                data: data && size ? host.readMemory(wholeAddress(data), size >>> 0).slice()
                     : new Uint8Array(0),
             });
             put32(out, id);
@@ -322,7 +324,7 @@ export function sessionDefinition(host, revisions){
             {
                 return DPERR_INVALIDPLAYER;
             }
-            player.data = data && size ? host.readMemory(data >>> 0, size >>> 0).slice()
+            player.data = data && size ? host.readMemory(wholeAddress(data), size >>> 0).slice()
                 : new Uint8Array(0);
             return DP_OK;
         },
@@ -376,7 +378,7 @@ export function sessionDefinition(host, revisions){
             {
                 return DPERR_INVALIDPLAYER;
             }
-            const bytes = host.readMemory(data >>> 0, size >>> 0).slice();
+            const bytes = host.readMemory(wholeAddress(data), size >>> 0).slice();
             const targets = to === DPID_ALLPLAYERS
                 ? [...players.keys()].filter(id=>id !== (from >>> 0)) : [to >>> 0];
             for (const target of targets)

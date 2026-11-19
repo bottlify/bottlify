@@ -15,6 +15,7 @@
 import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { readGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -159,21 +160,21 @@ export function createShellExtras(host, parts){
         return /** @type {number} */ (await target.handler(args)) >>> 0;
     };
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, dword(value));
+            host.writeMemory(wholeAddress(address), dword(value));
         }
     };
     /** @param {number} address */
     const wide = address=>((address >>> 0) === 0 || !host.readWideString ? null
-        : host.readWideString(address >>> 0, 0x8000));
+        : host.readWideString(wholeAddress(address), 0x8000));
     /** @param {number} address */
     const narrow = address=>((address >>> 0) === 0 ? null
-        : host.readCString(address >>> 0, 0x8000));
+        : host.readCString(wholeAddress(address), 0x8000));
 
     /**
      * A block of guest memory for the length of `body`; `failed` when there
@@ -225,7 +226,7 @@ export function createShellExtras(host, parts){
                 {
                     return room & 0xffff;
                 }
-                host.writeMemory(buffer >>> 0, host.readMemory(at, needed * unit).slice());
+                host.writeMemory(wholeAddress(buffer), host.readMemory(at, needed * unit).slice());
                 return ((1 << 16) | (needed & 0xffff)) >>> 0;
             }, room & 0xffff);
         },
@@ -275,7 +276,7 @@ export function createShellExtras(host, parts){
             {
                 return fromWin32(ERROR_PATH_NOT_FOUND);
             }
-            host.writeMemory(path >>> 0, isWide ? utf16z(full)
+            host.writeMemory(wholeAddress(path), isWide ? utf16z(full)
                 : Uint8Array.from(`${full}\0`, c=>c.charCodeAt(0) & 0xff));
             return S_OK;
         },
@@ -388,7 +389,7 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(key >>> 0, found.key);
+                host.writeMemory(wholeAddress(key), found.key);
                 return S_OK;
             } },
         /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
@@ -410,7 +411,7 @@ export function createShellExtras(host, parts){
                 {
                     bytes.set(found.bytes);
                 }
-                host.writeMemory(value >>> 0, bytes);
+                host.writeMemory(wholeAddress(value), bytes);
                 return S_OK;
             } },
         /** HRESULT SetValue(REFPROPERTYKEY key, REFPROPVARIANT propvar) */
@@ -421,9 +422,9 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                const bytes = host.readMemory(value >>> 0, 16).slice();
+                const bytes = host.readMemory(wholeAddress(value), 16).slice();
                 const type = bytes[0] | bytes[1] << 8;
-                const stored = { key: host.readMemory(key >>> 0, 20).slice(), bytes };
+                const stored = { key: host.readMemory(wholeAddress(key), 20).slice(), bytes };
                 if (type === VT_LPWSTR)
                 {
                     object.state.values.set(keyOf(key),
@@ -485,7 +486,7 @@ export function createShellExtras(host, parts){
                 }
                 name = `${base} (${n})${extension}`;
             }
-            host.writeMemory(out >>> 0, isWide ? utf16z(name)
+            host.writeMemory(wholeAddress(out), isWide ? utf16z(name)
                 : Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0) & 0xff));
             return 1;
         },
@@ -681,7 +682,7 @@ export function createShellExtras(host, parts){
                 // off, file names shown with their case.
                 view.setUint16(4, 0x0002 | 0x0004, true);
                 view.setUint32(8, 0, true);
-                host.writeMemory(state >>> 0, bytes);
+                host.writeMemory(wholeAddress(state), bytes);
                 return 0;
             },
         },

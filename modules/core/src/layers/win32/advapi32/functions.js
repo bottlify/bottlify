@@ -36,6 +36,7 @@ import { createNamedSecurityFunctions } from './named-security.js';
 import { createSecurityFunctions } from './security.js';
 import { createLsaFunctions } from './lsa.js';
 import { isTextUnicode } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -693,7 +694,7 @@ export function createRegistryFunctions(host){
             {
                 return STATUS.ACCESS_VIOLATION;
             }
-            host.writeMemory(buffer >>> 0,
+            host.writeMemory(wholeAddress(buffer),
                 answer.bytes.subarray(0, Math.min(length >>> 0, answer.bytes.length)));
             return (length >>> 0) < answer.bytes.length ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS;
         };
@@ -740,7 +741,7 @@ export function createRegistryFunctions(host){
             }
             const made = found ? { key: found, created: false }
                 : hive.create(named.base, named.path);
-            writeDword(out >>> 0, allocate(made.key));
+            writeDword(wholeAddress(out), allocate(made.key));
             writeDwordIf(disposition >>> 0,
                 made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
             return STATUS.SUCCESS;
@@ -792,7 +793,7 @@ export function createRegistryFunctions(host){
                     argBytes: 24,
                     handler: onHeld((key, [, name, , type, data, size])=>{
                         const bytes = (size >>> 0) === 0 ? new Uint8Array(0)
-                            : host.readMemory(data >>> 0, size >>> 0).slice();
+                            : host.readMemory(wholeAddress(data), size >>> 0).slice();
                         // The hive keeps a string in the ANSI page, as a W call stores it.
                         hive.setValue(key, counted(name >>> 0), type >>> 0,
                             STRING_TYPES.has(type >>> 0) ? narrowed(bytes) : bytes);
@@ -2120,14 +2121,14 @@ export function createRegistryFunctions(host){
                     return 0;
                 }
                 const needed = USER_NAME.length + 1;
-                if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
+                if ((buffer >>> 0) === 0 || readDword(wholeAddress(size)) < needed)
                 {
-                    writeDword(size >>> 0, needed);
+                    writeDword(wholeAddress(size), needed);
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
                 writeText(buffer >>> 0, USER_NAME);
-                writeDword(size >>> 0, needed);
+                writeDword(wholeAddress(size), needed);
                 return 1;
             },
         },
@@ -2142,14 +2143,14 @@ export function createRegistryFunctions(host){
                     return 0;
                 }
                 const needed = USER_NAME.length + 1;
-                if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
+                if ((buffer >>> 0) === 0 || readDword(wholeAddress(size)) < needed)
                 {
-                    writeDword(size >>> 0, needed);
+                    writeDword(wholeAddress(size), needed);
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, widened(encodeAnsi(`${USER_NAME}\0`)));
-                writeDword(size >>> 0, needed);
+                host.writeMemory(wholeAddress(buffer), widened(encodeAnsi(`${USER_NAME}\0`)));
+                writeDword(wholeAddress(size), needed);
                 return 1;
             },
         },
@@ -2170,16 +2171,16 @@ export function createRegistryFunctions(host){
             handler: ([buffer, size, result])=>{
                 const length = Math.max(size | 0, 0);
                 const asked = (result >>> 0) === 0 ? undefined
-                    : new DataView(host.readMemory(result >>> 0, 4).slice().buffer)
+                    : new DataView(host.readMemory(wholeAddress(result), 4).slice().buffer)
                         .getUint32(0, true);
                 const answer = (buffer >>> 0) === 0
                     ? { unicode: false, passed: 0 }
-                    : isTextUnicode(host.readMemory(buffer >>> 0, length).slice(), asked);
+                    : isTextUnicode(host.readMemory(wholeAddress(buffer), length).slice(), asked);
                 if ((result >>> 0) !== 0)
                 {
                     const out = new Uint8Array(4);
                     new DataView(out.buffer).setUint32(0, answer.passed, true);
-                    host.writeMemory(result >>> 0, out);
+                    host.writeMemory(wholeAddress(result), out);
                 }
                 return answer.unicode ? 1 : 0;
             },
@@ -2235,7 +2236,7 @@ export function createRegistryFunctions(host){
                 const bytes = new Uint8Array(size);
                 bytes[0] = 1;
                 bytes[1] = wanted;
-                bytes.set(host.readMemory(authority >>> 0, 6), 2);
+                bytes.set(host.readMemory(wholeAddress(authority), 6), 2);
                 for (let at = 0; at < wanted; at++)
                 {
                     const value = rest[at] >>> 0;
@@ -2243,7 +2244,7 @@ export function createRegistryFunctions(host){
                         value >>> 16 & 0xff, value >>> 24 & 0xff], 8 + at * 4);
                 }
                 host.writeMemory(sid, bytes);
-                writeDword(out >>> 0, sid);
+                writeDword(wholeAddress(out), sid);
                 return 1;
             },
         },
@@ -2473,7 +2474,7 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeDword(result >>> 0, HKEY_CURRENT_USER);
+                writeDword(wholeAddress(result), HKEY_CURRENT_USER);
                 return ERROR_SUCCESS;
             },
         },
@@ -2576,7 +2577,7 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_INVALID_HANDLE;
                 }
-                const kinds = filter >>> 0;
+                const kinds = wholeAddress(filter);
                 if ((kinds & ~(REG_NOTIFY_CHANGE_ALL | REG_NOTIFY_THREAD_AGNOSTIC)) !== 0
                     || (kinds & REG_NOTIFY_CHANGE_ALL) === 0)
                 {
@@ -2621,12 +2622,12 @@ export function createRegistryFunctions(host){
                     return ERROR_INVALID_HANDLE;
                 }
                 const named = (subKey >>> 0) === 0 ? key
-                    : hive.open(key, readWideText(subKey >>> 0) ?? '');
+                    : hive.open(key, readWideText(wholeAddress(subKey)) ?? '');
                 if (!named)
                 {
                     return ERROR_FILE_NOT_FOUND;
                 }
-                const to = (newName >>> 0) === 0 ? null : readWideText(newName >>> 0);
+                const to = (newName >>> 0) === 0 ? null : readWideText(wholeAddress(newName));
                 if (!to || to.includes('\\'))
                 {
                     return ERROR_INVALID_PARAMETER;

@@ -24,6 +24,7 @@
  */
 
 import { STATUS } from './status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The first word of a table, as Windows writes it: 'Atom'. */
 const SIGNATURE = 0x6d6f7441;
@@ -121,13 +122,13 @@ export function createAtomTableFunctions(host){
     const putAtom = (at, atom)=>{
         if (at !== 0)
         {
-            host.writeMemory(at >>> 0, u16(atom));
+            host.writeMemory(wholeAddress(at), u16(atom));
         }
     };
 
     /** @param {number} pointer @returns {ReturnType<typeof parseAtomName>} */
     const nameAt = pointer=>{
-        const raw = pointer >>> 0;
+        const raw = wholeAddress(pointer);
         return parseAtomName(raw < 0x10000 ? raw : host.readWideString(raw, MAX_READ_BYTES));
     };
 
@@ -239,7 +240,7 @@ export function createAtomTableFunctions(host){
 
     /** @param {number} at @returns {number} */
     const readU32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
@@ -260,7 +261,7 @@ export function createAtomTableFunctions(host){
                 }
                 host.writeMemory(block, u32(SIGNATURE));
                 tables.set(block, new Map());
-                host.writeMemory(out >>> 0, u32(block));
+                host.writeMemory(wholeAddress(out), u32(block));
                 return STATUS.SUCCESS;
             },
         },
@@ -399,11 +400,11 @@ export function createAtomTableFunctions(host){
                 }
                 if (refCount !== 0)
                 {
-                    host.writeMemory(refCount >>> 0, u32(/** @type {number} */ (found.references)));
+                    host.writeMemory(wholeAddress(refCount), u32(/** @type {number} */ (found.references)));
                 }
                 if (pinCount !== 0)
                 {
-                    host.writeMemory(pinCount >>> 0, u32(found.pinned ? 1 : 0));
+                    host.writeMemory(wholeAddress(pinCount), u32(found.pinned ? 1 : 0));
                 }
                 if (name === 0 || nameLength === 0)
                 {
@@ -412,12 +413,12 @@ export function createAtomTableFunctions(host){
                 const room = readU32(nameLength);
                 if (room < 2)
                 {
-                    host.writeMemory(nameLength >>> 0, u32(found.name.length * 2));
+                    host.writeMemory(wholeAddress(nameLength), u32(found.name.length * 2));
                     return STATUS.BUFFER_TOO_SMALL;
                 }
                 const text = found.name.slice(0, Math.floor(room / 2) - 1);
-                host.writeMemory(name >>> 0, utf16(`${text}\0`));
-                host.writeMemory(nameLength >>> 0, u32(text.length * 2));
+                host.writeMemory(wholeAddress(name), utf16(`${text}\0`));
+                host.writeMemory(wholeAddress(nameLength), u32(text.length * 2));
                 return STATUS.SUCCESS;
             },
         },
@@ -488,7 +489,7 @@ export function createAtomTableFunctions(host){
                 head.set(u16(/** @type {number} */ (found.references)), 0);
                 head.set(u16(found.pinned ? 1 : 0), 2);
                 head.set(u16(found.name.length * 2), 4);
-                host.writeMemory(buffer >>> 0, head);
+                host.writeMemory(wholeAddress(buffer), head);
                 if (size <= BASIC_SIZE)
                 {
                     return STATUS.BUFFER_TOO_SMALL;
@@ -498,7 +499,8 @@ export function createAtomTableFunctions(host){
                 host.writeMemory((buffer + 4) >>> 0, u16(text.length * 2));
                 if (returned !== 0)
                 {
-                    host.writeMemory(returned >>> 0, u32(BASIC_NAME_AT + (text.length + 1) * 2));
+                    host.writeMemory(wholeAddress(returned),
+                        u32(BASIC_NAME_AT + (text.length + 1) * 2));
                 }
                 return STATUS.SUCCESS;
             },
@@ -516,7 +518,8 @@ export function createAtomTableFunctions(host){
         {
             return { status: STATUS.INVALID_PARAMETER };
         }
-        const bytes = host.readMemory(pointer >>> 0, Math.min(length >>> 0, MAX_READ_BYTES) & ~1);
+        const bytes = host.readMemory(wholeAddress(pointer), Math.min(length >>> 0,
+            MAX_READ_BYTES) & ~1);
         let text = '';
         for (let at = 0; at + 1 < bytes.length; at += 2)
         {

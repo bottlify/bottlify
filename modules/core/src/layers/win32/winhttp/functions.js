@@ -23,6 +23,7 @@
  */
 
 import { crackUrl } from '../wininet/url.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
@@ -72,17 +73,17 @@ const MAX_URL = 0x8000;
 export function createWinhttpFunctions(host){
     /** @param {number} address */
     const dword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     };
     /** @param {number} address @param {number} value */
     const setDword = (address, value)=>{
         const out = new Uint8Array(4);
         new DataView(out.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, out);
+        host.writeMemory(wholeAddress(address), out);
     };
     /** @param {number} address @param {number} value */
-    const setWord = (address, value)=>host.writeMemory(address >>> 0,
+    const setWord = (address, value)=>host.writeMemory(wholeAddress(address),
         Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
     /** @param {number} code @param {number} [value] */
     const fail = (code, value = 0)=>{
@@ -98,7 +99,7 @@ export function createWinhttpFunctions(host){
         let text = '';
         for (let at = 0; at < (count || MAX_URL); at++)
         {
-            const bytes = host.readMemory((address >>> 0) + at * 2, 2);
+            const bytes = host.readMemory(wholeAddress(address) + at * 2, 2);
             const unit = bytes[0] | bytes[1] << 8;
             if (unit === 0 && count === 0)
             {
@@ -116,7 +117,7 @@ export function createWinhttpFunctions(host){
             out[i * 2] = text.charCodeAt(i) & 0xff;
             out[i * 2 + 1] = text.charCodeAt(i) >>> 8;
         }
-        host.writeMemory(address >>> 0, out);
+        host.writeMemory(wholeAddress(address), out);
     };
 
     /**
@@ -192,7 +193,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(config >>> 0, new Uint8Array(16));
+                host.writeMemory(wholeAddress(config), new Uint8Array(16));
                 return 1;
             },
         },
@@ -210,7 +211,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(info >>> 0, new Uint8Array(12));
+                host.writeMemory(wholeAddress(info), new Uint8Array(12));
                 setDword(info, ACCESS_TYPE_NO_PROXY);
                 return 1;
             },
@@ -327,7 +328,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 return fail(ERROR_WINHTTP_AUTODETECTION_FAILED);
             },
         },
@@ -346,7 +347,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const words = new DataView(host.readMemory(time >>> 0, 16).slice().buffer);
+                const words = new DataView(host.readMemory(wholeAddress(time), 16).slice().buffer);
                 const word = (/** @type {number} */ at)=>words.getUint16(at * 2, true);
                 const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
                 const date = `${HTTP_DAYS[word(2) % 7]}, ${two(word(3))}`
@@ -357,7 +358,7 @@ export function createWinhttpFunctions(host){
                 {
                     bytes[i * 2] = text.charCodeAt(i);
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -415,7 +416,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(ERROR_WINHTTP_UNRECOGNIZED_SCHEME);
                 }
-                const base = components >>> 0;
+                const base = wholeAddress(components);
                 setDword(base + URL.nScheme, scheme);
                 setWord(base + URL.port, cracked.port);
                 for (const [part, pointerAt, lengthAt] of /** @type {const} */ ([
@@ -648,7 +649,7 @@ export function createDhcpFunctions(host){
             handler: ([version])=>{
                 if ((version >>> 0) !== 0)
                 {
-                    host.writeMemory(version >>> 0, Uint8Array.of(2, 0, 0, 0));
+                    host.writeMemory(wholeAddress(version), Uint8Array.of(2, 0, 0, 0));
                 }
                 return 0;
             },

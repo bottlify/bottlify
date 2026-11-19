@@ -25,6 +25,7 @@
 import { createDeviceCalls } from '../d3dx9/device.js';
 import { canonicalGuid, formatGuid, parseGuid } from '../ole32/guid.js';
 import { IID_IUNKNOWN, createComObject } from '../ole32/objects.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const S_OK = 0;
 export const S_FALSE = 1;
@@ -111,30 +112,30 @@ export function createMfKit(host){
     const said = new Set();
 
     /** @param {number} at */
-    const guidAt = at=>formatGuid(host.readMemory(at >>> 0, 16));
+    const guidAt = at=>formatGuid(host.readMemory(wholeAddress(at), 16));
     /** @param {number} at @param {string} guid */
-    const putGuid = (at, guid)=>host.writeMemory(at >>> 0, /** @type {Uint8Array} */ (parseGuid(guid)));
+    const putGuid = (at, guid)=>host.writeMemory(wholeAddress(at), /** @type {Uint8Array} */ (parseGuid(guid)));
     /** @param {number} at */
     const u64 = at=>{
-        const bytes = host.readMemory(at >>> 0, 8);
+        const bytes = host.readMemory(wholeAddress(at), 8);
         return new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
     };
     /** @param {number} at @param {bigint} value */
     const putU64 = (at, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at */
     const f64 = at=>{
-        const bytes = host.readMemory(at >>> 0, 8);
+        const bytes = host.readMemory(wholeAddress(at), 8);
         return new DataView(bytes.buffer, bytes.byteOffset, 8).getFloat64(0, true);
     };
     /** @param {number} at @param {number} value */
     const putF64 = (at, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setFloat64(0, value, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** Two stack words as the 64-bit value they are. @param {number} low @param {number} high */
     const wide = (low, high)=>BigInt(high >>> 0) << 32n | BigInt(low >>> 0);

@@ -21,6 +21,7 @@
 
 import { writeGuid } from '../ole32/guid.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
 export const IID_IURL_A = '{FBF23B80-E3F0-101B-8488-00AA003E56F8}';
@@ -226,7 +227,7 @@ export function createInternetShortcut(host){
         IsDirty: state=>(state.dirty ? S_OK : S_FALSE),
         /** HRESULT Load(LPCOLESTR pszFileName, DWORD dwMode) */
         Load: (state, [name])=>{
-            const path = host.readWideString(name >>> 0, MAX_STRING * 2);
+            const path = host.readWideString(wholeAddress(name), MAX_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
@@ -268,7 +269,7 @@ export function createInternetShortcut(host){
          */
         Save: (state, [name, remember])=>{
             const given = (name >>> 0) === 0 ? null
-                : host.readWideString(name >>> 0, MAX_STRING * 2);
+                : host.readWideString(wholeAddress(name), MAX_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -308,7 +309,7 @@ export function createInternetShortcut(host){
         },
         SaveCompleted: (state, [name])=>{
             state.curFile = (name >>> 0) === 0 ? null
-                : host.readWideString(name >>> 0, MAX_STRING * 2);
+                : host.readWideString(wholeAddress(name), MAX_STRING * 2);
             state.dirty = false;
             return S_OK;
         },

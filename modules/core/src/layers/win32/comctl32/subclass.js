@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * comctl32's window subclassing: SetWindowSubclass (#410),
  * GetWindowSubclass (#411), RemoveWindowSubclass (#412) and DefSubclassProc
@@ -223,7 +225,7 @@ export function createSubclassFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, found?.ref ?? 0, true);
-                    host.writeMemory(out >>> 0, bytes);
+                    host.writeMemory(wholeAddress(out), bytes);
                 }
                 return found ? 1 : 0;
             },

@@ -24,6 +24,7 @@
 import { readText } from './unicode.js';
 import { after } from './controls.js';
 import { isFatalBox } from './fatal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
@@ -464,7 +465,7 @@ export function createMessageBoxFunctions({ host, call, procedure, measure, fram
      * @param {number} params @param {boolean} wide
      */
     const indirect = (params, wide)=>{
-        const bytes = host.readMemory(params >>> 0, 24);
+        const bytes = host.readMemory(wholeAddress(params), 24);
         /** @param {number} at */
         const field = at=>(bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
             | bytes[at + 3] << 24) >>> 0;

@@ -20,6 +20,7 @@
  */
 
 import { formatGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const E_NOTIMPL = 0x80004001 | 0;
 const E_POINTER = 0x80004003 | 0;
@@ -78,13 +79,13 @@ export function createMfReadWriteFunctions(host){
     const putU32 = (at, value)=>{
         if ((at >>> 0) !== 0)
         {
-            host.writeMemory(at >>> 0, new Uint8Array(Uint32Array.of(value >>> 0).buffer));
+            host.writeMemory(wholeAddress(at), new Uint8Array(Uint32Array.of(value >>> 0).buffer));
         }
     };
     /** A NUL-ended UTF-16 string, read a page at a time. @param {number} at */
     const wide = at=>{
         let text = '';
-        for (let address = at >>> 0; text.length < 32768;)
+        for (let address = wholeAddress(at); text.length < 32768;)
         {
             const bytes = host.readMemory(address, 0x1000 - (address & 0xfff));
             for (let i = 0; i + 1 < bytes.length; i += 2)
@@ -184,7 +185,7 @@ export function createMfReadWriteFunctions(host){
     };
     /** @param {number} clsid */
     const isReader = clsid=>(clsid >>> 0) !== 0
-        && formatGuid(host.readMemory(clsid >>> 0, 16)) === CLSID_MF_SOURCE_READER;
+        && formatGuid(host.readMemory(wholeAddress(clsid), 16)) === CLSID_MF_SOURCE_READER;
 
     const table = {
         /** HRESULT MFCreateSourceReaderFromURL(LPCWSTR url, IMFAttributes *attributes, IMFSourceReader **reader) */

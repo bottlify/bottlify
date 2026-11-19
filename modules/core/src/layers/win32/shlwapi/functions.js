@@ -31,6 +31,7 @@ import { createStringFunctions } from './strings.js';
 import { createWidths } from './text.js';
 import { createUrlFunctions } from './url.js';
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** As long as a path a program hands these may be, terminator included. */
 const MAX_LENGTH = 0x1000;
@@ -331,11 +332,11 @@ const hueToChannel = (low, high, hue)=>{
 export function createShlwapiFunctions(host){
     /** @param {number} address */
     const pathAt = address=>
-        (address >>> 0) === 0 ? null : host.readCString(address >>> 0, MAX_LENGTH);
+        (address >>> 0) === 0 ? null : host.readCString(wholeAddress(address), MAX_LENGTH);
 
     /** @param {number} address */
     const widePathAt = address=>((address >>> 0) === 0 || !host.readWideString
-        ? null : host.readWideString(address >>> 0, MAX_LENGTH * 2));
+        ? null : host.readWideString(wholeAddress(address), MAX_LENGTH * 2));
 
     /** In the ANSI page a path is read in. @param {string} text */
     const narrow = text=>encodeAnsi(`${text}\0`);
@@ -368,7 +369,7 @@ export function createShlwapiFunctions(host){
                 return 0;
             }
             const result = combine(read(directory), read(file));
-            host.writeMemory(destination >>> 0, encode(result ?? ''));
+            host.writeMemory(wholeAddress(destination), encode(result ?? ''));
             return result === null ? 0 : destination >>> 0;
         },
     });
@@ -414,7 +415,7 @@ export function createShlwapiFunctions(host){
             const text = compactPath(path, limit >>> 0, part=>measure(hdc >>> 0, part));
             if (text !== path)
             {
-                host.writeMemory(pointer >>> 0, encode(text));
+                host.writeMemory(wholeAddress(pointer), encode(text));
             }
             return 1;
         },
@@ -455,7 +456,7 @@ export function createShlwapiFunctions(host){
             const start = path === null ? 0 : fileNameStart(path);
             if (path !== null && start > 0)
             {
-                host.writeMemory(pointer >>> 0, encode(path.slice(start)));
+                host.writeMemory(wholeAddress(pointer), encode(path.slice(start)));
             }
             return 0;
         },
@@ -484,7 +485,7 @@ export function createShlwapiFunctions(host){
             {
                 return 0;
             }
-            host.writeMemory(pointer >>> 0, encode(result));
+            host.writeMemory(wholeAddress(pointer), encode(result));
             return 1;
         },
     });
@@ -567,7 +568,8 @@ export function createShlwapiFunctions(host){
     const writeWord = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, new Uint8Array([value & 0xff, value >>> 8 & 0xff]));
+            host.writeMemory(wholeAddress(address), new Uint8Array([value & 0xff,
+                value >>> 8 & 0xff]));
         }
     };
 
@@ -660,7 +662,7 @@ export function createShlwapiFunctions(host){
             }
             const answer = new DataView(new ArrayBuffer(8));
             answer.setBigInt64(0, value, true);
-            host.writeMemory(out >>> 0, new Uint8Array(answer.buffer, 0, bytes));
+            host.writeMemory(wholeAddress(out), new Uint8Array(answer.buffer, 0, bytes));
             return 1;
         },
     });
@@ -720,7 +722,7 @@ export function createShlwapiFunctions(host){
                 written += piece.length / unit;
             }
             bytes.push(...new Array(unit).fill(0));
-            host.writeMemory(destination >>> 0, Uint8Array.from(bytes));
+            host.writeMemory(wholeAddress(destination), Uint8Array.from(bytes));
             return written + 1;
         },
     });
@@ -1133,7 +1135,7 @@ export function createShlwapiFunctions(host){
                 const scratch = (amount | 0) === 0 ? 0 : host.allocate?.(8) ?? 0;
                 if (!scratch || !host.readMemory)
                 {
-                    return rgb >>> 0;
+                    return wholeAddress(rgb);
                 }
                 try
                 {

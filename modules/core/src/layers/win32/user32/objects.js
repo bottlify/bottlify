@@ -36,6 +36,7 @@ import {
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { readText, readWideString, writeText } from './unicode.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
@@ -74,8 +75,8 @@ const MAX_RESOURCE_NAME = 256;
  * @param {boolean} [wide] Whether a name is a wide string.
  */
 export function loadResourceObject(host, kind, type, instance, name, wide = false){
-    const module = instance >>> 0;
-    const raw = name >>> 0;
+    const module = wholeAddress(instance);
+    const raw = wholeAddress(name);
     if (module === 0)
     {
         return raw < MAX_INTEGER_RESOURCE ? raw : 0;
@@ -815,9 +816,9 @@ export function createObjectFunctions(options){
             const clipped = text.slice(0, (room | 0) - 1);
             if (!wide)
             {
-                return writeString(buffer >>> 0, clipped, room | 0);
+                return writeString(wholeAddress(buffer), clipped, room | 0);
             }
-            host.writeMemory(buffer >>> 0,
+            host.writeMemory(wholeAddress(buffer),
                 new Uint8Array(Uint16Array.from(`${clipped} `, c=>c.charCodeAt(0)).buffer));
             return clipped.length;
         },
@@ -852,14 +853,14 @@ export function createObjectFunctions(options){
                 host.setLastError?.(ERROR_INVALID_MENU_HANDLE);
                 return 0;
             }
-            const size = (info >>> 0) === 0 ? 0 : readU32(info >>> 0);
+            const size = (info >>> 0) === 0 ? 0 : readU32(wholeAddress(info));
             const layout = MENUINFO_LAYOUTS.find(each=>each.SIZE === size);
             if (!layout)
             {
                 host.setLastError?.(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const mask = readU32((info >>> 0) + 4);
+            const mask = readU32(wholeAddress(info) + 4);
             const fields = /** @type {const} */ ([[MIM_STYLE, 'style', layout.STYLE],
                 [MIM_MAXHEIGHT, 'maxHeight', layout.MAX_HEIGHT],
                 [MIM_BACKGROUND, 'background', layout.BACKGROUND],
@@ -872,7 +873,7 @@ export function createObjectFunctions(options){
                     {
                         if ((mask & bit) !== 0)
                         {
-                            each.info = { ...each.info, [name]: readU32((info >>> 0) + at) };
+                            each.info = { ...each.info, [name]: readU32(wholeAddress(info) + at) };
                         }
                     }
                 };
@@ -929,7 +930,7 @@ export function createObjectFunctions(options){
     const propertyKey = (value, wide = false)=>((value >>> 0) <= 0xffff
         ? value >>> 0
         : (wide ? readWideString(host, value >>> 0, MAX_TEXT)
-            : host.readCString(value >>> 0, MAX_TEXT)).toUpperCase());
+            : host.readCString(wholeAddress(value), MAX_TEXT)).toUpperCase());
 
     /**
      * SetProp, GetProp and RemoveProp, for either spelling.
@@ -1171,7 +1172,7 @@ export function createObjectFunctions(options){
             let bytes;
             try
             {
-                bytes = host.readMemory(address >>> 0, size);
+                bytes = host.readMemory(wholeAddress(address), size);
             }
             catch {
                 return 0;
@@ -1199,8 +1200,8 @@ export function createObjectFunctions(options){
      * @returns {number} the loaded menu's handle, or zero
      */
     const loadMenu = (instance, name, wide)=>{
-        const module = instance >>> 0;
-        const raw = name >>> 0;
+        const module = wholeAddress(instance);
+        const raw = wholeAddress(name);
         const key = raw < MAX_INTEGER_RESOURCE
             ? raw
             : (wide ? readTerminated(raw, 2) : host.readCString(raw, MAX_RESOURCE_NAME));
@@ -1226,7 +1227,7 @@ export function createObjectFunctions(options){
      * @param {boolean} wide
      */
     const flaggedItem = (uFlags, id, newItem, wide)=>{
-        const flags = uFlags >>> 0;
+        const flags = wholeAddress(uFlags);
         const separator = (flags & MF_SEPARATOR) !== 0;
         const popup = (flags & MF_POPUP) !== 0;
         const bitmap = (flags & MF_BITMAP) !== 0;
@@ -1649,8 +1650,8 @@ export function createObjectFunctions(options){
         argBytes: 8,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [instance, name])=>{
-            const module = instance >>> 0;
-            const raw = name >>> 0;
+            const module = wholeAddress(instance);
+            const raw = wholeAddress(name);
             const key = raw < MAX_INTEGER_RESOURCE
                 ? raw
                 : readText(host, raw, wide, MAX_RESOURCE_NAME);
@@ -1718,7 +1719,7 @@ export function createObjectFunctions(options){
             bytes[at + 4] = entry.command & 0xff;
             bytes[at + 5] = entry.command >>> 8;
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return count;
     };
 
@@ -1730,12 +1731,12 @@ export function createObjectFunctions(options){
         {
             return 0;
         }
-        const message = readU32((msg >>> 0) + 4);
+        const message = readU32(wholeAddress(msg) + 4);
         if (message !== WM_KEYDOWN && message !== WM_SYSKEYDOWN)
         {
             return 0;
         }
-        const key = readU32((msg >>> 0) + 8) & 0xffff;
+        const key = readU32(wholeAddress(msg) + 8) & 0xffff;
         const match = record.entries.find((/** @type {any} */ entry)=>
             entry.key === key
             && (entry.flags & FVIRTKEY) !== 0
@@ -1789,7 +1790,7 @@ export function createObjectFunctions(options){
         const ICON_RESOURCE_MAX = 0x00030000;
         const at = bits >>> 0;
         const length = size >>> 0;
-        const ver = version >>> 0;
+        const ver = wholeAddress(version);
         const icon = (isIcon >>> 0) !== 0;
         const skip = icon ? 0 : 4;
         if (at === 0 || length < skip + 40 || ver < ICON_RESOURCE_MIN || ver > ICON_RESOURCE_MAX)
@@ -1826,7 +1827,7 @@ export function createObjectFunctions(options){
         {
             return 0;
         }
-        const bytes = host.readMemory(table >>> 0, entries * ACCEL_SIZE);
+        const bytes = host.readMemory(wholeAddress(table), entries * ACCEL_SIZE);
         /** @type {AcceleratorEntry[]} */
         const read = [];
         for (let index = 0; index < entries; index++)
@@ -2905,7 +2906,7 @@ export function createObjectFunctions(options){
                 clipboard.formats.set(format >>> 0, memory >>> 0);
                 clipboard.changed = true;
                 ownership.changes++;
-                return memory >>> 0;
+                return wholeAddress(memory);
             },
         },
 
@@ -3042,7 +3043,7 @@ export function createObjectFunctions(options){
                 // A plane not given is a bitmap made without bits: all zero.
                 /** @param {number} plane */
                 const read = plane=>((plane >>> 0) === 0
-                    ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
+                    ? new Uint8Array(size) : host.readMemory(wholeAddress(plane), size));
                 const hotSpot = { x: x | 0, y: y | 0 };
                 const andPlane = read(and);
                 const xorPlane = read(xor);
@@ -3079,7 +3080,7 @@ export function createObjectFunctions(options){
                 }
                 /** @param {number} plane @param {number} size */
                 const read = (plane, size)=>((plane >>> 0) === 0
-                    ? new Uint8Array(size) : host.readMemory(plane >>> 0, size));
+                    ? new Uint8Array(size) : host.readMemory(wholeAddress(plane), size));
                 const mask = read(and, ((across + 15) >>> 4) * 2 * down);
                 const colour = read(xor, ((across * depth + 15) >>> 4) * 2 * down);
                 const hotSpot = { x: across >> 1, y: down >> 1 };
@@ -3235,7 +3236,7 @@ export function createObjectFunctions(options){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const raw = handle >>> 0;
+                const raw = wholeAddress(handle);
                 const kind = host.handles.typeOf?.(raw) ?? null;
                 if (kind === 'icon' || kind === 'cursor')
                 {
@@ -3378,7 +3379,7 @@ export function createObjectFunctions(options){
                 view.setUint32(8, hotSpot.y >>> 0, true);
                 view.setUint32(12, maskBitmap >>> 0, true);
                 view.setUint32(16, colourBitmap >>> 0, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },

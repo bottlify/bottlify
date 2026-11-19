@@ -19,6 +19,7 @@
  */
 
 import { E_INVALIDARG, E_POINTER, S_OK, drive } from './kit.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IMFASYNCRESULT = '{AC6B7889-0740-4D51-8619-905994A55CC6}';
 
@@ -129,7 +130,7 @@ export function createAsync(kit, host){
      * @param {number} result @returns {number}
      */
     const invoke = result=>{
-        const callback = u32((result >>> 0) + FIELD.CALLBACK);
+        const callback = u32(wholeAddress(result) + FIELD.CALLBACK);
         if ((result >>> 0) === 0 || callback === 0)
         {
             return E_INVALIDARG;

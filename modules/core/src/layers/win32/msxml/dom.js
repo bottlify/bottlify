@@ -30,6 +30,7 @@ import {
     decodeDocument, makeNode, NODE, NODE_TYPE_STRINGS, parseXml, serializeXml, textOf, XmlError,
 } from './xml.js';
 import { selectNodes, XPathError } from './xpath.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('./xml.js').XmlNode} XmlNode */
 /** @typedef {import('../ole32/objects.js').ComMethod} ComMethod */
@@ -250,22 +251,23 @@ export function registerMsxmlClasses(host){
         {
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-            host.writeMemory(address >>> 0, bytes);
+            host.writeMemory(wholeAddress(address), bytes);
         }
     };
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {boolean} value */
     const writeBool = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, Uint8Array.of(value ? 0xff : 0, value ? 0xff : 0));
+            host.writeMemory(wholeAddress(address), Uint8Array.of(value ? 0xff : 0,
+                value ? 0xff : 0));
         }
     };
     /** @param {number} bstr */
     const readBstr = bstr=>((bstr >>> 0) === 0 ? ''
-        : host.readWideString(bstr >>> 0, MAX_TEXT * 2));
+        : host.readWideString(wholeAddress(bstr), MAX_TEXT * 2));
     /** @param {string} text @returns {number} a BSTR from the heap, or 0 */
     const allocateBstr = text=>{
         const block = host.heap.allocate(4 + text.length * 2 + 2) >>> 0;
@@ -324,7 +326,7 @@ export function registerMsxmlClasses(host){
             view.setUint16(0, VT_BSTR, true);
             view.setUint32(8, bstr, true);
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return S_OK;
     };
     /**

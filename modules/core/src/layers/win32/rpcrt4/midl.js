@@ -35,6 +35,7 @@
 
 import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
 import { NDR_LOCAL_DATA_REPRESENTATION, RPC_MESSAGE, STUB_DESC, STUB_MESSAGE } from './ndr.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const RPC_S_OK = 0;
 const RPC_S_OUT_OF_MEMORY = 14;
@@ -265,19 +266,19 @@ export function createMidl(host){
 
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} at */
     const u16 = at=>{
-        const bytes = host.readMemory(at >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(at), 2);
         return bytes[0] | (bytes[1] << 8);
     };
     /** @param {number} at @param {number} value */
-    const w32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(
+    const w32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
     /** @param {number} at */
-    const guidAt = at=>formatGuid(host.readMemory(at >>> 0, GUID_SIZE));
+    const guidAt = at=>formatGuid(host.readMemory(wholeAddress(at), GUID_SIZE));
 
     /** Buffers the runtime made, which are its to free. @type {Set<number>} */
     const owned = new Set();
@@ -495,7 +496,8 @@ export function createMidl(host){
 
     /** @param {number} text @param {boolean} wide */
     const textAt = (text, wide)=>(text >>> 0) === 0 ? null
-        : wide ? host.readWideString(text >>> 0) : host.readCString(text >>> 0, 1024);
+        : wide ? host.readWideString(wholeAddress(text)) : host.readCString(wholeAddress(text),
+            1024);
 
     /**
      * @param {number} protseq @param {number} calls @param {number} endpointText
@@ -916,7 +918,8 @@ export function createMidl(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([message])=>{
-                const buffer = allocateBuffer(u32((message >>> 0) + RPC_MESSAGE.BUFFER_LENGTH));
+                const buffer = allocateBuffer(u32(wholeAddress(message)
+                    + RPC_MESSAGE.BUFFER_LENGTH));
                 if (buffer === 0)
                 {
                     return RPC_S_OUT_OF_MEMORY;
@@ -931,7 +934,7 @@ export function createMidl(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([message])=>{
-                freeBuffer(u32((message >>> 0) + RPC_MESSAGE.BUFFER));
+                freeBuffer(u32(wholeAddress(message) + RPC_MESSAGE.BUFFER));
                 w32((message >>> 0) + RPC_MESSAGE.BUFFER, 0);
                 return RPC_S_OK;
             },
@@ -961,7 +964,7 @@ export function createMidl(host){
                 {
                     return RPC_S_INVALID_BINDING;
                 }
-                const handle = u32(slot >>> 0);
+                const handle = u32(wholeAddress(slot));
                 if (!bindings.delete(handle))
                 {
                     return RPC_S_INVALID_BINDING;
@@ -979,11 +982,11 @@ export function createMidl(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor, procedure])=>{
-                host.writeMemory(rpc >>> 0, new Uint8Array(RPC_MESSAGE.SIZE));
+                host.writeMemory(wholeAddress(rpc), new Uint8Array(RPC_MESSAGE.SIZE));
                 w32((rpc >>> 0) + RPC_MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
                 w32((rpc >>> 0) + RPC_MESSAGE.PROC_NUM, procedure);
                 w32((rpc >>> 0) + RPC_MESSAGE.INTERFACE_INFORMATION,
-                    u32((descriptor >>> 0) + STUB_DESC.INTERFACE_INFORMATION));
+                    u32(wholeAddress(descriptor) + STUB_DESC.INTERFACE_INFORMATION));
                 initialize(rpc >>> 0, message >>> 0, descriptor >>> 0, true);
                 return 0;
             },
@@ -998,7 +1001,7 @@ export function createMidl(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([message, length, handle])=>{
-                const rpc = u32((message >>> 0) + STUB_MESSAGE.RPC_MESSAGE);
+                const rpc = u32(wholeAddress(message) + STUB_MESSAGE.RPC_MESSAGE);
                 const buffer = allocateBuffer(length >>> 0);
                 if (buffer === 0)
                 {
@@ -1023,7 +1026,7 @@ export function createMidl(host){
             /** @param {number[]} args */
             handler: ([message, end])=>{
                 const thread = host.callerThread();
-                const rpc = u32((message >>> 0) + STUB_MESSAGE.RPC_MESSAGE);
+                const rpc = u32(wholeAddress(message) + STUB_MESSAGE.RPC_MESSAGE);
                 w32(rpc + RPC_MESSAGE.BUFFER_LENGTH, ((end >>> 0) - u32(rpc + RPC_MESSAGE.BUFFER))
                     >>> 0);
                 return sendReceive(rpc).then(status=>{
@@ -1042,7 +1045,7 @@ export function createMidl(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([message])=>{
-                const rpc = u32((message >>> 0) + STUB_MESSAGE.RPC_MESSAGE);
+                const rpc = u32(wholeAddress(message) + STUB_MESSAGE.RPC_MESSAGE);
                 if (rpc !== 0)
                 {
                     freeBuffer(u32(rpc + RPC_MESSAGE.BUFFER));

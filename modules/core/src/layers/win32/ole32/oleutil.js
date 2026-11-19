@@ -17,6 +17,7 @@
  */
 
 import { GUID_SIZE, parseGuid } from './guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 
@@ -110,12 +111,12 @@ const READ_MAX = 1 << 20;
 export function createOleUtil(env){
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = env.readMemory(address >>> 0, 4);
+        const bytes = env.readMemory(wholeAddress(address), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} address */
     const readU16 = address=>{
-        const bytes = env.readMemory(address >>> 0, 2);
+        const bytes = env.readMemory(wholeAddress(address), 2);
         return bytes[0] | (bytes[1] << 8);
     };
     /** @param {number} address @param {number[]} words */
@@ -123,12 +124,12 @@ export function createOleUtil(env){
         const bytes = new Uint8Array(words.length * 4);
         const view = new DataView(bytes.buffer);
         words.forEach((word, index)=>view.setUint32(index * 4, word >>> 0, true));
-        env.writeMemory(address >>> 0, bytes);
+        env.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>writeWords(address, [value]);
     /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>env.writeMemory(address >>> 0,
+    const writeU16 = (address, value)=>env.writeMemory(wholeAddress(address),
         Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
 
     /** @param {string} text  With its terminator. */
@@ -149,7 +150,7 @@ export function createOleUtil(env){
      */
     const readWide = (address, max = 1024)=>{
         let text = '';
-        for (let at = address >>> 0; text.length < max; at += 2)
+        for (let at = wholeAddress(address); text.length < max; at += 2)
         {
             const unit = readU16(at);
             if (unit === 0)

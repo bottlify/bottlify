@@ -18,6 +18,7 @@
 
 import { expand, expandedName, readHeader } from './expand.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -168,8 +169,9 @@ export function createLzFunctions(host){
         LZOpenFileA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, reopen, style])=>openFile(host.readCString(name >>> 0, WHOLE_NAME),
-                reopen, style),
+            handler: ([name, reopen, style])=>openFile(host.readCString(wholeAddress(name),
+                WHOLE_NAME),
+            reopen, style),
         },
 
         /**
@@ -233,14 +235,14 @@ export function createLzFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, buffer])=>{
-                const asked = host.readCString(name >>> 0, WHOLE_NAME);
+                const asked = host.readCString(wholeAddress(name), WHOLE_NAME);
                 const bytes = load(asked);
                 if (bytes === null)
                 {
                     return LZERROR_BADINHANDLE >>> 0;
                 }
                 const answer = expandedName(asked, readHeader(bytes));
-                host.writeMemory(buffer >>> 0, encodeAnsi(`${answer}\0`));
+                host.writeMemory(wholeAddress(buffer), encodeAnsi(`${answer}\0`));
                 return 1;
             },
         },

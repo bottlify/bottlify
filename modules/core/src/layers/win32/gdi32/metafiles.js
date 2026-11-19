@@ -40,6 +40,7 @@ import {
 } from './emf.js';
 import { logFontBytes } from './structs.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
@@ -305,7 +306,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
 
     /** @param {number} address @param {number} count */
     const pointsAt = (address, count)=>{
-        const bytes = host.readMemory(address >>> 0, Math.max(0, count) * 8);
+        const bytes = host.readMemory(wholeAddress(address), Math.max(0, count) * 8);
         return pointsIn(viewOf(bytes), 0, Math.floor(bytes.length / 8), false);
     };
 
@@ -515,20 +516,21 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
     const textOf = ([, , , , , string, count, dx], wide)=>{
         const length = count >>> 0;
         const bytes = (string >>> 0) === 0 || length === 0 ? new Uint8Array(0)
-            : host.readMemory(string >>> 0, wide ? length * 2 : length);
+            : host.readMemory(wholeAddress(string), wide ? length * 2 : length);
         const text = wide
             ? String.fromCharCode(...Array.from({ length: Math.floor(bytes.length / 2) },
                 (_, index)=>bytes[index * 2] | bytes[index * 2 + 1] << 8))
             : decodeAnsi(bytes);
         const advances = (dx >>> 0) === 0 || length === 0 ? null
-            : Array.from({ length }, (_, index)=>viewOf(host.readMemory((dx >>> 0) + index * 4,
+            : Array.from({ length }, (_,
+                index)=>viewOf(host.readMemory(wholeAddress(dx) + index * 4,
                 4)).getInt32(0, true));
         return { text, advances };
     };
 
     /** @param {number} address */
     const rectAt = address=>{
-        const view = viewOf(host.readMemory(address >>> 0, 16));
+        const view = viewOf(host.readMemory(wholeAddress(address), 16));
         return { left: view.getInt32(0, true), top: view.getInt32(4, true),
             right: view.getInt32(8, true), bottom: view.getInt32(12, true) };
     };
@@ -560,7 +562,8 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
         {
             return;
         }
-        const sizes = Array.from(new Uint32Array(host.readMemory(counts >>> 0, (many >>> 0) * 4)
+        const sizes = Array.from(new Uint32Array(host.readMemory(wholeAddress(counts),
+            (many >>> 0) * 4)
             .slice().buffer));
         putPoints(dc, wide, narrow, pointsAt(points, sizes.reduce((sum, size)=>sum + size, 0)),
             sizes);
@@ -614,12 +617,13 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             if ((xform >>> 0) !== 0)
             {
                 put(dc, EMR.SETWORLDTRANSFORM, Array.from(new Uint32Array(
-                    host.readMemory(xform >>> 0, 24).slice().buffer)));
+                    host.readMemory(wholeAddress(xform), 24).slice().buffer)));
             }
         },
         ModifyWorldTransform: (dc, [, xform, mode])=>put(dc, EMR.MODIFYWORLDTRANSFORM, [
             ...((xform >>> 0) === 0 ? new Array(6).fill(0)
-                : Array.from(new Uint32Array(host.readMemory(xform >>> 0, 24).slice().buffer))),
+                : Array.from(new Uint32Array(host.readMemory(wholeAddress(xform),
+                    24).slice().buffer))),
             mode]),
         SaveDC: bare(EMR.SAVEDC),
         BeginPath: bare(EMR.BEGINPATH),
@@ -672,7 +676,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             if ((points >>> 0) !== 0 && (types >>> 0) !== 0 && (count | 0) > 0)
             {
                 putPoints(dc, EMR.POLYDRAW, EMR.POLYDRAW16, pointsAt(points, count | 0),
-                    undefined, host.readMemory(types >>> 0, count | 0));
+                    undefined, host.readMemory(wholeAddress(types), count | 0));
             }
         },
         SelectObject: (dc, [, handle])=>{
@@ -735,7 +739,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
         InvertRgn: (dc, [, region])=>putRegion(dc, EMR.INVERTRGN, region, []),
         GdiComment: (dc, [, size, data])=>{
             const bytes = (size >>> 0) === 0 ? new Uint8Array(0)
-                : host.readMemory(data >>> 0, size >>> 0);
+                : host.readMemory(wholeAddress(data), size >>> 0);
             const record = emfRecord(EMR.GDICOMMENT, 12 + bytes.length);
             record.view.setUint32(8, bytes.length, true);
             record.bytes.set(bytes, 12);
@@ -793,10 +797,10 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             {
                 return;
             }
-            const sizes = dibSizes(host.readMemory(info >>> 0, 40), usage >>> 0);
-            const record = dibRecord(EMR.STRETCHDIBITS, 80, host.readMemory(info >>> 0,
+            const sizes = dibSizes(host.readMemory(wholeAddress(info), 40), usage >>> 0);
+            const record = dibRecord(EMR.STRETCHDIBITS, 80, host.readMemory(wholeAddress(info),
                 sizes.info), (bits >>> 0) === 0 ? new Uint8Array(0)
-                : host.readMemory(bits >>> 0, sizes.bits));
+                : host.readMemory(wholeAddress(bits), sizes.bits));
             const bounds = include(dc, [{ x: xd | 0, y: yd | 0 },
                 { x: (xd | 0) + (wd | 0) - 1, y: (yd | 0) + (hd | 0) - 1 }]);
             const { view } = record;
@@ -810,10 +814,11 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             {
                 return;
             }
-            const sizes = dibSizes(host.readMemory(info >>> 0, 40), usage >>> 0, lines >>> 0);
-            const record = dibRecord(EMR.SETDIBITSTODEVICE, 76, host.readMemory(info >>> 0,
+            const sizes = dibSizes(host.readMemory(wholeAddress(info), 40), usage >>> 0,
+                lines >>> 0);
+            const record = dibRecord(EMR.SETDIBITSTODEVICE, 76, host.readMemory(wholeAddress(info),
                 sizes.info), (bits >>> 0) === 0 ? new Uint8Array(0)
-                : host.readMemory(bits >>> 0, sizes.bits));
+                : host.readMemory(wholeAddress(bits), sizes.bits));
             const bounds = include(dc, [{ x: xd | 0, y: yd | 0 },
                 { x: (xd | 0) + (w | 0) - 1, y: (yd | 0) + (h | 0) - 1 }]);
             const { view } = record;
@@ -1743,7 +1748,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             return bytes.length;
         }
         const copied = bytes.subarray(0, Math.min(bytes.length, room >>> 0));
-        host.writeMemory(out >>> 0, copied);
+        host.writeMemory(wholeAddress(out), copied);
         return copied.length;
     };
 
@@ -1895,7 +1900,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 {
                     return refuse(ERROR_INVALID_DATA);
                 }
-                const bytes = host.readMemory(data >>> 0, Math.min(size >>> 0, 0x10000000));
+                const bytes = host.readMemory(wholeAddress(data), Math.min(size >>> 0, 0x10000000));
                 const refusal = emfRefusal(bytes);
                 if (refusal)
                 {
@@ -1950,7 +1955,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                     return entries.length;
                 }
                 const copied = entries.slice(0, count >>> 0);
-                host.writeMemory(out >>> 0, new Uint8Array(new Uint32Array(copied).buffer));
+                host.writeMemory(wholeAddress(out), new Uint8Array(new Uint32Array(copied).buffer));
                 return copied.length;
             },
         },
@@ -2004,7 +2009,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 {
                     return refuse(ERROR_INVALID_DATA);
                 }
-                const wmf = host.readMemory(data >>> 0, Math.min(size >>> 0, 0x10000000));
+                const wmf = host.readMemory(wholeAddress(data), Math.min(size >>> 0, 0x10000000));
                 if (!isWmf(wmf))
                 {
                     return refuse(ERROR_INVALID_DATA);
@@ -2015,7 +2020,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                     return objects.create('enhmetafile', { bits: inner });
                 }
                 const pict = (picture >>> 0) === 0 ? null : (()=>{
-                    const fields = viewOf(host.readMemory(picture >>> 0, 12));
+                    const fields = viewOf(host.readMemory(wholeAddress(picture), 12));
                     return { mm: fields.getInt32(0, true), xExt: fields.getInt32(4, true),
                         yExt: fields.getInt32(8, true) };
                 })();
@@ -2061,7 +2066,8 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 {
                     return refuse(ERROR_INVALID_DATA);
                 }
-                const bits = host.readMemory(data >>> 0, Math.min(size >>> 0, 0x10000000)).slice();
+                const bits = host.readMemory(wholeAddress(data), Math.min(size >>> 0,
+                    0x10000000)).slice();
                 const header = viewOf(bits);
                 if (!isWmf(bits) || header.getUint16(0, true) !== MEMORY_METAFILE
                     || header.getUint16(4, true) !== VERSION_3)

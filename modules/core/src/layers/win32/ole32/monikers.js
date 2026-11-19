@@ -31,6 +31,7 @@ import { GUID_NULL, GUID_SIZE, canonicalGuid, formatGuid, parseGuid } from './gu
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -461,17 +462,18 @@ export function createMonikerFunctions(env){
     const MULTI_QI = env.pointerSize === 8 ? { IID: 0, ITF: 8, HR: 16, SIZE_OF: 24 }
         : { IID: 0, ITF: 4, HR: 8, SIZE_OF: 12 };
     /** @param {number} address */
-    const readU32 = address=>readU32Of(env.readMemory(address >>> 0, 4), 0);
+    const readU32 = address=>readU32Of(env.readMemory(wholeAddress(address), 4), 0);
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>env.writeMemory(address >>> 0, u32(value));
+    const writeU32 = (address, value)=>env.writeMemory(wholeAddress(address), u32(value));
     /** @param {number} address @param {bigint} value */
     const writeU64 = (address, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
-        env.writeMemory(address >>> 0, bytes);
+        env.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address */
-    const readGuidAt = address=>formatGuid(env.readMemory(address >>> 0, GUID_SIZE).slice());
+    const readGuidAt = address=>formatGuid(env.readMemory(wholeAddress(address),
+        GUID_SIZE).slice());
 
     /**
      * An OLESTR a program hands in, read a window at a time so a short one at
@@ -3384,7 +3386,7 @@ export function createMonikerFunctions(env){
                     {
                         const item = state.items[state.position++];
                         await addRef(item, thread);
-                        writeU32((array >>> 0) + given * 4, item);
+                        writeU32(wholeAddress(array) + given * 4, item);
                         given++;
                     }
                     if ((fetched >>> 0) !== 0)
@@ -3502,7 +3504,7 @@ export function createMonikerFunctions(env){
             }
             if (size > BIND_OPTS.FLAGS)
             {
-                object.state.options.set(env.readMemory((options >>> 0) + BIND_OPTS.FLAGS,
+                object.state.options.set(env.readMemory(wholeAddress(options) + BIND_OPTS.FLAGS,
                     size - BIND_OPTS.FLAGS), BIND_OPTS.FLAGS);
             }
             return S_OK;
@@ -3515,7 +3517,7 @@ export function createMonikerFunctions(env){
             const size = Math.min(readU32(options), BIND_OPTS.SIZE_OF);
             if (size > BIND_OPTS.FLAGS)
             {
-                env.writeMemory((options >>> 0) + BIND_OPTS.FLAGS,
+                env.writeMemory(wholeAddress(options) + BIND_OPTS.FLAGS,
                     object.state.options.subarray(BIND_OPTS.FLAGS, size));
             }
             writeU32(options, size);

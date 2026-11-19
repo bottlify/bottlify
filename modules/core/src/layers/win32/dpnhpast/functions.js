@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * dpnhpast — DirectPlay's NAT helper for Internet Connection Sharing, which
  * DirectX 8.1 installs and every Windows from XP on carries.
@@ -44,7 +46,7 @@ export function createDpnhpastFunctions(host){
                     + 'there is no DirectPlay 8 to use one');
                 if ((out >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 }
                 return CLASS_E_CLASSNOTAVAILABLE;
             },

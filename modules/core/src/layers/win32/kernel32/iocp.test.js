@@ -190,7 +190,7 @@ function fakeKernel(){
 /**
  * @param {{ synchronous?: (handle: number) => boolean,
  *     alertably?: (alertable: boolean, wait: () => any, answer?: () => number) => any,
- *     namedObjects?: any }} [extra]
+ *     namedObjects?: any, pointerSize?: number }} [extra]
  */
 function setup(extra = {}){
     const memory = fakeMemory();
@@ -261,6 +261,22 @@ test('a packet posted to a port comes back exactly as it went in', ()=>{
     assert.equal(memory.dword(OUT_KEY), 0xabc);
     assert.equal(memory.dword(OUT_OVERLAPPED), 0xdef);
     assert.equal(main.error, ERROR_SUCCESS);
+});
+
+test('a 64-bit caller\'s key and OVERLAPPED come back whole, eight bytes each', ()=>{
+    // A key is often the address of the pool's own object, which a 64-bit
+    // program keeps past 4 GiB; so is the OVERLAPPED in an image there.
+    const { fns, memory } = setup({ pointerSize: 8 });
+    const port = makePort(fns);
+    const args = Object.assign([port, 7, 0x2000, 0x3000], { high: [0, 0, 1, 1] });
+    // The bridge joins the declared address (lpOverlapped); the key is read whole.
+    args[3] = 0x1_0000_3000;
+    assert.equal(fns.PostQueuedCompletionStatus.handler(args), 1);
+    const [bytes, key, overlapped] = [0x500, 0x508, 0x510];
+    assert.equal(fns.GetQueuedCompletionStatus.handler([port, bytes, key, overlapped, 0]), 1);
+    assert.equal(memory.dword(bytes), 7);
+    assert.deepEqual([memory.dword(key), memory.dword(key + 4)], [0x2000, 1]);
+    assert.deepEqual([memory.dword(overlapped), memory.dword(overlapped + 4)], [0x3000, 1]);
 });
 
 test('a wait on an empty port parks, and a later post answers it', ()=>{

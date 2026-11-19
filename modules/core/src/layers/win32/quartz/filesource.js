@@ -22,6 +22,7 @@ import {
     GUID_NULL, MEDIATYPE_STREAM, mediaType,
 } from './filter.js';
 import { CLSID_ASYNC_READER } from './interfaces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -208,11 +209,11 @@ export function createFileSource(base, host, files){
                 return E_POINTER;
             }
             // Any alignment is taken: a read lands where the sample's buffer is.
-            if ((host.readU32((props >>> 0) + 8) | 0) <= 0)
+            if ((host.readU32(wholeAddress(props) + 8) | 0) <= 0)
             {
-                host.writeMemory((props >>> 0) + 8, dword(1));
+                host.writeMemory(wholeAddress(props) + 8, dword(1));
             }
-            let allocator = preferred >>> 0;
+            let allocator = wholeAddress(preferred);
             if (allocator !== 0)
             {
                 await base.addRef(allocator);
@@ -232,11 +233,11 @@ export function createFileSource(base, host, files){
             if ((set | 0) < 0)
             {
                 await base.release(allocator);
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return set === VFW_E_BADALIGN ? VFW_E_BADALIGN : set;
             }
-            sourceOf(pin).align = Math.max(1, host.readU32((props >>> 0) + 8) | 0);
-            host.writeMemory(out >>> 0, dword(allocator));
+            sourceOf(pin).align = Math.max(1, host.readU32(wholeAddress(props) + 8) | 0);
+            host.writeMemory(wholeAddress(out), dword(allocator));
             return S_OK;
         },
         /** HRESULT Request(IMediaSample *pSample, DWORD_PTR dwUser) */
@@ -286,13 +287,13 @@ export function createFileSource(base, host, files){
             const next = source.done.shift();
             if (!next)
             {
-                host.writeMemory(out >>> 0, dword(0));
-                host.writeMemory(user >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
+                host.writeMemory(wholeAddress(user), dword(0));
                 return source.flushing ? VFW_E_WRONG_STATE : VFW_E_TIMEOUT;
             }
             // The reference the request took goes with the sample handed back.
-            host.writeMemory(out >>> 0, dword(next.sample));
-            host.writeMemory(user >>> 0, dword(next.user));
+            host.writeMemory(wholeAddress(out), dword(next.sample));
+            host.writeMemory(wholeAddress(user), dword(next.user));
             await base.release(next.sample);
             return source.flushing ? VFW_E_WRONG_STATE : next.answer;
         },
@@ -321,7 +322,7 @@ export function createFileSource(base, host, files){
                 Math.min(position + (length | 0), source.file.size) - position);
             if (count > 0)
             {
-                host.writeMemory(buffer >>> 0, await source.file.read(position, count));
+                host.writeMemory(wholeAddress(buffer), await source.file.read(position, count));
             }
             return count === (length | 0) ? S_OK : S_FALSE;
         },
@@ -335,8 +336,8 @@ export function createFileSource(base, host, files){
             const size = source.file?.size ?? 0;
             const quad = new Uint8Array(8);
             new DataView(quad.buffer).setBigInt64(0, BigInt(size), true);
-            host.writeMemory(total >>> 0, quad);
-            host.writeMemory(available >>> 0, quad);
+            host.writeMemory(wholeAddress(total), quad);
+            host.writeMemory(wholeAddress(available), quad);
             return S_OK;
         },
         BeginFlush: pin=>{
@@ -390,7 +391,7 @@ export function createFileSource(base, host, files){
             {
                 return E_UNEXPECTED;
             }
-            const path = host.readWideString(name >>> 0, 32767 * 2);
+            const path = host.readWideString(wholeAddress(name), 32767 * 2);
             const file = await files.open(path);
             if (!file)
             {
@@ -414,10 +415,10 @@ export function createFileSource(base, host, files){
             // Before Load there is no file and no type, and that is the answer.
             if (source.path === null)
             {
-                host.writeMemory(nameOut >>> 0, dword(0));
+                host.writeMemory(wholeAddress(nameOut), dword(0));
                 if ((typeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(typeOut >>> 0, new Uint8Array(0x48));
+                    host.writeMemory(wholeAddress(typeOut), new Uint8Array(0x48));
                 }
                 return S_OK;
             }
@@ -425,7 +426,7 @@ export function createFileSource(base, host, files){
                 char=>char.charCodeAt(0)).buffer);
             const at = host.allocate(text.length);
             host.writeMemory(at, text);
-            host.writeMemory(nameOut >>> 0, dword(at));
+            host.writeMemory(wholeAddress(nameOut), dword(at));
             if ((typeOut >>> 0) !== 0)
             {
                 base.writeMediaType(typeOut >>> 0, offered(source)[0]);

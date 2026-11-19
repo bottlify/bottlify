@@ -10,6 +10,7 @@ import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { verLanguageName } from '../kernel32/languages.js';
 import { DISPLAY_DRIVER } from '../user32/display.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -513,7 +514,7 @@ export function createVersionFunctions(host){
     // of a version block.
     /** @param {number} address */
     const narrow = address=>((address >>> 0) === 0 ? ''
-        : host.readCString(address >>> 0, WHOLE_NAME));
+        : host.readCString(wholeAddress(address), WHOLE_NAME));
     /** @param {number} address */
     const wide = address=>((address >>> 0) === 0 ? ''
         : host.readWideString?.(address >>> 0, WHOLE_NAME * 2) ?? '');
@@ -530,7 +531,7 @@ export function createVersionFunctions(host){
             // Documented as always zero, and a caller passes it back to
             // GetFileVersionInfo, so leaving it unwritten leaves it whatever
             // the caller's stack happened to hold.
-            host.writeMemory(handle >>> 0, dword(0));
+            host.writeMemory(wholeAddress(handle), dword(0));
         }
         return after(resourceFor(path, errorSetter()), resource=>
             (resource ? resource.length + scratchFor(resource.length) : 0));
@@ -556,10 +557,10 @@ export function createVersionFunctions(host){
                 fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
                 return 0;
             }
-            host.writeMemory(data >>> 0, resource);
+            host.writeMemory(wholeAddress(data), resource);
             if (ansi && (length >>> 0) >= resource.length + scratchFor(resource.length))
             {
-                host.writeMemory((data >>> 0) + resource.length, ROOM_MARK);
+                host.writeMemory(wholeAddress(data) + resource.length, ROOM_MARK);
             }
             return 1;
         });
@@ -576,7 +577,7 @@ export function createVersionFunctions(host){
         // The head says how long the block is, and the block has to be read
         // whole before it can be walked -- reading the head alone and asking
         // it to parse itself fails its own bounds check.
-        const base = blockAddress >>> 0;
+        const base = wholeAddress(blockAddress);
         const head = host.readMemory(base, 2);
         const total = head[0] | head[1] << 8;
         if (total < 6)
@@ -631,8 +632,9 @@ export function createVersionFunctions(host){
             answer = roomy ? base + total + ROOM_MARK.length + (node.value >>> 1) : answer;
             host.writeMemory(answer, text);
         }
-        host.writeMemory(buffer >>> 0, dword(answer));
-        host.writeMemory(length >>> 0, dword(isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
+        host.writeMemory(wholeAddress(buffer), dword(answer));
+        host.writeMemory(wholeAddress(length),
+            dword(isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
         return 1;
     };
 
@@ -652,14 +654,14 @@ export function createVersionFunctions(host){
         {
             return 0;
         }
-        const room = host.readMemory(lengthAt >>> 0, 4);
+        const room = host.readMemory(wholeAddress(lengthAt), 4);
         const have = (room[0] | room[1] << 8 | room[2] << 16 | room[3] << 24) >>> 0;
         const needed = text.length + 1;
         if ((buffer >>> 0) !== 0 && have > 0)
         {
-            host.writeMemory(buffer >>> 0, encodeAnsi(`${text.slice(0, have - 1)}\0`));
+            host.writeMemory(wholeAddress(buffer), encodeAnsi(`${text.slice(0, have - 1)}\0`));
         }
-        host.writeMemory(lengthAt >>> 0, dword(needed));
+        host.writeMemory(wholeAddress(lengthAt), dword(needed));
         return needed > have ? VFF_BUFFTOOSMALL : 0;
     };
 
@@ -873,11 +875,11 @@ export function createVersionFunctions(host){
                     // is what a caller reads when the install completed on its own.
                     if ((tmpFile >>> 0) !== 0)
                     {
-                        host.writeMemory(tmpFile >>> 0, new Uint8Array([0]));
+                        host.writeMemory(wholeAddress(tmpFile), new Uint8Array([0]));
                     }
                     if ((tmpLen >>> 0) !== 0)
                     {
-                        host.writeMemory(tmpLen >>> 0, dword(0));
+                        host.writeMemory(wholeAddress(tmpLen), dword(0));
                     }
                     return 0;
                 };

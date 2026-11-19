@@ -45,6 +45,7 @@
  */
 
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Format characters. */
 export const FC = Object.freeze({
@@ -334,21 +335,21 @@ const align = (value, to)=>to <= 1 ? value >>> 0 : ((value + to - 1) & ~(to - 1)
  */
 export function createNdr(host){
     /** @param {number} at */
-    const u8 = at=>host.readMemory(at >>> 0, 1)[0];
+    const u8 = at=>host.readMemory(wholeAddress(at), 1)[0];
     /** @param {number} at */
     const u16 = at=>{
-        const bytes = host.readMemory(at >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(at), 2);
         return bytes[0] | (bytes[1] << 8);
     };
     /** @param {number} at */
     const i16 = at=>(u16(at) << 16) >> 16;
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} at @param {number} value */
-    const w32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(
+    const w32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
 
     /** @param {NdrCall} call @param {number} offset */

@@ -26,6 +26,7 @@
 
 import { decodeAnsi } from './locale.js';
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Codes this surface reports. */
 const ERROR_ACCESS_DENIED = 5;
@@ -105,7 +106,7 @@ export function createConsoleIoFunctions(host){
         const characters = count >>> 0;
         if (characters > 0)
         {
-            host.write(handle >>> 0, textOf(buffer >>> 0, characters, isWide));
+            host.write(handle >>> 0, textOf(wholeAddress(buffer), characters, isWide));
         }
         writeDwordIf(written >>> 0, characters);
         return 1;

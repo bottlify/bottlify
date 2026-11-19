@@ -19,6 +19,7 @@
  */
 
 import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -102,21 +103,21 @@ function roundEven(value){
 export function createPropsysFunctions(host){
     /** @param {number} at */
     const u16 = at=>{
-        const b = host.readMemory(at >>> 0, 2);
+        const b = host.readMemory(wholeAddress(at), 2);
         return b[0] | b[1] << 8;
     };
     /** @param {number} at */
     const u32 = at=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} at */
     const view = at=>{
-        const bytes = host.readMemory(at >>> 0, 8).slice();
+        const bytes = host.readMemory(wholeAddress(at), 8).slice();
         return new DataView(bytes.buffer);
     };
     /** @param {number} at @param {Uint8Array} bytes */
-    const put = (at, bytes)=>host.writeMemory(at >>> 0, bytes);
+    const put = (at, bytes)=>host.writeMemory(wholeAddress(at), bytes);
     /** @param {number} at @param {number[]} words */
     const putU32s = (at, words)=>put(at,
         new Uint8Array(Uint32Array.from(words.map(w=>w >>> 0)).buffer));
@@ -124,7 +125,7 @@ export function createPropsysFunctions(host){
     const text = (at, wide)=>{
         const width = wide ? 2 : 1;
         let out = '';
-        for (let address = at >>> 0; out.length < 32768;)
+        for (let address = wholeAddress(at); out.length < 32768;)
         {
             const bytes = host.readMemory(address, 0x1000 - (address & 0xfff));
             for (let i = 0; i + width <= bytes.length; i += width)
@@ -623,7 +624,7 @@ export function createPropsysFunctions(host){
                     return E_FAIL;
                 }
                 return recordOf(out, VT.LPWSTR,
-                    taskCopy(wideBytes(formatGuid(host.readMemory(guid >>> 0, 16)))));
+                    taskCopy(wideBytes(formatGuid(host.readMemory(wholeAddress(guid), 16)))));
             } },
         /** HRESULT InitVariantFromGUIDAsString(REFGUID, VARIANT *) */
         InitVariantFromGUIDAsString: { argBytes: 8,
@@ -632,26 +633,26 @@ export function createPropsysFunctions(host){
                 {
                     return E_FAIL;
                 }
-                const made = host.bstr?.(formatGuid(host.readMemory(guid >>> 0, 16))) ?? 0;
+                const made = host.bstr?.(formatGuid(host.readMemory(wholeAddress(guid), 16))) ?? 0;
                 return recordOf(out, VT.BSTR, made);
             } },
         /** HRESULT InitPropVariantFromBuffer(const void *, UINT, PROPVARIANT *) */
         InitPropVariantFromBuffer: { argBytes: 12,
             handler: (/** @type {number[]} */ [data, size, out])=>{
                 const bytes = (size >>> 0) === 0 ? new Uint8Array(0)
-                    : host.readMemory(data >>> 0, size >>> 0).slice();
+                    : host.readMemory(wholeAddress(data), size >>> 0).slice();
                 return recordOf(out, VT.VECTOR | VT.UI1, taskCopy(bytes), at=>[bytes.length, at]);
             } },
         /** HRESULT InitVariantFromBuffer(const void *, UINT, VARIANT *) */
         InitVariantFromBuffer: { argBytes: 12,
             handler: (/** @type {number[]} */ [data, size, out])=>{
                 const bytes = (size >>> 0) === 0 ? new Uint8Array(0)
-                    : host.readMemory(data >>> 0, size >>> 0).slice();
+                    : host.readMemory(wholeAddress(data), size >>> 0).slice();
                 return recordOf(out, VT.ARRAY | VT.UI1, host.byteArray?.(bytes) ?? 0);
             } },
         /** HRESULT InitPropVariantFromCLSID(REFCLSID, PROPVARIANT *) */
         InitPropVariantFromCLSID: { argBytes: 8, handler: (/** @type {number[]} */ [clsid, out])=>
-            recordOf(out, VT.CLSID, taskCopy(host.readMemory(clsid >>> 0, 16).slice())) },
+            recordOf(out, VT.CLSID, taskCopy(host.readMemory(wholeAddress(clsid), 16).slice())) },
         /**
          * HRESULT InitPropVariantFromStringVector(PCWSTR *strings, ULONG count, PROPVARIANT *):
          * each string copied, the vector a pointer even when it is empty.
@@ -668,7 +669,8 @@ export function createPropsysFunctions(host){
                 const copies = [];
                 for (let i = 0; i < n; i++)
                 {
-                    const copy = taskCopy(wideBytes(text(u32((strings >>> 0) + i * 4), true)));
+                    const copy = taskCopy(wideBytes(text(u32(wholeAddress(strings) + i * 4),
+                        true)));
                     if (copy === 0)
                     {
                         copies.forEach(at=>host.heap.free(at));

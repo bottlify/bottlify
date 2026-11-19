@@ -33,6 +33,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The handle a page description is copied under can never be this small. */
 const MAX_INTRESOURCE = 0x10000;
@@ -357,26 +358,26 @@ export function createPropertySheetFunctions(host){
 
     /** @param {number} address */
     const u32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address */
     const u16 = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} address @param {number} value */
     const putU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {boolean} wide */
     const readText = (address, wide)=>{
         let text = '';
         /** @type {number[]} */
         const bytes = [];
-        for (let at = address >>> 0, count = 0; count < 1024; count++)
+        for (let at = wholeAddress(address), count = 0; count < 1024; count++)
         {
             const unit = wide ? u16(at) : host.readMemory(at, 1)[0];
             if (unit === 0)
@@ -559,7 +560,7 @@ export function createPropertySheetFunctions(host){
         {
             return 0;
         }
-        const handle = place(host.readMemory(address >>> 0, size));
+        const handle = place(host.readMemory(wholeAddress(address), size));
         if (handle === 0)
         {
             return 0;
@@ -987,7 +988,7 @@ export function createPropertySheetFunctions(host){
             return after(api('CreateDialogIndirectParamA', [u32(page.handle + PSP.hInstance),
                 copy, sheet.hwnd, u32(page.handle + PSP.pfnDlgProc), page.handle]), made=>{
                 free(copy);
-                const hwnd = made >>> 0;
+                const hwnd = wholeAddress(made);
                 if (hwnd === 0)
                 {
                     return 0;
@@ -1495,7 +1496,7 @@ export function createPropertySheetFunctions(host){
             return 0;
         }
         const index = wParam | 0;
-        const handle = lParam >>> 0;
+        const handle = wholeAddress(lParam);
         switch (message >>> 0){
             case WM_COMMAND: {
                 const done = (wParam >>> 16) === BN_CLICKED ? press(sheet, wParam & 0xffff, thread)
@@ -1554,7 +1555,7 @@ export function createPropertySheetFunctions(host){
                 return after(insertPage(sheet, sheet.entries.length, handle, thread), added=>
                     answer(sheet, added));
             case PSM_INSERTPAGE: {
-                const where = wParam >>> 0;
+                const where = wholeAddress(wParam);
                 const at = where < MAX_INTRESOURCE ? where
                     : sheet.entries.findIndex(entry=>entry.page.handle === where) + 1;
                 return at === 0 && where >= MAX_INTRESOURCE ? answer(sheet, 0)
@@ -1596,7 +1597,7 @@ export function createPropertySheetFunctions(host){
                     ? `Properties for ${text}` : text), ()=>answer(sheet, 0));
             }
             case PSM_SETWIZBUTTONS: {
-                const flags = lParam >>> 0;
+                const flags = wholeAddress(lParam);
                 const finishing = (flags & (PSWIZB_FINISH | PSWIZB_DISABLEDFINISH)) !== 0;
                 /** @param {number} id @param {number} bit */
                 const enable = (id, bit)=>()=>api('EnableWindow',
@@ -1672,7 +1673,7 @@ export function createPropertySheetFunctions(host){
             case PSM_SETHEADERSUBTITLEA:
             case PSM_SETHEADERSUBTITLEW: {
                 const entry = sheet.entries[index];
-                const kind = message >>> 0;
+                const kind = wholeAddress(message);
                 if (!entry)
                 {
                     return answer(sheet, 0);
@@ -1797,7 +1798,7 @@ export function createPropertySheetFunctions(host){
                 {
                     return after(api('CreateDialogIndirectParamA', args), hwnd=>{
                         pending.delete(key);
-                        return hwnd >>> 0;
+                        return wholeAddress(hwnd);
                     });
                 }
                 // The owner is disabled before the sheet exists: its

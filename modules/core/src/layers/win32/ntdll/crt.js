@@ -27,6 +27,7 @@ import { decodeAnsi, encodeAnsi, upcaseUnit } from '../kernel32/locale.js';
 import { WIDE_READINGS } from '../msvcrt/convert.js';
 import { KERNEL_SCAN } from '../msvcrt/scan.js';
 import { WINDOWS_SORT } from '../msvcrt/sort.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The CT_CTYPE1 classes ntdll's wide classifiers answer for the first 256
@@ -140,7 +141,7 @@ export function createNtdllCrt(host){
         const units = Array.from(text, unit=>unit.charCodeAt(0));
         if (!wide)
         {
-            host.writeMemory(at >>> 0, Uint8Array.from([...units, 0]));
+            host.writeMemory(wholeAddress(at), Uint8Array.from([...units, 0]));
             return;
         }
         const bytes = new Uint8Array((units.length + 1) * 2);
@@ -148,7 +149,7 @@ export function createNtdllCrt(host){
             bytes[index * 2] = unit & 0xff;
             bytes[index * 2 + 1] = unit >>> 8;
         });
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
 
     /**
@@ -195,7 +196,7 @@ export function createNtdllCrt(host){
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([string])=>{
-            const at = string >>> 0;
+            const at = wholeAddress(string);
             if (at === 0)
             {
                 return 0;
@@ -239,8 +240,8 @@ export function createNtdllCrt(host){
             const limit = counted ? count >>> 0 : Infinity;
             for (let at = 0; at < limit; at++)
             {
-                const a = host.readMemory((first >>> 0) + at * 2, 2);
-                const b = host.readMemory((second >>> 0) + at * 2, 2);
+                const a = host.readMemory(wholeAddress(first) + at * 2, 2);
+                const b = host.readMemory(wholeAddress(second) + at * 2, 2);
                 const left = asciiLower(a[0] | a[1] << 8);
                 const right = asciiLower(b[0] | b[1] << 8);
                 if (left !== right || left === 0)

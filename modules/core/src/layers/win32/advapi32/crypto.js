@@ -28,6 +28,7 @@ import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { createRc4 } from '../crypto/rc4.js';
 import { createProviderRegistry } from './providers.js';
 import { bigIntToBe, bigIntToLe, beToBigInt, leToBigInt, modPow } from '../crypto/rsa.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('../crypto/digest.js').Digest} Digest */
 /** @typedef {import('../crypto/rc4.js').StreamCipher} StreamCipher */
@@ -307,17 +308,17 @@ export function createCryptoFunctions(host){
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
-        host.writeMemory(address >>> 0, new Uint8Array([
+        host.writeMemory(wholeAddress(address), new Uint8Array([
             value & 0xff, (value >>> 8) & 0xff,
             (value >>> 16) & 0xff, (value >>> 24) & 0xff,
         ]));
     };
 
     /** @param {number} address */
-    const readDword = address=>readU32LE(host.readMemory(address >>> 0, 4), 0);
+    const readDword = address=>readU32LE(host.readMemory(wholeAddress(address), 4), 0);
 
     /** @param {number} address @param {number} length */
-    const readBytes = (address, length)=>host.readMemory(address >>> 0, length).slice();
+    const readBytes = (address, length)=>host.readMemory(wholeAddress(address), length).slice();
 
     /** @param {number} handle */
     const asProvider = handle=>{
@@ -340,7 +341,7 @@ export function createCryptoFunctions(host){
     /** @param {number} pointer @param {number} max @returns {string | null} */
     const readAnsi = (pointer, max)=>((pointer >>> 0) === 0
         ? null
-        : host.readCString(pointer >>> 0, max));
+        : host.readCString(wholeAddress(pointer), max));
 
     /** @param {number} pointer @param {number} max @returns {string | null} */
     const readWide = (pointer, max)=>{
@@ -351,7 +352,7 @@ export function createCryptoFunctions(host){
         let text = '';
         for (let at = 0; at < max; at++)
         {
-            const pair = host.readMemory((pointer >>> 0) + at * 2, 2);
+            const pair = host.readMemory(wholeAddress(pointer) + at * 2, 2);
             const code = pair[0] | (pair[1] << 8);
             if (code === 0)
             {
@@ -385,7 +386,7 @@ export function createCryptoFunctions(host){
             writeDword(sizePointer, data.length);
             return fail(ERROR_MORE_DATA);
         }
-        host.writeMemory(buffer >>> 0, data);
+        host.writeMemory(wholeAddress(buffer), data);
         writeDword(sizePointer, data.length);
         return 1;
     };
@@ -698,7 +699,7 @@ export function createCryptoFunctions(host){
             {
                 return fail(NTE_BAD_FLAGS);
             }
-            const len = sigLen >>> 0;
+            const len = wholeAddress(sigLen);
             if (len !== pub.keyLen)
             {
                 return fail(NTE_BAD_SIGNATURE);
@@ -1292,7 +1293,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const id = algid >>> 0;
+                const id = wholeAddress(algid);
                 if ((id & ALG_CLASS_MASK) !== ALG_CLASS_DATA_ENCRYPT)
                 {
                     return fail(NTE_BAD_ALGID);
@@ -1332,7 +1333,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const id = algid >>> 0;
+                const id = wholeAddress(algid);
                 if ((id & ALG_CLASS_MASK) !== ALG_CLASS_DATA_ENCRYPT)
                 {
                     host.divergence?.('CryptGenKey',
@@ -1449,7 +1450,8 @@ export function createCryptoFunctions(host){
                 }
                 if (len > 0)
                 {
-                    host.writeMemory(data >>> 0, key.stream.transform(readBytes(data, len)));
+                    host.writeMemory(wholeAddress(data), key.stream.transform(readBytes(data,
+                        len)));
                 }
                 writeDword(sizePointer, len);
                 if ((final >>> 0) !== 0)
@@ -1493,7 +1495,7 @@ export function createCryptoFunctions(host){
                 if (len > 0)
                 {
                     const plain = key.stream.transform(readBytes(data, len));
-                    host.writeMemory(data >>> 0, plain);
+                    host.writeMemory(wholeAddress(data), plain);
                     if ((hashHandle >>> 0) !== 0)
                     {
                         const hash = asHash(hashHandle);
@@ -1540,7 +1542,7 @@ export function createCryptoFunctions(host){
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, randomBytes(len));
+                host.writeMemory(wholeAddress(buffer), randomBytes(len));
                 return 1;
             },
         },
@@ -1559,7 +1561,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(buffer >>> 0, randomBytes(len));
+                host.writeMemory(wholeAddress(buffer), randomBytes(len));
                 return 1;
             },
         },
@@ -1586,7 +1588,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const len = dataLen >>> 0;
+                const len = wholeAddress(dataLen);
                 if (len < BLOBHEADER_SIZE)
                 {
                     return fail(NTE_BAD_DATA);
@@ -1718,7 +1720,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const type = blobType >>> 0;
+                const type = wholeAddress(blobType);
                 if (type === PUBLICKEYBLOB)
                 {
                     if (!key.rsa)

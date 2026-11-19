@@ -20,6 +20,7 @@ import { toDosError } from '../ntdll/status.js';
 import {
     PRIVILEGES, USER_NAME, accountNamed, accountOfSid, isThisMachine, sidBytes, sidText,
 } from './tokens.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_SUCCESS = 0;
 const STATUS_SOME_NOT_MAPPED = 0x00000107;
@@ -204,14 +205,14 @@ export function createLsaFunctions(host){
 
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} at  An LSA_UNICODE_STRING's address. @returns {string | null} */
     const unicodeAt = at=>{
@@ -219,7 +220,7 @@ export function createLsaFunctions(host){
         {
             return null;
         }
-        const head = host.readMemory(at >>> 0, 8);
+        const head = host.readMemory(wholeAddress(at), 8);
         const length = head[0] | head[1] << 8;
         const buffer = (head[4] | head[5] << 8 | head[6] << 16 | head[7] << 24) >>> 0;
         const bytes = buffer === 0 ? new Uint8Array(0) : host.readMemory(buffer, length & ~1);
@@ -236,9 +237,9 @@ export function createLsaFunctions(host){
         {
             return null;
         }
-        const head = host.readMemory(at >>> 0, 2);
+        const head = host.readMemory(wholeAddress(at), 2);
         return head[0] === 1 && head[1] <= 15
-            ? host.readMemory(at >>> 0, 8 + 4 * head[1]).slice() : null;
+            ? host.readMemory(wholeAddress(at), 8 + 4 * head[1]).slice() : null;
     };
 
     /**
@@ -413,7 +414,7 @@ export function createLsaFunctions(host){
                 {
                     return secrets.remove(name) ? STATUS_SUCCESS : STATUS_OBJECT_NAME_NOT_FOUND;
                 }
-                const head = host.readMemory(data >>> 0, 8);
+                const head = host.readMemory(wholeAddress(data), 8);
                 const length = head[0] | head[1] << 8;
                 const buffer = (head[4] | head[5] << 8 | head[6] << 16 | head[7] << 24) >>> 0;
                 secrets.set(name, buffer === 0 ? new Uint8Array(0)
@@ -594,7 +595,7 @@ export function createLsaFunctions(host){
                 let mapped = 0;
                 for (let at = 0; at < (count >>> 0); at++)
                 {
-                    const sid = sidAt(readDword((sids >>> 0) + at * 4));
+                    const sid = sidAt(readDword(wholeAddress(sids) + at * 4));
                     const found = sid === null ? null : accountOfSid(sid);
                     const entry = at * 16;
                     if (found === null)
@@ -633,7 +634,7 @@ export function createLsaFunctions(host){
                     return STATUS_INVALID_PARAMETER;
                 }
                 const low = readDword(luid);
-                const name = readDword((luid >>> 0) + 4) === 0
+                const name = readDword(wholeAddress(luid) + 4) === 0
                     ? [...PRIVILEGES].find(([, value])=>value === low)?.[0] : undefined;
                 if (name === undefined)
                 {

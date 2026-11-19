@@ -23,6 +23,7 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { applyCommSettings, DCB_SIZE, parseCommString, TIMEOUTS_SIZE } from './comm-dcb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_FUNCTION = 1;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -117,20 +118,21 @@ export function createCommFunctions(host){
         argBytes: withTimeouts ? 12 : 8,
         /** @param {number[]} args */
         handler: ([text, dcb, timeouts])=>{
-            const settings = (text >>> 0) === 0 ? null : parseCommString(readText(text >>> 0));
+            const settings = (text >>> 0) === 0 ? null
+                : parseCommString(readText(wholeAddress(text)));
             if (settings === null)
             {
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const block = host.readMemory(dcb >>> 0, DCB_SIZE).slice();
+            const block = host.readMemory(wholeAddress(dcb), DCB_SIZE).slice();
             const times = withTimeouts && (timeouts >>> 0) !== 0
-                ? host.readMemory(timeouts >>> 0, TIMEOUTS_SIZE).slice() : null;
+                ? host.readMemory(wholeAddress(timeouts), TIMEOUTS_SIZE).slice() : null;
             applyCommSettings(settings, block, times);
-            host.writeMemory(dcb >>> 0, block);
+            host.writeMemory(wholeAddress(dcb), block);
             if (times)
             {
-                host.writeMemory(timeouts >>> 0, times);
+                host.writeMemory(wholeAddress(timeouts), times);
             }
             return 1;
         },

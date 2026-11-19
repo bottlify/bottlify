@@ -19,6 +19,7 @@ import { TB_ADDBITMAP, TB_ADDBUTTONSA, TB_BUTTONSTRUCTSIZE, TB_SETBITMAPSIZE,
 import { createRefusals } from '../common/refusal.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { after } from '../user32/controls.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WS_CHILD = 0x40000000;
 const IMAGE_BITMAP = 0;
@@ -210,7 +211,7 @@ export function createHelperFunctions(host){
                 /** @type {[number, number][]} */
                 const pairs = (map >>> 0) !== 0 && (entries | 0) > 0
                     ? Array.from({ length: Math.min(entries | 0, MAX_MAP) }, (_, at)=>{
-                        const pair = host.readMemory((map >>> 0) + at * 8, 8);
+                        const pair = host.readMemory(wholeAddress(map) + at * 8, 8);
                         return [i32(pair, 0) & 0xffffff, i32(pair, 4) & 0xffffff];
                     })
                     : DEFAULT_MAP.map(([from, index])=>[from,

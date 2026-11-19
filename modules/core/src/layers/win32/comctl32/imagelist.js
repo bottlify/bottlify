@@ -32,6 +32,7 @@
 
 import { CLSID_IMAGELIST, createImageListObjects } from './imagelist-com.js';
 import { STANDARD_STRIPS } from './strips.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** ImageList_Add and friends report failure with this, not with zero. */
 const FAILED = -1;
@@ -1183,8 +1184,8 @@ export function createImageLists(host){
                 {
                     return 0;
                 }
-                host.writeMemory(cx >>> 0, dwords([list.cx]));
-                host.writeMemory(cy >>> 0, dwords([list.cy]));
+                host.writeMemory(wholeAddress(cx), dwords([list.cx]));
+                host.writeMemory(wholeAddress(cy), dwords([list.cy]));
                 return 1;
             },
         },
@@ -1370,11 +1371,11 @@ export function createImageLists(host){
                 }
                 if ((point >>> 0) !== 0)
                 {
-                    host.writeMemory(point >>> 0, point32(drag.x, drag.y));
+                    host.writeMemory(wholeAddress(point), point32(drag.x, drag.y));
                 }
                 if ((hotspot >>> 0) !== 0)
                 {
-                    host.writeMemory(hotspot >>> 0, point32(drag.dx, drag.dy));
+                    host.writeMemory(wholeAddress(hotspot), point32(drag.dx, drag.dy));
                 }
                 return drag.owned || drag.list;
             },
@@ -1415,7 +1416,7 @@ export function createImageLists(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(params >>> 0, IMAGELISTDRAWPARAMS.V3_SIZE);
+                const bytes = host.readMemory(wholeAddress(params), IMAGELISTDRAWPARAMS.V3_SIZE);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
                 /** @param {number} at */
                 const field = at=>view.getInt32(at, true);
@@ -1617,7 +1618,7 @@ export function createImageLists(host){
                 }
                 const size = 1 << depthOf(list);
                 const wanted = Math.max(0, Math.min(entries >>> 0, size - (start >>> 0)));
-                const bytes = host.readMemory(quads >>> 0, wanted * 4);
+                const bytes = host.readMemory(wholeAddress(quads), wanted * 4);
                 list.colorsSet = true;
                 return setColors(list, start >>> 0, Array.from({ length: wanted },
                     (_, index)=>bytes[index * 4] | bytes[index * 4 + 1] << 8
@@ -1642,7 +1643,7 @@ export function createImageLists(host){
                     return 0;
                 }
                 const left = (index | 0) * list.cx;
-                host.writeMemory(info >>> 0, dwords([list.image, list.mask, 0, 0,
+                host.writeMemory(wholeAddress(info), dwords([list.image, list.mask, 0, 0,
                     left, 0, left + list.cx, list.cy]));
                 return 1;
             },

@@ -352,7 +352,7 @@ export function createThreadingFunctions(host){
             host.setLastError(ERROR_NO_MORE_FILES);
             return 0;
         }
-        if (readU32(host.readMemory(entry >>> 0, 4), 0) < size)
+        if (readU32(host.readMemory(wholeAddress(entry), 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
@@ -390,7 +390,7 @@ export function createThreadingFunctions(host){
             view.setUint32(THREADENTRY32.tpBasePri, NORMAL_PRIORITY_BASE, true);
             snapshot.thread = at + 1;
         }
-        host.writeMemory(entry >>> 0, bytes);
+        host.writeMemory(wholeAddress(entry), bytes);
         return 1;
     };
 
@@ -419,7 +419,7 @@ export function createThreadingFunctions(host){
         }
         const unit = wide ? 2 : 1;
         const size = MODULEENTRY32.szModule + (MODULEENTRY32.NAME + MAX_PATH) * unit;
-        if (readU32(host.readMemory(entry >>> 0, 4), 0) < size)
+        if (readU32(host.readMemory(wholeAddress(entry), 4), 0) < size)
         {
             host.setLastError(ERROR_INSUFFICIENT_BUFFER);
             return 0;
@@ -452,7 +452,7 @@ export function createThreadingFunctions(host){
             MODULEENTRY32.NAME);
         put(module.path, MODULEENTRY32.szModule + MODULEENTRY32.NAME * unit, MAX_PATH);
         snapshot.module = at + 1;
-        host.writeMemory(entry >>> 0, bytes);
+        host.writeMemory(wholeAddress(entry), bytes);
         return 1;
     };
 
@@ -563,7 +563,7 @@ export function createThreadingFunctions(host){
     };
     /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
     const inherits = attributes=>(attributes >>> 0) !== 0
-        && readU32(host.readMemory((attributes >>> 0) + 8, 4), 0) !== 0;
+        && readU32(host.readMemory(wholeAddress(attributes) + 8, 4), 0) !== 0;
 
     /**
      * Whether a handle is one GetHandleInformation and SetHandleInformation
@@ -645,8 +645,8 @@ export function createThreadingFunctions(host){
         {
             return null;
         }
-        const name = wide ? host.readWideString(pointer >>> 0, WHOLE_NAME * 2)
-            : host.readCString(pointer >>> 0, WHOLE_NAME);
+        const name = wide ? host.readWideString(wholeAddress(pointer), WHOLE_NAME * 2)
+            : host.readCString(wholeAddress(pointer), WHOLE_NAME);
         // The ANSI forms take a name shorter than MAX_PATH, as Windows' do.
         if (!wide && name.length >= MAX_NAME)
         {
@@ -890,7 +890,7 @@ export function createThreadingFunctions(host){
      * @param {number} attributes  SECURITY_ATTRIBUTES, or 0
      */
     const descriptorOf = attributes=>((attributes >>> 0) === 0 ? 0
-        : readU32(host.readMemory((attributes >>> 0) + 4, 4), 0));
+        : readU32(host.readMemory(wholeAddress(attributes) + 4, 4), 0));
 
     const createMutex = bothNamedForms(12, ([security, initialOwner, namePointer], wide)=>
         creates.mutex(nameOf(namePointer, wide), Boolean(initialOwner), descriptorOf(security),
@@ -1165,7 +1165,7 @@ export function createThreadingFunctions(host){
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, field(overlappedFields.internalHigh),
                         true);
-                    host.writeMemory(transferred >>> 0, bytes);
+                    host.writeMemory(wholeAddress(transferred), bytes);
                 };
                 let status = field(overlappedFields.internal);
                 if (status === STATUS.PENDING)
@@ -1245,7 +1245,7 @@ export function createThreadingFunctions(host){
                 {
                     return WAIT_FAILED;
                 }
-                const wait = timeout >>> 0;
+                const wait = wholeAddress(timeout);
                 const thread = host.currentThread();
 
                 if (kindOf(handle >>> 0) === 'process')
@@ -1401,7 +1401,7 @@ export function createThreadingFunctions(host){
                     const before = kernel.releaseSemaphore(semaphore, count | 0);
                     if (previous !== 0)
                     {
-                        host.writeMemory(previous >>> 0, new Uint8Array([
+                        host.writeMemory(wholeAddress(previous), new Uint8Array([
                             before & 0xff, before >>> 8 & 0xff,
                             before >>> 16 & 0xff, before >>> 24 & 0xff,
                         ]));
@@ -1515,7 +1515,7 @@ export function createThreadingFunctions(host){
                     {
                         from.close(source >>> 0);
                     }
-                    host.writeMemory(target >>> 0, new Uint8Array([
+                    host.writeMemory(wholeAddress(target), new Uint8Array([
                         taken & 0xff, taken >>> 8 & 0xff, taken >>> 16 & 0xff, taken >>> 24 & 0xff,
                     ]));
                     return 1;
@@ -1525,7 +1525,7 @@ export function createThreadingFunctions(host){
                 // console handle (a pseudo value) back.
                 if (CONSOLE_HANDLES.has(source >>> 0) && target !== 0)
                 {
-                    host.writeMemory(target >>> 0, new Uint8Array([source >>> 0, 0, 0, 0]));
+                    host.writeMemory(wholeAddress(target), new Uint8Array([source >>> 0, 0, 0, 0]));
                     return 1;
                 }
                 const held = object(source >>> 0);
@@ -1591,7 +1591,7 @@ export function createThreadingFunctions(host){
                     handleFlags.set(duplicate, inherit !== 0 ? HANDLE_FLAG_INHERIT : 0);
                     host.pipes?.setInheritable(duplicate, inherit !== 0);
                 }
-                host.writeMemory(target >>> 0, new Uint8Array([
+                host.writeMemory(wholeAddress(target), new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
                     duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
                 ]));
@@ -1631,7 +1631,7 @@ export function createThreadingFunctions(host){
                     return 0;
                 }
                 const flags = handleFlags.get(untagged(handle >>> 0)) ?? 0;
-                host.writeMemory(out >>> 0, new Uint8Array([flags, 0, 0, 0]));
+                host.writeMemory(wholeAddress(out), new Uint8Array([flags, 0, 0, 0]));
                 return 1;
             },
         },
@@ -1935,11 +1935,11 @@ export function createThreadingFunctions(host){
                 all.slice(0, count).forEach((id, i)=>view.setUint32(i * 4, id, true));
                 if (count > 0)
                 {
-                    host.writeMemory(ids >>> 0, bytes);
+                    host.writeMemory(wholeAddress(ids), bytes);
                 }
                 const written = new Uint8Array(4);
                 new DataView(written.buffer).setUint32(0, count * 4, true);
-                host.writeMemory(needed >>> 0, written);
+                host.writeMemory(wholeAddress(needed), written);
                 return 1;
             },
         },

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The printf format engine, shared by every function that renders one.
  *
@@ -801,7 +803,7 @@ function pad(spec, { prefix, body, zeroable }){
 export function varargsSlots(read, locate, list, slots, slotWords = 1){
     const words = slots * slotWords;
     const width = words * 4;
-    const at = list >>> 0;
+    const at = wholeAddress(list);
     const region = locate(at);
     const bytes = new Uint8Array(width);
     bytes.set(read(at, region
@@ -915,8 +917,8 @@ export function formatToString(format, varargs, readString, options = {}){
     };
     const takeDouble = ()=>{
         const [lowWord, highWord] = takeEight();
-        const low = lowWord >>> 0;
-        const high = highWord >>> 0;
+        const low = wholeAddress(lowWord);
+        const high = wholeAddress(highWord);
         const bytes = new DataView(new ArrayBuffer(8));
         bytes.setUint32(0, low, true);
         bytes.setUint32(4, high, true);

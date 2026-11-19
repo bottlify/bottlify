@@ -24,6 +24,7 @@
 
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { USER_NAME } from '../advapi32/tokens.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const SEC_E_OK = 0;
 const SEC_E_INVALID_HANDLE = 0x80090301 | 0;
@@ -74,7 +75,7 @@ export function createSecur32Functions(host){
     let lsaOpen = false;
 
     /** @param {number} address */
-    const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const u32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     /**
@@ -102,15 +103,15 @@ export function createSecur32Functions(host){
             }
             if (u32(size) < name.length + 1 || (buffer >>> 0) === 0)
             {
-                host.writeMemory(size >>> 0, dword(name.length + 1));
+                host.writeMemory(wholeAddress(size), dword(name.length + 1));
                 host.setLastError(ERROR_MORE_DATA);
                 return 0;
             }
             const text = wide
                 ? new Uint8Array(Uint16Array.from(`${name}\0`, c=>c.charCodeAt(0)).buffer)
                 : Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0));
-            host.writeMemory(buffer >>> 0, text);
-            host.writeMemory(size >>> 0, dword(name.length));
+            host.writeMemory(wholeAddress(buffer), text);
+            host.writeMemory(wholeAddress(size), dword(name.length));
             return 1;
         },
     });
@@ -125,7 +126,7 @@ export function createSecur32Functions(host){
         handler: ([, out])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
             }
             return SEC_E_SECPKG_NOT_FOUND;
         },
@@ -138,11 +139,11 @@ export function createSecur32Functions(host){
         handler: ([count, out])=>{
             if ((count >>> 0) !== 0)
             {
-                host.writeMemory(count >>> 0, dword(0));
+                host.writeMemory(wholeAddress(count), dword(0));
             }
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
             }
             return SEC_E_OK;
         },
@@ -204,7 +205,7 @@ export function createSecur32Functions(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 lsaOpen = true;
-                host.writeMemory(out >>> 0, dword(LSA_HANDLE));
+                host.writeMemory(wholeAddress(out), dword(LSA_HANDLE));
                 return STATUS_SUCCESS;
             },
         },
@@ -254,7 +255,7 @@ export function createNcryptFunctions(host){
                 {
                     return NTE_INVALID_PARAMETER;
                 }
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return NTE_NOT_SUPPORTED;
             },
         },

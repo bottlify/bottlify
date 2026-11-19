@@ -25,6 +25,7 @@
 import { createComObject } from '../ole32/objects.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
 import { describe } from '../quartz/describe.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const CLSID_SYSTEM_DEVICE_ENUM = '{62BE5D10-60EB-11D0-BD3B-00A0C911CE86}';
 export const CLSID_DEVICE_MONIKER = '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}';
@@ -307,7 +308,7 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            const wanted = host.readWideString(name >>> 0, NAME_BYTES);
+            const wanted = host.readWideString(wholeAddress(name), NAME_BYTES);
             const value = wanted === 'FriendlyName' ? filter.name || undefined
                 : wanted === 'CLSID' ? filter.clsid || undefined
                     : filter.properties.get(wanted) ?? registryValue(filter, wanted);
@@ -320,7 +321,7 @@ export function createDeviceEnumeration(host, store){
             // REG_DWORD and REG_BINARY read back - when that or nothing was asked.
             const natural = typeof value === 'string' ? VT_BSTR
                 : typeof value === 'number' ? VT_I4 : VT_ARRAY | VT_UI1;
-            const asked = host.readU32(variant >>> 0) & 0xffff;
+            const asked = host.readU32(wholeAddress(variant)) & 0xffff;
             if (asked !== VT_EMPTY && asked !== natural)
             {
                 return E_INVALIDARG;
@@ -332,8 +333,8 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_OUTOFMEMORY;
             }
-            host.writeMemory(variant >>> 0, dword(natural));
-            host.writeMemory((variant >>> 0) + 8, dword(payload));
+            host.writeMemory(wholeAddress(variant), dword(natural));
+            host.writeMemory(wholeAddress(variant) + 8, dword(payload));
             return S_OK;
         },
         /** HRESULT Write(LPCOLESTR pszPropName, VARIANT *pVar) */
@@ -342,8 +343,8 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            const type = host.readU32(variant >>> 0) & 0xffff;
-            const data = host.readU32((variant >>> 0) + 8);
+            const type = host.readU32(wholeAddress(variant)) & 0xffff;
+            const data = host.readU32(wholeAddress(variant) + 8);
             /** @type {string | number | Uint8Array} */
             let written;
             if (type === VT_BSTR)
@@ -366,7 +367,7 @@ export function createDeviceEnumeration(host, store){
                 return E_INVALIDARG;
             }
             const text = typeof written === 'string' ? written : '';
-            const property = host.readWideString(name >>> 0, NAME_BYTES);
+            const property = host.readWideString(wholeAddress(name), NAME_BYTES);
             // FriendlyName and CLSID are the registration's own: a moniker
             // parsed from a name nothing was under becomes a device in its
             // category once written to, as the key Windows creates does.
@@ -403,7 +404,7 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_INVALIDARG;
             }
-            host.writeMemory(out >>> 0, guidBytes(CLSID_DEVICE_MONIKER));
+            host.writeMemory(wholeAddress(out), guidBytes(CLSID_DEVICE_MONIKER));
             return S_OK;
         },
         IsDirty: ()=>S_FALSE,
@@ -416,7 +417,7 @@ export function createDeviceEnumeration(host, store){
             if (!filter.clsid)
             {
                 // A device whose key holds no CLSID binds to no class.
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return REGDB_E_CLASSNOTREG;
             }
             return host.createInstance(filter.clsid, iid >>> 0, out >>> 0);
@@ -427,16 +428,16 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            if (readGuid(iid >>> 0) !== IID_IPROPERTY_BAG)
+            if (readGuid(wholeAddress(iid)) !== IID_IPROPERTY_BAG)
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return MK_E_NOSTORAGE;
             }
             const bag = createComObject(CLSID_DEVICE_MONIKER, {
                 state: filter,
                 interfaces: [describe(IID_IPROPERTY_BAG, IPROPERTY_BAG_SLOTS, propertyBag)],
             });
-            host.writeMemory(out >>> 0, dword(host.publish(bag, IID_IPROPERTY_BAG)));
+            host.writeMemory(wholeAddress(out), dword(host.publish(bag, IID_IPROPERTY_BAG)));
             return S_OK;
         },
         Reduce: (filter, [, , , out])=>((out >>> 0) === 0 ? E_POINTER : MK_S_REDUCED_TO_SELF),
@@ -465,7 +466,7 @@ export function createDeviceEnumeration(host, store){
             {
                 hash = Math.imul(hash, 31) + char.charCodeAt(0) | 0;
             }
-            host.writeMemory(out >>> 0, dword(hash));
+            host.writeMemory(wholeAddress(out), dword(hash));
             return S_OK;
         },
         /** HRESULT GetDisplayName(IBindCtx*, IMoniker *pmkToLeft, LPOLESTR *ppszDisplayName) */
@@ -477,14 +478,14 @@ export function createDeviceEnumeration(host, store){
             const text = wide(displayName(filter));
             const at = host.allocate(text.length);
             host.writeMemory(at, text);
-            host.writeMemory(out >>> 0, dword(at));
+            host.writeMemory(wholeAddress(out), dword(at));
             return S_OK;
         },
         /** HRESULT IsSystemMoniker(DWORD *pdwMksys) */
         IsSystemMoniker: (filter, [out])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(MKSYS_NONE));
+                host.writeMemory(wholeAddress(out), dword(MKSYS_NONE));
             }
             return S_FALSE;
         },
@@ -518,13 +519,13 @@ export function createDeviceEnumeration(host, store){
             while (given < (count >>> 0) && state.at < state.filters.length)
             {
                 const pointer = monikerFor(state.filters[state.at]);
-                host.writeMemory((out >>> 0) + given * 4, dword(pointer));
+                host.writeMemory(wholeAddress(out) + given * 4, dword(pointer));
                 state.at++;
                 given++;
             }
             if ((fetched >>> 0) !== 0)
             {
-                host.writeMemory(fetched >>> 0, dword(given));
+                host.writeMemory(wholeAddress(fetched), dword(given));
             }
             return given === (count >>> 0) ? S_OK : S_FALSE;
         },
@@ -542,7 +543,7 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, dword(enumerate(state.filters, state.at)));
+            host.writeMemory(wholeAddress(out), dword(enumerate(state.filters, state.at)));
             return S_OK;
         },
     };
@@ -569,16 +570,16 @@ export function createDeviceEnumeration(host, store){
             }
             // A DMO category lists the DMOs registered in it (msdmo), as
             // Windows' devenum lists them beside the filters.
-            const asked = readGuid(category >>> 0).toUpperCase();
+            const asked = readGuid(wholeAddress(category)).toUpperCase();
             const filters = [...store.list(asked),
                 ...(host.dmos?.() ?? []).filter(dmo=>dmo.category.toUpperCase() === asked)];
             if (filters.length === 0)
             {
                 // An empty category hands out no enumerator, as the documentation says.
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return S_FALSE;
             }
-            host.writeMemory(out >>> 0, dword(enumerate(filters)));
+            host.writeMemory(wholeAddress(out), dword(enumerate(filters)));
             return S_OK;
         },
     };
@@ -635,16 +636,16 @@ export function createDeviceEnumeration(host, store){
         {
             return E_POINTER;
         }
-        const text = host.readWideString(nameAt >>> 0, NAME_BYTES);
-        host.writeMemory(out >>> 0, dword(0));
+        const text = host.readWideString(wholeAddress(nameAt), NAME_BYTES);
+        host.writeMemory(wholeAddress(out), dword(0));
         const filter = named(text) ?? unregistered(text);
         if (!filter)
         {
-            host.writeMemory(eaten >>> 0, dword(0));
+            host.writeMemory(wholeAddress(eaten), dword(0));
             return MK_E_SYNTAX;
         }
-        host.writeMemory(eaten >>> 0, dword(text.length));
-        host.writeMemory(out >>> 0, dword(monikerFor(filter)));
+        host.writeMemory(wholeAddress(eaten), dword(text.length));
+        host.writeMemory(wholeAddress(out), dword(monikerFor(filter)));
         return S_OK;
     };
 

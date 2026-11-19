@@ -73,6 +73,7 @@ import { createParsers } from './splitters.js';
 import { createTransforms } from './transforms.js';
 import { createColorSpaceConverter } from './colorspace.js';
 import { createAcmWrapper } from './acmwrapper.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -410,7 +411,7 @@ export function createQuartz(host){
         }
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setInt32(0, value | 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return S_OK;
     };
 
@@ -422,7 +423,7 @@ export function createQuartz(host){
         }
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setFloat64(0, value, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return S_OK;
     };
 
@@ -434,7 +435,7 @@ export function createQuartz(host){
         }
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigInt64(0, BigInt(value), true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return S_OK;
     };
 
@@ -1005,8 +1006,10 @@ export function createQuartz(host){
             return E_POINTER;
         }
         const sources = streaming;
-        const file = (path >>> 0) === 0 ? '' : stream.readWideString(path >>> 0, WHOLE_NAME * 2);
-        const label = (name >>> 0) === 0 ? file : stream.readWideString(name >>> 0, WHOLE_NAME * 2);
+        const file = (path >>> 0) === 0 ? '' : stream.readWideString(wholeAddress(path),
+            WHOLE_NAME * 2);
+        const label = (name >>> 0) === 0 ? file : stream.readWideString(wholeAddress(name),
+            WHOLE_NAME * 2);
         /** @param {VideoClip | null} clip */
         const took = clip=>{
             if (!clip || !clip.hasVideo)
@@ -1056,7 +1059,7 @@ export function createQuartz(host){
             return (out >>> 0) === 0 || (into >>> 0) === 0 ? E_POINTER : VFW_E_CANNOT_CONNECT;
         }
         // IPin::Connect, the vtable's fourth slot.
-        const entry = stream.readU32((stream.readU32(out >>> 0) + 3 * 4) >>> 0);
+        const entry = stream.readU32((stream.readU32(wholeAddress(out)) + 3 * 4) >>> 0);
         return (await stream.callGuest(entry, [out >>> 0, into >>> 0, type >>> 0],
             stream.currentThread())) | 0;
     };
@@ -1142,7 +1145,7 @@ export function createQuartz(host){
                 return E_NOTIMPL;
             }
             // IPin::Disconnect, the vtable's sixth slot.
-            const entry = stream.readU32((stream.readU32(pin >>> 0) + 5 * 4) >>> 0);
+            const entry = stream.readU32((stream.readU32(wholeAddress(pin)) + 5 * 4) >>> 0);
             return (await stream.callGuest(entry, [pin >>> 0], stream.currentThread())) | 0;
         },
 
@@ -1631,7 +1634,7 @@ export function createQuartz(host){
         const view = new DataView(bytes.buffer);
         for (let i = 0; i < 16; i += 4)
         {
-            view.setUint32(i, read((address >>> 0) + i), true);
+            view.setUint32(i, read(wholeAddress(address) + i), true);
         }
         const format = formatGuid(bytes);
         return format === '{00000000-0000-0000-0000-000000000000}'
@@ -1643,7 +1646,7 @@ export function createQuartz(host){
         {
             return E_POINTER;
         }
-        host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(TIME_FORMAT_MEDIA_TIME)));
+        host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(TIME_FORMAT_MEDIA_TIME)));
         return S_OK;
     };
 
@@ -1718,7 +1721,7 @@ export function createQuartz(host){
             {
                 return S_OK;
             }
-            const low = stream.readU32(current >>> 0);
+            const low = stream.readU32(wholeAddress(current));
             const high = stream.readU32((current + 4) >>> 0) | 0;
             return seekSource(graph, (high * 2 ** 32 + low) / TICKS_PER_SECOND) ?? S_OK;
         },
@@ -1791,7 +1794,7 @@ export function createQuartz(host){
         {
             return E_NOTIMPL;
         }
-        const entry = stream.readU32(stream.readU32(self >>> 0) + slot * 4);
+        const entry = stream.readU32(stream.readU32(wholeAddress(self)) + slot * 4);
         return (await stream.callGuest(entry, [self >>> 0, ...args], stream.currentThread())) >>> 0;
     };
     /** IUnknown's slots, as callObject numbers them. */
@@ -1815,7 +1818,7 @@ export function createQuartz(host){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(CLSID_FILTER_GRAPH)));
+            host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(CLSID_FILTER_GRAPH)));
             return S_OK;
         },
         Stop: (graph, args)=>mediaControl.Stop(graph, args),

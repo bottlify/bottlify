@@ -63,6 +63,7 @@ import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
 import { O_UNICODE, bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** A double the code reads as its two halves, which a 64-bit caller passes in XMM0. */
 const DOUBLE_HALVES = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
@@ -1469,7 +1470,7 @@ export function createMsvcrtFunctions(host){
         ...createProcessFunctions({
             errno,
             readCString: readString,
-            readU32: at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+            readU32: at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
                 .getUint32(0, true),
             allocate,
             writeMemory: host.writeMemory,
@@ -1616,7 +1617,8 @@ export function createMsvcrtFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([message])=>{
-                const lead = (message >>> 0) === 0 ? '' : host.readCString(message >>> 0, 4096);
+                const lead = (message >>> 0) === 0 ? '' : host.readCString(wholeAddress(message),
+                    4096);
                 const line = `${lead ? `${lead}: ` : ''}${messageOf(globals.get(errnoName()))}\n`;
                 const stderr = descriptors?.get(2);
                 if (stderr)
@@ -1655,7 +1657,8 @@ export function createMsvcrtFunctions(host){
                 const console = descriptors?.get(1);
                 if (console)
                 {
-                    descriptors?.put(console, encodeAnsi(host.readCString(text >>> 0, 1 << 20)));
+                    descriptors?.put(console, encodeAnsi(host.readCString(wholeAddress(text),
+                        1 << 20)));
                 }
                 return 0;
             },
@@ -1687,7 +1690,7 @@ export function createMsvcrtFunctions(host){
                     /** @param {number[]} args */
                     handler: ([text])=>{
                         const match = /^[ \t\n\v\f\r]*([+-]?)(\d*)/
-                            .exec(host.readCString(text >>> 0, 4096));
+                            .exec(host.readCString(wholeAddress(text), 4096));
                         const digits = match?.[2] ?? '';
                         let value = digits ? BigInt(digits) : 0n;
                         if (match?.[1] === '-')

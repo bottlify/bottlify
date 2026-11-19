@@ -24,6 +24,7 @@
 import { scanInteger, scanFloat, scanStandardDecimal } from './convert.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How many stack slots a variadic function reads past its fixed arguments.
@@ -671,7 +672,7 @@ export function listScanHandler(host){
                 {
                     return 0;
                 }
-                const slot = host.readMemory((list >>> 0) + slotBytes * taken++, 4);
+                const slot = host.readMemory(wholeAddress(list) + slotBytes * taken++, 4);
                 return new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
             }, store, { pointerBytes: slotBytes });
     };

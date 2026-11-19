@@ -31,6 +31,7 @@ import {
     isImport, resolveReference,
 } from './typelib.js';
 import { createInvoker } from './invoke.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The interfaces these objects answer to. */
 export const IID_ITYPELIB = '{00020402-0000-0000-C000-000000000046}';
@@ -641,11 +642,11 @@ export function createTypeLibraryObjects(host){
                 const description = state.library.typeInfos[index >>> 0];
                 if (!description)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                     return TYPE_E_ELEMENTNOTFOUND;
                 }
                 const pointer = typeInfoFor(state, description.hreftype, description);
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             } },
         { name: 'GetTypeInfoType', argBytes: 12,
@@ -656,7 +657,7 @@ export function createTypeLibraryObjects(host){
                 {
                     return description ? E_INVALIDARG : TYPE_E_ELEMENTNOTFOUND;
                 }
-                writeU32(out >>> 0, description.kind);
+                writeU32(wholeAddress(out), description.kind);
                 return S_OK;
             } },
         { name: 'GetTypeInfoOfGuid', argBytes: 12,
@@ -672,11 +673,11 @@ export function createTypeLibraryObjects(host){
                 const description = state.library.typeInfos.find(entry=>entry.guid === wanted);
                 if (!description)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                     return TYPE_E_ELEMENTNOTFOUND;
                 }
                 const pointer = typeInfoFor(state, description.hreftype, description);
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             } },
         { name: 'GetLibAttr', argBytes: 8,
@@ -696,7 +697,7 @@ export function createTypeLibraryObjects(host){
                 block.u16(26, library.minorVersion);
                 block.u16(28, library.flags);
                 const address = block.commit(host.heap, host.writeMemory);
-                writeU32(out >>> 0, address);
+                writeU32(wholeAddress(out), address);
                 if (address === 0)
                 {
                     return E_OUTOFMEMORY;
@@ -710,7 +711,7 @@ export function createTypeLibraryObjects(host){
         { name: 'GetTypeComp', argBytes: 8,
             /** @param {ComAdapter} object @param {number[]} args */
             invoke: (object, [out])=>{
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 host.divergence('ITypeLib::GetTypeComp', 'no ITypeComp is offered');
                 return E_NOTIMPL;
             } },
@@ -729,7 +730,7 @@ export function createTypeLibraryObjects(host){
                 }
                 if ((helpContext >>> 0) !== 0)
                 {
-                    writeU32(helpContext >>> 0, 0);
+                    writeU32(wholeAddress(helpContext), 0);
                 }
                 const given = giveString(name >>> 0, described.name)
                     && giveString(doc >>> 0, described.helpString)
@@ -739,10 +740,10 @@ export function createTypeLibraryObjects(host){
         { name: 'IsName', argBytes: 16,
             /** @param {ComAdapter} object @param {number[]} args */
             invoke: (object, [nameBuffer, , out])=>{
-                const found = findByName(object.state.library, readWide(nameBuffer >>> 0));
+                const found = findByName(object.state.library, readWide(wholeAddress(nameBuffer)));
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out >>> 0, found.length > 0 ? 1 : 0);
+                    writeU32(wholeAddress(out), found.length > 0 ? 1 : 0);
                 }
                 return S_OK;
             } },
@@ -755,16 +756,16 @@ export function createTypeLibraryObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                const room = host.readMemory(count >>> 0, 2);
+                const room = host.readMemory(wholeAddress(count), 2);
                 const wanted = room[0] | (room[1] << 8);
-                const found = findByName(state.library, readWide(nameBuffer >>> 0))
+                const found = findByName(state.library, readWide(wholeAddress(nameBuffer)))
                     .slice(0, wanted);
                 found.forEach((hit, index)=>{
-                    writeU32((typeInfos >>> 0) + index * WORD,
+                    writeU32(wholeAddress(typeInfos) + index * WORD,
                         typeInfoFor(state, hit.type.hreftype, hit.type));
-                    writeU32((memberIds >>> 0) + index * WORD, hit.memberId);
+                    writeU32(wholeAddress(memberIds) + index * WORD, hit.memberId);
                 });
-                host.writeMemory(count >>> 0,
+                host.writeMemory(wholeAddress(count),
                     Uint8Array.from([found.length & 0xff, found.length >> 8]));
                 return S_OK;
             } },
@@ -878,7 +879,7 @@ export function createTypeLibraryObjects(host){
                     writeTypeDesc(block, 60, type.alias);
                 }
                 const address = block.commit(host.heap, host.writeMemory);
-                writeU32(out >>> 0, address);
+                writeU32(wholeAddress(out), address);
                 if (address === 0)
                 {
                     return E_OUTOFMEMORY;
@@ -892,7 +893,7 @@ export function createTypeLibraryObjects(host){
         { name: 'GetTypeComp', argBytes: 8,
             /** @param {ComAdapter} object @param {number[]} args */
             invoke: (object, [out])=>{
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 host.divergence('ITypeInfo::GetTypeComp', 'no ITypeComp is offered');
                 return E_NOTIMPL;
             } },
@@ -909,7 +910,7 @@ export function createTypeLibraryObjects(host){
                 const fn = functionsOf(type)[index >>> 0];
                 if (!fn)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                     return TYPE_E_ELEMENTNOTFOUND;
                 }
                 const block = new Block();
@@ -932,7 +933,7 @@ export function createTypeLibraryObjects(host){
                         block, parameters + at * ELEMDESC_BYTES, parameter.type, parameter.flags));
                 }
                 const address = block.commit(host.heap, host.writeMemory);
-                writeU32(out >>> 0, address);
+                writeU32(wholeAddress(out), address);
                 return address === 0 ? E_OUTOFMEMORY : S_OK;
             } },
         { name: 'GetVarDesc', argBytes: 12,
@@ -947,7 +948,7 @@ export function createTypeLibraryObjects(host){
                 const variable = state.description.variables[index >>> 0];
                 if (!variable)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                     return TYPE_E_ELEMENTNOTFOUND;
                 }
                 const block = new Block();
@@ -994,7 +995,7 @@ export function createTypeLibraryObjects(host){
                     block.u32(8, variable.offset);
                 }
                 const address = block.commit(host.heap, host.writeMemory);
-                writeU32(out >>> 0, address);
+                writeU32(wholeAddress(out), address);
                 if (address === 0)
                 {
                     host.freeBstr(bstr);
@@ -1034,7 +1035,7 @@ export function createTypeLibraryObjects(host){
                 }
                 if ((count >>> 0) !== 0)
                 {
-                    writeU32(count >>> 0, given.length);
+                    writeU32(wholeAddress(count), given.length);
                 }
                 return S_OK;
             } },
@@ -1055,7 +1056,7 @@ export function createTypeLibraryObjects(host){
                     {
                         return TYPE_E_ELEMENTNOTFOUND;
                     }
-                    writeU32(out >>> 0, DUAL_TWIN_HREFTYPE);
+                    writeU32(wholeAddress(out), DUAL_TWIN_HREFTYPE);
                     return S_OK;
                 }
                 const implemented = type.implementedTypes[index >>> 0];
@@ -1063,7 +1064,7 @@ export function createTypeLibraryObjects(host){
                 {
                     return TYPE_E_ELEMENTNOTFOUND;
                 }
-                writeU32(out >>> 0, implemented.hreftype);
+                writeU32(wholeAddress(out), implemented.hreftype);
                 return S_OK;
             } },
         { name: 'GetImplTypeFlags', argBytes: 12,
@@ -1074,7 +1075,7 @@ export function createTypeLibraryObjects(host){
                 {
                     return implemented ? E_INVALIDARG : TYPE_E_ELEMENTNOTFOUND;
                 }
-                writeU32(out >>> 0, implemented.flags);
+                writeU32(wholeAddress(out), implemented.flags);
                 return S_OK;
             } },
         { name: 'GetIDsOfNames', argBytes: 16,
@@ -1130,7 +1131,7 @@ export function createTypeLibraryObjects(host){
                 }
                 if ((helpContext >>> 0) !== 0)
                 {
-                    writeU32(helpContext >>> 0, 0);
+                    writeU32(wholeAddress(helpContext), 0);
                 }
                 const given = giveString(name >>> 0, described.name)
                     && giveString(doc >>> 0, described.helpString)
@@ -1157,11 +1158,11 @@ export function createTypeLibraryObjects(host){
                 {
                     // The vtable view of a dual interface: the same type.
                     object.addRef();
-                    writeU32(out >>> 0, state.pointer);
+                    writeU32(wholeAddress(out), state.pointer);
                     return S_OK;
                 }
                 const pointer = referencedTypeInfo(state.owner, hreftype | 0);
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return pointer === 0 ? TYPE_E_CANTLOADLIBRARY : S_OK;
             } },
         { name: 'AddressOfMember', argBytes: 16,
@@ -1169,7 +1170,7 @@ export function createTypeLibraryObjects(host){
             invoke: (object, [, , out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                 }
                 host.divergence('ITypeInfo::AddressOfMember',
                     `${object.state.description.name} is not a module`);
@@ -1180,7 +1181,7 @@ export function createTypeLibraryObjects(host){
             invoke: (object, [, , out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                 }
                 host.divergence('ITypeInfo::CreateInstance',
                     `${object.state.description.name}: no class factory is reachable `
@@ -1190,7 +1191,7 @@ export function createTypeLibraryObjects(host){
         { name: 'GetMops', argBytes: 12,
             /** @param {ComAdapter} object @param {number[]} args */
             invoke: (object, [, out])=>{
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 return S_OK;
             } },
         { name: 'GetContainingTypeLib', argBytes: 12,
@@ -1203,10 +1204,10 @@ export function createTypeLibraryObjects(host){
                     return E_POINTER;
                 }
                 state.owner.object.addRef();
-                writeU32(out >>> 0, state.owner.pointer);
+                writeU32(wholeAddress(out), state.owner.pointer);
                 if ((index >>> 0) !== 0)
                 {
-                    writeU32(index >>> 0, state.description.index >>> 0);
+                    writeU32(wholeAddress(index), state.description.index >>> 0);
                 }
                 return S_OK;
             } },

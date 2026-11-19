@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The rights a handle opened by name is granted: what the caller asked for,
  * its generic rights mapped to the kind's own, and refused where it asked for
@@ -114,7 +116,7 @@ const KINDS = {
  */
 export function mappedAccess(kind, desired){
     const rights = KINDS[kind];
-    const asked = desired >>> 0;
+    const asked = wholeAddress(desired);
     if (!rights || (asked & (MAXIMUM_ALLOWED | GENERIC_ALL)) !== 0)
     {
         return null;
@@ -139,7 +141,7 @@ export function mappedAccess(kind, desired){
  */
 export function grantedAccess(kind, desired){
     const rights = KINDS[kind];
-    const asked = desired >>> 0;
+    const asked = wholeAddress(desired);
     if (!rights)
     {
         return { granted: null };

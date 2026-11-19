@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Vertex declarations and flexible vertex formats, both ways, as d3dx9mesh.h
  * and the D3DFVF and D3DDECLTYPE documentation define them: what a mesh made
@@ -224,7 +226,7 @@ export function declVertexSize(elements, stream){
  * @returns {VertexElement[] | null}
  */
 export function readDeclaration(readMemory, at){
-    const bytes = readMemory(at >>> 0, MAX_FVF_DECL_SIZE * 8).slice();
+    const bytes = readMemory(wholeAddress(at), MAX_FVF_DECL_SIZE * 8).slice();
     const view = new DataView(bytes.buffer);
     /** @type {VertexElement[]} */
     const elements = [];
@@ -282,7 +284,7 @@ export function createDeclarationFunctions(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, declarationBytes(elements));
+                host.writeMemory(wholeAddress(out), declarationBytes(elements));
                 return D3D_OK;
             },
         },
@@ -301,7 +303,7 @@ export function createDeclarationFunctions(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(Uint32Array.of(fvf).buffer));
+                host.writeMemory(wholeAddress(out), new Uint8Array(Uint32Array.of(fvf).buffer));
                 return D3D_OK;
             },
         },

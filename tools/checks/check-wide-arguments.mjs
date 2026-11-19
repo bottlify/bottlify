@@ -558,11 +558,18 @@ export function pointersOf(list, { addresses = false, sizes = false } = {}){
  * returns: 'pointer' }`, or the helper's call passes it (`...both(name, n,
  * body, { returns: 'pointer' })`).
  *
+ * With `exported`, every signature comment counts - over a key whose body is
+ * made elsewhere (`GetFileAttributesA: getFileAttributes.ansi,`), over the
+ * helper that makes it (`const openKeyExWith = ...`) - not only one over an
+ * object a host function is made of: what the signature says of the function
+ * it names.
+ *
  * @param {string} text
+ * @param {{ exported?: boolean }} [options]
  * @returns {{ name: string, key?: string, line: number, pointer: boolean,
  *     problem: string | null, params?: string | null }[]}
  */
-export function checkReturns(text){
+export function checkReturns(text, { exported = false } = {}){
     const found = [];
     const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*((?:[A-Za-z_]\w*\s*\**\s+)+?\**)\s*(\w+)\s*\(/g;
     // A signature on a later line of its comment, after the prose that says why:
@@ -625,7 +632,7 @@ export function checkReturns(text){
         // Only a spec right under its comment: an object with what a host
         // function is made of, or the line a helper makes one with.
         const made = /^\s*(?:(?:'[^'\n]+'|"[^"\n]+"|[\w$.]+)\s*:\s*)?\{(?:\s*\.\.\.\w+\(|[^]*?\b(argBytes|invoke|handler)\s*:)/;
-        if (!made.test(object) && !helper)
+        if (!made.test(object) && !helper && !exported)
         {
             continue;
         }
@@ -633,8 +640,10 @@ export function checkReturns(text){
         const line = text.slice(0, match.index).split('\n').length;
         const { pointer, problem } = resultProblem(match[1], match[2], own);
         // The key the spec is exported by, where it is not the C name (`'#71'`
-        // for Alloc, a C++ name): the gate meets a handler by its key.
-        const key = /^\s*['"]([^'"\n]+)['"]\s*:/.exec(spec)?.[1];
+        // for Alloc, a C++ name, `CreateFileA` under `CreateFile`'s comment):
+        // the gate meets a handler by its key.
+        const keyed = /^\s*(?:['"]([^'"\n]+)['"]|([A-Za-z_$][\w$]*))\s*:/.exec(spec);
+        const key = keyed?.[1] ?? keyed?.[2];
         found.push({ name: match[2], key: key !== match[2] ? key : undefined, line, pointer,
             problem, params: paramsAfter(text, match) });
         // The comment's other signatures, one per spec written after it

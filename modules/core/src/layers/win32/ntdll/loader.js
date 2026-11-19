@@ -17,6 +17,7 @@
 
 import { STATUS } from './status.js';
 import { DLL_SEARCH_PATH } from '../kernel32/modules.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_PROCEDURE_NOT_FOUND = 0xc000007a;
 const STATUS_ORDINAL_NOT_FOUND = 0xc0000138;
@@ -171,7 +172,7 @@ export function createLoaderFunctions({
         try
         {
             const found = kernel32.GetModuleHandleExW.handler([flags, text, scratch]) !== 0;
-            setU32(out >>> 0, found ? u32(scratch) : 0);
+            setU32(wholeAddress(out), found ? u32(scratch) : 0);
             return found ? STATUS.SUCCESS : STATUS.DLL_NOT_FOUND;
         }
         finally
@@ -318,7 +319,7 @@ export function createLoaderFunctions({
                 const fixed = /^([A-Za-z]:|[\\/]|\.\.?[\\/])/.test(asked);
                 /** Where it is looked for: as asked, or under each directory of the path. */
                 const places = (path & 1) !== 0 || (path >>> 0) === 0 || fixed ? [asked]
-                    : wideAt(path >>> 0).split(';').filter(directory=>directory !== '')
+                    : wideAt(wholeAddress(path)).split(';').filter(directory=>directory !== '')
                         .map(directory=>`${directory.replace(/[\\/]+$/, '')}\\${asked}`);
                 /**
                  * @param {number} next
@@ -351,7 +352,7 @@ export function createLoaderFunctions({
                             return refused instanceof Promise ? refused.then(then) : then(refused);
                         }
                         free(text);
-                        setU32(out >>> 0, base >>> 0);
+                        setU32(wholeAddress(out), base >>> 0);
                         return STATUS.SUCCESS;
                     };
                     const base = (path & 1) !== 0
@@ -381,9 +382,9 @@ export function createLoaderFunctions({
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const named = (module >>> 0) === 0 ? '' : wideAt(module >>> 0);
-                setU32(out >>> 0, heapWide(search(named, flags >>> 0).join(';')));
-                setU32(unknown >>> 0, 0);
+                const named = (module >>> 0) === 0 ? '' : wideAt(wholeAddress(module));
+                setU32(wholeAddress(out), heapWide(search(named, flags >>> 0).join(';')));
+                setU32(wholeAddress(unknown), 0);
                 return STATUS.SUCCESS;
             },
         },
@@ -406,7 +407,7 @@ export function createLoaderFunctions({
                     {
                         return STATUS.INVALID_PARAMETER;
                     }
-                    setU32(cookie >>> 0, notifications.register(callback, context));
+                    setU32(wholeAddress(cookie), notifications.register(callback, context));
                     return STATUS.SUCCESS;
                 },
             },
@@ -456,8 +457,8 @@ export function createLoaderFunctions({
                     {
                         free(text);
                     }
-                    const address = found >>> 0;
-                    setU32(out >>> 0, address);
+                    const address = wholeAddress(found);
+                    setU32(wholeAddress(out), address);
                     if (address !== 0)
                     {
                         return STATUS.SUCCESS;
@@ -493,11 +494,11 @@ export function createLoaderFunctions({
                 // refusal's included.
                 if ((disposition >>> 0) !== 0)
                 {
-                    setU32(disposition >>> 0, 0);
+                    setU32(wholeAddress(disposition), 0);
                 }
                 if ((cookie >>> 0) !== 0)
                 {
-                    setU32(cookie >>> 0, 0);
+                    setU32(wholeAddress(cookie), 0);
                 }
                 if (((flags >>> 0) & ~(LDR_LOCK_RAISE_ON_ERRORS | LDR_LOCK_TRY_ONLY)) !== 0)
                 {
@@ -513,9 +514,9 @@ export function createLoaderFunctions({
                 }
                 if ((disposition >>> 0) !== 0)
                 {
-                    setU32(disposition >>> 0, LDR_LOCK_ACQUIRED);
+                    setU32(wholeAddress(disposition), LDR_LOCK_ACQUIRED);
                 }
-                setU32(cookie >>> 0, ++locks);
+                setU32(wholeAddress(cookie), ++locks);
                 return STATUS.SUCCESS;
             },
         },
@@ -561,23 +562,25 @@ export function createLoaderFunctions({
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([directory])=>{
-                const room = u16((directory >>> 0) + 2) >>> 1;
+                const room = u16(wholeAddress(directory) + 2) >>> 1;
                 const needed = kernel32.GetDllDirectoryW.handler([0, 0]) >>> 0;
                 if (needed > room)
                 {
                     // Told the bytes it needs, its terminator counted, and
                     // left an empty string, as Windows answers.
                     const length = needed * 2;
-                    writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
+                    writeMemory(wholeAddress(directory), Uint8Array.of(length & 0xff,
+                        length >>> 8 & 0xff));
                     if (room > 0)
                     {
-                        writeMemory(u32((directory >>> 0) + 4), new Uint8Array(2));
+                        writeMemory(u32(wholeAddress(directory) + 4), new Uint8Array(2));
                     }
                     return STATUS.BUFFER_TOO_SMALL;
                 }
                 const length = (needed - 1) * 2;
-                writeMemory(directory >>> 0, Uint8Array.of(length & 0xff, length >>> 8 & 0xff));
-                kernel32.GetDllDirectoryW.handler([room, u32((directory >>> 0) + 4)]);
+                writeMemory(wholeAddress(directory), Uint8Array.of(length & 0xff,
+                    length >>> 8 & 0xff));
+                kernel32.GetDllDirectoryW.handler([room, u32(wholeAddress(directory) + 4)]);
                 return STATUS.SUCCESS;
             },
         },

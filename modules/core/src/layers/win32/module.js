@@ -232,7 +232,8 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
     from './mfreadwrite/functions.js';
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
-import { paramsOf } from './common/pointers.js';
+import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
+import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
 // 64-bit process places (`withLongCode`), the conversions here and the flush in heap.js.
@@ -3607,7 +3608,7 @@ export function createWin32Module(){
             // The common controls, one implementation and the two libraries it is:
             // system32's 5.82 and Common Controls 6 (`commonControlsFaces`).
             const commonControls = commonControlsFaces({
-                readMemory, writeMemory, divergence: config?.divergence, imageLists,
+                readMemory, writeMemory, pointerSize, divergence: config?.divergence, imageLists,
                 // What _TrackMouseEvent is documented to call where the
                 // system has it; looked up when called, as user32 is built
                 // beside it.
@@ -5681,7 +5682,7 @@ export function createWin32Module(){
                                     setError(ERROR_INVALID_PARAMETER);
                                     return 0;
                                 }
-                                writeMemory(index >>> 0, Uint8Array.of(1, 0, 0, 0));
+                                writeMemory(wholeAddress(index), Uint8Array.of(1, 0, 0, 0));
                                 return AVRT_TASK_HANDLE;
                             } }]),
                     ['AvRevertMmThreadCharacteristics', { argBytes: 4,
@@ -5936,7 +5937,7 @@ export function createWin32Module(){
                         // What came before was looked at by the caller just now.
                         kernel.resetEvent(held.event);
                         const words = new Uint8Array(count * 4 + 4);
-                        words.set(readMemory(array >>> 0, count * 4));
+                        words.set(readMemory(wholeAddress(array), count * 4));
                         new DataView(words.buffer).setUint32(count * 4, held.handle, true);
                         writeMemory(held.array, words);
                         return libraries['KERNEL32.dll'].WaitForMultipleObjects.handler(
@@ -7009,6 +7010,10 @@ export function createWin32Module(){
                 libraries['ntdll.dll'].NtPowerInformation =
                     libraries['POWRPROF.dll'].CallNtPowerInformation;
             }
+
+            // Each function's address arguments, as its signature names them:
+            // a 64-bit caller's past 4 GiB reaches the handler whole.
+            declareAddresses(libraries, POINTER_ARGUMENTS);
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));

@@ -24,6 +24,7 @@ import {
 } from './filter.js';
 import { describe } from './describe.js';
 import { IID_IREFERENCE_CLOCK, IREFERENCE_CLOCK_SLOTS } from './interfaces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -224,7 +225,7 @@ export function createRenderers(base, host, passThru){
         }
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setInt32(0, value | 0, true);
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return S_OK;
     };
 

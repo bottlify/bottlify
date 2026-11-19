@@ -22,6 +22,7 @@ import { DIRECTX_VERSION } from '../advapi32/registry.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** DirectXSetup's answer when everything is in place and no restart is needed. */
 export const DSETUPERR_SUCCESS = 0;
@@ -144,8 +145,8 @@ export function createDsetupFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: async([buffer, room, language])=>{
-            const to = buffer >>> 0;
-            const capacity = room >>> 0;
+            const to = wholeAddress(buffer);
+            const capacity = wholeAddress(room);
             if (to !== 0 && capacity !== 0)
             {
                 host.writeMemory(to, new Uint8Array(wide ? 2 : 1));
@@ -199,11 +200,11 @@ export function createDsetupFunctions(host){
             handler: ([version, revision])=>{
                 if ((version >>> 0) !== 0)
                 {
-                    host.writeMemory(version >>> 0, dword(words.version));
+                    host.writeMemory(wholeAddress(version), dword(words.version));
                 }
                 if ((revision >>> 0) !== 0)
                 {
-                    host.writeMemory(revision >>> 0, dword(words.revision));
+                    host.writeMemory(wholeAddress(revision), dword(words.revision));
                 }
                 return 1;
             },

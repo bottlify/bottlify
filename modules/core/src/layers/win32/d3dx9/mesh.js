@@ -7,6 +7,7 @@
 import { DEVICE, INDEX_BUFFER, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDeviceCalls }
     from './device.js';
 import { adjacencyErrors } from './mesh-topology.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DX's geometry over vertex data: the bounds of a run of positions, and
@@ -171,11 +172,11 @@ export function createMeshFunctions(host, buffers){
     const f = Math.fround;
     /** @param {number} at @returns {[number, number, number]} */
     const position = at=>{
-        const view = new DataView(host.readMemory(at >>> 0, 12).slice().buffer);
+        const view = new DataView(host.readMemory(wholeAddress(at), 12).slice().buffer);
         return [view.getFloat32(0, true), view.getFloat32(4, true), view.getFloat32(8, true)];
     };
     /** @param {number} at @param {number[]} values */
-    const putFloats = (at, values)=>host.writeMemory(at >>> 0,
+    const putFloats = (at, values)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Float32Array.from(values).buffer));
     const { u32, putU32s, method } = createDeviceCalls(host);
 
@@ -422,7 +423,8 @@ export function createMeshFunctions(host, buffers){
                     + `${vertices}`);
             }
         });
-        const given = [...new Uint32Array(host.readMemory(adjacency >>> 0, faces * 12).slice()
+        const given = [...new Uint32Array(host.readMemory(wholeAddress(adjacency),
+            faces * 12).slice()
             .buffer)];
         return errors.concat(adjacencyErrors(given, faces));
     };
@@ -515,8 +517,9 @@ export function createMeshFunctions(host, buffers){
                         const faces = await method(thread, mesh, MESH.GetNumFaces, []);
                         if ((adjacencyOut >>> 0) !== 0)
                         {
-                            host.writeMemory(adjacencyOut >>> 0, host.readMemory(adjacency >>> 0,
-                                faces * 12).slice());
+                            host.writeMemory(wholeAddress(adjacencyOut),
+                                host.readMemory(wholeAddress(adjacency),
+                                    faces * 12).slice());
                         }
                         await method(thread, mesh, UNKNOWN_ADDREF, []);
                         putU32s(meshOut, [mesh]);

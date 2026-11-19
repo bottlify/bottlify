@@ -40,6 +40,7 @@ import {
 import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { stableSort } from './stable-sort.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TREEVIEW_CLASS = 'SysTreeView32';
@@ -298,10 +299,10 @@ export function createTreeViewProcedure(host, tk){
         : node(record, item.parent)?.children ?? []);
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, u32(value));
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), u32(value));
     /** @param {number} address @returns {number} */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @returns {number} signed */
@@ -501,7 +502,7 @@ export function createTreeViewProcedure(host, tk){
             }
             else if (pointer !== 0)
             {
-                item.text = host.readCString(pointer >>> 0, 0x10000);
+                item.text = host.readCString(wholeAddress(pointer), 0x10000);
                 item.textCallback = false;
             }
         }

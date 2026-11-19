@@ -8,6 +8,7 @@ import { LOCKED_RECT_BYTES, SURFACE, TEXTURE, createDeviceCalls } from './device
 import { IFF } from './images.js';
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DXSaveTextureToFile, D3DXSaveSurfaceToFile and their InMemory forms: a
@@ -271,7 +272,7 @@ export function createTextureSaver(host, buffers){
             }
             const [{ width, height, bytes }] = levels;
             const colours = (palette >>> 0) === 0 ? undefined
-                : host.readMemory(palette >>> 0, 1024).slice();
+                : host.readMemory(wholeAddress(palette), 1024).slice();
             if (format === FMT.P8 && !colours)
             {
                 return D3DERR_INVALIDCALL;
@@ -352,7 +353,7 @@ export function createTextureSaver(host, buffers){
         const format = u32(scratch);
         const [full, tall] = [u32(scratch + 24), u32(scratch + 28)];
         const [left, top, right, bottom] = (rect >>> 0) === 0 ? [0, 0, full, tall]
-            : [0, 4, 8, 12].map(at=>u32((rect >>> 0) + at) | 0);
+            : [0, 4, 8, 12].map(at=>u32(wholeAddress(rect) + at) | 0);
         if (left < 0 || top < 0 || right > full || bottom > tall || right <= left
             || bottom <= top)
         {
@@ -430,7 +431,7 @@ export function createTextureSaver(host, buffers){
         handler: ([out, fileFormat, source, palette, rect])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
             }
             if ((out >>> 0) === 0 || (source >>> 0) === 0 || !host.callGuest || !host.heap)
             {

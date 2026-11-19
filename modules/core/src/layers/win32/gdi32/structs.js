@@ -20,6 +20,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** LOGPEN. Its width is a POINT, of which only the x is ever meaningful. */
 export const LOGPEN = Object.freeze({
@@ -229,7 +230,7 @@ export const PALETTEENTRY_SIZE = 4;
  * @returns {number} 0x00RRGGBB
  */
 export function paletteEntryToPixel(entry){
-    const value = entry >>> 0;
+    const value = wholeAddress(entry);
     return ((value & 0xff) << 16 | value & 0xff00 | (value >>> 16) & 0xff) >>> 0;
 }
 

@@ -25,6 +25,7 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -60,7 +61,7 @@ export function createMsvcr80Functions(crt, host){
     const setU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     const seam = /** @type {any} */ (crt)[INVALID_PARAMETERS];
@@ -82,14 +83,14 @@ export function createMsvcr80Functions(crt, host){
     };
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     const pointer = host.pointerSize ?? 4;
     /** A pointer, every address below 4 GiB. @param {number} address @param {number} value */
     const setPointer = (address, value)=>{
         const bytes = new Uint8Array(pointer);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -117,7 +118,7 @@ export function createMsvcr80Functions(crt, host){
                 return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
             };
             const set = new Set();
-            for (let at = delimiters >>> 0; read(at) !== 0; at += unit)
+            for (let at = wholeAddress(delimiters); read(at) !== 0; at += unit)
             {
                 set.add(read(at));
             }
@@ -275,15 +276,15 @@ export function createMsvcr80Functions(crt, host){
                 const written = crt._vsnprintf.handler([buffer, limit, format, list]) | 0;
                 if (written >= 0)
                 {
-                    host.writeMemory((buffer >>> 0) + written, Uint8Array.of(0));
+                    host.writeMemory(wholeAddress(buffer) + written, Uint8Array.of(0));
                     return written;
                 }
                 if ((count >>> 0) === TRUNCATE || (count >>> 0) <= room)
                 {
-                    host.writeMemory((buffer >>> 0) + limit, Uint8Array.of(0));
+                    host.writeMemory(wholeAddress(buffer) + limit, Uint8Array.of(0));
                     return -1;
                 }
-                host.writeMemory(buffer >>> 0, Uint8Array.of(0));
+                host.writeMemory(wholeAddress(buffer), Uint8Array.of(0));
                 fail(ERANGE);
                 return -1;
             },
@@ -473,12 +474,12 @@ export function createMsvcr80Functions(crt, host){
                 const length = crt._vsnwprintf.handler([0, 0, format, list]) | 0;
                 if (length < 0 || length + 1 > (size >>> 0))
                 {
-                    host.writeMemory(buffer >>> 0, Uint8Array.of(0, 0));
+                    host.writeMemory(wholeAddress(buffer), Uint8Array.of(0, 0));
                     fail(length < 0 ? EINVAL : ERANGE);
                     return -1;
                 }
                 crt._vsnwprintf.handler([buffer, size, format, list]);
-                host.writeMemory((buffer >>> 0) + length * 2, Uint8Array.of(0, 0));
+                host.writeMemory(wholeAddress(buffer) + length * 2, Uint8Array.of(0, 0));
                 return length;
             },
         }),

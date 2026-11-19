@@ -21,6 +21,7 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Atoms a caller allocates start here; below it are the integer atoms. */
 const FIRST_ATOM = 0xc000;
@@ -72,7 +73,7 @@ export function createAtomFunctions(host){
      * @returns {{ integer: number } | { text: string } | null}
      */
     const nameOf = (pointer, wide = false)=>{
-        const raw = pointer >>> 0;
+        const raw = wholeAddress(pointer);
         if (raw < MAX_INTEGER_ATOM)
         {
             return integerName(raw);
@@ -144,7 +145,7 @@ export function createAtomFunctions(host){
 
     /** @param {number} atom @returns {number} zero on success, the atom on failure */
     const remove = atom=>{
-        const value = atom >>> 0;
+        const value = wholeAddress(atom);
         if (value < FIRST_ATOM)
         {
             // An integer atom is not reference counted and cannot be deleted.
@@ -215,11 +216,13 @@ export function createAtomFunctions(host){
         if (global && wide)
         {
             const kept = text.slice(0, room);
-            host.writeMemory(buffer >>> 0, encodeWide(kept.length < room ? `${kept}\0` : kept));
+            host.writeMemory(wholeAddress(buffer),
+                encodeWide(kept.length < room ? `${kept}\0` : kept));
             return kept.length;
         }
         const kept = text.slice(0, room - 1);
-        host.writeMemory(buffer >>> 0, wide ? encodeWide(`${kept}\0`) : encodeAnsi(`${kept}\0`));
+        host.writeMemory(wholeAddress(buffer),
+            wide ? encodeWide(`${kept}\0`) : encodeAnsi(`${kept}\0`));
         if (kept.length < text.length && (global || kept.length === 0))
         {
             host.setLastError?.(short);

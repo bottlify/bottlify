@@ -46,6 +46,7 @@ import {
 import {
     CONTEXT_DEBUG_REGISTERS, debugGroupOf, setDebugRegisters, writeDebugGroup,
 } from './debug-registers.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** EXCEPTION_RECORD, and the size the whole of one occupies. */
 export const RECORD = Object.freeze({
@@ -525,7 +526,7 @@ export function createSeh(host){
         const word = (/** @type {number} */ at)=>{
             try
             {
-                return host.isMapped(at >>> 0) ? readU32(at >>> 0) : null;
+                return host.isMapped(at >>> 0) ? readU32(wholeAddress(at)) : null;
             }
             catch {
                 return null;
@@ -807,13 +808,13 @@ export function createSeh(host){
         const caller = what.raisedFrom !== undefined
             ? `${what.call ? ` in ${what.call}` : ''}, raised from ${hex(what.raisedFrom)}`
             : (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
-                ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
+                ? `, called from ${hex(readU32(wholeAddress(registers.esp)))}` : '';
         // An instruction the processor refused is named by its bytes: a
         // deliberate trap and an opcode the translator lacks look alike
         // otherwise.
         const refused = what.code === STATUS.ILLEGAL_INSTRUCTION
             && host.isMapped(what.address >>> 0)
-            ? ` (${[...host.readMemory(what.address >>> 0, 8)]
+            ? ` (${[...host.readMemory(wholeAddress(what.address), 8)]
                 .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')})` : '';
         // An access violation names the address it could not reach, and
         // whether it read or wrote there: what a caught one was after.
@@ -932,7 +933,7 @@ export function createSeh(host){
         const registers = options.registers ?? host.registers();
         const record = options.record ?? 0;
         const at = carve(registers);
-        const target = targetFrame >>> 0;
+        const target = wholeAddress(targetFrame);
         const everything = target === 0 || target === END_OF_CHAIN;
         const flags = EH_UNWINDING | (everything ? EXCEPTION_EXIT_UNWIND : 0);
         let shown = at.record;
@@ -1079,7 +1080,7 @@ export function createSeh(host){
             flags,
             address: registers.eip,
             parameters,
-            raisedFrom: readU32(registers.esp >>> 0),
+            raisedFrom: readU32(wholeAddress(registers.esp)),
             ...call ? { call } : {},
         }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
     };
@@ -1236,7 +1237,7 @@ export function createSeh(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([code, flags, count, args])=>{
-                    const from = args >>> 0;
+                    const from = wholeAddress(args);
                     const total = from === 0 ? 0 : Math.min(count >>> 0, 15);
                     /** @type {number[]} */
                     const parameters = [];

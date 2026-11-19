@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Interlocked singly linked lists: a LIFO of entries the program owns, each
  * an SLIST_ENTRY whose first word is the next one's address, under an
@@ -185,7 +187,7 @@ export function createSListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([header])=>{
-                host.writeMemory(header >>> 0, new Uint8Array(HEADER.SIZE));
+                host.writeMemory(wholeAddress(header), new Uint8Array(HEADER.SIZE));
                 return 0;
             },
         },

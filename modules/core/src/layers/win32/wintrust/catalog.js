@@ -19,6 +19,7 @@
 
 import { createDigestFor, OID } from '../crypto/signature.js';
 import { readSubject } from './subject.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
@@ -67,14 +68,14 @@ export function createCatalogFunctions(host){
     let next = ADMIN_BASE;
     /** @param {number} address */
     const dword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     };
     /** @param {number} address @param {number} value */
     const setDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -129,7 +130,7 @@ export function createCatalogFunctions(host){
             {
                 return fail(NTE_BAD_ALGID);
             }
-            host.writeMemory(out >>> 0, hash);
+            host.writeMemory(wholeAddress(out), hash);
             setDword(sizeAt, hash.length);
             return 1;
         };
@@ -160,7 +161,7 @@ export function createCatalogFunctions(host){
             argBytes: 20,
             handler: (/** @type {number[]} */ [out, , algorithm])=>{
                 const name = (algorithm >>> 0) === 0 ? 'SHA1'
-                    : host.readWideString(algorithm >>> 0, 32 * 2).toUpperCase();
+                    : host.readWideString(wholeAddress(algorithm), 32 * 2).toUpperCase();
                 const oid = name === 'SHA1' ? OID.SHA1 : name === 'SHA256' ? OID.SHA256 : null;
                 return oid ? acquire(out, oid) : refuse(NTE_BAD_ALGID);
             },

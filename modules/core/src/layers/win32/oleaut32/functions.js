@@ -61,6 +61,7 @@ import {
     VT_RECORD, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
     VT_VECTOR, DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE,
 } from './vartypes.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -2080,10 +2081,10 @@ export function createAutomationFunctions(host){
                 return TYPE_E_REGISTRYACCESS;
             }
             hive.setValue(key, '', REG_SZ, ansi(library.helpString ?? library.name));
-            const path = wideAt(fullPath >>> 0) || loaded.path;
+            const path = wideAt(wholeAddress(fullPath)) || loaded.path;
             hive.setValue(hive.create(key, '0\\win32').key, '', REG_SZ, ansi(path));
             hive.setValue(hive.create(key, 'FLAGS').key, '', REG_SZ, ansi(String(library.flags)));
-            const help = wideAt(helpDir >>> 0) || path.slice(0, path.lastIndexOf('\\'));
+            const help = wideAt(wholeAddress(helpDir)) || path.slice(0, path.lastIndexOf('\\'));
             hive.setValue(hive.create(key, 'HELPDIR').key, '', REG_SZ, ansi(help));
             // Every interface the universal marshaler can carry is registered
             // to it, with the library that describes it: that is how a proxy
@@ -2149,12 +2150,12 @@ export function createAutomationFunctions(host){
                 return E_INVALIDARG;
             }
             english(api, lcid);
-            const answer = convert(wideAt(strIn >>> 0), flags >>> 0);
+            const answer = convert(wideAt(wholeAddress(strIn)), flags >>> 0);
             if (typeof answer === 'number')
             {
                 return answer;
             }
-            host.writeMemory(out >>> 0, answer);
+            host.writeMemory(wholeAddress(out), answer);
             return S_OK;
         },
     });
@@ -2636,7 +2637,7 @@ export function createAutomationFunctions(host){
                     {
                         return outcome;
                     }
-                    host.writeMemory((out >>> 0) + (target === VT_DECIMAL ? 2 : 0),
+                    host.writeMemory(wholeAddress(out) + (target === VT_DECIMAL ? 2 : 0),
                         valueBytesOf(outcome).subarray(0, size));
                     return S_OK;
                 });
@@ -2765,9 +2766,9 @@ export function createAutomationFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            const bytes = host.readMemory(pin >>> 0, 16).slice();
+            const bytes = host.readMemory(wholeAddress(pin), 16).slice();
             bytes[3] = change(bytes[3]);
-            host.writeMemory((pout >>> 0) + 2, bytes.subarray(2));
+            host.writeMemory(wholeAddress(pout) + 2, bytes.subarray(2));
             return S_OK;
         },
     });
@@ -3025,7 +3026,7 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([cDims, out])=>{
-                const dims = cDims >>> 0;
+                const dims = wholeAddress(cDims);
                 if (dims === 0 || dims > 0xffff)
                 {
                     return E_INVALIDARG;
@@ -3035,7 +3036,7 @@ export function createAutomationFunctions(host){
                     return E_POINTER;
                 }
                 const psa = allocateDescriptor(dims);
-                writeU32(out >>> 0, psa);
+                writeU32(wholeAddress(out), psa);
                 return psa === 0 ? E_UNEXPECTED : S_OK;
             },
         },
@@ -3050,7 +3051,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([vt, cDims, out])=>{
-                const dims = cDims >>> 0;
+                const dims = wholeAddress(cDims);
                 if (dims === 0 || dims > 0xffff)
                 {
                     return E_INVALIDARG;
@@ -3060,7 +3061,7 @@ export function createAutomationFunctions(host){
                     return E_POINTER;
                 }
                 const psa = allocateDescriptor(dims);
-                writeU32(out >>> 0, psa);
+                writeU32(wholeAddress(out), psa);
                 if (psa === 0)
                 {
                     return E_UNEXPECTED;
@@ -3176,8 +3177,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(guid >>> 0,
-                    host.readMemory((psa >>> 0) - DESCRIPTOR_PREFIX, 16).slice());
+                host.writeMemory(wholeAddress(guid),
+                    host.readMemory(wholeAddress(psa) - DESCRIPTOR_PREFIX, 16).slice());
                 return S_OK;
             },
         },
@@ -3192,8 +3193,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory((psa >>> 0) - DESCRIPTOR_PREFIX,
-                    host.readMemory(guid >>> 0, 16).slice());
+                host.writeMemory(wholeAddress(psa) - DESCRIPTOR_PREFIX,
+                    host.readMemory(wholeAddress(guid), 16).slice());
                 return S_OK;
             },
         },
@@ -3218,7 +3219,7 @@ export function createAutomationFunctions(host){
                 // SafeArrayAllocDescriptorEx made for IDispatch -- answers
                 // VT_UNKNOWN, as Windows answers.
                 const type = (features & FADF_RECORD) !== 0 ? VT_RECORD
-                    : (features & FADF_HAVEVARTYPE) !== 0 ? readU32((psa >>> 0) - 4) & 0xffff
+                    : (features & FADF_HAVEVARTYPE) !== 0 ? readU32(wholeAddress(psa) - 4) & 0xffff
                         : (features & FADF_DISPATCH) !== 0 ? VT_DISPATCH
                             : (features & (FADF_HAVEIID | FADF_UNKNOWN)) !== 0 ? VT_UNKNOWN
                                 : (features & FADF_BSTR) !== 0 ? VT_BSTR
@@ -3227,7 +3228,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU16(pvt >>> 0, type);
+                writeU16(wholeAddress(pvt), type);
                 return S_OK;
             },
         },
@@ -3242,8 +3243,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const held = readU32((psa >>> 0) - 4);
-                writeU32((psa >>> 0) - 4, info >>> 0);
+                const held = readU32(wholeAddress(psa) - 4);
+                writeU32(wholeAddress(psa) - 4, info >>> 0);
                 return settle({ addRef: (info >>> 0) !== 0 ? [info >>> 0] : [],
                     release: held !== 0 ? [held] : [], recordClear: [], recordCopy: [] },
                 host.callerThread?.(), S_OK);
@@ -3260,8 +3261,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const info = readU32((psa >>> 0) - 4);
-                writeU32(out >>> 0, info);
+                const info = readU32(wholeAddress(psa) - 4);
+                writeU32(wholeAddress(out), info);
                 return settle({ addRef: info !== 0 ? [info] : [], release: [], recordClear: [],
                     recordCopy: [] }, host.callerThread?.(), S_OK);
             },
@@ -3374,7 +3375,7 @@ export function createAutomationFunctions(host){
                 {
                     return value;
                 }
-                const text = (format >>> 0) === 0 ? '' : wideAt(format >>> 0);
+                const text = (format >>> 0) === 0 ? '' : wideAt(wholeAddress(format));
                 return answerText(out >>> 0, formatValue(value, text, firstDay | 0,
                     real=>textOfReal(real, 15)));
             },
@@ -3469,7 +3470,7 @@ export function createAutomationFunctions(host){
                 const names = ALTERNATE_MONTHS.get(lcid & 0x3ff);
                 if (!names)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                     return S_OK;
                 }
                 // One table per language for the life of the process, as
@@ -3487,7 +3488,7 @@ export function createAutomationFunctions(host){
                         + index * 4, at));
                     alternateTables.set(lcid & 0x3ff, table);
                 }
-                writeU32(out >>> 0, table);
+                writeU32(wholeAddress(out), table);
                 return S_OK;
             },
         },
@@ -3507,7 +3508,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const text = (format >>> 0) === 0 ? '' : wideAt(format >>> 0);
+                const text = (format >>> 0) === 0 ? '' : wideAt(wholeAddress(format));
                 const bytes = new Uint8Array(TOKEN_HEADER + text.length * 2);
                 const view = new DataView(bytes.buffer);
                 view.setUint16(0, text.length, true);
@@ -3517,10 +3518,10 @@ export function createAutomationFunctions(host){
                 {
                     return 0x80020013 | 0;
                 }
-                host.writeMemory(tokens >>> 0, bytes);
+                host.writeMemory(wholeAddress(tokens), bytes);
                 if ((actual >>> 0) !== 0)
                 {
-                    writeU32(actual >>> 0, bytes.length);
+                    writeU32(wholeAddress(actual), bytes.length);
                 }
                 return S_OK;
             },
@@ -3561,7 +3562,7 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([psz])=>{
-                const source = psz >>> 0;
+                const source = wholeAddress(psz);
                 // Documented, and relied on: a NULL string allocates nothing
                 // and answers NULL rather than an empty string.
                 if (source === 0)
@@ -3592,8 +3593,8 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([psz, len])=>{
-                const source = psz >>> 0;
-                const bytes = len >>> 0;
+                const source = wholeAddress(psz);
+                const bytes = wholeAddress(len);
                 // A length with the top bit set is no string on a 32-bit
                 // system, refused before anything is read.
                 if (bytes >= 0x80000000)
@@ -3612,12 +3613,12 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pbstr, psz])=>{
-                const slot = pbstr >>> 0;
+                const slot = wholeAddress(pbstr);
                 if (slot === 0)
                 {
                     return 0;
                 }
-                const source = psz >>> 0;
+                const source = wholeAddress(psz);
                 const replacement = source === 0
                     ? 0
                     : allocateFrom(source, lengthOfWide(source));
@@ -3636,7 +3637,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pbstr, psz, len])=>{
-                const slot = pbstr >>> 0;
+                const slot = wholeAddress(pbstr);
                 if (slot === 0)
                 {
                     return 0;
@@ -3650,7 +3651,7 @@ export function createAutomationFunctions(host){
                 const data = new Uint8Array(bytes);
                 if ((psz >>> 0) !== 0)
                 {
-                    data.set(host.readMemory(psz >>> 0, bytes));
+                    data.set(host.readMemory(wholeAddress(psz), bytes));
                 }
                 else if (old !== 0)
                 {
@@ -3719,18 +3720,18 @@ export function createAutomationFunctions(host){
                 const data = new Uint8Array(leftBytes + rightBytes);
                 if (leftBytes)
                 {
-                    data.set(host.readMemory(left >>> 0, leftBytes));
+                    data.set(host.readMemory(wholeAddress(left), leftBytes));
                 }
                 if (rightBytes)
                 {
-                    data.set(host.readMemory(right >>> 0, rightBytes), leftBytes);
+                    data.set(host.readMemory(wholeAddress(right), rightBytes), leftBytes);
                 }
                 const bstr = allocateBstr(data);
                 if (bstr === 0)
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(result >>> 0, bstr);
+                writeU32(wholeAddress(result), bstr);
                 return S_OK;
             },
         },
@@ -3758,8 +3759,8 @@ export function createAutomationFunctions(host){
                     return leftEmpty === rightEmpty ? VARCMP_EQ
                         : leftEmpty ? VARCMP_LT : VARCMP_GT;
                 }
-                const a = host.readMemory(left >>> 0, leftBytes);
-                const b = host.readMemory(right >>> 0, rightBytes);
+                const a = host.readMemory(wholeAddress(left), leftBytes);
+                const b = host.readMemory(wholeAddress(right), rightBytes);
                 if ((lcid >>> 0) !== 0)
                 {
                     /** @param {Uint8Array} bytes */
@@ -3791,7 +3792,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, start, pbstr])=>{
-                const units = (byteLengthOf(readU32(pbstr >>> 0)) + 1) >>> 1;
+                const units = (byteLengthOf(readU32(wholeAddress(pbstr))) + 1) >>> 1;
                 return ((((start >>> 0) + 3) & ~3) + WIRE_BSTR_HEADER + units * 2) >>> 0;
             },
         },
@@ -3808,9 +3809,9 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, buffer, pbstr])=>{
-                const from = buffer >>> 0;
+                const from = wholeAddress(buffer);
                 const pad = (4 - (from & 3)) & 3;
-                const bstr = readU32(pbstr >>> 0);
+                const bstr = readU32(wholeAddress(pbstr));
                 const bytes = byteLengthOf(bstr);
                 const units = (bytes + 1) >>> 1;
                 const wire = new Uint8Array(pad + WIRE_BSTR_HEADER + units * 2);
@@ -3823,7 +3824,7 @@ export function createAutomationFunctions(host){
                     wire.set(host.readMemory(bstr, units * 2), pad + WIRE_BSTR_HEADER);
                 }
                 host.writeMemory(from, wire);
-                return (from + wire.length) >>> 0;
+                return wholeAddress(from + wire.length);
             },
         },
 
@@ -3841,11 +3842,11 @@ export function createAutomationFunctions(host){
                 const at = (((buffer >>> 0) + 3) & ~3) >>> 0;
                 const bytes = readU32(at + 4);
                 const units = readU32(at + 8);
-                const slot = pbstr >>> 0;
+                const slot = wholeAddress(pbstr);
                 freeBstr(readU32(slot));
                 writeU32(slot, bytes === 0xffffffff ? 0 : allocateBstr(host.readMemory(
                     at + WIRE_BSTR_HEADER, Math.min(bytes, units * 2)).slice()));
-                return (at + WIRE_BSTR_HEADER + units * 2) >>> 0;
+                return wholeAddress(at + WIRE_BSTR_HEADER + units * 2);
             },
         },
 
@@ -3854,7 +3855,7 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, pbstr])=>{
-                const slot = pbstr >>> 0;
+                const slot = wholeAddress(pbstr);
                 freeBstr(readU32(slot));
                 writeU32(slot, 0);
                 return 0;
@@ -3899,8 +3900,8 @@ export function createAutomationFunctions(host){
         /** unsigned char *LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *pBuffer, LPSAFEARRAY *ppsa) */
         LPSAFEARRAY_UserUnmarshal: {
             ...noWireForm('LPSAFEARRAY_UserUnmarshal', ([, buffer, ppsa])=>{
-                writeU32(ppsa >>> 0, 0);
-                return buffer >>> 0;
+                writeU32(wholeAddress(ppsa), 0);
+                return wholeAddress(buffer);
             }),
             returns: 'pointer',
         },
@@ -3912,7 +3913,7 @@ export function createAutomationFunctions(host){
              * @param {number[]} args
              * @returns {number | Promise<number>}
              */
-            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([readU32(ppsa >>> 0)]),
+            handler: ([, ppsa])=>table.SafeArrayDestroy.handler([readU32(wholeAddress(ppsa))]),
         },
 
         /** void VariantInit(VARIANTARG *pvarg) */
@@ -3920,7 +3921,7 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pvarg])=>{
-                const variant = pvarg >>> 0;
+                const variant = wholeAddress(pvarg);
                 if (variant !== 0)
                 {
                     // Documented as setting only the type. The union is zeroed
@@ -3938,7 +3939,7 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pvarg])=>{
-                const variant = pvarg >>> 0;
+                const variant = wholeAddress(pvarg);
                 if (variant === 0)
                 {
                     return E_INVALIDARG;
@@ -3965,8 +3966,8 @@ export function createAutomationFunctions(host){
             handler: ([pvargDest, pvargSrc])=>{
                 const thread = host.callerThread?.();
                 const owed = nothingOwed();
-                const dest = pvargDest >>> 0;
-                const src = pvargSrc >>> 0;
+                const dest = wholeAddress(pvargDest);
+                const src = wholeAddress(pvargSrc);
                 // A record with no IRecordInfo to copy it by is copied as it is.
                 if (dest !== 0 && src !== 0 && dest !== src && readU16(src) === VT_RECORD
                     && readU32(src + VARIANT_VALUE + 4) !== 0 && isVariantType(readU16(dest)))
@@ -3982,8 +3983,8 @@ export function createAutomationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pvarDest, pvargSrc])=>{
-                const dest = pvarDest >>> 0;
-                const src = pvargSrc >>> 0;
+                const dest = wholeAddress(pvarDest);
+                const src = wholeAddress(pvargSrc);
                 if (dest === 0 || src === 0)
                 {
                     return E_INVALIDARG;
@@ -4149,7 +4150,7 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_BADVARTYPE;
                 }
-                const out = pout >>> 0;
+                const out = wholeAddress(pout);
                 const number = Number(value.number);
                 switch (value.type)
                 {
@@ -4194,7 +4195,7 @@ export function createAutomationFunctions(host){
                     case VT_INT:
                     case VT_UINT:
                         return writeVariant(out, value.type,
-                            host.readMemory((pin >>> 0) + VARIANT_VALUE, 8).slice());
+                            host.readMemory(wholeAddress(pin) + VARIANT_VALUE, 8).slice());
                     default:
                         return DISP_E_BADVARTYPE;
                 }
@@ -4216,7 +4217,7 @@ export function createAutomationFunctions(host){
                     return E_INVALIDARG;
                 }
                 const reserved = [pleft, pright]
-                    .map(pvar=>(readU16(pvar >>> 0) & VT_RESERVED) !== 0);
+                    .map(pvar=>(readU16(wholeAddress(pvar)) & VT_RESERVED) !== 0);
                 // A string beside a number is not read unless the flags ask
                 // for it, so one that points nowhere is still text.
                 /** @param {number} pvar */
@@ -4226,8 +4227,8 @@ export function createAutomationFunctions(host){
                         && value.flags === VT_BYREF && (readU16(pvar) & VT_BYREF) === 0
                         ? variantValue(VT_BSTR, { text: '' }) : value;
                 };
-                const left = read(pleft >>> 0);
-                const right = read(pright >>> 0);
+                const left = read(wholeAddress(pleft));
+                const right = read(wholeAddress(pright));
                 if (typeof left === 'number' || typeof right === 'number')
                 {
                     return typeof left === 'number' ? left : /** @type {number} */ (right);
@@ -4437,7 +4438,7 @@ export function createAutomationFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([strIn, lcid, , pnumprs, rgbDig])=>{
-                const numprs = pnumprs >>> 0;
+                const numprs = wholeAddress(pnumprs);
                 if ((strIn >>> 0) === 0 || numprs === 0 || (rgbDig >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -4446,7 +4447,7 @@ export function createAutomationFunctions(host){
                 const fields = peek(numprs, 24);
                 const capacity = fields.getInt32(NUMPARSE_C_DIG, true);
                 const allowed = fields.getUint32(NUMPARSE_IN_FLAGS, true);
-                const text = wideAt(strIn >>> 0);
+                const text = wideAt(wholeAddress(strIn));
                 const parsed = parseNumberText(text, allowed, capacity);
                 if (parsed === null)
                 {
@@ -4456,7 +4457,7 @@ export function createAutomationFunctions(host){
                 // of the string makes USE_ALL refuse it.
                 if ((allowed & NUMPRS_USE_ALL) !== 0 && parsed.used < text.length)
                 {
-                    host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.written));
+                    host.writeMemory(wholeAddress(rgbDig), Uint8Array.from(parsed.written));
                     return DISP_E_TYPEMISMATCH;
                 }
                 const out = new DataView(new ArrayBuffer(24));
@@ -4467,7 +4468,7 @@ export function createAutomationFunctions(host){
                 out.setInt32(NUMPARSE_BASE_SHIFT, parsed.baseShift, true);
                 out.setInt32(NUMPARSE_PWR10, parsed.pwr10, true);
                 host.writeMemory(numprs, new Uint8Array(out.buffer));
-                host.writeMemory(rgbDig >>> 0, Uint8Array.from(parsed.written));
+                host.writeMemory(wholeAddress(rgbDig), Uint8Array.from(parsed.written));
                 return S_OK;
             },
         },
@@ -4483,14 +4484,14 @@ export function createAutomationFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([pnumprs, rgbDig, vtBits, pvar])=>{
-                const numprs = pnumprs >>> 0;
+                const numprs = wholeAddress(pnumprs);
                 if (numprs === 0 || (rgbDig >>> 0) === 0 || (pvar >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const fields = peek(numprs, 24);
                 const count = Math.max(fields.getInt32(NUMPARSE_C_DIG, true), 0);
-                const digits = [...host.readMemory(rgbDig >>> 0, count)];
+                const digits = [...host.readMemory(wholeAddress(rgbDig), count)];
                 const negative = (fields.getUint32(NUMPARSE_OUT_FLAGS, true) & NUMPRS_NEG) !== 0;
                 const made = numberVariant(digits, fields.getInt32(NUMPARSE_PWR10, true),
                     fields.getInt32(NUMPARSE_BASE_SHIFT, true), negative, vtBits >>> 0);
@@ -4502,7 +4503,7 @@ export function createAutomationFunctions(host){
                 // A DECIMAL fills the variant from its third byte on.
                 variant.set(made.bytes, made.type === VT_DECIMAL ? 0 : VARIANT_VALUE);
                 variant[0] = made.type;
-                host.writeMemory(pvar >>> 0, variant);
+                host.writeMemory(wholeAddress(pvar), variant);
                 return S_OK;
             },
         },
@@ -4534,7 +4535,7 @@ export function createAutomationFunctions(host){
                 }
                 const thread = host.callerThread?.() ?? null;
                 const held = heldErrorInfo.get(thread) ?? 0;
-                const given = errorInfo >>> 0;
+                const given = wholeAddress(errorInfo);
                 if (given === 0)
                 {
                     heldErrorInfo.delete(thread);
@@ -4562,7 +4563,7 @@ export function createAutomationFunctions(host){
                 heldErrorInfo.delete(thread);
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out >>> 0, held);
+                    writeU32(wholeAddress(out), held);
                 }
                 return held === 0 ? S_FALSE : S_OK;
             },
@@ -4586,7 +4587,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 return MK_E_UNAVAILABLE;
             },
         },
@@ -4617,7 +4618,7 @@ export function createAutomationFunctions(host){
                 }
                 /** @param {number} result */
                 const register = result=>(result === S_OK
-                    ? registerTypeLib.handler([readU32(out >>> 0), file, 0])
+                    ? registerTypeLib.handler([readU32(wholeAddress(out)), file, 0])
                     : result);
                 return loaded instanceof Promise ? loaded.then(register) : register(loaded);
             },
@@ -4639,7 +4640,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const key = registrationKey(
                     readGuid(host, guid >>> 0), major & 0xffff, minor & 0xffff, false);
                 const win32 = key && host.hive ? host.hive.open(key, '0\\win32') : null;
@@ -4765,7 +4766,7 @@ export function createAutomationFunctions(host){
                 const inner = array.bounds.slice(1)
                     .reduce((total, bound)=>total * bound.elements, 1);
                 const before = array.bounds[0].elements * inner;
-                const elements = readU32(psaboundNew >>> 0);
+                const elements = readU32(wholeAddress(psaboundNew));
                 const after = elements * inner;
                 const stride = array.elementBytes;
                 const thread = host.callerThread?.();
@@ -4788,10 +4789,10 @@ export function createAutomationFunctions(host){
                             host.readMemory(array.data, before * stride).slice());
                         host.heap.free(array.data);
                     }
-                    writeU32((psa >>> 0) + 12, data);
+                    writeU32(wholeAddress(psa) + 12, data);
                 }
-                host.writeMemory((psa >>> 0) + SAFEARRAY_BOUNDS,
-                    host.readMemory(psaboundNew >>> 0, 8).slice());
+                host.writeMemory(wholeAddress(psa) + SAFEARRAY_BOUNDS,
+                    host.readMemory(wholeAddress(psaboundNew), 8).slice());
                 return settle(owed, thread, S_OK);
             },
         },
@@ -4828,7 +4829,7 @@ export function createAutomationFunctions(host){
                     {
                         return E_OUTOFMEMORY;
                     }
-                    writeU32(pv >>> 0, copy);
+                    writeU32(wholeAddress(pv), copy);
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
@@ -4836,19 +4837,20 @@ export function createAutomationFunctions(host){
                 if ((features & FADF_RECORD) !== 0)
                 {
                     // A record is copied by its own IRecordInfo.
-                    owed.recordCopy.push([readU32((psa >>> 0) - 4), at.address, pv >>> 0]);
+                    owed.recordCopy.push([readU32(wholeAddress(psa) - 4), at.address, pv >>> 0]);
                     return settle(owed, thread, S_OK);
                 }
                 if ((features & FADF_VARIANT) !== 0)
                 {
-                    host.writeMemory(pv >>> 0, new Uint8Array(VARIANT_BYTES));
+                    host.writeMemory(wholeAddress(pv), new Uint8Array(VARIANT_BYTES));
                     return settle(owed, thread, copyVariant(pv >>> 0, at.address, owed));
                 }
                 if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(at.address) !== 0)
                 {
                     owed.addRef.push(readU32(at.address));
                 }
-                host.writeMemory(pv >>> 0, host.readMemory(at.address, elementBytes).slice());
+                host.writeMemory(wholeAddress(pv), host.readMemory(at.address,
+                    elementBytes).slice());
                 return settle(owed, thread, S_OK);
             },
         },
@@ -4866,7 +4868,7 @@ export function createAutomationFunctions(host){
                 {
                     // The argument is the BSTR itself, not a pointer to one;
                     // NULL is the empty string, as SysStringByteLen reads it.
-                    const source = pv >>> 0;
+                    const source = wholeAddress(pv);
                     const copy = allocateBstr(source === 0 ? new Uint8Array(0)
                         : host.readMemory(source, byteLengthOf(source)).slice());
                     if (copy === 0)
@@ -4897,14 +4899,15 @@ export function createAutomationFunctions(host){
                 }
                 if ((features & FADF_RECORD) !== 0)
                 {
-                    owed.recordCopy.push([readU32((psa >>> 0) - 4), pv >>> 0, at.address]);
+                    owed.recordCopy.push([readU32(wholeAddress(psa) - 4), pv >>> 0, at.address]);
                     return settle(owed, thread, S_OK);
                 }
                 if ((features & FADF_VARIANT) !== 0)
                 {
                     return settle(owed, thread, copyVariant(at.address, pv >>> 0, owed));
                 }
-                host.writeMemory(at.address, host.readMemory(pv >>> 0, elementBytes).slice());
+                host.writeMemory(at.address, host.readMemory(wholeAddress(pv),
+                    elementBytes).slice());
                 return S_OK;
             },
         },
@@ -4928,7 +4931,7 @@ export function createAutomationFunctions(host){
                 {
                     return at.error;
                 }
-                writeU32(ppvData >>> 0, at.address);
+                writeU32(wholeAddress(ppvData), at.address);
                 return S_OK;
             },
         },
@@ -4953,8 +4956,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32((psa >>> 0) + 8, array.locks + 1);
-                writeU32(out >>> 0, array.data);
+                writeU32(wholeAddress(psa) + 8, array.locks + 1);
+                writeU32(wholeAddress(out), array.data);
                 return S_OK;
             },
         },
@@ -4971,7 +4974,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32((psa >>> 0) + 8, array.locks - 1);
+                writeU32(wholeAddress(psa) + 8, array.locks - 1);
                 return S_OK;
             },
         },
@@ -5010,7 +5013,7 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_BADINDEX;
                 }
-                writeU32(out >>> 0, bound.lower + bound.elements - 1);
+                writeU32(wholeAddress(out), bound.lower + bound.elements - 1);
                 return S_OK;
             },
         },
@@ -5028,7 +5031,7 @@ export function createAutomationFunctions(host){
                 {
                     return DISP_E_BADINDEX;
                 }
-                writeU32(out >>> 0, bound.lower);
+                writeU32(wholeAddress(out), bound.lower);
                 return S_OK;
             },
         },
@@ -5055,7 +5058,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32((psa >>> 0) + 8, array.locks + 1);
+                writeU32(wholeAddress(psa) + 8, array.locks + 1);
                 return S_OK;
             },
         },
@@ -5072,7 +5075,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32((psa >>> 0) + 8, array.locks - 1);
+                writeU32(wholeAddress(psa) + 8, array.locks - 1);
                 return S_OK;
             },
         },
@@ -5093,14 +5096,14 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 // No array copies as none; one with no element size, as
                 // nothing to copy.
                 if ((psa >>> 0) === 0)
                 {
                     return S_OK;
                 }
-                if (readU32((psa >>> 0) + 4) === 0)
+                if (readU32(wholeAddress(psa) + 4) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -5111,7 +5114,7 @@ export function createAutomationFunctions(host){
                 {
                     return copy.hr;
                 }
-                writeU32(out >>> 0, copy.descriptor);
+                writeU32(wholeAddress(out), copy.descriptor);
                 return settle(owed, thread, S_OK);
             },
         },
@@ -5128,7 +5131,7 @@ export function createAutomationFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([pdispparams, position, vtTarg, pvarResult, puArgErr])=>{
-                const params = pdispparams >>> 0;
+                const params = wholeAddress(pdispparams);
                 if (params === 0)
                 {
                     return E_INVALIDARG;
@@ -5148,7 +5151,7 @@ export function createAutomationFunctions(host){
                 {
                     if ((puArgErr >>> 0) !== 0)
                     {
-                        writeU32(puArgErr >>> 0, slot);
+                        writeU32(wholeAddress(puArgErr), slot);
                     }
                     return E_INVALIDARG;
                 }
@@ -5159,7 +5162,7 @@ export function createAutomationFunctions(host){
                     owed, 0, thread), result=>{
                     if (result !== S_OK && (puArgErr >>> 0) !== 0)
                     {
-                        writeU32(puArgErr >>> 0, slot);
+                        writeU32(wholeAddress(puArgErr), slot);
                     }
                     return settle(owed, thread, result);
                 });
@@ -5241,8 +5244,8 @@ export function createAutomationFunctions(host){
                 const pushed = (instance >>> 0) === 0 ? [] : [instance >>> 0];
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    const type = readU16((types >>> 0) + index * 2);
-                    const variant = readU32((values >>> 0) + index * 4);
+                    const type = readU16(wholeAddress(types) + index * 2);
+                    const variant = readU32(wholeAddress(values) + index * 4);
                     const dwords = type === VT_VARIANT ? 4 : wide64.has(type) ? 2 : 1;
                     const from = type === VT_VARIANT ? variant : variant + VARIANT_VALUE;
                     for (let word = 0; word < dwords; word++)
@@ -5252,13 +5255,13 @@ export function createAutomationFunctions(host){
                 }
                 const entry = (instance >>> 0) === 0
                     ? offset >>> 0
-                    : readU32(readU32(instance >>> 0) + (offset >>> 0));
+                    : readU32(readU32(wholeAddress(instance)) + (offset >>> 0));
                 return host.call(entry, pushed, host.callerThread?.()).then(answer=>{
                     if ((result >>> 0) !== 0)
                     {
-                        host.fillMemory(result >>> 0, 0, 16);
-                        writeU16(result >>> 0, returned);
-                        writeU32((result >>> 0) + VARIANT_VALUE, answer >>> 0);
+                        host.fillMemory(wholeAddress(result), 0, 16);
+                        writeU16(wholeAddress(result), returned);
+                        writeU32(wholeAddress(result) + VARIANT_VALUE, answer >>> 0);
                     }
                     return S_OK;
                 });
@@ -5334,8 +5337,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
-                return pictureAtPath(wideAt(path >>> 0),
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
+                return pictureAtPath(wideAt(wholeAddress(path)),
                     (riid >>> 0) === 0 ? IID_IPICTURE : readGuid(host, riid >>> 0), out >>> 0);
             },
         },
@@ -5355,13 +5358,13 @@ export function createAutomationFunctions(host){
                 {
                     return E_POINTER;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 if ((type & 0xffff) !== VT_BSTR)
                 {
                     return CTL_E_FILENOTFOUND;
                 }
                 // A file's path, never a URL: a name with a scheme is no path.
-                const file = wideAt(name >>> 0);
+                const file = wideAt(wholeAddress(name));
                 if (/^[a-z][a-z0-9+.-]+:\/\//i.test(file))
                 {
                     return CTL_E_PATHFILEACCESSERROR;
@@ -5393,7 +5396,7 @@ export function createAutomationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([color, palette, out])=>{
-                const clr = color >>> 0;
+                const clr = wholeAddress(color);
                 let answer = clr;
                 switch (clr >>> 24)
                 {
@@ -5432,7 +5435,7 @@ export function createAutomationFunctions(host){
                 }
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out >>> 0, answer);
+                    writeU32(wholeAddress(out), answer);
                 }
                 return S_OK;
             },
@@ -5452,7 +5455,7 @@ export function createAutomationFunctions(host){
                 report('OLE Automation', 'OleCreateFontIndirect: no IFont object is implemented');
                 if ((out >>> 0) !== 0)
                 {
-                    writeU32(out >>> 0, 0);
+                    writeU32(wholeAddress(out), 0);
                 }
                 return E_NOTIMPL;
             },
@@ -5477,7 +5480,7 @@ export function createAutomationFunctions(host){
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        writeU32(out >>> 0, 0);
+                        writeU32(wholeAddress(out), 0);
                     }
                     return E_INVALIDARG;
                 }
@@ -5488,7 +5491,7 @@ export function createAutomationFunctions(host){
                 }
                 return stdDispatches.create(outer >>> 0, self >>> 0, typeInfo >>> 0)
                     .then(pointer=>{
-                        writeU32(out >>> 0, pointer);
+                        writeU32(wholeAddress(out), pointer);
                         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
                     });
             },
@@ -5508,7 +5511,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const loaded = typeLibraries?.typeInfoAt(typeInfo >>> 0) ?? null;
                 if (!loaded || !recordInfos)
                 {
@@ -5522,7 +5525,7 @@ export function createAutomationFunctions(host){
                 }
                 return recordInfos.create(loaded.library, loaded.description, typeInfo >>> 0)
                     .then(pointer=>{
-                        writeU32(out >>> 0, pointer);
+                        writeU32(wholeAddress(out), pointer);
                         return pointer === 0 ? E_OUTOFMEMORY : S_OK;
                     });
             },
@@ -5538,7 +5541,7 @@ export function createAutomationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pcust])=>{
-                const custom = pcust >>> 0;
+                const custom = wholeAddress(pcust);
                 if (custom === 0)
                 {
                     return 0;
@@ -5569,7 +5572,7 @@ export function createAutomationFunctions(host){
                     return E_INVALIDARG;
                 }
                 const pointer = errorInfos?.create() ?? 0;
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
