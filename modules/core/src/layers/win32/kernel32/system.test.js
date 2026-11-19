@@ -487,7 +487,12 @@ test('an unmapped pointer is bad and a mapped one is not', ()=>{
 
     assert.equal(fns.IsBadReadPtr.handler([0x200, 16]), 0);
     assert.equal(fns.IsBadReadPtr.handler([0x10, 16]), 1, 'below the mapped range');
-    assert.equal(fns.IsBadReadPtr.handler([0, 16]), 1, 'null is always bad');
+    assert.equal(fns.IsBadReadPtr.handler([0, 16]), 1, 'null is bad');
+    // Nothing to read or write is never bad (Wine's virtual.c test_IsBadReadPtr).
+    assert.equal(fns.IsBadReadPtr.handler([0, 0]), 0);
+    assert.equal(fns.IsBadReadPtr.handler([0xdeadbeef, 0]), 0);
+    assert.equal(fns.IsBadWritePtr.handler([0, 0]), 0);
+    assert.equal(fns.IsBadWritePtr.handler([0xdeadbeef, 0]), 0);
     assert.equal(fns.IsBadWritePtr.handler([0x200, 16]), 0);
     assert.equal(fns.IsBadCodePtr.handler([0x200]), 0);
     assert.equal(fns.IsBadCodePtr.handler([0]), 1);
@@ -537,6 +542,10 @@ test('a write pointer is bad on a page VirtualQuery answers without write access
     assert.equal(fns.IsBadWritePtr.handler([0x2000, 16]), 0, 'write-copy');
     assert.equal(fns.IsBadWritePtr.handler([0x3000, 16]), 1, 'a guard page trips');
     assert.equal(fns.IsBadWritePtr.handler([0x4000, 16]), 1, 'reserved, not committed');
+    // A read goes by the same pages: a stack's reserved page, a guard page.
+    assert.equal(fns.IsBadReadPtr.handler([0x1010, 256]), 0, 'read-only is readable');
+    assert.equal(fns.IsBadReadPtr.handler([0x4000, 4]), 1, 'reserved, not committed');
+    assert.equal(fns.IsBadReadPtr.handler([0x3000, 4]), 1, 'a guard page trips');
 });
 
 test('a string pointer is bad when its terminator is not in mapped memory', ()=>{
