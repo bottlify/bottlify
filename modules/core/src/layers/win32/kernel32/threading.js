@@ -244,9 +244,20 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
  */
 
 /**
+ * Whether a thread is still an object of its process: running, or ended and
+ * held by a handle, as Windows keeps a thread's object - in its process's
+ * list, to be opened by id - until its last reference goes.
+ *
+ * @param {any} kernel @param {any} thread
+ */
+export const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
+    || kernel.handles?.holds?.(thread) === true;
+
+/**
  * The run's processes as a snapshot lists them: this one, its threads in the
  * order they were made (ids are taken in that order; the scheduler's own list
- * is rotated as threads take turns), then the children it started that are
+ * is rotated as threads take turns) while each is an object
+ * (`threadObjectLives`), then the children it started that are
  * still running, each with the first thread it was told of.
  *
  * @param {any} kernel
@@ -256,7 +267,7 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
 export function listProcesses(kernel, self){
     return [
         { ...self, threads: (kernel.threads?.() ?? [])
-            .filter((/** @type {any} */ thread)=>thread.state !== 'terminated')
+            .filter((/** @type {any} */ thread)=>threadObjectLives(kernel, thread))
             .map((/** @type {any} */ thread)=>thread.id >>> 0)
             .sort((/** @type {number} */ a, /** @type {number} */ b)=>a - b) },
         ...(kernel.processes?.all() ?? [])
@@ -1873,7 +1884,8 @@ export function createThreadingFunctions(host){
         /**
          * HANDLE OpenThread(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwThreadId)
          *
-         * A new handle to a thread of this process that has not ended, or to
+         * A new handle to a thread of this process that is still an object -
+         * running, or ended and held (`threadObjectLives`) - or to
          * a thread of a child it started that it knows the id of -- the first,
          * or one it made there; any other id is refused.
          */
@@ -1883,7 +1895,7 @@ export function createThreadingFunctions(host){
             handler: ([desired, inherit, id])=>{
                 const wanted = id >>> 0;
                 const own = (kernel.threads?.() ?? []).find((/** @type {any} */ thread)=>
-                    (thread.id >>> 0) === wanted && thread.state !== 'terminated');
+                    (thread.id >>> 0) === wanted && threadObjectLives(kernel, thread));
                 if (own)
                 {
                     // The handle carries the rights asked for: a wait on it

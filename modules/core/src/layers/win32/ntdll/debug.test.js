@@ -9,9 +9,7 @@ import assert from 'node:assert/strict';
 import { createDebugFunctions } from './debug.js';
 
 const STATUS_SUCCESS = 0;
-const STATUS_UNSUCCESSFUL = 0xc0000001;
 const STATUS_NOT_IMPLEMENTED = 0xc0000002;
-const STATUS_INVALID_HANDLE = 0xc0000008;
 const TEB = 0x2000;
 
 /** @param {{ teb?: number }} [options] */
@@ -121,19 +119,18 @@ test('the thread\'s debug object is kept in its thread block, NULL until set', (
 
 test('the native debug calls not made answer their status, each said once', ()=>{
     const { fns, diverged } = setup();
-    // Made, set, attached through and removed are kernel32's (debug-events.js).
+    // Made, set, attached through, waited on, continued and removed are
+    // kernel32's (debug-events.js).
     for (const name of ['NtCreateDebugObject', 'NtDebugActiveProcess', 'NtRemoveProcessDebug',
-        'NtSetInformationDebugObject'])
+        'NtSetInformationDebugObject', 'NtWaitForDebugEvent', 'NtDebugContinue',
+        'DbgUiConvertStateChangeStructure'])
     {
         assert.equal(fns[name], undefined, name);
     }
     /** @type {[string, number, number][]} */
     const expected = [
-        ['NtDebugContinue', 12, STATUS_INVALID_HANDLE],
-        ['NtWaitForDebugEvent', 16, STATUS_INVALID_HANDLE],
         ['NtSystemDebugControl', 24, STATUS_NOT_IMPLEMENTED],
         ['DbgUiIssueRemoteBreakin', 4, STATUS_NOT_IMPLEMENTED],
-        ['DbgUiConvertStateChangeStructure', 8, STATUS_UNSUCCESSFUL],
     ];
     for (const [name, argBytes, status] of expected)
     {

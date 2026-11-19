@@ -137,6 +137,9 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {(process: any, code: number) => any} [terminateProcess]  A job's process ended
  *           as TerminateProcess ends it, null for this one (`process-policy.js`).
  * @property {() => boolean} [debugged]  Whether this process's parent debugs it.
+ * @property {import('./process-policy.js').ProcessPolicyHost['postCompletion']} [postCompletion]
+ * @property {import('./process-policy.js').ProcessPolicyHost['listen']} [listenJobs]  Where
+ *     the jobs are told of a process that exited and of a job's handle closed.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
@@ -794,6 +797,8 @@ export function createSyncFunctions(host){
             processors,
             terminateProcess: host.terminateProcess,
             debugged: host.debugged,
+            postCompletion: host.postCompletion,
+            listen: host.listenJobs,
         }),
         ...createThreadInfoFunctions({
             kernel,

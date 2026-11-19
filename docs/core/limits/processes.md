@@ -70,7 +70,12 @@
   other kind, have every right. A job and a completion port made by name share the one namespace
   of named objects. `TerminateJobObject` ends every process of the job with its code, as
   `TerminateProcess` does, and leaves the job signalled for good; a process that has ended joins
-  no job, and a job's accounting counts the processes ever assigned and those still running. Not exported, as on Windows 7: the
+  no job, and a job's accounting counts the processes ever assigned and those still running. A
+  job associated with a completion port tells it of each process it takes (those it already runs
+  as it is associated), of each child that exits (an exception's code as an abnormal exit) and of
+  its last running process gone; with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` its last handle closed
+  ends its processes. The job's other limits are kept and read back, not enforced, and this
+  process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
 - In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
   no arena to lend it a table on), and goes on after a parent that exits first.
@@ -154,9 +159,11 @@
   handle closes, or its process ends, the debuggees end (`STATUS_DEBUGGER_INACTIVE`) where it
   says `DEBUG_KILL_ON_CLOSE` (`DebugSetProcessKillOnExit`, `NtSetInformationDebugObject`) and
   go on otherwise. A child in a worker of its own cannot be attached to (refused). A breakpoint
-  shows its debugger the thread past the `int3`. Not done: waiting and continuing natively
-  (`NtWaitForDebugEvent`, `NtDebugContinue`, the `DbgUi` state changes), and
-  `WaitForDebugEvent` hears every debuggee of the process, not only those of the calling
-  thread's debug object; a debuggee's own children are not debugged under `DEBUG_PROCESS`;
+  shows its debugger the thread past the `int3`. A wait hears only the debuggees of the debug
+  object it waits on - `WaitForDebugEvent` and `ContinueDebugEvent` the calling thread's, as
+  `DbgUiWaitStateChange` and `DbgUiContinue`, `NtWaitForDebugEvent` and `NtDebugContinue` the one
+  named - and hands out the state change `DbgUiConvertStateChangeStructure` converts. Not done:
+  an alertable native wait is not ended by an APC; a debuggee's own children are not debugged
+  under `DEBUG_PROCESS`;
   hardware breakpoints and the trap flag raise nothing; a 64-bit debuggee reports neither its
   start nor its exceptions; `hFile` and `lpImageName` are always null.

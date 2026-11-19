@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
+import { aboutBox } from './desktop.js';
 
 const E_FAIL = 0x80004005 | 0;
 
@@ -91,15 +92,65 @@ test('SHGetSettings sets the bits asked for as a fresh profile has them', ()=>{
     assert.equal(m.shell.SHGetSettings.argBytes, 8);
 });
 
-test('the about box is answered as closed, an object in Explorer\'s process refused', ()=>{
-    const m = machine();
-    assert.equal(m.shell.ShellAboutA.handler([0, 0, 0, 0]), 1);
-    assert.equal(m.shell.ShellAboutW.handler([0, 0, 0, 0]), 1);
-    assert.equal(m.shell.ShellAboutW.argBytes, 16);
-    assert.equal(m.shell.SHLoadInProc.handler([0x100]), E_FAIL);
-    assert.equal(m.shell.SHAddToRecentDocs.handler([2, 0x100]), 0);
-    assert.deepEqual([m.shell.SHLoadInProc.argBytes, m.shell.SHAddToRecentDocs.argBytes],
-        [4, 8]);
-    assert.deepEqual(m.diverged.map(line=>line.split(':')[0]),
-        ['ShellAbout', 'SHLoadInProc', 'SHAddToRecentDocs']);
+test('the about box is answered as closed where none can be shown; Explorer\'s calls refused',
+    ()=>{
+        const m = machine();
+        assert.equal(m.shell.ShellAboutA.handler([0, 0, 0, 0]), 1);
+        assert.equal(m.shell.ShellAboutW.handler([0, 0, 0, 0]), 1);
+        assert.equal(m.shell.ShellAboutW.argBytes, 16);
+        assert.equal(m.shell.SHLoadInProc.handler([0x100]), E_FAIL);
+        assert.equal(m.shell.SHAddToRecentDocs.handler([2, 0x100]), 0);
+        assert.deepEqual([m.shell.SHLoadInProc.argBytes, m.shell.SHAddToRecentDocs.argBytes],
+            [4, 8]);
+        assert.deepEqual(m.diverged.map(line=>line.split(':')[0]),
+            ['ShellAbout', 'ShellAbout', 'SHLoadInProc', 'SHAddToRecentDocs']);
+    });
+
+test('the about box is user32\'s modal box, its words as ShellAbout lays them out', async()=>{
+    const version = { major: 6, minor: 1, build: 7601 };
+    assert.deepEqual(aboutBox('Windows', '', version), { caption: 'About Windows',
+        text: 'Microsoft Windows\r\nVersion 6.1 (Build 7601)' });
+    assert.deepEqual(aboutBox('Setup#Windows', 'For you', version), { caption: 'Setup',
+        text: 'Microsoft Windows\r\nVersion 6.1 (Build 7601)\r\n\r\nFor you' },
+    'a # divides the title bar\'s text from the line\'s');
+
+    const memory = new Uint8Array(0x1000);
+    /** @type {any[]} */
+    const shown = [];
+    let next = 0x800;
+    const freed = new Set();
+    /** @param {number} at */
+    const wideAt = at=>{
+        let text = '';
+        for (let index = at; memory[index] | memory[index + 1]; index += 2)
+        {
+            text += String.fromCharCode(memory[index] | memory[index + 1] << 8);
+        }
+        return text;
+    };
+    const shell = /** @type {any} */ (createShellFunctions({
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readWideString: address=>wideAt(address),
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 8;
+            return at;
+        },
+        free: address=>{
+            freed.add(address);
+        },
+        library: name=>/** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+            name === 'USER32.dll' ? { MessageBoxW: { handler: args=>{
+                shown.push([args[0], wideAt(args[1]), wideAt(args[2]), args[3]]);
+                return Promise.resolve(1);
+            } } } : { GetVersion: { handler: ()=>(7601 << 16 | 1 << 8 | 6) >>> 0 } }),
+    }));
+    'Windows\0'.split('').forEach((c, at)=>{
+        memory[0x100 + at * 2] = c.charCodeAt(0);
+    });
+    assert.equal(await shell.ShellAboutW.handler([0x40, 0x100, 0, 0]), 1, 'TRUE once closed');
+    assert.deepEqual(shown, [[0x40, 'Microsoft Windows\r\nVersion 6.1 (Build 7601)',
+        'About Windows', 0]], 'MB_OK, owned by the window given');
+    assert.equal(freed.size, 2, 'its strings given back');
 });

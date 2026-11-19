@@ -882,6 +882,14 @@ export function createIoCompletionPorts(host){
         table,
 
         /**
+         * A packet posted to a port object, as PostQueuedCompletionStatus
+         * posts one: what a job tells the port it was associated with.
+         *
+         * @param {any} port @param {CompletionPacket} packet
+         */
+        postTo: (port, packet)=>post(port, packet),
+
+        /**
          * Where an overlapped operation was asked to start.
          *
          * Windows reads the position out of the OVERLAPPED rather than from the
