@@ -855,6 +855,24 @@ export function createNamedPipes(host){
     };
 
     /**
+     * A request done in its own call signals the end's handle as one that
+     * finished later does (`finish`): when it had no event of its own and the
+     * handle does not skip it.
+     *
+     * @param {End} end @param {number} handle @param {number} overlapped
+     * @param {NativeAsync} [io]
+     */
+    const doneAtOnce = (end, handle, overlapped, io)=>{
+        const event = io ? io.event
+            : (overlapped >>> 0) === 0 ? 0 : readDword((overlapped >>> 0) + layout.event) & ~1;
+        if (end.signal && event === 0
+            && ((ctx.modes.get(handle >>> 0) ?? 0) & FILE_SKIP_SET_EVENT_ON_HANDLE) === 0)
+        {
+            kernel.setEvent?.(end.signal);
+        }
+    };
+
+    /**
      * Finishes an operation where its process asked it, and wakes that process's
      * thread when it was parked.
      *
@@ -864,8 +882,10 @@ export function createNamedPipes(host){
         const owner = op.ctx.host;
         // The end's handle is signalled by an operation that had no event of
         // its own to signal, as a file object is when its request completes;
-        // one with an event leaves the handle as the request's start left it.
-        if (op.end?.signal && !ownEvent(op))
+        // one with an event leaves the handle as the request's start left it,
+        // and a handle set to skip it (FILE_SKIP_SET_EVENT_ON_HANDLE) is never.
+        if (op.end?.signal && !ownEvent(op)
+            && ((op.ctx.modes.get(op.handle) ?? 0) & FILE_SKIP_SET_EVENT_ON_HANDLE) === 0)
         {
             owner.kernel.setEvent?.(op.end.signal);
         }
@@ -1639,11 +1659,17 @@ export function createNamedPipes(host){
             ? io : undefined;
         /** @param {number} status @param {number} count */
         const answerNow = (status, count)=>{
+            if ((status >>> 30) !== 3)
+            {
+                doneAtOnce(end, handle, overlapped, native ? io : undefined);
+            }
             if (async)
             {
                 // The block, the event and the APC are the native call's to
-                // answer (`ntTransfer`); a port still gets its packet.
-                const skip = status === STATUS.SUCCESS
+                // answer (`ntTransfer`); a port still gets its packet, unless
+                // the handle skips it for a request done at once - with a
+                // warning too (part of a message), as Windows 7 answers one.
+                const skip = (status >>> 30) !== 3
                     && ((ctx.modes.get(handle) ?? 0) & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0;
                 if (!skip)
                 {
@@ -1858,6 +1884,7 @@ export function createNamedPipes(host){
             return host.park();
         }
         const modes = ctx.modes.get(handle) ?? 0;
+        doneAtOnce(end, handle, overlapped, native ? io : undefined);
         if (routine !== 0)
         {
             completeRoutine(host, host.currentThread(), overlapped, routine, STATUS.SUCCESS,
@@ -2767,7 +2794,23 @@ export function createNamedPipes(host){
         {
             return ERROR_INVALID_HANDLE;
         }
-        ctx.modes.set(handle >>> 0, (ctx.modes.get(handle >>> 0) ?? 0) | (flags >>> 0));
+        const modes = (ctx.modes.get(handle >>> 0) ?? 0) | (flags >>> 0);
+        ctx.modes.set(handle >>> 0, modes);
+        // Setting them is itself a request on the file object: its handle is
+        // cleared as the request starts and signalled as it ends, unless the
+        // modes just set say it never is.
+        const end = endOf(handle >>> 0);
+        if (end?.signal)
+        {
+            if ((modes & FILE_SKIP_SET_EVENT_ON_HANDLE) !== 0)
+            {
+                kernel.resetEvent?.(end.signal);
+            }
+            else
+            {
+                kernel.setEvent?.(end.signal);
+            }
+        }
         return 0;
     }
 
@@ -3397,8 +3440,17 @@ export function createNamedPipes(host){
             }
             // Only a message cut short overflows: a byte pipe's peek takes what fits.
             const whole = end.instance.pipe.messages ? seen.length : seen.bytes.length;
-            return { status: seen.bytes.length < whole ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS,
-                information: PEEK_HEAD + seen.bytes.length };
+            const status = seen.bytes.length < whole ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS;
+            const information = PEEK_HEAD + seen.bytes.length;
+            // Done at once on an end opened for overlapped I/O, its packet goes
+            // to the port as a read's does, unless the handle skips it.
+            const skips = ((ctx.modes.get(handle >>> 0) ?? 0)
+                & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0;
+            if (io && /** @type {any} */ (end).overlapped === true && !skips)
+            {
+                host.posted?.(handle >>> 0, information, status, io.context);
+            }
+            return { status, information };
         },
 
         /**
