@@ -14,6 +14,7 @@
 
 import { D3DERR_INVALIDCALL } from '../../d3d8/constants.js';
 import { FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, SHADOW, TEXTURE } from '../block.js';
+import { relaid } from './volatile.js';
 
 /** @param {number} value @returns {number[]} */
 export const dword = value=>[
@@ -24,32 +25,60 @@ export const dword = value=>[
  * Lays out a routine whose branches name their targets, so that no
  * displacement is counted by hand: a part is bytes, a label, or a branch
  * `{ jcc, to }` that becomes two bytes once every label has a position --
- * or five or six, `jmp`/`jcc rel32`, when it says `near`. A short branch
- * that cannot be reached with a byte is a mistake in the routine and is
- * refused rather than truncated.
+ * or five or six, `jmp`/`jcc rel32`, when it says `near` or its target is
+ * past a byte's reach: one source is laid out for two widths, and what is
+ * near in the i386 need not be in a 64-bit process's longer instructions.
  *
  * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
  * @returns {Uint8Array}
  */
 export function assemble(parts){
+    /** The branches a byte does not reach, found by laying the routine out again. */
+    const far = new Set();
     /** @param {{ jcc: number, near?: boolean }} branch */
-    const sizeOf = branch=>(!branch.near ? 2 : branch.jcc === 0xeb ? 5 : 6);
+    const sizeOf = branch=>(!branch.near && !far.has(branch) ? 2 : branch.jcc === 0xeb ? 5 : 6);
     /** @type {Map<string, number>} */
     const labels = new Map();
-    let at = 0;
-    for (const part of parts)
+    for (let settled = false; !settled;)
     {
-        if (Array.isArray(part))
+        settled = true;
+        let at = 0;
+        for (const part of parts)
         {
-            at += part.length;
+            if (Array.isArray(part))
+            {
+                at += part.length;
+            }
+            else if ('label' in part)
+            {
+                labels.set(part.label, at);
+            }
+            else
+            {
+                at += sizeOf(part);
+            }
         }
-        else if ('label' in part)
+        at = 0;
+        for (const part of parts)
         {
-            labels.set(part.label, at);
-        }
-        else
-        {
-            at += sizeOf(part);
+            if (Array.isArray(part))
+            {
+                at += part.length;
+            }
+            else if ('jcc' in part)
+            {
+                at += sizeOf(part);
+                const rel = (labels.get(part.to) ?? at) - at;
+                if (sizeOf(part) === 2 && (rel < -128 || rel > 127))
+                {
+                    if (part.jcc !== 0xeb && (part.jcc & 0xf0) !== 0x70)
+                    {
+                        throw new Error(`shadow: branch to ${part.to} does not fit a byte`);
+                    }
+                    far.add(part);
+                    settled = false;
+                }
+            }
         }
     }
     /** @type {number[]} */
@@ -67,19 +96,14 @@ export function assemble(parts){
             {
                 throw new Error(`shadow: no label ${part.to}`);
             }
-            if (part.near)
+            const rel = target - (out.length + sizeOf(part));
+            if (sizeOf(part) === 2)
             {
-                const rel = target - (out.length + sizeOf(part));
-                const opcode = part.jcc === 0xeb ? [0xe9] : [0x0f, part.jcc + 0x10];
-                out.push(...opcode, ...dword(rel | 0));
+                out.push(part.jcc, rel & 0xff);
                 continue;
             }
-            const rel = target - (out.length + 2);
-            if (rel < -128 || rel > 127)
-            {
-                throw new Error(`shadow: branch to ${part.to} does not fit a byte`);
-            }
-            out.push(part.jcc, rel & 0xff);
+            const opcode = part.jcc === 0xeb ? [0xe9] : [0x0f, part.jcc + 0x10];
+            out.push(...opcode, ...dword(rel | 0));
         }
     }
     return new Uint8Array(out);
@@ -121,8 +145,9 @@ const memoryOperand = (reg, base, disp)=>(disp === 0 ? [reg << 3 | base]
  * the four into their home slots (`entry`), after which argument `i` is at
  * [rsp + 8 + 8i] as it is at [esp + 4 + 4i] in the i386, the four registers
  * free; the slow way puts them back (`reload`) before the jump to the trap,
- * which reads the call as it came. It pushes nothing (`save`): RSP stays the
- * caller's, as an unwinder takes code without unwind data to leave it.
+ * which reads the call as it came. It pushes nothing and changes none of RBX,
+ * RSI and RDI (`lay`): to an unwinder, code without unwind data is a leaf,
+ * which leaves RSP and those registers the caller's.
  *
  * A pointer of the program's - where a getter writes, what a setter copies,
  * a rectangle, a lock's out-pointer - may lie anywhere in a 64-bit process's
@@ -161,8 +186,13 @@ const memoryOperand = (reg, base, disp)=>(disp === 0 ? [reg << 3 | base]
  * @property {(reg: number) => number[]} testPointer  `test reg, reg` on such a pointer
  * @property {(dst: number, src: number) => number[]} movePointer  `mov dst, src` of one
  * @property {(regs: number[]) => number[]} save  keeps registers the convention has the
- *     routine keep: pushed in a 32-bit process, moved into R9, R10 and R11 in a 64-bit one
+ *     routine keep: pushed in a 32-bit process, nothing in a 64-bit one, whose routine
+ *     never touches them (`lay`)
  * @property {(regs: number[]) => number[]} restore  gives them back, in `save`'s reverse
+ * @property {(bytes: number[]) => number[]} lay  a run of the body's whole instructions as
+ *     the process runs them: as written in a 32-bit one; in a 64-bit one with R9, R10 and
+ *     R11 for EBX, ESI and EDI and `rep movs` as a loop over them (`volatile.js`), so that
+ *     the routine changes no register an unwinder takes a leaf to keep
  */
 
 /** @type {Width} */
@@ -183,31 +213,15 @@ export const I386 = Object.freeze({
     movePointer: (dst, src)=>[0x89, 0xc0 | src << 3 | dst],
     save: regs=>regs.map(reg=>0x50 + reg),
     restore: regs=>regs.map(reg=>0x58 + reg),
+    lay: bytes=>bytes,
 });
-
-/**
- * Where a 64-bit process's routine keeps a register the convention has it
- * keep - RBX, RSI or RDI, which `rep movs` and the i386's longer routines
- * use - instead of pushing it: R9, R10 or R11, which it may change, past the
- * entry that put R9 into its home slot. RSP is then the caller's all through
- * the routine, as an unwinder takes code without unwind data to leave it.
- */
-const KEPT_IN = Object.freeze({ 3: 9, 6: 10, 7: 11 });
-/** @param {number} reg */
-const keptIn = reg=>{
-    const into = KEPT_IN[/** @type {3 | 6 | 7} */ (reg)];
-    if (into === undefined)
-    {
-        throw new Error(`shadow: register ${reg} is not one a routine keeps`);
-    }
-    return into;
-};
 
 /** The four argument registers' home slots: mov [rsp+8], rcx .. mov [rsp+32], r9. */
 const HOMES = [[0x48, 1, 8], [0x48, 2, 16], [0x4c, 0, 24], [0x4c, 1, 32]];
 
-// A 64-bit process's routine pushes nothing (`save`), so an argument's slot is where the
-// entry found it whatever the i386 pushed by then: `pushed` counts for the i386 alone.
+// A 64-bit process's routine pushes nothing and keeps nothing (`save`): its body is laid out
+// on registers the caller does not expect back (`lay`, `volatile.js`). So an argument's slot is
+// where the entry found it whatever the i386 pushed by then: `pushed` counts for the i386 alone.
 /** @type {Width} */
 export const X64 = Object.freeze({
     bits: /** @type {64} */ (64),
@@ -222,9 +236,9 @@ export const X64 = Object.freeze({
     pointerOp: (opcode, reg, index)=>onStack([0x48, ...opcode], reg, 8 * (1 + index)),
     testPointer: reg=>[0x48, 0x85, 0xc0 | reg << 3 | reg],
     movePointer: (dst, src)=>[0x48, 0x89, 0xc0 | src << 3 | dst],
-    // mov r9/r10/r11, reg - and back: mov reg, r9/r10/r11.
-    save: regs=>regs.flatMap(reg=>[0x49, 0x89, 0xc0 | reg << 3 | keptIn(reg) & 7]),
-    restore: regs=>regs.flatMap(reg=>[0x4c, 0x89, 0xc0 | (keptIn(reg) & 7) << 3 | reg]),
+    save: ()=>[],
+    restore: ()=>[],
+    lay: relaid,
     blockOf: (dst, src)=>[0x8b, 0x40 | dst << 3 | src, 8],
     storePointer: (base, src, disp)=>[0x48, 0x89, ...memoryOperand(src, base, disp)],
     ret: ()=>[0xc3],
@@ -304,6 +318,16 @@ export const saveOf = regs=>/** @type {Wide} */ ({ save: regs });
 
 /** The same given back (`restore`). @param {number[]} regs */
 export const restoreOf = regs=>/** @type {Wide} */ ({ restore: regs });
+
+/**
+ * A routine's parts as `width`'s process runs them: each `Wide` one laid out
+ * for it, and every run of bytes on its registers (`lay`).
+ *
+ * @param {Part[]} parts @param {Width} width
+ * @returns {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]}
+ */
+export const laidParts = (parts, width)=>resolveParts(parts, width).map(part=>(
+    Array.isArray(part) ? width.lay(part) : part));
 
 /**
  * A routine's parts with each `Wide` one laid out for `width`.
@@ -541,7 +565,7 @@ export const TEB_GL_CONTEXT = 0xbf0;
 export const routine = (at, trap, parts, exits = {}, width = I386)=>{
     const names = Object.keys(exits);
     const reload = width.reload();
-    const body = assemble([width.entry(), ...resolveParts(parts, width),
+    const body = assemble([width.entry(), ...laidParts(parts, width),
         ...names.flatMap(name=>[{ label: name }, [0xe9, 0, 0, 0, 0]]), { label: 'slow' }, reload]);
     names.forEach((name, i)=>{
         const from = body.length - reload.length - (names.length - i) * 5;

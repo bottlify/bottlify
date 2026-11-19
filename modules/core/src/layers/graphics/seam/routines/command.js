@@ -504,7 +504,8 @@ export function commandCode(at, trap, shape, width = I386){
         const steps = [
             [1, []],                                             // POINTLIST: n
             [2, [[0x01, 0xd2]]],                                 // LINELIST: add edx, edx
-            [3, [[0x42]]],                                       // LINESTRIP: inc edx
+            // LINESTRIP: inc edx - whose one byte is a prefix in a 64-bit process.
+            [3, [width.bits === 64 ? [0xff, 0xc2] : [0x42]]],
             [4, [[0x8d, 0x14, 0x52]]],                           // TRIANGLELIST: lea edx, [edx*3]
             [5, [[0x83, 0xc2, 0x02]]],                           // TRIANGLESTRIP: add edx, 2
             [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2

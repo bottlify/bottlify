@@ -12,7 +12,8 @@
  */
 
 import {
-    EAX, EBX, ECX, EDI, EDX, ESI, I386, assemble, dword, letHeldGo, prologue, routine, takeHeld,
+    EAX, EBX, ECX, EDI, EDX, ESI, I386, assemble, dword, laidParts, letHeldGo, prologue, routine,
+    takeHeld,
 } from './assemble.js';
 import {
     BUFFER, COMMAND, D3DLOCK_DISCARD, D3DLOCK_NOOVERWRITE, D3DLOCK_READONLY, FLAG_SLOW_PATH, LEVEL,
@@ -425,7 +426,7 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
  * @returns {Uint8Array}
  */
 export function moveCopyCode(width = I386){
-    return assemble([
+    return assemble(laidParts([
         width.save([ESI, EDI, EBX]),                             // push esi; push edi; push ebx
         [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
         width.arg(EBX, 2, 3),                                    // mov ebx, [esp+24]
@@ -454,7 +455,7 @@ export function moveCopyCode(width = I386){
         width.restore([EBX, EDI, ESI]),                          // pop ebx; pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(5),                                            // ret 20
-    ]);
+    ], width));
 }
 
 /**
