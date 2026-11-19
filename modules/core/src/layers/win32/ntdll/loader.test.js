@@ -333,3 +333,34 @@ test('LdrGetDllDirectory fills a counted string; one too small is told the bytes
         assert.deepEqual([view.getUint16(BUFFER, true), view.getUint16(BUFFER + 2, true)],
             [0, 0xcccc]);
     });
+
+test('LdrShutdownProcess begins the shutdown RtlDllShutdownInProgress answers', async()=>{
+    // Wine's kernel32:loader (child phase 0): before it the process is not
+    // shutting down; LdrShutdownProcess tells the images DLL_PROCESS_DETACH,
+    // the process goes on, and from then on it is.
+    let begun = false;
+    let told = 0;
+    /** @param {number} address @param {number} length */
+    const readMemory = (address, length)=>new Uint8Array(length);
+    const table = createLoaderFunctions({
+        readMemory, writeMemory: ()=>{}, kernel32: {}, allocate: ()=>0x1000, free: ()=>true,
+        shutdown: {
+            inProgress: ()=>begun,
+            begin: ()=>{
+                begun = true;
+                told++;
+                return Promise.resolve();
+            },
+            terminate: ()=>{},
+        },
+    });
+    assert.equal(table.RtlDllShutdownInProgress.handler([]), 0);
+    assert.equal(await table.LdrShutdownProcess.handler([]), STATUS.SUCCESS);
+    assert.equal(told, 1, 'the images told');
+    assert.equal(table.RtlDllShutdownInProgress.handler([]), 1);
+
+    const none = createLoaderFunctions({
+        readMemory, writeMemory: ()=>{}, kernel32: {}, allocate: ()=>0, free: ()=>true });
+    assert.equal(none.LdrShutdownProcess, undefined, 'not exported with no shutdown to begin');
+    assert.equal(none.RtlDllShutdownInProgress.handler([]), 0);
+});

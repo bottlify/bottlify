@@ -420,10 +420,12 @@ test('NtTerminateProcess with no handle ends the other threads, then the process
         allocate: ()=>0,
         free: ()=>true,
         processes: ()=>[{ id: 1, threads: [5, 7, 9] }, { id: 2, threads: [11] }],
+        terminate: ()=>calls.push(['ending']),
     }));
     const terminations = ()=>calls.filter(([name])=>name !== 'GetCurrentThreadId');
 
     assert.equal(fns.NtTerminateProcess.handler([0, 0xdead]), STATUS_SUCCESS, 'it returns');
+    assert.deepEqual(calls.shift(), ['ending'], 'the process is ending before its threads end');
     assert.deepEqual(terminations(), [
         ['OpenThread', 1, 0, 5], ['TerminateThread', 0x105, 0xdead], ['CloseHandle', 0x105],
         ['OpenThread', 1, 0, 9], ['TerminateThread', 0x109, 0xdead], ['CloseHandle', 0x109],

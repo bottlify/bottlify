@@ -122,6 +122,8 @@ const DUPLICATE_SAME_ACCESS = 0x00000002;
  * @property {() => number} [threadStart]
  *           Where a new thread begins: the libraries told of it, then its start
  *           routine. Zero, or absent, and it begins in its start routine.
+ * @property {() => boolean} [terminating]  Whether the process has begun to end,
+ *           after which CreateThread makes no thread (ERROR_ACCESS_DENIED).
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {(object: object, sd: number) => void} [recordObjectSecurity]
@@ -1032,6 +1034,13 @@ export function createThreadingFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([, stackSize, start, parameter, flags, threadIdOut])=>{
+                // A process that has begun to end takes no new thread, as
+                // Windows refuses one from NtTerminateProcess on.
+                if (host.terminating?.())
+                {
+                    host.setLastError(ERROR_ACCESS_DENIED);
+                    return 0;
+                }
                 // The size is the stack's commit unless the caller says it is
                 // the reserve; the kernel turns either into the reserve by the
                 // rules CreateThread documents.

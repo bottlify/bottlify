@@ -198,7 +198,9 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  *           answered as statuses.
  * @property {import('./loader.js').LoaderHost['notifications']} [dllNotifications]  The
  *           loader's LdrRegisterDllNotification callbacks.
- * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
+ * @property {import('./loader.js').LoaderHost['shutdown']} [processShutdown]  The
+ *           process's shutdown: whether it began, and LdrShutdownProcess's beginning.
+ * @property {Record<string, Entry>} crt      The assembled msvcrt.dll table.
  * @property {() => number} teb  The running thread's block.
  * @property {() => any} [currentThread]
  * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
@@ -552,7 +554,7 @@ export function createNtdllFunctions(host){
         ...(LOADER_ENTRIES.every(name=>kernel32[name])
             ? createLoaderFunctions({ readMemory: host.readMemory,
                 writeMemory: host.writeMemory, kernel32, allocate, free,
-                notifications: host.dllNotifications })
+                notifications: host.dllNotifications, shutdown: host.processShutdown })
             : {}),
 
         ...(['GetEnvironmentStringsW', 'SetEnvironmentVariableW'].every(name=>kernel32[name])
@@ -730,6 +732,7 @@ export function createNtdllFunctions(host){
                 free,
                 processes: host.processes,
                 native: name=>natives[name],
+                ...host.processShutdown ? { terminate: host.processShutdown.terminate } : {},
                 ...host.pointerSize ? { pointerSize: host.pointerSize } : {},
                 ...host.divergence ? { divergence: host.divergence } : {},
             })
