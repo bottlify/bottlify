@@ -88,6 +88,11 @@ test('a read stops where the source or the destination refuses, and says how far
 
     assert.equal(memory.ReadProcessMemory.handler([SELF, 0, 0x4000, 0, 0x8000]), 1, 'nothing');
     assert.equal(view.getUint32(0x8000, true), 0);
+
+    view.setUint32(0x8000, 0xdeadbeef, true);
+    assert.equal(memory.ReadProcessMemory.handler([0x44, 0, 0x4000, 4, 0x8000]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(view.getUint32(0x8000, true), 0, 'a refused read counts nothing');
 });
 
 test('a write goes to the first page it cannot write; a source short of its count writes none',

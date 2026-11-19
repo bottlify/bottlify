@@ -338,7 +338,12 @@ export function createProcessMemory(host){
         ReadProcessMemory: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: args=>asBool(nativeRead(args)),
+            handler: args=>{
+                // Told 0 before anything is tried: a refused handle leaves it
+                // so (Wine's process.c test_process_security_attributes).
+                writeCount(args[4] >>> 0, 0);
+                return asBool(nativeRead(args));
+            },
         },
 
         /**
