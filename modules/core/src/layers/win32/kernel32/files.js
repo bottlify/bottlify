@@ -40,7 +40,7 @@ import { mountPointsOf, onVolume } from './drives.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
 import { isPipeName } from './pipes.js';
-import { isNameInExpression } from './name-expression.js';
+import { isNameInExpression, win32Expression } from './name-expression.js';
 import { fullPathName } from '../ntdll/paths.js';
 
 /** Codes this surface reports through the last-error slot. */
@@ -2290,14 +2290,19 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
         }
-        // Every folder but a drive's root lists itself and its parent first,
-        // as "." and "..", for any pattern of wildcards and dots alone; a
-        // program that skips the first two entries unseen relies on it.
-        // ponytail: wildcards-and-dots stands in for the volume's own match,
-        // which "." and ".." pass exactly then.
-        const dots = /^[A-Za-z]:\\?$/.test(directory) || !/^[*?.]+$/.test(pattern) ? []
+        // The pattern is matched as the native expression kernel32 makes of
+        // it (`win32Expression`), each name of the folder in turn; every
+        // folder but a drive's root lists itself and its parent first, as "."
+        // and "..", when the expression takes them - a program that skips the
+        // first two entries unseen relies on it.
+        const expression = win32Expression(pattern);
+        const dots = /^[A-Za-z]:\\?$/.test(directory) ? []
             : ['.', '..'].map(dot=>({ ...holder, name: dot, isDirectory: true, size: 0 }));
-        const entries = [...dots, ...files.list(directory, pattern) ?? []];
+        // A name without wildcards is looked up as itself, which finds the
+        // libraries this build implements in the system folder too.
+        const listed = files.list(directory, /[*?<>"]/.test(pattern) ? '*' : pattern) ?? [];
+        const entries = [...dots, ...listed]
+            .filter(entry=>isNameInExpression(expression, entry.name));
         if (entries.length === 0)
         {
             return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);

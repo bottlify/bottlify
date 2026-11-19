@@ -48,28 +48,17 @@ export function isNameInExpression(expression, name){
  */
 function matches(e, n){
     const finalDot = n.lastIndexOf('.');
-    /** @type {Map<number, boolean>} */
-    const memo = new Map();
-
-    /** @param {number} i @param {number} j @returns {boolean} */
-    const from = (i, j)=>{
-        const key = i * (n.length + 1) + j;
-        const known = memo.get(key);
-        if (known !== undefined)
-        {
-            return known;
-        }
-        const answer = step(i, j);
-        memo.set(key, answer);
-        return answer;
-    };
+    const width = n.length + 1;
+    // Whether the expression from i matches the name from j, filled from the
+    // expression's end back: every step looks only further into the
+    // expression, so a row is complete before a row before it reads it. No
+    // recursion: a long expression or name costs a table, not the stack.
+    const at = new Uint8Array((e.length + 1) * width);
+    /** @param {number} i @param {number} j */
+    const from = (i, j)=>at[i * width + j] === 1;
 
     /** @param {number} i @param {number} j @returns {boolean} */
     const step = (i, j)=>{
-        if (i === e.length)
-        {
-            return j === n.length;
-        }
         switch (e[i])
         {
             case '*':
@@ -118,5 +107,64 @@ function matches(e, n){
                 return j < n.length && n[j] === e[i] && from(i + 1, j + 1);
         }
     };
+
+    at[e.length * width + n.length] = 1;
+    for (let i = e.length - 1; i >= 0; i--)
+    {
+        for (let j = n.length; j >= 0; j--)
+        {
+            at[i * width + j] = step(i, j) ? 1 : 0;
+        }
+    }
     return from(0, 0);
+}
+
+/**
+ * The native expression a Win32 search pattern is (FindFirstFile's last
+ * component, rewritten as kernel32 hands it to NtQueryDirectoryFile):
+ *
+ * - a pattern ending in spaces loses every trailing dot and space; one ending
+ *   in a dot loses them too and keeps that one dot, so `* .` and `*..` are `*.`;
+ * - `*.*` is `*`, every name;
+ * - `?` is DOS_QM; a `.` before a `?` or a `*`, or at the end, is DOS_DOT; a
+ *   `*` before a `.` is DOS_STAR. So `*.` is the names with no extension.
+ *
+ * The rules are read off the conformance tests' table of patterns and what
+ * each lists; what that table lists by a name's 8.3 form is not reached, a
+ * volume here keeping none.
+ *
+ * @param {string} pattern
+ * @returns {string}
+ */
+export function win32Expression(pattern){
+    const trimmed = /[. ]$/.test(pattern)
+        ? pattern.replace(/[. ]+$/, '') + (pattern.endsWith('.') ? '.' : '')
+        : pattern;
+    if (trimmed === '*.*')
+    {
+        return '*';
+    }
+    let out = '';
+    for (let i = 0; i < trimmed.length; i++)
+    {
+        const here = trimmed[i];
+        const next = trimmed[i + 1];
+        if (here === '?')
+        {
+            out += DOS_QM;
+        }
+        else if (here === '.' && (next === '?' || next === '*' || next === undefined))
+        {
+            out += DOS_DOT;
+        }
+        else if (here === '*' && next === '.')
+        {
+            out += DOS_STAR;
+        }
+        else
+        {
+            out += here;
+        }
+    }
+    return out;
 }
