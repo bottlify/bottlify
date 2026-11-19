@@ -330,12 +330,32 @@ export function createMsvcp80Functions(crt, host){
             /** const char &basic_string::operator[](_Size_type_nosscl) const */
             [`??A${STRING}QEBAAEBDU_Size_type_nosscl@01@@Z`]: inGuestLong('stringAt',
                 cdecl(8, ([self, index])=>(textOf(self) + index) >>> 0)),
+            /** basic_string &basic_string::operator+=(char) */
+            [`??Y${STRING}QEAAAEAV01@D@Z`]: inGuestLong('stringAppendChar',
+                cdecl(8, ([self, c])=>appendBytes(self, Uint8Array.of(c & 0xff)))),
             /** basic_string &basic_string::operator+=(const char *) */
             [`??Y${STRING}QEAAAEAV01@PEBD@Z`]: cdecl(8, ([self, from])=>
                 appendBytes(self, bytesAt(from))),
             /** basic_string &basic_string::operator+=(const basic_string &) */
             [`??Y${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
                 appendBytes(self, bytesOf(other))),
+            /** basic_string &basic_string::append(const basic_string &) */
+            [`?append@${STRING}QEAAAEAV12@AEBV12@@Z`]: cdecl(8, ([self, other])=>
+                appendBytes(self, bytesOf(other))),
+            /** basic_string &basic_string::append(const char *) */
+            [`?append@${STRING}QEAAAEAV12@PEBD@Z`]: cdecl(8, ([self, from])=>
+                appendBytes(self, bytesAt(from))),
+            /** void basic_string::reserve(size_type) */
+            [`?reserve@${STRING}QEAAX_K@Z`]: inGuestLong('stringReserve',
+                cdecl(8, ([self, count])=>{
+                    const length = u32(self + SIZE);
+                    if (length <= (count >>> 0) && u32(self + RESERVED) !== (count >>> 0)
+                        && grow(self, count >>> 0, true))
+                    {
+                        endAt(self, length);
+                    }
+                    return 0;
+                })),
             /** basic_string &basic_string::operator=(const basic_string &) */
             [`??4${STRING}QEAAAEAV01@AEBV01@@Z`]: cdecl(8, ([self, other])=>
                 (self === other ? self : assignBytes(self, bytesOf(other)))),
