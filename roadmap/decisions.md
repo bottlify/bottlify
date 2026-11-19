@@ -2549,7 +2549,7 @@ loader.c 945-950). Revisit if the engine can place memory outside the arena. *20
 **A275. A symbolic link is set by FSCTL_SET_REPARSE_POINT without SeCreateSymbolicLinkPrivilege.**
 On Windows the I/O manager refuses IO_REPARSE_TAG_SYMLINK with STATUS_PRIVILEGE_NOT_HELD unless the
 caller's token holds the privilege enabled, which an administrator enables and an ordinary user does
-not have. The run's token does not carry it and LookupPrivilegeValue does not name it, so a program
+not have. The run's token does not carry it, so a program
 setting a link through the control would always be refused; here the control takes the link as an
 elevated caller's would (`kernel32/reparse.js`), and CreateSymbolicLink still answers
 ERROR_PRIVILEGE_NOT_HELD as before. Revisit when the token carries its privileges and the run
