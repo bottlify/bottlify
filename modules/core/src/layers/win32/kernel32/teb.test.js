@@ -66,6 +66,21 @@ test('a thread block points at itself, because FS cannot be read as a pointer', 
         'the stack is committed whole: its reservation begins at its limit');
 });
 
+test('an i386 thread block names its ids again and its static string, as Windows makes it', ()=>{
+    // What a parent reads of its suspended child's thread before it runs
+    // (Wine's process.c test_SuspendProcessState).
+    const memory = guest();
+    const { teb } = build(memory).createThreadBlock(
+        { id: 7, stackBase: 0x300000, stackLimit: 0x2f0000 });
+
+    assert.equal(memory.view.getUint32(teb + TEB.REAL_CLIENT_ID, true), 0x1234);
+    assert.equal(memory.view.getUint32(teb + TEB.REAL_CLIENT_ID + 4, true), 7);
+    assert.equal(memory.view.getUint16(teb + TEB.STATIC_UNICODE_STRING, true), 0, 'empty');
+    assert.equal(memory.view.getUint16(teb + TEB.STATIC_UNICODE_STRING + 2, true), 261 * 2);
+    assert.equal(memory.view.getUint32(teb + TEB.STATIC_UNICODE_STRING + 4, true),
+        teb + TEB.STATIC_UNICODE_BUFFER);
+});
+
 test('the thread-local array is somewhere real, not at offset zero', ()=>{
     // A thread-local variable compiles to an index off this pointer. A null one
     // is read without complaint and indexed into the bottom of memory.
@@ -274,6 +289,13 @@ test('the process block holds the process heap, for GetProcessHeap compiled inli
     const memory = guest();
     const { peb } = build(memory, { processHeap: 0x50004 });
     assert.equal(memory.view.getUint32(peb + PEB.PROCESS_HEAP, true), 0x50004);
+});
+
+test('the process block names the critical section time-out, thirty days relative', ()=>{
+    const memory = guest();
+    const { peb } = build(memory);
+    assert.equal(memory.view.getBigInt64(peb + PEB.CRITICAL_SECTION_TIMEOUT, true),
+        -30n * 24n * 3600n * 10_000_000n);
 });
 
 test('the process block counts the processors the machine has, one when it is not told', ()=>{

@@ -27,7 +27,7 @@ function fakeCpu(esp = 0){
     return {
         parkAddress: ()=>PARK,
         /** @param {any} state */
-        newContext: state=>({ ...state }),
+        newContext: state=>({ ...state, reg32: new Int32Array(8) }),
         /** @param {string} name */
         readReg32: name=>(name === 'esp' ? esp : 0),
     };
@@ -122,6 +122,24 @@ test('a thread begun in a routine of the loader finds its start routine above it
     assert.equal(thread.entry, 0x00402000, 'named by its own routine');
     assert.equal(memory.words.get(kernel.createThread({ entry: 0x00402000 }).stackTop + 8),
         undefined, 'nothing written there for a thread without one');
+});
+
+test('a new thread\'s context names its start routine and parameter, a first thread its entry'
+    + ' point and process block', async()=>{
+    // What GetThreadContext reads of a thread not yet run, as on Windows'
+    // i386: EAX the start routine, EBX its parameter. A debugger or a
+    // launcher that hollows its suspended child reads the entry point there.
+    const { kernel } = await makeKernel();
+    const loaderStarted = kernel.createThread({ entry: 0x00403000, parameter: 7,
+        start: 0x00402000 });
+    assert.equal(loaderStarted.context.reg32[0], 0x00402000, 'the start routine, not the loader');
+    assert.equal(loaderStarted.context.reg32[3], 7);
+    const plain = kernel.createThread({ entry: 0x00402000, parameter: 9 });
+    assert.deepEqual([plain.context.reg32[0], plain.context.reg32[3]], [0x00402000, 9]);
+    const first = kernel.createThread({ entry: 0x00405000, first: { entry: 0x00401000,
+        block: 0x7ffdf000 } });
+    assert.equal(first.context.reg32[0], 0x00401000, 'the image\'s entry point');
+    assert.equal(first.context.reg32[3] >>> 0, 0x7ffdf000, 'the process block');
 });
 
 test('a caller with nowhere better sends the thread to the park loop', async()=>{

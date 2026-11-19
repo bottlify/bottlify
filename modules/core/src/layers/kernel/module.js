@@ -432,6 +432,9 @@ export function createKernelModule(){
                  *   the thread -- and then enters it: placed in the word above the
                  *   parameter for that routine to find, so the start routine is
                  *   entered with the stack it would have had as `entry`.
+                 * @param {{ entry: number, block: number }} [options.first]
+                 *   A process's first thread: its image's entry point and its
+                 *   process block, which its context names before it runs.
                  * @returns {any} null once this instance is disposed -- there is
                  *     no scheduler left to give a thread to -- or when the pool has
                  *     no room for its stack, which is a thread that cannot be made
@@ -439,7 +442,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo, id, start,
+                    tebAddress, name, returnTo, id, start, first,
                 })
                 {
                     if (!live())
@@ -514,6 +517,15 @@ export function createKernelModule(){
                     {
                         thread.context.reg32[1] = parameter | 0;
                         thread.context.reg32[2] = (start ?? 0) | 0;
+                    }
+                    else if (thread.context?.reg32)
+                    {
+                        // Where a new thread's context says it will go, as
+                        // Windows' i386 start leaves it: EAX the start routine,
+                        // EBX its parameter (a first thread's: the image's entry
+                        // point and its process block).
+                        thread.context.reg32[0] = (first?.entry ?? start ?? entry) | 0;
+                        thread.context.reg32[3] = (first?.block ?? parameter) | 0;
                     }
                     thread.stackBase = region;
                     thread.handle = state.handles.open('thread', thread);

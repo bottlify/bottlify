@@ -25,9 +25,16 @@ const DONE = 0x10000000;
 const THREAD_HANDLE = 0x40;
 /** The same thread, opened with THREAD_QUERY_LIMITED_INFORMATION alone. */
 const LIMITED_HANDLE = 0x44;
+/** A thread of a child, by a handle with every right and by one with the limited right. */
+const CHILD_HANDLE = 0x48;
+const CHILD_LIMITED = 0x4c;
 
 /** Guest memory from 0x1000 to 0x4000; anything else is unmapped. */
-function setup({ processors: count = 4 } = {}){
+/**
+ * @param {{ processors?: number, onChildThread?: import('./thread-info.js')
+ *     .ThreadInfoHost['onChildThread'] }} [options]
+ */
+function setup({ processors: count = 4, onChildThread } = {}){
     const bytes = new Uint8Array(0x4000);
     const view = new DataView(bytes.buffer);
     /** @param {number} address @param {number} length */
@@ -50,7 +57,8 @@ function setup({ processors: count = 4 } = {}){
             resolve: handle=>(handle === THREAD_HANDLE || handle === LIMITED_HANDLE ? other
                 : null),
             /** @param {number} handle */
-            access: handle=>(handle === LIMITED_HANDLE ? 0x800 : null),
+            access: handle=>(handle === LIMITED_HANDLE || handle === CHILD_LIMITED ? 0x800
+                : null),
         },
         threads: ()=>threads,
         clock: { virtualTime: ()=>0 },
@@ -79,6 +87,7 @@ function setup({ processors: count = 4 } = {}){
             return at;
         },
         threadTimes: (handle, at)=>view.setUint32(at, 0x1234, true),
+        onChildThread,
     }));
     const natives = fns.SetThreadDescription.natives;
     /** @param {number} at */
@@ -98,6 +107,29 @@ function setup({ processors: count = 4 } = {}){
     };
     return { fns, natives, view, self, other, threads, errors, processors, wide, putWide };
 }
+
+test('a thread of a child is asked where it runs, through the rights of the handle here', ()=>{
+    /** @type {any[]} */
+    const asked = [];
+    const { natives } = setup({ onChildThread: (handle, call, rest, into)=>{
+        if (handle !== CHILD_HANDLE && handle !== CHILD_LIMITED)
+        {
+            return null;
+        }
+        asked.push({ handle, call, rest, into });
+        return Promise.resolve(STATUS_SUCCESS);
+    } });
+    const query = natives.NtQueryInformationThread.handler;
+    assert.equal(typeof query([CHILD_HANDLE, THREAD_INFO.BASIC, 0x1000, 28, 0x1100])?.then,
+        'function', 'answered once the child has');
+    assert.deepEqual(asked.at(-1), { handle: CHILD_HANDLE, call: 'NtQueryInformationThread',
+        rest: [THREAD_INFO.BASIC, { out: 28 }, 28, { out: 4 }],
+        into: [null, 0x1000, null, 0x1100] });
+    assert.equal(query([CHILD_LIMITED, THREAD_INFO.HIDE_FROM_DEBUGGER, 0x1000, 1, 0]),
+        0xc0000022, 'a class the handle may not read is refused here, the child not asked');
+    assert.equal(asked.length, 1);
+    assert.equal(query([0x99, THREAD_INFO.BASIC, 0x1000, 28, 0]), STATUS_INVALID_HANDLE);
+});
 
 test('ThreadBasicInformation names the thread, its process and its block', ()=>{
     const { natives, view, other } = setup();

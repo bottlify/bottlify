@@ -9075,6 +9075,7 @@ async function buildApp(options){
         // A program whose entry point returns ends as one that called
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
+        first: { entry: image.entryPoint, block: process.peb },
     });
     // CREATE_SUSPENDED: the process is there, and nothing of it runs -- not
     // its libraries' initialisers either, which run on this thread -- until

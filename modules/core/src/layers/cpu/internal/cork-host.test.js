@@ -652,7 +652,8 @@ test('newContext under cork positions eip and esp', async()=>{
         api.restoreContext(context, 0);
         assert.equal(api.readReg32('eip'), 0x401000);
         assert.equal(api.readReg32('esp'), 0x80000);
-        assert.equal(api.readReg32('eflags'), 0x2);
+        assert.equal(api.readReg32('eflags'), 0x202,
+            'interrupts enabled and nothing else, as a new thread on Windows');
     }
     finally
     {

@@ -105,7 +105,8 @@ give, and when a run falls back to `compatible`, is in
 thread, and a child process runs beside it there from `CreateProcess` on, the two machines
 taking turns. With 2 or 4 every process has a thread of its own, and one past that many takes
 turns with its parent on the parent's thread. A call a parent makes in its child
-(`VirtualAllocEx`, `ReadProcessMemory`, `SuspendThread` on its thread and the like) is sent to the
+(`VirtualAllocEx`, `ReadProcessMemory`, `SuspendThread` or `NtQueryInformationThread` on its
+thread and the like; the thread's rights are the parent's handle's) is sent to the
 child and made there with its own kernel32, between its turns, whichever way it runs
 ([`kernel32/cross-process.js`](../../modules/core/src/layers/win32/kernel32/cross-process.js)); only
 bytes cross. A copy of memory between them is one copy for both libraries' calls

@@ -1630,6 +1630,13 @@ export function createCpuModule(){
                     context.eip = entry;
                     context.reg32[4] = stackTop; // ESP
                     context.reg32[5] = stackTop; // EBP
+                    // A thread begins with interrupts enabled and no other
+                    // flag, as GetThreadContext reads a new thread on Windows;
+                    // the template's are its creator's.
+                    if (context.block)
+                    {
+                        setContextEflags(context, 0x202);
+                    }
                     context.inHlt = 0;
                     return context;
                 },
