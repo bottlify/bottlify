@@ -205,6 +205,10 @@ const FLOAT_BIT_HELPERS = {
  * @property {(destination: number, source: number, count: number) => void} copyDown
  *     Byte by byte from the last, as `std; rep movsb` copies.
  * @property {(destination: number, value: number, count: number) => void} fill
+ * @property {(address: number) => number} ptr  The pointer at an address: a dword in a
+ *     32-bit process, a quadword in a 64-bit one.
+ * @property {(address: number, value: number) => void} setPtr  A pointer stored, by the
+ *     process's width.
  * @property {(address: number, expected: number, value: number) => number} compareExchange
  *     The dword at the address replaced by the value where it held `expected`,
  *     answering what it held, as `lock cmpxchg` does: the 32-bit kernel's
@@ -266,6 +270,7 @@ function x87Words(fpu){
  *     A guest function run to its return, synchronously: a test's stand-in.
  *     The engine has none -- running the guest from the host is a wait --
  *     so a function that calls one has no handler, only its x86.
+ * @property {number} [pointerSize]  8 in a 64-bit process: what `ptr` and `setPtr` move.
  */
 
 /**
@@ -295,6 +300,7 @@ export function guestMemory(host){
     // most of what the call cost.
     const scratch = new Uint8Array(8);
     const scratchView = new DataView(scratch.buffer);
+    const wide = host.pointerSize === 8;
     /** By length, the buffer's first bytes. @type {Record<number, Uint8Array>} */
     const pieces = { 1: scratch.subarray(0, 1), 2: scratch.subarray(0, 2),
         4: scratch.subarray(0, 4), 8: scratch };
@@ -325,6 +331,15 @@ export function guestMemory(host){
         setU32: (address, value)=>write(address, 4, v=>v.setUint32(0, value, true)),
         setF32: (address, value)=>write(address, 4, v=>v.setFloat32(0, value, true)),
         setF64: (address, value)=>write(address, 8, v=>v.setFloat64(0, value, true)),
+        ptr: address=>{
+            const held = view(address, wide ? 8 : 4);
+            return held.getUint32(0, true) + (wide ? held.getUint32(4, true) * 2 ** 32 : 0);
+        },
+        setPtr: (address, value)=>write(address, wide ? 8 : 4, v=>{
+            const high = Math.floor(value / 2 ** 32);
+            v.setUint32(0, value - high * 2 ** 32, true);
+            v.setUint32(4, high, true);
+        }),
         copyUp: (destination, source, count)=>{
             const length = count >>> 0;
             // Apart, or the destination below: a copy of the whole reads the
@@ -551,7 +566,8 @@ export function guestEntry(source, compiled, host, fallback){
     /** @type {Guest | null} */
     const guest = uses.length === 0 ? null : readMemory && writeMemory
         ? /** @type {Guest} */ ({ ...guestMemory({ readMemory, writeMemory,
-            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {} }), ...words, ...bits })
+            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {},
+            ...host.pointerSize === 8 ? { pointerSize: 8 } : {} }), ...words, ...bits })
         : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words, ...bits,
             host: ()=>{
                 throw new Error('guest code: host() is answered only in a handler with a '

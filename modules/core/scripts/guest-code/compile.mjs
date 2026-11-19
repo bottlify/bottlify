@@ -399,8 +399,18 @@ const INT64_PARTS = ['low64', 'high64', 'int64'];
  */
 const POINTER_BYTES = 'pointerBytes';
 
-const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
+/**
+ * A pointer in memory: `ptr(address)` loads one and `setPtr(address, value)`
+ * stores one, a dword in the i386 (the code of `u32` and `setU32`) and a
+ * quadword at 64 bits. What `ptr` loads is a pointer where it is given to a
+ * pointer variable, returned from a `ptr` function, passed to a call or
+ * stored by `setPtr`.
+ */
+const POINTER_LOAD = 'ptr';
+const POINTER_STORE = 'setPtr';
+
+const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES), POINTER_LOAD,
+    POINTER_STORE, 'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
     ...FLOAT_BITS, ...INT64_PARTS, POINTER_BYTES]);
 
 const TABLE_KINDS = /** @type {const} */ ([
@@ -2585,6 +2595,18 @@ class FunctionCompiler {
                     this.storeCall(node, name);
                     return;
                 }
+                if (name === POINTER_STORE && this.helpers.has(name))
+                {
+                    if (this.long)
+                    {
+                        this.storePointer(node);
+                    }
+                    else
+                    {
+                        this.storeCall(node, 'setU32');
+                    }
+                    return;
+                }
                 if ((name === 'copyUp' || name === 'copyDown' || name === 'fill')
                     && this.helpers.has(name))
                 {
@@ -3746,8 +3768,12 @@ class FunctionCompiler {
                 const otherwise = a.fresh('else');
                 const end = a.fresh('end');
                 this.branch(node.test, otherwise, false);
-                const yes = this.expr(node.consequent);
-                const no = this.peekType(node.alternate);
+                // One of two pointers is the i386's 32 bits of each.
+                const pointers = this.isPointer(node);
+                const yes = pointers ? this.pointerValue(node.consequent)
+                    : this.expr(node.consequent);
+                const peeked = this.peekType(node.alternate);
+                const no = pointers && peeked === 'intish' ? 'u32' : peeked;
                 if (isFloat(yes.type) || isFloat(no))
                 {
                     this.toFloat(yes, node.consequent);
@@ -3761,7 +3787,8 @@ class FunctionCompiler {
                 const type = this.join(node, yes.type, no);
                 this.toEax(yes, node.consequent);
                 a.jump(-1, end).label(otherwise);
-                this.toEax(this.expr(node.alternate), node.alternate);
+                this.toEax(pointers ? this.pointerValue(node.alternate)
+                    : this.expr(node.alternate), node.alternate);
                 a.label(end);
                 return { where: 'eax', type };
             }
@@ -4514,10 +4541,15 @@ class FunctionCompiler {
         const name = callee.name;
         if (this.helpers.has(name))
         {
-            if (Object.hasOwn(LOADS, name))
+            if (name === POINTER_LOAD && this.long)
+            {
+                this.fail(node, 'ptr() loads a pointer: given to a pointer variable, returned, '
+                    + 'passed to a call or stored by setPtr');
+            }
+            if (Object.hasOwn(LOADS, name) || name === POINTER_LOAD)
             {
                 this.arity(node, 1);
-                const load = LOADS[name];
+                const load = name === POINTER_LOAD ? LOADS.u32 : LOADS[name];
                 const operand = this.address(node.arguments[0]);
                 if (isFloat(load.type) && this.long)
                 {
@@ -4944,6 +4976,11 @@ class FunctionCompiler {
             }
             inner = at;
         }
+        if (inner.type !== 'Identifier')
+        {
+            this.fail(node, 'a pointer loaded by ptr(), or one of two chosen by ?:, is given to '
+                + 'a pointer variable before it is moved, compared or read through');
+        }
         if (Math.abs(disp) >= 2 ** 31)
         {
             this.fail(node, 'a pointer is moved by less than 2^31 at once');
@@ -4990,6 +5027,33 @@ class FunctionCompiler {
      * @param {any} node
      */
     pointerToRax(node){
+        if (isPointerLoad(node))
+        {
+            this.arity(node, 1);
+            const one = this.wrapped(this.address(node.arguments[0]), EAX);
+            this.rexBits |= Rex.W;
+            this.op(0x8b, ...this.mem(EAX, one));                          // mov rax, [m]
+            this.loaded = null;
+            return;
+        }
+        if (node.type === 'ConditionalExpression')
+        {
+            const known = this.foldTest(node.test);
+            if (known !== undefined)
+            {
+                this.pointerToRax(known ? node.consequent : node.alternate);
+                return;
+            }
+            const otherwise = this.a.fresh('else');
+            const end = this.a.fresh('end');
+            this.branch(node.test, otherwise, false);
+            this.pointerToRax(node.consequent);
+            this.a.jump(-1, end).label(otherwise);
+            this.pointerToRax(node.alternate);
+            this.a.label(end);
+            this.loaded = null;
+            return;
+        }
         const { v, disp, index } = this.pointerParts(node);
         if (index !== null)
         {
@@ -5233,7 +5297,7 @@ class FunctionCompiler {
                     && v.pointer === true);
             }
         }
-        if (![...scopes[0].values()].some(Boolean))
+        if (![...scopes[0].values()].some(Boolean) && !this.helpers.has(POINTER_LOAD))
         {
             return;
         }
@@ -5329,15 +5393,22 @@ class FunctionCompiler {
                     return;
                 case 'ConditionalExpression':
                     visit(node.test, 'value');
-                    visit(node.consequent, inner);
-                    visit(node.alternate, inner);
+                    visit(node.consequent, context === 'pointer' ? 'pointer' : inner);
+                    visit(node.alternate, context === 'pointer' ? 'pointer' : inner);
                     return;
                 case 'CallExpression':
                 {
                     const name = node.callee.type === 'Identifier' ? node.callee.name : '';
                     const helper = this.helpers.has(name);
+                    if (helper && name === POINTER_LOAD && context !== 'pointer')
+                    {
+                        this.fail(node, 'ptr() loads a pointer, whole only given to a pointer '
+                            + 'variable, returned, passed to a call or stored by setPtr: its '
+                            + '32 bits are u32() of the same address');
+                    }
                     // How many of the arguments, from the first, are addresses.
-                    const addresses = helper && (Object.hasOwn(LOADS, name)
+                    const addresses = helper && name === POINTER_STORE ? 2
+                        : helper && (Object.hasOwn(LOADS, name) || name === POINTER_LOAD
                         || Object.hasOwn(STORES, name) || name === 'fill') ? 1
                         : helper && (name === 'copyUp' || name === 'copyDown') ? 2
                             : helper && (name === 'call' || name === 'callStd')
@@ -5645,6 +5716,36 @@ class FunctionCompiler {
         this.grew(-this.word);
         this.unhold(ECX);                                                  // pop ecx: the value
         return { where: 'eax', type: 'u32' };
+    }
+
+    /**
+     * `setPtr(address, value)` at 64 bits: the quadword of a pointer, or of
+     * an integer extended by zeros, stored at the address.
+     *
+     * @param {any} node
+     */
+    storePointer(node){
+        this.arity(node, 2);
+        const operand = this.address(node.arguments[0]);
+        // The address made one register's and kept while the value is made.
+        this.rexBits |= operand.whole === true ? Rex.W : 0;
+        this.op(0x8d, ...this.mem(EAX, operand));                          // lea (r|e)ax, [m]
+        this.hold(true);                                                   // push rax
+        const value = node.arguments[1];
+        if (this.isPointer(value))
+        {
+            this.pointerToRax(value);
+        }
+        else
+        {
+            const given = this.expr(value);
+            this.integer(given, value, 'typed');
+            this.toEax(given, value);
+            this.a.emit(0x89, 0xc0);                                       // mov eax, eax
+        }
+        this.unhold(ECX);                                                  // pop rcx
+        this.a.emit(0x48, 0x89, 0x01);                                     // mov [rcx], rax
+        this.loaded = null;
     }
 
     /** @param {any} node @param {string} name */
@@ -6033,6 +6134,16 @@ function isPointerExpression(node, named){
     {
         return named(node.name);
     }
+    if (isPointerLoad(node))
+    {
+        return true;
+    }
+    if (node.type === 'ConditionalExpression')
+    {
+        // One of two pointers.
+        return isPointerExpression(node.consequent, named)
+            && isPointerExpression(node.alternate, named);
+    }
     if (node.type !== 'BinaryExpression' || node.operator !== '+' && node.operator !== '-')
     {
         return false;
@@ -6040,6 +6151,12 @@ function isPointerExpression(node, named){
     const left = isPointerExpression(node.left, named);
     const right = isPointerExpression(node.right, named);
     return node.operator === '+' ? left !== right : left && !right;
+}
+
+/** Whether a node is `ptr(address)`, the load of a pointer. @param {any} node */
+function isPointerLoad(node){
+    return node.type === 'CallExpression' && node.callee.type === 'Identifier'
+        && node.callee.name === POINTER_LOAD;
 }
 
 /**

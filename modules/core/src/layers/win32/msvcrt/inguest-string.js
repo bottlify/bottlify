@@ -114,7 +114,7 @@ export function stringFromText({ u8, setU32, copyUp, host, pointerBytes }, self,
  * @param {Guest} guest @param {ptr} self @param {ptr} other
  * @returns {ptr}
  */
-export function stringCopy({ u32, setU32, copyUp, host, pointerBytes }, self, other){
+export function stringCopy({ u32, setU32, copyUp, host, pointerBytes, ptr }, self, other){
     const atBuffer = pointerBytes;
     const atSize = pointerBytes + 16;
     const atReserved = pointerBytes * 2 + 16;
@@ -123,8 +123,8 @@ export function stringCopy({ u32, setU32, copyUp, host, pointerBytes }, self, ot
     {
         return host();
     }
-    const from = u32(other + atReserved) > STRING_INLINE
-        ? u32(other + atBuffer) : (other + atBuffer) >>> 0;
+    const from = u32(other + atReserved) > STRING_INLINE ? ptr(other + atBuffer)
+        : other + atBuffer;
     copyUp(self + atBuffer, from, length + 1);
     setU32(self + atSize, length);
     setU32(self + atReserved, STRING_INLINE);
@@ -170,11 +170,11 @@ export function stringDestroy({ u32, setU8, setU32, host, pointerBytes }, self){
  * @param {Guest} guest @param {ptr} self
  * @returns {ptr}
  */
-export function stringText({ u32, pointerBytes }, self){
+export function stringText({ u32, pointerBytes, ptr }, self){
     const atBuffer = pointerBytes;
     const atReserved = pointerBytes * 2 + 16;
-    return u32(self + atReserved) > STRING_INLINE
-        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
+    return u32(self + atReserved) > STRING_INLINE ? ptr(self + atBuffer)
+        : self + atBuffer;
 }
 
 /**
@@ -184,12 +184,12 @@ export function stringText({ u32, pointerBytes }, self){
  * @param {Guest} guest @param {ptr} self @param {u32} index
  * @returns {ptr}
  */
-export function stringAt({ u32, pointerBytes }, self, index){
+export function stringAt({ u32, pointerBytes, ptr }, self, index){
     const atBuffer = pointerBytes;
     const atReserved = pointerBytes * 2 + 16;
-    const text = u32(self + atReserved) > STRING_INLINE
-        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
-    return (text + index) >>> 0;
+    const text = u32(self + atReserved) > STRING_INLINE ? ptr(self + atBuffer)
+        : self + atBuffer;
+    return text + index;
 }
 
 /**
@@ -213,7 +213,7 @@ export function stringSize({ u32, pointerBytes }, self){
  * @param {Guest} guest @param {ptr} self @param {u32} c
  * @returns {ptr}
  */
-export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, self, c){
+export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes, ptr }, self, c){
     const atBuffer = pointerBytes;
     const atSize = pointerBytes + 16;
     const atReserved = pointerBytes * 2 + 16;
@@ -223,8 +223,8 @@ export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, sel
     {
         return host();
     }
-    const text = reserved > STRING_INLINE
-        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
+    const text = reserved > STRING_INLINE ? ptr(self + atBuffer)
+        : self + atBuffer;
     setU8(text + length, c & 0xff);
     setU8(text + length + 1, 0);
     setU32(self + atSize, length + 1);
@@ -241,7 +241,7 @@ export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, sel
  * @param {Guest} guest @param {ptr} self @param {u32} count
  * @returns {u32}  Nothing a caller reads: zero.
  */
-export function stringResize({ u32, setU8, setU32, host, pointerBytes }, self, count){
+export function stringResize({ u32, setU8, setU32, host, pointerBytes, ptr }, self, count){
     const atBuffer = pointerBytes;
     const atSize = pointerBytes + 16;
     const atReserved = pointerBytes * 2 + 16;
@@ -250,8 +250,8 @@ export function stringResize({ u32, setU8, setU32, host, pointerBytes }, self, c
     {
         return host();
     }
-    const text = reserved > STRING_INLINE
-        ? u32(self + atBuffer) : (self + atBuffer) >>> 0;
+    const text = reserved > STRING_INLINE ? ptr(self + atBuffer)
+        : self + atBuffer;
     for (let at = u32(self + atSize); at < count; at++)
     {
         setU8(text + at, 0);

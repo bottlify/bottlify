@@ -1188,11 +1188,10 @@ export function strstr({ u8 }, haystack, needle){
  * copies: as if read whole first.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {ptr} source
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source
  * @returns {ptr}
  */
 export function strcat({ u8, copyUp, copyDown }, destination, source){
-    /** @type {u32} */
     let end = destination;
     while (u8(end) !== 0)
     {
@@ -1418,7 +1417,7 @@ export function _mbsinc({ u8, host }, at){
     {
         return host();
     }
-    return (at + 1) >>> 0;
+    return at + 1;
 }
 
 /**
@@ -2167,7 +2166,7 @@ export function memchr({ u8 }, buffer, value, count){
     {
         if (u8(buffer + i) === wanted)
         {
-            return (buffer + i) >>> 0;
+            return buffer + i;
         }
     }
     return 0;
@@ -2181,11 +2180,10 @@ export function memchr({ u8 }, buffer, value, count){
  * first, as strcat copies.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {ptr} source @param {u32} count
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, count){
-    /** @type {u32} */
     let end = destination;
     while (u8(end) !== 0)
     {
@@ -2295,11 +2293,10 @@ export function wcsncmp({ u16 }, left, right, count){
  * whole first.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {ptr} source
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source
  * @returns {ptr}
  */
 export function wcscat({ u16, copyUp, copyDown }, destination, source){
-    /** @type {u32} */
     let end = destination;
     while (u16(end) !== 0)
     {
@@ -2329,11 +2326,10 @@ export function wcscat({ u16, copyUp, copyDown }, destination, source){
  * always a terminator.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {ptr} source @param {u32} count
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, count){
-    /** @type {u32} */
     let end = destination;
     while (u16(end) !== 0)
     {
@@ -3065,7 +3061,7 @@ export function strcat_s({ u8, copyUp, host }, destination, size, source){
     {
         length++;
     }
-    const to = (destination + end) >>> 0;
+    const to = destination + end;
     const gap = (to - source) >>> 0;
     if (length >= rest || gap !== 0 && gap < ((length + 1) >>> 0))
     {
@@ -3175,7 +3171,7 @@ export function strncat_s({ u8, setU8, copyUp, host }, destination, size, source
             answer = STRUNCATE;
         }
     }
-    const to = (destination + end) >>> 0;
+    const to = destination + end;
     const gap = (to - source) >>> 0;
     if (gap !== 0 && gap <= copied)
     {
@@ -3252,7 +3248,7 @@ export function wcscat_s({ u16, copyUp, host }, destination, size, source){
     {
         length++;
     }
-    const to = (destination + end * 2) >>> 0;
+    const to = destination + end * 2;
     const gap = (to - source) >>> 0;
     if (length >= rest || gap !== 0 && gap < ((length * 2 + 2) >>> 0))
     {
@@ -3362,7 +3358,7 @@ export function wcsncat_s({ u16, setU16, copyUp, host }, destination, size, sour
             answer = STRUNCATE;
         }
     }
-    const to = (destination + end * 2) >>> 0;
+    const to = destination + end * 2;
     const gap = (to - source) >>> 0;
     if (gap !== 0 && gap < ((copied * 2 + 2) >>> 0))
     {
