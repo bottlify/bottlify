@@ -21,7 +21,7 @@ const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
 const NAME = '\\\\.\\mailslot\\wine_mailslot_test';
 
-function setup(){
+function setup(pointerSize = 4){
     const bytes = new Uint8Array(0x1000);
     const view = new DataView(bytes.buffer);
     /** @type {Map<number, { type: string, object: any }>} */
@@ -47,6 +47,7 @@ function setup(){
     /** @type {{ file: number, transferred: number, status: number, value: number }[]} */
     const packets = [];
     const slots = createMailslots({
+        pointerSize,
         kernel: {
             block: (/** @type {any} */ thread, /** @type {string} */ reason,
                 /** @type {any} */ timed)=>blocked.push({ thread, reason, timed }),
@@ -275,6 +276,21 @@ test('the native calls answer with statuses, touching the block only on a transf
     }
     assert.equal(t.slots.information(slot, 5), 'unknown class');
     assert.equal(t.slots.information(0x9999, 26), null);
+});
+
+test('a 64-bit process\'s native calls write Information eight bytes into the block', ()=>{
+    const t = setup(8);
+    const slot = t.functions.CreateMailslotA.handler([t.ansi(0x100, NAME), 0, 0, 0]);
+    const writer = /** @type {{ handle: number }} */ (t.slots.open(NAME, GENERIC_WRITE)).handle;
+    const block = 0x700;
+    const whole = ()=>[0, 4, 8, 12, 16].map(at=>t.dword(block + at));
+    t.bytes.fill(0xef, block, block + 20);
+    t.bytes.set([7, 8], 0x200);
+    assert.equal(t.slots.write(writer, 0x200, 2, block, true), 0);
+    assert.deepEqual(whole(), [0, 0, 2, 0, 0xefefefef]);
+    t.bytes.fill(0xef, block, block + 20);
+    assert.equal(t.slots.read(slot, 0x400, 16, block, true), 0);
+    assert.deepEqual(whole(), [0, 0, 2, 0, 0xefefefef]);
 });
 
 test('a native read of a slot made without synchronous I/O does not wait', ()=>{

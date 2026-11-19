@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
+
 /**
  * Mailslots: a queue of messages one server handle reads and any number of
  * client handles write, found by a name under `\\.\mailslot\`.
@@ -106,6 +108,8 @@ const LOCAL_PREFIX = '\\\\.\\mailslot\\';
  * @property {(thread: any, code: number) => void} setLastErrorFor
  * @property {() => any} currentThread
  * @property {() => any} park
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose IO_STATUS_BLOCK
+ *     holds Information eight bytes in; absent, 4.
  * @property {(event: number) => void} [setEvent]
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  * @property {(file: number, transferred: number, status: number, value: number) => boolean}
@@ -141,6 +145,20 @@ export function createMailslots(host){
         {
             host.writeMemory(address, Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
                 (value >>> 16) & 0xff, value >>> 24));
+        }
+    };
+
+    const layout = overlappedLayout(host.pointerSize);
+    /**
+     * A native call's IO_STATUS_BLOCK, status and Information each a pointer
+     * wide; a null one is not written.
+     *
+     * @param {number} block @param {number} status @param {number} count
+     */
+    const statusBlock = (block, status, count)=>{
+        if (block !== 0)
+        {
+            overlappedResult(writeDwordIf, layout, block, status, count);
         }
     };
 
@@ -299,11 +317,12 @@ export function createMailslots(host){
 
     /** @param {Caller} caller @param {number} count */
     const report = (caller, count)=>{
-        writeDwordIf(caller.out, caller.native ? STATUS_SUCCESS : count);
         if (caller.native)
         {
-            writeDwordIf(caller.out + 4, count);
+            statusBlock(caller.out, STATUS_SUCCESS, count);
+            return;
         }
+        writeDwordIf(caller.out, count);
     };
 
     /** @param {Caller} caller @param {number} count */
@@ -332,8 +351,7 @@ export function createMailslots(host){
         {
             kernel.cancelTimer?.(reader.timer);
         }
-        writeDwordIf(reader.out, status);
-        writeDwordIf(reader.out + 4, count);
+        statusBlock(reader.out, status, count);
         if (io.event !== 0)
         {
             host.setEvent?.(io.event);

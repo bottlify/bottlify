@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
+
 /**
  * The thread pool API: pools, cleanup groups and the callback objects a
  * program makes in them -- work, simple callbacks, timers and waits -- and
@@ -384,9 +386,9 @@ export function createThreadpoolApi(core){
         {
             // IO_STATUS_BLOCK: the status, then the bytes; the callback's own,
             // given back once it has returned.
-            const block = host.allocate(8);
-            write32(block, packet.status ?? 0);
-            write32(block + 4, packet.transferred);
+            const layout = overlappedLayout(host.pointerSize);
+            const block = host.allocate(2 * layout.word);
+            overlappedResult(write32, layout, block, packet.status ?? 0, packet.transferred);
             core.dispatch({ entry: item.callback, instanced: true, owner: item,
                 args: [item.context, packet.overlapped, block, item.handle],
                 done: ()=>host.free?.(block) }, item.pool.lane);

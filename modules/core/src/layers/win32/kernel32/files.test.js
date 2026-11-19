@@ -2272,6 +2272,44 @@ test('NtCreateFile opens a \\??\\ name and reports how in the status block', ()=
     assert.equal(files.stat('C:\\GAME\\NEW.BIN')?.exists, true);
 });
 
+test('a 64-bit process\'s native names, rename record and port binding are laid out wide', ()=>{
+    // OBJECT_ATTRIBUTES: Length, then RootDirectory at 8 and ObjectName at 16;
+    // a UNICODE_STRING's Buffer at 8. Read at the 32-bit offsets the name's
+    // pointer was the root handle's upper half and no native open found a file.
+    const { files, fns, memory } = setup({ pointerSize: 8 });
+    const native = /** @type {any} */ (fns.CreateFileW).natives;
+    files.put('C:\\GAME\\DATA.BIN', 'data');
+    const name = '\\??\\C:\\GAME\\DATA.BIN';
+    putWide(memory, NT_NAME, name);
+    const view = new DataView(memory.bytes.buffer);
+    const string = 0x900;
+    const attributes = 0x920;
+    memory.bytes.fill(0, string, attributes + 48);
+    view.setUint16(string, name.length * 2, true);
+    view.setUint16(string + 2, name.length * 2, true);
+    view.setBigUint64(string + 8, BigInt(NT_NAME), true);
+    view.setUint32(attributes, 48, true);
+    view.setBigUint64(attributes + 16, BigInt(string), true);
+    view.setUint32(attributes + 24, 0x40, true);
+    const block = 0x980;
+    assert.equal(native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ | GENERIC_WRITE | DELETE,
+        attributes, block, 0, 0, 7, FILE_OPEN, FILE_NON_DIRECTORY_FILE, 0, 0]), 0);
+    assert.equal(memory.dword(block + 8), 1, 'FILE_OPENED, eight bytes in');
+    const handle = memory.dword(NT_HANDLE);
+
+    // FILE_RENAME_INFORMATION: the flag, RootDirectory at 8, the length at 16
+    // and the name at 20.
+    const record = 0xa00;
+    memory.bytes.fill(0, record, record + 0x40);
+    view.setUint32(record + 16, 14, true);
+    putWide(memory, record + 20, 'MOVED.B');
+    assert.equal(native.NtSetInformationFile.handler([handle, block, record, 20, 10]) >>> 0,
+        0xc0000004, 'STATUS_INFO_LENGTH_MISMATCH below the 64-bit record\'s 24 bytes');
+    assert.equal(native.NtSetInformationFile.handler([handle, block, record, 34, 10]), 0);
+    assert.equal(files.text('C:\\GAME\\MOVED.B'), 'data');
+    assert.ok(!files.nodes.has('C:\\GAME\\DATA.BIN'));
+});
+
 test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only file', ()=>{
     // file.c's _lcreat test: write access is refused first, then a
     // delete-on-close open of the read-only file, then asking a file to be a

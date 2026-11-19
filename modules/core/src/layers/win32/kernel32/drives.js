@@ -28,6 +28,7 @@
  * four values together must not overflow.
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { encodeAnsi } from './locale.js';
 
 /**
@@ -259,6 +260,8 @@ export const COMPUTER_NAME = 'BOTTLIFY';
  * @property {() => string} [currentDirectory]  The process's, as a full path.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(path: string) => { exists?: boolean, isDirectory?: boolean } | null} [stat]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose IO_STATUS_BLOCK
+ *     holds Information eight bytes in; absent, 4.
  * @property {{ resolve: (handle: number, type?: string) => any }} [handles]
  *     The handle table, for the volume an open file is on.
  */
@@ -995,8 +998,11 @@ export function createDriveFunctions(host){
         handler: ([handle, block, out, length, kind])=>{
             /** @param {number} status @param {number} information */
             const report = (status, information)=>{
-                writeDwordIf(block >>> 0, status);
-                writeDwordIf(block === 0 ? 0 : (block >>> 0) + 4, information);
+                if ((block >>> 0) !== 0)
+                {
+                    overlappedResult(writeDwordIf, overlappedLayout(host.pointerSize),
+                        block >>> 0, status, information);
+                }
                 return status;
             };
             const root = rootOfHandle(handle);
