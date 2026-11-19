@@ -57,7 +57,7 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_BAD_LENGTH = 24;
 const ERROR_NOT_SUPPORTED = 50;
 const ERROR_GEN_FAILURE = 31;
-const ERROR_OBJECT_NAME_EXISTS = 5010;
+const ERROR_OBJECT_NAME_EXISTS = 698;
 /** QueryFullProcessImageName's one flag: the path in the object manager's terms. */
 const PROCESS_NAME_NATIVE = 1;
 /** CreateProcess's flag saying the environment block is UTF-16. */

@@ -1052,7 +1052,8 @@ test('a process-thread attribute list is laid out as Windows lays it, each kind 
     assert.equal(host.errors.at(-1), 24, 'ERROR_BAD_LENGTH');
     assert.equal(update(0x20000, 4), 1, 'the parent process');
     assert.equal(update(0x20000, 4), 0);
-    assert.equal(host.errors.at(-1), 5010, 'ERROR_OBJECT_NAME_EXISTS');
+    assert.equal(host.errors.at(-1), 698,
+        'ERROR_OBJECT_NAME_EXISTS, not ERROR_OBJECT_ALREADY_EXISTS (5010)');
     assert.equal(update(0x20002, 15), 0, 'a handle list of part of a handle');
     assert.equal(update(0x20002, 16), 1);
     assert.equal(update(0x30003, 12), 1, 'group affinity');
