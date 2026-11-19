@@ -511,6 +511,68 @@ test('a child of a process in a job is in the job, unless the job lets it break 
     assert.equal(posted.length, 0, 'no port, nobody told');
 });
 
+test('jobs nest: a job a process in a job is assigned to becomes its child, and a job of another'
+    + ' hierarchy refuses it', ()=>{
+    // Wine's process.c test_nested_jobs and test_nested_jobs_child.
+    const { view, call, handles, errors } = machine();
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    const process = (/** @type {any} */ one)=>handles.open('process', one);
+    const parent = call('CreateJobObjectW', 0, 0);
+    const job = call('CreateJobObjectW', 0, 0);
+    const other = call('CreateJobObjectW', 0, 0);
+    const first = { id: 0x500 };
+    const second = { id: 0x504 };
+    assert.equal(call('AssignProcessToJobObject', parent, process(first)), 1);
+    assert.equal(call('AssignProcessToJobObject', job, process(first)), 1,
+        'an empty job of no hierarchy nests under the process\'s job');
+    assert.equal(call('AssignProcessToJobObject', other, process(second)), 1);
+    assert.equal(call('AssignProcessToJobObject', other, process(first)), 0,
+        'a job with processes of its own does not nest');
+    assert.equal(errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
+    assert.equal(call('AssignProcessToJobObject', job, process(second)), 0,
+        'the nested job is in another hierarchy than the second process\'s');
+    assert.equal(errors.at(-1), 5);
+    const third = { id: 0x508 };
+    assert.equal(call('AssignProcessToJobObject', job, process(third)), 1);
+    assert.deepEqual([inJob(third, job), inJob(third, parent)], [1, 1],
+        'a process in the inner job is in the outer one');
+});
+
+test('a child is made in the jobs its job list names, each nested under the one before, and refused'
+    + ' by one of another hierarchy', ()=>{
+    // Wine's process.c test_job_list_attribute.
+    const { view, call, handles, jobEvents, posted } = machine();
+    const inJob = (/** @type {any} */ process, /** @type {number} */ which)=>{
+        call('IsProcessInJob', handles.open('process', process), which, 0x2000);
+        return view.getUint32(0x2000, true);
+    };
+    const parent = call('CreateJobObjectW', 0, 0);
+    call('AssignProcessToJobObject', parent, CURRENT_PROCESS);
+    const a = call('CreateJobObjectW', 0, 0);
+    const b = call('CreateJobObjectW', 0, 0);
+    assert.equal(jobEvents().listed([a, 0xdeadbeef]), null, 'a handle naming no job');
+    assert.equal(jobEvents().listed([0]), null, 'nor does NULL');
+    /** @type {any} */
+    const chained = { id: 0x600, breakaway: false, jobList: jobEvents().listed([a, b]) };
+    jobEvents().started(chained);
+    assert.equal(chained.refused, undefined);
+    assert.deepEqual([inJob(chained, parent), inJob(chained, a), inJob(chained, b)], [1, 1, 1]);
+    // b is nested in a now: after a job of no hierarchy, it is of another.
+    const fresh = call('CreateJobObjectW', 0, 0);
+    view.setUint32(0x3200, 1, true);
+    view.setUint32(0x3204, handles.open('iocp', { kind: 'iocp' }), true);
+    assert.equal(call('SetInformationJobObject', fresh, 7, 0x3200, 8), 1);
+    /** @type {any} */
+    const refused = { id: 0x610, breakaway: false, jobList: jobEvents().listed([fresh, b]) };
+    jobEvents().started(refused);
+    assert.equal(refused.refused, 5, 'ERROR_ACCESS_DENIED');
+    assert.deepEqual(posted.map(([, packet])=>packet.transferred), [6, 7, 4],
+        'the first job heard it come and go: NEW_PROCESS, EXIT_PROCESS, ACTIVE_PROCESS_ZERO');
+});
+
 test('a child breaks away from nested jobs from the innermost out, until one keeps it', ()=>{
     // Wine's process.c test_BreakawayOk with nested jobs.
     const { view, call, handles, jobEvents } = machine();

@@ -13,7 +13,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PIPE_CLIENT, createNamedPipes, isPipeName, pipeDeviceOf } from './pipes.js';
+import { PIPE_CLIENT, createNamedPipes, dropUnclaimed, isPipeName, pipeDeviceOf } from './pipes.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_ACCESS_DENIED = 5;
@@ -650,13 +650,46 @@ test('a child\'s inherited end closes when the child ends: its reader reads to t
     const child = processOn(new Map(), 2);
     const entry = p.pipes.inherited([client])[0];
     child.handles.set(entry.handle, { type: 'pipe', object: entry.object });
-    child.pipes.adopted(entry.handle, entry.object);
+    child.pipes.adopted(entry.handle, entry.object, entry);
     p.pipes.closed(client, entry.object);
     assert.equal(child.write(entry.handle, 'out'), 1);
     child.pipes.processEnded();
     assert.equal(p.read(server, 10), 1, 'what the child wrote is still read');
     assert.equal(p.read(server, 10), 0);
     assert.equal(p.error(), ERROR_BROKEN_PIPE, 'and then the end of it');
+});
+
+test('a child\'s inherited end is its from CreateProcess: the parent closing its copy before the'
+    + ' child starts leaves the pipe open, and a child that never takes it gives it back', ()=>{
+    // A parent hands a child its stdin and closes its own copy of the child's
+    // end at once; the child is started after that, at the parent's next turn.
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX);
+    const client = p.client();
+    p.pipes.setInheritable(client, true);
+    const entry = p.pipes.inherited([client])[0];
+    assert.equal(entry.held, true, 'held for the child from CreateProcess');
+    p.pipes.closed(client, entry.object);
+    assert.equal(p.write(server, 'msg'), 1, 'the child\'s end is still there to write to');
+    const child = processOn(new Map(), 2);
+    child.handles.set(entry.handle, { type: 'pipe', object: entry.object });
+    child.pipes.adopted(entry.handle, entry.object, entry);
+    assert.equal(entry.held, false, 'the child took the handle held for it');
+    dropUnclaimed([entry]);
+    assert.equal(child.read(entry.handle, 10), 1, 'taken, it is not given back again');
+    child.pipes.processEnded();
+    assert.equal(p.write(server, 'x'), 0, 'with the child gone the pipe is broken');
+    assert.equal(p.error(), ERROR_NO_DATA);
+
+    const q = processOn(new Map());
+    const listening = q.server(PIPE_ACCESS_DUPLEX);
+    const handed = q.client();
+    q.pipes.setInheritable(handed, true);
+    const never = q.pipes.inherited([handed]);
+    q.pipes.closed(handed, never[0].object);
+    dropUnclaimed(never);
+    assert.equal(q.write(listening, 'x'), 0, 'a child that never started holds nothing');
+    assert.equal(q.error(), ERROR_NO_DATA);
 });
 
 test('a wait on an end\'s handle is a wait on its pending operations, as on a file', ()=>{

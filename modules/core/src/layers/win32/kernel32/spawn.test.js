@@ -71,6 +71,8 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\
                     }
                     return held.object;
                 },
+                /** @param {number} handle */
+                close: handle=>handles.delete(handle),
             },
         },
         /** @param {number} address @param {number} length */
@@ -889,6 +891,47 @@ test('a STARTUPINFO\'s pipe ends the child inherits are its standard handles', (
         [0, putAnsi(host, 0x100, 'dxinfo.exe'), 0, 0, 0, 0, 0, 0, startup, 0]), 1);
     assert.equal(host.requests.at(-1).standardHandles, undefined,
         'bInheritHandles FALSE: nothing is inherited, the console stays');
+});
+
+test('a job list names the jobs a child is made in: a handle of no job, or a job that refuses it,'
+    + ' fails CreateProcess', ()=>{
+    // Wine's kernel32 process.c test_job_list_attribute.
+    const host = /** @type {any} */ (fakeHost({ files: ['C:\\App\\child.exe'] }));
+    const jobA = { kind: 'job' };
+    host.jobsListed = (/** @type {number[]} */ handles)=>(handles.every(one=>one === 0x40)
+        ? handles.map(()=>jobA) : null);
+    const spawned = host.spawned;
+    let refuse = false;
+    host.spawned = (/** @type {any} */ request)=>{
+        spawned(request);
+        // As the jobs refuse it (`process-policy.js`): it never runs.
+        if (refuse)
+        {
+            request.refused = 5;
+            request.completed = true;
+        }
+    };
+    const fns = createSpawnFunctions(host);
+    const startup = 0x400;
+    const LIST = 0x600;
+    const JOBS = 0x700;
+    host.view.setUint32(startup + 68, LIST, true);
+    host.view.setUint32(0x7f0, 0x100, true);
+    assert.equal(fns.InitializeProcThreadAttributeList.handler([LIST, 1, 0, 0x7f0]), 1);
+    host.view.setUint32(JOBS, 0x44, true);
+    fns.UpdateProcThreadAttribute.handler([LIST, 0, 0x2000d, JOBS, 4, 0, 0]);
+    const create = ()=>fns.CreateProcessA.handler(
+        [0, putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0x80000, 0, 0, startup, 0]);
+    const made = host.requests.length;
+    assert.equal(create(), 0, 'a handle that names no job');
+    assert.equal(host.errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(host.requests.length, made, 'and nothing is made');
+    host.view.setUint32(JOBS, 0x40, true);
+    assert.equal(create(), 1);
+    assert.deepEqual(host.requests.at(-1).jobList, [jobA], 'the jobs go with the child');
+    refuse = true;
+    assert.equal(create(), 0, 'a job of another hierarchy refuses it');
+    assert.equal(host.errors.at(-1), 5, 'ERROR_ACCESS_DENIED');
 });
 
 test('this process and its children are in the interactive session, and no other id is', ()=>{

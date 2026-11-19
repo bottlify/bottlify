@@ -42,6 +42,7 @@ import { debuggeeFor } from './debug-events.js';
 import { grantedAccess } from './access.js';
 import { createProcessTarget } from './process-target.js';
 import { INTERACTIVE_SESSION } from './teb.js';
+import { dropUnclaimed } from './pipes.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -107,6 +108,8 @@ const ATTRIBUTE_LIST_HEADER = 20;
 const ATTRIBUTE_ENTRY = 12;
 /** The attribute that names the handles a child inherits, and none else. */
 const PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002;
+/** The jobs a child is made in besides those it inherits (Windows 10 on). */
+const PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x2000d;
 /** CreateProcess's flag: the STARTUPINFO is a STARTUPINFOEX, its attribute list behind it. */
 const EXTENDED_STARTUPINFO_PRESENT = 0x80000;
 /**
@@ -511,6 +514,8 @@ export function createSpawner(host){
  *           The process's current directory, for the spawner this builds.
  * @property {() => boolean} [breakawayRefused]  Whether a job this process is in
  *           keeps its children: CREATE_BREAKAWAY_FROM_JOB is then refused.
+ * @property {(handles: number[]) => any[] | null} [jobsListed]  The jobs a
+ *           PROC_THREAD_ATTRIBUTE_JOB_LIST names, null when one names none.
  * @property {Spawner} [spawner]
  *           The one every library in this process launches through, when the
  *           caller assembled it. Built here otherwise, from the same fields.
@@ -819,7 +824,17 @@ export function createSpawnFunctions(host){
      * @param {number} startup @param {number} flags
      * @returns {number[] | null}
      */
-    const handleList = (startup, flags)=>{
+    const handleList = (startup, flags)=>attributeHandles(startup, flags,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST);
+
+    /**
+     * The handles a STARTUPINFOEX's attribute list gives an attribute of
+     * handles (a handle list, a job list), null where it names none.
+     *
+     * @param {number} startup @param {number} flags @param {number} attribute
+     * @returns {number[] | null}
+     */
+    const attributeHandles = (startup, flags, attribute)=>{
         if (startup === 0 || (flags & EXTENDED_STARTUPINFO_PRESENT) === 0)
         {
             return null;
@@ -833,7 +848,7 @@ export function createSpawnFunctions(host){
         for (let at = 0; at < used; at++)
         {
             const entry = list + ATTRIBUTE_LIST_HEADER + at * ATTRIBUTE_ENTRY;
-            if (readDword(entry) === PROC_THREAD_ATTRIBUTE_HANDLE_LIST)
+            if (readDword(entry) === attribute)
             {
                 const value = readDword(entry + 8);
                 return Array.from({ length: readDword(entry + 4) >>> 2 },
@@ -898,6 +913,15 @@ export function createSpawnFunctions(host){
             host.setLastError(ERROR_ACCESS_DENIED);
             return 0;
         }
+        // The jobs it is to be made in: each must be a job (ERROR_INVALID_HANDLE).
+        const listedHandles = attributeHandles(startup >>> 0, flags,
+            PROC_THREAD_ATTRIBUTE_JOB_LIST);
+        const jobList = listedHandles ? host.jobsListed?.(listedHandles) ?? null : [];
+        if (jobList === null)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
         const inheritedHandles = inherit && host.inheritedHandles
             ? host.inheritedHandles(handleList(startup >>> 0, flags)) : [];
         const made = record(named ?? '', line, flags, directory, {
@@ -919,10 +943,25 @@ export function createSpawnFunctions(host){
             // them by: the pipes' ends, which every process of the run on this
             // thread holds alike. A child in a worker of its own takes none.
             inheritedHandles,
+            jobList,
         });
+        if (!made || made.completed)
+        {
+            // A child that never runs takes nothing it was handed.
+            dropUnclaimed(inheritedHandles);
+        }
         if (!made)
         {
             host.setLastError(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+        // A job of its list in another hierarchy refused it: it never was.
+        if (made.refused)
+        {
+            kernel.handles.close(made.handle);
+            kernel.handles.close(made.threadHandle);
+            kernel.processes.finish?.(made, 0);
+            host.setLastError(made.refused);
             return 0;
         }
         if ((information >>> 0) !== 0)

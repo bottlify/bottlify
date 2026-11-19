@@ -64,7 +64,7 @@ import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
 import { createMailslots } from './kernel32/mailslots.js';
-import { PIPE_CLIENT, createNamedPipes } from './kernel32/pipes.js';
+import { PIPE_CLIENT, createNamedPipes, dropUnclaimed } from './kernel32/pipes.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
 import { createFileTimeFunctions, msToFileTime } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
@@ -858,7 +858,8 @@ export function createWin32Module(){
              *
              * @type {{ exited: (process: any, code: number) => void,
              *     closed: (job: any) => void, started: (process: any) => void,
-             *     refusesBreakaway: () => boolean } | null}
+             *     refusesBreakaway: () => boolean,
+             *     listed: (handles: number[]) => any[] | null } | null}
              */
             let jobEvents = null;
             /** Whether CreateProcessWithLogonW has said it checks no password. */
@@ -1573,7 +1574,7 @@ export function createWin32Module(){
                 if (inherited.type === 'pipe'
                     && kernel.handles.adopt(inherited.handle, inherited.type, inherited.object))
                 {
-                    pipes.adopted(inherited.handle, inherited.object);
+                    pipes.adopted(inherited.handle, inherited.object, inherited);
                 }
                 // An object inherited is inheritable again, as the parent's was.
                 else if (INHERITED_KINDS.has(inherited.type)
@@ -4153,6 +4154,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         spawned: request=>config?.spawned?.(request),
                         breakawayRefused: ()=>jobEvents?.refusesBreakaway() ?? false,
+                        jobsListed: listed=>jobEvents?.listed(listed) ?? null,
                         spawner,
                         pointerSize,
                         patchMemory: (address, bytes)=>
@@ -7402,6 +7404,8 @@ export function createWin32Module(){
                  */
                 childExited(child, code){
                     kernel.processes.finish(child, code);
+                    // What CreateProcess held for it and it never took.
+                    dropUnclaimed(child.inheritedHandles);
                     debuggerSide?.exited(child);
                     jobEvents?.exited(child, code);
                     // A thread whose timed wait ran out has gone on, to
