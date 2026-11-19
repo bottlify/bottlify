@@ -2555,18 +2555,6 @@ elevated caller's would (`kernel32/reparse.js`), and CreateSymbolicLink still an
 ERROR_PRIVILEGE_NOT_HELD as before. Revisit when the token carries its privileges and the run
 says whether it is elevated. *2026-11-19.*
 
-**A276. Temporary: a device's guest routines built for x86-64 change RBX, RSI and RDI without
-unwind data.** A 64-bit program's frames are unwound by the function table of the image they run in
-(RUNTIME_FUNCTION and its UNWIND_INFO); code with no entry is taken for a leaf: its return address at
-RSP and every register the convention has a callee keep as the caller left it. Direct3D 9's routines
-in a 64-bit process (`seam/routines`, `Width`) push nothing - RSP is the caller's all through them, so
-an unwind finds the caller's frame - but the lock, level-lock and copying routines use RBX, RSI or RDI
-(`rep movs` takes RSI and RDI), kept meanwhile in R9, R10 and R11 (`save`). A fault inside one,
-through a pointer of the program's, reaches the caller's handler with those three as the routine
-left them. Removed when the routines use only RAX, RCX, RDX and R8 to R11 at 64 bits (a copy loop
-for `rep movs`), or the code arena gives each an unwind entry that says where it keeps them.
-*2026-11-18, narrowed the same day: the routines no longer push.*
-
 **A277. A program's plain loads and stores keep no x86 order between executors on a host that
 reorders them (arm64).** x86 is TSO: one thread's stores are seen by another in the order made, and
 programs hand data over with plain movs - a spinlock let go with `mov [lock], 0`, a `volatile` flag
