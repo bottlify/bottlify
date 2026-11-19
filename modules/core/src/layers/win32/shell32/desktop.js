@@ -58,7 +58,7 @@ const SETTINGS = Object.freeze([
  * @property {(address: number) => void} [free]
  */
 
-/** The longest string ShellAbout reads of each it is given. */
+/** The most characters ShellAbout reads of each string it is given. */
 const ABOUT_TEXT_LIMIT = 1024;
 const MB_OK = 0;
 
@@ -122,7 +122,7 @@ export function createDesktopFunctions(host){
      * TRUE once it is closed. Its icon is the box's own, not `hIcon`, which
      * is said.
      *
-     * @param {(address: number, maxLength: number) => string} read
+     * @param {(address: number) => string} read  a string of the call's width
      */
     const about = read=>({
         argBytes: 16,
@@ -141,8 +141,8 @@ export function createDesktopFunctions(host){
             }
             const packed = (kernel32?.GetVersion?.handler([]) ?? 0) >>> 0;
             const { caption, text } = aboutBox(
-                (app >>> 0) === 0 ? '' : read(app >>> 0, ABOUT_TEXT_LIMIT),
-                (other >>> 0) === 0 ? '' : read(other >>> 0, ABOUT_TEXT_LIMIT),
+                (app >>> 0) === 0 ? '' : read(app >>> 0),
+                (other >>> 0) === 0 ? '' : read(other >>> 0),
                 { major: packed & 0xff, minor: packed >>> 8 & 0xff, build: packed >>> 16 });
             const allocate = /** @type {(bytes: number) => number} */ (host.allocate);
             const free = /** @type {(address: number) => void} */ (host.free);
@@ -336,8 +336,8 @@ export function createDesktopFunctions(host){
          *
          * A modal box that returns TRUE once it is closed (`aboutBox`).
          */
-        ShellAboutA: about((address, most)=>host.readCString?.(address, most) ?? ''),
-        ShellAboutW: about((address, most)=>host.readWideString?.(address, most) ?? ''),
+        ShellAboutA: about(address=>host.readCString?.(address, ABOUT_TEXT_LIMIT) ?? ''),
+        ShellAboutW: about(address=>host.readWideString?.(address, ABOUT_TEXT_LIMIT * 2) ?? ''),
 
         /**
          * HRESULT SHLoadInProc(REFCLSID rclsid)
