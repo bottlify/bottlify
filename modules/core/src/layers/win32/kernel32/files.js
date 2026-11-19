@@ -632,7 +632,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *              completed: (file: number, transferred: number, overlapped: number) => boolean,
  *              closed: (handle: number, object: any) => void,
  *              bind?: (file: number, port: number, key: number)
- *                  => boolean | 'synchronous' }} [ports]
+ *                  => boolean | 'synchronous',
+ *              bound?: (file: number) => boolean }} [ports]
  *           Completion ports. Absent, overlapped I/O still reads and writes;
  *           what it does not do is tell anyone it finished.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
@@ -3697,6 +3698,12 @@ export function createFileFunctions(host){
                 }
                 return answer;
             };
+            // A file bound to a completion port completes there: a request
+            // that also asks for an APC is refused before anything is done.
+            if ((apc >>> 0) !== 0 && host.ports?.bound?.(handle >>> 0))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
             // A request on a pipe end clears its event as it is made, whatever
             // then becomes of it: what the event says afterwards is this
             // request's (a read refused as the pipe broken leaves it clear).

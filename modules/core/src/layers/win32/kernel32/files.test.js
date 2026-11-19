@@ -577,6 +577,34 @@ test('a write whose file is still being fetched parks, then reports its count', 
     assert.equal(memory.dword(OUT_COUNT), 2);
 });
 
+test('a request on a file bound to a completion port cannot also ask for an APC', ()=>{
+    /** @type {Set<number>} */
+    const bound = new Set();
+    /** @type {number[]} */
+    const queued = [];
+    const { files, fns, open } = setup({
+        ports: { offsetOf: ()=>0, completed: ()=>false, closed: ()=>{},
+            bound: (/** @type {number} */ file)=>bound.has(file) },
+        queueApc: (/** @type {any} */ thread, /** @type {number} */ routine)=>queued.push(routine),
+    });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    bound.add(handle);
+    for (const call of [natives.NtReadFile, natives.NtWriteFile])
+    {
+        assert.equal(call.handler([handle, 0, 0x4000, 0, 0x500, BUFFER, 4, 0, 0]) >>> 0,
+            0xc000000d, 'STATUS_INVALID_PARAMETER');
+    }
+    assert.deepEqual(queued, [], 'nothing done, nothing queued');
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0, 0, 0x500, BUFFER, 4, 0, 0]), 0,
+        'without an APC it reads');
+    bound.delete(handle);
+    assert.equal(natives.NtReadFile.handler([handle, 0, 0x4000, 0, 0x500, BUFFER, 2, 0, 0]), 0,
+        'unbound, the APC is queued');
+    assert.deepEqual(queued, [0x4000]);
+});
+
 test('NtReadFile and NtWriteFile move bytes where ByteOffset says, and fill the block', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
