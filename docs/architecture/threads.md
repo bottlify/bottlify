@@ -111,8 +111,9 @@ child and made there with its own kernel32, between its turns, whichever way it 
 bytes cross. The other way, a child its parent started with `DEBUG_PROCESS` reports its debug
 events to the parent as values - its start (the process, every library mapped with it, the loader's
 breakpoint), a library loaded or unloaded, a thread made or ended, `OutputDebugString`, an exception
-first and, unhandled, again - and the whole child stops, its threads suspended once each, until
-the status `ContinueDebugEvent` answers, called directly: a child its parent debugs is always started beside it, on its thread or
+first and, unhandled, again - and the whole child stops, its threads frozen (their suspend counts
+untouched) until the status `ContinueDebugEvent` answers, called directly: a child its parent
+debugs is always started beside it, on its thread or
 in its worker, never in a worker of its own, so its parent always hears it. While a
 thread waits on an exception's answer the exception's context is its context, so a debugger's
 `GetThreadContext` and `SetThreadContext` read and change the context it goes on from
