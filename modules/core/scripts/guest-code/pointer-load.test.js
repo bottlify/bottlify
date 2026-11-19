@@ -71,6 +71,33 @@ export function link({ ptr, setPtr, pointerBytes }, slot, target, index){
 }
 
 /**
+ * A word claimed where a pointer and an offset say: lock cmpxchg at the whole address.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} words @param {u32} mine
+ * @returns {u32}
+ */
+export function claim({ compareExchange }, words, mine){
+    return compareExchange(words + 4, 0, mine) >>> 0;
+}
+
+/**
+ * The node two links on, through a function of the module that answers a pointer.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {ptr} node
+ * @returns {ptr}
+ */
+export function twoOn({ ptr }, node){
+    const next = held({ ptr }, node - 8);
+    if (next === 0)
+    {
+        return 0;
+    }
+    return held({ ptr }, next - 8);
+}
+
+/**
  * A pointer loaded and returned as it is.
  *
  * @guestCode cdecl
@@ -138,6 +165,9 @@ test('ptr and setPtr below 4 GiB: the i386 by dwords, the x86-64 by quadwords', 
             run('link', { stack: [DATA + 0x380, nodes[next() % nodes.length], next() % 64],
                 memory: input });
             run('held', { stack: [DATA + 0x300 - 0x40 - 8], memory: input });
+            run('twoOn', { stack: [nodes[order[0]]], memory: input });
+            run('claim', { stack: [DATA + 0x380 + (next() % 2) * 0x10, 1 + next() % 100],
+                memory: [[DATA, Uint8Array.from(memory, (byte, at)=>(at === 0x394 ? 7 : byte))]] });
         }
     }
 });
@@ -212,6 +242,20 @@ test('past 4 GiB: a list\'s links, a table\'s entry and a stored pointer are qua
     assert.equal(view.getBigUint64(8, true), 5n, 'an integer stored, extended by zeros');
     assert.equal(view.getBigUint64(16, true), BigInt(HIGH + 0x1000 + 5 + 8),
         'a loaded pointer stored as it was loaded');
+
+    const two = run('twoOn', m=>{
+        quad(m, HIGH, HIGH + 0x40);
+        quad(m, HIGH + 0x40, HIGH + 0x80);
+        quad(m, TWIN + 0x40, 0x1234);
+    }, [BigInt(HIGH)]);
+    assert.equal(two.reg('rax'), BigInt(HIGH + 0x80), 'a module call\'s pointer, whole');
+
+    const claimed = run('claim', m=>{
+        m.write(TWIN + 4, [9, 0, 0, 0]);
+    }, [BigInt(HIGH), 0x55n]);
+    assert.equal(claimed.reg('rax'), 0n, 'the word past 4 GiB was free');
+    assert.deepEqual(Array.from(claimed.read(HIGH + 4, 4)), [0x55, 0, 0, 0], 'and is taken');
+    assert.deepEqual(Array.from(claimed.read(TWIN + 4, 4)), [9, 0, 0, 0], 'its twin untouched');
 });
 
 test('a loaded pointer is refused where code would take half of it', ()=>{

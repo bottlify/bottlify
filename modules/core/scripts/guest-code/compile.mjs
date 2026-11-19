@@ -4802,7 +4802,8 @@ class FunctionCompiler {
         }
         if (this.long)
         {
-            this.longCall(given, null, ()=>void a.call(`fn:${name}`));
+            // A pointer the callee answers is RAX as it left it.
+            this.longCall(given, null, ()=>void a.call(`fn:${name}`), callee.returns === 'ptr');
             this.callees.add(name);
             return { where: 'eax', type: callee.returns === 'i32' ? 'i32' : 'u32' };
         }
@@ -4928,7 +4929,19 @@ class FunctionCompiler {
         return isPointerExpression(node, name=>{
             const v = this.lookupLocal(name);
             return v !== undefined && !('constant' in v) && v.pointer === true;
-        });
+        }, name=>this.answersPointer(name));
+    }
+
+    /**
+     * Whether a name is a `@guestCode` function of the module that answers a
+     * pointer: its call is one, whole in RAX at 64 bits.
+     *
+     * @param {string} name
+     */
+    answersPointer(name){
+        return this.scope.guests.has(name) && this.lookupLocal(name) === undefined
+            && name !== this.node.id.name
+            && this.scope.compiledOf(name, this.node).returns === 'ptr';
     }
 
     /**
@@ -5033,6 +5046,13 @@ class FunctionCompiler {
             const one = this.wrapped(this.address(node.arguments[0]), EAX);
             this.rexBits |= Rex.W;
             this.op(0x8b, ...this.mem(EAX, one));                          // mov rax, [m]
+            this.loaded = null;
+            return;
+        }
+        if (node.type === 'CallExpression')
+        {
+            // A function of the module that answers a pointer: RAX as it left it.
+            this.moduleCall(node, node.callee.name);
             this.loaded = null;
             return;
         }
@@ -5287,7 +5307,8 @@ class FunctionCompiler {
             return false;
         };
         /** @param {any} node */
-        const isPointer = node=>isPointerExpression(node, named);
+        const isPointer = node=>isPointerExpression(node, named,
+            name=>this.answersPointer(name));
         for (const param of this.node.params)
         {
             if (param.type === 'Identifier')
@@ -5400,6 +5421,11 @@ class FunctionCompiler {
                 {
                     const name = node.callee.type === 'Identifier' ? node.callee.name : '';
                     const helper = this.helpers.has(name);
+                    if (!helper && context !== 'pointer' && this.answersPointer(name))
+                    {
+                        this.fail(node, `${name} answers a pointer, whole only given to a `
+                            + 'pointer variable, returned, passed to a call or stored by setPtr');
+                    }
                     if (helper && name === POINTER_LOAD && context !== 'pointer')
                     {
                         this.fail(node, 'ptr() loads a pointer, whole only given to a pointer '
@@ -5408,6 +5434,7 @@ class FunctionCompiler {
                     }
                     // How many of the arguments, from the first, are addresses.
                     const addresses = helper && name === POINTER_STORE ? 2
+                        : helper && name === 'compareExchange' ? 1
                         : helper && (Object.hasOwn(LOADS, name) || name === POINTER_LOAD
                         || Object.hasOwn(STORES, name) || name === 'fill') ? 1
                         : helper && (name === 'copyUp' || name === 'copyDown') ? 2
@@ -5689,7 +5716,14 @@ class FunctionCompiler {
         const [address, expected, value] = node.arguments;
         for (const argument of [value, address])
         {
-            const made = this.expr(argument);
+            if (argument === address && this.long && this.isPointer(address))
+            {
+                this.pointerToRax(address);
+                this.hold(true);                                           // push rax
+                continue;
+            }
+            const made = argument === address ? this.pointerValue(argument)
+                : this.expr(argument);
             this.integer(made, argument, 'intish');
             this.toEax(made, argument);
             this.hold();                                                   // push eax
@@ -5709,8 +5743,9 @@ class FunctionCompiler {
         {
             this.op(0x89, this.regs(valueAt, EDX));                        // mov edx, reg
         }
-        // The address zero-extended by the 32-bit operation that made it: in
-        // long mode [rcx] is the guest's address as [ecx] is in the i386.
+        // The address zero-extended by the 32-bit operation that made it, or a
+        // pointer's quadword: in long mode [rcx] is the guest's address as
+        // [ecx] is in the i386.
         a.emit(0xf0, 0x0f, 0xb1, 0x11);                                    // lock cmpxchg [ecx],edx
         a.emit(0x5a);                                                      // pop edx
         this.grew(-this.word);
@@ -6080,8 +6115,9 @@ class FunctionCompiler {
      * @param {any} target  The pointer's node, or null.
      * @param {(at: number) => void} emitCall  Emits the call, the target's
      *     slot `at` bytes above RSP.
+     * @param {boolean} [whole]  The answer a pointer: RAX kept as the callee left it.
      */
-    longCall(args, target, emitCall){
+    longCall(args, target, emitCall, whole = false){
         const a = this.a;
         const slots = Math.max(args.length, ARGUMENTS_64.length);
         const area = slots * 8 + (target === null ? 0 : 8);
@@ -6116,7 +6152,10 @@ class FunctionCompiler {
         emitCall(slots * 8);
         a.emit(...moveStack64(size));
         this.grew(-size);
-        a.emit(0x89, 0xc0);                                                // mov eax, eax
+        if (!whole)
+        {
+            a.emit(0x89, 0xc0);                                            // mov eax, eax
+        }
     }
 }
 
@@ -6129,27 +6168,28 @@ class FunctionCompiler {
  *     is a pointer variable where the expression stands.
  * @returns {boolean}
  */
-function isPointerExpression(node, named){
+function isPointerExpression(node, named, answers = ()=>false){
     if (node.type === 'Identifier')
     {
         return named(node.name);
     }
-    if (isPointerLoad(node))
+    if (isPointerLoad(node) || node.type === 'CallExpression'
+        && node.callee.type === 'Identifier' && answers(node.callee.name))
     {
         return true;
     }
     if (node.type === 'ConditionalExpression')
     {
         // One of two pointers.
-        return isPointerExpression(node.consequent, named)
-            && isPointerExpression(node.alternate, named);
+        return isPointerExpression(node.consequent, named, answers)
+            && isPointerExpression(node.alternate, named, answers);
     }
     if (node.type !== 'BinaryExpression' || node.operator !== '+' && node.operator !== '-')
     {
         return false;
     }
-    const left = isPointerExpression(node.left, named);
-    const right = isPointerExpression(node.right, named);
+    const left = isPointerExpression(node.left, named, answers);
+    const right = isPointerExpression(node.right, named, answers);
     return node.operator === '+' ? left !== right : left && !right;
 }
 

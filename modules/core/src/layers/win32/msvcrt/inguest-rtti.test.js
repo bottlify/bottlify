@@ -18,11 +18,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPILED } from './inguest-rtti.x86.js';
 import { COMPILED as LONG } from './inguest-rtti.x64.js';
+import { CODE_64, HIGH_64, callLong, longMachine } from
+    '../../../../scripts/guest-code/long.mjs';
 import * as sources from './inguest-rtti.js';
 import { DATA, equivalence } from '../../../../scripts/guest-code/equivalence.mjs';
 import { classGraph } from '../../../../scripts/guest-code/class-graph.mjs';
 
-const { same, sameAt64 } = equivalence(COMPILED, sources, undefined, LONG);
+// The i386 over the 32-bit layout alone: the x86-64 follows quadword pointers,
+// which that layout has none of.
+const { same } = equivalence(COMPILED, sources, undefined, {});
+const { sameAt64 } = equivalence(COMPILED, sources, undefined, LONG);
 
 /** The hierarchy at DATA, with the long names. */
 const hierarchy = ()=>classGraph(DATA, { long: true });
@@ -91,4 +96,34 @@ test('at 64 bits a cast reads the image-relative layout to the same answers', ()
         'the same decorated name at another address');
     assert.equal(cast64(graph, [object, 0, types.derived, types.longOther]), object + 4,
         'names alike in the 512 bytes compared, unlike past them');
+});
+
+test('past 4 GiB a cast follows the object\'s pointers whole: the vtable, the locator, the '
+    + 'virtual base table', ()=>{
+    const HIGH = HIGH_64 + 0x380000;
+    const HALT = 0x0f00;
+    const graph = classGraph(HIGH, { bits: 64, long: true });
+    const { types } = graph;
+    const object = graph.subobject(0);
+    const second = graph.subobject(8);
+    const m = longMachine({ window: 2 ** 33 });
+    m.write(CODE_64, /** @type {any} */ (LONG).__RTDynamicCast.code);
+    m.write(HALT, [0xf4]);
+    m.write(HIGH, Array.from(graph.image));
+    // 4 GiB below, another object's bytes: a pointer cut to its low half reads these.
+    m.write(HIGH - HIGH_64, Array.from(graph.image, byte=>byte ^ 0xa5));
+    /** @param {number[]} args */
+    const cast = args=>{
+        const { halted } = callLong(m, CODE_64, { args: [...args, 0].map(BigInt),
+            returnTo: HALT });
+        assert.ok(halted && m.rip() === HALT + 1, 'the cast returns');
+        return Number(m.reg('rax'));
+    };
+    assert.equal(cast([object, 0, types.derived, types.base]), object);
+    assert.equal(cast([object, 0, types.derived, types.second]), object + 8);
+    assert.equal(cast([second, 0, types.second, types.base]), second - 8);
+    assert.equal(cast([graph.complete + 4, 4, types.derived, types.second]), graph.complete + 8);
+    assert.equal(cast([object, 0, types.derived, types.virtual]), graph.complete + 16 + 24);
+    assert.equal(cast([object, 0, types.derived, types.stranger]), 0);
+    assert.equal(cast([object, 0, types.derived, types.longOther]), object + 4);
 });

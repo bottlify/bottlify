@@ -48,6 +48,15 @@ export function classGraph(at, { bits = 32, long = false, bytes = 0x2000 } = {})
     };
     /** @param {number} offset @param {number} value */
     const set = (offset, value)=>view.setUint32(offset, value >>> 0, true);
+    /** A pointer: a quadword at 64 bits, past 4 GiB too. @param {number} offset @param {number} value */
+    const setPointer = (offset, value)=>{
+        const high = Math.floor(value / 2 ** 32);
+        view.setUint32(offset, value - high * 2 ** 32, true);
+        if (wide)
+        {
+            view.setUint32(offset + 4, high, true);
+        }
+    };
     /** An address in the graph as a word of its RTTI: itself, or its offset. @param {number} offset */
     const word = offset=>(wide ? offset : at + offset);
     /** @param {string} name */
@@ -84,7 +93,7 @@ export function classGraph(at, { bits = 32, long = false, bytes = 0x2000 } = {})
     const complete = allocate(48);
     const table = allocate(8);
     set(table + 4, 24);
-    set(complete + 16, at + table);
+    setPointer(complete + 16, at + table);
     /**
      * A vtable pointer at `offset` into the object, whose locator says so.
      *
@@ -102,8 +111,8 @@ export function classGraph(at, { bits = 32, long = false, bytes = 0x2000 } = {})
             set(locator + 20, locator);
         }
         const vtable = allocate(2 * pointer);
-        set(vtable, at + locator);
-        set(complete + offset, at + vtable + pointer);
+        setPointer(vtable, at + locator);
+        setPointer(complete + offset, at + vtable + pointer);
         return at + complete + offset;
     };
     /** @type {Record<string, number>} */

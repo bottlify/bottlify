@@ -48,6 +48,12 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){ ... }
   source's own on the halves in the 32-bit subset: a carry or a borrow an unsigned compare, a
   product of a half split into 16-bit parts (`msvcrt/inguest-int64.js`), the same code at both
   widths.
+- **A pointer in memory**: `ptr(address)` loads one and `setPtr(address, value)` stores one: the
+  code of `u32` and `setU32` in the i386, a quadword at 64 bits, the process's width in the
+  handler. What `ptr` loads is a pointer where one stands - given to a pointer variable,
+  returned, passed to a call, stored by `setPtr` - and so is `c ? p : q` of two pointers, and
+  the call of a function of the module that answers a `ptr`; as an integer each is refused
+  (its 32 bits are `u32` of the same address).
 - **Guest memory**: through the helpers taken from the first parameter: the loads `u8` `i8`
   `u16` `i16` `u32` `i32` `f32` `f64`, the stores `setU8` `setU16` `setU32` `setF32` `setF64`,
   `copyUp`/`copyDown`/`fill`, `call(fn, ...)` for a cdecl function pointer, and
@@ -134,7 +140,7 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
 - **An `i64` result**: the whole quadword in RAX - a double truncated by `cvttsd2si` (NaN and
   out of range the integer indefinite, as `fisttp` answers), an integer extended by its sign.
 - **`compareExchange`**: the i386's `lock cmpxchg` of a dword, the address zero-extended by the
-  32-bit operation that made it.
+  32-bit operation that made it, or a pointer's quadword.
 - **MXCSR**: `mxcsr()` and `setMxcsr()` are the x86-64's as they are the i386's (`stmxcsr`,
   `ldmxcsr` through the stack): the word a 64-bit runtime keeps its rounding and exception
   flags in.
