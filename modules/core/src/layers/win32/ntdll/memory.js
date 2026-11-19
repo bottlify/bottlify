@@ -334,6 +334,12 @@ export function createMemoryFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([process, baseOut, sizeOut, type])=>{
+                // No handle is none, before the allocation is looked for: the
+                // lookup would answer it as no memory there.
+                if ((process >>> 0) === 0)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
                 const base = read32(baseOut);
                 const size = read32(sizeOut);
                 /** @param {number} at @param {number} bytes @param {number} extent */

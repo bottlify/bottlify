@@ -146,6 +146,10 @@ test('NtFreeVirtualMemory releases a whole allocation, named by a page of its ba
     assert.deepEqual([view.getUint32(0x100, true), view.getUint32(0x104, true)],
         [0x10000, 0x4000]);
     assert.equal(free(0x30000, 0, 0x8000), 0xc00000a0, 'nothing there');
+    view.setUint32(0x100, 0x10000, true);
+    view.setUint32(0x104, 0, true);
+    assert.equal(fns.NtFreeVirtualMemory.handler([0, 0x100, 0x104, 0x8000]), 0xc0000008,
+        'STATUS_INVALID_HANDLE: no handle is none, not memory missing');
 });
 
 test('NtQueryVirtualMemory answers basic information and nothing else', ()=>{
