@@ -980,13 +980,15 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
          * again.
          *
          * @param {string} from @param {string} to
+         * @param {{ held?: boolean }} [options]  `held`: through a handle that
+         *     holds the file for deletion (the file system's `rename`)
          * @returns {boolean | Promise<boolean>}
          */
-        renameOrFetch(from, to){
+        renameOrFetch(from, to, options = {}){
             const existed = attempt(()=>fs.stat(to), null) !== null;
             try
             {
-                return this.rename(from, to);
+                return this.rename(from, to, options);
             }
             catch (e){
                 const miss = /** @type {any} */ (e);
@@ -1009,7 +1011,7 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
                 {
                     attempt(()=>fs.deleteFile(to), null);
                 }
-                return fetchBlocks(miss.blocks).then(()=>this.renameOrFetch(from, to));
+                return fetchBlocks(miss.blocks).then(()=>this.renameOrFetch(from, to, options));
             }
         },
 
@@ -1050,9 +1052,13 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             }, false);
         },
 
-        /** @param {string} from @param {string} to @returns {boolean} */
-        rename: (from, to)=>attempt(()=>{
-            fs.rename(from, to);
+        /**
+         * @param {string} from @param {string} to
+         * @param {{ held?: boolean }} [options]  as `renameOrFetch`'s
+         * @returns {boolean}
+         */
+        rename: (from, to, options = {})=>attempt(()=>{
+            fs.rename(from, to, options);
             moved(from, to);
             return true;
         }, false),

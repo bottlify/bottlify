@@ -2249,15 +2249,23 @@ test('NtCreateFile answers the statuses kernel32\'s tests expect of a read-only 
     assert.equal(files.stat('C:\\GAME\\RO.TXT')?.exists, true, 'and nothing deleted it');
 });
 
-test('NtCreateFile opens a pipe\'s client end by its native name, with the rights asked', ()=>{
-    /** @type {[string, number, number][]} */
+test('NtCreateFile opens what the pipe device answers there, with the rights asked', ()=>{
+    /** @type {[string, number, number, number][]} */
     const opens = [];
     const { fns, memory, handles } = setup({ pipes: {
-        /** @param {string} name @param {number} access @param {number} flags */
-        open: (name, access, flags)=>{
-            opens.push([name, access, flags]);
-            return name.endsWith('busy') ? { error: 231 }
-                : { handle: handles.open('pipe', {}, access) };
+        /**
+         * @param {{ root: number, name: string }} given @param {number} access
+         * @param {number} options @param {number} disposition
+         */
+        nativeOpen: (given, access, options, disposition)=>{
+            if (!/pipe/i.test(given.name))
+            {
+                return null;
+            }
+            opens.push([given.name, access, options, disposition]);
+            return given.name.endsWith('busy') ? { error: 231 }
+                : given.name.endsWith('gone') ? { status: 0xc0000033 }
+                    : { handle: handles.open('pipe', {}, access) };
         },
         isPipe: ()=>false,
     } });
@@ -2267,11 +2275,10 @@ test('NtCreateFile opens a pipe\'s client end by its native name, with the right
     const open = (name, options)=>native.handler([NT_HANDLE, SYNCHRONIZE,
         objectAttributes(memory, name), NT_STATUS, 0, 0, 3, FILE_OPEN, options, 0, 0]) >>> 0;
     assert.equal(open('\\??\\pipe\\game', 0x20), 0);
-    assert.deepEqual(opens.at(-1), ['\\\\.\\pipe\\game', SYNCHRONIZE, 0],
-        'a synchronous end, asked nothing more');
-    assert.equal(open('\\Device\\NamedPipe\\game', 0), 0);
-    assert.equal(opens.at(-1)?.[2], 0x40000000, 'no synchronous option: overlapped');
-    assert.equal(open('\\??\\pipe\\busy', 0), 0xc00000ac, 'STATUS_PIPE_NOT_AVAILABLE');
+    assert.deepEqual(opens.at(-1), ['\\??\\pipe\\game', SYNCHRONIZE, 0x20, FILE_OPEN],
+        'the name, the rights, the options and the disposition, as given');
+    assert.equal(open('\\??\\pipe\\busy', 0), 0xc00000ac, 'a Win32 error as its status');
+    assert.equal(open('\\??\\pipe\\gone', 0), 0xc0000033, 'a status as it is');
 
     // FileAccessInformation is the handle's rights; a process handle is the wrong object.
     const query = /** @type {any} */ (fns.CreateFileW).natives.NtQueryInformationFile;
@@ -2691,6 +2698,11 @@ test('NtQueryInformationFile answers the name, the size and the position of an o
     assert.equal(memory.dword(out), 3);
 
     assert.equal(query.handler([handle, block, out, 4, 5]) >>> 0, 0xc0000004, 'too short');
+    // A name's record needs its length and a character, aligned, before
+    // anything is written: four bytes are refused, eight hold a part.
+    assert.equal(query.handler([handle, block, out, 4, 9]) >>> 0, 0xc0000004);
+    assert.equal(query.handler([handle, block, out, 8, 9]) >>> 0, 0x80000005);
+    assert.equal(memory.dword(out), name.length * 2, 'the whole name\'s length');
     assert.equal(query.handler([handle, block, out, 0x100, 1]) >>> 0, 0xc0000003,
         'a class NtQueryDirectoryFile answers, not this');
     assert.equal(query.handler([0x999, block, out, 0x100, 9]) >>> 0, 0xc0000008);
@@ -2920,6 +2932,51 @@ test('a watch made with no room loses every change and says so', ()=>{
     told([{ action: 2, name: 'hoo' }]);
     assert.equal(memory.dword(ov), 0x10c, 'the first call\'s room is the watch\'s');
 });
+
+test('FileLinkInformation gives an open file one more name, a taken one only when replacing',
+    ()=>{
+        const { memory, files, fns, open } = setup();
+        const anyFiles = /** @type {any} */ (files);
+        anyFiles.link = (/** @type {string} */ name, /** @type {string} */ existing)=>{
+            files.put(name, files.text(existing) ?? '');
+            return null;
+        };
+        const view = new DataView(memory.bytes.buffer);
+        const native = /** @type {any} */ (fns.CreateFileW).natives.NtSetInformationFile;
+        const LINK = 11;
+        const LINK_EX = 72;
+        /** @param {number} handle @param {string} name @param {number} flags @param {number} kind */
+        const link = (handle, name, flags, kind = LINK)=>{
+            memory.bytes.fill(0, 0x800, 0x880);
+            view.setUint32(0x800, flags, true);
+            view.setUint32(0x808, name.length * 2, true);
+            putWide(memory, 0x80c, name);
+            view.setUint32(0x300, 0xdeadbeef, true);
+            return native.handler([handle, 0x300, 0x800, 12 + name.length * 2, kind]) >>> 0;
+        };
+        files.put('C:\\GAME\\a.tmp', 'abc');
+        files.put('C:\\GAME\\taken.tmp', 'old');
+        const file = open('C:\\GAME\\a.tmp', OPEN_EXISTING, GENERIC_WRITE);
+        assert.equal(link(file, 'b.tmp', 0), 0, 'no DELETE needed');
+        assert.equal(memory.dword(0x300), 0, 'the block says so');
+        assert.equal(files.text('C:\\GAME\\b.tmp'), 'abc');
+        assert.equal(files.text('C:\\GAME\\a.tmp'), 'abc', 'the first name stays');
+        assert.equal(link(file, 'taken.tmp', 0), 0xc0000035, 'STATUS_OBJECT_NAME_COLLISION');
+        assert.equal(link(file, 'taken.tmp', 1), 0);
+        assert.equal(files.text('C:\\GAME\\taken.tmp'), 'abc', 'replaced');
+        assert.equal(link(file, 'a.tmp', 0), 0xc0000035, 'its own name is taken');
+        assert.equal(link(file, 'a.tmp', 1), 0, 'and is its link already');
+
+        files.put('C:\\GAME\\ro.tmp', 'ro');
+        files.setAttributes('C:\\GAME\\ro.tmp', 0x1);
+        assert.equal(link(file, 'ro.tmp', 0x1, LINK_EX), 0xc0000022, 'a read-only one kept');
+        assert.equal(link(file, 'ro.tmp', 0x41, LINK_EX), 0, 'unless ignored');
+
+        const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        const folder = fns.CreateFileA.handler([memory.putString(NAME, 'C:\\GAME') ?? NAME,
+            GENERIC_WRITE, 0, 0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0]) >>> 0;
+        assert.equal(link(folder, 'c.tmp', 0), 0xc00000ba, 'STATUS_FILE_IS_A_DIRECTORY');
+    });
 
 test('CreateHardLink links through the volume and answers its refusals as Windows does', ()=>{
     /** @type {string[]} */
@@ -3564,6 +3621,59 @@ test('SetFileInformationByHandle renames, deletes on close and moves the end', (
     assert.equal(fns.SetFileInformationByHandle.handler([other, 0, 0x800, 40]), 1);
     assert.equal(files.stat('C:\\GAME\\c.dat')?.attributes, 0x2);
 });
+
+test('a rename through a handle needs DELETE and holds the file against its other opens',
+    ()=>{
+        const { memory, files, fns, open, error } = setup();
+        const view = new DataView(memory.bytes.buffer);
+        /** @param {string} name @param {number} flags */
+        const renameInfo = (name, flags)=>{
+            memory.bytes.fill(0, 0x800, 0x880);
+            view.setUint32(0x800, flags, true);
+            view.setUint32(0x808, name.length * 2, true);
+            putWide(memory, 0x80c, name);
+            return 12 + name.length * 2;
+        };
+        files.put('C:\\GAME\\a.tmp', 'abc');
+        // An open that shares nothing, its own deletion asked: the file
+        // system would refuse anyone else, never the handle that holds it.
+        Object.assign(files, { removalRefused: ()=>'SHARING_VIOLATION' });
+        const holder = open('C:\\GAME\\a.tmp', OPEN_EXISTING, GENERIC_WRITE | DELETE);
+        assert.equal(fns.SetFileInformationByHandle.handler([holder, 3, 0x800,
+            renameInfo('b.tmp', 0)]), 1);
+        assert.equal(files.text('C:\\GAME\\b.tmp'), 'abc');
+
+        const writer = open('C:\\GAME\\b.tmp', OPEN_EXISTING, GENERIC_WRITE);
+        assert.equal(fns.SetFileInformationByHandle.handler([writer, 3, 0x800,
+            renameInfo('c.tmp', 0)]), 0);
+        assert.equal(error.code, 5, 'no DELETE: ERROR_ACCESS_DENIED');
+        Object.assign(files, { removalRefused: ()=>null });
+
+        // FileRenameInformationEx: a read-only file at the name is replaced
+        // only when the call ignores the attribute.
+        files.put('C:\\GAME\\ro.tmp', 'old');
+        files.setAttributes('C:\\GAME\\ro.tmp', 0x1);
+        const native = /** @type {any} */ (fns.CreateFileW).natives.NtSetInformationFile;
+        const RENAME_EX = 65;
+        const REPLACE = 0x1;
+        const IGNORE_READONLY = 0x40;
+        const length = renameInfo('ro.tmp', REPLACE);
+        assert.equal(native.handler([holder, 0x300, 0x800, length, RENAME_EX]) >>> 0,
+            0xc0000022, 'STATUS_ACCESS_DENIED');
+        renameInfo('ro.tmp', REPLACE | IGNORE_READONLY);
+        assert.equal(native.handler([holder, 0x300, 0x800, length, RENAME_EX]), 0);
+        assert.equal(files.text('C:\\GAME\\ro.tmp'), 'abc');
+
+        // A name relative to a folder CreateFile opened (a file object of a folder).
+        const FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        const folder = fns.CreateFileA.handler([memory.putString(NAME, 'C:\\GAME') ?? NAME, 0, 0,
+            0, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0]) >>> 0;
+        const RENAME = 10;
+        const relative = renameInfo('d.tmp', 0);
+        view.setUint32(0x804, folder, true);
+        assert.equal(native.handler([holder, 0x300, 0x800, relative, RENAME]), 0);
+        assert.equal(files.text('C:\\GAME\\d.tmp'), 'abc');
+    });
 
 test('GetBinaryType tells programs apart by their headers, and refuses a library', async()=>{
     const { memory, files, fns, error } = setup();

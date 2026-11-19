@@ -6758,6 +6758,7 @@ export function createWin32Module(){
                 // The name the run's namespace keeps for the object a handle opens.
                 namedObjectName: (/** @type {number} */ handle)=>
                     runObjects.nameOf(kernel.handles.resolve(handle)),
+                pipeName: (/** @type {number} */ handle)=>pipes.objectName(handle),
                 processOf: (/** @type {number} */ handle)=>
                     (kernel.handles.typeOf(handle) === 'process'
                         ? kernel.handles.resolve(handle, 'process') : null),

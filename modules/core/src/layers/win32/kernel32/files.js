@@ -41,7 +41,7 @@ import { mountPointsOf, onVolume } from './drives.js';
 import { accessibleSpan } from './process-memory.js';
 import { MOUNT_MANAGER, mountManagerControl } from './mountmgr.js';
 import { isMailslotName } from './mailslots.js';
-import { isPipeName, pipeNameOf } from './pipes.js';
+import { isPipeName } from './pipes.js';
 import { isNameInExpression, win32Expression } from './name-expression.js';
 import { fullPathName } from '../ntdll/paths.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
@@ -406,6 +406,26 @@ const FILE_COMPLETION_INFORMATION = 30;
 const FILE_VALID_DATA_LENGTH_INFORMATION = 39;
 /** FILE_IO_COMPLETION_NOTIFICATION_INFORMATION: the completion modes, a ULONG. */
 const FILE_IO_COMPLETION_NOTIFICATION_INFORMATION = 41;
+/** The FILE_INFORMATION_CLASS values of a pipe end. */
+const FILE_PIPE_INFORMATION = 23;
+const FILE_PIPE_LOCAL_INFORMATION = 24;
+/**
+ * The room each class's record needs before the I/O manager asks the file
+ * system anything: a buffer shorter than its fixed part is
+ * STATUS_INFO_LENGTH_MISMATCH whatever the object, a name's record
+ * included (its length and one character, aligned: Wine's ntdll pipe test
+ * finds four bytes refused).
+ *
+ * @type {Map<number, number>}
+ */
+const QUERY_LENGTHS = new Map([
+    [FILE_BASIC_INFORMATION, 40], [FILE_STANDARD_INFORMATION, 24],
+    [FILE_INTERNAL_INFORMATION, 8], [FILE_EA_INFORMATION, 4], [FILE_ACCESS_INFORMATION, 4],
+    [FILE_NAME_INFORMATION, 8], [FILE_POSITION_INFORMATION, 8], [FILE_MODE_INFORMATION, 4],
+    [FILE_ALIGNMENT_INFORMATION, 4], [FILE_NETWORK_OPEN_INFORMATION, 56],
+    [FILE_ATTRIBUTE_TAG_INFORMATION, 8], [FILE_PIPE_INFORMATION, 8],
+    [FILE_PIPE_LOCAL_INFORMATION, 40],
+]);
 /** NtReadFile's and NtWriteFile's two negative offsets: the end, the file pointer. */
 const FILE_WRITE_TO_END_OF_FILE = 0xffffffff;
 const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
@@ -447,6 +467,13 @@ const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 /** The name goes as the handle that asked closes, other opens or not. */
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
+const FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x40;
+/** NtSetInformationFile's hard link classes (FILE_LINK_INFORMATION and its Ex form). */
+const FILE_LINK_INFORMATION = 11;
+const FILE_LINK_INFORMATION_EX = 72;
+/** FILE_LINK_INFORMATION_EX's flags: replace what is there, a read-only one too. */
+const FILE_LINK_REPLACE_IF_EXISTS = 0x1;
+const FILE_LINK_IGNORE_READONLY_ATTRIBUTE = 0x40;
 /** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
@@ -516,8 +543,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string) => boolean} remove
  * @property {(path: string, modified: number) => boolean} [setModified]
  * @property {(path: string) => boolean} mkdir
- * @property {(from: string, to: string) => boolean} rename
- * @property {(from: string, to: string) => boolean | Promise<boolean>} [renameOrFetch]
+ * @property {(from: string, to: string, options?: { held?: boolean }) => boolean} rename
+ *     `held`: through a handle that holds the file for deletion, so its other opens
+ *     are not asked again
+ * @property {(from: string, to: string, options?: { held?: boolean }) =>
+ *     boolean | Promise<boolean>} [renameOrFetch]
  *           rename, waiting for the blocks a move off a bundle copies.
  * @property {(path: string, pattern: string) => DirectoryEntry[]} list
  * @property {() => string} currentDirectory
@@ -1586,9 +1616,15 @@ export function createFileFunctions(host){
      * share: the Win32 error it ends in, 0 when it moved.
      *
      * @param {string} source @param {string} destination @param {boolean} replace
+     * @param {{ held?: boolean, readOnlyReplaced?: boolean }} [how]  `held`: through
+     *     a handle that holds the file for deletion; `readOnlyReplaced`: a read-only
+     *     file at the destination is replaced as any other
+     *     (FILE_RENAME_IGNORE_READONLY_ATTRIBUTE)
      * @returns {number | Promise<number>}
      */
-    const moveError = (source, destination, replace)=>{
+    const moveError = (source, destination, replace,
+        { held = false, readOnlyReplaced = false } = {})=>
+    {
         const moving = files.stat(source);
         if (!moving?.exists)
         {
@@ -1602,7 +1638,7 @@ export function createFileFunctions(host){
         // spelling may change.
         if (source.toLowerCase() === destination.toLowerCase())
         {
-            return files.rename(source, destination) ? 0 : denied(source);
+            return files.rename(source, destination, { held }) ? 0 : denied(source);
         }
         const present = files.stat(destination);
         if (present?.exists && !replace)
@@ -1618,8 +1654,10 @@ export function createFileFunctions(host){
             return ERROR_PATH_NOT_FOUND;
         }
         // A file is renamed as it is deleted: an open that does not share
-        // deletion keeps its name.
-        if (files.removalRefused?.(source) === 'SHARING_VIOLATION')
+        // deletion keeps its name - unless the rename is through a handle
+        // that holds it for deletion, against which every other open was
+        // admitted already.
+        if (!held && files.removalRefused?.(source) === 'SHARING_VIOLATION')
         {
             return ERROR_SHARING_VIOLATION;
         }
@@ -1630,7 +1668,7 @@ export function createFileFunctions(host){
             {
                 return ERROR_ACCESS_DENIED;
             }
-            if (readOnlyFile(present) || !files.remove(destination))
+            if ((readOnlyFile(present) && !readOnlyReplaced) || !files.remove(destination))
             {
                 return denied(destination);
             }
@@ -1638,8 +1676,8 @@ export function createFileFunctions(host){
         // A move off a disc has to delete what it moved, so the disc refuses
         // it as surely as a move onto one.
         // A move off the bundle may have to wait for the blocks it copies.
-        const moved = files.renameOrFetch ? files.renameOrFetch(source, destination)
-            : files.rename(source, destination);
+        const moved = files.renameOrFetch ? files.renameOrFetch(source, destination, { held })
+            : files.rename(source, destination, { held });
         /** @param {boolean} done */
         const answer = done=>{
             if (!done)
@@ -2938,7 +2976,9 @@ export function createFileFunctions(host){
         }
         if (root !== 0)
         {
-            const directory = object(root, 'directory');
+            // A folder CreateFile opened is a file object of a folder.
+            const opened = object(root, 'file');
+            const directory = object(root, 'directory') ?? (opened?.directory ? opened : null);
             if (!directory)
             {
                 return { status: STATUS_INVALID_HANDLE };
@@ -3026,18 +3066,17 @@ export function createFileFunctions(host){
         {
             return STATUS_INVALID_PARAMETER;
         }
-        // A pipe's name opens a client end, with the rights asked and no more.
+        // What the pipe device answers - itself, a pipe's name, a server's
+        // own instance - opens there, with the rights asked and no more.
         const given = givenName(attributes >>> 0);
-        const pipeName = given && given.root === 0 && host.pipes ? pipeNameOf(given.name) : null;
-        if (pipeName !== null && host.pipes)
+        const client = given && host.pipes
+            ? host.pipes.nativeOpen(given, access >>> 0, options >>> 0, disposition >>> 0) : null;
+        if (client)
         {
-            if ((disposition >>> 0) !== FILE_OPEN && (disposition >>> 0) !== FILE_OPEN_IF)
+            if ('status' in client)
             {
-                return STATUS_INVALID_PARAMETER;
+                return client.status;
             }
-            const client = host.pipes.open(pipeName, access >>> 0,
-                ((options >>> 0) & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)) === 0
-                    ? FILE_FLAG_OVERLAPPED : 0);
             if ('error' in client)
             {
                 return NATIVE_FAILURES[client.error] ?? STATUS_UNSUCCESSFUL;
@@ -3988,7 +4027,8 @@ export function createFileFunctions(host){
                     host.resetEvent?.(event >>> 0);
                 }
                 const piped = host.pipes?.control(handle, code, output, room, block,
-                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 });
+                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 },
+                    input >>> 0, inLength >>> 0);
                 if (piped)
                 {
                     if ('parked' in piped)
@@ -4076,6 +4116,10 @@ export function createFileFunctions(host){
                 }
                 const held = heldKind(handle);
                 const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held ?? '');
+                if (fileObject && (length >>> 0) < (QUERY_LENGTHS.get(kind >>> 0) ?? 0))
+                {
+                    return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                }
                 // A pipe end answers its own classes, then what any file object does.
                 const piped = host.pipes?.information?.(handle >>> 0, kind >>> 0) ?? null;
                 if (piped !== null && !(piped instanceof Uint8Array))
@@ -4107,7 +4151,7 @@ export function createFileFunctions(host){
                 {
                     // A name, alone or at the end of the whole record, is
                     // cut to the room with its length saying all of it.
-                    const fixed = kind >>> 0 === FILE_NAME_INFORMATION ? 4
+                    const fixed = kind >>> 0 === FILE_NAME_INFORMATION ? 8
                         : kind >>> 0 === FILE_ALL_INFORMATION ? ALL_INFORMATION_FIXED : -1;
                     const fits = fixed >= 0 && (length >>> 0) >= fixed;
                     if (fits)
@@ -4289,6 +4333,9 @@ export function createFileFunctions(host){
          * mailslot's read timeout, which are this call's own. A rename's name
          * is a native one, relative to the record's root directory or in
          * `\??\`. A class nothing keeps is refused, and the refusal said.
+         *
+         * FileLinkInformation (and its Ex form) gives the file one more name
+         * (`linkError`), its record laid out as a rename's.
          */
         NtSetInformationFile: {
             argBytes: 20,
@@ -4339,6 +4386,17 @@ export function createFileFunctions(host){
                     return settled(block >>> 0, held !== null && held !== 'pipe'
                         && !FILE_OBJECT_KINDS.has(held) ? STATUS_OBJECT_TYPE_MISMATCH
                         : STATUS_INVALID_HANDLE, 0);
+                }
+                if ((kind >>> 0) === FILE_LINK_INFORMATION
+                    || (kind >>> 0) === FILE_LINK_INFORMATION_EX)
+                {
+                    if ((length >>> 0) < 16)
+                    {
+                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    }
+                    const record = host.readMemory(from >>> 0, length >>> 0).slice();
+                    return settled(block >>> 0, linkError(open, record,
+                        (kind >>> 0) === FILE_LINK_INFORMATION_EX), 0);
                 }
                 const type = NATIVE_SET_CLASSES.get(kind >>> 0);
                 const own = (kind >>> 0) === FILE_POSITION_SET || (kind >>> 0) === FILE_MODE_SET
@@ -4811,7 +4869,17 @@ export function createFileFunctions(host){
                 {
                     return ERROR_PATH_NOT_FOUND;
                 }
-                const moved = moveError(file.path, destination, replace);
+                // A rename is the file's deletion from its name: the handle
+                // must hold it for deletion, and then holds it against every
+                // other open already.
+                if (!allows(host.handles.access?.(handle >>> 0) ?? null, DELETE))
+                {
+                    return ERROR_ACCESS_DENIED;
+                }
+                const moved = moveError(file.path, destination, replace, { held: true,
+                    readOnlyReplaced: type === FILE_INFO.RENAME_EX
+                        && (view.getUint32(0, true) & FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE)
+                            !== 0 });
                 /** @param {number} code */
                 const settle = code=>{
                     if (code === 0)
@@ -4826,6 +4894,83 @@ export function createFileFunctions(host){
                 // FileIoPriorityHintInfo: a hint with nothing to prioritise.
                 return 0;
         }
+    };
+
+    /**
+     * A hard link asked through an open file: FILE_LINK_INFORMATION's
+     * replace flag (or the Ex form's flags), root directory and name, the
+     * name a native one as a rename's. A folder has no other names
+     * (STATUS_FILE_IS_A_DIRECTORY). A name that is taken is a collision
+     * unless replacing was asked; then a folder or an open file there is
+     * refused (STATUS_ACCESS_DENIED), as is a read-only file the call did
+     * not say to ignore, and anything else gives its name up - the new name
+     * spelt as asked. The file's own name is already its link.
+     *
+     * @param {{ file: any, kind: string }} open  the handle's file
+     * @param {Uint8Array} record @param {boolean} extended  the Ex form
+     * @returns {number}  the status
+     */
+    const linkError = (open, record, extended)=>{
+        const view = new DataView(record.buffer);
+        const flags = extended ? view.getUint32(0, true)
+            : record[0] !== 0 ? FILE_LINK_REPLACE_IF_EXISTS : 0;
+        const root = view.getUint32(4, true);
+        const nameBytes = view.getUint32(8, true);
+        if (nameBytes === 0 || 12 + nameBytes > record.length)
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+        let asked = '';
+        for (let at = 12; at + 1 < 12 + nameBytes; at += 2)
+        {
+            asked += String.fromCharCode(record[at] | record[at + 1] << 8);
+        }
+        const { file } = open;
+        if (open.kind === 'directory' || file.directory)
+        {
+            return STATUS_FILE_IS_A_DIRECTORY;
+        }
+        const resolved = root === 0 && !asked.includes(SEPARATOR)
+            ? { path: renameTarget(file.path, asked) } : resolveNative(root, asked);
+        if (!resolved.path)
+        {
+            return resolved.status ?? STATUS_OBJECT_PATH_NOT_FOUND;
+        }
+        const path = resolved.path;
+        const present = files.stat(path);
+        if (present?.exists)
+        {
+            if ((flags & FILE_LINK_REPLACE_IF_EXISTS) === 0)
+            {
+                return STATUS_OBJECT_NAME_COLLISION;
+            }
+            // Its own name, perhaps spelt otherwise: the link it is takes the
+            // spelling asked.
+            if (path.toLowerCase() === String(file.path).toLowerCase())
+            {
+                if (path !== file.path && files.rename(file.path, path, { held: true }))
+                {
+                    follow(file.path, path);
+                }
+                return STATUS_SUCCESS;
+            }
+            if (present.isDirectory || files.isOpen?.(path)
+                || (readOnlyFile(present) && (flags & FILE_LINK_IGNORE_READONLY_ATTRIBUTE) === 0)
+                || !files.remove(path))
+            {
+                return STATUS_ACCESS_DENIED;
+            }
+        }
+        if (!files.link)
+        {
+            host.divergence?.('NtSetInformationFile',
+                `the volume keeps no links; ${path} not linked`);
+            return STATUS_INVALID_DEVICE_REQUEST;
+        }
+        const refused = files.link(path, file.path);
+        return refused === null ? STATUS_SUCCESS
+            : NATIVE_FAILURES[LINK_ERRORS[/** @type {keyof typeof LINK_ERRORS} */ (refused)]
+                ?? ERROR_ACCESS_DENIED] ?? STATUS_ACCESS_DENIED;
     };
 
     /**

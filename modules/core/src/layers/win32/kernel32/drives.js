@@ -79,6 +79,7 @@ const ATTRIBUTE_FIXED = 12;
 /** FILE_FS_DEVICE_INFORMATION's device types and characteristics. */
 const FILE_DEVICE_CD_ROM = 2;
 const FILE_DEVICE_DISK = 7;
+const FILE_DEVICE_NAMED_PIPE = 0x11;
 const FILE_REMOVABLE_MEDIA = 0x1;
 const FILE_READ_ONLY_DEVICE = 0x2;
 const FILE_DEVICE_IS_MOUNTED = 0x20;
@@ -867,6 +868,22 @@ export function createDriveFunctions(host){
         };
     };
 
+    /** FILE_FS_DEVICE_INFORMATION of the pipe device: its type, no characteristics. */
+    const pipeDevice = ()=>{
+        const bytes = new Uint8Array(8);
+        new DataView(bytes.buffer).setUint32(0, FILE_DEVICE_NAMED_PIPE, true);
+        return bytes;
+    };
+    /** Whether a handle opens a pipe end or the pipe device. @param {number} handle */
+    const isPipeHandle = handle=>{
+        try
+        {
+            return host.handles?.resolve(handle >>> 0, 'pipe') != null;
+        }
+        catch {
+            return false;
+        }
+    };
     /**
      * The root of the volume an open file or directory is on, or null for a
      * handle that is neither.
@@ -981,11 +998,16 @@ export function createDriveFunctions(host){
                 return status;
             };
             const root = rootOfHandle(handle);
-            if (root === null)
+            const piped = root === null && isPipeHandle(handle);
+            if (root === null && !piped)
             {
                 return STATUS_INVALID_HANDLE;
             }
-            const found = volumeRecord(root, kind >>> 0);
+            // A pipe is on the pipe device, which says what kind of device it
+            // is and keeps nothing a volume does.
+            const found = root !== null ? volumeRecord(root, kind >>> 0)
+                : (kind >>> 0) === FILE_FS_DEVICE_INFORMATION ? { bytes: pipeDevice(), fixed: 8 }
+                    : null;
             if (found === null)
             {
                 host.divergence?.('NtQueryVolumeInformationFile',
