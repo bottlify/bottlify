@@ -404,6 +404,8 @@ const HELD_ELSEWHERE = Object.freeze({
     'layers/win32/d3dx9/inguest-vector.js': 'vectors without NaN: d3dx9/inguest-vector.test.js',
     'layers/win32/d3dx9/inguest-quaternion.js': 'quaternions without NaN: '
         + 'd3dx9/inguest-quaternion.test.js',
+    'layers/graphics/glu/inguest.js': 'matrices and points without NaN: '
+        + 'graphics/glu/inguest.test.js',
 });
 
 test('each function\'s x86-64 answers as its JavaScript, on inputs of every shape', async()=>{

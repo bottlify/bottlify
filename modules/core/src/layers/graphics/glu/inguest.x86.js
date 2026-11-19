@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     gluPerspectiveMatrix: {
         convention: 'stdcall',
-        params: ['u32', 'f64', 'f64', 'f64', 'f64'],
+        params: ['ptr', 'f64', 'f64', 'f64', 'f64'],
         returns: 'u32',
         uses: ['setF64'],
         code: Uint8Array.of(
@@ -42,7 +42,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluLookAtMatrix: {
         convention: 'stdcall',
-        params: ['u32', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64'],
+        params: ['ptr', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64'],
         returns: 'void',
         uses: ['setF64'],
         code: Uint8Array.of(
@@ -93,7 +93,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluPickMatrixArgs: {
         convention: 'stdcall',
-        params: ['u32', 'f64', 'f64', 'f64', 'f64', 'u32'],
+        params: ['ptr', 'f64', 'f64', 'f64', 'f64', 'ptr'],
         returns: 'u32',
         uses: ['i32', 'setF64'],
         code: Uint8Array.of(
@@ -118,7 +118,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluProject: {
         convention: 'stdcall',
-        params: ['f64', 'f64', 'f64', 'u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['f64', 'f64', 'f64', 'ptr', 'ptr', 'ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'i32',
         uses: ['f64', 'i32', 'setF64'],
         code: Uint8Array.of(
@@ -168,7 +168,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluUnProjectPoint: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr', 'f64', 'f64', 'f64', 'f64', 'f64', 'f64'],
         returns: 'u32',
         uses: ['f64', 'i32', 'setF64'],
         code: Uint8Array.of(
@@ -526,7 +526,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluUnProjectDivide: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'i32',
         uses: ['f64', 'setF64'],
         code: Uint8Array.of(
@@ -544,7 +544,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluUnProjectStore: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'ptr', 'ptr'],
         returns: 'i32',
         uses: ['u32', 'setU32'],
         code: Uint8Array.of(
@@ -567,7 +567,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     gluCheckExtension: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u8'],
         code: Uint8Array.of(

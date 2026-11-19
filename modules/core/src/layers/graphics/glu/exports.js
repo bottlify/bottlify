@@ -32,15 +32,21 @@
  */
 
 import { GL } from '../opengl/constants.js';
-import { guestEntry, guestMemory } from '../../win32/msvcrt/guest-code.js';
+import { guestEntry, guestMemory, withLongCode } from '../../win32/msvcrt/guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { COMPILED as COMPILED_LONG } from './inguest.x64.js';
 import {
     lookAtCode, ortho2DCode, perspectiveCode, pickMatrixCode, unProject4Code, unProjectCode,
 } from './code.js';
 import { GLU, cylinder, newQuadric, partialDisk, sphere } from './quadric.js';
 import { TESS, tessellate } from './tess.js';
 import { createImages } from './images.js';
+
+// The x86-64 of the functions that answer in the guest: gluProject and
+// gluCheckExtension take it as their exports' `long`. The matrix helpers'
+// callers (`code.js`) are i386 by hand, and stay traps in a 64-bit process.
+withLongCode(COMPILED, COMPILED_LONG);
 
 /**
  * Every export, by the bytes of stack it takes: a GLdouble is eight.
