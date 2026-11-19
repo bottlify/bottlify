@@ -135,6 +135,36 @@ test('a thread\'s block let go at its end leaves FlsSlots pointing at nothing', 
     assert.equal(errors.at(-1), ERROR_INVALID_PARAMETER);
 });
 
+test('a thread starting gets its block once an index is allocated, and reads it as NULL', ()=>{
+    const { storage, fns, words, errors } = setup();
+    storage.threadStarts();
+    assert.equal(words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0, 0, 'none before any index');
+    const index = fns.FlsAlloc.handler([0]);
+    words.set(TEB_AT + TEB.FLS_SLOTS, 0);
+    storage.threadStarts();
+    assert.notEqual(words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0, 0, 'made at its start');
+    assert.equal(fns.FlsGetValue.handler([index]), 0);
+    assert.equal(errors.at(-1), 0, 'NULL and success');
+});
+
+test('a thread\'s end keeps its block, the values cleared, until its libraries are told',
+    async()=>{
+        // Windows calls a thread's values back before DLL_THREAD_DETACH and
+        // frees its block after: a DllMain reading FlsGetValue gets NULL.
+        const { storage, fns, words, freed, calls } = setup();
+        const index = fns.FlsAlloc.handler([0x401000]);
+        assert.equal(fns.FlsSetValue.handler([index, 0x1587]), 1);
+        const block = words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0;
+        await storage.release(block, { teb: TEB_AT, keep: true });
+        assert.deepEqual(calls, [[0x401000, [0x1587]]], 'called back');
+        assert.deepEqual(freed, [], 'kept');
+        assert.equal(words.get(TEB_AT + TEB.FLS_SLOTS), block, 'FlsSlots still at it');
+        assert.equal(fns.FlsGetValue.handler([index]), 0, 'its value cleared');
+        storage.forget(block, TEB_AT);
+        assert.deepEqual(freed, [block]);
+        assert.equal(words.get(TEB_AT + TEB.FLS_SLOTS) ?? 0, 0);
+    });
+
 test('every callback of one call runs on the thread that made it, whoever runs after the first',
     async()=>{
         // A callback lets the scheduler run another thread; asked again after it,

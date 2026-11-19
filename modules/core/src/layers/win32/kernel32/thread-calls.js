@@ -252,6 +252,8 @@ export function longThreadCallsCode({ at, trap, lock }){
  * @property {(bytes: number) => number} allocate
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => ThreadCallImage[]} images
+ * @property {() => void} [starting]  A thread is about to be told of its own
+ *           start, on itself: what it needs before its libraries run.
  *           In load order, only those a thread is told of now.
  * @property {() => LoaderLock | null} [loaderLock]
  * @property {boolean} [long]  The process is an x86-64 one (`longThreadCallsCode`).
@@ -309,6 +311,7 @@ export function createThreadCalls(host){
         else
         {
             told.attaches++;
+            host.starting?.();
         }
         // Nobody told, rather than a list read from address zero.
         return tableOf(ordered.flatMap(image=>

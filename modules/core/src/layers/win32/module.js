@@ -1282,6 +1282,8 @@ export function createWin32Module(){
              */
             const threadCalls = createThreadCalls({
                 long: pointerSize === 8,
+                // Its fibre-local block, before its libraries read it.
+                starting: ()=>fiberStorage.threadStarts(),
                 register: (name, fn)=>bridge.register(name, fn),
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
@@ -1318,22 +1320,37 @@ export function createWin32Module(){
                     other !== thread && other.state !== 'terminated');
                 // Its running fiber's fibre-local values are called back
                 // first, on the thread, as a C runtime frees a thread's data in
-                // that callback (`kernel32/fls.js`); not for the process's end.
-                // Its own call has returned by now, so each is called as the
-                // loader calls a DllMain below: on the thread's resting stack.
+                // that callback (`kernel32/fls.js`), and the block is let go
+                // once the libraries are told. Its own call has returned by
+                // now, so each is called as the loader calls a DllMain below:
+                // on the thread's resting stack. The process's end does the
+                // same in detachAndEnd.
                 const fibreLocal = others ? fiberStorage.current() : 0;
                 if (fibreLocal !== 0)
                 {
                     const teb = thread.tebAddress >>> 0;
-                    return Promise.resolve().then(()=>fiberStorage.release(fibreLocal, { teb,
-                        call: (entry, args)=>callGuarded({ entry, args, thread, failed: 0,
-                            report: exception=>config?.divergence?.('FlsCallback',
-                                `exception 0x${exception} freeing a thread's fibre-local`
-                                + ' values at its end, taken by the loader') }) }))
-                        .then(()=>tellAndEnd(thread, code, others) ?? 0);
+                    return callFibreLocalBack(fibreLocal, thread)
+                        .then(()=>tellAndEnd(thread, code, others) ?? 0)
+                        .then(ended=>{
+                            fiberStorage.forget(fibreLocal, teb);
+                            return ended;
+                        });
                 }
                 return tellAndEnd(thread, code, others);
             };
+            /**
+             * A thread's fibre-local values called back at its end, on it, the
+             * block kept for its libraries' DllMain to read NULL in.
+             *
+             * @param {number} block @param {any} thread
+             * @returns {Promise<void>}
+             */
+            const callFibreLocalBack = (block, thread)=>Promise.resolve().then(()=>
+                fiberStorage.release(block, { teb: thread.tebAddress >>> 0, keep: true,
+                    call: (entry, args)=>callGuarded({ entry, args, thread, failed: 0,
+                        report: exception=>config?.divergence?.('FlsCallback',
+                            `exception 0x${exception} freeing a thread's fibre-local`
+                            + ' values at its end, taken by the loader') }) }));
             /**
              * endThread's rest, once the fibre-local values are called back.
              *
@@ -3244,7 +3261,12 @@ export function createWin32Module(){
                         kernel.exitThread(thread, code);
                     }
                 }
-                return tellDetach(attached, self).then(()=>{
+                // The ending thread's fibre-local values are called back before
+                // the images hear DLL_PROCESS_DETACH, as at a thread's end.
+                const fibreLocal = self ? fiberStorage.current() : 0;
+                const calledBack = fibreLocal !== 0 ? callFibreLocalBack(fibreLocal, self)
+                    : Promise.resolve();
+                return calledBack.then(()=>tellDetach(attached, self)).then(()=>{
                     exitCode = code;
                     processEnded();
                     return 0;

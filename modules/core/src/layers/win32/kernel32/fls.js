@@ -25,10 +25,13 @@
  * FlsGetValue and FlsSetValue are called on every runtime call that reaches
  * its per-thread data, so both are guest code (`flsGetValueCode` and the rest):
  * an index out of range, or a fiber with no block yet, is handed to the
- * host, which answers ERROR_INVALID_PARAMETER for the first and makes the
- * block for a value set. As on Windows, a value may be set and read at an
- * index nobody allocated, and success clears the last error on a read and
- * leaves it on a write.
+ * host, which answers ERROR_INVALID_PARAMETER for the first, and for a read
+ * with no block (a new fiber's, as Windows answers it), and makes the block
+ * for a value set. A thread gets its block when it starts once the process has
+ * allocated an index (`threadStarts`), so its libraries' DLL_THREAD_ATTACH
+ * reads NULL there. As on Windows, a value may be set and read at an index
+ * nobody allocated, and success clears the last error on a read and leaves it
+ * on a write.
  */
 
 import { TEB, TEB64 } from './teb.js';
@@ -203,13 +206,19 @@ export function createFiberLocalStorage(host){
 
     /**
      * A block's values called back and the block let go: a fiber's when it
-     * is deleted, a thread's running one when the thread ends.
+     * is deleted, a thread's running one when the thread ends. A thread's end
+     * keeps the block (`keep`) while its libraries are told: Windows calls
+     * the values back before DLL_THREAD_DETACH and DLL_PROCESS_DETACH and
+     * frees the block after, so a DllMain reading FlsGetValue then gets NULL
+     * and success (Wine's loader.c dll_entry_point); `forget` lets it go.
      *
      * @param {number} block
-     * @param {{ call?: (entry: number, args: number[]) => unknown, teb?: number }} [ending]
+     * @param {{ call?: (entry: number, args: number[]) => unknown, teb?: number,
+     *     keep?: boolean }} [ending]
      *     A thread's end: how its callbacks are called (it has no call of its own left
-     *     to answer, so as the loader calls a DllMain) and its thread block, named by
-     *     the caller since another thread may be running once they have been
+     *     to answer, so as the loader calls a DllMain), its thread block, named by
+     *     the caller since another thread may be running once they have been, and
+     *     whether the block stays until `forget`
      * @returns {Promise<void>}
      */
     const release = async(block, ending = {})=>{
@@ -220,9 +229,24 @@ export function createFiberLocalStorage(host){
         const teb = ending.teb ?? host.teb() >>> 0;
         await callBack(block, [...allocated.keys()].sort((a, b)=>a - b),
             ending.call ?? callerCalls());
-        // The libraries hear of a thread's end after this, and a C runtime asks
-        // FlsGetValue in its DllMain: FlsSlots left at the freed block would hand
-        // it the heap's own links as its data, to free.
+        if (!ending.keep)
+        {
+            forget(block, teb);
+        }
+    };
+
+    /**
+     * A block let go, its values already called back. FlsSlots left at the
+     * freed block would hand whoever reads it next the heap's own links as
+     * its data, so it is cleared where it still points there.
+     *
+     * @param {number} block @param {number} teb
+     */
+    const forget = (block, teb)=>{
+        if (!blocks.has(block))
+        {
+            return;
+        }
         if (teb !== 0 && host.readPointer(teb + slotsAt) === block)
         {
             host.writePointer(teb + slotsAt, 0);
@@ -233,9 +257,8 @@ export function createFiberLocalStorage(host){
 
     /**
      * The running fiber's block, made when it has none: by the first value
-     * set, and by FlsAlloc, which gives its caller one as Windows does (a
-     * thread that allocated an index reads it as NULL at once; one that
-     * did not, and set nothing, is refused). 0 when there is no memory.
+     * set, and by FlsAlloc, which gives its caller one as Windows does. 0
+     * when there is no memory.
      */
     const ownBlock = ()=>{
         const block = current();
@@ -389,9 +412,29 @@ export function createFiberLocalStorage(host){
          * Lets a fiber's or an ended thread's block go, its values called back.
          *
          * @param {number} block
-         * @param {{ call?: (entry: number, args: number[]) => unknown, teb?: number }} [ending]
+         * @param {{ call?: (entry: number, args: number[]) => unknown, teb?: number,
+         *     keep?: boolean }} [ending]
          */
         release,
+        /**
+         * Lets a block kept at a thread's end go, once its libraries are told.
+         *
+         * @param {number} block @param {number} teb
+         */
+        forget,
+        /**
+         * A thread starting, on itself, before its libraries hear of it: it
+         * gets its block once the process has allocated an index, as a thread
+         * Windows starts reads an allocated index as NULL and success in its
+         * DLL_THREAD_ATTACH (Wine's loader.c dll_entry_point) where a new
+         * fiber is refused (fiber.c FiberMainProc).
+         */
+        threadStarts: ()=>{
+            if (allocated.size > 0)
+            {
+                ownBlock();
+            }
+        },
         /** Where FlsSlots is in this process's thread block. */
         slotsAt,
     };
