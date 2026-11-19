@@ -30,6 +30,8 @@
  * catch read, under the names the compiler gives it.
  */
 
+import { createStreams } from './msvcp60-streams.js';
+
 /** No string can be longer: max_size(), the allocator's count less the two extra elements. */
 const npos = 0xffffffff;
 
@@ -86,6 +88,7 @@ const copierOf = name=>(name === 'exception' ? '??0exception@@QAE@ABV0@@Z'
  * @property {(self: number, elements: Uint8Array) => number} assignElements
  * @property {(self: number, other: number) => number} assignString
  * @property {(self: number) => number} cstr
+ * @property {(self: number) => Uint8Array} whole  The text's elements, as a copy.
  */
 
 /** Where each member is, from the object. */
@@ -107,6 +110,7 @@ const stringOf = element=>`?$basic_string@${element}U?$char_traits@${element}@st
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(name: string) => number} addressOf  This library's own export, placed.
+ * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
  */
 
 /**
@@ -160,9 +164,15 @@ export function createMsvcp60Functions(crt, host){
     const cdecl = (argBytes, handler)=>
         ({ convention: 'cdecl', argBytes, handler: throwing(handler) });
 
-    /** The char string's members, which the exceptions hold their message in. */
-    /** @type {StringMembers | null} */
-    let narrow = null;
+    /**
+     * The strings' members by element size: the exceptions hold their message
+     * in a char string, the streams read and make strings of both.
+     *
+     * @type {Record<number, StringMembers>}
+     */
+    const stringsBy = {};
+    /** The char string's. */
+    const narrowOf = ()=>stringsBy[1];
 
     /**
      * Throws an exception of one of the library's classes into the program,
@@ -174,7 +184,7 @@ export function createMsvcp60Functions(crt, host){
      * @returns {never}
      */
     const raise = (name, message)=>{
-        const members = /** @type {StringMembers} */ (narrow);
+        const members = narrowOf();
         const object = allocate(ERROR_SIZE);
         const text = new TextEncoder().encode(message);
         const scratch = allocate(STRING_SIZE);
@@ -1111,14 +1121,15 @@ export function createMsvcp60Functions(crt, host){
         {
             table[name] = cdecl(12, ([out, c, right])=>made(out, join(one(c), whole(right))));
         }
-        if (unit === 1)
-        {
-            narrow = { tidy, assignElements, assignString, cstr };
-        }
+        stringsBy[unit] = { tidy, assignElements, assignString, cstr, whole };
         return table;
     }
 
-    return { ...strings(1, 'D'), ...strings(2, 'G'), ...errors(), ...restartable() };
+    const strings1 = strings(1, 'D');
+    const strings2 = strings(2, 'G');
+    return { ...strings1, ...strings2, ...errors(), ...restartable(),
+        ...createStreams({ crt, host, thiscall, cdecl, raise, strings: stringsBy, allocate, free,
+            u32, setU32 }) };
 
     /**
      * The C library's restartable conversions, which the C runtime Visual
@@ -1137,7 +1148,7 @@ export function createMsvcp60Functions(crt, host){
      * @param {number} self @param {string} name @param {number} message  a string
      */
     function constructError(self, name, message){
-        const members = /** @type {StringMembers} */ (narrow);
+        const members = narrowOf();
         const empty = crt.malloc.handler([1]) >>> 0;
         setU8(empty, 0);
         setU32(self, host.addressOf(`??_7${name}@std@@6B@`));
@@ -1153,7 +1164,7 @@ export function createMsvcp60Functions(crt, host){
      * throw of each and a catch of it read.
      */
     function errors(){
-        const members = /** @type {StringMembers} */ (narrow);
+        const members = narrowOf();
         /** @param {number} self */
         const destroy = self=>{
             crt['??1exception@@UAE@XZ'].handler([self]);

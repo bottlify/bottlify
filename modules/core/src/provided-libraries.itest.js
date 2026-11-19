@@ -132,3 +132,32 @@ function buildVc6Exe(){
 test('a program importing Visual C++ 6\'s C++ library, none in the bottle, runs on ours', async()=>{
     assert.equal(await exitCodeOf(buildVc6Exe()), 56);
 });
+
+/**
+ * std::cout of Visual C++ 6's library: an object of the library's that the
+ * program reads before any call, as its headers inline. "hi" is written
+ * through it; the program exits with the offset its vbtable gives to its
+ * basic_ios (4) plus the state found there (0 after a good write).
+ */
+function buildCoutExe(){
+    const traits = 'DU?$char_traits@D@std@@';
+    const cout = `?cout@std@@3V?$basic_ostream@${traits}@1@A`;
+    const write = `??6std@@YAAAV?$basic_ostream@${traits}@0@AAV10@PBD@Z`;
+    return buildExe({
+        imports: { 'msvcrt.dll': ['strlen'], 'MSVCP60.dll': [cout, write],
+            'KERNEL32.dll': ['ExitProcess'] },
+        data: { hi: [0x68, 0x69, 0x0a, 0] },
+        codeSize: 0x60,
+        code: ({ iat, at })=>[
+            0x8b, 0x1d, ...u32(iat(cout)),                        // mov ebx, [&cout]
+            0x68, ...u32(at('hi')), 0x53, 0xff, 0x15, ...u32(iat(write)), 0x83, 0xc4, 0x08,
+            0x8b, 0x03, 0x8b, 0x40, 0x04,                     // mov eax, [ebx]; mov eax, [eax+4]
+            0x8b, 0x4c, 0x03, 0x04,                               // mov ecx, [ebx+eax+4]: state
+            0x01, 0xc8, 0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
+
+test('std::cout is laid out whole for the program and writes', async()=>{
+    assert.equal(await exitCodeOf(buildCoutExe()), 4);
+});
