@@ -458,6 +458,8 @@ test('the modules given at build time are all three lists, in order, walkable fr
         // it: a program reading TlsIndex reads 0, not a name's characters.
         assert.equal(memory.view.getUint16(entry + LDR_ENTRY.TLS_INDEX, true), 0, 'TlsIndex');
         assert.equal(memory.view.getUint16(entry + LDR_ENTRY.LOAD_COUNT, true), 0, 'LoadCount');
+        assert.equal(memory.view.getUint32(entry + 0x50, true), 0,
+            'a later Windows\' DdagNode: none, not a pointer made of a name');
     }
 
     // The same entries, reached through either of the other two orderings --
