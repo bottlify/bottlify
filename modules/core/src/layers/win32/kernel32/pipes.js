@@ -2068,6 +2068,11 @@ export function createNamedPipes(host){
         const op = { kind: 'flush', ctx, thread: host.currentThread(), handle: handle >>> 0,
             overlapped: 0, buffer: 0, length: 0, out: block >>> 0, end, native: true };
         peer.drains.push(op);
+        // Pending, it holds the end's handle down as any request does.
+        if (end.signal)
+        {
+            kernel.resetEvent?.(end.signal);
+        }
         kernel.block(op.thread, 'pipe flush');
         return { parked: host.park() };
     };

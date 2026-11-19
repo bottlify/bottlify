@@ -669,7 +669,9 @@ test('NtFlushBuffersFile waits for the reader to take everything; a cut client i
     assert.equal(p.pipes.flushNative(server, BLOCK), 0, 'listening: nothing to flush');
     const client = p.client();
     p.write(client, 'abc');
+    const signal = p.pipes.waitable(client);
     assert.deepEqual(p.pipes.flushNative(client, BLOCK), { parked: 'parked' });
+    assert.equal(signal.signalled, false, 'a pending flush holds the handle down');
     assert.equal(p.read(server, 3), 1);
     assert.deepEqual([p.u32(BLOCK), p.u32(BLOCK + 4)], [0, 0], 'read: the flush is done');
     assert.deepEqual(p.woken.at(-1)?.result, 0);
