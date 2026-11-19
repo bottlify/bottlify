@@ -214,13 +214,28 @@ test('an optional header cut short has no data directory past its end', ()=>{
     assert.equal(parsePe(file).directories.length, 16);
 });
 
-test('an image without relocations refuses to move', ()=>{
-    const image = parsePe(file);
-    assert.equal(image.relocatable, false,
-        'the fixture has no .reloc, like many pre-2000 binaries');
-    assert.throws(()=>applyRelocations(new Uint8Array(image.sizeOfImage), image, 0x1000), /no relocation directory/);
-    assert.throws(()=>buildImage(file, { resolveImport: ()=>0, base: 0x800000 }), /carries no relocations/);
-});
+test('an image whose relocations are stripped refuses to move; one without them moves as it lies',
+    ()=>{
+        const stripped = new Uint8Array(file);
+        const view = new DataView(stripped.buffer, stripped.byteOffset, stripped.byteLength);
+        const characteristics = view.getUint32(0x3c, true) + 4 + 18;
+        view.setUint16(characteristics, view.getUint16(characteristics, true) | 1, true);
+        const fixed = parsePe(stripped);
+        assert.equal(fixed.relocatable, false,
+            'the fixture has no .reloc, like many pre-2000 binaries');
+        assert.equal(fixed.relocsStripped, true);
+        assert.throws(()=>applyRelocations(new Uint8Array(fixed.sizeOfImage), fixed, 0x1000),
+            /no relocation directory/);
+        assert.throws(()=>buildImage(stripped, { resolveImport: ()=>0, base: 0x800000 }),
+            /carries no relocations/);
+
+        // IMAGE_FILE_RELOCS_STRIPPED clear: Windows' loader moves it, nothing fixed up.
+        const loose = parsePe(file);
+        assert.equal(loose.relocatable, false);
+        assert.equal(loose.relocsStripped, false);
+        assert.equal(applyRelocations(new Uint8Array(loose.sizeOfImage), loose, 0x1000), 0);
+        assert.equal(buildImage(file, { resolveImport: ()=>0, base: 0x800000 }).base, 0x800000);
+    });
 
 /**
  * The fixture made a library of resources alone: a DLL with no entry point, no section that

@@ -197,6 +197,9 @@ flowchart TD
   32-bit Windows (`kernel32/mapping.js` `imageRefusal`) - and answers `SectionImageInformation`
   from the headers. An image is mapped in whole pages, one aligned below a page flat
   (the file as it lies), and an optional header cut short has no data directory past its end.
+  A library with no relocation directory goes to its own base; where that is taken it is
+  refused if its relocations are marked stripped (`IMAGE_FILE_RELOCS_STRIPPED`), and otherwise
+  moved as it lies, nothing fixed up, as Windows' loader moves one (`app.js` `placeLibrary`).
   A `DllMain` (or TLS callback) that raises on `DLL_PROCESS_ATTACH` is ended by the loader's
   own frame, and one that answers FALSE is told `DLL_PROCESS_DETACH`: either way the library is
   unloaded and `LoadLibrary` fails with `ERROR_DLL_INIT_FAILED`. A library file is read sharing
