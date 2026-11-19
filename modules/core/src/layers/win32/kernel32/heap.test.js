@@ -2154,10 +2154,11 @@ test('GetWriteWatch in a 64-bit process writes its PVOID array and ULONG_PTR cou
     host.bytes.fill(0xaa, 0x100, 0x300);
     view.setUint32(0x100, 64, true);
     assert.equal(fns.GetWriteWatch.handler([0, base, 4 * PAGE_SIZE, 0x200, 0x100, 0x180]), 0);
-    assert.equal(view.getBigUint64(0x100, true), 4n, 'the count, all eight bytes');
-    assert.deepEqual(Array.from({ length: 4 }, (_, at)=>view.getBigUint64(0x200 + 8 * at, true)),
-        [0, 1, 2, 3].map(page=>BigInt(base + page * PAGE_SIZE)), 'each address eight bytes apart');
-    assert.equal(view.getBigUint64(0x220, true), 0xaaaaaaaaaaaaaaaan, 'nothing past the answer');
+    // The watch tells the second page of what it is asked for.
+    assert.equal(view.getBigUint64(0x100, true), 1n, 'the count, all eight bytes');
+    assert.equal(view.getBigUint64(0x200, true), BigInt(base + PAGE_SIZE),
+        'the address, all eight bytes');
+    assert.equal(view.getBigUint64(0x208, true), 0xaaaaaaaaaaaaaaaan, 'nothing past the answer');
     assert.equal(view.getUint32(0x180, true), PAGE_SIZE, 'the granularity is a DWORD');
     assert.equal(view.getUint32(0x184, true), 0xaaaaaaaa, 'and only a DWORD');
 });

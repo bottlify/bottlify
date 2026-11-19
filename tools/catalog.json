@@ -532,12 +532,13 @@
    "kind": "check",
    "browser": false,
    "question": "A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on",
-   "command": "node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000]",
+   "command": "node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]",
    "tests": [
     "tools/checks/check-wide-addresses.test.js"
    ],
    "parts": [
-    "tools/checks/wide-addresses-known.json"
+    "tools/checks/wide-addresses-known.json",
+    "tools/checks/wide-addresses-high.json"
    ]
   },
   {
