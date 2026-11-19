@@ -150,7 +150,8 @@ function fakeFiles(){
             const node = nodes.get(path);
             return node
                 ? { exists: true, isDirectory: node.directory, size: node.data.length,
-                    ...attributes.has(path) ? { attributes: attributes.get(path) } : {} }
+                    ...attributes.has(path) ? { attributes: attributes.get(path) } : {},
+                    .../** @type {any} */ (node).link ?? {} }
                 : null;
         },
         /** @param {string} path @param {number | null} value */
@@ -823,6 +824,27 @@ test('a copy overwrites unless the caller says not to', ()=>{
         [at(NAME, 'C:\\GAME\\A.DAT'), at(NAME2, 'C:\\GAME\\B.DAT'), 0]), 1);
     assert.equal(files.text('C:\\GAME\\B.DAT'), 'source',
         'and the whole file, not part of it');
+});
+
+test('a copy goes through a symbolic link at either end, the link left as it is', ()=>{
+    const { error, files, fns, at } = setup();
+    files.put('C:\\GAME\\TARGET.DAT', 'target');
+    files.put('C:\\GAME\\LINK.DAT', '');
+    /** @type {any} */ (files.nodes.get('C:\\GAME\\LINK.DAT')).link =
+        { reparseTag: 0xa000000c, junction: 'GAME\\TARGET.DAT' };
+    files.put('C:\\GAME\\NEW.DAT', 'new');
+
+    assert.equal(fns.CopyFileA.handler(
+        [at(NAME, 'C:\\GAME\\LINK.DAT'), at(NAME2, 'C:\\GAME\\COPY.DAT'), 0]), 1);
+    assert.equal(files.text('C:\\GAME\\COPY.DAT'), 'target', 'what the link names');
+
+    assert.equal(fns.CopyFileA.handler(
+        [at(NAME, 'C:\\GAME\\NEW.DAT'), at(NAME2, 'C:\\GAME\\LINK.DAT'), 1]), 0);
+    assert.equal(error.code, ERROR_FILE_EXISTS, 'the link is there');
+    assert.equal(fns.CopyFileA.handler(
+        [at(NAME, 'C:\\GAME\\NEW.DAT'), at(NAME2, 'C:\\GAME\\LINK.DAT'), 0]), 1);
+    assert.equal(files.text('C:\\GAME\\TARGET.DAT'), 'new', 'written where it points');
+    assert.equal(files.text('C:\\GAME\\LINK.DAT'), '', 'the link itself untouched');
 });
 
 test('a copy from a bundle\'s file waits for its blocks and copies the whole of it', async()=>{

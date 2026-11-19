@@ -334,6 +334,26 @@ test('a reparse point is set on an empty directory or a file, and taken off only
     assert.equal(tree.reparseOf(['Game']), null);
 });
 
+test('a reparse point is the file\'s: every name of it is one, set before or after the link', ()=>{
+    const { tree } = mounted();
+    tree.createFile(['Link.TXT']);
+    tree.setReparse(['Link.TXT'], { tag: SYMLINK, data: null, target: ['Readme.TXT'] });
+    tree.link(['Link.TXT'], ['Link2.TXT']);
+    assert.equal(tree.stat(['Link2.TXT'])?.reparseTag, SYMLINK, 'a name made after');
+    assert.equal(tree.stat(['Link2.TXT'])?.junction, 'Readme.TXT');
+
+    tree.link(['Readme.TXT'], ['Readme2.TXT']);
+    tree.setReparse(['Readme2.TXT'], { tag: 0xbeef, data: null, target: null });
+    assert.equal(tree.stat(['Readme.TXT'])?.reparseTag, 0xbeef, 'a name made before');
+    tree.setReparse(['Readme.TXT'], null);
+    assert.equal(tree.stat(['Readme2.TXT'])?.reparseTag, 0, 'and taken off all of them');
+
+    const again = mounted().tree;
+    again.createFile(['Link.TXT']);
+    again.restoreLinks(JSON.parse(JSON.stringify(tree.links())));
+    assert.equal(again.stat(['Link2.TXT'])?.reparseTag, SYMLINK, 'a session keeps both');
+});
+
 test('a session carries every reparse point, and a junction recorded alone still loads', ()=>{
     const { tree } = mounted();
     const data = Uint8Array.from([0xef, 0xbe, 0, 0, 1, 0, 0, 0, 7]);

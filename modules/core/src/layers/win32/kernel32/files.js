@@ -1948,28 +1948,48 @@ export function createFileFunctions(host){
      * as a copy on Windows does; a file copied onto itself is the destination
      * open colliding with the source's, a sharing violation.
      *
-     * @param {string} source @param {string} destination @param {boolean} failIfExists
+     * @param {string} named @param {string} destinationNamed @param {boolean} failIfExists
      * @returns {number | Promise<number>}
      */
-    const copyPath = (source, destination, failIfExists)=>{
-        if (source === '' || destination === '')
+    const copyPath = (named, destinationNamed, failIfExists)=>{
+        if (named === '' || destinationNamed === '')
         {
             return fail(ERROR_PATH_NOT_FOUND);
         }
+        // Both names are opened as an open of them would be: a symbolic
+        // link copies what it names, and a copy onto one writes what it
+        // names, the link left as it is.
+        const origin = throughReparse(named, files.stat(named));
+        if (origin.error !== undefined)
+        {
+            return fail(origin.error);
+        }
+        const source = origin.path;
         const entry = files.stat(source);
         if (!entry || !entry.exists || entry.isDirectory)
         {
             return fail(entry?.isDirectory ? ERROR_ACCESS_DENIED : missing(source));
         }
+        if (named.toLowerCase() === destinationNamed.toLowerCase())
+        {
+            return fail(ERROR_SHARING_VIOLATION);
+        }
+        const link = files.stat(destinationNamed);
+        if (failIfExists && link?.exists)
+        {
+            return fail(ERROR_FILE_EXISTS);
+        }
+        const to = throughReparse(destinationNamed, link);
+        if (to.error !== undefined)
+        {
+            return fail(to.error);
+        }
+        const destination = to.path;
         if (source.toLowerCase() === destination.toLowerCase())
         {
             return fail(ERROR_SHARING_VIOLATION);
         }
-        const present = files.stat(destination);
-        if (failIfExists && present?.exists)
-        {
-            return fail(ERROR_FILE_EXISTS);
-        }
+        const present = destination === destinationNamed ? link : files.stat(destination);
         if (readOnlyFile(present) || present?.isDirectory)
         {
             return fail(ERROR_ACCESS_DENIED);

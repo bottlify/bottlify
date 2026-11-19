@@ -635,6 +635,9 @@ export function createOverlay({
         target.inWritable = true;
         target.body = body;
         target.modified = node.modified;
+        // A reparse point is the file's, so every name of it is one.
+        target.reparse = node.reparse;
+        target.junction = node.junction;
         body.names.add(target);
         return target;
     };
@@ -1115,8 +1118,11 @@ export function createOverlay({
                     throw fsError(ErrorCode.NOT_A_REPARSE_POINT,
                         `"${node.path}" is not a reparse point`);
                 }
-                node.reparse = null;
-                node.junction = null;
+                for (const name of namesOf(node))
+                {
+                    name.reparse = null;
+                    name.junction = null;
+                }
                 changed(node.path, 'written');
                 return;
             }
@@ -1124,8 +1130,13 @@ export function createOverlay({
             {
                 throw fsError(ErrorCode.DIRECTORY_NOT_EMPTY, `"${node.path}" is not empty`);
             }
-            node.reparse = { tag: point.tag >>> 0, data: point.data ? point.data.slice() : null };
-            node.junction = point.target ? [...point.target] : null;
+            // The point is the file's: a file with several names is one under each.
+            const reparse = { tag: point.tag >>> 0, data: point.data ? point.data.slice() : null };
+            for (const name of namesOf(node))
+            {
+                name.reparse = reparse;
+                name.junction = point.target ? [...point.target] : null;
+            }
             changed(node.path, 'written');
         },
 
