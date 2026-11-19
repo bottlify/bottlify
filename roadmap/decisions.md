@@ -2535,3 +2535,12 @@ what is queued fits the size (`kernel32/pipes.js`), so the choice is observable:
 before reading a short message it wrote would wait for ever. So a 0 is the default, 4096, the size
 an anonymous pipe has; GetNamedPipeInfo still answers the 0 that was asked. Revisit when a
 measurement on Windows shows what a 0 holds. *2026-11-19.*
+
+**A274. The address space outside a process's arena answers MEM_RESERVE, never MEM_FREE.** On
+Windows the page after a loaded image, or any page no allocation holds, is free and VirtualQuery
+answers MEM_FREE. Here a process's memory is one arena the engine reserves at its start, and every
+address in it that no allocation, view or image holds is still the arena's, so VirtualQuery answers
+it as reserved.
+A program that asks for MEM_FREE before placing something at a fixed address is told the place is
+taken where Windows says it is open (Wine's loader.c 945-950). Revisit if the arena's unused pages can
+be answered as free without a second map of what the arena lends. *2026-11-19.*
