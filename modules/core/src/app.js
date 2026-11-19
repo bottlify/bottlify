@@ -6912,6 +6912,33 @@ async function buildApp(options){
         });
         return { code, jumps, pointers: fn.pointers };
     };
+    /**
+     * An export the host answers: a trampoline jumping to its trap, or guest
+     * code placed at bind time where the function has any (`guest`; in a
+     * 64-bit process only where it places its x86-64 there, `guestLong`, and
+     * its host handler where the machine had no room for it).
+     *
+     * ntdll's system calls (Nt*, Zw*) are the trap's own bytes instead. On
+     * Windows each is a few position-independent instructions that enter the
+     * kernel, and a program may copy one elsewhere and call the copy - a
+     * protection does, to call the kernel past a hook on the original; a
+     * trampoline's relative jump, copied, lands nowhere. The trap's bytes
+     * carry its id and run wherever they are.
+     *
+     * @param {string} library @param {string} exported @param {any} fn
+     */
+    const trapExport = (library, exported, fn)=>{
+        const target = (fn.guest && (!long || fn.guestLong)
+            ? fn.guest({
+                /** @param {string} label @param {any} trap */
+                register: (label, trap)=>bridge.register(label, trap),
+            }) : 0)
+            || bridge.register(`${library}!${exported}`, fn);
+        const systemCall = !long && !fn.guest && library.toLowerCase() === 'ntdll.dll'
+            && /^(Nt|Zw)[A-Z]/.test(exported);
+        const own = systemCall ? cpu.stubAt(target) : null;
+        return own ? { code: own } : { target };
+    };
     // Each system module where the one before it ends, at the granularity
     // every image is placed at: the window they share is the room left for
     // the libraries a program brings, and a module is a few pages -- a
@@ -7058,17 +7085,7 @@ async function buildApp(options){
                 ? codeExport(long && fn.long ? longOf(fn) : fn, `${name}!${exported}`)
                 : fn.data ? {
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
-                } : {
-                    // Guest code placed at bind time runs in a 64-bit process
-                    // too where it says it places its x86-64 there (`guestLong`).
-                    // One the machine's memory had no room for is its host handler.
-                    target: (fn.guest && (!long || fn.guestLong)
-                        ? fn.guest({
-                            /** @param {string} label @param {any} trap */
-                            register: (label, trap)=>bridge.register(label, trap),
-                        }) : 0)
-                        || bridge.register(`${name}!${exported}`, fn),
-                },
+                } : trapExport(name, exported, fn),
         }));
 
         // A table with a DllMain is a module with an entry point, run when a

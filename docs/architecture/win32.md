@@ -58,6 +58,11 @@ C2 nn nn         ret N              ; C3 for cdecl
 CC ...           int3 up to 16 bytes
 ```
 
+ntdll's system calls (`Nt*`, `Zw*`) are not slots: each export is its stub's own bytes. On Windows
+a system call is a few position-independent instructions, and a program may copy one elsewhere and
+call the copy; a slot's relative JMP, copied, lands nowhere, while a stub carries its id and runs
+wherever it is (`trapExport` in `app.js`, `stubAt` in `cpu/internal/thunks.js`).
+
 How many bytes `ret N` takes off, the bridge decides from the calling convention: stdcall takes all
 of `argBytes`, cdecl none, and thiscall and fastcall leave out the arguments passed in registers.
 
