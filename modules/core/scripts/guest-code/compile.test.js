@@ -1390,7 +1390,7 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'let s = a;\n    s = c;\n    return s;'), /s is i32, and this is u32/);
     refused(one('{ u9 }, a, c, x', 'return 0;'), /the guest's helpers are/);
     refused(one('a, c, x, y', 'return 0;'),
-        /@param \{i32 \| u32 \| f64 \| f32 \| x87 \| i64\} y is wanted/);
+        /@param \{i32 \| u32 \| ptr \| f64 \| f32 \| x87 \| i64\} y is wanted/);
     refused(one(p, 'return 0;').replace('@guestCode cdecl', '@guestCode'),
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f16}'),
@@ -1644,4 +1644,32 @@ test('an i64 is read by its halves alone and int64 only returned', ()=>{
         /int64\(low, high\) is an i64 function's result, returned/);
     refused(`${head}    return int64(low64(a) + 1, 0);\n}\n`,
         /a half of an i64 is brought back to 32 bits first/);
+});
+
+const MXCSR = `
+/**
+ * The exception flags as they stood, those named cleared.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} clear
+ * @returns {u32}
+ */
+export function flags({ mxcsr, setMxcsr }, clear){
+    const before = mxcsr();
+    setMxcsr(before & ~(clear & 0x3f));
+    return (before & 0xffff) >>> 0;
+}
+`;
+
+test('MXCSR read and loaded at both widths: the x86-64 has the word too', async()=>{
+    const { same, long, refusedAt64 } = await load(MXCSR);
+    assert.deepEqual(refusedAt64, {});
+    assert.equal(long.flags.leaf, false, 'the word goes through the stack: no leaf');
+    for (const mxcsr of [0x1f80, 0x1fbf, 0x1f81, 0x7fa4, 0x1f9d])
+    {
+        for (const clear of [0, 0x3f, 0x01, 0x24, 0xffffffff])
+        {
+            same('flags', { stack: [clear], mxcsr });
+        }
+    }
 });

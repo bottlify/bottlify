@@ -2589,8 +2589,11 @@ compares against. So a size is no address to the bridge (`check-wide-arguments.m
 `returns: 'pointer'` over one). The cost: a host size of 2 GiB or more comes back wrong unless its
 handler answers a quadword. Pointer-sized integers (`ULONG_PTR`, `UINT_PTR`, `DWORD_PTR`,
 `uintptr_t`, `WPARAM`) are decided by meaning: GetClassLongPtr's value may be an address and is
-declared one.
-*2026-11-18.*
+declared one. A function that has guest code is the exception, because its code answers too: its
+handler leaves RAX as its x86-64 does for the type its source declares (`@returns {u32}` by zeros,
+`{i32}` by its sign, `{ptr}` whole; `guestExport` hands the bridge that type), so that a caller
+cannot tell which of the two answered. A size whose errors are `(size_t)-1` is declared `i32` there.
+*2026-11-18; the guest-code exception 2026-11-19.*
 
 **A279. A locked access across two aligned quadwords (a split lock), and `lock cmpxchg16b`, are
 made holding one lock word of the process, not as one atomic access.** A `lock`-prefixed

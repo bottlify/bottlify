@@ -550,8 +550,8 @@ export const REFUSED = /** @type {const} */ ({
         'statusWord: the x87\'s control and status words are the 32-bit runtime\'s, refused'
         + ' at 64 bits',
     _clearfp:
-        'mxcsr: the x87\'s control and status words are the 32-bit runtime\'s, refused at'
-        + ' 64 bits',
+        'statusWord: the x87\'s control and status words are the 32-bit runtime\'s, refused'
+        + ' at 64 bits',
     _fpclass:
         'a double passed as two dwords, which x86-64 passes in XMM0: as a double its'
         + ' handler would hold a signalling NaN quieted',
