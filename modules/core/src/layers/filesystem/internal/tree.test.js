@@ -515,3 +515,59 @@ test('a source file is copied up a piece at a time, never read whole', ()=>{
     expected[PIECE_SIZE + 5] = 255;
     assert.deepEqual(writable.read('Data\\Archive.pak', 0, whole.length), expected);
 });
+
+test('a file\'s number is its own: kept across renames, shared by its names, never reused', ()=>{
+    const { tree } = mounted();
+    const readme = tree.fileId(['Readme.TXT']);
+    const setup = tree.fileId(['Game', 'Setup.EXE']);
+    assert.notEqual(readme, setup, 'two files, two numbers');
+    assert.equal(tree.fileId(['README.txt']), readme, 'asked again in another spelling');
+    assert.equal(tree.fileId([]), 5, 'the root, as NTFS numbers it');
+
+    tree.moveFile(['Readme.TXT'], ['Game', 'Moved.TXT']);
+    assert.equal(tree.fileId(['Game', 'Moved.TXT']), readme, 'renamed, the same file');
+    assert.deepEqual(tree.pathOfId(readme), ['Game', 'Moved.TXT']);
+
+    tree.link(['Game', 'Moved.TXT'], ['Other.TXT']);
+    assert.equal(tree.fileId(['Other.TXT']), readme, 'a further name, the same number');
+    tree.moveFile(['Other.TXT'], ['Third.TXT']);
+    tree.removeFile(['Game', 'Moved.TXT']);
+    assert.equal(tree.fileId(['Third.TXT']), readme, 'the name left keeps it');
+    assert.deepEqual(tree.pathOfId(readme), ['Third.TXT']);
+
+    tree.removeFile(['Third.TXT']);
+    assert.equal(tree.pathOfId(readme), null, 'a deleted file\'s number names nothing');
+    tree.createFile(['Third.TXT']);
+    assert.notEqual(tree.fileId(['Third.TXT']), readme, 'and is no new file\'s');
+
+    tree.createDirectory(['Dir']);
+    const dir = tree.fileId(['Dir']);
+    tree.createDirectory(['Dir2']);
+    tree.carryId(['Dir'], ['Dir2']);
+    tree.removeDirectory(['Dir']);
+    assert.equal(tree.fileId(['Dir2']), dir, 'a directory moved by remaking it');
+});
+
+test('a file\'s number goes with the session, and a session without numbers still loads', ()=>{
+    const { tree, writable } = mounted();
+    tree.createFile(['A.DAT']);
+    tree.link(['A.DAT'], ['B.DAT']);
+    const a = tree.fileId(['B.DAT']);
+    const readme = tree.fileId(['Readme.TXT']);
+    const records = JSON.parse(JSON.stringify(tree.links()));
+    assert.deepEqual(records.filter((/** @type {any} */ record)=>record.id !== undefined)
+        .map((/** @type {any} */ record)=>record.id).sort(), [a, readme].sort());
+
+    const again = createOverlay({ source: mounted().source, writable });
+    again.restoreLinks(records);
+    assert.equal(again.fileId(['A.DAT']), a, 'a written file');
+    assert.equal(again.fileId(['B.DAT']), a, 'under its other name too');
+    assert.equal(again.fileId(['Readme.TXT']), readme, 'and one from the source');
+    assert.ok(again.fileId(['Game', 'Setup.EXE']) > Math.max(a, readme),
+        'a new number past the restored ones');
+
+    const old = createOverlay({ source: mounted().source, writable });
+    old.restoreLinks(records.filter((/** @type {any} */ record)=>record.id === undefined));
+    assert.equal(old.stat(['B.DAT'])?.links, 2, 'a session saved before numbers');
+    assert.equal(old.fileId(['A.DAT']), old.fileId(['B.DAT']), 'numbered when asked');
+});

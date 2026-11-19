@@ -31,7 +31,7 @@
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { FILE_OBJECT_KINDS } from './handle-tags.js';
 import { FILE_IMPLIED, SYNCHRONIZE, allows, mappedAccess } from './access.js';
-import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
+import { fileAttributes, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
@@ -435,6 +435,11 @@ const FILE_WRITE_THROUGH = 0x2;
 const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
 /** The last of the open options FileModeInformation reports back. */
 const FILE_NO_INTERMEDIATE_BUFFERING = 0x8;
+/** FILE_IO_COMPLETION_NOTIFICATION_INFORMATION's flags, as winbase.h names them. */
+const FILE_SKIP_COMPLETION_PORT_ON_SUCCESS = 0x1;
+const COMPLETION_MODES = 0x7;
+/** An overlapped transfer the call answers as begun, its work done all the same. */
+const ERROR_IO_PENDING = 997;
 /** The open options a handle's mode keeps: the rest act at the open and are gone. */
 const FILE_MODE_OPTIONS = FILE_WRITE_THROUGH | FILE_SEQUENTIAL_ONLY
     | FILE_NO_INTERMEDIATE_BUFFERING | FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
@@ -444,6 +449,26 @@ const FILE_FLAG_NO_BUFFERING = 0x20000000;
 
 /** The two modes a handle waits in for its I/O. */
 const SYNCHRONOUS_MODES = FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT;
+
+/**
+ * The devices a name opens that hold no files here, by their names in the
+ * object namespace (`\??\` links to `\Device\`): the mailslot file
+ * system's root and the mount point manager. The pipe device is the pipes'
+ * own (`pipes.nativeOpen`).
+ */
+const NT_DEVICES = [
+    { device: 'mailslot', names: ['\\??\\mailslot\\', '\\device\\mailslot\\'] },
+    { device: 'mountmgr', names: ['\\??\\mountpointmanager', '\\device\\mountpointmanager'] },
+];
+
+/**
+ * Which of NT_DEVICES a native name opens itself, null for none.
+ *
+ * @param {string} name
+ * @returns {string | null}
+ */
+const deviceNamed = name=>NT_DEVICES.find(({ names })=>names.includes(name.toLowerCase()))
+    ?.device ?? null;
 
 /**
  * A file handle's FILE_MODE_INFORMATION: what its open kept, or, for one
@@ -467,6 +492,10 @@ const modeOfFlags = flags=>(((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0
 const FILE_DISPOSITION_FLAG_DELETE = 0x1;
 /** The name goes as the handle that asked closes, other opens or not. */
 const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
+/** FileDispositionInformationEx's flag that says the open's delete-on-close. */
+const FILE_DISPOSITION_FLAG_ON_CLOSE = 0x8;
+/** FileDispositionInformationEx's flag that deletes a read-only file all the same. */
+const FILE_DISPOSITION_FLAG_IGNORE_READONLY = 0x10;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
 const FILE_RENAME_FLAG_IGNORE_READONLY_ATTRIBUTE = 0x40;
 /** NtSetInformationFile's hard link classes (FILE_LINK_INFORMATION and its Ex form). */
@@ -525,6 +554,15 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Sets a reparse point (null: takes it off): null, or the volume's code for why not.
  * @property {(path: string) => { tag: number, data: Uint8Array | null } | null} [reparseOf]
  *           The reparse point as it was set.
+ * @property {(path: string, access: { read?: boolean, write?: boolean, delete?: boolean },
+ *     share: { read?: boolean, write?: boolean, delete?: boolean })
+ *     => { token: number } | { error: string }} [holdDirectory]
+ *           Holds a directory open on its open's terms, settled against its other opens.
+ * @property {(token: number) => void} [releaseDirectory]
+ * @property {(path: string) => number} fileId
+ *           The file's number on its volume: the same under every name, kept across renames.
+ * @property {(path: string, id: number) => string | null} pathOfFileId
+ *           Where the file numbered `id` is on the volume `path` is on.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
  * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
  *     Uint8Array | Promise<Uint8Array>} read
@@ -639,7 +677,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           been parked -- by then the running thread is somebody else.
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  * @property {{ offsetOf: (overlapped: number) => number,
- *              completed: (file: number, transferred: number, overlapped: number) => boolean,
+ *              completed: (file: number, transferred: number, overlapped: number,
+ *                  status?: number, skip?: { port?: boolean, event?: boolean }) => boolean,
  *              closed: (handle: number, object: any) => void,
  *              bind?: (file: number, port: number, key: number)
  *                  => boolean | 'synchronous',
@@ -2679,7 +2718,7 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number,
-     *     mode?: number }} request
+     *     mode?: number, native?: 'supersede' | 'other' }} request  (`openPathOnce`)
      * @param {number} [implied]  rights the handle is granted beside those asked
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean,
      *     deletePending?: boolean }}
@@ -2697,12 +2736,16 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number,
-     *     mode?: number }} request
+     *     mode?: number, native?: 'supersede' | 'other' }} request
+     *        `native`: the open is NtCreateFile's, whose overwriting dispositions
+     *        need no write access, and whose FILE_SUPERSEDE replaces even a
+     *        read-only file.
      * @param {number} implied
      * @returns {{ handle: number, existed: boolean }
      *     | { error: number, cannotDelete?: boolean, deletePending?: boolean }}
      */
-    const openPathOnce = (path, { access, share, disposition, flags, mode: kept }, implied)=>{
+    const openPathOnce = (path, request, implied)=>{
+        const { access, share, disposition, flags, mode: kept, native } = request;
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
@@ -2715,7 +2758,7 @@ export function createFileFunctions(host){
         const deleteOnClose = ((flags >>> 0) & FILE_FLAG_DELETE_ON_CLOSE) !== 0;
         // Emptying an existing file is asked with GENERIC_WRITE itself:
         // FILE_WRITE_DATA alone does not do.
-        if (disposition === TRUNCATE_EXISTING && (rights & GENERIC_WRITE) === 0)
+        if (disposition === TRUNCATE_EXISTING && (rights & GENERIC_WRITE) === 0 && !native)
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
@@ -2734,7 +2777,8 @@ export function createFileFunctions(host){
         if (landed.path !== path)
         {
             return openPathOnce(landed.path, { access, share, disposition,
-                flags: (flags >>> 0) | FILE_FLAG_OPEN_REPARSE_POINT, mode: kept }, implied);
+                flags: (flags >>> 0) | FILE_FLAG_OPEN_REPARSE_POINT, mode: kept, native },
+            implied);
         }
         const existing = named;
         const exists = Boolean(existing && existing.exists);
@@ -2756,11 +2800,17 @@ export function createFileFunctions(host){
             {
                 return { error: ERROR_FILE_EXISTS };
             }
+            const hold = holdFolder(path, rights | (deleteOnClose ? DELETE : 0), share);
+            if (!hold)
+            {
+                return { error: ERROR_SHARING_VIOLATION };
+            }
             const handle = host.handles.open('file',
                 { path, node: null, directory: true, read: false, write: false, position: 0,
+                    held: hold.held, ...deleteOnClose ? { deleteOnClose } : {},
                     // A folder watched through a completion port is opened so.
                     ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} },
-                mappedAccess('file', rights | implied));
+                mappedAccess('file', rights | implied | (deleteOnClose ? DELETE : 0)));
             return { handle, existed: true };
         }
         if (exists && disposition === CREATE_NEW)
@@ -2781,7 +2831,8 @@ export function createFileFunctions(host){
         }
         if (readOnlyFile(existing))
         {
-            if (write || disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+            if (write || ((disposition === CREATE_ALWAYS || disposition === TRUNCATE_EXISTING)
+                && native !== 'supersede'))
             {
                 return { error: ERROR_ACCESS_DENIED };
             }
@@ -2813,7 +2864,8 @@ export function createFileFunctions(host){
         }
         // A new file takes the attributes it was created with; one that is
         // replaced takes them too, as a file made afresh would.
-        if (!exists || disposition === CREATE_ALWAYS)
+        if (!exists || disposition === CREATE_ALWAYS
+            || (native && disposition === TRUNCATE_EXISTING))
         {
             giveAttributes(path, flags);
         }
@@ -3029,10 +3081,7 @@ export function createFileFunctions(host){
     /**
      * FILE_OPEN_BY_FILE_ID's name: the eight bytes of a file's number on the
      * volume the root handle is on, as FileInternalInformation and the
-     * directory listings answer it. A number is made from what the file is
-     * known by, so it is found by walking the volume: the root handle's folder
-     * first, where a program that just listed it looks, then the drive. A
-     * reparse point is not walked through, so a loop is never followed.
+     * directory listings answer it - the volume keeps each number's file.
      *
      * @param {{ root: number, name: string }} given
      * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
@@ -3051,49 +3100,7 @@ export function createFileFunctions(host){
         }
         const number = (name.charCodeAt(0) | name.charCodeAt(1) << 16) >>> 0;
         const above = (name.charCodeAt(2) | name.charCodeAt(3) << 16) >>> 0;
-        const drive = /^[A-Za-z]:/.exec(directory.path)?.[0];
-        if (above !== 0 || !drive)
-        {
-            return { status: STATUS_INVALID_PARAMETER };
-        }
-        const start = opened && !opened.directory
-            ? directory.path.replace(/\\[^\\]*$/, '') : directory.path;
-        const seen = new Set();
-        /** @param {string} folder @returns {string | null} */
-        const walk = folder=>{
-            const key = folder.toLowerCase();
-            if (seen.has(key))
-            {
-                return null;
-            }
-            seen.add(key);
-            if (fileIndex(folder) === number)
-            {
-                return folder;
-            }
-            const entries = files.list(folder, '*') ?? [];
-            for (const entry of entries)
-            {
-                const identity = listedIdentity(folder, entry);
-                if (!entry.isDirectory && fileIndex(identity) === number)
-                {
-                    return identity;
-                }
-            }
-            for (const entry of entries)
-            {
-                if (entry.isDirectory && !(/** @type {any} */ (entry).reparseTag))
-                {
-                    const found = walk(`${folder.replace(/\\$/, '')}${SEPARATOR}${entry.name}`);
-                    if (found)
-                    {
-                        return found;
-                    }
-                }
-            }
-            return null;
-        };
-        const found = walk(start) ?? walk(`${drive}${SEPARATOR}`);
+        const found = above === 0 ? files.pathOfFileId(directory.path, number) : null;
         return found ? { path: fullPath(found) } : { status: STATUS_INVALID_PARAMETER };
     };
 
@@ -3183,6 +3190,24 @@ export function createFileFunctions(host){
             }
             return STATUS_SUCCESS;
         }
+        // A device the volume does not hold opens as itself: a handle with
+        // the mode it was opened in and nothing to read or write.
+        const device = given && given.root === 0 ? deviceNamed(given.name) : null;
+        if (device)
+        {
+            if (![FILE_OPEN, FILE_OPEN_IF].includes(disposition >>> 0))
+            {
+                return STATUS_INVALID_PARAMETER;
+            }
+            writeDword(out >>> 0, host.handles.open('device',
+                { device, mode: (options >>> 0) & SYNCHRONOUS_MODES }, access >>> 0));
+            if ((status >>> 0) !== 0)
+            {
+                writeDword(status >>> 0, STATUS_SUCCESS);
+                writeDword((status >>> 0) + 4, FILE_OPENED);
+            }
+            return STATUS_SUCCESS;
+        }
         const named = ((options >>> 0) & FILE_OPEN_BY_FILE_ID) !== 0 && given
             ? byFileId(given) : nativeName(attributes >>> 0);
         if ('status' in named)
@@ -3240,8 +3265,17 @@ export function createFileFunctions(host){
             {
                 return STATUS_ACCESS_DENIED;
             }
+            if (deletePending.has(path.toLowerCase()))
+            {
+                return STATUS_DELETE_PENDING;
+            }
+            const hold = holdFolder(path, access >>> 0, share >>> 0);
+            if (!hold)
+            {
+                return STATUS_SHARING_VIOLATION;
+            }
             return opened(host.handles.open('directory',
-                { path, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
+                { path, held: hold.held, ...deleteOnClose ? { deleteOnClose } : {} }), FILE_OPENED);
         }
         if (directoryOnly)
         {
@@ -3262,15 +3296,23 @@ export function createFileFunctions(host){
                 return onReadOnlyMedia(path)
                     ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_OBJECT_PATH_NOT_FOUND;
             }
-            return opened(host.handles.open('directory', { path: landed.path }), FILE_CREATED);
+            const hold = holdFolder(landed.path, access >>> 0, share >>> 0);
+            return opened(host.handles.open('directory',
+                { path: landed.path, held: hold?.held ?? null }), FILE_CREATED);
         }
 
+        // A name ending in a separator names a directory, and a file is none.
+        if (given && given.name.endsWith(SEPARATOR))
+        {
+            return STATUS_OBJECT_NAME_INVALID;
+        }
         // The reparse points on the way are behind it: the file is opened as it is.
         const result = openPath(landed.path, {
             access, share, disposition: creation,
             flags: (givenAttributes >>> 0) | (deleteOnClose ? FILE_FLAG_DELETE_ON_CLOSE : 0)
                 | FILE_FLAG_OPEN_REPARSE_POINT,
             mode: wanted & FILE_MODE_OPTIONS,
+            native: (disposition >>> 0) === FILE_SUPERSEDE ? 'supersede' : 'other',
         });
         if ('error' in result)
         {
@@ -3296,6 +3338,33 @@ export function createFileFunctions(host){
      * @type {Map<string, string>}
      */
     const deletePending = new Map();
+
+    /**
+     * Holds a directory open as its open asked - `rights` as granted, `share`
+     * CreateFile's FILE_SHARE_* - so its other opens, a rename and a
+     * RemoveDirectory are settled against it as they are against a file's:
+     * the hold's number, or null when the opens already there refuse it.
+     *
+     * @param {string} path @param {number} rights @param {number} share
+     * @returns {{ held: number | null } | null}
+     */
+    const holdFolder = (path, rights, share)=>{
+        if (!files.holdDirectory)
+        {
+            return { held: null };
+        }
+        const granted = mappedAccess('file', rights) ?? 0;
+        const answer = files.holdDirectory(path, {
+            read: (granted & (FILE_READ_DATA | FILE_EXECUTE)) !== 0,
+            write: (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0,
+            delete: (granted & DELETE) !== 0,
+        }, {
+            read: (share & FILE_SHARE_READ) !== 0,
+            write: (share & FILE_SHARE_WRITE) !== 0,
+            delete: (share & FILE_SHARE_DELETE) !== 0,
+        });
+        return 'token' in answer ? { held: answer.token } : null;
+    };
 
     /**
      * The byte ranges locked in each file, by the file's name folded to one
@@ -3394,6 +3463,28 @@ export function createFileFunctions(host){
     };
 
     /**
+     * An overlapped ReadFile or WriteFile of a file, done in its own call:
+     * the OVERLAPPED, its event and the port, less the packet a success at
+     * once skips when the handle's completion modes say so
+     * (FILE_SKIP_COMPLETION_PORT_ON_SUCCESS). On a handle that caches nothing
+     * (FILE_FLAG_NO_BUFFERING) Windows answers the call pending whatever: the
+     * work is done, and the call says ERROR_IO_PENDING, its packet posted;
+     * a read of nothing past the end is then the end (STATUS_END_OF_FILE).
+     *
+     * @param {number} handle @param {any} file @param {number} count @param {number} pointer
+     * @param {boolean} [pastEnd]  a read that found nothing past the end
+     * @returns {number} the call's answer
+     */
+    const finishOverlapped = (handle, file, count, pointer, pastEnd = false)=>{
+        const pending = file.overlapped === true
+            && (modeOf(file) & FILE_NO_INTERMEDIATE_BUFFERING) !== 0;
+        const skipsPort = !pending && (host.pipes?.skipsPortOnSuccess?.(handle >>> 0) ?? false);
+        host.ports?.completed(handle >>> 0, count, pointer,
+            pending && pastEnd ? STATUS_END_OF_FILE : 0, { port: skipsPort });
+        return pending ? fail(ERROR_IO_PENDING) : 1;
+    };
+
+    /**
      * Closes a handle of any kind, and whatever it held here with it: the
      * volume's node, its locks, a file it was to delete.
      *
@@ -3427,6 +3518,11 @@ export function createFileFunctions(host){
                     locks.set(key, kept);
                 }
             }
+            // A directory's hold goes with the last handle of its open.
+            if (closed?.held && !host.handles.holds?.(closed))
+            {
+                files.releaseDirectory?.(closed.held);
+            }
             // With the last handle to the file, not with a duplicate of it.
             // POSIX semantics: the name goes with the handle that asked.
             if (closed?.posixDelete && closed.path !== undefined && !host.handles.holds?.(closed))
@@ -3446,8 +3542,9 @@ export function createFileFunctions(host){
             {
                 for (const [key, path] of [...deletePending])
                 {
-                    // A directory's open is its handle alone.
-                    if (!(files.isOpen?.(path) ?? false) || (!closed.node && own === key))
+                    // A directory held by no open goes; one with something
+                    // in it stays, and is no longer pending.
+                    if (!(files.isOpen?.(path) ?? false))
                     {
                         files.remove(path);
                         deletePending.delete(key);
@@ -3532,6 +3629,22 @@ export function createFileFunctions(host){
         : host.handles.typeOf?.(handle >>> 0) ?? null);
 
     /**
+     * The device a handle opens as itself - the pipe device, or one of
+     * NT_DEVICES - with the mode it was opened in; null for any other.
+     *
+     * @param {number} handle @returns {{ mode?: number } | null}
+     */
+    const deviceObject = handle=>{
+        const kind = heldKind(handle);
+        if (kind !== 'device' && kind !== 'pipe')
+        {
+            return null;
+        }
+        const held = host.handles.resolve(handle, kind);
+        return kind === 'device' || held?.device ? held : null;
+    };
+
+    /**
      * One FILE_INFORMATION_CLASS record of an open file, as NtQueryInformationFile
      * lays it out; null for a class this keeps nothing for. The volume keeps
      * one time per file, the last write, and every time answers with it, as
@@ -3568,7 +3681,7 @@ export function createFileFunctions(host){
         // A file's number on its volume, GetFileInformationByHandle's: the
         // same for the same file under any of its names, which is what
         // comparing two handles asks.
-        const index = fileIndex(entry?.identity ?? file.path);
+        const index = files.fileId(file.path);
         switch (kind)
         {
             case FILE_BASIC_INFORMATION:
@@ -3583,8 +3696,10 @@ export function createFileFunctions(host){
                     view.setBigUint64(0, allocated, true);
                     view.setBigUint64(8, size, true);
                     view.setUint32(16, entry?.links ?? 1, true);
+                    // A name deleted under the open leaves the open's file pending too.
                     view.setUint8(20, file.deleteOnClose
-                        || deletePending.has(String(file.path).toLowerCase()) ? 1 : 0);
+                        || deletePending.has(String(file.path).toLowerCase())
+                        || !files.stat(file.path) ? 1 : 0);
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
             case FILE_INTERNAL_INFORMATION:
@@ -4227,9 +4342,12 @@ export function createFileFunctions(host){
                 {
                     return report(block >>> 0, piped.status, 0);
                 }
+                // A device opened as itself answers the mode it was opened in.
+                const device = deviceObject(handle >>> 0);
                 const slot = piped ?? (fileObject && (kind >>> 0) === FILE_ACCESS_INFORMATION
                     ? dwordOf(rightsOf(handle))
-                    : host.mailslots?.information(handle, kind >>> 0) ?? null);
+                    : device && (kind >>> 0) === FILE_MODE_INFORMATION ? dwordOf(device.mode ?? 0)
+                        : host.mailslots?.information(handle, kind >>> 0) ?? null);
                 // A directory the native open made is a file object as any
                 // other, its information the directory's.
                 const folder = slot === null ? object(handle, 'directory') : null;
@@ -4466,8 +4584,17 @@ export function createFileFunctions(host){
                     {
                         return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
-                    const error = host.pipes.completionModes.set(handle >>> 0,
-                        readDword(from >>> 0));
+                    // The native call keeps the flags it knows and passes over
+                    // the rest; skipping the port is for a handle whose I/O
+                    // can finish later, not a synchronous file's.
+                    const flags = readDword(from >>> 0) & COMPLETION_MODES;
+                    const opened = object(handle, 'file');
+                    if (opened && (flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0
+                        && (modeOf(opened) & SYNCHRONOUS_MODES) !== 0)
+                    {
+                        return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                    }
+                    const error = host.pipes.completionModes.set(handle >>> 0, flags);
                     return settled(block >>> 0, error === 0 ? STATUS_SUCCESS
                         : error === ERROR_INVALID_PARAMETER ? STATUS_INVALID_PARAMETER
                             : STATUS_INVALID_HANDLE, 0);
@@ -4697,6 +4824,11 @@ export function createFileFunctions(host){
         {
             return NATIVE_FAILURES[missing(named.path)];
         }
+        // A file whose deletion is pending is there, and answers nothing.
+        if (deletePending.has(named.path.toLowerCase()))
+        {
+            return STATUS_DELETE_PENDING;
+        }
         const record = informationOf({ path: named.path, directory: entry.isDirectory }, kind);
         if (!(record instanceof Uint8Array))
         {
@@ -4844,7 +4976,7 @@ export function createFileFunctions(host){
                     if (shape.id !== undefined)
                     {
                         view.setBigUint64(at + shape.id,
-                            BigInt(fileIndex(listedIdentity(directory.path, entry))), true);
+                            BigInt(files.fileId(listedIdentity(directory.path, entry))), true);
                     }
                 });
             }
@@ -4935,7 +5067,11 @@ export function createFileFunctions(host){
                 if (deleting)
                 {
                     const entry = files.stat(file.path);
-                    if (readOnlyFile(entry) || onReadOnlyMedia(file.path))
+                    const ignoreReadOnly = type === FILE_INFO.DISPOSITION_EX
+                        && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_IGNORE_READONLY) !== 0;
+                    // A file a section maps, or a view of it, is not deleted.
+                    if ((readOnlyFile(entry) && !ignoreReadOnly) || onReadOnlyMedia(file.path)
+                        || (!entry?.isDirectory && files.mappedAs?.(file.path)))
                     {
                         return { error: ERROR_ACCESS_DENIED, status: STATUS_CANNOT_DELETE };
                     }
@@ -4948,6 +5084,14 @@ export function createFileFunctions(host){
                 // Pending, the file opens no more, and goes with the last
                 // handle onto it; cleared through any handle, it stays.
                 const key = String(file.path).toLowerCase();
+                // FILE_DISPOSITION_ON_CLOSE sets or clears the open's
+                // delete-on-close itself, as FILE_FLAG_DELETE_ON_CLOSE set it.
+                if (type === FILE_INFO.DISPOSITION_EX
+                    && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_ON_CLOSE) !== 0)
+                {
+                    file.deleteOnClose = deleting;
+                    return 0;
+                }
                 if (deleting && type === FILE_INFO.DISPOSITION_EX
                     && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) !== 0)
                 {
@@ -4959,8 +5103,8 @@ export function createFileFunctions(host){
                 }
                 else
                 {
+                    // FILE_FLAG_DELETE_ON_CLOSE is the open's, and is not undone.
                     deletePending.delete(key);
-                    file.deleteOnClose = false;
                 }
                 return 0;
             }
@@ -5234,6 +5378,11 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
                 }
+                // A directory is not reopened, FILE_FLAG_BACKUP_SEMANTICS or not.
+                if (files.stat(path)?.isDirectory)
+                {
+                    return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
+                }
                 const opened = openPath(path, { access: access >>> 0, share: share >>> 0,
                     disposition: OPEN_EXISTING, flags: flags >>> 0 });
                 if ('error' in opened)
@@ -5329,11 +5478,8 @@ export function createFileFunctions(host){
                     // Written even when nothing was read: a program that checks
                     // it is exactly the one that has reached the end of a file.
                     writeDwordIf(read >>> 0, bytes.length);
-                    if (pointer !== 0)
-                    {
-                        host.ports?.completed(handle >>> 0, bytes.length, pointer);
-                    }
-                    return 1;
+                    return pointer !== 0 ? finishOverlapped(handle, file, bytes.length, pointer,
+                        bytes.length === 0 && (length >>> 0) !== 0) : 1;
                 };
 
                 const bytes = files.read(file.node, at, length >>> 0);
@@ -5430,11 +5576,7 @@ export function createFileFunctions(host){
                     writeDwordIf(written >>> 0, stored);
                     // The same debt an overlapped read owes: a save written through
                     // a pool hangs if the packet its worker waits on never arrives.
-                    if (pointer !== 0)
-                    {
-                        host.ports?.completed(handle >>> 0, stored, pointer);
-                    }
-                    return 1;
+                    return pointer !== 0 ? finishOverlapped(handle, file, stored, pointer) : 1;
                 };
                 const stored = (files.writeOrFetch ?? files.write)
                     .call(files, file.node, at, bytes);

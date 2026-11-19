@@ -544,6 +544,23 @@ export function createFileTable({ sharing = createSharing() } = {}){
             sharing.release(sharing.admit(removal(key, path)));
         },
 
+        /**
+         * Holds a directory open on the terms its open agreed to: a
+         * directory has no bytes to hand out, but its opens share and refuse
+         * as a file's do - another open, a rename, a RemoveDirectory is
+         * settled against them. Its number, or SHARING_VIOLATION thrown.
+         *
+         * @param {OpenTerms} terms @returns {number}
+         */
+        holdDirectory(terms){
+            return sharing.admit(terms);
+        },
+
+        /** @param {number} token */
+        releaseDirectory(token){
+            sharing.release(token);
+        },
+
         /** @returns {FileHandle[]} */
         list(){
             return [...open];

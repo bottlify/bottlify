@@ -112,6 +112,30 @@ function fakeMemory(size = 0x1000){
  * Paths are matched exactly: case folding belongs to the filesystem, and a test
  * that relied on it here would be testing this fake.
  */
+/**
+ * A volume's numbering as the filesystem keeps it: a number per file, given
+ * the first time it is asked for, the same for the same path whatever its case.
+ */
+function numbering(){
+    /** @type {Map<string, { id: number, path: string }>} */
+    const ids = new Map();
+    return {
+        /** @param {string} path */
+        fileId: path=>{
+            const key = path.toLowerCase();
+            if (!ids.has(key))
+            {
+                ids.set(key, { id: 64 + ids.size, path });
+            }
+            return /** @type {{ id: number }} */ (ids.get(key)).id;
+        },
+        /** @param {string} path @param {number} id */
+        pathOfFileId: (path, id)=>[...ids.values()].find(one=>one.id === id
+            && one.path.slice(0, 2).toLowerCase() === path.slice(0, 2).toLowerCase())?.path
+            ?? null,
+    };
+}
+
 function fakeFiles(){
     /** @type {Map<string, { data: Uint8Array, directory: boolean }>} */
     const nodes = new Map();
@@ -271,6 +295,7 @@ function fakeFiles(){
                     size: node.data.length,
                 }));
         },
+        ...numbering(),
         currentDirectory: ()=>current,
         /** @param {string} path */
         setCurrentDirectory: path=>{
@@ -2385,6 +2410,9 @@ test('a deletion is the file\'s: pending, it opens no more and goes with the las
         assert.equal(native.handler([NT_HANDLE, GENERIC_READ,
             objectAttributes(memory, '\\??\\C:\\GAME\\d.tmp'), NT_STATUS, 0, 0, 7, FILE_OPEN,
             0, 0, 0]) >>> 0, 0xc0000056, 'STATUS_DELETE_PENDING');
+        const attributes = /** @type {any} */ (fns.CreateFileW).natives.NtQueryAttributesFile;
+        assert.equal(attributes.handler([objectAttributes(memory, '\\??\\C:\\GAME\\d.tmp'),
+            0x400]) >>> 0, 0xc0000056, 'its attributes asked by name: pending too');
         assert.equal(fns.CloseHandle.handler([deleter]), 1);
         assert.ok(files.nodes.has('C:\\GAME\\d.tmp'), 'the writer still has it open');
         assert.equal(fns.CloseHandle.handler([writer]), 1);
@@ -3985,4 +4013,103 @@ test('a file handle reads and writes by the rights it holds: a second handle ont
     assert.equal(handles.access(handle), 0x0012019f,
         'CreateFile grants what it was asked, generic rights mapped, with SYNCHRONIZE and'
         + ' FILE_READ_ATTRIBUTES');
+});
+
+test('a device that holds no files opens as itself, in the mode it was opened in', ()=>{
+    const { memory, fns } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives;
+    const SYNCHRONIZE = 0x100000;
+    const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
+    for (const name of ['\\??\\MAILSLOT\\', '\\??\\MountPointManager',
+        '\\Device\\MountPointManager'])
+    {
+        for (const mode of [0, FILE_SYNCHRONOUS_IO_ALERT])
+        {
+            assert.equal(native.NtCreateFile.handler([NT_HANDLE, SYNCHRONIZE,
+                objectAttributes(memory, name), NT_STATUS, 0, 0, 0, FILE_OPEN, mode, 0, 0]), 0,
+            name);
+            const device = memory.dword(NT_HANDLE);
+            memory.putDword(0x400, 0xcccccccc);
+            assert.equal(native.NtQueryInformationFile.handler([device, 0x300, 0x400, 4, 16]), 0,
+                'FileModeInformation');
+            assert.equal(memory.dword(0x400), mode, `${name} opened in mode ${mode}`);
+            assert.equal(fns.CloseHandle.handler([device]), 1);
+        }
+    }
+    assert.equal(native.NtCreateFile.handler([NT_HANDLE, SYNCHRONIZE,
+        objectAttributes(memory, '\\??\\MountPointManager'), NT_STATUS, 0, 0, 0, FILE_CREATE, 0,
+        0, 0]) >>> 0, 0xc000000d, 'a device is opened, never made');
+});
+
+test('NtCreateFile overwrites without write access, and supersedes a read-only file', ()=>{
+    const { memory, files, fns } = setup();
+    const native = /** @type {any} */ (fns.CreateFileW).natives.NtCreateFile;
+    const FILE_SUPERSEDE = 0;
+    const FILE_OVERWRITE = 4;
+    const FILE_OVERWRITE_IF = 5;
+    const FILE_ATTRIBUTE_ARCHIVE = 0x20;
+    /** @param {string} name @param {number} disposition @param {number} attributes */
+    const create = (name, disposition, attributes)=>{
+        const status = native.handler([NT_HANDLE, GENERIC_READ, objectAttributes(memory, name),
+            NT_STATUS, 0, attributes, 3, disposition, 0, 0, 0]) >>> 0;
+        if (status === 0)
+        {
+            fns.CloseHandle.handler([memory.dword(NT_HANDLE)]);
+        }
+        return status;
+    };
+    files.put('C:\\GAME\\o.tmp', 'abc');
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_OVERWRITE, FILE_ATTRIBUTE_READONLY), 0,
+        'GENERIC_READ is enough to overwrite');
+    assert.equal(memory.dword(NT_STATUS + 4), 3, 'FILE_OVERWRITTEN');
+    assert.equal(files.text('C:\\GAME\\o.tmp'), '', 'emptied');
+    assert.equal(files.stat('C:\\GAME\\o.tmp')?.attributes,
+        FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE, 'and given the attributes asked');
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_OVERWRITE, 0), 0xc0000022,
+        'a read-only file is not overwritten');
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_OVERWRITE_IF, 0), 0xc0000022);
+    assert.equal(create('\\??\\C:\\GAME\\o.tmp', FILE_SUPERSEDE, 0), 0, 'but superseded');
+    assert.equal(memory.dword(NT_STATUS + 4), 0, 'FILE_SUPERSEDED');
+    assert.equal(create('\\??\\C:\\GAME\\none.tmp', FILE_OVERWRITE, 0), 0xc0000034,
+        'nothing to overwrite');
+    assert.equal(create('\\??\\C:\\GAME\\dir\\', 2, 0), 0xc0000033,
+        'a name ending in a separator is no file\'s');
+});
+
+test('an overlapped transfer done at once skips the port as the handle says, and an unbuffered'
+    + ' one answers pending', ()=>{
+    /** @type {any[][]} */
+    const done = [];
+    let skipping = false;
+    const { files, fns, open, error } = setup({
+        ports: {
+            offsetOf: ()=>0,
+            /**
+             * @param {number} handle @param {number} count @param {number} pointer
+             * @param {number} [status] @param {{ port?: boolean }} [skip]
+             */
+            completed: (handle, count, pointer, status, skip)=>done.push([count, status ?? 0,
+                skip?.port === true]),
+        },
+        pipes: /** @type {any} */ ({ skipsPortOnSuccess: ()=>skipping }),
+    });
+    const FILE_FLAG_OVERLAPPED = 0x40000000;
+    const FILE_FLAG_NO_BUFFERING = 0x20000000;
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const plain = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ, FILE_FLAG_OVERLAPPED);
+    assert.equal(fns.ReadFile.handler([plain, BUFFER, 4, OUT_COUNT, 0x500]), 1);
+    skipping = true;
+    assert.equal(fns.ReadFile.handler([plain, BUFFER, 4, OUT_COUNT, 0x500]), 1);
+    assert.deepEqual(done, [[4, 0, false], [4, 0, true]], 'the packet skipped once the modes say');
+
+    const unbuffered = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING, GENERIC_READ,
+        FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING);
+    assert.equal(fns.ReadFile.handler([unbuffered, BUFFER, 4, OUT_COUNT, 0x500]), 0);
+    assert.equal(error.code, 997, 'ERROR_IO_PENDING, its work done');
+    assert.deepEqual(done.at(-1), [4, 0, false], 'and its packet posted');
+    files.put('C:\\GAME\\EMPTY.DAT', '');
+    const empty = open('C:\\GAME\\EMPTY.DAT', OPEN_EXISTING, GENERIC_READ,
+        FILE_FLAG_OVERLAPPED | FILE_FLAG_NO_BUFFERING);
+    assert.equal(fns.ReadFile.handler([empty, BUFFER, 4, OUT_COUNT, 0x500]), 0);
+    assert.deepEqual(done.at(-1), [0, 0xc0000011, false], 'nothing past the end: the end');
 });

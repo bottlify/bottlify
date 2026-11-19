@@ -619,6 +619,56 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
         },
 
         /**
+         * Holds the directory at `path` open on `access` and `share`: its
+         * number, or the volume's code for why not - SHARING_VIOLATION when
+         * the opens already there do not allow it.
+         *
+         * @param {string} path
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} access
+         * @param {{ read?: boolean, write?: boolean, delete?: boolean }} share
+         * @returns {{ token: number } | { error: string }}
+         */
+        holdDirectory(path, access, share){
+            try
+            {
+                return { token: fs.holdDirectory(path, access, share) };
+            }
+            catch (e){
+                const error = /** @type {any} */ (e);
+                if (!error?.code || !(error.code in ErrorCode))
+                {
+                    throw error;
+                }
+                return { error: error.code };
+            }
+        },
+
+        /** @param {number} token */
+        releaseDirectory(token){
+            fs.releaseDirectory(token);
+        },
+
+        /**
+         * The number of the file at `path` on its volume, the same under
+         * every name and across renames: 0 for a path that names nothing.
+         *
+         * @param {string} path @returns {number}
+         */
+        fileId(path){
+            return attempt(()=>fs.fileId(path), 0);
+        },
+
+        /**
+         * Where the file numbered `id` is on the volume `path` is on: null
+         * for a number no file there has.
+         *
+         * @param {string} path @param {number} id @returns {string | null}
+         */
+        pathOfFileId(path, id){
+            return attempt(()=>fs.pathOfFileId(path, id), null);
+        },
+
+        /**
          * Gives the file at `existing` the further name `path`: null when it
          * did, or the volume's code for why not -- NOT_SAME_DEVICE across
          * drives, ACCESS_DENIED for a directory, ALREADY_EXISTS for a name
