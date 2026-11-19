@@ -215,6 +215,8 @@ const STATUS_MEDIA_WRITE_PROTECTED = 0xc00000a2;
 const STATUS_FILE_IS_A_DIRECTORY = 0xc00000ba;
 const STATUS_NOT_A_DIRECTORY = 0xc0000103;
 const STATUS_CANNOT_DELETE = 0xc0000121;
+/** An open of a file whose deletion is pending: ERROR_ACCESS_DENIED to Win32. */
+const STATUS_DELETE_PENDING = 0xc0000056;
 const STATUS_SHARING_VIOLATION = 0xc0000043;
 const STATUS_DIRECTORY_NOT_EMPTY = 0xc0000101;
 const STATUS_NO_SUCH_FILE = 0xc000000f;
@@ -359,6 +361,12 @@ const VOLUME_NAME_NT = 0x2;
 const VOLUME_NAME_NONE = 0x4;
 
 /** FILE_INFO_BY_HANDLE_CLASS: the classes SetFileInformationByHandle takes here. */
+/**
+ * What setting a class of an open file ends in: a Win32 error (0 when it
+ * held), or a refusal the native call names apart from it.
+ *
+ * @typedef {number | { error: number, status: number }} InformationError
+ */
 const FILE_INFO = Object.freeze({ BASIC: 0, RENAME: 3, DISPOSITION: 4, ALLOCATION: 5,
     END_OF_FILE: 6, IO_PRIORITY_HINT: 12, DISPOSITION_EX: 21, RENAME_EX: 22 });
 /**
@@ -394,6 +402,8 @@ const FILE_USE_FILE_POINTER_POSITION = 0xfffffffe;
 const FILE_WRITE_THROUGH = 0x2;
 const FILE_SYNCHRONOUS_IO_ALERT = 0x10;
 const FILE_DISPOSITION_FLAG_DELETE = 0x1;
+/** The name goes as the handle that asked closes, other opens or not. */
+const FILE_DISPOSITION_FLAG_POSIX_SEMANTICS = 0x2;
 const FILE_RENAME_FLAG_REPLACE_IF_EXISTS = 0x1;
 /** Milliseconds between 1601 and 1970, what a FILETIME counts from. */
 const FILETIME_EPOCH_MS = 11644473600000;
@@ -2406,13 +2416,15 @@ export function createFileFunctions(host){
     /**
      * The open CreateFile and NtCreateFile share, over a resolved path: a
      * handle and whether the file was already there, or the Win32 error it
-     * failed with. `cannotDelete` marks the one refusal the native call names
-     * differently -- a read-only file asked to go away when it closes.
+     * failed with. `cannotDelete` and `deletePending` mark the refusals the
+     * native call names differently -- a read-only file asked to go away when
+     * it closes, and a file whose deletion is pending.
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
      * @param {number} [implied]  rights the handle is granted beside those asked
-     * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
+     * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean,
+     *     deletePending?: boolean }}
      */
     const openPath = (path, request, implied = 0)=>{
         const result = openPathOnce(path, request, implied);
@@ -2428,7 +2440,8 @@ export function createFileFunctions(host){
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
      * @param {number} implied
-     * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
+     * @returns {{ handle: number, existed: boolean }
+     *     | { error: number, cannotDelete?: boolean, deletePending?: boolean }}
      */
     const openPathOnce = (path, { access, share, disposition, flags }, implied)=>{
         const mode = openModes[disposition >>> 0];
@@ -2454,6 +2467,11 @@ export function createFileFunctions(host){
 
         const existing = files.stat(path);
         const exists = Boolean(existing && existing.exists);
+        // A file whose deletion is pending opens no more, whatever is asked.
+        if (exists && deletePending.has(path.toLowerCase()))
+        {
+            return { error: ERROR_ACCESS_DENIED, deletePending: true };
+        }
         if (exists && existing?.isDirectory)
         {
             // A directory opens only with FILE_FLAG_BACKUP_SEMANTICS, and
@@ -2534,11 +2552,12 @@ export function createFileFunctions(host){
         const sequential = ((flags >>> 0) & FILE_FLAG_SEQUENTIAL_SCAN) !== 0;
         const writeAttributes = (rights
             & (GENERIC_WRITE | GENERIC_ALL | FILE_WRITE_ATTRIBUTES)) !== 0;
+        // FILE_FLAG_DELETE_ON_CLOSE asks for DELETE with it, as CreateFile does.
         const handle = host.handles.open('file', {
             path, node, read, write, writeAttributes, position: 0,
             ...deleteOnClose ? { deleteOnClose } : {},
             ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
-        }, mappedAccess('file', rights | implied));
+        }, mappedAccess('file', rights | implied | (deleteOnClose ? DELETE : 0)));
         return { handle, existed: exists };
     };
 
@@ -2840,13 +2859,26 @@ export function createFileFunctions(host){
         {
             return result.cannotDelete
                 ? STATUS_CANNOT_DELETE
-                : NATIVE_FAILURES[result.error] ?? STATUS_UNSUCCESSFUL;
+                : result.deletePending ? STATUS_DELETE_PENDING
+                    : NATIVE_FAILURES[result.error] ?? STATUS_UNSUCCESSFUL;
         }
         const replaced = disposition === FILE_SUPERSEDE ? FILE_SUPERSEDED : FILE_OVERWRITTEN;
         return opened(result.handle, !result.existed ? FILE_CREATED
             : creation === CREATE_ALWAYS || creation === TRUNCATE_EXISTING
                 ? replaced : FILE_OPENED);
     };
+
+    /**
+     * The files whose deletion is pending, by path folded to one case: set
+     * through FileDispositionInformation on any handle, they open no more
+     * (STATUS_DELETE_PENDING) and go when the last handle onto them closes.
+     *
+     * Each is kept with the path it goes by: a section made from the file
+     * may hold it open past its last handle, and closing that deletes it.
+     *
+     * @type {Map<string, string>}
+     */
+    const deletePending = new Map();
 
     /**
      * The byte ranges locked in each file, by the file's name folded to one
@@ -2979,9 +3011,31 @@ export function createFileFunctions(host){
                 }
             }
             // With the last handle to the file, not with a duplicate of it.
-            if (closed?.deleteOnClose && !host.handles.holds?.(closed))
+            // POSIX semantics: the name goes with the handle that asked.
+            if (closed?.posixDelete && closed.path !== undefined && !host.handles.holds?.(closed))
             {
                 files.remove(closed.path);
+            }
+            // A handle that deletes on close leaves the file pending while
+            // other opens of it remain - a handle, or a section made from it -
+            // and the last of them deletes it.
+            if (closed?.deleteOnClose && closed.path !== undefined
+                && !host.handles.holds?.(closed))
+            {
+                deletePending.set(String(closed.path).toLowerCase(), String(closed.path));
+            }
+            const own = String(closed?.path ?? '').toLowerCase();
+            if (closed && (closed.node || deletePending.has(own)) && !host.handles.holds?.(closed))
+            {
+                for (const [key, path] of [...deletePending])
+                {
+                    // A directory's open is its handle alone.
+                    if (!(files.isOpen?.(path) ?? false) || (!closed.node && own === key))
+                    {
+                        files.remove(path);
+                        deletePending.delete(key);
+                    }
+                }
             }
             // A no-op on anything that was never named.
             host.namedObjects?.forget(closed);
@@ -3114,7 +3168,8 @@ export function createFileFunctions(host){
                     view.setBigUint64(0, allocated, true);
                     view.setBigUint64(8, size, true);
                     view.setUint32(16, entry?.links ?? 1, true);
-                    view.setUint8(20, file.deleteOnClose ? 1 : 0);
+                    view.setUint8(20, file.deleteOnClose
+                        || deletePending.has(String(file.path).toLowerCase()) ? 1 : 0);
                     view.setUint8(21, file.directory ? 1 : 0);
                 });
             case FILE_INTERNAL_INFORMATION:
@@ -4039,11 +4094,13 @@ export function createFileFunctions(host){
                     // A bare name with no root renames the file where it is.
                     asked=>(view.getUint32(4, true) === 0 && !asked.includes(SEPARATOR)
                         ? renameTarget(file.path, asked)
-                        : resolveNative(view.getUint32(4, true), asked).path ?? null));
-                /** @param {number} code */
-                const answer = code=>settled(block >>> 0, code === 0 ? STATUS_SUCCESS
-                    : NATIVE_FAILURES[code] ?? STATUS_UNSUCCESSFUL, 0);
-                return typeof error === 'number' ? answer(error) : error.then(answer);
+                        : resolveNative(view.getUint32(4, true), asked).path ?? null),
+                    handle >>> 0);
+                /** @param {InformationError} code */
+                const answer = code=>settled(block >>> 0, typeof code !== 'number' ? code.status
+                    : code === 0 ? STATUS_SUCCESS : NATIVE_FAILURES[code] ?? STATUS_UNSUCCESSFUL,
+                0);
+                return error instanceof Promise ? error.then(answer) : answer(error);
             },
         },
 
@@ -4338,9 +4395,11 @@ export function createFileFunctions(host){
      * @param {Uint8Array} bytes  the record, at least its class's size
      * @param {(name: string) => string | null} target  where a rename's name
      *     leads, null for one that leads nowhere
-     * @returns {number | Promise<number>}
+     * @param {number} handle  the handle the class is set through: its rights
+     * @returns {InformationError | Promise<InformationError>}  a Win32 error, or
+     *     one the native call names otherwise (`status`)
      */
-    const informationError = (file, kind, type, bytes, target)=>{
+    const informationError = (file, kind, type, bytes, target, handle)=>{
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
         switch (type)
         {
@@ -4386,12 +4445,17 @@ export function createFileFunctions(host){
             case FILE_INFO.DISPOSITION_EX: {
                 const deleting = type === FILE_INFO.DISPOSITION ? bytes[0] !== 0
                     : (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_DELETE) !== 0;
+                // Deletion is the file's, asked through a handle that may delete it.
+                if (!allows(host.handles.access?.(handle >>> 0) ?? null, DELETE))
+                {
+                    return ERROR_ACCESS_DENIED;
+                }
                 if (deleting)
                 {
                     const entry = files.stat(file.path);
                     if (readOnlyFile(entry) || onReadOnlyMedia(file.path))
                     {
-                        return ERROR_ACCESS_DENIED;
+                        return { error: ERROR_ACCESS_DENIED, status: STATUS_CANNOT_DELETE };
                     }
                     if (entry?.isDirectory && files.list(file.path, '*')
                         .some(each=>each.name !== '.' && each.name !== '..'))
@@ -4399,7 +4463,23 @@ export function createFileFunctions(host){
                         return ERROR_DIR_NOT_EMPTY;
                     }
                 }
-                file.deleteOnClose = deleting;
+                // Pending, the file opens no more, and goes with the last
+                // handle onto it; cleared through any handle, it stays.
+                const key = String(file.path).toLowerCase();
+                if (deleting && type === FILE_INFO.DISPOSITION_EX
+                    && (view.getUint32(0, true) & FILE_DISPOSITION_FLAG_POSIX_SEMANTICS) !== 0)
+                {
+                    file.posixDelete = true;
+                }
+                else if (deleting)
+                {
+                    deletePending.set(key, String(file.path));
+                }
+                else
+                {
+                    deletePending.delete(key);
+                    file.deleteOnClose = false;
+                }
                 return 0;
             }
             case FILE_INFO.RENAME:
@@ -4472,10 +4552,11 @@ export function createFileFunctions(host){
         }
         const bytes = host.readMemory(from, Math.max(length, size)).slice();
         const error = informationError(open.file, open.kind, type, bytes,
-            asked=>renameTarget(open.file.path, asked));
-        /** @param {number} code */
-        const answer = code=>(code === 0 ? 1 : fail(code));
-        return typeof error === 'number' ? answer(error) : error.then(answer);
+            asked=>renameTarget(open.file.path, asked), handle >>> 0);
+        /** @param {InformationError} code */
+        const answer = code=>(typeof code !== 'number' ? fail(code.error)
+            : code === 0 ? 1 : fail(code));
+        return error instanceof Promise ? error.then(answer) : answer(error);
     };
 
     /**
