@@ -49,6 +49,8 @@ const INVALID_HANDLE_VALUE = 0xffffffff;
 const SECTION_QUERY = 0x1;
 const PAGE_READONLY = 0x02;
 const SEC_IMAGE = 0x1000000;
+/** ERROR_BAD_EXE_FORMAT, which GetProcAddress leaves for a forwarder loop. */
+const ERROR_BAD_EXE_FORMAT = 193;
 /** ERROR_PROC_NOT_FOUND, which GetProcAddress leaves. */
 const ERROR_PROC_NOT_FOUND = 127;
 /**
@@ -448,28 +450,31 @@ export function createLoaderFunctions({
                     return STATUS.INVALID_PARAMETER;
                 }
                 const text = (name >>> 0) === 0 ? 0 : terminated(name >>> 0, 1);
-                try
-                {
-                    const address = kernel32.GetProcAddress.handler([base,
-                        text !== 0 ? text : ordinal & 0xffff]) >>> 0;
+                /** @param {number} found */
+                const answer = found=>{
+                    if (text !== 0)
+                    {
+                        free(text);
+                    }
+                    const address = found >>> 0;
                     setU32(out >>> 0, address);
                     if (address !== 0)
                     {
                         return STATUS.SUCCESS;
                     }
-                    if (kernel32.GetLastError.handler([]) !== ERROR_PROC_NOT_FOUND)
+                    const error = kernel32.GetLastError.handler([]);
+                    if (error === ERROR_PROC_NOT_FOUND)
                     {
-                        return STATUS.DLL_NOT_FOUND;
+                        return text !== 0 ? STATUS_PROCEDURE_NOT_FOUND : STATUS_ORDINAL_NOT_FOUND;
                     }
-                    return text !== 0 ? STATUS_PROCEDURE_NOT_FOUND : STATUS_ORDINAL_NOT_FOUND;
-                }
-                finally
-                {
-                    if (text !== 0)
-                    {
-                        free(text);
-                    }
-                }
+                    // A forwarder followed past its limit, or back to itself.
+                    return error === ERROR_BAD_EXE_FORMAT ? STATUS.INVALID_IMAGE_FORMAT
+                        : STATUS.DLL_NOT_FOUND;
+                };
+                // GetProcAddress waits while a forwarder's target loads.
+                const found = kernel32.GetProcAddress.handler([base,
+                    text !== 0 ? text : ordinal & 0xffff]);
+                return found instanceof Promise ? found.then(answer) : answer(found);
             },
         },
 

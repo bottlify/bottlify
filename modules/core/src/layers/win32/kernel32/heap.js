@@ -1843,11 +1843,34 @@ export function createHeapFunctions(host){
             // was mapped with until VirtualProtect gives it another; a run is
             // the pages that share one, as Windows answers a view.
             const end = ((view.base + view.length + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1)) >>> 0;
-            takeCopies(view, page, end);
+            // The writes found are taken only where they can change the
+            // answer: through a copy-on-write run, in doubling steps ahead of
+            // it (twice its pages at most), and at a copy-on-write page that
+            // ends any other run, which a write turns into one of its own. A
+            // look never touches the rest of the view.
+            let taken = page + PAGE_SIZE;
+            takeCopies(view, page, taken);
             const protection = viewPageProtection(view, page);
+            const copying = copyOnWrite(protection);
             let to = page + PAGE_SIZE;
-            while (to < end && viewPageProtection(view, to) === protection)
+            while (to < end)
             {
+                if (copying && to >= taken)
+                {
+                    const ahead = Math.min(end, to + Math.max(PAGE_SIZE, to - page));
+                    takeCopies(view, taken, ahead);
+                    taken = ahead;
+                }
+                let next = viewPageProtection(view, to);
+                if (next !== protection && !copying && copyOnWrite(next))
+                {
+                    takeCopies(view, to, to + PAGE_SIZE);
+                    next = viewPageProtection(view, to);
+                }
+                if (next !== protection)
+                {
+                    break;
+                }
                 to += PAGE_SIZE;
             }
             return [page, view.base, view.sections ? PAGE_EXECUTE_WRITECOPY

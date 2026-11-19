@@ -213,11 +213,21 @@ flowchart TD
   volume after it is mapped and before its `DllMain`, and on unload after it.
 - **`GetProcAddress(NULL, ...)`** looks in the program's own image; what it does not export is
   `ERROR_PROC_NOT_FOUND`.
+- **An export forwarder** (`"LIB.Name"`, `"LIB.#7"`) is followed to the library it names by one
+  resolver (`exportOf` in `app.js`) for `GetProcAddress`, `LdrGetProcedureAddress` and the import
+  tables. `GetProcAddress` loads a target not yet loaded, the caller waiting; an import through a
+  forwarder has its target planned before the library at the start (`planDependencies`) and loaded
+  before a run-time library is bound. The forwarding library then holds its target, a reference
+  given back when it is unloaded, so a `FreeLibrary` of the target by name leaves it loaded while
+  the forwarder stands. A missing target is `ERROR_MOD_NOT_FOUND`, a name it lacks
+  `ERROR_PROC_NOT_FOUND`; past 32 forwarders, or back to itself, `ERROR_BAD_EXE_FORMAT`.
 - **A DLL already loaded** is handed back with its count raised. A bare name finds the first module
   of that name; a path finds only the module read from that file, so a second file of a loaded
   module's name is a module of its own (the .NET Framework loads a mixed assembly's native image
   so while the assembly is loaded).
-- **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
+- **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first (one
+  loaded at run time holds the libraries its import table names, and gives them back when it is
+  unloaded, as Windows counts a dependency; the program's own imports stay for the run), its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. Every image's TLS is supported, a library's loaded at run time too: a slot, a
   copy of its block in every thread (those already running when it is loaded included), and TLS

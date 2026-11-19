@@ -226,3 +226,35 @@ test('a library is looked for knowing what the image naming it takes from it', a
     });
     assert.deepEqual(asked, [['MSVCP71.dll', ['Anything']]]);
 });
+
+test('a library whose imported export is forwarded is planned after the one it forwards to',
+    async()=>{
+        // The program takes f.dll's `func`, which is s.dll's: s.dll is loaded
+        // to bind it, before f.dll; f.dll's other forwarder, which nothing
+        // imports, brings nothing in.
+        const forwarding = new Uint8Array(buildExe({
+            dll: true,
+            imageBase: 0x11000000,
+            imports: { 'KERNEL32.dll': ['GetLastError'] },
+            exports: [{ name: 'func', forwards: 's.func' }, { name: 'other', forwards: 'u.func' }],
+            code: ()=>[0xc3],
+        }));
+        /** @type {string[]} */
+        const read = [];
+        const { order, missing } = await planDependencies({
+            entry: new Uint8Array(buildExe({
+                imports: { 'f.dll': ['func'] },
+                code: ()=>[0xc3],
+            })),
+            isSystem: systemOnly(['kernel32.dll']),
+            isKnownDll: systemOnly(['kernel32.dll']),
+            readLibrary: async name=>{
+                read.push(name.toLowerCase());
+                return name.toLowerCase() === 'f.dll' ? forwarding
+                    : name.toLowerCase() === 's.dll' ? importing([]) : null;
+            },
+        });
+        assert.deepEqual(order.map(entry=>entry.name), ['s.dll', 'f.dll']);
+        assert.deepEqual(read, ['f.dll', 's.dll'], 'u.dll is not looked for');
+        assert.deepEqual(missing, []);
+    });

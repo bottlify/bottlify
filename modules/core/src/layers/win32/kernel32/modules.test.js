@@ -115,6 +115,32 @@ test('a module already in the table answers when the loader finds no file', ()=>
     assert.equal(fns.LoadLibraryA.handler([0x400000]), 0x1000);
 });
 
+test('GetProcAddress answers what the forwarder resolver finds, waiting while it loads',
+    async()=>{
+        const f = hostFor({ lookup: { 'f.dll': 0x1000 } });
+        /** @type {[string, string | null, number | null][]} */
+        const asked = [];
+        const fns = createModuleFunctions({
+            ...f.host,
+            exportOf: (module, name, ordinal)=>{
+                asked.push([module.name, name, ordinal]);
+                return name === 'later' ? Promise.resolve({ address: 0x2004 })
+                    : name === 'loop' ? { error: 193 } : { address: 0x2000 };
+            },
+        });
+        f.say(0x400000, 'func');
+        f.say(0x400010, 'later');
+        f.say(0x400020, 'loop');
+        assert.equal(fns.GetProcAddress.handler([0x1000, 0x400000]), 0x2000);
+        assert.equal(fns.GetProcAddress.handler([0x1000, 2]), 0x2000, 'by ordinal too');
+        assert.equal(await fns.GetProcAddress.handler([0x1000, 0x400010]), 0x2004,
+            'a forwarder\'s target loaded first');
+        assert.equal(fns.GetProcAddress.handler([0x1000, 0x400020]), 0);
+        assert.equal(f.lastError(), 193, 'the resolver\'s error is the one left');
+        assert.deepEqual(asked, [['f.dll', 'func', null], ['f.dll', null, 2],
+            ['f.dll', 'later', null], ['f.dll', 'loop', null]]);
+    });
+
 test('a name nothing provides is zero and sets ERROR_MOD_NOT_FOUND', ()=>{
     const f = hostFor({ lookup: {}, load: ()=>0 });
     const fns = createModuleFunctions(f.host);

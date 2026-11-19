@@ -276,6 +276,27 @@ test('an export by name or ordinal, and the status each miss is', ()=>{
     assert.equal(call('LdrGetProcedureAddress', 0x10000000, 0, 8, OUT), 0xc0000138);
 });
 
+test('an export through a forwarder waits for its target, and a forwarder loop or a missing'
+    + ' target is its status', async()=>{
+    let lastError = 0;
+    const { view, call } = machine({
+        GetProcAddress: { handler: (/** @type {number[]} */ [, ordinal])=>{
+            if (ordinal === 1)
+            {
+                return Promise.resolve(0x30001000);
+            }
+            lastError = ordinal === 2 ? 193 : 126;
+            return 0;
+        } },
+        GetLastError: { handler: ()=>lastError },
+    });
+    assert.equal(await call('LdrGetProcedureAddress', 0x10000000, 0, 1, OUT), STATUS.SUCCESS);
+    assert.equal(view.getUint32(OUT, true), 0x30001000);
+    assert.equal(call('LdrGetProcedureAddress', 0x10000000, 0, 2, OUT),
+        STATUS.INVALID_IMAGE_FORMAT);
+    assert.equal(call('LdrGetProcedureAddress', 0x10000000, 0, 3, OUT), STATUS.DLL_NOT_FOUND);
+});
+
 test('the loader lock is taken with a cookie; a try with nowhere to answer is refused', ()=>{
     const { view, call } = machine();
     assert.equal(call('LdrLockLoaderLock', 0, OUT, OUT + 4), STATUS.SUCCESS);
