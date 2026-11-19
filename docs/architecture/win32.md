@@ -161,7 +161,10 @@ sequenceDiagram
   keeps. Others are written once in JavaScript, marked `@guestCode`, and compiled to i386 by the
   build ([`core/scripts/guest-code/`](../../modules/core/scripts/guest-code/)): the compiled bytes sit beside the source as `*.x86.js`. The
   JavaScript stays the host's handler and the reference a test holds the x86 to, and
-  `return host()` hands a rare case to that handler. D3DX's vector, matrix and quaternion math and
+  `return host()` hands a rare case to that handler. For a 64-bit process the same source is
+  compiled to x86-64 too (`*.x64.js`): a parameter declared a pointer (`ptr`) is carried whole
+  there, past 4 GiB as well, and the handler answers a 64-bit caller's RAX as the code does, by
+  the type the source declares. D3DX's vector, matrix and quaternion math and
   its effect setters, msvcrt's string, float and math functions and GLU are written so.
 - **When a function is missing.** Each name has a stub of its own. If it is known how many bytes of
   arguments to take off (an `@N` decoration, a C++ name, a cdecl library, or a library the program

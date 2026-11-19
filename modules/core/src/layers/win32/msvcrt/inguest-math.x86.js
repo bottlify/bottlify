@@ -1065,7 +1065,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     frexp: {
         convention: 'cdecl',
-        params: ['f64', 'u32'],
+        params: ['f64', 'ptr'],
         returns: 'f64',
         uses: ['setU32'],
         code: Uint8Array.of(
@@ -1087,7 +1087,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     modf: {
         convention: 'cdecl',
-        params: ['f64', 'u32'],
+        params: ['f64', 'ptr'],
         returns: 'f64',
         uses: ['setF64'],
         code: Uint8Array.of(
@@ -1923,7 +1923,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     modff: {
         convention: 'cdecl',
-        params: ['f32', 'u32'],
+        params: ['f32', 'ptr'],
         returns: 'f32',
         uses: ['host', 'setF32'],
         host: 161,

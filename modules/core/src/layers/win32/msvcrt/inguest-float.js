@@ -37,6 +37,7 @@ import { X87 } from './x87.js';
 /** @typedef {import('./guest-code.js').f32} f32 */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 
 /** The largest double. */
 const MAX = 1.7976931348623157e308;
@@ -389,7 +390,7 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
  * times over before the first call returns.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end
+ * @param {Guest} guest @param {u32} text @param {ptr} end
  * @returns {f64}
  */
 export function strtod({ u8, setU32, controlWord, setControlWord, host, pointerBytes }, text,
@@ -731,7 +732,7 @@ export function _fdclass({ floatBits }, x){
  * short _dtest(double *x) -- the class of the double it points at.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} at
+ * @param {Guest} guest @param {ptr} at
  * @returns {i32}
  */
 export function _dtest({ u32 }, at){
@@ -742,7 +743,7 @@ export function _dtest({ u32 }, at){
  * short _fdtest(float *x)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} at
+ * @param {Guest} guest @param {ptr} at
  * @returns {i32}
  */
 export function _fdtest({ u32 }, at){
@@ -777,7 +778,7 @@ export function _fdsign({ floatBits }, x){
  * the reading, the end two bytes a character.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end
+ * @param {Guest} guest @param {u32} text @param {ptr} end
  * @returns {f64}
  */
 export function wcstod({ u16, setU32, controlWord, setControlWord, host, pointerBytes }, text,

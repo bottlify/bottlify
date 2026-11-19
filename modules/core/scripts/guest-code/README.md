@@ -26,9 +26,19 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){ ... }
 
 - **Convention**: the tag names `cdecl`, `stdcall` or `thiscall`. A thiscall function's first
   parameter is `this`, which arrives in ECX.
-- **Types**: `i32`/`u32` (a stack slot, EAX as a result), `f64`, `f32`, `x87` (a double the
-  caller left on the x87 stack), `i64`, `void`; and as a result `ptr`, a pointer: a
-  `u32` in the i386, the whole of RAX at 64 bits.
+- **Types**: `i32`/`u32` (a stack slot, EAX as a result), `ptr` (a pointer: a `u32` in the
+  i386, a quadword at 64 bits), `f64`, `f32`, `x87` (a double the caller left on the x87
+  stack), `i64`, `void`.
+- **A pointer**: a `ptr` parameter, or a variable declared with a pointer expression (a pointer
+  with constants and integers added or taken away: `const end = text + count`; several integers
+  are summed in 32 bits first, a signed index within 2 GiB of the pointer). It
+  is taken whole where a pointer stands: the address of a load, a store, `copyUp`, `copyDown`
+  or `fill`; a comparison with another pointer or a constant; `=`, `+=`, `-=`, `++` and `--`
+  of a pointer variable; an argument of `call` or of a `@guestCode` function whose parameter
+  is a `ptr`; the result of a `ptr` function. Its 32 bits are written as such - `p & 3`,
+  `(q - p) | 0`, `p >>> 0` - and any other use of it as an integer is refused, because the
+  x86-64 would take half of what the handler takes. Write a pointer the function walks as a
+  pointer (`at++`, `at += 4`, `at < end`), not as `(at + 1) >>> 0`, which is its low half.
 - **A 64-bit integer**: an `i64` parameter is two stack slots in the i386 and one argument at
   64 bits (a bigint in the JavaScript); `low64(x)` and `high64(x)` read its dwords where it
   lies, and nothing else reads it. An `i64` result is EDX:EAX, or RAX: a double truncated, an
@@ -67,10 +77,13 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
 `REFUSED` names each function with none and why.
 
 - **Convention**: the arguments in RCX, RDX, R8 and R9 and the stack past the 32 bytes of home
-  space, read as their low halves; the result in RAX, an `i32` extended by its sign, a `u32`
-  (a `size_t`, a `DWORD`) and a `ptr` by zeros - the whole value a Win64 caller of a `size_t`
-  or a pointer reads; the bridge's 64-bit trap answers a handed-over call by the same declared
-  type. The tag's convention means nothing at 64 bits.
+  space, an integer read as its low half and a `ptr` whole; the result in RAX, an `i32`
+  extended by its sign, a `u32` (a `size_t`, a `DWORD`) by zeros, a `ptr` whole - what a
+  Win64 caller of a `size_t` or a pointer reads. The export carries the declared type to the
+  bridge (`guestExport`: `returns`, and `addresses` for its `ptr` parameters), so the 64-bit
+  trap hands the handler a pointer whole and leaves RAX as the code does:
+  [`answers.test.js`](answers.test.js) holds the two to one quadword from 2^31 up. The tag's
+  convention means nothing at 64 bits.
 - **Registers**: the same 32-bit integers, over RAX..RDI and R8..R11 (named through a REX
   prefix). Variables take RDX and R8 to R11 first, which the callee may change, then the
   slots of the home space no argument holds, and only past those RBX, RSI, RDI or RBP, which
@@ -78,9 +91,14 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
   nothing and needs no more is a leaf (`leaf: true` in the module): it moves no stack and
   changes no register its caller keeps, which is what an unwinder takes code without unwind
   data to be. One that calls through a pointer or copies with `rep movs` is not.
-- **Addresses**: a register holds an address as a 32-bit operation leaves it, zero-extended;
-  an address of two registers is made into one by a 32-bit `lea` first, which wraps at 2^32 as
-  the helpers' addresses do.
+- **Addresses**: an integer's register holds an address as a 32-bit operation leaves it,
+  zero-extended; an address of two such registers is made into one by a 32-bit `lea` first,
+  which wraps at 2^32 as the helpers' addresses do. A `ptr` is the quadword: its register or
+  its slot whole, its index extended to 64 bits (an `i32` by its sign) and added there, its
+  comparisons and its moves under REX.W, and `rep movs` and `rep stos` stepping RSI and RDI
+  whole. A function whose pointers are `u32` reads the low half of a pointer past 4 GiB, as
+  it always did; one whose pointers are `ptr` follows it
+  ([`pointer.test.js`](pointer.test.js), on a wide window).
 - **`return host()`**: the frame taken down, RCX, RDX, R8 and R9 taken back from the home
   space where the entry wrote them, and a `jmp rel32` to the handler's trap.
 - **Doubles**: scalar SSE2, exact as JavaScript's doubles are. A double or float argument comes
@@ -115,6 +133,9 @@ the i386 one: `inguest.js` into `inguest.x64.js` (and so `inguest-math.js`, `ing
   out of range the integer indefinite, as `fisttp` answers), an integer extended by its sign.
 - **`compareExchange`**: the i386's `lock cmpxchg` of a dword, the address zero-extended by the
   32-bit operation that made it.
+- **MXCSR**: `mxcsr()` and `setMxcsr()` are the x86-64's as they are the i386's (`stmxcsr`,
+  `ldmxcsr` through the stack): the word a 64-bit runtime keeps its rounding and exception
+  flags in.
 - **Refused at 64 bits**: x87 arguments, a use of the x87's control and status words, more than
   six doubles at once, and a function `LONG` names for a pointer its source lays out as four
   bytes. Each stays a trap into its handler there.
@@ -135,6 +156,8 @@ for the tests: `equivalence` runs every case through the x86-64 too where there 
 | [`model.mjs`](model.mjs) | the x87's model of a module under single precision, the reference there |
 | [`compile.test.js`](compile.test.js) | the compiler's own tests |
 | [`long.test.js`](long.test.js) | the gate of the committed x86-64: every function against its JavaScript |
+| [`pointer.test.js`](pointer.test.js) | the pointer type: below 4 GiB at both widths, past it on a wide window, and what is refused |
+| [`answers.test.js`](answers.test.js) | RAX from 2^31 up, the x86-64 code against the handler through the bridge's 64-bit trap |
 | [`shaped-inputs.mjs`](shaped-inputs.mjs) | the gate's inputs for a function whose arguments agree only in a shape of their own (a C++ object and the delta it is held by), which its random text, counts and pointers never meet |
 | [`class-graph.mjs`](class-graph.mjs) | a class hierarchy laid out as Visual C++ lays out its RTTI, 32-bit or 64-bit, for what reads it |
 | `../build-guest-code.mjs` | compiles every `@guestCode` module under `src/` |

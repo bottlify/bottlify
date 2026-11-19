@@ -53,13 +53,17 @@ import { isDriven } from './drive.js';
  *     largest dword (0xFFFFFFFF) - a request no handler can meet, which it
  *     refuses as it refuses any too large - never as its low half, which
  *     would answer a request of 4 GiB + 16 bytes with sixteen.
- * @property {string} [returns]  The answer is an address or an unsigned
- *     size (a pointer, an HMODULE, a SIZE_T): a 64-bit caller finds it in RAX
- *     zero-extended. Every other dword answer is sign-extended there, as a
- *     HANDLE of -1 is INVALID_HANDLE_VALUE whole; the callers of a function
- *     that answers a dword read EAX alone, and its high half is no one's.
+ * @property {string} [returns]  'pointer': the answer is an address or an
+ *     unsigned size (a pointer, an HMODULE, a SIZE_T), and a 64-bit caller
+ *     finds it in RAX zero-extended. 'u32': the function has guest code that
+ *     answers an unsigned dword (`@returns {u32}`), which leaves RAX
+ *     zero-extended, and its handler answers the same quadword. Every other
+ *     dword answer is sign-extended there, as a HANDLE of -1 is
+ *     INVALID_HANDLE_VALUE whole; the callers of a function that answers a
+ *     dword read EAX alone, and its high half is no one's.
  *     `tools/checks/check-wide-arguments.mjs` holds each spec to the return
- *     type its signature comment writes.
+ *     type its signature comment writes; a function with guest code takes
+ *     its `returns` from the type its source declares (`guestExport`).
  * @property {Record<number, number>} [structs]  The structures wider than eight
  *     bytes passed by value -- a GUID, a VARIANT -- by their first dword's index,
  *     and how many dwords each is: the 32-bit signature has them inline, an
@@ -140,7 +144,7 @@ import { isDriven } from './drive.js';
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
  * @property {number[] | null} addresses  Of `fn`, checked; null for none.
  * @property {number[] | null} sizes  Of `fn`, checked; null for none.
- * @property {boolean} zeroExtends  `fn.returns` is 'pointer': RAX takes the answer zero-extended.
+ * @property {boolean} zeroExtends  `zeroExtendsOf(fn)`: RAX takes the answer zero-extended.
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
  *     null when every slot is one dword.
@@ -475,12 +479,15 @@ function makeRecord(){
 const NO_ERROR = ()=>0;
 
 /**
- * Whether a function's answer is an address, which RAX takes zero-extended
- * in a 64-bit process (`longAnswer`): its spec says `returns: 'pointer'`.
+ * Whether RAX takes a function's answer zero-extended in a 64-bit process
+ * (`longAnswer`): an address (`returns: 'pointer'`), or the unsigned dword
+ * of a function whose guest code leaves RAX so (`returns: 'u32'`) - the
+ * handler and the code are one function, and a caller that reads RAX whole
+ * must not be able to tell which answered.
  *
  * @param {{ returns?: string }} fn
  */
-export const zeroExtendsOf = fn=>fn.returns === 'pointer';
+export const zeroExtendsOf = fn=>fn.returns === 'pointer' || fn.returns === 'u32';
 
 /**
  * RAX as a 64-bit call's answer leaves it, as the function's type has it: a

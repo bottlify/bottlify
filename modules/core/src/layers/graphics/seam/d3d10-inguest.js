@@ -44,6 +44,7 @@
  *     & Pick<import('../../win32/msvcrt/guest-code.js').Guest, 'pointerBytes'>} Guest
  */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../../win32/msvcrt/guest-code.js').ptr} ptr */
 
 /** `SHADOW.FLAGS`, `COMMANDS`, `COMMAND_BYTES`, `COMMAND_HEAD` and `HELD`. */
 const COMMANDS = 4;
@@ -161,7 +162,7 @@ export function publish({ setU32, compareExchange }, block, record, slot, length
  *
  * @guestCode stdcall
  * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
- * @param {u32} self @param {u32} slot @param {u32} value
+ * @param {ptr} self @param {u32} slot @param {u32} value
  * @returns {u32}
  */
 export function one({ u32, setU32, compareExchange, pointerBytes }, self, slot, value){
@@ -179,8 +180,8 @@ export function one({ u32, setU32, compareExchange, pointerBytes }, self, slot, 
  *
  * @guestCode stdcall
  * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
- * @param {u32} self @param {u32} slot @param {u32} start
- * @param {u32} count @param {u32} objects
+ * @param {ptr} self @param {u32} slot @param {u32} start
+ * @param {u32} count @param {ptr} objects
  * @returns {u32}
  */
 export function slots({ u32, setU32, compareExchange, pointerBytes }, self, slot, start, count,
@@ -562,8 +563,8 @@ export function GSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes
  * the offsets, each `count` words.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} start @param {u32} count
- * @param {u32} buffers @param {u32} strides @param {u32} offsets
+ * @param {Guest} guest @param {ptr} self @param {u32} start @param {u32} count
+ * @param {ptr} buffers @param {ptr} strides @param {ptr} offsets
  * @returns {u32}
  */
 export function IASetVertexBuffers({ u32, setU32, compareExchange, host, pointerBytes }, self,
@@ -598,7 +599,7 @@ export function IASetVertexBuffers({ u32, setU32, compareExchange, host, pointer
  * void IASetIndexBuffer(this, ID3D10Buffer*, DXGI_FORMAT, UINT offset)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} buffer @param {u32} format
+ * @param {Guest} guest @param {ptr} self @param {u32} buffer @param {u32} format
  * @param {u32} offset
  * @returns {u32}
  */
@@ -625,7 +626,7 @@ export function IASetIndexBuffer({ u32, setU32, compareExchange, host, pointerBy
  * The record: how many, the depth view, then the targets.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} views
+ * @param {Guest} guest @param {ptr} self @param {u32} count @param {ptr} views
  * @param {u32} depth
  * @returns {u32}
  */
@@ -660,7 +661,7 @@ export function OMSetRenderTargets({ u32, setU32, compareExchange, host, pointer
  * factor's four floats as bits (zero without one).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} state @param {u32} factor
+ * @param {Guest} guest @param {ptr} self @param {u32} state @param {ptr} factor
  * @param {u32} mask
  * @returns {u32}
  */
@@ -688,7 +689,7 @@ export function OMSetBlendState({ u32, setU32, compareExchange, host, pointerByt
  * void OMSetDepthStencilState(this, ID3D10DepthStencilState*, UINT stencilRef)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} state @param {u32} reference
+ * @param {Guest} guest @param {ptr} self @param {u32} state @param {u32} reference
  * @returns {u32}
  */
 export function OMSetDepthStencilState({ u32, setU32, compareExchange, host, pointerBytes },
@@ -753,7 +754,7 @@ export function ContextRSSetViewports({ u32, setU32, compareExchange, host, poin
  *
  * @guestCode stdcall
  * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
- * @param {u32} self @param {u32} slot @param {u32} count @param {u32} items
+ * @param {ptr} self @param {u32} slot @param {u32} count @param {ptr} items
  * @param {u32} words
  * @returns {u32}
  */
@@ -783,7 +784,7 @@ export function counted({ u32, setU32, compareExchange, pointerBytes }, self, sl
  * void RSSetScissorRects(this, UINT count, const D3D10_RECT*): four words each.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} rects
+ * @param {Guest} guest @param {ptr} self @param {u32} count @param {ptr} rects
  * @returns {u32}
  */
 export function RSSetScissorRects({ u32, setU32, compareExchange, host, pointerBytes }, self,
@@ -812,7 +813,7 @@ export function RSSetScissorRects({ u32, setU32, compareExchange, host, pointerB
  * void Draw(this, UINT vertexCount, UINT startVertex)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} start
+ * @param {Guest} guest @param {ptr} self @param {u32} count @param {u32} start
  * @returns {u32}
  */
 export function Draw({ u32, setU32, compareExchange, host, pointerBytes }, self, count, start){
@@ -830,7 +831,7 @@ export function Draw({ u32, setU32, compareExchange, host, pointerBytes }, self,
  * void DrawIndexed(this, UINT indexCount, UINT startIndex, INT baseVertex)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} start
+ * @param {Guest} guest @param {ptr} self @param {u32} count @param {u32} start
  * @param {u32} base
  * @returns {u32}
  */
@@ -854,7 +855,7 @@ export function DrawIndexed({ u32, setU32, compareExchange, host, pointerBytes }
  *                    UINT startInstance)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} instances
+ * @param {Guest} guest @param {ptr} self @param {u32} count @param {u32} instances
  * @param {u32} start @param {u32} first
  * @returns {u32}
  */
@@ -880,7 +881,7 @@ export function DrawInstanced({ u32, setU32, compareExchange, host, pointerBytes
  *                           INT baseVertex, UINT startInstance)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} count @param {u32} instances
+ * @param {Guest} guest @param {ptr} self @param {u32} count @param {u32} instances
  * @param {u32} start @param {u32} base @param {u32} first
  * @returns {u32}
  */
@@ -907,7 +908,7 @@ export function DrawIndexedInstanced({ u32, setU32, compareExchange, host, point
  * void ClearRenderTargetView(this, ID3D10RenderTargetView*, const FLOAT colour[4])
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} view @param {u32} colour
+ * @param {Guest} guest @param {ptr} self @param {u32} view @param {ptr} colour
  * @returns {u32}
  */
 export function ClearRenderTargetView({ u32, setU32, compareExchange, host, pointerBytes }, self,
@@ -938,7 +939,7 @@ export function ClearRenderTargetView({ u32, setU32, compareExchange, host, poin
  *                            UINT8 stencil): the depth as its bits.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} view @param {u32} flags
+ * @param {Guest} guest @param {ptr} self @param {u32} view @param {u32} flags
  * @param {u32} depth @param {u32} stencil
  * @returns {u32}
  */
@@ -970,7 +971,7 @@ export function ClearDepthStencilView({ u32, setU32, compareExchange, host, poin
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} self @param {u32} type @param {u32} flags
- * @param {u32} out
+ * @param {ptr} out
  * @returns {u32}
  */
 export function BufferMap({ u32, setU32, compareExchange, host, pointerBytes }, self, type,
@@ -998,8 +999,8 @@ export function BufferMap({ u32, setU32, compareExchange, host, pointerBytes }, 
  * maps are the host's, kept apart for its command list.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} resource @param {u32} subresource
- * @param {u32} type @param {u32} flags @param {u32} out
+ * @param {Guest} guest @param {ptr} self @param {ptr} resource @param {u32} subresource
+ * @param {u32} type @param {u32} flags @param {ptr} out
  * @returns {u32}
  */
 export function ContextMap({ u32, setU32, compareExchange, host, pointerBytes }, self, resource,
@@ -1030,7 +1031,7 @@ export function ContextMap({ u32, setU32, compareExchange, host, pointerBytes },
  *
  * @guestCode stdcall
  * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
- * @param {u32} buffer @param {u32} type
+ * @param {ptr} buffer @param {u32} type
  * @returns {u32}
  */
 export function mapStorage({ u32, setU32, compareExchange, pointerBytes }, buffer, type){
@@ -1105,7 +1106,7 @@ export function BufferUnmap({ u32, setU32, compareExchange, host, pointerBytes }
  * a dynamic buffer's unmap of a map the guest made, as `BufferUnmap`.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} self @param {u32} resource @param {u32} subresource
+ * @param {Guest} guest @param {ptr} self @param {u32} resource @param {u32} subresource
  * @returns {u32}
  */
 export function ContextUnmap({ u32, setU32, compareExchange, host, pointerBytes }, self, resource,

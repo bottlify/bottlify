@@ -67,7 +67,7 @@ export const TENS_HIGH = Uint32Array.from({ length: 20 },
  * clamps and sets errno; so is a base outside 2..36 other than 0.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
  * @returns {i64}
  */
 export function _strtoi64({ u8, setU32, host, pointerBytes, int64 }, text, end, base){
@@ -164,7 +164,7 @@ export function _strtoi64({ u8, setU32, host, pointerBytes, int64 }, text, end, 
  * 64 bits. A magnitude past 64 bits is the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
  * @returns {i64}
  */
 export function _strtoui64({ u8, setU32, host, pointerBytes, int64 }, text, end, base){

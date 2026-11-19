@@ -90,7 +90,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     printInto: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u8', 'u32', 'setU8', 'setU32', 'pointerBytes'],
         tables: { POWERS: 3072, NULL_TEXT: 3112 },
@@ -359,7 +359,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     vsprintf: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 109,
@@ -709,7 +709,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _vsnprintf: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 127,
@@ -1407,7 +1407,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _vsnprintf_s: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 229,
@@ -1767,7 +1767,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     vsprintf_s: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u8', 'u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
         host: 175,
@@ -2925,7 +2925,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     printIntoWide: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u16', 'u32', 'setU16', 'setU32', 'pointerBytes'],
         tables: { POWERS: 3156, NULL_TEXT: 3196 },
@@ -3201,7 +3201,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _vsnwprintf: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u16', 'u32', 'setU16', 'setU32', 'host', 'pointerBytes'],
         host: 155,
@@ -3562,7 +3562,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     vswprintf: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u16', 'u32', 'setU16', 'setU32', 'host', 'pointerBytes'],
         host: 117,
@@ -4275,7 +4275,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     vswprintf_s: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'i32',
         uses: ['u16', 'u32', 'setU16', 'setU32', 'host', 'pointerBytes'],
         host: 183,

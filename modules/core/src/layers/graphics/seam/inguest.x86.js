@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     TestCooperativeLevel: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
         uses: ['u32', 'host', 'pointerBytes'],
         host: 36,
@@ -24,7 +24,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     QueryGetType: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
         uses: ['u32', 'host', 'pointerBytes'],
         host: 18,
@@ -35,7 +35,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     QueryGetDataSize: {
         convention: 'stdcall',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'u32',
         uses: ['u32', 'host', 'pointerBytes'],
         host: 20,
@@ -46,7 +46,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     QueryIssue: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'host', 'pointerBytes'],
         host: 36,
@@ -59,7 +59,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     QueryGetData: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'host', 'pointerBytes'],
         host: 214,

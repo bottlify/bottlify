@@ -49,7 +49,7 @@ export const STRING_INLINE = 15;
  * basic_string::basic_string()
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {ptr}
  */
 export function stringConstruct({ setU8, setU32, pointerBytes }, self){
@@ -75,7 +75,7 @@ export function stringConstruct({ setU8, setU32, pointerBytes }, self){
  * Inline when the text fits; the host's when it does not.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self @param {u32} text
+ * @param {Guest} guest @param {ptr} self @param {ptr} text
  * @returns {ptr}
  */
 export function stringFromText({ u8, setU32, copyUp, host, pointerBytes }, self, text){
@@ -111,7 +111,7 @@ export function stringFromText({ u8, setU32, copyUp, host, pointerBytes }, self,
  * A copy's capacity is its own: inline when the other's text fits.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self @param {u32} other
+ * @param {Guest} guest @param {ptr} self @param {ptr} other
  * @returns {ptr}
  */
 export function stringCopy({ u32, setU32, copyUp, host, pointerBytes }, self, other){
@@ -145,7 +145,7 @@ export function stringCopy({ u32, setU32, copyUp, host, pointerBytes }, self, ot
  * the heap is the host's, which frees it.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}  Nothing a caller reads: zero.
  */
 export function stringDestroy({ u32, setU8, setU32, host, pointerBytes }, self){
@@ -167,7 +167,7 @@ export function stringDestroy({ u32, setU8, setU32, host, pointerBytes }, self){
  * at an index -- `operator[]` in the forms that do not check it.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {ptr}
  */
 export function stringText({ u32, pointerBytes }, self){
@@ -181,7 +181,7 @@ export function stringText({ u32, pointerBytes }, self){
  * char &basic_string::operator[](size_type index), unchecked.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self @param {u32} index
+ * @param {Guest} guest @param {ptr} self @param {u32} index
  * @returns {ptr}
  */
 export function stringAt({ u32, pointerBytes }, self, index){
@@ -196,7 +196,7 @@ export function stringAt({ u32, pointerBytes }, self, index){
  * size_type basic_string::size() const
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self
+ * @param {Guest} guest @param {ptr} self
  * @returns {u32}
  */
 export function stringSize({ u32, pointerBytes }, self){
@@ -210,7 +210,7 @@ export function stringSize({ u32, pointerBytes }, self){
  * Within the capacity here; past it the host's, which grows the string.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self @param {u32} c
+ * @param {Guest} guest @param {ptr} self @param {u32} c
  * @returns {ptr}
  */
 export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, self, c){
@@ -238,7 +238,7 @@ export function stringAppendChar({ u32, setU8, setU32, host, pointerBytes }, sel
  * it the host's.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} count
  * @returns {u32}  Nothing a caller reads: zero.
  */
 export function stringResize({ u32, setU8, setU32, host, pointerBytes }, self, count){
@@ -269,7 +269,7 @@ export function stringResize({ u32, setU8, setU32, host, pointerBytes }, self, c
  * to fit inline again, is the host's.
  *
  * @guestCode thiscall
- * @param {Guest} guest @param {u32} self @param {u32} count
+ * @param {Guest} guest @param {ptr} self @param {u32} count
  * @returns {u32}  Nothing a caller reads: zero.
  */
 export function stringReserve({ u32, host, pointerBytes }, self, count){

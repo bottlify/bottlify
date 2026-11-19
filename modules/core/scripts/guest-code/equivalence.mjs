@@ -282,14 +282,17 @@ export function equivalence(compiled, sources, model, long){
         }
         const words = input.stack ?? [];
         // The words as the 32-bit stack has them: a double's two, low first.
+        // A pointer is its register whole, where a dword's upper half is
+        // whatever the caller left there.
         let next = 0;
         const args = fn.params.map((type, i)=>(type === 'f64' || type === 'i64'
             ? BigInt(words[next++] >>> 0) | BigInt(words[next++] >>> 0) << 32n
-            : argumentOf(words[next++] ?? 0, i)));
+            : type === 'ptr' ? BigInt((words[next++] ?? 0) >>> 0)
+                : argumentOf(words[next++] ?? 0, i)));
         const floats = fn.params.map(type=>type === 'f64' || type === 'f32');
         const before = m.read(DATA, span);
         const { entry, xmm, slots, halted } = callLong(m, CODE_64, { args, floats,
-            returnTo: HALT });
+            returnTo: HALT, mxcsr: input.mxcsr });
         const what = `${name}(${JSON.stringify(words)}) at 64 bits`;
         assert.ok(halted, `${what} halts`);
         // XMM6 to XMM15 are the caller's, as RBX and the rest are.
@@ -355,7 +358,7 @@ export function equivalence(compiled, sources, model, long){
             return {
                 rax: typeof answer === 'bigint' ? BigInt.asUintN(64, answer)
                     : typeof answer !== 'number' ? 0n : wholeAnswer(fn.returns, answer),
-                rsp: BigInt(STACK_64 + 8), kept, given, df,
+                rsp: BigInt(STACK_64 + 8), kept, given, df, mxcsr: m.mxcsr(),
                 data: memory.slice(DATA, DATA + data.length), handedOver: true,
                 ...typeof answer !== 'object' ? {} : { xmm0: fn.returns === 'f32'
                     ? Math.fround(answer.st0) : answer.st0 },
@@ -364,7 +367,7 @@ export function equivalence(compiled, sources, model, long){
         assert.equal(m.rip(), HALT + 1, `${what} returns to its caller's address`);
         const answer = new DataView(m.xmm(0).buffer);
         return { rax: m.reg('rax'), rsp: m.reg('rsp'), kept, given, df, data: m.read(DATA, span),
-            handedOver: false,
+            handedOver: false, mxcsr: m.mxcsr(),
             xmm0: fn.returns === 'f32' ? answer.getFloat32(0, true) : answer.getFloat64(0, true) };
     };
 
@@ -400,6 +403,13 @@ export function equivalence(compiled, sources, model, long){
         assert.deepEqual(x64.kept, x64.given, `${at64}: the registers a callee keeps kept`);
         assert.equal(x64.rsp, BigInt(STACK_64 + 8), `${at64}: RSP past the return address`);
         assert.equal(x64.df, false, `${at64}: the direction flag clear`);
+        if (fn.uses.includes('mxcsr') || fn.uses.includes('setMxcsr'))
+        {
+            // Of a function that reads or loads the word: the flags SSE
+            // arithmetic raises on the way are no part of the JavaScript.
+            assert.equal(x64.mxcsr, /** @type {{ mxcsr?: number }} */ (judge).mxcsr,
+                `${at64}: MXCSR`);
+        }
         if (fn.returns === 'f64' || fn.returns === 'f32')
         {
             assert.ok(sameDouble(/** @type {number} */ (x64.xmm0), judge.st[0]),

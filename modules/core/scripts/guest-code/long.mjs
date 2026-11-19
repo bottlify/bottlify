@@ -122,13 +122,14 @@ export function longMachine({ window, config } = {}){
             new Uint8Array(memory.buffer).set(bytes, layout.xmm + index * 16);
         },
         flags: ()=>view().getUint32(layout.eflags, true),
-        call(at, registers, budget = 50_000_000){
+        mxcsr: ()=>view().getUint32(layout.mxcsr, true),
+        call(at, registers, budget = 50_000_000, mxcsr = 0x1f80){
             const v = view();
             QUADS.forEach((name, i)=>v.setBigUint64(layout.regs + i * 8,
                 BigInt.asUintN(64, registers[name] ?? 0n), true));
             v.setBigUint64(layout.eip, BigInt(at), true);
             v.setUint32(layout.eflags, 0x202, true);
-            v.setUint32(layout.mxcsr, 0x1f80, true);
+            v.setUint32(layout.mxcsr, mxcsr, true);
             // The x87 as the convention leaves it at a call: every register empty, the
             // control word Windows sets for a 64-bit thread (double precision).
             v.setUint8(layout.x87Empty, 0xff);
@@ -161,10 +162,12 @@ export function longMachine({ window, config } = {}){
  * @property {(index: number) => Uint8Array} xmm  XMM register `index`'s sixteen bytes, a copy.
  * @property {(index: number, bytes: ArrayLike<number>) => void} setXmm
  * @property {() => number} flags
- * @property {(at: number, registers: Record<string, bigint>, budget?: number)
+ * @property {() => number} mxcsr
+ * @property {(at: number, registers: Record<string, bigint>, budget?: number, mxcsr?: number)
  *     => { halted: boolean, retired: number }} call
  *     Runs from `at` with the registers given (the others zero) to a `hlt`,
- *     or the budget's end; a fault is thrown with its vector.
+ *     or the budget's end; a fault is thrown with its vector. MXCSR is its
+ *     reset at the call unless one is given.
  */
 
 /**
@@ -179,14 +182,15 @@ export function longMachine({ window, config } = {}){
  *
  * @param {LongMachine} m @param {number} at
  * @param {{ args?: bigint[], floats?: boolean[], returnTo: number,
- *     registers?: Record<string, bigint> }} call
- *     floats: which of the arguments are doubles or floats
+ *     registers?: Record<string, bigint>, mxcsr?: number }} call
+ *     floats: which of the arguments are doubles or floats; mxcsr: MXCSR as
+ *     the call finds it, its reset where none is given
  * @returns {{ entry: Record<string, bigint>, xmm: Uint8Array[], home: Uint8Array,
  *     slots: bigint[], halted: boolean, retired: number }}
  *     What the call was given: the registers, the XMM registers, the home
  *     space's bytes, the stack slots past it
  */
-export function callLong(m, at, { args = [], floats = [], returnTo, registers = {} }){
+export function callLong(m, at, { args = [], floats = [], returnTo, registers = {}, mxcsr }){
     m.setQuad(STACK_64, BigInt(returnTo));
     m.write(STACK_64 + 8, new Uint8Array(32).fill(0xcd));
     const slots = args.slice(4);
@@ -206,7 +210,7 @@ export function callLong(m, at, { args = [], floats = [], returnTo, registers = 
     });
     xmm.forEach((bytes, i)=>m.setXmm(i, bytes));
     const home = m.read(STACK_64 + 8, 32);
-    const ran = m.call(at, entry);
+    const ran = m.call(at, entry, undefined, mxcsr);
     return { entry, xmm, home, slots, ...ran };
 }
 

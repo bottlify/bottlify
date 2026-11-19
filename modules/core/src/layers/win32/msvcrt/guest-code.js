@@ -135,7 +135,7 @@ const FLOAT_BIT_HELPERS = {
  *
  * @typedef {Object} CompiledGuestCode
  * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
- * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87' | 'i64')[]} params
+ * @property {readonly ('i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'x87' | 'i64')[]} params
  * @property {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
@@ -418,7 +418,7 @@ export function guestMemory(host){
  * @param {CompiledGuestCode} compiled
  * @param {HostFallback} [fallback]
  * @returns {{ convention: string, argBytes: number,
- *     floats?: Record<number, 'f32' | 'f64'>,
+ *     floats?: Record<number, 'f32' | 'f64'>, addresses?: number[], returns?: string,
  *     code: (builder?: CodeBuilder) => Uint8Array,
  *     long?: (builder?: CodeBuilder) => Uint8Array }}
  */
@@ -437,6 +437,8 @@ export function guestExport(compiled, fallback){
     const floats = {};
     /** @type {number[]} An i64's first slot: one argument whole to a 64-bit caller. */
     const quadwords = [];
+    /** @type {number[]} A pointer's slot: the address whole to a handler of a 64-bit caller. */
+    const addresses = [];
     let word = 0;
     for (const type of compiled.params)
     {
@@ -448,10 +450,20 @@ export function guestExport(compiled, fallback){
         {
             quadwords.push(word);
         }
+        if (type === 'ptr')
+        {
+            addresses.push(word);
+        }
         word += type === 'f64' || type === 'i64' ? 2 : type === 'x87' ? 0 : 1;
     }
+    // RAX as the x86-64 code leaves it for the declared type, which the trap
+    // has to answer the same: a pointer and an unsigned dword by zeros, a
+    // signed one (no `returns`) by its sign. One source, the function's own.
+    const returns = compiled.returns === 'ptr' ? 'pointer'
+        : compiled.returns === 'u32' ? 'u32' : undefined;
     const declared = { ...Object.keys(floats).length > 0 ? { floats } : {},
-        ...quadwords.length > 0 ? { quadwords } : {} };
+        ...quadwords.length > 0 ? { quadwords } : {},
+        ...addresses.length > 0 ? { addresses } : {}, ...returns ? { returns } : {} };
     /**
      * The code with its jump to the trap filled in, where it has one.
      *
@@ -504,7 +516,7 @@ export function guestExport(compiled, fallback){
  * @param {HostFallback} [fallback]  What `return host()` answers with, in the
  *     handler and through the trap the code jumps to.
  * @returns {{ convention: string, argBytes: number,
- *     floats?: Record<number, 'f32' | 'f64'>,
+ *     floats?: Record<number, 'f32' | 'f64'>, addresses?: number[], returns?: string,
  *     code: (builder?: CodeBuilder) => Uint8Array,
  *     long?: (builder?: CodeBuilder) => Uint8Array, handler: (args: number[]) => number }}
  */
@@ -569,6 +581,12 @@ export function guestEntry(source, compiled, host, fallback){
                     | BigInt(args[slot] >>> 0)));
                 slot += 2;
             }
+            else if (type === 'ptr')
+            {
+                // Whole from a 64-bit caller (the spec's `addresses`).
+                values.push(args[slot] >= 2 ** 32 ? args[slot] : args[slot] >>> 0);
+                slot++;
+            }
             else
             {
                 values.push(type === 'i32' ? args[slot] | 0 : args[slot] >>> 0);
@@ -610,6 +628,11 @@ export function guestEntry(source, compiled, host, fallback){
             }
             case 'void':
                 return 0;
+            case 'ptr':
+                // Past a dword only in a 64-bit process, whose RAX takes a bigint
+                // whole (the bridge's `longAnswer`); a number to every other reader.
+                return result >= 2 ** 32
+                    ? /** @type {number} */ (/** @type {unknown} */ (BigInt(result))) : result;
             default:
                 return result;
         }

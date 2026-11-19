@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     D3DXMatrixMultiply: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -77,7 +77,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixTranspose: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u32', 'setU32'],
         code: Uint8Array.of(
@@ -106,7 +106,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixInverse: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -342,7 +342,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixTranslation: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'ptr',
         uses: ['setU32'],
         code: Uint8Array.of(
@@ -360,7 +360,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixOrthoLH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32'],
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32'],
         returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
@@ -382,7 +382,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXMatrixPerspectiveLH: {
         convention: 'stdcall',
-        params: ['u32', 'f32', 'f32', 'f32', 'f32'],
+        params: ['ptr', 'f32', 'f32', 'f32', 'f32'],
         returns: 'ptr',
         uses: ['setU32', 'setF32'],
         code: Uint8Array.of(
@@ -405,7 +405,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec4Transform: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -433,7 +433,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec3Transform: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -459,7 +459,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec3TransformNormal: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -481,7 +481,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec3TransformCoord: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -513,7 +513,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec3TransformCoordArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['u32', 'u32', 'u32', 'u32', 'ptr', 'u32'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(
@@ -559,7 +559,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     D3DXVec3Normalize: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['f32', 'setF32'],
         code: Uint8Array.of(

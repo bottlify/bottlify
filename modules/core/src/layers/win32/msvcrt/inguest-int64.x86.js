@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     _strtoi64: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32'],
+        params: ['u32', 'ptr', 'i32'],
         returns: 'i64',
         uses: ['u8', 'setU32', 'host', 'pointerBytes', 'int64'],
         host: 535,
@@ -100,7 +100,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _strtoui64: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'i32'],
+        params: ['u32', 'ptr', 'i32'],
         returns: 'i64',
         uses: ['u8', 'setU32', 'host', 'pointerBytes', 'int64'],
         host: 487,

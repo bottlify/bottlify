@@ -40,6 +40,7 @@ import { X87 } from './x87.js';
 /** @typedef {import('./guest-code.js').x87} x87 */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 
 /** The largest double: a result above it is an overflow. */
 const MAX = 1.7976931348623157e308;
@@ -988,7 +989,7 @@ export function ldexp({ host }, x, exponent){
  * answer themselves and an exponent of 0.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {f64} x @param {u32} exponent
+ * @param {Guest} guest @param {f64} x @param {ptr} exponent
  * @returns {f64}
  */
 export function frexp({ setU32 }, x, exponent){
@@ -1006,7 +1007,7 @@ export function frexp({ setU32 }, x, exponent){
  * parts with x's sign but a zero fraction's, which is x less its whole.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {f64} x @param {u32} whole
+ * @param {Guest} guest @param {f64} x @param {ptr} whole
  * @returns {f64}
  */
 export function modf({ setF64 }, x, whole){
@@ -1734,7 +1735,7 @@ export function ilogbf({ host }, x){
  * handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {f32} x @param {u32} whole
+ * @param {Guest} guest @param {f32} x @param {ptr} whole
  * @returns {f32}
  */
 export function modff({ host, setF32 }, x, whole){

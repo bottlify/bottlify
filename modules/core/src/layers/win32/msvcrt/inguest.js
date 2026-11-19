@@ -184,7 +184,7 @@ export function toupper(c){
  * difference of the first two bytes that differ.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function strncmp({ u8 }, left, right, count){
@@ -277,7 +277,7 @@ export function tolower(c){
  * strncmp with the ASCII letters folded to lower case first.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function _strnicmp({ u8 }, left, right, count){
@@ -301,7 +301,7 @@ export function _strnicmp({ u8 }, left, right, count){
  * int _stricmp(const char *left, const char *right)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right
+ * @param {Guest} guest @param {ptr} left @param {ptr} right
  * @returns {i32}
  */
 export function _stricmp({ u8 }, left, right){
@@ -740,7 +740,7 @@ export function bsearch({ call }, key, base, num, width, compare){
  * leaves the same bytes.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function memmove({ copyUp, copyDown }, destination, source, count){
@@ -759,7 +759,7 @@ export function memmove({ copyUp, copyDown }, destination, source, count){
  * void *memset(void *destination, int value, size_t count)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} value @param {u32} count
+ * @param {Guest} guest @param {ptr} destination @param {u32} value @param {u32} count
  * @returns {ptr}
  */
 export function memset({ fill }, destination, value, count){
@@ -775,7 +775,7 @@ export function memset({ fill }, destination, value, count){
  * first four that differ.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function memcmp({ u8, u32 }, left, right, count){
@@ -801,7 +801,7 @@ export function memcmp({ u8, u32 }, left, right, count){
  * size_t strlen(const char *text)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {u32}
  */
 export function strlen({ u8 }, text){
@@ -822,7 +822,7 @@ export function strlen({ u8 }, text){
  * the string before it wrote.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source
  * @returns {ptr}
  */
 export function strcpy({ u8, copyUp, copyDown }, destination, source){
@@ -847,7 +847,7 @@ export function strcpy({ u8, copyUp, copyDown }, destination, source){
  * int strcmp(const char *left, const char *right)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right
+ * @param {Guest} guest @param {ptr} left @param {ptr} right
  * @returns {i32}
  */
 export function strcmp({ u8 }, left, right){
@@ -900,7 +900,7 @@ export const BELOW_CARRY = Uint32Array.from({ length: 37 },
  * it goes, so the host answers the call as it came.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
  * @returns {i32}
  */
 export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
@@ -987,7 +987,7 @@ export function strtol({ u8, setU32, host, pointerBytes }, text, end, base){
  * strtoul("-1") is ULONG_MAX. A magnitude past 32 bits is the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
  * @returns {u32}
  */
 export function strtoul({ u8, setU32, host, pointerBytes }, text, end, base){
@@ -1158,7 +1158,7 @@ export function strrchr({ u8 }, text, c){
  * itself for an empty needle, and null for none.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @param {Guest} guest @param {u32} haystack @param {ptr} needle
  * @returns {ptr}
  */
 export function strstr({ u8 }, haystack, needle){
@@ -1188,7 +1188,7 @@ export function strstr({ u8 }, haystack, needle){
  * copies: as if read whole first.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @param {Guest} guest @param {u32} destination @param {ptr} source
  * @returns {ptr}
  */
 export function strcat({ u8, copyUp, copyDown }, destination, source){
@@ -1223,7 +1223,7 @@ export function strcat({ u8, copyUp, copyDown }, destination, source){
  * no terminator.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function strncpy({ u8, copyUp, copyDown, fill }, destination, source, count){
@@ -1295,7 +1295,7 @@ export function _strupr({ u8, setU8 }, text){
  * size_t wcslen(const wchar_t *text)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {u32}
  */
 export function wcslen({ u16 }, text){
@@ -1314,7 +1314,7 @@ export function wcslen({ u16 }, text){
  * By unit, as unsigned sixteen-bit values, the answer -1, 0 or 1.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right
+ * @param {Guest} guest @param {ptr} left @param {ptr} right
  * @returns {i32}
  */
 export function wcscmp({ u16 }, left, right){
@@ -1339,7 +1339,7 @@ export function wcscmp({ u16 }, left, right){
  * The source and its terminator, as if read whole first.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source
  * @returns {ptr}
  */
 export function wcscpy({ u16, copyUp, copyDown }, destination, source){
@@ -1373,7 +1373,7 @@ export function wcscpy({ u16, copyUp, copyDown }, destination, source){
  * size_t _mbslen(const unsigned char *text)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text
+ * @param {Guest} guest @param {ptr} text
  * @returns {u32}
  */
 export function _mbslen({ u8, host }, text){
@@ -1395,7 +1395,7 @@ export function _mbslen({ u8, host }, text){
  * size_t _mbclen(const unsigned char *at)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} at
+ * @param {Guest} guest @param {ptr} at
  * @returns {u32}
  */
 export function _mbclen({ u8, host }, at){
@@ -1410,7 +1410,7 @@ export function _mbclen({ u8, host }, at){
  * unsigned char *_mbsinc(const unsigned char *at)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} at
+ * @param {Guest} guest @param {ptr} at
  * @returns {ptr}
  */
 export function _mbsinc({ u8, host }, at){
@@ -1528,7 +1528,7 @@ export function _mbsrchr({ u8, host }, text, c){
  * byte past 0x7f before the answer is the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @param {Guest} guest @param {u32} haystack @param {ptr} needle
  * @returns {ptr}
  */
 export function _mbsstr({ u8, host }, haystack, needle){
@@ -1561,7 +1561,7 @@ export function _mbsstr({ u8, host }, haystack, needle){
  * No string, either side, is the host's: _NLSCMPERROR and EINVAL.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right
+ * @param {Guest} guest @param {ptr} left @param {ptr} right
  * @returns {i32}
  */
 export function _mbscmp({ u8, host }, left, right){
@@ -1592,7 +1592,7 @@ export function _mbscmp({ u8, host }, left, right){
  * int _mbsicmp(const unsigned char *left, const unsigned char *right)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right
+ * @param {Guest} guest @param {ptr} left @param {ptr} right
  * @returns {i32}
  */
 export function _mbsicmp({ u8, host }, left, right){
@@ -1626,7 +1626,7 @@ export function _mbsicmp({ u8, host }, left, right){
  * and _mbsnbcmp, which counts bytes: in ASCII the same count
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function _mbsncmp({ u8, host }, left, right, count){
@@ -1655,7 +1655,7 @@ export function _mbsncmp({ u8, host }, left, right, count){
  * and _mbsnbicmp
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function _mbsnicmp({ u8, host }, left, right, count){
@@ -1691,7 +1691,7 @@ export function _mbsnicmp({ u8, host }, left, right, count){
  * EINVAL.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @param {Guest} guest @param {ptr} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function _mbsncpy({ u8, copyUp, copyDown, fill, host }, destination, source, count){
@@ -2158,7 +2158,7 @@ export function fmodf({ host }, x, y){
  * The first of `count` bytes that is `value`'s low byte, or null.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} value @param {u32} count
+ * @param {Guest} guest @param {ptr} buffer @param {u32} value @param {u32} count
  * @returns {ptr}
  */
 export function memchr({ u8 }, buffer, value, count){
@@ -2181,7 +2181,7 @@ export function memchr({ u8 }, buffer, value, count){
  * first, as strcat copies.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @param {Guest} guest @param {u32} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function strncat({ u8, setU8, copyUp, copyDown }, destination, source, count){
@@ -2268,7 +2268,7 @@ export function wcsrchr({ u16 }, text, c){
  * or 1.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function wcsncmp({ u16 }, left, right, count){
@@ -2295,7 +2295,7 @@ export function wcsncmp({ u16 }, left, right, count){
  * whole first.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source
+ * @param {Guest} guest @param {u32} destination @param {ptr} source
  * @returns {ptr}
  */
 export function wcscat({ u16, copyUp, copyDown }, destination, source){
@@ -2329,7 +2329,7 @@ export function wcscat({ u16, copyUp, copyDown }, destination, source){
  * always a terminator.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} source @param {u32} count
+ * @param {Guest} guest @param {u32} destination @param {ptr} source @param {u32} count
  * @returns {ptr}
  */
 export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, count){
@@ -2364,7 +2364,7 @@ export function wcsncat({ u16, setU16, copyUp, copyDown }, destination, source, 
  * The first place the needle's units are, the haystack itself for an empty one.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} haystack @param {u32} needle
+ * @param {Guest} guest @param {u32} haystack @param {ptr} needle
  * @returns {ptr}
  */
 export function wcsstr({ u16 }, haystack, needle){
@@ -2476,7 +2476,7 @@ export function wcspbrk({ u16 }, text, accept){
  * The bytes before the terminator, `most` at the most: no byte past them read.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} most
+ * @param {Guest} guest @param {ptr} text @param {u32} most
  * @returns {u32}
  */
 export function strnlen({ u8 }, text, most){
@@ -2493,7 +2493,7 @@ export function strnlen({ u8 }, text, most){
  * size_t wcsnlen(const wchar_t *text, size_t most)
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} most
+ * @param {Guest} guest @param {ptr} text @param {u32} most
  * @returns {u32}
  */
 export function wcsnlen({ u16 }, text, most){
@@ -2515,7 +2515,7 @@ const lowerUnit = (/** @type {number} */ unit)=>(unit < 0x80 ? LOWER[unit] : uni
  * wcscmp with the ASCII letters folded to lower case, the answer -1, 0 or 1.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right
+ * @param {Guest} guest @param {ptr} left @param {ptr} right
  * @returns {i32}
  */
 export function _wcsicmp({ u16 }, left, right){
@@ -2542,7 +2542,7 @@ export function _wcsicmp({ u16 }, left, right){
  * ending both.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function _wcsnicmp({ u16 }, left, right, count){
@@ -2566,7 +2566,7 @@ export function _wcsnicmp({ u16 }, left, right, count){
  * the handler's (_NLSCMPERROR and EINVAL, errno being the thread's).
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} left @param {u32} right @param {u32} count
+ * @param {Guest} guest @param {ptr} left @param {ptr} right @param {u32} count
  * @returns {i32}
  */
 export function _memicmp({ u8, host }, left, right, count){
@@ -2638,7 +2638,7 @@ const wideDigit = (/** @type {number} */ unit)=>(unit < 0x80 ? DIGITS[unit] : 99
  * does not take.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
  * @returns {i32}
  */
 export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
@@ -2733,7 +2733,7 @@ export function wcstol({ u16, setU32, host, pointerBytes }, text, end, base){
  * as strtoul does.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} text @param {u32} end @param {i32} base
+ * @param {Guest} guest @param {u32} text @param {ptr} end @param {i32} base
  * @returns {u32}
  */
 export function wcstoul({ u16, setU32, host, pointerBytes }, text, end, base){
@@ -3007,7 +3007,7 @@ const STRUNCATE = 80;
  * found before a byte is written.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @returns {u32}
  */
 export function strcpy_s({ u8, copyUp, host }, destination, size, source){
@@ -3038,7 +3038,7 @@ export function strcpy_s({ u8, copyUp, host }, destination, size, source){
  * and every refusal strcpy_s hands over are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @returns {u32}
  */
 export function strcat_s({ u8, copyUp, host }, destination, size, source){
@@ -3083,7 +3083,7 @@ export function strcat_s({ u8, copyUp, host }, destination, size, source){
  * handler's longest and a destination inside the source are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @param {u32} count
  * @returns {u32}
  */
@@ -3132,7 +3132,7 @@ export function strncpy_s({ u8, setU8, copyUp, host }, destination, size, source
  * strncpy_s hands over are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @param {u32} count
  * @returns {u32}
  */
@@ -3194,7 +3194,7 @@ export function strncat_s({ u8, setU8, copyUp, host }, destination, size, source
  * found before a unit is written.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @returns {u32}
  */
 export function wcscpy_s({ u16, copyUp, host }, destination, size, source){
@@ -3225,7 +3225,7 @@ export function wcscpy_s({ u16, copyUp, host }, destination, size, source){
  * and every refusal wcscpy_s hands over are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @returns {u32}
  */
 export function wcscat_s({ u16, copyUp, host }, destination, size, source){
@@ -3270,7 +3270,7 @@ export function wcscat_s({ u16, copyUp, host }, destination, size, source){
  * handler's longest and a destination inside the source are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @param {u32} count
  * @returns {u32}
  */
@@ -3319,7 +3319,7 @@ export function wcsncpy_s({ u16, setU16, copyUp, host }, destination, size, sour
  * wcsncpy_s hands over are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @param {u32} count
  * @returns {u32}
  */
@@ -3380,7 +3380,7 @@ export function wcsncat_s({ u16, setU16, copyUp, host }, destination, size, sour
  * holds (which the handler zeroes), are the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @param {u32} count
  * @returns {u32}
  */
@@ -3410,7 +3410,7 @@ export function memcpy_s({ copyUp, copyDown, host }, destination, size, source, 
  * was, the handler's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} destination @param {u32} size @param {u32} source
+ * @param {Guest} guest @param {ptr} destination @param {u32} size @param {ptr} source
  * @param {u32} count
  * @returns {u32}
  */

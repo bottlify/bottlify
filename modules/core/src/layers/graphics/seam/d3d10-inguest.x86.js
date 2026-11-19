@@ -47,7 +47,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     one: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
@@ -83,7 +83,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     slots: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
@@ -949,7 +949,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     IASetVertexBuffers: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr', 'ptr', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 313,
@@ -1005,7 +1005,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     IASetIndexBuffer: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 103,
@@ -1043,7 +1043,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     OMSetRenderTargets: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 182,
@@ -1088,7 +1088,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     OMSetBlendState: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 174,
@@ -1132,7 +1132,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     OMSetDepthStencilState: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 96,
@@ -1272,7 +1272,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     counted: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
@@ -1317,7 +1317,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     RSSetScissorRects: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 178,
@@ -1362,7 +1362,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     Draw: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 96,
@@ -1400,7 +1400,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     DrawIndexed: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 103,
@@ -1438,7 +1438,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     DrawInstanced: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 110,
@@ -1477,7 +1477,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     DrawIndexedInstanced: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 117,
@@ -1517,7 +1517,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     ClearRenderTargetView: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 147,
@@ -1559,7 +1559,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     ClearDepthStencilView: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 116,
@@ -1598,7 +1598,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     BufferMap: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['u32', 'u32', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 57,
@@ -1636,7 +1636,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     ContextMap: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'u32', 'u32', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 98,
@@ -1678,7 +1678,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     mapStorage: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
@@ -1766,7 +1766,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     ContextUnmap: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 52,

@@ -11,7 +11,7 @@
 export const COMPILED = /** @type {const} */ ({
     SetMatrix: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 399,
@@ -54,7 +54,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetMatrixTranspose: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 399,
@@ -97,7 +97,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetVector: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 301,
@@ -132,7 +132,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetVectorArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 379,
@@ -173,7 +173,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetFloat: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 175,
@@ -197,7 +197,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetInt: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 175,
@@ -221,7 +221,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetBool: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 175,
@@ -245,7 +245,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetTexture: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 179,
@@ -270,7 +270,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetValue: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 318,
@@ -306,7 +306,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetIntArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 302,
@@ -341,7 +341,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetFloatArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 302,
@@ -376,7 +376,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetBoolArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 319,
@@ -412,7 +412,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetMatrixArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 444,
@@ -459,7 +459,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetMatrixTransposeArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 444,
@@ -506,7 +506,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetMatrixPointerArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 499,
@@ -557,7 +557,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetMatrixTransposePointerArray: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 499,
@@ -608,7 +608,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     Resolve: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'ptr'],
         returns: 'u32',
         uses: ['u8', 'u32'],
         code: Uint8Array.of(
