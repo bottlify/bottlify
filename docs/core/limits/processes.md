@@ -66,8 +66,11 @@
   carries the rights asked for when it is made as well. A process opened by id (`OpenProcess`)
   carries the rights asked for: its memory calls need `PROCESS_VM_OPERATION`, `PROCESS_VM_READ`,
   `PROCESS_VM_WRITE` or `PROCESS_QUERY_INFORMATION` as on Windows, and a handle it opens to its own
-  id is this process to them. Other handles a process creates, and every
-  other kind, have every right. A job and a completion port made by name share the one namespace
+  id is this process to them. A file opened by `CreateFile` or `NtCreateFile` carries what was
+  asked, generic rights mapped to `FILE_GENERIC_*`: reads need `FILE_READ_DATA`, writes
+  `FILE_WRITE_DATA` or `FILE_APPEND_DATA`, and its duplicate cannot be granted a right it lacks
+  (`ERROR_ACCESS_DENIED`). Other handles a process creates, and every other kind, have every
+  right. A job and a completion port made by name share the one namespace
   of named objects. `TerminateJobObject` ends every process of the job with its code, as
   `TerminateProcess` does, and leaves the job signalled for good; a process that has ended joins
   no job, and a job's accounting counts the processes ever assigned and those still running. A
@@ -129,8 +132,12 @@
   handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
   own: they are served where the parent holds them, and a wait on such a handle itself fails
   (`ERROR_INVALID_HANDLE`, said as a divergence); so does a `ReadFileEx` or `WriteFileEx` on one,
-  which works on a pipe of the engine's thread. Writes are never held back by a full buffer, and
-  `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on nothing.
+  which works on a pipe of the engine's thread. A write waits, as on Windows, until what is
+  queued up to its end fits the buffer the pipe was made with (the server's output size one way,
+  its input size the other) and `FlushFileBuffers` until the reader has taken everything; a write
+  from a process in a worker of its own is the exception and finishes at once, said as a
+  divergence. `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on
+  nothing.
   `ImpersonateNamedPipeClient` takes on the client once the server has read from it, as the
   process's own account at SecurityImpersonation: every process is the one user, and a client's
   security quality of service and impersonated token are not carried.

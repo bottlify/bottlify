@@ -25,8 +25,17 @@
  * ERROR_IO_PENDING and completes through its OVERLAPPED. A read that finds
  * its bytes already there completes at once, and an overlapped one still
  * sets its event and posts its packet, unless the handle asked to skip that
- * (SetFileCompletionNotificationModes). Writes always finish at once: the
- * buffer is not bounded.
+ * (SetFileCompletionNotificationModes).
+ *
+ * Each way through an instance holds what the pipe was made to buffer: the
+ * server's output size for what the server writes, its input size for what
+ * the client writes. A write is queued whole, where a peek sees it, and
+ * finishes once everything queued up to its end fits that size - at once
+ * when it does, else as the reader drains the queue, writes finishing in
+ * the order they were made. A write of nothing finishes at once. A write on
+ * a handle that does not wait (PIPE_NOWAIT) never waits: what a waiting
+ * reader takes is written, and the rest only if it all fits. FlushFileBuffers
+ * waits for the reader to have taken everything.
  */
 
 import { STATUS, toDosError } from '../ntdll/status.js';
@@ -49,9 +58,7 @@ const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_BAD_PIPE = 230;
 const ERROR_PIPE_BUSY = 231;
 const ERROR_NO_DATA = 232;
-const ERROR_PIPE_NOT_CONNECTED = 233;
 const ERROR_PIPE_CONNECTED = 535;
-const ERROR_PIPE_LISTENING = 536;
 const ERROR_IO_PENDING = 997;
 const ERROR_NOACCESS = 998;
 
@@ -80,6 +87,8 @@ const PIPE_STATE_MASK = PIPE_READMODE_MESSAGE | PIPE_NOWAIT;
 /** WaitNamedPipe's two special timeouts. */
 const NMPWAIT_USE_DEFAULT_WAIT = 0;
 const NMPWAIT_WAIT_FOREVER = 0xffffffff;
+/** What a pipe made with a buffer size of 0 holds that way (decisions.md A273). */
+const DEFAULT_BUFFER = 4096;
 /** What a pipe made with no timeout waits by default: fifty milliseconds. */
 const DEFAULT_TIMEOUT = 50;
 
@@ -110,8 +119,18 @@ const STATUS_PIPE_DISCONNECTED = STATUS.PIPE_DISCONNECTED;
 const STATUS_PIPE_LISTENING = STATUS.PIPE_LISTENING;
 /** A write to an end whose peer is gone: ERROR_NO_DATA. */
 const STATUS_PIPE_CLOSING = STATUS.PIPE_CLOSING;
+/** A listen whose client came first: a good connection. */
+const STATUS_PIPE_CONNECTED = STATUS.PIPE_CONNECTED;
 
-/** OVERLAPPED's two status fields and its event. */
+/** NtFsControlFile's peek, and the head of the FILE_PIPE_PEEK_BUFFER it fills. */
+const FSCTL_PIPE_PEEK = 0x11400c;
+/** NtFsControlFile's ConnectNamedPipe and DisconnectNamedPipe. */
+const FSCTL_PIPE_LISTEN = 0x110008;
+const FSCTL_PIPE_DISCONNECT = 0x110004;
+const PEEK_HEAD = 16;
+/** FILE_PIPE_PEEK_BUFFER.NamedPipeState: both ends there, or the other gone. */
+const FILE_PIPE_CONNECTED_STATE = 3;
+const FILE_PIPE_CLOSING_STATE = 4;
 
 /** Where a pipe's names begin, in the namespace's own spelling. */
 const PREFIXES = ['\\\\.\\pipe\\', '\\\\?\\pipe\\'];
@@ -257,7 +276,11 @@ export function pipeStandIn(id, described){
  * @typedef {Object} End
  * @property {Instance} instance
  * @property {'server' | 'client'} side
- * @property {{ bytes: Uint8Array, at: number }[]} inbox  what the other end wrote, unread
+ * @property {Entry[]} inbox  what the other end wrote, unread: a write still
+ *     waiting for room is here too, its op beside its bytes
+ * @property {number} waiting  the entries of `inbox` whose write still waits
+ * @property {Op[]} drains  FlushFileBuffers' waits on the other end's writes: they
+ *     finish when `inbox` is empty
  * @property {Op[]} readers
  * @property {boolean} readMessages
  * @property {boolean} nowait
@@ -270,6 +293,16 @@ export function pipeStandIn(id, described){
  *     waited on: set while no operation of it is pending, as a file object is
  * @property {() => void} retain  one more handle onto it
  * @property {() => EndAcross} across  the end served to a process in a worker of its own
+ */
+
+/**
+ * A write as the reading end holds it: its bytes, how many were read, and
+ * while the write has not finished, its op.
+ *
+ * @typedef {Object} Entry
+ * @property {Uint8Array} bytes
+ * @property {number} at
+ * @property {Op} [op]
  */
 
 /**
@@ -302,11 +335,11 @@ export function pipeStandIn(id, described){
  */
 
 /**
- * An operation waiting: a read, a connect or a wait for an instance, with
- * the process it belongs to.
+ * An operation waiting: a read, a write that has no room yet, a connect or
+ * a flush, with the process it belongs to.
  *
  * @typedef {Object} Op
- * @property {'read' | 'connect'} kind
+ * @property {'read' | 'write' | 'connect' | 'flush'} kind
  * @property {Context} ctx
  * @property {any} thread
  * @property {number} handle
@@ -477,7 +510,8 @@ export function createNamedPipes(host){
     const makeEnd = (instance, side, canRead, canWrite)=>{
         /** @type {End} */
         const end = {
-            instance, side, inbox: [], readers: [], readMessages: false, nowait: false,
+            instance, side, inbox: [], waiting: 0, drains: [], readers: [],
+            readMessages: false, nowait: false,
             canRead, canWrite, closed: false, cut: false, refs: 1,
             retain(){
                 end.refs++;
@@ -493,6 +527,116 @@ export function createNamedPipes(host){
     /** Bytes waiting at an end. @param {End} end */
     const available = end=>end.inbox.reduce((total, message)=>
         total + message.bytes.length - message.at, 0);
+
+    /**
+     * What a peek at an end sees: the bytes a read would see first - on a
+     * message pipe the message at the front, whatever the end reads in, on a
+     * byte pipe all of them - up to `size` of them, every byte waiting, the
+     * length of the message at the front (0 on a byte pipe) and how many
+     * messages wait. A peek's "left in this message" is that length less what
+     * it copied, as Windows' PeekNamedPipe computes it - on a byte pipe, the
+     * copy's count below zero.
+     *
+     * @param {End} end @param {number} size
+     */
+    const peekAt = (end, size)=>{
+        const { messages } = end.instance.pipe;
+        const front = end.inbox[0];
+        const length = messages && front ? front.bytes.length - front.at : 0;
+        const total = available(end);
+        const copied = Math.min(messages ? length : total, size >>> 0);
+        const bytes = new Uint8Array(copied);
+        let at = 0;
+        for (const message of end.inbox)
+        {
+            if (at === copied)
+            {
+                break;
+            }
+            const part = message.bytes.subarray(message.at,
+                message.at + Math.min(copied - at, message.bytes.length - message.at));
+            bytes.set(part, at);
+            at += part.length;
+        }
+        return { bytes, total, length, count: messages ? end.inbox.length : 0 };
+    };
+
+    /**
+     * What the queue into an end holds before a write waits: the server's
+     * input size for what its client writes, its output size for what it
+     * writes itself, as the pipe was made; a size of 0 is the default, 4096,
+     * as CreatePipe's is (decisions.md A273).
+     *
+     * @param {End} end
+     */
+    const quotaOf = end=>(end.side === 'server' ? end.instance.pipe.inSize
+        : end.instance.pipe.outSize) || DEFAULT_BUFFER;
+
+    /**
+     * A write the reader has taken the whole of has finished, if it had not.
+     *
+     * @param {End} end @param {Entry} entry
+     */
+    const drained = (end, entry)=>{
+        if (entry.op)
+        {
+            const { op } = entry;
+            entry.op = undefined;
+            end.waiting--;
+            finish(op, STATUS.SUCCESS, op.length);
+        }
+    };
+
+    /**
+     * Finishes the writes into an end that now fit its queue, in the order
+     * they were made, and the flushes once the queue is empty.
+     *
+     * @param {End} end
+     */
+    const settle = end=>{
+        if (end.waiting > 0)
+        {
+            const quota = quotaOf(end);
+            let total = 0;
+            for (const entry of end.inbox)
+            {
+                total += entry.bytes.length - entry.at;
+                if (total > quota)
+                {
+                    break;
+                }
+                drained(end, entry);
+            }
+        }
+        if (end.inbox.length === 0 && end.drains.length > 0)
+        {
+            for (const op of end.drains.splice(0))
+            {
+                finish(op, STATUS.SUCCESS, 0);
+            }
+        }
+    };
+
+    /**
+     * Empties the queue into an end: the writes still waiting in it and the
+     * flushes waiting for it fail with the status - the reader gone, or the
+     * pipe disconnected - or, for a status of null, are dropped unanswered.
+     *
+     * @param {End} end @param {number | null} status
+     */
+    const dropInbox = (end, status)=>{
+        const ops = [...end.inbox.flatMap(entry=>(entry.op ? [entry.op] : [])),
+            ...end.drains.splice(0)];
+        end.inbox = [];
+        end.waiting = 0;
+        if (status !== null)
+        {
+            for (const op of ops)
+            {
+                finish(op, status, 0);
+            }
+        }
+    };
 
     /**
      * Finishes a native call that did not wait: its IO_STATUS_BLOCK, its event,
@@ -636,9 +780,11 @@ export function createNamedPipes(host){
             if (count < left)
             {
                 message.at += count;
+                settle(end);
                 return { bytes, status: STATUS.BUFFER_OVERFLOW };
             }
-            end.inbox.shift();
+            drained(end, /** @type {Entry} */ (end.inbox.shift()));
+            settle(end);
             return { bytes, status: STATUS.SUCCESS };
         }
         const parts = [];
@@ -652,14 +798,18 @@ export function createNamedPipes(host){
             taken += count;
             if (message.at === message.bytes.length)
             {
-                end.inbox.shift();
+                drained(end, /** @type {Entry} */ (end.inbox.shift()));
             }
         }
-        // A byte read of an empty message still takes it, and reads nothing.
-        while (end.inbox.length > 0 && end.inbox[0].bytes.length === end.inbox[0].at)
+        // A byte read that took nothing still takes an empty message at the
+        // front, and reads nothing; one whose buffer filled leaves the empty
+        // message behind it for the next read (Wine's test_blocking_rw).
+        if (taken === 0 && end.inbox.length > 0
+            && end.inbox[0].bytes.length === end.inbox[0].at)
         {
-            end.inbox.shift();
+            drained(end, /** @type {Entry} */ (end.inbox.shift()));
         }
+        settle(end);
         const bytes = new Uint8Array(taken);
         let at = 0;
         for (const part of parts)
@@ -723,10 +873,13 @@ export function createNamedPipes(host){
     /**
      * Ends what waits on an end, as cancelled - or, where the end itself is
      * closing, as the pipe broken, which is how a read still pending on the
-     * handle being closed completes on Windows.
+     * handle being closed completes on Windows. A write that waits is taken
+     * out of the reader's queue with what was not read of it, and the writes
+     * behind it may then fit. A status of null drops them unanswered: their
+     * process is gone.
      *
      * @param {End} end @param {(op: Op) => boolean} which
-     * @param {number} [status]
+     * @param {number | null} [status]
      */
     const abort = (end, which, status = STATUS_CANCELLED)=>{
         let count = 0;
@@ -738,10 +891,44 @@ export function createNamedPipes(host){
             }
             end.readers = end.readers.filter(one=>one !== op);
             end.instance.connects = end.instance.connects.filter(one=>one !== op);
-            finish(op, status, 0);
+            if (status !== null)
+            {
+                finish(op, status, 0);
+            }
             count++;
         }
-        return count;
+        const peer = peerOf(end);
+        if (!peer)
+        {
+            return count;
+        }
+        const writes = peer.inbox.filter(entry=>entry.op?.end === end && which(entry.op));
+        const flushes = peer.drains.filter(op=>op.end === end && which(op));
+        if (writes.length === 0 && flushes.length === 0)
+        {
+            return count;
+        }
+        peer.inbox = peer.inbox.filter(entry=>!writes.includes(entry));
+        peer.drains = peer.drains.filter(op=>!flushes.includes(op));
+        peer.waiting -= writes.length;
+        for (const entry of writes)
+        {
+            const op = /** @type {Op} */ (entry.op);
+            entry.op = undefined;
+            if (status !== null)
+            {
+                finish(op, status, entry.at);
+            }
+        }
+        if (status !== null)
+        {
+            for (const op of flushes)
+            {
+                finish(op, status, 0);
+            }
+        }
+        settle(peer);
+        return count + writes.length + flushes.length;
     };
 
     /** A client has come to an instance: its connects end. @param {Instance} instance */
@@ -770,6 +957,9 @@ export function createNamedPipes(host){
     const closeEnd = end=>{
         end.closed = true;
         abort(end, ()=>true, STATUS_PIPE_BROKEN);
+        // Nobody reads what was written to it: a write still waiting for room
+        // finds the pipe broken.
+        dropInbox(end, STATUS_PIPE_BROKEN);
         const { instance } = end;
         if (end.side === 'client')
         {
@@ -793,6 +983,92 @@ export function createNamedPipes(host){
         {
             table.delete(pipe.key);
         }
+    };
+
+    /**
+     * A server end listens for its client, as ConnectNamedPipe and
+     * FSCTL_PIPE_LISTEN ask: a client already there is STATUS_PIPE_CONNECTED
+     * (a good connection), one that came and went STATUS_PIPE_CLOSING, an end
+     * that does not wait STATUS_PIPE_LISTENING; a disconnected instance
+     * listens again. Otherwise the connect waits: pending through its
+     * OVERLAPPED or its native block, or parked - the answer then the park's.
+     *
+     * @param {End} end @param {number} handle
+     * @param {{ overlapped?: number, block?: number, io?: NativeAsync }} how
+     * @returns {number | any}  a status, or the park
+     */
+    const listen = (end, handle, { overlapped = 0, block = 0, io })=>{
+        const { instance } = end;
+        if (instance.state === 'connected')
+        {
+            return STATUS_PIPE_CONNECTED;
+        }
+        if (instance.state === 'closing')
+        {
+            return STATUS_PIPE_CLOSING;
+        }
+        if (instance.state === 'disconnected')
+        {
+            instance.state = 'listening';
+            listening(instance.pipe);
+        }
+        if (end.nowait)
+        {
+            return STATUS_PIPE_LISTENING;
+        }
+        const native = block !== 0;
+        const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
+            ? io : undefined;
+        /** @type {Op} */
+        const op = { kind: 'connect', ctx, thread: host.currentThread(), handle,
+            overlapped, buffer: 0, length: 0, out: block, end,
+            ...native ? { native } : {}, ...async ? { async } : {} };
+        instance.connects.push(op);
+        if (end.signal)
+        {
+            kernel.resetEvent?.(end.signal);
+        }
+        if (overlapped !== 0 || async)
+        {
+            return STATUS.PENDING;
+        }
+        kernel.block(op.thread, `pipe ${instance.pipe.name}`);
+        return host.park();
+    };
+
+    /**
+     * A server end cuts its client off, as DisconnectNamedPipe and
+     * FSCTL_PIPE_DISCONNECT ask: the client's handle stays and every call on
+     * it says the pipe is not connected, what was unread either way is
+     * dropped, and a write still waiting for room, or a flush, finds the
+     * pipe not connected. The instance may then be connected again. An
+     * instance still listening is STATUS_PIPE_LISTENING; one already cut off
+     * has no client to cut off again.
+     *
+     * @param {End} end  a server end
+     */
+    const disconnect = end=>{
+        const { instance } = end;
+        if (instance.state === 'listening')
+        {
+            return STATUS_PIPE_LISTENING;
+        }
+        if (instance.state === 'disconnected')
+        {
+            return STATUS_PIPE_DISCONNECTED;
+        }
+        const client = instance.client;
+        dropInbox(end, STATUS_PIPE_DISCONNECTED);
+        if (client)
+        {
+            client.cut = true;
+            dropInbox(client, STATUS_PIPE_DISCONNECTED);
+            abort(client, ()=>true);
+        }
+        abort(end, op=>op.kind === 'read');
+        instance.client = null;
+        instance.state = 'disconnected';
+        return STATUS.SUCCESS;
     };
 
     /**
@@ -873,6 +1149,12 @@ export function createNamedPipes(host){
                     peer.inbox.push({ bytes: bytes.slice(), at: 0 });
                 }
                 serve(peer);
+                if (available(peer) > quotaOf(peer) && !unboundedSaid)
+                {
+                    unboundedSaid = true;
+                    host.divergence?.('WriteFile', 'a write from a process in a worker of its own'
+                        + ' is not held back by the pipe\'s buffer: it finishes at once');
+                }
                 return { status: STATUS.SUCCESS, count: bytes.length };
             },
             peek(size){
@@ -881,30 +1163,9 @@ export function createNamedPipes(host){
                 {
                     return { status: why };
                 }
-                const front = end.inbox[0];
-                const visible = end.readMessages && front ? front.bytes.subarray(front.at) : null;
-                const total = available(end);
-                const copied = Math.min(visible ? visible.length : total, size >>> 0);
-                const bytes = new Uint8Array(copied);
-                let at = 0;
-                for (const message of end.inbox)
-                {
-                    if (at === copied)
-                    {
-                        break;
-                    }
-                    const part = message.bytes.subarray(message.at,
-                        message.at + Math.min(copied - at, message.bytes.length - message.at));
-                    bytes.set(part, at);
-                    at += part.length;
-                    if (end.readMessages)
-                    {
-                        break;
-                    }
-                }
-                return { status: STATUS.SUCCESS, bytes, total,
-                    left: end.instance.pipe.messages && front
-                        ? front.bytes.length - front.at - (visible ? copied : 0) : 0 };
+                const seen = peekAt(end, size);
+                return { status: STATUS.SUCCESS, bytes: seen.bytes, total: seen.total,
+                    left: (seen.length - seen.bytes.length) >>> 0 };
             },
             describe: ()=>({ side: end.side, canRead: end.canRead, canWrite: end.canWrite,
                 messages: end.instance.pipe.messages, readMessages: end.readMessages }),
@@ -1231,13 +1492,21 @@ export function createNamedPipes(host){
     };
 
     /**
-     * Writes from an end the call has already found.
+     * Writes from an end the call has already found. The write is queued
+     * whole for the reader; it finishes now if everything queued up to its
+     * end fits the queue (`quotaOf`), else it waits for the reader to drain
+     * it - parked, pending through its OVERLAPPED or its native block, or
+     * with its completion routine - as a read that finds nothing waits.
      *
      * @param {End} end @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {number} overlapped @param {boolean} native
      * @param {number} [routine]  WriteFileEx's completion routine
+     * @param {{ io?: NativeAsync, whole?: boolean }} [extra]  NtWriteFile's event,
+     *     APC and context; `whole`, a write that never waits (TransactNamedPipe's)
      */
-    const startWrite = (end, handle, buffer, length, out, overlapped, native, routine = 0)=>{
+    const startWrite = (end, handle, buffer, length, out, overlapped, native, routine = 0,
+        { io, whole = false } = {})=>
+    {
         if (!end.canWrite)
         {
             return native ? STATUS.ACCESS_DENIED : fail(ERROR_ACCESS_DENIED);
@@ -1255,36 +1524,106 @@ export function createNamedPipes(host){
                 : toDosError(status));
         }
         const peer = /** @type {End} */ (peerOf(end));
+        const { messages } = end.instance.pipe;
+        const quota = quotaOf(peer);
         // A zero-length write is a message of its own on a message pipe, and
         // nothing at all on a byte one.
-        if (count > 0 || end.instance.pipe.messages)
+        /** @type {Entry | null} */
+        const entry = count > 0 || messages ? { bytes: count === 0 ? new Uint8Array(0)
+            : host.readMemory(buffer >>> 0, count).slice(), at: 0 } : null;
+        let written = count;
+        let waits = false;
+        if (entry && end.nowait && count > 0)
         {
-            peer.inbox.push({ bytes: count === 0 ? new Uint8Array(0)
-                : host.readMemory(buffer >>> 0, count).slice(), at: 0 });
+            // A handle that does not wait writes what a waiting reader takes,
+            // and the rest only if all of it fits; a message goes whole or not
+            // at all.
+            const reader = peer.inbox.length === 0 ? peer.readers[0] : undefined;
+            const takes = reader ? Math.min(reader.length, count) : 0;
+            if (messages && available(peer) + count - takes > quota)
+            {
+                written = 0;
+            }
+            else
+            {
+                peer.inbox.push(entry);
+                serve(peer);
+                if (peer.inbox.includes(entry) && available(peer) > quota)
+                {
+                    peer.inbox = peer.inbox.filter(one=>one !== entry);
+                    written = entry.at;
+                }
+            }
         }
+        else if (entry)
+        {
+            peer.inbox.push(entry);
+            serve(peer);
+            waits = !whole && count > 0 && peer.inbox.includes(entry)
+                && available(peer) > quota;
+        }
+        if (waits)
+        {
+            const entryOf = /** @type {Entry} */ (entry);
+            const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
+                ? io : undefined;
+            // A handle opened without FILE_FLAG_OVERLAPPED waits with the
+            // OVERLAPPED it was given, as its read does (`startRead`).
+            const parks = overlapped !== 0 && !native && routine === 0
+                && /** @type {any} */ (end).overlapped !== true;
+            /** @type {Op} */
+            const op = { kind: 'write', ctx, thread: host.currentThread(), handle,
+                overlapped: parks ? 0 : overlapped >>> 0, buffer: buffer >>> 0, length: count,
+                out: out >>> 0, native, end,
+                ...parks ? { statusAt: overlapped >>> 0 } : {}, ...async ? { async } : {},
+                ...routine !== 0 ? { routine } : {} };
+            entryOf.op = op;
+            peer.waiting++;
+            if (end.signal)
+            {
+                kernel.resetEvent?.(end.signal);
+            }
+            if (async)
+            {
+                return STATUS.PENDING;
+            }
+            if (routine !== 0 || op.overlapped !== 0)
+            {
+                overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+                return routine !== 0 ? 1 : native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
+            }
+            kernel.block(op.thread, 'pipe write');
+            return host.park();
+        }
+        const modes = ctx.modes.get(handle) ?? 0;
         if (routine !== 0)
         {
             completeRoutine(host, host.currentThread(), overlapped, routine, STATUS.SUCCESS,
-                count);
+                written);
         }
         else if (overlapped !== 0 && host.completed)
         {
-            const modes = ctx.modes.get(handle) ?? 0;
-            host.completed(handle, count, overlapped, STATUS.SUCCESS, {
+            host.completed(handle, written, overlapped, STATUS.SUCCESS, {
                 port: (modes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0,
                 event: (modes & FILE_SKIP_SET_EVENT_ON_HANDLE) !== 0 });
         }
-        serve(peer);
         if (native)
         {
+            if (io !== undefined && /** @type {any} */ (end).overlapped === true
+                && (modes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) === 0)
+            {
+                // Done in its own call, an overlapped native write still posts
+                // its packet, as its read does (`startRead`).
+                host.posted?.(handle, written, STATUS.SUCCESS, io.context);
+            }
             writeDword(out, STATUS.SUCCESS);
-            writeDword(out + 4, count);
+            writeDword(out + 4, written);
             return STATUS.SUCCESS;
         }
         // The last error is left as it was, as WriteFile and ReadFile leave
         // it when they succeed: a program reads it after one that is pending
         // and another that went through (ntdll's thread pool I/O tests).
-        writeDwordIf(out, count);
+        writeDwordIf(out, written);
         return 1;
     };
 
@@ -1443,8 +1782,11 @@ export function createNamedPipes(host){
      * @param {number} handle @param {number} buffer @param {number} length
      * @param {number} out @param {boolean} [native] @param {number} [overlapped]
      * @param {number} [routine]  WriteFileEx's completion routine
+     * @param {NativeAsync} [io]  NtWriteFile's event, APC and context
      */
-    const write = (handle, buffer, length, out, native = false, overlapped = 0, routine = 0)=>{
+    const write = (handle, buffer, length, out, native = false, overlapped = 0, routine = 0,
+        io = undefined)=>
+    {
         const end = endOf(handle);
         const standIn = end ? null : standInOf(handle);
         if (!end && !standIn)
@@ -1458,7 +1800,7 @@ export function createNamedPipes(host){
         if (end)
         {
             return startWrite(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
-                native, routine >>> 0);
+                native, routine >>> 0, { io });
         }
         if (routine !== 0)
         {
@@ -1473,7 +1815,11 @@ export function createNamedPipes(host){
      * all of it, the calling thread's alone, or the one OVERLAPPED -- ends
      * cancelled. The count, or null for a handle that is no pipe end.
      *
-     * @param {number} handle @param {{ overlapped?: number, thread?: any }} which
+     * NtCancelIoFileEx names the one by its IO_STATUS_BLOCK (`block`): an
+     * OVERLAPPED is one, a native call's is where it was asked.
+     *
+     * @param {number} handle
+     * @param {{ overlapped?: number, thread?: any, block?: number }} which
      */
     const cancel = (handle, which)=>{
         const end = endOf(handle);
@@ -1485,36 +1831,86 @@ export function createNamedPipes(host){
         }
         return abort(end, op=>op.ctx === ctx && op.handle === (handle >>> 0)
             && (which.overlapped === undefined || op.overlapped === which.overlapped)
+            && (which.block === undefined || op.overlapped === which.block
+                || op.statusAt === which.block || (op.native === true && op.out === which.block))
             && (which.thread === undefined || op.thread === which.thread));
     };
 
     /**
-     * CancelSynchronousIo: the reads and connects a thread of this process
-     * waits in synchronously end cancelled. How many there were.
+     * CancelSynchronousIo: the reads, writes and connects a thread of this
+     * process waits in synchronously end cancelled - NtCancelSynchronousIoFile's,
+     * the one whose IO_STATUS_BLOCK is `block`. How many there were.
      *
-     * @param {any} thread
+     * @param {any} thread @param {number} [block]
      */
-    const cancelSynchronous = thread=>{
+    const cancelSynchronous = (thread, block = 0)=>{
         let count = 0;
+        forEachEnd(end=>{
+            count += abort(end, op=>op.ctx === ctx && op.thread === thread
+                && op.overlapped === 0 && !op.async && !op.routine
+                && (block === 0 || (op.native === true && op.out === block)
+                    || op.statusAt === block));
+        });
+        return count;
+    };
+
+    /**
+     * Every end of every pipe in the run's table.
+     *
+     * @param {(end: End) => void} visit
+     */
+    function forEachEnd(visit){
         for (const [key, entry] of table)
         {
             if (!key.startsWith(TABLE_PREFIX) || entry?.kind !== 'pipe')
             {
                 continue;
             }
-            for (const instance of /** @type {Pipe} */ (entry.object).instances)
+            for (const instance of [.../** @type {Pipe} */ (entry.object).instances])
             {
                 for (const end of [instance.server, instance.client])
                 {
                     if (end)
                     {
-                        count += abort(end, op=>op.ctx === ctx && op.thread === thread
-                            && op.overlapped === 0 && !op.async && !op.routine);
+                        visit(end);
                     }
                 }
             }
         }
-        return count;
+    }
+
+    /**
+     * FlushFileBuffers on a pipe end: it waits until the other end has read
+     * everything this end wrote, as Windows' does - at once when it has, or
+     * with the pipe's state when the other end goes. Null for a handle that
+     * is no pipe end.
+     *
+     * @param {number} handle
+     */
+    const flush = handle=>{
+        const end = endOf(handle);
+        if (!end)
+        {
+            return standInOf(handle) ? 1 : null;
+        }
+        // Everything written read, or nothing left to read it: done, whatever
+        // became of the reader since.
+        const peer = peerOf(end);
+        if (!end.canWrite || !peer || peer.inbox.length === 0)
+        {
+            return 1;
+        }
+        const why = blocked(end, true);
+        if (why !== null)
+        {
+            return fail(toDosError(why));
+        }
+        /** @type {Op} */
+        const op = { kind: 'flush', ctx, thread: host.currentThread(), handle: handle >>> 0,
+            overlapped: 0, buffer: 0, length: 0, out: 0, end };
+        peer.drains.push(op);
+        kernel.block(op.thread, 'pipe flush');
+        return host.park();
     };
 
     /**
@@ -1755,40 +2151,18 @@ export function createNamedPipes(host){
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
                 begin(overlapped);
-                const { instance } = end;
-                if (instance.state === 'connected')
-                {
-                    return fail(ERROR_PIPE_CONNECTED);
-                }
-                if (instance.state === 'closing')
-                {
-                    return fail(ERROR_NO_DATA);
-                }
-                if (instance.state === 'disconnected')
-                {
-                    instance.state = 'listening';
-                    listening(instance.pipe);
-                }
-                if (end.nowait)
-                {
-                    return fail(ERROR_PIPE_LISTENING);
-                }
-                /** @type {Op} */
-                const op = { kind: 'connect', ctx, thread: host.currentThread(),
-                    handle: handle >>> 0, overlapped: overlapped >>> 0, buffer: 0, length: 0,
-                    out: 0, end };
-                instance.connects.push(op);
-                if (end.signal)
-                {
-                    kernel.resetEvent?.(end.signal);
-                }
-                if ((overlapped >>> 0) !== 0)
+                const answer = listen(end, handle >>> 0, { overlapped: overlapped >>> 0 });
+                if (answer === STATUS.PENDING)
                 {
                     overlappedResult(writeDword, layout, overlapped >>> 0, STATUS.PENDING, 0);
                     return fail(ERROR_IO_PENDING);
                 }
-                kernel.block(op.thread, `pipe ${instance.pipe.name}`);
-                return host.park();
+                if (answer === STATUS_PIPE_CONNECTED)
+                {
+                    return fail(ERROR_PIPE_CONNECTED);
+                }
+                return typeof answer === 'number' ? fail(answer === STATUS_PIPE_CLOSING
+                    ? ERROR_NO_DATA : toDosError(answer)) : answer;
             },
         },
 
@@ -1808,28 +2182,8 @@ export function createNamedPipes(host){
                 {
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                const { instance } = end;
-                if (instance.state === 'listening')
-                {
-                    return fail(ERROR_PIPE_LISTENING);
-                }
-                // Once cut off, there is no client to cut off again.
-                if (instance.state === 'disconnected')
-                {
-                    return fail(ERROR_PIPE_NOT_CONNECTED);
-                }
-                const client = instance.client;
-                if (client)
-                {
-                    client.cut = true;
-                    client.inbox = [];
-                    abort(client, ()=>true);
-                }
-                end.inbox = [];
-                abort(end, op=>op.kind === 'read');
-                instance.client = null;
-                instance.state = 'disconnected';
-                return 1;
+                const status = disconnect(end);
+                return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
             },
         },
 
@@ -1849,6 +2203,10 @@ export function createNamedPipes(host){
          *   LPVOID lpOutBuffer, DWORD nOutBufferSize, LPDWORD lpBytesRead, LPOVERLAPPED)
          *
          * A message written, then the answer read, on a message pipe read as one.
+         * Its write never waits for room; an answer already waiting unread
+         * refuses the transaction, ERROR_PIPE_BUSY, before anything is written
+         * (Windows 7 answers at once, as here; 8 and later through the
+         * OVERLAPPED - Wine's test_transact takes either).
          */
         TransactNamedPipe: {
             argBytes: 28,
@@ -1863,8 +2221,13 @@ export function createNamedPipes(host){
                 {
                     return fail(ERROR_BAD_PIPE);
                 }
+                if (end.inbox.length > 0)
+                {
+                    return fail(ERROR_PIPE_BUSY);
+                }
                 begin(overlapped);
-                const wrote = startWrite(end, handle >>> 0, input, inputSize, 0, 0, false);
+                const wrote = startWrite(end, handle >>> 0, input, inputSize, 0, 0, false, 0,
+                    { whole: true });
                 if (wrote !== 1)
                 {
                     return 0;
@@ -2139,6 +2502,8 @@ export function createNamedPipes(host){
     let anonymousCount = 0;
     /** Whether a wait on an end served across a link was said to fail. */
     let waitAcrossSaid = false;
+    /** Whether a write across a link past the pipe's buffer was said to finish at once. */
+    let unboundedSaid = false;
 
     return {
         functions,
@@ -2164,12 +2529,14 @@ export function createNamedPipes(host){
             }
             end.signal ??= kernel.createEvent({ manualReset: true,
                 signalled: end.readers.length === 0
-                    && !end.instance.connects.some(op=>op.end === end),
+                    && !end.instance.connects.some(op=>op.end === end)
+                    && !peerOf(end)?.inbox.some(entry=>entry.op?.end === end),
                 name: `pipe ${end.instance.pipe.name}` });
             return end.signal;
         },
         read,
         write,
+        flush,
         cancelSynchronous,
         /**
          * ReadFileEx's way in: the answer, or null for a handle that is no pipe end.
@@ -2286,33 +2653,90 @@ export function createNamedPipes(host){
             {
                 return fail(toDosError(why));
             }
-            const front = end.inbox[0];
-            const visible = end.readMessages && front
-                ? front.bytes.subarray(front.at) : null;
-            const all = available(end);
-            const copied = Math.min(visible ? visible.length : all, size >>> 0);
-            if ((buffer >>> 0) !== 0 && copied > 0)
+            const seen = peekAt(end, (buffer >>> 0) === 0 ? 0 : size);
+            if (seen.bytes.length > 0)
             {
-                const bytes = new Uint8Array(copied);
-                let at = 0;
-                for (const message of end.inbox)
-                {
-                    const part = message.bytes.subarray(message.at,
-                        message.at + Math.min(copied - at, message.bytes.length - message.at));
-                    bytes.set(part, at);
-                    at += part.length;
-                    if (at === copied || end.readMessages)
-                    {
-                        break;
-                    }
-                }
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(buffer >>> 0, seen.bytes);
             }
-            writeDwordIf(copiedOut, copied);
-            writeDwordIf(total, all);
-            writeDwordIf(left, end.instance.pipe.messages && front
-                ? front.bytes.length - front.at - (visible ? copied : 0) : 0);
+            writeDwordIf(copiedOut, seen.bytes.length);
+            writeDwordIf(total, seen.total);
+            writeDwordIf(left, (seen.length - seen.bytes.length) >>> 0);
             return 1;
+        },
+
+        /**
+         * NtFsControlFile on a pipe end: FSCTL_PIPE_PEEK fills a
+         * FILE_PIPE_PEEK_BUFFER - the pipe's state, the bytes waiting, the
+         * messages waiting and the front message's length, then what a peek
+         * sees of the data. A buffer too small for its head is
+         * STATUS_BUFFER_TOO_SMALL; data cut short, STATUS_BUFFER_OVERFLOW.
+         * Null for a handle that is no pipe end; another code answers
+         * STATUS_INVALID_DEVICE_REQUEST, said.
+         *
+         * FSCTL_PIPE_LISTEN and FSCTL_PIPE_DISCONNECT are ConnectNamedPipe's and
+         * DisconnectNamedPipe's, native: a listen that waits is STATUS_PENDING
+         * on an overlapped end, finished through its block, event, APC and
+         * port, and parks a synchronous one (`parked`, the call's answer).
+         *
+         * @param {number} handle @param {number} code @param {number} output
+         * @param {number} room @param {number} [block]  the IO_STATUS_BLOCK
+         * @param {NativeAsync} [io]  the event, APC and context the call was given
+         * @returns {{ status: number, information: number } | { parked: any } | null}
+         */
+        control(handle, code, output, room, block = 0, io = undefined){
+            const end = endOf(handle);
+            if (!end)
+            {
+                return null;
+            }
+            if ((code >>> 0) === FSCTL_PIPE_LISTEN || (code >>> 0) === FSCTL_PIPE_DISCONNECT)
+            {
+                if (end.side !== 'server')
+                {
+                    return { status: STATUS.INVALID_PARAMETER, information: 0 };
+                }
+                if ((block >>> 0) === 0)
+                {
+                    return { status: STATUS.ACCESS_VIOLATION, information: 0 };
+                }
+                const answer = (code >>> 0) === FSCTL_PIPE_DISCONNECT ? disconnect(end)
+                    : listen(end, handle >>> 0, { block: block >>> 0, io });
+                return typeof answer === 'number' ? { status: answer, information: 0 }
+                    : { parked: answer };
+            }
+            if ((code >>> 0) !== FSCTL_PIPE_PEEK)
+            {
+                host.divergence?.('NtFsControlFile', `pipe control code 0x${(code >>> 0)
+                    .toString(16)} is not answered`);
+                return { status: STATUS.INVALID_DEVICE_REQUEST, information: 0 };
+            }
+            if ((room >>> 0) < PEEK_HEAD)
+            {
+                return { status: STATUS.BUFFER_TOO_SMALL, information: 0 };
+            }
+            if (end.side === 'server' && end.instance.state === 'disconnected')
+            {
+                return { status: STATUS.INVALID_PIPE_STATE, information: 0 };
+            }
+            const why = blocked(end, false);
+            if (why !== null && end.inbox.length === 0)
+            {
+                return { status: why, information: 0 };
+            }
+            const seen = peekAt(end, (room >>> 0) - PEEK_HEAD);
+            const state = end.instance.state === 'connected' ? FILE_PIPE_CONNECTED_STATE
+                : FILE_PIPE_CLOSING_STATE;
+            writeDword(output, state);
+            writeDword((output >>> 0) + 4, seen.total);
+            writeDword((output >>> 0) + 8, seen.count);
+            writeDword((output >>> 0) + 12, seen.length);
+            if (seen.bytes.length > 0)
+            {
+                host.writeMemory((output >>> 0) + PEEK_HEAD, seen.bytes);
+            }
+            const whole = end.instance.pipe.messages ? seen.length : seen.total;
+            return { status: seen.bytes.length < whole ? STATUS.BUFFER_OVERFLOW : STATUS.SUCCESS,
+                information: PEEK_HEAD + seen.bytes.length };
         },
 
         /**
@@ -2390,6 +2814,10 @@ export function createNamedPipes(host){
          * output a child inherited reads to its end when the child exits.
          */
         processEnded(){
+            // Its reads, writes and flushes end with it, unanswered: what a
+            // write of it had not had read is gone from the pipe, as Windows
+            // cancels a thread's I/O when it ends.
+            forEachEnd(end=>abort(end, op=>op.ctx === ctx, null));
             for (const handle of [...inheritable.keys()])
             {
                 closed(handle, endOf(handle) ?? standInOf(handle));

@@ -175,8 +175,9 @@ const HANDLE_PROBE = 1 << 20;
  * @property {() => Record<string, number>} [registers]
  * @property {number} [pointerSize]
  * @property {(handle: number) => any} threadOf  A thread by handle, the pseudo-handle its own.
- * @property {(thread: any) => number} [cancelSynchronous]  Ends cancelled the
- *     synchronous I/O a thread waits in, how many there were: a pipe's reads and connects.
+ * @property {(thread: any, block?: number) => number} [cancelSynchronous]  Ends cancelled
+ *     the synchronous I/O a thread waits in - the one whose IO_STATUS_BLOCK is `block`,
+ *     when given - how many there were: a pipe's reads, writes and connects.
  * @property {(handle: number, type?: string) => any} objectOf  A kernel object by handle, or null.
  * @property {(process: any, code: number) => any} [terminateProcess]  A process ended as
  *     TerminateProcess ends it, null for this one (which does not return: its answer is the park).
@@ -624,9 +625,42 @@ export function createProcessPolicyFunctions(host){
 
     /**
      * The native calls over the same jobs, which ntdll publishes: a job one
-     * front door makes by name the other opens.
+     * front door makes by name the other opens - and NtCancelSynchronousIoFile,
+     * CancelSynchronousIo's.
      */
     const jobNatives = {
+        /**
+         * NTSTATUS NtCancelSynchronousIoFile(HANDLE ThreadHandle,
+         *   PIO_STATUS_BLOCK IoRequestToCancel, PIO_STATUS_BLOCK IoStatusBlock)
+         *
+         * CancelSynchronousIo's, native: the thread's synchronous I/O - the one
+         * whose block is named, or any - ends cancelled; STATUS_NOT_FOUND when
+         * there was none. The answer is written in the block, which is probed
+         * before anything is cancelled: one that cannot be written is
+         * STATUS_ACCESS_VIOLATION (ntdll's wrapper answers the fault so).
+         */
+        NtCancelSynchronousIoFile: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, request, block])=>{
+                const thread = host.threadOf(handle);
+                if (!thread)
+                {
+                    return STATUS.INVALID_HANDLE;
+                }
+                if ((block >>> 0) === 0)
+                {
+                    return STATUS.ACCESS_VIOLATION;
+                }
+                writeDword(block >>> 0, 0);
+                const status = (host.cancelSynchronous?.(thread, request >>> 0) ?? 0) > 0
+                    ? STATUS.SUCCESS : STATUS.NOT_FOUND;
+                writeDword(block >>> 0, status);
+                writeDword((block >>> 0) + 4, 0);
+                return status;
+            },
+        },
+
         /**
          * NTSTATUS NtCreateJobObject(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES)
          *

@@ -30,6 +30,7 @@
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { FILE_OBJECT_KINDS } from './handle-tags.js';
+import { FILE_IMPLIED, allows, mappedAccess } from './access.js';
 import { fileAttributes, fileIndex, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
@@ -101,6 +102,8 @@ const ERROR_FILENAME_EXCED_RANGE = 206;
 
 /** ReadDirectoryChangesW's statuses, and the error a completion routine is told. */
 const STATUS_PENDING = 0x103;
+/** What a cancel found nothing to cancel with. */
+const STATUS_NOT_FOUND = 0xc0000225;
 const STATUS_NOTIFY_ENUM_DIR = 0x10c;
 const ERROR_NOTIFY_ENUM_DIR = 1022;
 /** Every FILE_NOTIFY_CHANGE_ flag. */
@@ -476,7 +479,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     native?: boolean, overlapped?: number,
  *     io?: { event: number, apc: number, context: number }) => any,
  *     write: (handle: number, buffer: number, length: number, out: number,
- *     native?: boolean, overlapped?: number) => any,
+ *     native?: boolean, overlapped?: number, routine?: number,
+ *     io?: { event: number, apc: number, context: number }) => any,
  *     readEx?: (handle: number, buffer: number, length: number, overlapped: number,
  *     routine: number) => any,
  *     writeEx?: (handle: number, buffer: number, length: number, overlapped: number,
@@ -524,8 +528,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           Signals the event NtReadFile or NtWriteFile is given, when it completes.
  * @property {() => string[]} [drives]  the drive letters, for the mount manager
  * @property {(letter: string) => any} [volume]  a drive's volume, its `kind` read
- * @property {{ open: (type: string, object: any) => number,
+ * @property {{ open: (type: string, object: any, access?: number | null) => number,
  *              resolve: (handle: number, type?: string) => any,
+ *              access?: (handle: number) => number | null,
  *              close: (handle: number) => any,
  *              typeOf?: (handle: number) => string | undefined,
  *              holds?: (object: any) => boolean,
@@ -1076,6 +1081,22 @@ export function createFileFunctions(host){
             void e;
             return null;
         }
+    };
+
+    /**
+     * Whether a file handle may read its data, or write it: its open may,
+     * and the handle was granted the right - a duplicate may hold fewer
+     * rights than the open it shares (`access.js`, the file kind).
+     *
+     * @param {number} handle @param {{ read?: boolean, write?: boolean }} file
+     */
+    const reads = (handle, file)=>Boolean(file.read)
+        && allows(host.handles.access?.(handle >>> 0) ?? null, FILE_READ_DATA);
+    /** @param {number} handle @param {{ read?: boolean, write?: boolean }} file */
+    const writes = (handle, file)=>{
+        const granted = host.handles.access?.(handle >>> 0) ?? null;
+        return Boolean(file.write)
+            && (granted === null || (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0);
     };
 
     /** @param {number} handle  whether it is the null device's */
@@ -2382,10 +2403,11 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {number} [implied]  rights the handle is granted beside those asked
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
      */
-    const openPath = (path, request)=>{
-        const result = openPathOnce(path, request);
+    const openPath = (path, request, implied = 0)=>{
+        const result = openPathOnce(path, request, implied);
         if ('error' in result)
         {
             host.openRefused?.({ path, error: result.error, ...request });
@@ -2397,9 +2419,10 @@ export function createFileFunctions(host){
      *
      * @param {string} path
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @param {number} implied
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
      */
-    const openPathOnce = (path, { access, share, disposition, flags })=>{
+    const openPathOnce = (path, { access, share, disposition, flags }, implied)=>{
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {
@@ -2439,7 +2462,8 @@ export function createFileFunctions(host){
             const handle = host.handles.open('file',
                 { path, node: null, directory: true, read: false, write: false, position: 0,
                     // A folder watched through a completion port is opened so.
-                    ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} });
+                    ...((flags >>> 0) & FILE_FLAG_OVERLAPPED) !== 0 ? { overlapped: true } : {} },
+                mappedAccess('file', rights | implied));
             return { handle, existed: true };
         }
         if (exists && disposition === CREATE_NEW)
@@ -2506,7 +2530,7 @@ export function createFileFunctions(host){
             path, node, read, write, writeAttributes, position: 0,
             ...deleteOnClose ? { deleteOnClose } : {},
             ...overlapped ? { overlapped } : {}, ...sequential ? { sequential } : {},
-        });
+        }, mappedAccess('file', rights | implied));
         return { handle, existed: exists };
     };
 
@@ -2561,7 +2585,10 @@ export function createFileFunctions(host){
         {
             return fail(refusal, INVALID_HANDLE_VALUE);
         }
-        const opened = openPath(text.path(name), { access, share, disposition, flags });
+        // CreateFile asks, beside what it was asked, to wait on the handle and
+        // to read the file's attributes, as Windows' does.
+        const opened = openPath(text.path(name), { access, share, disposition, flags },
+            FILE_IMPLIED);
         if ('error' in opened)
         {
             return fail(opened.error, INVALID_HANDLE_VALUE);
@@ -3308,7 +3335,7 @@ export function createFileFunctions(host){
                 // finishes the call through these, as Windows does.
                 const io = { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 };
                 const answer = writing
-                    ? stream.write(handle, buffer, length, block, true)
+                    ? stream.write(handle, buffer, length, block, true, 0, 0, io)
                     : stream.read(handle, buffer, length, block, true, 0, io);
                 if (answer === STATUS_PENDING && (event >>> 0) !== 0)
                 {
@@ -3324,7 +3351,7 @@ export function createFileFunctions(host){
             {
                 return STATUS_INVALID_HANDLE;
             }
-            if (writing ? !file.write : !file.read)
+            if (writing ? !writes(handle, file) : !reads(handle, file))
             {
                 return STATUS_ACCESS_DENIED;
             }
@@ -3463,16 +3490,78 @@ export function createFileFunctions(host){
         NtCreateFile: { argBytes: 44, handler: ntCreateFile },
 
         /**
+         * NTSTATUS NtCancelIoFile(HANDLE, PIO_STATUS_BLOCK)
+         *
+         * What the calling thread waits for on the handle ends cancelled - a
+         * pipe's reads, writes and connects; a file's I/O has finished by the
+         * time its call answers. Success, written in the block, whether or
+         * not there was any; a handle that is no file object is refused.
+         */
+        NtCancelIoFile: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, block])=>{
+                if (host.pipes?.cancel(handle, { thread: host.currentThread?.() }) == null
+                    && !FILE_OBJECTS.has(host.handles.typeOf?.(handle >>> 0) ?? ''))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                return report(block >>> 0, STATUS_SUCCESS, 0);
+            },
+        },
+
+        /**
+         * NTSTATUS NtCancelIoFileEx(HANDLE, PIO_STATUS_BLOCK IoRequestToCancel,
+         *   PIO_STATUS_BLOCK)
+         *
+         * The one request whose IO_STATUS_BLOCK is named, or every one on the
+         * handle of any thread: STATUS_NOT_FOUND, written in the block, when
+         * there was none (CancelIoEx's ERROR_NOT_FOUND).
+         */
+        NtCancelIoFileEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, request, block])=>{
+                const count = host.pipes?.cancel(handle,
+                    (request >>> 0) === 0 ? {} : { block: request >>> 0 });
+                if (count == null && !FILE_OBJECTS.has(host.handles.typeOf?.(handle >>> 0) ?? ''))
+                {
+                    return STATUS_INVALID_HANDLE;
+                }
+                return report(block >>> 0, (count ?? 0) > 0 ? STATUS_SUCCESS : STATUS_NOT_FOUND, 0);
+            },
+        },
+
+        /**
          * NTSTATUS NtFsControlFile(HANDLE, HANDLE Event, PIO_APC_ROUTINE, PVOID,
          *   PIO_STATUS_BLOCK, ULONG FsControlCode, PVOID, ULONG, PVOID, ULONG)
          *
-         * The volume answers no file-system control: reparse points,
-         * compression and the rest are the requests of a volume it is not.
+         * A pipe end answers its own (`pipes.control`: FSCTL_PIPE_PEEK). The
+         * volume answers no file-system control: reparse points, compression
+         * and the rest are the requests of a volume it is not.
          */
         NtFsControlFile: {
             argBytes: 40,
             /** @param {number[]} args */
-            handler: ([handle, , , , block, code])=>{
+            handler: ([handle, event, apc, context, block, code, , , output, room])=>{
+                const piped = host.pipes?.control(handle, code, output, room, block,
+                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 });
+                if (piped)
+                {
+                    if ('parked' in piped)
+                    {
+                        return piped.parked;
+                    }
+                    if (piped.status === STATUS_PENDING)
+                    {
+                        if ((event >>> 0) !== 0)
+                        {
+                            host.resetEvent?.(event >>> 0);
+                        }
+                        return STATUS_PENDING;
+                    }
+                    return settled(block >>> 0, piped.status, piped.information);
+                }
                 if (!object(handle, 'file'))
                 {
                     return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
@@ -3642,7 +3731,8 @@ export function createFileFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                return report(block >>> 0, file.write ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, 0);
+                return report(block >>> 0, writes(handle, file) ? STATUS_SUCCESS
+                    : STATUS_ACCESS_DENIED, 0);
             },
         },
 
@@ -4433,7 +4523,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4529,7 +4619,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4600,7 +4690,7 @@ export function createFileFunctions(host){
                 {
                     return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4632,7 +4722,7 @@ export function createFileFunctions(host){
                 {
                     return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4687,7 +4777,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4757,7 +4847,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4863,7 +4953,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if (!file.write)
+                if (!writes(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
@@ -4877,15 +4967,16 @@ export function createFileFunctions(host){
         /**
          * BOOL FlushFileBuffers(HANDLE)
          *
-         * Nothing between the guest and the filesystem is buffered, so there is
-         * nothing to push. Validating the handle is the only observable part,
-         * and a program that flushes an invalid one wants to hear about it.
+         * Nothing between the guest and the filesystem is buffered, so a file
+         * has nothing to push; a pipe end waits for its reader to take what it
+         * wrote (`pipes.flush`). Validating the handle is the rest, and a
+         * program that flushes an invalid one wants to hear about it.
          */
         FlushFileBuffers: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(object(handle, 'file') || host.pipes?.isPipe(handle)
-                ? 1 : fail(ERROR_INVALID_HANDLE)),
+            handler: ([handle])=>host.pipes?.flush(handle)
+                ?? (object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE)),
         },
 
         /**
@@ -5316,7 +5407,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
                 }
-                if (!file.read)
+                if (!reads(handle, file))
                 {
                     return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
@@ -5342,7 +5433,7 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, buffer, count])=>{
                 const file = object(handle, 'file');
-                if (!file || !file.write)
+                if (!file || !writes(handle, file))
                 {
                     return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
                 }

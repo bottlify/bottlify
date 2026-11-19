@@ -1111,10 +1111,12 @@ export function createWin32Module(){
 
             /** Everything a table needs from the kernel's handle table. */
             const handles = {
-                /** @param {string} type @param {any} object */
-                open: (type, object)=>kernel.handles.open(type, object),
+                /** @param {string} type @param {any} object @param {number | null} [access] */
+                open: (type, object, access)=>kernel.handles.open(type, object, access),
                 /** @param {number} handle @param {string} [type] */
                 resolve: (handle, type)=>kernel.handles.resolve(handle, type),
+                /** The rights a handle holds, null for every one. @param {number} handle */
+                access: handle=>kernel.handles.access?.(handle) ?? null,
                 /** @param {number} handle */
                 close: handle=>kernel.handles.close(handle),
                 /** @param {number} handle */
@@ -3840,8 +3842,9 @@ export function createWin32Module(){
                         // A job tells the completion port it was associated with.
                         postCompletion: (port, packet)=>ports.postTo(port, packet),
                         // The waits CancelSynchronousIo can cut short: a pipe's.
-                        cancelSynchronous: (/** @type {any} */ thread)=>
-                            pipes.cancelSynchronous(thread),
+                        cancelSynchronous: (/** @type {any} */ thread,
+                            /** @type {number | undefined} */ block)=>
+                            pipes.cancelSynchronous(thread, block),
                         listenJobs: events=>{
                             jobEvents = events;
                         },

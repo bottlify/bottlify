@@ -280,17 +280,19 @@ function parent(path){
 
 /** The handle table the real kernel provides, with the same reuse discipline. */
 function fakeHandles(){
-    /** @type {Map<number, { type: string, object: any }>} */
+    /** @type {Map<number, { type: string, object: any, access: number | null }>} */
     const entries = new Map();
     let next = 4;
     return {
-        /** @param {string} type @param {any} object */
-        open(type, object){
+        /** @param {string} type @param {any} object @param {number | null} [access] */
+        open(type, object, access = null){
             const handle = next;
             next += 4;
-            entries.set(handle, { type, object });
+            entries.set(handle, { type, object, access });
             return handle;
         },
+        /** @param {number} handle */
+        access: handle=>entries.get(handle)?.access ?? null,
         /** @param {number} handle @param {string} [type] */
         resolve(handle, type){
             const entry = entries.get(handle);
@@ -3421,4 +3423,26 @@ test('NtQueryDirectoryFile matches its mask as a native expression, "." and ".."
     const none = names('nothing');
     assert.equal(none.status, 0xc000000f, 'STATUS_NO_SUCH_FILE');
     assert.equal(none.block, 0xdeadbeef, 'an error leaves the status block alone');
+});
+
+test('a file handle reads and writes by the rights it holds: a second handle onto the open'
+    + ' with fewer is refused', ()=>{
+    const { memory, files, handles, fns, open, error } = setup();
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const file = handles.resolve(handle, 'file');
+    // What DuplicateHandle makes of it asking FILE_READ_DATA alone: the same
+    // open, a handle of its own with that right.
+    const reader = handles.open('file', file, 0x00100081);
+    memory.putString(BUFFER, 'XY');
+    assert.equal(fns.WriteFile.handler([reader, BUFFER, 2, OUT_COUNT, 0]), 0);
+    assert.equal(error.code, ERROR_ACCESS_DENIED);
+    assert.equal(fns.ReadFile.handler([reader, BUFFER, 2, OUT_COUNT, 0]), 1);
+    const appender = handles.open('file', file, 0x00100004);
+    assert.equal(fns.WriteFile.handler([appender, BUFFER, 2, OUT_COUNT, 0]), 1,
+        'FILE_APPEND_DATA writes');
+    assert.equal(fns.ReadFile.handler([appender, BUFFER, 2, OUT_COUNT, 0]), 0);
+    assert.equal(handles.access(handle), 0x0012019f,
+        'CreateFile grants what it was asked, generic rights mapped, with SYNCHRONIZE and'
+        + ' FILE_READ_ATTRIBUTES');
 });

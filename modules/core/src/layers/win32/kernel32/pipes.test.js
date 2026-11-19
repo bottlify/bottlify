@@ -901,3 +901,260 @@ test('a server end knows its client once it has read from it; its computer name 
         assert.equal(p.fns.GetNamedPipeServerSessionId.handler([client, COUNT]), 1);
         assert.equal(p.u32(COUNT), 1, 'the interactive session');
     });
+
+/**
+ * A pipe made as Wine's test_blocking_rw makes it: the server's output 5000
+ * bytes, its input 6000, overlapped ends - and calls with buffers of their own,
+ * clear of the harness's.
+ *
+ * @param {number} [pipeMode]
+ */
+function bounded(pipeMode = 0){
+    const p = processOn(new Map());
+    const server = p.fns.CreateNamedPipeA.handler([p.putString(NAME_AT, NAME),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, pipeMode, 1, 5000, 6000, 0, 0]) >>> 0;
+    const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+    const DATA = 0x3000;
+    const READ = 0x8000;
+    return {
+        p, server, client,
+        /** @param {number} handle @param {number} count @param {number} [overlapped] */
+        write: (handle, count, overlapped = 0)=>p.pipes.write(handle, DATA, count, COUNT + 4,
+            false, overlapped),
+        /** @param {number} handle @param {number} count @param {number} [overlapped] */
+        read: (handle, count, overlapped = 0)=>p.pipes.read(handle, READ, count, COUNT, false,
+            overlapped),
+        /** What a peek at an end sees waiting. @param {number} handle */
+        waiting: handle=>{
+            p.pipes.peek([handle, 0, 0, 0, STATE, 0]);
+            return p.u32(STATE);
+        },
+        /** An OVERLAPPED's status and count. @param {number} at */
+        result: at=>[p.u32(at), p.u32(at + 4)],
+    };
+}
+
+const W1 = 0x2a00;
+const W2 = 0x2a40;
+const R1 = 0x2a80;
+const STATUS_PIPE_BROKEN = 0xc000014b;
+const STATUS_PIPE_DISCONNECTED = 0xc00000b0;
+
+test('a write waits until what is queued up to its end fits the pipe\'s buffer, in order', ()=>{
+    const { p, server, client, write, read, waiting, result } = bounded();
+    // A read waiting takes its part, and the rest of the write fits.
+    assert.equal(read(client, 1000, R1), 0);
+    assert.equal(write(server, 4000, W1), 1);
+    assert.deepEqual(result(R1), [0, 1000]);
+    assert.equal(waiting(client), 3000);
+
+    // 3000 queued and 5000 more do not fit the server's 5000: it pends, a
+    // peek sees its bytes all the same, and a write behind it waits too.
+    assert.equal(write(server, 5000, W1), 0);
+    assert.equal(p.error(), ERROR_IO_PENDING);
+    assert.equal(write(server, 1, W2), 0);
+    assert.equal(waiting(client), 8001);
+    assert.equal(write(server, 0, 0x2ac0), 1, 'a write of nothing does not wait');
+
+    // Read the first write's rest: the second fits now, the third not yet.
+    assert.equal(read(client, 3000), 1);
+    assert.deepEqual(result(W1), [0, 5000]);
+    assert.equal(p.u32(W2), STATUS_PENDING);
+    assert.equal(read(client, 1), 1);
+    assert.deepEqual(result(W2), [0, 1]);
+    assert.equal(waiting(client), 5000);
+    assert.equal(read(client, 5000), 1);
+
+    // The client's writes are held to the server's input size, 6000.
+    assert.equal(write(client, 6000, W1), 1);
+    assert.equal(write(client, 1, W2), 0);
+    assert.equal(read(server, 6000), 1);
+    assert.deepEqual(result(W2), [0, 1]);
+});
+
+test('a write too big for the buffer finishes when what is left of it fits; a synchronous one'
+    + ' parks', ()=>{
+    const { p, server, client, write, read, result } = bounded();
+    assert.equal(write(server, 7000, W1), 0);
+    assert.equal(read(client, 1999), 1);
+    assert.equal(p.u32(W1), STATUS_PENDING, '5001 left');
+    assert.equal(read(client, 1), 1);
+    assert.deepEqual(result(W1), [0, 7000]);
+    assert.equal(read(client, 5000), 1);
+
+    p.as('p1:writer');
+    assert.equal(write(server, 6000), 'parked');
+    assert.equal(p.blocked.at(-1).reason, 'pipe write');
+    p.as('p1:reader');
+    assert.equal(read(client, 1000), 1);
+    assert.deepEqual(p.woken.at(-1), { thread: 'p1:writer', result: 1 });
+    assert.equal(p.u32(COUNT + 4), 6000, 'the count where the parked write asked it');
+});
+
+test('a waiting write is cancelled with what was not read of it; the next one fits', ()=>{
+    const { p, server, client, write, read, waiting, result } = bounded();
+    assert.equal(write(server, 7000, W1), 0);
+    assert.equal(write(server, 1, W2), 0);
+    assert.equal(read(client, 10), 1);
+    assert.equal(p.pipes.cancel(server, { overlapped: W1 }), 1);
+    assert.deepEqual(result(W1), [STATUS_CANCELLED, 10]);
+    assert.deepEqual(result(W2), [0, 1], 'what is behind it fits now');
+    assert.equal(waiting(client), 1);
+});
+
+test('a flush waits for the reader to take everything; a closed or cut reader fails what waits',
+    ()=>{
+        const { p, server, client, write, read } = bounded();
+        assert.equal(p.pipes.flush(server), 1, 'nothing written, nothing to wait for');
+        assert.equal(write(server, 100), 1);
+        p.as('p1:flusher');
+        assert.equal(p.pipes.flush(server), 'parked');
+        p.as('p1:main');
+        assert.equal(read(client, 50), 1);
+        assert.equal(p.woken.some(one=>one.thread === 'p1:flusher'), false);
+        assert.equal(read(client, 50), 1);
+        assert.deepEqual(p.woken.at(-1), { thread: 'p1:flusher', result: 1 });
+
+        // The reader closes: the write waiting for it finds the pipe broken.
+        assert.equal(write(server, 7000, W1), 0);
+        p.pipes.closed(client, p.handles.get(client)?.object);
+        assert.equal(p.u32(W1), STATUS_PIPE_BROKEN);
+
+        // Disconnected: both ways' waiting writes are not connected.
+        const again = bounded();
+        assert.equal(again.write(again.client, 7000, W1), 0);
+        assert.equal(again.write(again.server, 7000, W2), 0);
+        assert.equal(again.p.fns.DisconnectNamedPipe.handler([again.server]), 1);
+        assert.equal(again.p.u32(W1), STATUS_PIPE_DISCONNECTED);
+        assert.equal(again.p.u32(W2), STATUS_PIPE_DISCONNECTED);
+    });
+
+test('a handle that does not wait never waits to write: whole, what a reader takes, or nothing',
+    ()=>{
+        for (const messages of [false, true])
+        {
+            const p = processOn(new Map());
+            const server = p.fns.CreateNamedPipeA.handler([p.putString(NAME_AT, NAME),
+                PIPE_ACCESS_DUPLEX, PIPE_NOWAIT | (messages ? PIPE_TYPE_MESSAGE : 0), 1, 512,
+                512, 0, 0]) >>> 0;
+            const client = p.client(GENERIC_READ, FILE_FLAG_OVERLAPPED);
+            /** @param {number} count */
+            const write = count=>{
+                assert.equal(p.pipes.write(server, 0x3000, count, COUNT + 4, false, 0), 1);
+                return p.u32(COUNT + 4);
+            };
+            assert.equal(write(513), 0, 'one byte past the buffer: nothing');
+            assert.equal(write(512), 512, 'the buffer whole');
+            assert.equal(p.pipes.read(client, 0x8000, 1000, COUNT, false, 0), 1);
+            assert.equal(p.pipes.read(client, 0x8000, 1, COUNT, false, R1), 0, 'a reader waits');
+            assert.equal(write(513), 513, 'the reader takes one, the rest fits');
+            assert.equal(p.pipes.read(client, 0x8000, 1000, COUNT, false, 0), 1);
+            assert.equal(p.pipes.read(client, 0x8000, 1, COUNT, false, R1), 0);
+            assert.equal(write(514), messages ? 0 : 1,
+                'a byte pipe writes what the reader took; a message goes whole or not at all');
+        }
+    });
+
+test('a transaction with an answer already waiting is refused before it writes', ()=>{
+    const { p, server, client, write } = bounded(PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE);
+    p.view.setUint32(STATE, PIPE_READMODE_MESSAGE, true);
+    assert.equal(p.fns.SetNamedPipeHandleState.handler([client, STATE, 0, 0]), 1);
+    assert.equal(write(server, 1), 1);
+    assert.equal(p.fns.TransactNamedPipe.handler([client, 0x3000, 2, 0x8000, 1, COUNT, R1]), 0);
+    assert.equal(p.error(), ERROR_PIPE_BUSY);
+    assert.equal(p.pipes.read(server, 0x8000, 10, COUNT, false, R1), 0, 'nothing was written');
+});
+
+test('a process that ends takes its waiting write out of the pipe, unanswered', ()=>{
+    const table = new Map();
+    const parent = processOn(table, 1);
+    const server = parent.fns.CreateNamedPipeA.handler([parent.putString(NAME_AT, NAME),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, 0, 1, 512, 512, 0, 0]) >>> 0;
+    const child = processOn(table, 2);
+    const client = child.client();
+    assert.equal(child.pipes.write(client, 0x3000, 2000, COUNT + 4, false, 0), 'parked');
+    assert.equal(parent.pipes.read(server, 0x8000, 10, COUNT, false, 0), 1);
+    child.pipes.processEnded();
+    assert.equal(child.woken.length, 0, 'nobody is left to answer');
+    assert.equal(parent.pipes.read(server, 0x8000, 10, COUNT, false, OVERLAPPED), 0,
+        'the rest of its write is gone');
+});
+
+test('a peek sees a message pipe\'s front message whatever the end reads in; FSCTL_PIPE_PEEK'
+    + ' says the same', ()=>{
+    const PEEK = 0x9000;
+    for (const messages of [false, true])
+    {
+        const { p, server, client, write } = bounded(messages ? PIPE_TYPE_MESSAGE : 0);
+        assert.equal(write(server, 20), 1);
+        assert.equal(write(server, 15), 1);
+        assert.equal(p.pipes.peek([client, 0x8000, 1000, COUNT, STATE, R1]), 1);
+        assert.equal(p.u32(COUNT), messages ? 20 : 35, 'a byte read still peeks one message');
+        assert.equal(p.u32(STATE), 35);
+        // What is left of the message: its length less the copy, below zero
+        // on a byte pipe, as Windows' PeekNamedPipe computes it.
+        assert.equal(p.u32(R1), messages ? 0 : (-35 >>> 0));
+
+        const answer = p.pipes.control(client, 0x11400c, PEEK, 16 + 1000);
+        assert.deepEqual(answer, { status: 0, information: 16 + (messages ? 20 : 35) });
+        assert.deepEqual([p.u32(PEEK), p.u32(PEEK + 4), p.u32(PEEK + 8), p.u32(PEEK + 12)],
+            [3, 35, messages ? 2 : 0, messages ? 20 : 0]);
+        assert.deepEqual(p.pipes.control(client, 0x11400c, PEEK, 16 + 1),
+            { status: STATUS_BUFFER_OVERFLOW, information: 17 });
+        assert.deepEqual(p.pipes.control(client, 0x11400c, PEEK, 15),
+            { status: 0xc0000023, information: 0 },
+            'no room for the head: STATUS_BUFFER_TOO_SMALL');
+    }
+});
+
+test('a pipe made with buffer sizes of 0 holds the default, 4096 bytes, each way', ()=>{
+    const p = processOn(new Map());
+    const server = p.fns.CreateNamedPipeA.handler([p.putString(NAME_AT, NAME),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, 0, 1, 0, 0, 0, 0]) >>> 0;
+    const client = p.client(RW, FILE_FLAG_OVERLAPPED);
+    assert.equal(p.pipes.write(client, 0x3000, 4096, COUNT, false, W1), 1);
+    assert.equal(p.pipes.write(client, 0x3000, 1, COUNT, false, W2), 0, 'the 4097th waits');
+    assert.equal(p.pipes.write(server, 0x3000, 4096, COUNT, false, R1), 1);
+    assert.equal(p.fns.GetNamedPipeInfo.handler([server, 0, STATE, STATE + 4, 0]), 1);
+    assert.deepEqual([p.u32(STATE), p.u32(STATE + 4)], [0, 0], 'the sizes asked are answered');
+});
+
+test('FSCTL_PIPE_LISTEN is ConnectNamedPipe, native: pending on an overlapped end, cancelled by'
+    + ' its block', ()=>{
+    const FSCTL_PIPE_LISTEN = 0x110008;
+    const FSCTL_PIPE_DISCONNECT = 0x110004;
+    const IOSB = 0x2b00;
+    const p = processOn(new Map());
+    const server = p.server(PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED);
+    const io = { event: 0x77, apc: 0, context: 0x55 };
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_LISTEN, 0, 0, IOSB, io),
+        { status: STATUS_PENDING, information: 0 });
+    assert.equal(p.pipes.cancel(server, { block: 0x9999 }), 0, 'another block: nothing');
+    assert.equal(p.pipes.cancel(server, { block: IOSB }), 1);
+    assert.deepEqual([p.u32(IOSB), p.u32(IOSB + 4)], [STATUS_CANCELLED, 0]);
+    assert.ok(p.events.includes(0x77), 'its event set');
+
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_LISTEN, 0, 0, IOSB, io),
+        { status: STATUS_PENDING, information: 0 });
+    p.client();
+    assert.deepEqual([p.u32(IOSB), p.u32(IOSB + 4)], [0, 0], 'the client came: connected');
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_LISTEN, 0, 0, IOSB, io),
+        { status: 0xc00000b2, information: 0 }, 'STATUS_PIPE_CONNECTED');
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_DISCONNECT, 0, 0, IOSB, io),
+        { status: 0, information: 0 });
+    assert.deepEqual(p.pipes.control(server, FSCTL_PIPE_DISCONNECT, 0, 0, IOSB, io),
+        { status: 0xc00000b0, information: 0 }, 'cut off already: STATUS_PIPE_DISCONNECTED');
+});
+
+test('a synchronous listen parks; CancelSynchronousIo by its block ends it cancelled', ()=>{
+    const IOSB = 0x2b00;
+    const p = processOn(new Map());
+    const server = p.server();
+    p.as('p1:listener');
+    assert.deepEqual(p.pipes.control(server, 0x110008, 0, 0, IOSB, undefined),
+        { parked: 'parked' });
+    assert.equal(p.pipes.cancelSynchronous('p1:listener', 0x9999), 0);
+    assert.equal(p.pipes.cancelSynchronous('p1:listener', IOSB), 1);
+    assert.equal(p.u32(IOSB), STATUS_CANCELLED);
+    assert.deepEqual(p.woken.at(-1), { thread: 'p1:listener', result: STATUS_CANCELLED });
+});
