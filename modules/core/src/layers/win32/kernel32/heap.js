@@ -1483,10 +1483,15 @@ export function createHeapFunctions(host){
 
     /**
      * The protections VirtualProtect gave a loaded image's pages, by the
-     * image's base, with the header fields that tell that image from one
-     * mapped at the same base after it is gone.
+     * image's base, with what tells that image from one mapped at the same
+     * base after it is gone: the arena block the loader took for it (a new
+     * load is a new block, its headers the same or not - a program that
+     * writes one DLL file over and over with only a section's
+     * characteristics changed loads each at the same base with the same
+     * stamp), and the header fields for an image mapped as a region.
      *
-     * @type {Map<number, { stamp: string, pages: Map<number, number> }>}
+     * @type {Map<number, { holder: object | null, stamp: string,
+     *     pages: Map<number, number> }>}
      */
     const imageProtections = new Map();
 
@@ -1497,7 +1502,7 @@ export function createHeapFunctions(host){
      *
      * @param {number} page
      * @returns {{ base: number, layout: NonNullable<ReturnType<typeof imageLayout>>,
-     *     changed: Map<number, number> | null } | null}
+     *     holder: object | null, changed: Map<number, number> | null } | null}
      */
     const imageAt = page=>{
         const block = allocator.blockContaining(page);
@@ -1513,9 +1518,10 @@ export function createHeapFunctions(host){
         {
             return null;
         }
+        const holder = block ?? null;
         const kept = imageProtections.get(base);
-        return { base, layout,
-            changed: kept && kept.stamp === imageStamp(base) ? kept.pages : null };
+        return { base, layout, holder, changed: kept && kept.holder === holder
+            && kept.stamp === imageStamp(base) ? kept.pages : null };
     };
 
     /**
@@ -3636,7 +3642,7 @@ export function createHeapFunctions(host){
                     writeDword(oldProtect >>> 0, imagePageProtection(image, first));
                     const changed = image.changed ?? new Map();
                     imageProtections.set(image.base,
-                        { stamp: imageStamp(image.base), pages: changed });
+                        { holder: image.holder, stamp: imageStamp(image.base), pages: changed });
                     for (let page = first; page < end; page += PAGE_SIZE)
                     {
                         changed.set(page, imageWriteCopy(protect >>> 0));

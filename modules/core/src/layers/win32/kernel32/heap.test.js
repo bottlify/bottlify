@@ -1284,6 +1284,37 @@ test('a loaded image answers each section\'s protection, and keeps what VirtualP
             0, 'past the image\'s end');
     });
 
+test('an image loaded again where one was answers its own sections, not the protections given'
+    + ' the one before', ()=>{
+    // Wine's kernel32:loader writes one DLL over and over, a section's
+    // characteristics changed each time and nothing else: each load is at
+    // the same base with the same stamp, and is a new image.
+    const host = fakeHost({ base: 0x10000, size: 0x40000 });
+    const allocator = createHeapAllocator(host.arena);
+    const fns = createHeapFunctions({ ...host, allocator });
+    // The answers' buffer is a block of its own: the images take the arena's.
+    const buffer = allocator.allocate(0x100);
+    const view = new DataView(host.bytes.buffer);
+    /** @param {number} characteristics */
+    const load = characteristics=>{
+        const base = allocator.allocate(0x3000, { alignment: 0x10000, owner: 'image' });
+        host.writeMemory(base, imageHeaders(0x3000, [[0x1000, 0x1000, characteristics]]));
+        return base;
+    };
+    /** @param {number} address */
+    const protection = address=>{
+        assert.equal(fns.VirtualQuery.handler([address, buffer, MBI.SIZE]), MBI.SIZE);
+        return view.getUint32(buffer + MBI.Protect, true);
+    };
+    const first = load(0x60000020);
+    assert.equal(fns.VirtualProtect.handler([first + 0x1000, 0x10, 0x02, buffer + 0x40]), 1);
+    assert.equal(protection(first + 0x1000), 0x02, 'what VirtualProtect gave it');
+    allocator.free(first);
+    const second = load(0x20000020);
+    assert.equal(second, first, 'the same base');
+    assert.equal(protection(second + 0x1000), 0x10, 'its own section, PAGE_EXECUTE');
+});
+
 test('a 64-bit VirtualQuery past 4 GiB answers whole addresses, its walk reaching the image there',
     ()=>{
         // A packer walks the space with `address += RegionSize` up to an image at
