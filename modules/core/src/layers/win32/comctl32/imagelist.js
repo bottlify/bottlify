@@ -128,6 +128,8 @@ const ILD_ROP = 0x0040;
 /** A colour that is none, and one that is the list's own. */
 const CLR_NONE = 0xffffffff;
 const CLR_DEFAULT = 0xff000000;
+/** IImageList::GetItemFlags: an image with alpha of its own. */
+const ILIF_ALPHA = 0x1;
 
 /** Raster operations. DSna clears the destination where the source is set. */
 const SRCCOPY = 0x00cc0020;
@@ -234,6 +236,11 @@ export function createImageLists(host){
      * @property {readonly number[]} overlays  The images the fifteen overlays are, or -1.
      * @property {number[] | null} [colors]  A list of four or eight bits a pixel's colour
      *     table, 0xRRGGBB: its image's, kept to make the image again when it grows.
+     * @property {boolean} [colorsSet]  Whether its table was set, by ImageList_SetColorTable
+     *     or by the first image brought to it empty with a table of its own: once set, later
+     *     images, a list emptied included, leave it.
+     * @property {boolean[]} [alpha]  For each image of a list of 32 bits, whether the bitmap
+     *     it came from had alpha (ILIF_ALPHA).
      */
 
     /** @type {Map<number, ImageList>} */
@@ -264,6 +271,11 @@ export function createImageLists(host){
         initialize: (handle, cx, cy, flags, initial, grow)=>{
             const list = listOf(handle);
             return list !== null && cx > 0 && cy > 0 && setUp(list, cx, cy, flags, initial, grow);
+        },
+        itemFlags: (handle, index)=>{
+            const list = listOf(handle);
+            return list === null || index < 0 || index >= list.count ? null
+                : list.alpha?.[index] ? ILIF_ALPHA : 0;
         },
     }) : null;
 
@@ -418,10 +430,12 @@ export function createImageLists(host){
         const depth = depthOf(list);
         const size = depth <= 8 ? 1 << depth : 0;
         const set = Math.max(0, Math.min(colors.length, size - start));
-        if (set === 0 || !list.colors)
+        if (set === 0)
         {
             return 0;
         }
+        // A table set before the list has an image is the one it is made with.
+        list.colors ??= [...(depth === 4 ? DEFAULT_COLORS_4 : DEFAULT_COLORS_8)];
         colors.slice(0, set).forEach((rgb, index)=>{
             /** @type {number[]} */ (list.colors)[start + index] = rgb & 0xffffff;
         });
@@ -556,6 +570,7 @@ export function createImageLists(host){
      */
     const place = (list, index, bitmap, from, mask, key = null)=>{
         const x = index * list.cx;
+        (list.alpha ??= [])[index] = depthOf(list) === 32 && hasAlpha(list, bitmap, from);
         withDCs([list.image, bitmap], (target, source)=>gdi('BitBlt', target, x, 0, list.cx,
             list.cy, source, from, 0, SRCCOPY));
         if (list.mask === 0)
@@ -586,6 +601,80 @@ export function createImageLists(host){
     };
 
     /**
+     * Whether the image a bitmap of 32 bits a pixel holds at `from` has any
+     * alpha: IImageList::GetItemFlags's ILIF_ALPHA, which a list of 32 bits
+     * keeps for each image. A bitmap of fewer bits has none.
+     *
+     * @param {ImageList} list @param {number} bitmap @param {number} from
+     */
+    const hasAlpha = (list, bitmap, from)=>{
+        const read = host.readMemory;
+        const info = host.allocate?.(24) ?? 0;
+        if (!read || info === 0)
+        {
+            return false;
+        }
+        /** @param {Uint8Array} pixels @param {number} start @param {number} end */
+        const anyAlpha = (pixels, start, end)=>{
+            for (let i = start + 3; i < end; i += 4)
+            {
+                if (pixels[i] !== 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+        try
+        {
+            if (gdi('GetObjectA', bitmap, 24, info) === 0)
+            {
+                return false;
+            }
+            const header = new DataView(read(info, 24).slice().buffer);
+            if (header.getUint16(18, true) !== 32)
+            {
+                return false;
+            }
+            const stride = header.getInt32(12, true);
+            const rows = Math.min(Math.abs(header.getInt32(8, true)), list.cy);
+            const width = Math.min(list.cx, header.getInt32(4, true) - from);
+            const pointer = header.getUint32(20, true);
+            if (pointer !== 0 && width > 0)
+            {
+                // A DIB section's bits are in memory: its rows read in place.
+                for (let row = 0; row < rows; row++)
+                {
+                    const line = read(pointer + row * stride + from * 4, width * 4);
+                    if (anyAlpha(line, 0, line.length))
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            const size = list.cx * 4 * list.cy;
+            const at = host.allocate?.(size) ?? 0;
+            if (at === 0)
+            {
+                return false;
+            }
+            const copy = gdi('CreateBitmap', list.cx, list.cy, 1, 32, 0);
+            withDCs([copy, bitmap], (target, source)=>gdi('BitBlt', target, 0, 0, list.cx,
+                list.cy, source, from, 0, SRCCOPY));
+            gdi('GetBitmapBits', copy, size, at);
+            gdi('DeleteObject', copy);
+            const found = anyAlpha(read(at, size), 0, size);
+            host.release?.(at);
+            return found;
+        }
+        finally
+        {
+            host.release?.(info);
+        }
+    };
+
+    /**
      * Adds every image a bitmap holds.
      *
      * @param {number} handle @param {number} bitmap @param {number} mask
@@ -605,12 +694,15 @@ export function createImageLists(host){
         }
         if (host.gdi32 && (bitmap >>> 0) !== 0)
         {
-            // The first images a list of a palette is given bring theirs:
-            // a bitmap with a colour table puts its colours in the list's.
-            const own = first === 0 && depthOf(list) <= 8 ? colorsOf(bitmap >>> 0) : null;
+            // The first images a list of a palette is given bring theirs,
+            // once: a bitmap with a colour table, added to an empty list
+            // whose table nothing set yet, puts its colours in the list's.
+            const own = first === 0 && !list.colorsSet && depthOf(list) <= 8
+                ? colorsOf(bitmap >>> 0) : null;
             if (own)
             {
                 setColors(list, 0, own);
+                list.colorsSet = true;
             }
             for (let at = 0; at < count; at++)
             {
@@ -1058,9 +1150,11 @@ export function createImageLists(host){
                 if ((index | 0) === -1)
                 {
                     list.count = 0;
+                    list.alpha = [];
                     resize(list, list.grow, 0);
                     return 1;
                 }
+                list.alpha?.splice(index | 0, 1);
                 const at = (index | 0) * list.cx;
                 for (const bitmap of [list.image, list.mask].filter(held=>held !== 0))
                 {
@@ -1524,6 +1618,7 @@ export function createImageLists(host){
                 const size = 1 << depthOf(list);
                 const wanted = Math.max(0, Math.min(entries >>> 0, size - (start >>> 0)));
                 const bytes = host.readMemory(quads >>> 0, wanted * 4);
+                list.colorsSet = true;
                 return setColors(list, start >>> 0, Array.from({ length: wanted },
                     (_, index)=>bytes[index * 4] | bytes[index * 4 + 1] << 8
                         | bytes[index * 4 + 2] << 16));
