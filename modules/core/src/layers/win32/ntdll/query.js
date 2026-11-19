@@ -972,6 +972,15 @@ export function createQueryFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, infoClass, buffer, length, returnLength])=>{
                 const wanted = infoClass >>> 0;
+                // No handle names no process, for a class there is (Wine's
+                // info.c test_query_process_image_file_name); a class there
+                // is not is refused as one first.
+                if ((handle >>> 0) === 0)
+                {
+                    return [PROCESS_BASIC_INFORMATION, PROCESS_DEBUG_PORT, PROCESS_EXECUTE_FLAGS,
+                        PROCESS_IMAGE_FILE_NAME, PROCESS_IMAGE_FILE_NAME_WIN32].includes(wanted)
+                        ? STATUS.INVALID_HANDLE : STATUS.INVALID_INFO_CLASS;
+                }
                 const child = (handle >>> 0) === CURRENT_PROCESS ? null
                     : host.processOf?.(handle >>> 0) ?? null;
                 if (child && !child.current)
