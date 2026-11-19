@@ -167,7 +167,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     SetFloat: {
         convention: 'stdcall',
-        params: ['ptr', 'ptr', 'ptr', 'u32'],
+        params: ['ptr', 'ptr', 'ptr', 'f32bits'],
         returns: 'u32',
         uses: ['u32', 'setU32', 'callStd', 'host', 'pointerBytes'],
         host: 310,

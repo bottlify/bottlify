@@ -1390,7 +1390,7 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'let s = a;\n    s = c;\n    return s;'), /s is i32, and this is u32/);
     refused(one('{ u9 }, a, c, x', 'return 0;'), /the guest's helpers are/);
     refused(one('a, c, x, y', 'return 0;'),
-        /@param \{i32 \| u32 \| ptr \| f64 \| f32 \| x87 \| i64\} y is wanted/);
+        /@param \{i32 \| u32 \| ptr \| f64 \| f32 \| f32bits \| x87 \| i64\} y is wanted/);
     refused(one(p, 'return 0;').replace('@guestCode cdecl', '@guestCode'),
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f16}'),

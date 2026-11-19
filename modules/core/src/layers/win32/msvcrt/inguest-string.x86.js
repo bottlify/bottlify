@@ -43,7 +43,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'thiscall',
         params: ['ptr', 'ptr'],
         returns: 'ptr',
-        uses: ['u32', 'setU32', 'copyUp', 'host', 'pointerBytes'],
+        uses: ['u32', 'setU32', 'copyUp', 'host', 'pointerBytes', 'ptr'],
         host: 136,
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x04, 0x8b, 0x6c,
@@ -77,7 +77,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'thiscall',
         params: ['ptr'],
         returns: 'ptr',
-        uses: ['u32', 'pointerBytes'],
+        uses: ['u32', 'pointerBytes', 'ptr'],
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x8b, 0x54, 0x24, 0x04, 0x8b, 0x42, 0x18, 0x83, 0xf8,
             0x0f, 0x76, 0x05, 0x8b, 0x42, 0x04, 0xeb, 0x05, 0x8b, 0xc2, 0x83, 0xc0,
@@ -88,7 +88,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'thiscall',
         params: ['ptr', 'u32'],
         returns: 'ptr',
-        uses: ['u32', 'pointerBytes'],
+        uses: ['u32', 'pointerBytes', 'ptr'],
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x83, 0xec, 0x04, 0x8b, 0x54, 0x24, 0x08, 0x8b, 0x42,
             0x18, 0x83, 0xf8, 0x0f, 0x76, 0x05, 0x8b, 0x42, 0x04, 0xeb, 0x05, 0x8b,
@@ -110,7 +110,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'thiscall',
         params: ['ptr', 'u32'],
         returns: 'ptr',
-        uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
+        uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes', 'ptr'],
         host: 75,
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x53, 0x56, 0x57, 0x8b, 0x74, 0x24, 0x10, 0x8b, 0x7e,
@@ -126,7 +126,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'thiscall',
         params: ['ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes'],
+        uses: ['u32', 'setU8', 'setU32', 'host', 'pointerBytes', 'ptr'],
         host: 77,
         code: Uint8Array.of(
             0x58, 0x51, 0x50, 0x53, 0x56, 0x57, 0x55, 0x8b, 0x5c, 0x24, 0x14, 0x8b,

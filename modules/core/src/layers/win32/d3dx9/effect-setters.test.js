@@ -14,6 +14,7 @@
  */
 
 import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import { COMPILED } from './effect-setters.x86.js';
 import { COMPILED as LONG } from './effect-setters.x64.js';
 import * as sources from './effect-setters.js';
@@ -164,6 +165,8 @@ test('the setters in the guest answer, write and date as their JavaScript', ()=>
 
 test('the setters in a 64-bit process answer, write and date as their JavaScript', ()=>{
     const next = random(64);
+    /** The calls the x86-64 answered itself. */
+    const taken = { SetFloat: 0, SetValue: 0 };
     for (let round = 0; round < 400; round++)
     {
         // Resolve's x86-64 where the block points, as a 64-bit process places it.
@@ -177,6 +180,10 @@ test('the setters in a 64-bit process answer, write and date as their JavaScript
         sameAt64('SetMatrixTranspose', { stack: [SELF, h, pointer], memory }, HANDED);
         sameAt64('SetVector', { stack: [SELF, h, pointer], memory }, HANDED);
         sameAt64('SetVectorArray', { stack: [SELF, h, pointer, count], memory }, HANDED);
+        taken.SetFloat += sameAt64('SetFloat', { stack: [SELF, h, word], memory }, HANDED)
+            .handedOver ? 0 : 1;
+        taken.SetValue += sameAt64('SetValue', { stack: [SELF, h, pointer, 4 * (next() % 48)],
+            memory }, HANDED).handedOver ? 0 : 1;
         sameAt64('SetInt', { stack: [SELF, h, word], memory }, HANDED);
         sameAt64('SetBool', { stack: [SELF, h, word], memory }, HANDED);
         sameAt64('SetTexture', { stack: [SELF, h, word], memory }, HANDED);
@@ -194,4 +201,6 @@ test('the setters in a 64-bit process answer, write and date as their JavaScript
             sameAt64(name, { stack: [SELF, h, pointers, next() % 9], memory }, HANDED);
         }
     }
+    assert.ok(taken.SetFloat > 0 && taken.SetFloat < 400, `SetFloat took ${taken.SetFloat}`);
+    assert.ok(taken.SetValue > 0 && taken.SetValue < 400, `SetValue took ${taken.SetValue}`);
 });

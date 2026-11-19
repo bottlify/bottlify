@@ -1892,7 +1892,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strcat: {
         convention: 'cdecl',
-        params: ['u32', 'ptr'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u8', 'copyUp', 'copyDown'],
         code: Uint8Array.of(
@@ -2610,7 +2610,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strncat: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'u32'],
+        params: ['ptr', 'ptr', 'u32'],
         returns: 'ptr',
         uses: ['u8', 'setU8', 'copyUp', 'copyDown'],
         code: Uint8Array.of(
@@ -2671,7 +2671,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcscat: {
         convention: 'cdecl',
-        params: ['u32', 'ptr'],
+        params: ['ptr', 'ptr'],
         returns: 'ptr',
         uses: ['u16', 'copyUp', 'copyDown'],
         code: Uint8Array.of(
@@ -2693,7 +2693,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcsncat: {
         convention: 'cdecl',
-        params: ['u32', 'ptr', 'u32'],
+        params: ['ptr', 'ptr', 'u32'],
         returns: 'ptr',
         uses: ['u16', 'setU16', 'copyUp', 'copyDown'],
         code: Uint8Array.of(

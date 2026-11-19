@@ -38,6 +38,7 @@
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 /** @typedef {import('./guest-code.js').i32} i32 */
 /** @typedef {import('./guest-code.js').f64} f64 */
 
@@ -89,7 +90,7 @@ const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
  * @guestCode cdecl
  * @param {Pick<Guest, 'u8' | 'u32' | 'setU8' | 'setU16' | 'setU32' | 'setF32' | 'setF64'
  *     | 'controlWord' | 'setControlWord' | 'pointerBytes'>} guest
- * @param {u32} input @param {u32} format @param {u32} list @param {u32} write
+ * @param {ptr} input @param {ptr} format @param {ptr} list @param {u32} write
  * @returns {i32}
  */
 export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, controlWord,
@@ -111,10 +112,20 @@ export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, contr
                 return HANDED;
             }
             // No conversion without its '%': as many slots as there are of
-            // them is every slot the format can read.
+            // them is every slot the format can read - but for "%%", a
+            // percent sign matched, and a conversion suppressed by '*', which
+            // store through none.
             if (b === 37)
             {
-                listSpan++;
+                const after = u8(format + formatSpan + 1);
+                if (after === 37)
+                {
+                    formatSpan++;
+                }
+                else if (after !== 42)
+                {
+                    listSpan++;
+                }
             }
             formatSpan++;
             b = u8(format + formatSpan);
@@ -139,9 +150,7 @@ export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, contr
         inputSpan++;
     }
 
-    /** @type {u32} */
     let at = input;
-    /** @type {u32} */
     let f = format;
     let assigned = 0;
     /** @type {u32} */
@@ -333,9 +342,9 @@ export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, contr
                 const textPlace = u32(list + Math.imul(taken, pointerBytes));
                 if (write === 0 && (textPlace === 0
                     || (pointerBytes === 8 && u32(list + Math.imul(taken, pointerBytes) + 4) !== 0)
-                    || clearOf(textPlace, textBytes, input, inputSpan) === 0
-                    || clearOf(textPlace, textBytes, format, formatSpan) === 0
-                    || clearOf(textPlace, textBytes, list, listSpan) === 0))
+                    || clearOf(textPlace, textBytes, input >>> 0, inputSpan) === 0
+                    || clearOf(textPlace, textBytes, format >>> 0, formatSpan) === 0
+                    || clearOf(textPlace, textBytes, list >>> 0, listSpan) === 0))
                 {
                     return HANDED;
                 }
@@ -460,9 +469,9 @@ export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, contr
                 const realPlace = u32(list + Math.imul(taken, pointerBytes));
                 if (write === 0 && (realPlace === 0
                     || (pointerBytes === 8 && u32(list + Math.imul(taken, pointerBytes) + 4) !== 0)
-                    || clearOf(realPlace, realBytes, input, inputSpan) === 0
-                    || clearOf(realPlace, realBytes, format, formatSpan) === 0
-                    || clearOf(realPlace, realBytes, list, listSpan) === 0))
+                    || clearOf(realPlace, realBytes, input >>> 0, inputSpan) === 0
+                    || clearOf(realPlace, realBytes, format >>> 0, formatSpan) === 0
+                    || clearOf(realPlace, realBytes, list >>> 0, listSpan) === 0))
                 {
                     return HANDED;
                 }
@@ -571,9 +580,9 @@ export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, contr
             const place = u32(list + Math.imul(taken, pointerBytes));
             if (write === 0 && (place === 0
                 || (pointerBytes === 8 && u32(list + Math.imul(taken, pointerBytes) + 4) !== 0)
-                || clearOf(place, bytes, input, inputSpan) === 0
-                || clearOf(place, bytes, format, formatSpan) === 0
-                || clearOf(place, bytes, list, listSpan) === 0))
+                || clearOf(place, bytes, input >>> 0, inputSpan) === 0
+                || clearOf(place, bytes, format >>> 0, formatSpan) === 0
+                || clearOf(place, bytes, list >>> 0, listSpan) === 0))
             {
                 return HANDED;
             }
@@ -606,7 +615,7 @@ export function scanInto({ u8, u32, setU8, setU16, setU32, setF32, setF64, contr
  * (`variadicEntry`). A call `scanInto` does not take is the host's whole.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} input @param {u32} format @param {u32} list
+ * @param {Guest} guest @param {ptr} input @param {ptr} format @param {ptr} list
  * @returns {i32}
  */
 export function scanList({ u8, u32, setU8, setU16, setU32, setF32, setF64, controlWord,

@@ -30,6 +30,7 @@
  */
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
+/** @typedef {import('../msvcrt/guest-code.js').f32bits} f32bits */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
 /** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 
@@ -270,7 +271,7 @@ export function SetVectorArray({ u32, setU32, callStd, host, pointerBytes }, sel
  * HRESULT SetFloat(D3DXHANDLE hParameter, FLOAT f): a float scalar.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {ptr} self @param {u32} h @param {u32} f
+ * @param {Guest} guest @param {ptr} self @param {u32} h @param {f32bits} f
  * @returns {u32}
  */
 export function SetFloat({ u32, setU32, callStd, host, pointerBytes }, self, h, f){
@@ -450,6 +451,15 @@ export function SetValue({ u32, setU32, callStd, host, pointerBytes }, self, h, 
         || size > bytes || (size & 3) !== 0)
     {
         return host();
+    }
+    if (pointerBytes === 8)
+    {
+        // A texture's pointers are quadwords there, the record's words four
+        // bytes each: the handler's to lay out.
+        if (cls === PC_OBJECT)
+        {
+            return host();
+        }
     }
     const to = u32(p + 24);
     for (let i = 0; i < (size | 0); i += 4)

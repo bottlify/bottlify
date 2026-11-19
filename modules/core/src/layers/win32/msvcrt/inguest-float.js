@@ -21,6 +21,12 @@
  * raises the invalid flag in MXCSR alone and asks `_statusfp` for it). The
  * control calls keep to the x87.
  *
+ * A 64-bit process's arithmetic is SSE's, and its runtime keeps the
+ * environment in MXCSR alone: the six masks, the rounding, and the two
+ * denormal bits `_MCW_DN` names; a precision or an infinity control asked
+ * of it changes nothing and reads back as none, and the x87's words are not
+ * touched (`pointerBytes === 8` in each function below).
+ *
  * The classifications read a double's bits, as integers: no x87 load, so a
  * signalling NaN raises nothing. `strtod` and `atof` read the text here and
  * compute what Clinger's fast path computes exactly -- up to 15 significant
@@ -127,6 +133,27 @@ const readBack = (/** @type {number} */ word)=>EXCEPTIONS[word & 0x3f]
 const loadable = (/** @type {number} */ bits)=>HARDWARE_EXCEPTIONS[bits & 0x1f | bits >>> 14 & 0x20]
     | (bits & 0x300) << 2 | HARDWARE_PRECISION[bits >>> 16 & 3] | (bits & 0x40000) >>> 6;
 
+/** The bits a 64-bit process's `_control87` changes: `_MCW_EM`, `_MCW_RC` and `_MCW_DN`. */
+const CHANGEABLE_SSE = 0x0008001f | 0x300 | 0x03000000;
+
+/**
+ * MXCSR as the runtime reads it: the masks (bits 7-12, in the x87's order),
+ * the rounding (bits 13-14), and the denormal control -- flush-to-zero with
+ * denormals-are-zero `_DN_FLUSH` 0x01000000, denormals-are-zero alone
+ * `_DN_FLUSH_OPERANDS_SAVE_RESULTS` 0x02000000, flush-to-zero alone
+ * `_DN_SAVE_OPERANDS_FLUSH_RESULTS` 0x03000000.
+ */
+const readBackSse = (/** @type {number} */ word)=>EXCEPTIONS[word >>> 7 & 0x3f]
+    | word >>> 5 & 0x300
+    | ((word & 0x8040) === 0x8040 ? 0x01000000 : (word & 0x8040) === 0x40 ? 0x02000000
+        : (word & 0x8040) === 0x8000 ? 0x03000000 : 0);
+
+/** The runtime's bits as MXCSR's masks, rounding and denormal bits. */
+const loadableSse = (/** @type {number} */ bits)=>
+    HARDWARE_EXCEPTIONS[bits & 0x1f | bits >>> 14 & 0x20] << 7 | (bits & 0x300) << 5
+    | ((bits & 0x03000000) === 0x01000000 ? 0x8040 : (bits & 0x03000000) === 0x02000000 ? 0x40
+        : (bits & 0x03000000) === 0x03000000 ? 0x8000 : 0);
+
 /** The control word Clinger's step runs under: double precision, to nearest. */
 const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
 
@@ -141,7 +168,18 @@ const exactly = (/** @type {number} */ word)=>word & 0xf0ff | 0x0200;
  * @param {Guest} guest @param {u32} newControl @param {u32} mask
  * @returns {u32}
  */
-export function _control87({ controlWord, setControlWord }, newControl, mask){
+export function _control87({ controlWord, setControlWord, mxcsr, setMxcsr, pointerBytes },
+    newControl, mask)
+{
+    if (pointerBytes === 8)
+    {
+        const sse = mxcsr();
+        const changing = mask & CHANGEABLE_SSE;
+        const asked = readBackSse(sse) & ~changing | newControl & changing;
+        const kept = sse & 0x3f | loadableSse(asked);
+        setMxcsr(kept);
+        return readBackSse(kept) >>> 0;
+    }
     const word = controlWord();
     const changed = mask & CHANGEABLE;
     const wanted = readBack(word) & ~changed | newControl & changed;
@@ -158,7 +196,18 @@ export function _control87({ controlWord, setControlWord }, newControl, mask){
  * @param {Guest} guest @param {u32} newControl @param {u32} mask
  * @returns {u32}
  */
-export function _controlfp({ controlWord, setControlWord }, newControl, mask){
+export function _controlfp({ controlWord, setControlWord, mxcsr, setMxcsr, pointerBytes },
+    newControl, mask)
+{
+    if (pointerBytes === 8)
+    {
+        const sse = mxcsr();
+        const changing = mask & CHANGEABLE_SSE & ~EM_DENORMAL;
+        const asked = readBackSse(sse) & ~changing | newControl & changing;
+        const kept = sse & 0x3f | loadableSse(asked);
+        setMxcsr(kept);
+        return readBackSse(kept) >>> 0;
+    }
     const word = controlWord();
     const changed = mask & CHANGEABLE & ~EM_DENORMAL;
     const wanted = readBack(word) & ~changed | newControl & changed;
@@ -173,10 +222,25 @@ export function _controlfp({ controlWord, setControlWord }, newControl, mask){
  * pointer that may be NULL, and zero.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} current @param {u32} newControl @param {u32} mask
+ * @param {Guest} guest @param {ptr} current @param {u32} newControl @param {u32} mask
  * @returns {u32}
  */
-export function _controlfp_s({ controlWord, setControlWord, setU32 }, current, newControl, mask){
+export function _controlfp_s({ controlWord, setControlWord, setU32, mxcsr, setMxcsr,
+    pointerBytes }, current, newControl, mask)
+{
+    if (pointerBytes === 8)
+    {
+        const sse = mxcsr();
+        const changing = mask & CHANGEABLE_SSE & ~EM_DENORMAL;
+        const asked = readBackSse(sse) & ~changing | newControl & changing;
+        const kept = sse & 0x3f | loadableSse(asked);
+        setMxcsr(kept);
+        if (current !== 0)
+        {
+            setU32(current, readBackSse(kept) >>> 0);
+        }
+        return 0;
+    }
     const word = controlWord();
     const changed = mask & CHANGEABLE & ~EM_DENORMAL;
     const wanted = readBack(word) & ~changed | newControl & changed;
@@ -198,7 +262,11 @@ export function _controlfp_s({ controlWord, setControlWord, setU32 }, current, n
  * @param {Guest} guest
  * @returns {u32}
  */
-export function _statusfp({ statusWord, mxcsr }){
+export function _statusfp({ statusWord, mxcsr, pointerBytes }){
+    if (pointerBytes === 8)
+    {
+        return EXCEPTIONS[mxcsr() & 0x3f] >>> 0;
+    }
     return EXCEPTIONS[(statusWord() | mxcsr()) & 0x3f] >>> 0;
 }
 
@@ -210,8 +278,13 @@ export function _statusfp({ statusWord, mxcsr }){
  * @param {Guest} guest
  * @returns {u32}
  */
-export function _clearfp({ statusWord, clearExceptions, mxcsr, setMxcsr }){
+export function _clearfp({ statusWord, clearExceptions, mxcsr, setMxcsr, pointerBytes }){
     const sse = mxcsr();
+    if (pointerBytes === 8)
+    {
+        setMxcsr(sse & ~0x3f);
+        return EXCEPTIONS[sse & 0x3f] >>> 0;
+    }
     const flags = EXCEPTIONS[(statusWord() | sse) & 0x3f];
     clearExceptions();
     setMxcsr(sse & ~0x3f);
@@ -333,7 +406,7 @@ export function _logb({ host }, x){
  * @param {Guest} guest @param {f64} x @param {f64} y
  * @returns {f64}
  */
-export function _nextafter({ controlWord, setControlWord, host }, x, y){
+export function _nextafter({ controlWord, setControlWord, host, pointerBytes }, x, y){
     if (Number.isNaN(x) || Number.isNaN(y))
     {
         return x + y;
@@ -356,10 +429,17 @@ export function _nextafter({ controlWord, setControlWord, host }, x, y){
     const halved = upward !== positive && exponent > -1022
         && Math.abs(X87.significand(x)) === 1 ? 1 : 0;
     const step = X87.scale(1, exponent < -1022 ? -1074 : (exponent - 52 - halved) | 0);
-    const word = controlWord();
-    setControlWord(word | 0x200);
+    // SSE's sum is a double whatever the x87 is set to.
+    const word = pointerBytes === 4 ? controlWord() : 0;
+    if (pointerBytes === 4)
+    {
+        setControlWord(word | 0x200);
+    }
     const next = upward !== 0 ? x + step : x - step;
-    setControlWord(word);
+    if (pointerBytes === 4)
+    {
+        setControlWord(word);
+    }
     if (!(Math.abs(next) <= MAX))
     {
         return host();

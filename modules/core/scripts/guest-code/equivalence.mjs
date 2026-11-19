@@ -57,6 +57,9 @@ export const HALT = 0x0f00;
 export const CALLBACK = 0x0e00;
 /** Where the host's trap is, for a function that hands a call to it: a halt. */
 export const HOST = 0x0d00;
+/** The helpers by which a source lays memory out by the pointer's size. */
+const POINTER_SIZED = ['pointerBytes', 'ptr', 'setPtr'];
+
 export const DATA = 0x10000;
 export const DATA_END = 0x40000;
 const STACK = 0x7fff0;
@@ -289,7 +292,7 @@ export function equivalence(compiled, sources, model, long){
             ? BigInt(words[next++] >>> 0) | BigInt(words[next++] >>> 0) << 32n
             : type === 'ptr' ? BigInt((words[next++] ?? 0) >>> 0)
                 : argumentOf(words[next++] ?? 0, i)));
-        const floats = fn.params.map(type=>type === 'f64' || type === 'f32');
+        const floats = fn.params.map(type=>type === 'f64' || type === 'f32' || type === 'f32bits');
         const before = m.read(DATA, span);
         const { entry, xmm, slots, halted } = callLong(m, CODE_64, { args, floats,
             returnTo: HALT, mxcsr: input.mxcsr });
@@ -311,12 +314,13 @@ export function equivalence(compiled, sources, model, long){
             // of its place, which the trap reads it from.
             const places = fn.params.slice(0, 4);
             const owed = [...['rcx', 'rdx', 'r8', 'r9'].slice(0, places.length)
-                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'), ...KEPT_64];
+                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'
+                    && places[i] !== 'f32bits'), ...KEPT_64];
             assert.deepEqual(Object.fromEntries(owed.map(reg=>[reg, m.reg(reg)])),
                 Object.fromEntries(owed.map(reg=>[reg, entry[reg]])),
                 `${handed}: the argument registers and the kept ones as the call left them`);
             places.forEach((type, i)=>{
-                if (type === 'f64' || type === 'f32')
+                if (type === 'f64' || type === 'f32' || type === 'f32bits')
                 {
                     const size = type === 'f64' ? 8 : 4;
                     assert.deepEqual(Array.from(m.xmm(i).slice(0, size)),
@@ -344,7 +348,7 @@ export function equivalence(compiled, sources, model, long){
             // an integer's low half, a double's two dwords and a float's one
             // out of the XMM register of its place among the first four.
             const trapWords = fn.params.flatMap((type, i)=>{
-                const bits = i < 4 && (type === 'f64' || type === 'f32')
+                const bits = i < 4 && (type === 'f64' || type === 'f32' || type === 'f32bits')
                     ? new DataView(xmm[i].buffer, xmm[i].byteOffset).getBigUint64(0, true)
                     : BigInt(args[i] ?? 0n);
                 return type === 'f64' || type === 'i64'
@@ -396,7 +400,7 @@ export function equivalence(compiled, sources, model, long){
         const at64 = `${what} at 64 bits`;
         // A source that lays memory out by the pointer's size is held, at 64
         // bits, to its own run with pointers of eight bytes.
-        const judge = fn.uses.includes('pointerBytes') && !laidOut
+        const judge = POINTER_SIZED.some(use=>fn.uses.includes(use)) && !laidOut
             ? runJs(name, input, double, sources, undefined, 8) : js;
         assert.equal(x64.handedOver, judge.handedOver, `${at64}: handed to the host by both or by `
             + 'neither');
@@ -795,7 +799,7 @@ export function equivalence(compiled, sources, model, long){
                 throw new Error(`no x86-64 code for ${name}`);
             }
             const js = runJs(name, input, double, sources, bounds,
-                longOf(name)?.uses.includes('pointerBytes') ? 8 : 4);
+                POINTER_SIZED.some(use=>longOf(name)?.uses.includes(use)) ? 8 : 4);
             sameLong(name, input, double, js, `${name}(${JSON.stringify(input.stack ?? [])})`,
                 true);
             return js;
