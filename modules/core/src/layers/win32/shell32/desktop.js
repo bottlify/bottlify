@@ -12,7 +12,8 @@
  * menu -- and each call answers as it does on a machine where Explorer is not
  * running, which is a state Windows itself documents and a program is written
  * to meet. The settings are the exception: they are the values a fresh
- * Windows XP profile has, which is what a program asking them expects.
+ * Windows XP profile has, which is what a program asking them expects. The
+ * about box is the shell's own and needs no Explorer: it is shown.
  */
 
 import { createRefusals } from '../common/refusal.js';
@@ -51,7 +52,38 @@ const SETTINGS = Object.freeze([
  * @property {(code: number) => void} [setLastError]
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
  *     | undefined} [library]
+ * @property {(address: number, maxLength: number) => string} [readCString]
+ * @property {(address: number, maxLength: number) => string} [readWideString]
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(address: number) => void} [free]
  */
+
+/** The longest string ShellAbout reads of each it is given. */
+const ABOUT_TEXT_LIMIT = 1024;
+const MB_OK = 0;
+
+/**
+ * What ShellAbout shows: its caption, and its text - "Microsoft" and the
+ * application's line, the version, then the program's own words. `app` is the
+ * title bar's text, unless a `#` divides it: then the part before is the title
+ * bar's and the part after the line's (ShellAbout's szApp, MSDN).
+ *
+ * @param {string} app @param {string} other
+ * @param {{ major: number, minor: number, build: number }} version
+ * @returns {{ caption: string, text: string }}
+ */
+export function aboutBox(app, other, version){
+    const split = app.indexOf('#');
+    const caption = split < 0 ? `About ${app}` : app.slice(0, split);
+    const line = split < 0 ? app : app.slice(split + 1);
+    const lines = [`Microsoft ${line}`.trimEnd(),
+        `Version ${version.major}.${version.minor} (Build ${version.build})`];
+    if (other !== '')
+    {
+        lines.push('', other);
+    }
+    return { caption, text: lines.join('\r\n') };
+}
 
 /** APPBARDATA: cbSize, hWnd, uCallbackMessage, uEdge, rc, lParam. */
 const APPBARDATA = Object.freeze({ hWnd: 4, uCallbackMessage: 8, uEdge: 12, rc: 16 });
@@ -85,9 +117,61 @@ const dword = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 1
 export function createDesktopFunctions(host){
     const refuse = createRefusals(host);
 
-    /** Explorer's about box, answered as a person who closed it at once. */
-    const about = refuse('ShellAbout', { argBytes: 16, answer: 1,
-        why: 'the about box is not shown: answered as dismissed' });
+    /**
+     * The about box: a modal box of user32's (MessageBox), owned by `owner`,
+     * TRUE once it is closed. Its icon is the box's own, not `hIcon`, which
+     * is said.
+     *
+     * @param {(address: number, maxLength: number) => string} read
+     */
+    const about = read=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([owner, app, other, icon])=>{
+            const user32 = host.library?.('USER32.dll');
+            const kernel32 = host.library?.('KERNEL32.dll');
+            if (!user32?.MessageBoxW || !host.allocate || !host.free)
+            {
+                host.divergence?.('ShellAbout', 'no box can be shown here: answered as closed');
+                return 1;
+            }
+            if ((icon >>> 0) !== 0)
+            {
+                host.divergence?.('ShellAbout', 'the icon given is not shown');
+            }
+            const packed = (kernel32?.GetVersion?.handler([]) ?? 0) >>> 0;
+            const { caption, text } = aboutBox(
+                (app >>> 0) === 0 ? '' : read(app >>> 0, ABOUT_TEXT_LIMIT),
+                (other >>> 0) === 0 ? '' : read(other >>> 0, ABOUT_TEXT_LIMIT),
+                { major: packed & 0xff, minor: packed >>> 8 & 0xff, build: packed >>> 16 });
+            const allocate = /** @type {(bytes: number) => number} */ (host.allocate);
+            const free = /** @type {(address: number) => void} */ (host.free);
+            /** @param {string} value */
+            const wide = value=>{
+                const at = allocate(value.length * 2 + 2);
+                const bytes = new Uint8Array(value.length * 2 + 2);
+                for (let index = 0; index < value.length; index++)
+                {
+                    bytes[index * 2] = value.charCodeAt(index) & 0xff;
+                    bytes[index * 2 + 1] = value.charCodeAt(index) >>> 8;
+                }
+                host.writeMemory(at, bytes);
+                return at;
+            };
+            const textAt = wide(text);
+            const captionAt = wide(caption);
+            const release = ()=>{
+                free(textAt);
+                free(captionAt);
+                return 1;
+            };
+            const shown = user32.MessageBoxW.handler([owner, textAt, captionAt, MB_OK]);
+            return shown instanceof Promise ? shown.then(release, error=>{
+                release();
+                throw error;
+            }) : release();
+        },
+    });
 
     /** @type {AppBar[]} The bars, in the order they were registered. */
     const bars = [];
@@ -250,11 +334,10 @@ export function createDesktopFunctions(host){
          * int ShellAboutA(HWND hWnd, LPCSTR szApp, LPCSTR szOtherStuff, HICON hIcon)
          * int ShellAboutW(HWND, LPCWSTR, LPCWSTR, HICON)
          *
-         * A modal box that returns TRUE once it is closed; it is not drawn,
-         * and is answered as closed straight away.
+         * A modal box that returns TRUE once it is closed (`aboutBox`).
          */
-        ShellAboutA: about,
-        ShellAboutW: about,
+        ShellAboutA: about((address, most)=>host.readCString?.(address, most) ?? ''),
+        ShellAboutW: about((address, most)=>host.readWideString?.(address, most) ?? ''),
 
         /**
          * HRESULT SHLoadInProc(REFCLSID rclsid)
