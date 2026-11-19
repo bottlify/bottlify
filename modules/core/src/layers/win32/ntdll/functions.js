@@ -199,6 +199,8 @@ const NAMED_KINDS = new Set(['event', 'mutex', 'semaphore', 'timer', 'mapping', 
  * @property {import('./loader.js').LoaderHost['notifications']} [dllNotifications]  The
  *           loader's LdrRegisterDllNotification callbacks.
  * @property {Record<string, Entry>} crt       The assembled msvcrt.dll table.
+ * @property {(library: string, name: string) => number} [exportAddress]  Where a
+ *           system library's export was placed, 0 for none.
  * @property {() => number} teb  The running thread's block.
  * @property {() => any} [currentThread]
  * @property {(thread: any) => number} [lastErrorOf]  A thread's last error, which a call
@@ -719,6 +721,7 @@ export function createNtdllFunctions(host){
             allocate,
             free,
             ...host.divergence ? { divergence: host.divergence } : {},
+            breakPoint: ()=>host.exportAddress?.('ntdll.dll', 'DbgBreakPoint') ?? 0,
         }),
 
         ...(PROCESS_ENTRIES.every(name=>kernel32[name])

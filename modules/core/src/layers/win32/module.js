@@ -648,14 +648,17 @@ export function createWin32Module(){
             };
             /**
              * A debugger's break into this process: a thread of its own that
-             * runs DbgBreakPoint, whose breakpoint the debugger hears from it
-             * (DebugBreakProcess, and the last of an attach).
+             * runs DbgUiRemoteBreakin, whose DbgBreakPoint the debugger hears
+             * from it and whose frame ends the thread when the debugger
+             * declines it (DebugBreakProcess, and the last of an attach). A
+             * 64-bit process's thread runs DbgBreakPoint itself.
              *
              * @returns {number}
              */
             const breakIn = ()=>{
                 const kernel32 = libraries['KERNEL32.dll'];
-                const at = modules.find('ntdll.dll')?.addressOf?.('DbgBreakPoint') ?? 0;
+                const at = modules.find('ntdll.dll')?.addressOf?.(pointerSize === 8
+                    ? 'DbgBreakPoint' : 'DbgUiRemoteBreakin') ?? 0;
                 const made = at === 0 ? 0
                     : kernel32.CreateThread.handler([0, 0, at, 0, 0, 0]) >>> 0;
                 if (made === 0)
@@ -6644,6 +6647,8 @@ export function createWin32Module(){
                 pool: threadPool.native,
                 dllNotifications: modules.dllNotifications,
                 crt: libraries['msvcrt.dll'],
+                exportAddress: (/** @type {string} */ library, /** @type {string} */ name)=>
+                    /** @type {any} */ (modules.find(library))?.addressOf?.(name) ?? 0,
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 currentThread: ()=>kernel.currentThread(),
                 lastErrorOf,

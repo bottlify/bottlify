@@ -152,8 +152,10 @@
   its parent, each stopping the whole child until `ContinueDebugEvent`. `DebugActiveProcess`
   attaches to a running child the parent hears - one run beside it, as every child is at
   concurrency 1: it is told the process, ntdll, its threads and its libraries, the child stopped
-  until each is continued, then breaks in on a thread of its own at `DbgBreakPoint`, as
-  `DebugBreakProcess` breaks into a debuggee. A debuggee belongs to a debug object - the
+  until each is continued, then breaks in on a thread of its own running `DbgUiRemoteBreakin`,
+  as `DebugBreakProcess` breaks into a debuggee: its `DbgBreakPoint` is what the debugger hears,
+  and a breakpoint the debugger declines ends that thread, not the process (a 64-bit process's
+  thread runs `DbgBreakPoint` alone, with no such frame). A debuggee belongs to a debug object - the
   debugging thread's, made at its first `DEBUG_PROCESS` or attach (`DbgUiConnectToDbg`), or one
   made by `NtCreateDebugObject` and attached through (`NtDebugActiveProcess`); when its last
   handle closes, or its process ends, the debuggees end (`STATUS_DEBUGGER_INACTIVE`) where it
