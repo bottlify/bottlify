@@ -19,7 +19,9 @@
  *   --bin PATH        the code, a flat image's bytes, lying at --at (a micro workload's image,
  *                     modules/cork/bench/micro: `--at 0x401000`, its block profile from
  *                     `run.mjs --blocks`)
- *   --bits 64         the code long mode's, formed and emitted as the long-mode runtime has it
+ *   --bits 64         the code long mode's, formed and emitted as the long-mode runtime has it;
+ *                     a PE32+ image's by itself (decoded as 32-bit code it was a count of
+ *                     other instructions, said as if it were the program's)
  *   --window GIB      with --bits 64, a wide window of 8 or 16 GiB (the RAM a memory64
  *                     memory of its own) in place of the 4 GiB layout
  *   --pe PATH         a PE image, its sections mapped at --base (default its own image base)
@@ -128,7 +130,7 @@ function mapImage(file, base){
         const length = Math.min(rawSize, virtualSize || rawSize, size - address);
         image.set(file.subarray(raw, raw + length), address);
     }
-    return { image, base: base ?? imageBase };
+    return { image, base: base ?? imageBase, long: view.getUint16(optional, true) === 0x20b };
 }
 
 /**
@@ -233,6 +235,8 @@ if (pePath === null && hex === null && binPath === null && reportPath === null
 }
 let code;
 let at;
+/** Whether an image given is a PE32+ one: its code long mode's. */
+let longImage = false;
 const images = args.flatMap((arg, i)=>(arg === '--image' ? [args[i + 1]] : []));
 if (images.length > 0)
 {
@@ -249,6 +253,7 @@ if (images.length > 0)
     {
         code.set(one.image, one.base - at);
     }
+    longImage = mapped.some(one=>one.long);
 }
 else if (pePath !== null)
 {
@@ -256,6 +261,7 @@ else if (pePath !== null)
     const mapped = mapImage(readFileSync(pePath), base === null ? null : Number(base));
     code = mapped.image;
     at = mapped.base;
+    longImage = mapped.long;
 }
 else if (binPath !== null)
 {
@@ -279,7 +285,7 @@ const formDepth = value('--form-depth') === null ? null : Number(value('--form-d
 // Guest RAM from the memory's start, as a Windows process's first executor has it
 // (`ownLayout`'s `ramBase` 0), unless `--ram-base` says one page in.
 const ramBase = Number(value('--ram-base') ?? 0);
-const bits = value('--bits') === '64' ? 64 : 32;
+const bits = (value('--bits') ?? (longImage ? '64' : '32')) === '64' ? 64 : 32;
 const wideWindow = value('--window') === null ? {}
     : { window: Number(value('--window')) * 2 ** 30 };
 /** Where a block's mark is stored: in the state page, short of `nanFirst`. */
