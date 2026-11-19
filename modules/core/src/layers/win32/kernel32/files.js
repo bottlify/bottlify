@@ -486,6 +486,8 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     [mailslots]  Opens a client of the mailslot CreateFile is given the name of, and
  *     answers NtQueryInformationFile and NtSetInformationFile of a mailslot handle
  *     (null: not one).
+ * @property {{ closed: (object: any) => void }} [debugObjects]  Told of a debug object's
+ *           handle closed: with its last, its debuggees go as it says.
  * @property {ReturnType<typeof import('./pipes.js').createNamedPipes>} [pipes]
  *           Named pipes: CreateFile opens a client end by a pipe's name, a closed
  *           end is told, CancelIo and CancelIoEx cancel what waits on one.
@@ -2907,6 +2909,10 @@ export function createFileFunctions(host){
             if (type === 'pipe')
             {
                 host.pipes?.closed(handle, closed);
+            }
+            if (type === 'debug-object')
+            {
+                host.debugObjects?.closed(closed);
             }
             // Handle numbers are recycled, so anything keyed by this one
             // has to go now: a completion-port association that outlives

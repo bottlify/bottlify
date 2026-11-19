@@ -117,7 +117,9 @@ in its worker, never in a worker of its own, so its parent always hears it. Whil
 thread waits on an exception's answer the exception's context is its context, so a debugger's
 `GetThreadContext` and `SetThreadContext` read and change the context it goes on from
 ([`kernel32/debug-events.js`](../../modules/core/src/layers/win32/kernel32/debug-events.js)). A
-debugger's end ends the debuggees set to end with it and lets the others go. A child run beside its parent always carries its parent's ear and is heard only while
+debuggee belongs to its debugger's debug object, a kernel object kept in the debugging thread's
+block; with the object's last handle, or the debugger's end, its debuggees end where it says
+`DEBUG_KILL_ON_CLOSE` and go on otherwise. A child run beside its parent always carries its parent's ear and is heard only while
 its record says it is debugged, so `DebugActiveProcess` attaches by marking it and asking it, as
 a cross-process call no program can name, to tell what it already is and break in on a thread of
 its own. The engine

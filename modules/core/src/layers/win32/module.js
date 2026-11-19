@@ -18,7 +18,7 @@ import {
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
     from './kernel32/process.js';
-import { SKIP_THREAD_ATTACH, blockLayouts } from './kernel32/teb.js';
+import { SKIP_THREAD_ATTACH, TEB, blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -3018,6 +3018,7 @@ export function createWin32Module(){
             // it named, which needs the image found the same way in both.
             const spawner = createSpawner({
                 kernel,
+                debugObject: ()=>/** @type {any} */ (debuggerSide).connect(),
                 /** @param {string} path */
                 stat: path=>volume.stat(path),
                 // A child is recorded with a full path, because everything that
@@ -3466,6 +3467,26 @@ export function createWin32Module(){
                 breakIn,
                 terminateChild: (/** @type {any} */ child, /** @type {number} */ code)=>
                     config?.terminate?.(child, code) === true,
+                readMemory,
+                // DbgSsReserved[1] of the calling thread's block; a 64-bit
+                // thread's has no slot here yet, and keeps none.
+                threadDebugObject: {
+                    get: ()=>{
+                        const block = pointerSize === 8 ? 0
+                            : kernel.currentThread()?.tebAddress ?? 0;
+                        return block === 0 ? 0 : new DataView(readMemory(block + TEB.DEBUG_OBJECT,
+                            4).slice().buffer).getUint32(0, true);
+                    },
+                    set: (/** @type {number} */ handle)=>{
+                        const block = pointerSize === 8 ? 0
+                            : kernel.currentThread()?.tebAddress ?? 0;
+                        if (block !== 0)
+                        {
+                            writeMemory(block + TEB.DEBUG_OBJECT, Uint8Array.of(handle & 0xff,
+                                handle >>> 8 & 0xff, handle >>> 16 & 0xff, handle >>> 24 & 0xff));
+                        }
+                    },
+                },
             });
             endTasks.push(()=>debuggerSide?.debuggerEnded());
             // The libraries this build implements, standing in the system
@@ -4167,6 +4188,7 @@ export function createWin32Module(){
                         currentThread: ()=>kernel.currentThread(),
                         setLastErrorFor: setErrorOn,
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                        debugObjects: { closed: object=>debuggerSide?.closed(object) },
                         ports: {
                             /** @param {number} overlapped */
                             offsetOf: overlapped=>ports.offsetOf(overlapped),

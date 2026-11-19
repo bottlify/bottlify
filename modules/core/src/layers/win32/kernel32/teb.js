@@ -52,6 +52,8 @@ export const TEB = Object.freeze({
     DEALLOCATION_STACK: 0xe0c,
     /** TlsSlots: the 64 values TlsGetValue and TlsSetValue keep, a pointer each. */
     TLS_SLOTS: 0xe10,
+    /** DbgSsReserved[1]: the thread's debug object (DbgUiGetThreadDebugObject). */
+    DEBUG_OBJECT: 0xf24,
     /** The thread's error mode, in ntdll's bits (RTL_SEM_*). */
     HARD_ERROR_MODE: 0xf28,
     /** GuaranteedStackBytes: what SetThreadStackGuarantee keeps for an overflow's handler. */
