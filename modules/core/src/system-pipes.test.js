@@ -186,3 +186,19 @@ test('a child that ends while its parent still holds the end gives up its waitin
     assert.equal(parent.read(input.read, 64), 1);
     assert.equal(parent.text(4), 'kept');
 });
+
+test('a duplicate only a console program keeps says so as it crosses, with its flags', ()=>{
+    const table = new Map();
+    const parent = processOf({ table, id: 1 });
+    const pipe = /** @type {{ read: number, write: number }} */ (parent.pipes.anonymous(0, 4096));
+    const served = pipeHandlers([
+        { handle: pipe.write, type: 'pipe', object: parent.handles.get(pipe.write)?.object,
+            consoleOnly: true, flags: 2 },
+        { handle: pipe.read, type: 'pipe', object: parent.handles.get(pipe.read)?.object },
+    ]);
+    const marks = served.described.map((/** @type {any} */ end)=>
+        [end.handle, end.consoleOnly ?? false, end.flags]);
+    assert.deepEqual(marks, [[pipe.write, true, 2], [pipe.read, false, undefined]],
+        'as a file duplicate keeps its mark');
+    served.dispose();
+});

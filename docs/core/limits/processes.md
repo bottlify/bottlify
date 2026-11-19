@@ -141,7 +141,8 @@
   `DuplicateHandle` puts into another process of the run. A child in a worker of its own
   inherits pipe ends and open files: a file there is opened on the same terms, its pointer the
   parent's open's, read and moved across the link on each read and write, and the parent's hold
-  on it lasts until that child ends. A file handed as a standard handle is one of these, so it
+  on it lasts until that child ends, as does a duplicated pipe end a window program there does
+  not keep. A file handed as a standard handle is one of these, so it
   must be inheritable, as on Windows. A child's standard handles are the ones its STARTUPINFO names with
   `STARTF_USESTDHANDLES`, or else its parent's own, copied as they are when it inherits handles
   (one it does not inherit names nothing there) and NULL when it inherits none; a console child
