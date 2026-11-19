@@ -4929,8 +4929,9 @@ async function buildApp(options){
     // holds -- its tables inside the guest's space, not past it: 2 GiB otherwise.
     // A wide window's space below is the whole 2 GiB every address it gives out lies in:
     // its RAM is the window, and the image's low dword span is cut from that heap.
+    // More than 4 GiB asked for is 4 GiB: what a process's own space holds here.
     const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
-        : options.memorySize ?? DEFAULT_MEMORY_SIZE;
+        : Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE, 2 ** 32);
     const memorySize = askedMemory > 2 ** 31 && areaFor(askedMemory) === undefined ? 2 ** 31
         : askedMemory;
     const engineArea = areaFor(memorySize);

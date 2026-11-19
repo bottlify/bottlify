@@ -266,6 +266,27 @@ export function cacheShare(bytes, executors, executor){
 }
 
 /**
+ * A wide window's RAM, or the refusal said plainly: a browser without 64-bit
+ * WebAssembly memories (Safari, iOS) cannot run a program whose image lies
+ * past 4 GiB, and what the engine answers its attempt is no sentence for the
+ * person who started the program.
+ *
+ * @param {any} engine @param {number} window @param {boolean} shared
+ * @returns {WebAssembly.Memory}
+ */
+function wideMemory(engine, window, shared){
+    try
+    {
+        return engine.memory64(window, shared);
+    }
+    catch (e){
+        throw new Error(`cpu: this program is linked past 4 GiB and needs a 64-bit WebAssembly`
+            + ` memory (memory64) of ${window / 2 ** 30} GiB, which this browser does not provide`
+            + ` (${/** @type {Error} */ (e)?.message ?? e})`, { cause: e });
+    }
+}
+
+/**
  * Builds the cork host over a memory of its own.
  *
  * @param {CorkHostConfig} config
@@ -276,8 +297,10 @@ export function createCorkHost(config){
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
         memoryHolder, guestCharge } = config;
-    /** Whether the guest's memory counts by its length, not by what it was given. */
-    const byLength = guestByLength(guestCharge);
+    // Whether the guest's memory counts by its length, not by what it was given.
+    // A wide window is 8 GiB long whatever its program takes of it, more than
+    // any machine's memory here: counted by what was given wherever it runs.
+    const byLength = guestByLength(guestCharge) && wideWindow === undefined;
     /** The machine's memory this process's grows are taken from, where the run has one. */
     const machine = memoryBudget === undefined ? null
         : openMemoryBudget(memoryBudget, memoryHolder);
@@ -490,7 +513,7 @@ export function createCorkHost(config){
         ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
     /** A wide window's RAM, a memory64 memory of the window's size made whole; none otherwise. */
     const ramMemory = own.ramMemory === undefined ? undefined
-        : config.ram ?? engine.memory64(/** @type {number} */ (own.window), shared);
+        : config.ram ?? wideMemory(engine, /** @type {number} */ (own.window), shared);
     /** The buffer the guest's RAM lies in. */
     const ramBuffer = ()=>(ramMemory ?? memory).buffer;
     // The memory past the guest's RAM, or a growing memory's engine range: the

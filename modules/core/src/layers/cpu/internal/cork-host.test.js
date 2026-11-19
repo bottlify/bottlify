@@ -1164,3 +1164,15 @@ test('the other executors\' pages apart from the first\'s: the memory starts hol
     assert.ok(ranges.every((/** @type {[number, number]} */ [from, to])=>to <= reached
         && from < to));
 });
+
+test('where the browser makes no 64-bit memory, a program past 4 GiB is refused in plain words',
+    ()=>{
+        // Safari and iOS have no memory64: what the engine answers its attempt
+        // is not what the person who started the program should read.
+        const without = { ...engine, memory64: ()=>{
+            throw new RangeError('memory64 of 8589934592 bytes not made: address: bad');
+        } };
+        assert.throws(()=>host({ engine: without, bits: 64, memorySize: 2 ** 31,
+            window: 2 ** 33, codeBase: 2 ** 32 }),
+        /linked past 4 GiB and needs a 64-bit WebAssembly memory \(memory64\) of 8 GiB, which/);
+    });

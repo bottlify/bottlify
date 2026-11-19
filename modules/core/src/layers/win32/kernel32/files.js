@@ -884,6 +884,15 @@ export function withSystemLibraries(real, libraries, where = {}){
  */
 export function createFileFunctions(host){
     const layout = overlappedLayout(host.pointerSize);
+    /**
+     * An IO_STATUS_BLOCK written: the status and Information, each a pointer
+     * wide, as an OVERLAPPED's first two fields are - at 64 bits Information
+     * lies eight bytes in, not four.
+     *
+     * @param {number} block @param {number} status @param {number} information
+     */
+    const statusBlock = (block, status, information)=>
+        overlappedResult(writeDword, layout, block, status, information >>> 0);
     const files = withSystemLibraries(host.files, host.systemLibraries,
         { programs: host.systemPrograms });
 
@@ -1267,8 +1276,7 @@ export function createFileFunctions(host){
             }
             if (native)
             {
-                writeDword(out >>> 0, STATUS_END_OF_FILE);
-                writeDword((out >>> 0) + 4, 0);
+                statusBlock(out >>> 0, STATUS_END_OF_FILE, 0);
                 return STATUS_END_OF_FILE;
             }
             writeDwordIf(out >>> 0, 0);
@@ -1284,8 +1292,7 @@ export function createFileFunctions(host){
             }
             if (native)
             {
-                writeDword(out >>> 0, STATUS_SUCCESS);
-                writeDword((out >>> 0) + 4, length >>> 0);
+                statusBlock(out >>> 0, STATUS_SUCCESS, length >>> 0);
                 return STATUS_SUCCESS;
             }
             writeDwordIf(out >>> 0, length >>> 0);
@@ -3178,8 +3185,7 @@ export function createFileFunctions(host){
             writeDword(out >>> 0, client.handle);
             if ((status >>> 0) !== 0)
             {
-                writeDword(status >>> 0, STATUS_SUCCESS);
-                writeDword((status >>> 0) + 4, FILE_OPENED);
+                statusBlock(status >>> 0, STATUS_SUCCESS, FILE_OPENED);
             }
             return STATUS_SUCCESS;
         }
@@ -3205,8 +3211,7 @@ export function createFileFunctions(host){
             writeDword(out >>> 0, handle);
             if ((status >>> 0) !== 0)
             {
-                writeDword(status >>> 0, STATUS_SUCCESS);
-                writeDword((status >>> 0) + 4, information);
+                statusBlock(status >>> 0, STATUS_SUCCESS, information);
             }
             return STATUS_SUCCESS;
         };
@@ -3493,8 +3498,7 @@ export function createFileFunctions(host){
     const report = (block, status, information)=>{
         if (block !== 0)
         {
-            writeDword(block, status);
-            writeDword(block + 4, information);
+            statusBlock(block, status, information);
         }
         return status;
     };
@@ -3966,8 +3970,7 @@ export function createFileFunctions(host){
                 {
                     file.position = at + done;
                 }
-                writeDword(block >>> 0, code);
-                writeDword((block >>> 0) + 4, done);
+                statusBlock(block >>> 0, code, done);
                 return status(code);
             };
             const count = length >>> 0;

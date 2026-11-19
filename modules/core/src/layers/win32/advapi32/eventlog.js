@@ -111,6 +111,8 @@ const MAX_NAME = 0x8000;
  * @property {Reader} readCString
  * @property {Reader} readWideString
  * @property {(code: number) => void} setLastError
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose TRACE_GUID_REGISTRATION
+ *           is two quadwords.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
@@ -831,10 +833,17 @@ export function createEventLogFunctions(host){
             }
             const handle = nextRegistration++;
             traceRegistrations.add(handle);
-            // TRACE_GUID_REGISTRATION: the GUID, then the handle Windows fills in.
+            // TRACE_GUID_REGISTRATION: the GUID's pointer, then the handle Windows
+            // fills in, each a pointer wide.
+            const word = host.pointerSize === 8 ? 8 : 4;
             for (let at = 0; at < (count >>> 0); at++)
             {
-                writeDword((guids >>> 0) + at * 8 + 4, handle);
+                const slot = (guids >>> 0) + at * 2 * word + word;
+                writeDword(slot, handle);
+                if (word === 8)
+                {
+                    writeDword(slot + 4, 0);
+                }
             }
             writeDword(out, handle);
             writeDword((out >>> 0) + 4, 0);

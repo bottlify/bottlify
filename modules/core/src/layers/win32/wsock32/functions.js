@@ -358,18 +358,23 @@ export function createWinsockFunctions(host){
      * @param {[string, number, string[]]} service @param {string | null} proto
      */
     const writeServent = ([name, port, protocols], proto)=>{
-        const block = staticBuffer('servent', SERVENT.SIZE + 48);
-        const nameAt = block + SERVENT.SIZE;
+        // At 64 bits the pointers are quadwords and the protocol comes before
+        // the port (winsock.h's _WIN64 order).
+        const layout = POINTER === 8
+            ? { s_name: 0, s_aliases: 8, s_proto: 16, s_port: 24, SIZE: 32 } : SERVENT;
+        const block = staticBuffer('servent', layout.SIZE + 48);
+        const nameAt = block + layout.SIZE;
         const aliasesAt = nameAt + 32;
-        const protoAt = aliasesAt + 4;
+        const protoAt = aliasesAt + POINTER;
         host.writeMemory(nameAt, sz(name));
-        writeDword(aliasesAt, 0);
+        putPointer(aliasesAt, 0);
         host.writeMemory(protoAt, sz(proto ?? protocols[0]));
-        const record = new DataView(new ArrayBuffer(SERVENT.SIZE));
-        record.setUint32(SERVENT.s_name, nameAt, true);
-        record.setUint32(SERVENT.s_aliases, aliasesAt, true);
-        record.setUint16(SERVENT.s_port, port, false);
-        record.setUint32(SERVENT.s_proto, protoAt, true);
+        // The record's upper halves and padding zero: the pointers lie below 4 GiB.
+        const record = new DataView(new ArrayBuffer(layout.SIZE));
+        record.setUint32(layout.s_name, nameAt, true);
+        record.setUint32(layout.s_aliases, aliasesAt, true);
+        record.setUint16(layout.s_port, port, false);
+        record.setUint32(layout.s_proto, protoAt, true);
         host.writeMemory(block, new Uint8Array(record.buffer));
         return block >>> 0;
     };
@@ -926,18 +931,21 @@ export function createWinsockFunctions(host){
      * @param {[string, number, string]} protocol
      */
     const writeProtoent = ([name, number, alias])=>{
-        const block = staticBuffer('protoent', PROTOENT.SIZE + 48);
-        const nameAt = block + PROTOENT.SIZE;
+        const layout = POINTER === 8 ? { p_name: 0, p_aliases: 8, p_proto: 16, SIZE: 24 }
+            : PROTOENT;
+        const block = staticBuffer('protoent', layout.SIZE + 48);
+        const nameAt = block + layout.SIZE;
         const aliasAt = nameAt + 16;
         const aliasesAt = aliasAt + 16;
         host.writeMemory(nameAt, sz(name));
         host.writeMemory(aliasAt, sz(alias));
-        writeDword(aliasesAt, aliasAt);
-        writeDword(aliasesAt + 4, 0);
-        const record = new DataView(new ArrayBuffer(PROTOENT.SIZE));
-        record.setUint32(PROTOENT.p_name, nameAt, true);
-        record.setUint32(PROTOENT.p_aliases, aliasesAt, true);
-        record.setInt16(PROTOENT.p_proto, number, true);
+        // The list: the alias, then the null that ends it, each a pointer wide.
+        putPointer(aliasesAt, aliasAt);
+        putPointer(aliasesAt + POINTER, 0);
+        const record = new DataView(new ArrayBuffer(layout.SIZE));
+        record.setUint32(layout.p_name, nameAt, true);
+        record.setUint32(layout.p_aliases, aliasesAt, true);
+        record.setInt16(layout.p_proto, number, true);
         host.writeMemory(block, new Uint8Array(record.buffer));
         return block >>> 0;
     };

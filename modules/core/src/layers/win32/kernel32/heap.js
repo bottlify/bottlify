@@ -145,6 +145,8 @@ const ERROR_NOACCESS = 998;
 const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** A commit the machine has no memory for. */
+const ERROR_COMMITMENT_LIMIT = 1455;
 
 /** The pseudo-handle for the running process, the one process the Ex forms reach. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -1802,6 +1804,29 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * Whether the guest may be given pages up to `to`: its memory grown to hold
+     * them and they taken from the machine's (`reach`). A commit with no room
+     * is refused before anything of it is made, as at Windows's commit limit.
+     *
+     * @param {number} to
+     */
+    const roomTo = to=>host.reach?.(to) !== false;
+
+    /**
+     * A commit refused for want of memory: the code Windows gives at its commit
+     * limit, and why.
+     *
+     * @param {number} bytes
+     * @returns {0}
+     */
+    const noRoom = bytes=>{
+        host.setLastError(ERROR_COMMITMENT_LIMIT);
+        host.divergence?.('VirtualAlloc', `a commit of ${bytes} bytes refused: the machine's`
+            + ' memory has no room for it');
+        return 0;
+    };
+
+    /**
      * Marks [from, to) of a reservation committed or not.
      *
      * @param {number} reservation @param {number} from @param {number} to
@@ -1810,7 +1835,7 @@ export function createHeapFunctions(host){
     const markCommitted = (reservation, from, to, on)=>{
         // A commit is memory the guest is given: the guest's memory grows to
         // hold it (`reach`), where its reservation did not.
-        if (on && host.reach?.(to) === false)
+        if (on && !roomTo(to))
         {
             host.divergence?.('VirtualAlloc', 'a commit up to 0x' + to.toString(16)
                 + ' past the memory the browser would give', 'loss');
@@ -2254,16 +2279,22 @@ export function createHeapFunctions(host){
 
     /**
      * A reservation of exactly this span at its start, committed whole when
-     * the type asks; false where any of it is taken.
+     * the type asks; false where any of it is taken, null where it was free and
+     * the machine has no memory for the commit.
      *
      * @param {number} start @param {number} span @param {number} kind
      * @param {number} protection
-     * @returns {boolean}
+     * @returns {boolean | null}
      */
     const reserveAt = (start, span, kind, protection)=>{
         if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
         {
             return false;
+        }
+        if ((kind & MEM_COMMIT) !== 0 && !roomTo(start + span))
+        {
+            allocator.free(start);
+            return null;
         }
         decommitted.delete(start);
         committed.set(start, []);
@@ -2489,7 +2520,12 @@ export function createHeapFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            if (!reserveAt(start, span, kind, protection))
+            const made = reserveAt(start, span, kind, protection);
+            if (made === null)
+            {
+                return noRoom(span);
+            }
+            if (!made)
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
                 host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
@@ -2569,6 +2605,10 @@ export function createHeapFunctions(host){
             // succeeding without zeroing, and an allocator that
             // commits up to its high-water mark each time it grows
             // does exactly that.
+            if (!roomTo(page + needed))
+            {
+                return noRoom(needed);
+            }
             takeBack(existing.address, page, page + needed);
             markCommitted(existing.address, page, page + needed, true);
             noteProtection(existing.address, page, page + needed, protection);
@@ -2599,6 +2639,11 @@ export function createHeapFunctions(host){
             allocator.free(placed);
         }
         const address = outside ? 0 : placed;
+        if (address !== 0 && (kind & MEM_COMMIT) !== 0 && !roomTo(address + rounded))
+        {
+            allocator.free(address);
+            return noRoom(rounded);
+        }
         if (address === 0)
         {
             // A caller checks the return and then asks why. A zero with
@@ -2825,6 +2870,11 @@ export function createHeapFunctions(host){
         // Exactly the placeholder's span, which a split may have left off
         // an allocation granule.
         const span = block.capacity;
+        if ((rest & MEM_COMMIT) !== 0 && !roomTo(start + span))
+        {
+            // The placeholder stays: nothing of the commit was made.
+            return noRoom(span);
+        }
         release(start, start + span);
         reserveAt(start, span, rest, protect >>> 0);
         replaced.add(start);

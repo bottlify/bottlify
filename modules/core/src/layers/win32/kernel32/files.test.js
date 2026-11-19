@@ -644,6 +644,36 @@ test('NtReadFile and NtWriteFile move bytes where ByteOffset says, and fill the 
     assert.equal(memory.dword(block), 0xdeadbeef, 'a refusal leaves the block alone');
 });
 
+test('a 64-bit process\'s IO_STATUS_BLOCK has Information eight bytes in', ()=>{
+    // The status and Information are each a pointer wide: written four bytes
+    // in, a 64-bit caller read the count as the status's upper half and its
+    // Information as whatever lay there.
+    const { memory, files, fns, open } = setup({ pointerSize: 8 });
+    files.put('C:\\GAME\\SAVE.DAT', 'abcdef');
+    const handle = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    const block = 0x500;
+    const whole = ()=>[0, 4, 8, 12, 16].map(at=>memory.dword(block + at));
+    /** @param {number} length */
+    const read = length=>{
+        memory.bytes.fill(0xaa, block, block + 20);
+        return natives.NtReadFile.handler([handle, 0, 0, 0, block, BUFFER, length, 0, 0]) >>> 0;
+    };
+
+    assert.equal(read(4), 0);
+    assert.deepEqual(whole(), [0, 0, 4, 0, 0xaaaaaaaa]);
+    assert.equal(read(8), 0);
+    assert.deepEqual(whole(), [0, 0, 2, 0, 0xaaaaaaaa]);
+    assert.equal(read(8), 0xc0000011, 'STATUS_END_OF_FILE');
+    assert.deepEqual(whole(), [0xc0000011, 0, 0, 0, 0xaaaaaaaa]);
+    memory.bytes.fill(0xaa, block, block + 20);
+    assert.equal(natives.NtWriteFile.handler([handle, 0, 0, 0, block, BUFFER, 3, 0, 0]), 0);
+    assert.deepEqual(whole(), [0, 0, 3, 0, 0xaaaaaaaa]);
+    memory.bytes.fill(0xaa, block, block + 20);
+    assert.equal(natives.NtFlushBuffersFile.handler([handle, block]), 0);
+    assert.deepEqual(whole(), [0, 0, 0, 0, 0xaaaaaaaa], 'and every other native call\'s');
+});
+
 test('a zero-length write still reports a count', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcd');
