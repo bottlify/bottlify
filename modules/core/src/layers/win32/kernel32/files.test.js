@@ -2630,6 +2630,41 @@ test('NtQueryInformationFile answers the name, the size and the position of an o
         'no block to write is not a fault');
 });
 
+test('a file opens by the number FileInternalInformation answers, from any folder of its drive',
+    ()=>{
+        const { memory, files, fns, open } = setup();
+        files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');
+        files.nodes.set('C:\\GAME\\LEVELS', { data: new Uint8Array(0), directory: true });
+        files.put('C:\\GAME\\LEVELS\\ONE.MAP', 'map');
+        const native = /** @type {any} */ (fns.CreateFileW).natives;
+        const query = native.NtQueryInformationFile;
+        const save = open('C:\\GAME\\LEVELS\\ONE.MAP', OPEN_EXISTING, GENERIC_READ);
+        assert.equal(query.handler([save, 0x300, 0x400, 8, 6]), 0, 'FileInternalInformation');
+        const low = memory.dword(0x400);
+        assert.equal(memory.dword(0x404), 0);
+        fns.CloseHandle.handler([save]);
+
+        assert.equal(native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ, objectAttributes(memory,
+            '\\??\\C:\\GAME'), NT_STATUS, 0, 0, 3, FILE_OPEN, FILE_DIRECTORY_FILE, 0, 0]), 0);
+        const folder = memory.dword(NT_HANDLE);
+        /** @param {number[]} id @param {number} root */
+        const byId = (id, root)=>{
+            objectAttributes(memory, '');
+            id.forEach((value, at)=>memory.putDword(NT_NAME + at * 4, value));
+            memory.putDword(NT_STRING, id.length * 4 | id.length * 4 << 16);
+            memory.putDword(NT_ATTRIBUTES + 4, root);
+            return native.NtCreateFile.handler([NT_HANDLE, GENERIC_READ, NT_ATTRIBUTES,
+                NT_STATUS, 0, 0, 3, FILE_OPEN, 0x2000, 0, 0]) >>> 0;
+        };
+        assert.equal(byId([low, 0], folder), 0, 'found below the root handle\'s folder');
+        const opened = memory.dword(NT_HANDLE);
+        assert.equal(fns.ReadFile.handler([opened, BUFFER, 3, OUT_COUNT, 0]), 1);
+        assert.equal(memory.dword(OUT_COUNT), 3, 'the same file: its three bytes');
+        assert.equal(byId([low, 1], folder), 0xc000000d, 'a number no file has');
+        assert.equal(byId([low, 0, 0, 0], folder), 0xc000000d, 'an object id: none kept');
+        assert.equal(byId([low, 0], 0), 0xc0000008, 'a number needs a volume to be on');
+    });
+
 test('NtQueryInformationFile answers the mode, times, access and the whole record', ()=>{
     const { memory, files, fns, open } = setup();
     files.put('C:\\GAME\\SAVE.DAT', 'abcdefghij');

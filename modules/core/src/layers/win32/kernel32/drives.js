@@ -139,8 +139,10 @@ const FS_UNICODE_STORED_ON_DISK = 0x00000004;
 const FS_PERSISTENT_ACLS = 0x00000008;
 // It keeps reparse points: mount points, symbolic links, tags of a program's own.
 const FILE_SUPPORTS_REPARSE_POINTS = 0x00000080;
+// A file opens by its number, the one FileInternalInformation answers.
+const FILE_SUPPORTS_OPEN_BY_FILE_ID = 0x01000000;
 const FILE_SYSTEM_FLAGS = FS_CASE_IS_PRESERVED | FS_UNICODE_STORED_ON_DISK | FS_PERSISTENT_ACLS
-    | FILE_SUPPORTS_REPARSE_POINTS;
+    | FILE_SUPPORTS_REPARSE_POINTS | FILE_SUPPORTS_OPEN_BY_FILE_ID;
 
 /**
  * A disc, as the CD-ROM file system describes one: 2048-byte sectors, one to

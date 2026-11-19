@@ -159,6 +159,7 @@ const FILE_OVERWRITTEN = 3;
 const FILE_DIRECTORY_FILE = 0x0001;
 const FILE_NON_DIRECTORY_FILE = 0x0040;
 const FILE_DELETE_ON_CLOSE = 0x1000;
+const FILE_OPEN_BY_FILE_ID = 0x2000;
 
 /** The statuses the native opens answer with. */
 const STATUS_SUCCESS = 0;
@@ -2814,6 +2815,86 @@ export function createFileFunctions(host){
             : { status: STATUS_OBJECT_PATH_NOT_FOUND };
     };
 
+    /**
+     * What a listed entry is known by, the path its number is made from: a
+     * file with several names is known by one of them, any other by its own.
+     *
+     * @param {string} directory @param {{ name: string, identity?: string }} entry
+     */
+    const listedIdentity = (directory, entry)=>entry.identity
+        ?? `${directory.replace(/\\$/, '')}${SEPARATOR}${entry.name}`;
+
+    /**
+     * FILE_OPEN_BY_FILE_ID's name: the eight bytes of a file's number on the
+     * volume the root handle is on, as FileInternalInformation and the
+     * directory listings answer it. A number is made from what the file is
+     * known by, so it is found by walking the volume: the root handle's folder
+     * first, where a program that just listed it looks, then the drive. A
+     * reparse point is not walked through, so a loop is never followed.
+     *
+     * @param {{ root: number, name: string }} given
+     * @returns {{ path: string, status?: undefined } | { status: number, path?: undefined }}
+     */
+    const byFileId = ({ root, name })=>{
+        const opened = root === 0 ? null : object(root, 'file');
+        const directory = root === 0 ? null : object(root, 'directory') ?? opened;
+        if (!directory)
+        {
+            return { status: STATUS_INVALID_HANDLE };
+        }
+        // An object id (sixteen bytes) names nothing on a volume that keeps none.
+        if (name.length !== 4)
+        {
+            return { status: STATUS_INVALID_PARAMETER };
+        }
+        const number = (name.charCodeAt(0) | name.charCodeAt(1) << 16) >>> 0;
+        const above = (name.charCodeAt(2) | name.charCodeAt(3) << 16) >>> 0;
+        const drive = /^[A-Za-z]:/.exec(directory.path)?.[0];
+        if (above !== 0 || !drive)
+        {
+            return { status: STATUS_INVALID_PARAMETER };
+        }
+        const start = opened && !opened.directory
+            ? directory.path.replace(/\\[^\\]*$/, '') : directory.path;
+        const seen = new Set();
+        /** @param {string} folder @returns {string | null} */
+        const walk = folder=>{
+            const key = folder.toLowerCase();
+            if (seen.has(key))
+            {
+                return null;
+            }
+            seen.add(key);
+            if (fileIndex(folder) === number)
+            {
+                return folder;
+            }
+            const entries = files.list(folder, '*') ?? [];
+            for (const entry of entries)
+            {
+                const identity = listedIdentity(folder, entry);
+                if (!entry.isDirectory && fileIndex(identity) === number)
+                {
+                    return identity;
+                }
+            }
+            for (const entry of entries)
+            {
+                if (entry.isDirectory && !(/** @type {any} */ (entry).reparseTag))
+                {
+                    const found = walk(`${folder.replace(/\\$/, '')}${SEPARATOR}${entry.name}`);
+                    if (found)
+                    {
+                        return found;
+                    }
+                }
+            }
+            return null;
+        };
+        const found = walk(start) ?? walk(`${drive}${SEPARATOR}`);
+        return found ? { path: fullPath(found) } : { status: STATUS_INVALID_PARAMETER };
+    };
+
     /** @type {Record<number, number>} */
     const NATIVE_FAILURES = {
         [ERROR_FILE_NOT_FOUND]: STATUS_OBJECT_NAME_NOT_FOUND,
@@ -2900,7 +2981,8 @@ export function createFileFunctions(host){
             }
             return STATUS_SUCCESS;
         }
-        const named = nativeName(attributes >>> 0);
+        const named = ((options >>> 0) & FILE_OPEN_BY_FILE_ID) !== 0 && given
+            ? byFileId(given) : nativeName(attributes >>> 0);
         if ('status' in named)
         {
             return named.status;
@@ -4469,8 +4551,12 @@ export function createFileFunctions(host){
             // it (`name-expression.js`), and every folder but a drive's root
             // holds "." and ".." first.
             const holder = files.stat(directory.path);
+            // "." is the folder itself and ".." its parent, by number too.
+            const parent = directory.path.replace(/\\[^\\]*\\?$/, '');
             const dots = /^[A-Za-z]:\\?$/.test(directory.path) || !holder ? []
-                : ['.', '..'].map(dot=>({ ...holder, name: dot, isDirectory: true, size: 0 }));
+                : [['.', directory.path], ['..', /^[A-Za-z]:$/.test(parent) ? `${parent}\\` : parent]]
+                    .map(([dot, of])=>({ ...holder, name: dot, isDirectory: true, size: 0,
+                        identity: of }));
             const entries = [...dots, ...files.list(directory.path, '*') ?? []]
                 .filter(entry=>isNameInExpression(pattern === '' ? '*' : pattern, entry.name));
             directory.listing = { pattern, entries, next: 0, first: true };
@@ -4540,8 +4626,8 @@ export function createFileFunctions(host){
                     view.setUint32(at + 60, name.length * 2, true);
                     if (shape.id !== undefined)
                     {
-                        const identity = entry.identity ?? `${directory.path}\\${name}`;
-                        view.setBigUint64(at + shape.id, BigInt(fileIndex(identity)), true);
+                        view.setBigUint64(at + shape.id,
+                            BigInt(fileIndex(listedIdentity(directory.path, entry))), true);
                     }
                 });
             }
