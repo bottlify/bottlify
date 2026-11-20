@@ -9,7 +9,7 @@ import {
     SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
     STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
     LEFT_CUT, RIGHT_CUT, KIND, KIND_QUEUE, KIND_DMA, BASE, LENGTH, POSITION, LOOPING, PLAYING,
-    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES,
+    LAPS, ENDS, FRESH, STREAMING, HELD, ARENA_OFFSET, ARENA_BYTES, DEVICE_LEAD_MS,
     STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
     OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
     slotHeaderOffset, slotPcmOffset, FLOAT_SAMPLES, pcmSample, sampleBytes,
@@ -241,6 +241,8 @@ function createEngineMixer(
                 /** Each side's share of `gain`, left then right: a pan. */
                 balance: [1, 1],
                 paused: false,
+                /** Output frames `playedBytes()` last told taken, held so it never goes back. */
+                taken: 0,
 
                 /**
                  * The resampler's seam between the buffers streamed into this
@@ -308,9 +310,21 @@ function createEngineMixer(
                  * when the last frame a buffer became has been heard, the whole
                  * of that buffer's byte count is credited, so a caller waiting
                  * for a buffer to come back is never left a fraction short.
+                 *
+                 * Taken, not heard: `DEVICE_LEAD_MS` ahead of the device while
+                 * the track plays, never past what was written, never back.
                  */
                 playedBytes(){
-                    let remaining = track.played() - track.retiredFrames;
+                    let written = track.retiredFrames;
+                    for (const entry of track.ledger)
+                    {
+                        written += entry.frames;
+                    }
+                    const ahead = !track.paused
+                        ? Math.round(sampleRate * DEVICE_LEAD_MS / 1000) : 0;
+                    track.taken = Math.max(track.taken,
+                        Math.min(written, track.played() + ahead));
+                    let remaining = track.taken - track.retiredFrames;
                     while (track.ledger.length > 0
                         && remaining >= track.ledger[0].frames)
                     {
@@ -364,6 +378,7 @@ function createEngineMixer(
                     track.offset = 0;
                     track.mixed = 0;
                     track.heard = 0;
+                    track.taken = 0;
                 },
 
                 close(){
@@ -1112,6 +1127,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
         // a previous reset. The bases below are what gets subtracted back off.
         let bytesBase = 0;
         let framesBase = 0;
+        /** What `playedBytes()` last told, held so it never goes back. */
+        let told = 0;
+        const leadBytes = ()=>Math.round(track.format.sampleRate * DEVICE_LEAD_MS / 1000) * stride;
 
         const track = {
             format,
@@ -1218,9 +1236,18 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
              * slot's whole life, including whatever this track played before
              * a previous reset, and a caller like `waveOutReset` expects the
              * cursor to restart at zero, the way its own `trackBytes` does.
+             *
+             * Taken, not heard: `DEVICE_LEAD_MS` ahead of `READ` while the
+             * track is not held (a stream before its Start is), never past what
+             * was written, and never back.
              */
             playedBytes(){
-                return Math.max(0, (Atomics.load(header, READ) - bytesBase) | 0);
+                const written = Atomics.load(header, WRITTEN);
+                const read = Math.max(Atomics.load(header, READ), Atomics.load(header, DROP_TO));
+                const ahead = track.paused ? 0 : leadBytes();
+                const taken = Math.min((written - bytesBase) | 0, (read - bytesBase + ahead) | 0);
+                told = Math.max(told, taken, 0);
+                return told;
             },
 
             /** Guest frames of this track still queued, by its own rate. */
@@ -1240,6 +1267,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             reset(){
                 bytesBase = Atomics.load(header, WRITTEN);
                 framesBase = Atomics.load(header, MIXED_FRAMES);
+                told = 0;
                 Atomics.store(header, DROP_TO, bytesBase);
                 Atomics.add(header, GENERATION, 1);
             },

@@ -12,7 +12,8 @@
  * the engine's thread cost a collection every 75 ms and stalls of 10 to 30 ms
  * nothing on a page has - the very gaps the test is there to find.
  *
- * Its `workerData`: `{ program, windows }`; it posts back
+ * Its `workerData`: `{ program, windows, stall? }`, `stall` holding the engine's
+ * thread `{ ms }` every `{ everyMs }`; it posts back
  * `{ exit, heard: { first, frames, hz, gaps }, win32 }`.
  */
 
@@ -171,8 +172,22 @@ const app = await createApp({ host: 'thread', mode: 'isolated', executable: prog
     imagePath: 'C:\\tone.exe', windows: workerData.windows,
     audio: { drained: true, sampleRate: RATE } });
 const ear = listen(app, 12);
+// The engine's thread held now and then, as a busy frame holds a page's: the
+// worklet plays on regardless, and what reaches it must already be there.
+const { everyMs, ms } = workerData.stall ?? {};
+const stalls = everyMs ? setInterval(()=>{
+    const until = performance.now() + ms;
+    while (performance.now() < until)
+    {
+        // Held.
+    }
+}, everyMs) : null;
 const exit = await app.run({ timeoutMs: 20000 }).catch((/** @type {any} */ error)=>
     String(error?.message ?? error));
+if (stalls)
+{
+    clearInterval(stalls);
+}
 await ear.done();
 const layers = await app.diagnostics();
 const win32 = layers.find((/** @type {any} */ table)=>table.name === 'win32')?.metrics;

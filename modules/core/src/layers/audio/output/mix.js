@@ -22,6 +22,18 @@
 /** A game of this era opens a handful of buffers; more than this falls back. */
 export const SLOTS = 64;
 
+/**
+ * The audio adapter's one rule for every output a program plays through: a
+ * track tells the program its sound was taken this long before the audio
+ * thread plays it, as a sound card's FIFO takes it ahead of the speaker, so
+ * that much is always in the table already. The engine's thread is held now
+ * and then - a busy frame's turn, 40 ms at worst under a virtual machine -
+ * and the audio thread plays on regardless; a program whose own queue was
+ * shorter (waveOut's three buffers of 20 ms, WASAPI's 20 ms buffer) went
+ * short there. Chosen: 80 ms, twice that turn.
+ */
+export const DEVICE_LEAD_MS = 80;
+
 /* WORKLET-SHARED:BEGIN */
 
 /**

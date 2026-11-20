@@ -54,8 +54,19 @@ flowchart TB
   voice and the mix then play that copy (`effectedWindow`), the program's samples left as they
   are. The standard effects are `dsound/effects.js`; they keep their parameters and change
   nothing yet (`roadmap/decisions.md` A264).
+- **The audio adapter.** A queue track - waveOut's, WASAPI's - tells the program its sound was
+  taken `DEVICE_LEAD_MS` (80 ms, `output/mix.js`) before the AudioWorklet plays it, as a sound
+  card's FIFO takes it ahead of the speaker, never past what was written and not while the track
+  is held, as a stream is before its Start (`playedBytes`). That much is always in the table already, so a turn of the engine's
+  thread up to that long (a busy frame, 40 ms at worst under a virtual machine) does not reach the
+  speaker, whatever queue the program keeps. `played()`, which films are timed by, stays what was
+  heard.
 - **waveOut** is one track per device. `waveOutWrite` copies the block at once, and `WOM_DONE`
-  arrives when the AudioWorklet has finished reading it.
+  arrives when the adapter has taken it.
+- **WASAPI** shared-mode streams hand what `ReleaseBuffer` released to their track at once; the
+  padding is what the adapter has not taken yet. An event-driven stream's event is set when the
+  program has a period's room, looked at twice a period by a timer the kernel's clock fires on the
+  host, so its wakes follow the device and not the guest's clock.
 - **MP3 for Miles.** In place of the program's own `Mp3dec.asi`, our provider runs, attached through
   `mss32.dll`'s `RIB` entry points. Decoding is minimp3 built to wasm (`audio/asi/`). There is also an
   MP3 codec for ACM.
