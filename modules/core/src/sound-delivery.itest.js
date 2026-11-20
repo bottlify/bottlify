@@ -53,6 +53,9 @@ const CASES = [
             + ' by QueryPerformanceCounter and Sleep(1)',
         todo: 'one gap of some 15 ms 30 ms in, the same in every run: the engine held as the'
             + ' main thread\'s loop is first translated, longer than the track\'s two periods' },
+    { program: 'wasapi-heavy', on: ['win7', 'win10'],
+        what: 'fed to WASAPI from a thread of its own while the main thread makes frames',
+        todo: 'the same gap as wasapi-busy, 10 ms in' },
     { program: 'waveout', on: ['winxp', 'win7', 'win10'],
         what: 'played through waveOut buffers written again as they come back' },
     { program: 'dsound', on: ['winxp', 'win7', 'win10'],

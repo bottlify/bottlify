@@ -24,8 +24,13 @@ import { RATE, TONE_HZ, directSoundTone, waveOutTone, wasapiTone } from './tone-
 const WORKLET = fileURLToPath(new URL('../../modules/core/src/layers/audio/output/worklet.js',
     import.meta.url));
 
+/** A game's frame on the main thread, in rounds of the busy loop. */
+const HEAVY_FRAME = 10_000_000;
+
 /** The programs a run may play, by name. */
 const PROGRAMS = { wasapi: ()=>wasapiTone(), 'wasapi-busy': ()=>wasapiTone({ busy: true }),
+    'wasapi-heavy': ()=>wasapiTone({ busy: true,
+        work: Number(process.env.SOUND_WORK ?? HEAVY_FRAME) }),
     waveout: waveOutTone, dsound: directSoundTone };
 
 /**

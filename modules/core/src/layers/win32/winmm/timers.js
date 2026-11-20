@@ -20,7 +20,11 @@ const THREAD_PRIORITY_TIME_CRITICAL = 15;
  * small number, not a record, so the loop tests what it got and asks again.
  *
  * The event forms (`TIME_CALLBACK_EVENT_SET`/`_PULSE`) signal instead of
- * calling; they are settled on the host and the loop only asks again.
+ * calling, so nothing of theirs needs the thread: the kernel's clock fires
+ * them on the host at their tick (`clockTimer`), as it does a waitable
+ * timer. Left to the thread, a tick waited for it to be given the processor,
+ * behind a main thread's slice; a sound thread woken by them wrote 98 periods
+ * of a hundred a second, and the speaker went short.
  */
 
 /** Guest-side layout of one delivery: the routine, then its five arguments. */
@@ -147,6 +151,11 @@ export function longTimerLoopCode(stub, at){
  * @property {(thread: any, result: number) => boolean} wake
  * @property {(thread: any) => any} park
  * @property {() => number} now  Guest milliseconds.
+ * @property {() => any} [clockTimer]  A timer the kernel's clock fires on the
+ *           host (a waitable timer); with the two below, an event timer's.
+ * @property {(timer: any, due: number, period: number,
+ *             fired: (at: number) => void) => void} [armClockTimer]
+ * @property {(timer: any) => void} [cancelClockTimer]
  * @property {(handle: number) => void} setEvent
  * @property {(handle: number) => void} pulseEvent
  * @property {boolean} [long]  The process is an x86-64 one: the loop in its convention.
@@ -166,6 +175,7 @@ export function createTimerService(deps){
      * @property {number} flags
      * @property {() => boolean} [when]  An event set only while this holds.
      * @property {boolean} [firing]  A one shot whose routine is running now.
+     * @property {any} [clock]  The kernel's timer firing it, for an event timer.
      */
     /** @type {Map<number, Timer>} */
     const timers = new Map();
@@ -188,6 +198,13 @@ export function createTimerService(deps){
      * @type {Timer | null}
      */
     let calling = null;
+    /**
+     * The kernel's timers of event timers gone, armed again by the next: the
+     * kernel keeps every object it made.
+     *
+     * @type {any[]}
+     */
+    const spareClocks = [];
 
     /** @param {number} value */
     const dword = value=>new Uint8Array([
@@ -214,7 +231,7 @@ export function createTimerService(deps){
         let found = null;
         for (const timer of timers.values())
         {
-            if (timer.firing)
+            if (timer.firing || timer.clock)
             {
                 continue;
             }
@@ -350,10 +367,35 @@ export function createTimerService(deps){
                 return 0;
             }
             const id = nextId++;
-            timers.set(id, {
+            /** @type {Timer} */
+            const timer = {
                 id, due: deps.now() + delay, period: (flags & TIME_PERIODIC) ? delay : 0,
                 target, user, flags, when,
-            });
+            };
+            timers.set(id, timer);
+            const kind = flags & CALLBACK_MASK;
+            if (kind !== 0 && deps.clockTimer && deps.armClockTimer)
+            {
+                timer.clock = spareClocks.pop() ?? deps.clockTimer();
+                deps.armClockTimer(timer.clock, timer.due, timer.period, at=>{
+                    fired++;
+                    noteLate(deps.now() - at);
+                    if (timer.period === 0)
+                    {
+                        timers.delete(id);
+                        spareClocks.push(timer.clock);
+                    }
+                    if (kind === TIME_CALLBACK_EVENT_PULSE)
+                    {
+                        deps.pulseEvent(target);
+                    }
+                    else if (!when || when())
+                    {
+                        deps.setEvent(target);
+                    }
+                });
+                return id;
+            }
             if (thread === null)
             {
                 start();
@@ -371,8 +413,15 @@ export function createTimerService(deps){
 
         /** MMRESULT timeKillEvent(UINT uTimerID) @param {number} id */
         kill(id){
-            if (timers.delete(id))
+            const timer = timers.get(id);
+            if (timer)
             {
+                if (timer.clock)
+                {
+                    deps.cancelClockTimer?.(timer.clock);
+                    spareClocks.push(timer.clock);
+                }
+                timers.delete(id);
                 return 0;
             }
             return id > 0 && id < nextId ? TIMERR_NOCANDO : MMSYSERR_INVALPARAM;

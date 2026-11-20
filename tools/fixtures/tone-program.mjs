@@ -59,10 +59,12 @@ const guid = text=>{
  * Busy, the stream is fed from a thread of its own while the main thread waits
  * for its next frame as a game does - QueryPerformanceCounter and Sleep(1)
  * round and round - which is how a game's sound thread meets the scheduler.
+ * With `work`, the main thread makes a frame between its waits as a game
+ * does, that many rounds of a two-instruction loop.
  *
- * @param {{ busy?: boolean }} [options]
+ * @param {{ busy?: boolean, work?: number }} [options]
  */
-export function wasapiTone({ busy = false } = {}){
+export function wasapiTone({ busy = false, work = 0 } = {}){
     return buildExe({
         imports: {
             'ole32.dll': ['CoInitialize', 'CoCreateInstance'],
@@ -164,6 +166,11 @@ export function wasapiTone({ busy = false } = {}){
                 bytes.push(...call(iat, 'CreateThread', [0, 0, code(loop), 0, 0, 0]));
                 check(true);
                 const spin = bytes.length;
+                if (work > 0)
+                {
+                    // mov ecx, work; frame: dec ecx; jnz frame
+                    bytes.push(0xb9, ...u32(work), 0x49, 0x75, 0xfd);
+                }
                 bytes.push(...call(iat, 'QueryPerformanceCounter', [at('counter')]),
                     ...call(iat, 'Sleep', [1]), 0xe9);
                 bytes.push(...u32(spin - (bytes.length + 4)));

@@ -109,8 +109,12 @@ const MINIMUM_PERIODS = 2;
 /**
  * The periods of sound the track of a stream the engine takes from keeps ahead
  * of the page's audio thread, gathered whenever it ran dry (`pullForEngine`).
+ * Chosen: 80 ms, for an engine tick 40 ms late - a turn of the engine's
+ * thread on a busy frame, as measured under a virtual machine (worst 38-42 ms)
+ * - beside a device taking 20 ms at once. Four periods ran dry there, in a
+ * game a dozen blocks a second; Windows' own engine is never held up.
  */
-const PRIMING_PERIODS = 2;
+const PRIMING_PERIODS = 8;
 
 /** timeSetEvent's flags: periodic, and setting an event rather than calling back. */
 const TIME_PERIODIC = 0x1;
@@ -400,19 +404,23 @@ export function createAudioClients(host, endpoint){
         return given;
     };
 
+    /** A period of the engine's, in the stream's frames. @param {any} stream */
+    const periodFrames = stream=>Math.round(stream.rate * DEFAULT_PERIOD / 10_000_000);
+
     /**
-     * Windows' engine, for a stream that asked to be woken: once a period by
-     * the guest's clock it takes the frames that period is owed from the
-     * buffer - those of a late tick too - and sets the event, so the program
-     * woken finds a period's room and the program's padding is what the engine
-     * has yet to take. What it takes goes to the track, which the page's audio
-     * thread reads on its own clock and in bursts of its own: the track keeps
-     * PRIMING_PERIODS ahead of it, waiting, paused, until it has that much
-     * whenever it ran dry, so those bursts are met there and not in the
-     * program's buffer. Read straight off the buffer, a program writing half
-     * its buffer at an event (SDL) had ten milliseconds of sound ahead of a
-     * device that took fourteen at a time: a second of tone played with
-     * fifteen gaps.
+     * Windows' engine, for a stream that asked to be woken: it takes from the
+     * buffer what the device played, and sets the event when the program has
+     * a period's room, so its padding is what the engine has yet to take. The
+     * device is the page's audio thread, reading the track on its own clock
+     * and in bursts of its own: the engine tops the track up to
+     * PRIMING_PERIODS, and a track run dry waits, paused, until it has that
+     * much again, so those bursts are met there and not in the program's
+     * buffer. Paced by the device and not by the guest's clock, which is
+     * credited between turns and drifts from it: taking what the guest's clock
+     * owed, or waking once a guest's period, a device three percent faster
+     * ran dry - 1360 frames a second under SDL, which fills what room there
+     * is, and 950 under a program writing a period a wake. Run twice a
+     * period, so that wakes can keep up with a faster device.
      *
      * @param {any} stream
      * @returns {boolean} whether to set the event
@@ -422,14 +430,17 @@ export function createAudioClients(host, endpoint){
         {
             return false;
         }
-        const owed = Math.floor((host.now() - stream.since) * stream.rate / 1000);
-        const take = Math.max(0, Math.min(owed - stream.engineAt, stream.written - stream.pulled));
-        // A period the buffer had nothing for is silence, not a debt: the
-        // engine's clock goes on whether or not the program kept up.
-        stream.engineAt = owed;
+        const room = ()=>stream.bufferFrames - padding(stream) >= periodFrames(stream);
+        const track = stream.track;
+        if (!track)
+        {
+            return room();
+        }
+        const cushion = PRIMING_PERIODS * periodFrames(stream);
+        const take = Math.max(0,
+            Math.min(cushion - track.pending(), stream.written - stream.pulled));
         const given = feed(stream, take * stream.format.blockAlign) / stream.format.blockAlign;
         stream.pulled += given;
-        const track = stream.track;
         const waiting = track.pending();
         if (!stream.priming && waiting === 0)
         {
@@ -439,11 +450,10 @@ export function createAudioClients(host, endpoint){
         {
             // Under way once the cushion is there, or once the program has
             // no more to give: the end of a sound plays out.
-            const cushion = PRIMING_PERIODS * Math.round(stream.rate * DEFAULT_PERIOD / 10_000_000);
             stream.priming = waiting < cushion && given > 0;
         }
         track.paused = stream.priming;
-        return true;
+        return room();
     };
 
     /**
@@ -1134,7 +1144,6 @@ export function createAudioClients(host, endpoint){
                 played(stream);
                 stream.started = true;
                 stream.since = host.now();
-                stream.engineAt = 0;
                 stream.priming = true;
                 if (stream.track)
                 {
@@ -1142,9 +1151,10 @@ export function createAudioClients(host, endpoint){
                 }
                 if (stream.event !== 0 && stream.timer === 0)
                 {
-                    // The engine's period, the event set as it takes it (`pullForEngine`).
-                    const period = Math.max(1, Math.round(DEFAULT_PERIOD / 10000));
-                    stream.timer = host.timers?.set(period, stream.event, 0,
+                    // Twice a period, the event set when a period's room is there
+                    // (`pullForEngine`).
+                    const half = Math.max(1, Math.round(DEFAULT_PERIOD / 20000));
+                    stream.timer = host.timers?.set(half, stream.event, 0,
                         TIME_PERIODIC | TIME_CALLBACK_EVENT_SET, ()=>pullForEngine(stream)) ?? 0;
                     if (stream.timer === 0)
                     {
@@ -1414,8 +1424,8 @@ export function createAudioClients(host, endpoint){
                 initialized: false, started: false, flags: 0, format: null, rate: 0,
                 bufferFrames: 0, scratch: 0, silence: 0, held: null, written: 0,
                 clockFrames: 0, since: 0, event: 0, timer: 0, track: null,
-                /** Frames the engine took, the engine's clock in frames since Start, and whether the track waits for its cushion (`pullForEngine`). */
-                pulled: 0, engineAt: 0, priming: true,
+                /** Frames the engine took, and whether the track waits for its cushion (`pullForEngine`). */
+                pulled: 0, priming: true,
                 /** GetBuffer asked and refused for room, GetCurrentPadding asked and what it summed. */
                 counts: { gets: 0, refused: 0, paddings: 0, paddingSum: 0 },
                 /** @type {Uint8Array[]} */
