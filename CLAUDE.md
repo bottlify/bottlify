@@ -130,6 +130,12 @@ Nothing is done until it is tested: unit, contract (Wine's expectations), graphi
 frames) and end to end. Tests use `node:test`, colocated as `*.test.js` (unit) and `*.itest.js`
 (integration and gates); no test dependencies.
 
+**A defect found in a program is reproduced by a test first.** A regression or a breakage seen
+in a game goes in this order: a test that reproduces it on the engine, outside the game (it fails
+before the fix); then the fix, in the generic contract it broke; then the same test over every
+condition like it - the other APIs, widths, Windows versions and host paths it could meet; and a
+fix again for whatever that finds. A fix judged only by the game is not done.
+
 **Every second path has a gate.** An optimisation that puts a fast path beside a slow one — guest
 routines beside host traps, a command ring beside direct calls, a recording replayed in a worker
 beside a device that draws itself, a device mixer beside the guest clock — lands with a
