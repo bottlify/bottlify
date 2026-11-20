@@ -25,6 +25,7 @@ import { sharedFormsOf } from './shared-forms.js';
 import { cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
 import { regionOfSummary, summaryOf } from './summary.js';
 import { usesX87 } from './variants.js';
+import { StoredBlocks } from './stored-blocks.js';
 
 /** @typedef {import('./state.js').Lookup} Lookup */
 /** @typedef {import('./state.js').Forming} Forming */
@@ -400,7 +401,7 @@ export function createStore(state){
      * there: of a warm Far Cry run's 2 072 misses, 803 were such blocks. Read from the
      * store as the runtime starts, written back with this run's regions when it
      * flushes. null until read.
-     * @type {Map<number, number> | null}
+     * @type {StoredBlocks | null}
      */
     let storedBlocks = null;
     const blocksKey = ()=>cacheKey({ version: cacheVersion, features: found, variant,
@@ -413,33 +414,6 @@ export function createStore(state){
      */
     const storeHere = ()=>(leaveOut.size > 0 || profiling
         ? null : (settings.store ?? null));
-    /** `storedBlocks` as a record holds it: a block, an entry and their tops each.
-     * @param {Map<number, number>} blocks */
-    const packBlocks = blocks=>{
-        const bytes = new Uint8Array(blocks.size * 12);
-        const data = new DataView(bytes.buffer);
-        let at = 0;
-        for (const [block, owner] of blocks)
-        {
-            data.setUint32(at, Math.floor(block / 16), true);
-            data.setUint32(at + 4, Math.floor(owner / 16), true);
-            data.setUint32(at + 8, (block % 16) << 4 | owner % 16, true);
-            at += 12;
-        }
-        return bytes;
-    };
-    /** @param {Uint8Array} bytes @returns {Map<number, number>} */
-    const unpackBlocks = bytes=>{
-        const blocks = new Map();
-        const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        for (let at = 0; at + 12 <= bytes.length && bytes.length % 12 === 0; at += 12)
-        {
-            const tops = data.getUint32(at + 8, true);
-            blocks.set(keyOf(data.getUint32(at, true), tops >>> 4),
-                keyOf(data.getUint32(at + 4, true), tops & 15));
-        }
-        return blocks;
-    };
     /** The read of `storedBlocks`, which a flush waits for before it writes them back. */
     const blocksRead = (async()=>{
         const store = storeHere();
@@ -447,10 +421,10 @@ export function createStore(state){
         {
             const bytes = store === null || typeof store.get !== 'function' ? null
                 : await store.get(blocksKey());
-            storedBlocks = bytes === null ? new Map() : unpackBlocks(bytes);
+            storedBlocks = bytes === null ? StoredBlocks.empty() : StoredBlocks.fromBytes(bytes);
         }
         catch {
-            storedBlocks = new Map();
+            storedBlocks = StoredBlocks.empty();
         }
     })();
     /**
@@ -886,38 +860,32 @@ export function createStore(state){
             // dropping what the others added since, and put it whole even
             // when it added nothing: 46 maps of 2.5 MB a run.
             await blocksRead;
-            /** @type {Map<number, number> | null} */
-            let now = storedBlocks;
+            let now = storedBlocks ?? StoredBlocks.empty();
             try
             {
                 const bytes = await store.get(blocksKey());
-                now = bytes === null ? now : unpackBlocks(bytes);
+                now = bytes === null ? now : StoredBlocks.fromBytes(bytes);
             }
             catch {
                 // The map read at the start stands for it.
             }
-            const blocks = new Map(now ?? []);
-            let added = 0;
+            /** @type {Map<number, number>} */
+            const ours = new Map();
             for (const record of regions)
             {
                 for (const slot of record.slots)
                 {
                     const { eip, top } = entries.at(slot);
-                    const block = keyOf(eip, top);
-                    const owner = keyOf(record.entry, record.entryTop);
-                    if (blocks.get(block) !== owner)
-                    {
-                        blocks.set(block, owner);
-                        added++;
-                    }
+                    ours.set(keyOf(eip, top), keyOf(record.entry, record.entryTop));
                 }
             }
+            const { blocks, changed } = now.with(ours);
             // Put whole, the map is worth it only for what this runtime adds to
             // it: a tool's process adding a few blocks to a game's map of
             // 200 000 wrote 2.5 MB for each of its runs.
-            if (added > 0 && added * MAP_SHARE >= blocks.size)
+            if (changed > 0 && changed * MAP_SHARE >= blocks.size)
             {
-                await store.put(blocksKey(), packBlocks(blocks)).catch(()=>{});
+                await store.put(blocksKey(), blocks.bytes()).catch(()=>{});
             }
         }
         await settings.store?.flush?.();
