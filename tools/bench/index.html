@@ -76,6 +76,8 @@ compare over several runs.</p>
     <label for="bits">widths <select id="bits"><option value="32,64">32 and 64-bit</option>
         <option value="32">32-bit</option><option value="64">64-bit</option></select></label>
     <label for="rounds">rounds <select id="rounds"><option>5</option><option selected>7</option><option>11</option></select></label>
+    <label for="only">workloads <input id="only" size="22" placeholder="all (or e.g. calls4096,calls512)"></label>
+    <label for="warmMs">warm ms <input id="warmMs" size="6" placeholder="by regions"></label>
     <button id="workOnly">Check the work</button>
     <button id="copy" disabled>Copy report</button>
 </div>
@@ -288,12 +290,12 @@ function render(runs, workRows){
 let report = null;
 async function start(timed){
     const runs = timed ? Number($('runs').value) : 1;
-    // A narrower or longer run by the page's address: `?only=calls4096,calls512` (names'
-    // beginnings) and `?warmMs=5000` (virtual ms of guest work after the warm iterations).
-    const asked = new URLSearchParams(location.search);
+    // A narrower or longer run: workloads by their names' beginnings, and the virtual ms of
+    // guest work after the warm iterations at least (more for a workload of many regions).
+    const warmMs = Number($('warmMs').value);
     const options = { bits: $('bits').value.split(',').map(Number), rounds: Number($('rounds').value),
-        timed, only: (asked.get('only') ?? '').split(',').filter(Boolean),
-        ...asked.has('warmMs') ? { warmMs: Number(asked.get('warmMs')) } : {} };
+        timed, only: $('only').value.split(',').map(name=>name.trim()).filter(Boolean),
+        ...warmMs > 0 ? { warmMs } : {} };
     for (const id of ['run', 'workOnly', 'copy'])
     {
         $(id).disabled = true;
@@ -345,6 +347,12 @@ async function start(timed){
     $('run').disabled = false;
     $('workOnly').disabled = false;
     $('copy').disabled = report === null;
+}
+// The fields may come filled from the page's address: `?only=calls4096,calls512&warmMs=5000`.
+{
+    const asked = new URLSearchParams(location.search);
+    $('only').value = asked.get('only') ?? '';
+    $('warmMs').value = asked.get('warmMs') ?? '';
 }
 $('run').onclick = ()=>start(true);
 $('workOnly').onclick = ()=>start(false);

@@ -13,7 +13,7 @@
  *
  *     node tools/bench/serve.mjs [--dir DIR] [--port N]
  *     node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64]
- *         [--agent STRING]
+ *         [--only NAME,NAME] [--agent STRING]
  *
  * `--dir` serves what `build.mjs` made (the page with two builds of cork) instead
  * of the checkout. `--check` runs the work alone unless `--timed`; `--agent` has
@@ -72,6 +72,7 @@ else
             // A count the page does not offer is added to its choices.
             + `document.getElementById('runs').add(new Option(${runs}));`
             + `document.getElementById('runs').value = ${runs};`
+            + `document.getElementById('only').value = ${JSON.stringify(option('only', ''))};`
             + `document.getElementById(${JSON.stringify(button)}).click()`);
         let report;
         let said = '';

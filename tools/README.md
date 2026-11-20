@@ -341,10 +341,10 @@ From `node tools/bench/stand.mjs --only vm,vcall,calls512-scatter on cork 94512c
 
 ### How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?
 
-[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); the address takes ?only=NAME,NAME (workloads by their names' beginnings) and ?warmMs=N (guest work before the rounds, at least; more for a workload of many regions)`
+[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); its fields (or ?only=NAME,NAME and ?warmMs=N in the address) narrow the run to workloads by their names' beginnings and set the guest work before the rounds, at least (more for a workload of many regions)`
 
 Needs the shared browser, a GPU or a phone: no sample yet from this
-machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); the address takes ?only=NAME,NAME (workloads by their names' beginnings) and ?warmMs=N (guest work before the rounds, at least; more for a workload of many regions)` and put what it prints here.
+machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); its fields (or ?only=NAME,NAME and ?warmMs=N in the address) narrow the run to workloads by their names' beginnings and set the guest work before the rounds, at least (more for a workload of many regions)` and put what it prints here.
 
 ### What does a title import, or look up by name, that this build does not export?
 
@@ -391,7 +391,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 
 ### `bench/`
 
-- [`bench/serve.mjs`](bench/serve.mjs) - Does the stand's page run in Chromium and do the work recorded there, as in Node? (`npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--agent STRING])`)
+- [`bench/serve.mjs`](bench/serve.mjs) - Does the stand's page run in Chromium and do the work recorded there, as in Node? (`npm run cdp:bench  (node tools/bench/serve.mjs [--dir DIR] --check [--timed] [--runs N] [--bits 32|64] [--only NAME,NAME] [--agent STRING])`)
 
 ### `gates/`
 
