@@ -182,10 +182,6 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [tablesZeroed]    The host made the tables zero itself: a memory just
  *     made, or one it zeroed where they lie. The entry hash is then not cleared at the start,
  *     which wrote every page of it. The cpu layer sets it. Default false.
- * @property {boolean} [zeroPage]        The guest's first page is the RAM's zeros, which nothing
- *     writes and a store to faults (`zeroReadsBelow` over it): a tested read inside it reads
- *     them in translated code rather than leaving to the host. The cpu layer sets it where
- *     that holds. Default false.
  * @property {boolean} [atomic]          Locked instructions (`lock`-prefixed read-modify-writes,
  *     `xchg` with memory) as wasm atomics, each indivisible on the shared memory: for a process
  *     whose threads run on more than one executor. Default false.

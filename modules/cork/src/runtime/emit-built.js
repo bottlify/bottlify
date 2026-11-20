@@ -201,7 +201,7 @@ function contextKey(layout, features, options, leaveOut){
         options.atomic === true,
         options.resume === true, options.callReturn === true,
         options.linkedCalls !== false, options.looseStacks === true,
-        options.checkReads === true, options.zeroPage === true, options.expansion != null,
+        options.checkReads === true, options.expansion != null,
         options.crossTailCalls !== false,
         options.callDepth ?? null, [...leaveOut].sort()]);
 }
@@ -309,7 +309,7 @@ function sameShape(kept, shape){
  *     precise?: boolean, profileCalls?: boolean, resume?: boolean,
  *     atomic?: boolean,
  *     callReturn?: boolean, linkedCalls?: boolean, crossTailCalls?: boolean,
- *     callDepth?: number, looseStacks?: boolean, checkReads?: boolean, zeroPage?: boolean,
+ *     callDepth?: number, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
  *     expansion?: import('../emit/region.js').ExpansionNote | null,
  *     progress?: (index: number) => void }}
@@ -347,7 +347,6 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         linkedCalls: options.linkedCalls !== false,
         looseStacks: options.looseStacks === true,
         checkReads: options.checkReads === true,
-        zeroPage: options.zeroPage === true,
         crossTailCalls: options.crossTailCalls !== false,
         ...(options.callDepth === undefined ? {} : { callDepth: options.callDepth }),
         leaveOut,

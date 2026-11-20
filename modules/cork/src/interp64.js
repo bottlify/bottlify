@@ -330,18 +330,17 @@ class BlockState64 {
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
  *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'],
- *     zeroReadsBelow?: number, readThrough?: [number, number][], atomic?: boolean }} what
- *     `zeroReadsBelow`, `readThrough` and `atomic` as `blockState`'s
+ *     readThrough?: [number, number][], atomic?: boolean }} what
+ *     `readThrough` and `atomic` as `blockState`'s
  */
 export function blockState64(what){
-    const { memory, ram, layout, onCodeWrite, rdtsc, ports, zeroReadsBelow = 0,
+    const { memory, ram, layout, onCodeWrite, rdtsc, ports,
         readThrough = [], atomic = false } = what;
     const state = new BlockState64(memory, layout, onCodeWrite ?? null, rdtsc, ports, ram);
     if (state.blockMemory instanceof BlockMemory)
     {
         state.blockMemory.atomic = atomic;
     }
-    state.blockMemory.zeroReadsBelow = zeroReadsBelow;
     state.blockMemory.readThrough = readThrough;
     return state;
 }

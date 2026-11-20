@@ -326,6 +326,68 @@ test('a store through NULL faults where it stands, with the stack and frame of t
     });
 
 /**
+ * A field read through NULL, over and over in one loop: each read faults with
+ * the address it read and goes on past it, as the .NET runtime's JIT counts on
+ * (it emits no null test; the read's access violation is its
+ * NullReferenceException). The loop runs long enough to be translated, so
+ * the interpreter and translated code both meet it.
+ *
+ * Exits 0 when the handler saw every read as a read of 0x28; 1 otherwise
+ * (0 handled: the reads went through and found something there).
+ */
+const NULL_READS = 2000;
+function buildNullReadExe(){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        data: { count: [0, 0, 0, 0] },
+        codeSize: 0x100,
+        code: ({ iat, at, code })=>{
+            const handler = code(0x80);
+            const main = [
+                0x68, ...u32(handler),                           // push handler
+                0x64, 0xff, 0x35, 0, 0, 0, 0,                    // push dword fs:[0]
+                0x64, 0x89, 0x25, 0, 0, 0, 0,                    // mov fs:[0], esp
+                0xbe, ...u32(NULL_READS),                        // mov esi, NULL_READS
+                0x31, 0xc0,                                      // L: xor eax, eax
+                0x8b, 0x48, 0x28,                                // mov ecx, [eax+0x28]
+                0x4e,                                            // dec esi
+                0x75, 0xf8,                                      // jnz L
+                0xa1, ...u32(at('count')),                       // mov eax, [count]
+                0x3d, ...u32(NULL_READS),                        // cmp eax, NULL_READS
+                0x74, 0x08,                                      // je +8
+                0x6a, 0x01, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 1
+                0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')), // exit 0
+            ];
+            const handle = [
+                0x8b, 0x44, 0x24, 0x04,                          // mov eax, [esp+4]: the record
+                0x81, 0x38, ...u32(0xc0000005),                  // cmp [eax], ACCESS_VIOLATION
+                0x75, 0x12,                                      // jne done
+                0x83, 0x78, 0x14, 0x00,                          // cmp [eax+0x14], 0: a read
+                0x75, 0x0c,                                      // jne done
+                0x83, 0x78, 0x18, 0x28,                          // cmp [eax+0x18], 0x28: of 0x28
+                0x75, 0x06,                                      // jne done
+                0xff, 0x05, ...u32(at('count')),                 // inc [count]
+                0x8b, 0x4c, 0x24, 0x0c,                          // done: mov ecx, [esp+12]
+                0x83, 0x81, ...u32(0xb8), 0x03,                  // context.Eip += 3: past the read
+                0x31, 0xc0,                                      // xor eax, eax: continue
+                0xc3,                                            // ret
+            ];
+            const bytes = new Array(0x100).fill(0xcc);
+            bytes.splice(0, main.length, ...main);
+            bytes.splice(0x80, handle.length, ...handle);
+            return bytes;
+        },
+    });
+}
+
+test('a read through NULL faults with the address it read, interpreted and translated alike',
+    { timeout: 120000 },
+    async t=>{
+        const { code } = await runExecutable(t, buildNullReadExe());
+        assert.equal(code, 0, 'every read faulted as a read of 0x28');
+    });
+
+/**
  * Two frames on the chain: the inner one's handler at an address no region
  * holds, the outer one's the program's own. A frame is checked by whether its
  * memory is there (seh.js), so the inner frame is passed over and the outer

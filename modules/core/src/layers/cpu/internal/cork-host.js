@@ -157,14 +157,6 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     they answer.
  * @property {number} [closedBelow]  Addresses below this are no-access: a fetch, a
  *           store or an interpreted read there faults. Zero, the default, closes none.
- * @property {number} [zeroReadsBelow]  Below this a closed page reads as zeros, its
- *           stores and fetches still faulting: the null range as a program finds
- *           it, a store through NULL reaching its handler, a read of a structure
- *           through a pointer not yet set finding zeros. Translated reads, which
- *           do not test their page, find the RAM's zeros there; whatever tests
- *           (the interpreters, a checked read) leaves the instruction to the
- *           JavaScript interpreter, which reads the zeros. Zero, the default,
- *           opens none.
  * @property {[number, number][]} [readThrough]  Ranges past RAM, [from, to), a read
  *           finds where an untested translated read finds them (`wrappedAddress`),
  *           their stores faulting: a page the host keeps at that place in RAM, the
@@ -294,7 +286,7 @@ function wideMemory(engine, window, shared){
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, zeroReadsBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
+        closedBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
         memoryHolder, guestCharge } = config;
@@ -1105,13 +1097,7 @@ export function createCorkHost(config){
         // translated twice, never once per executor.
         ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
             ? { sharedLayout: engine.sharedLayout(own) } : {}),
-        // The guest's first page is the RAM's own, zeros the engine's state starts past and
-        // nothing writes (its stores fault), where reads below the bound answer zeros:
-        // a tested read inside it reads them in place (`zeroPage`).
         config: { ...(trapPort === undefined ? {} : { trapPort }),
-            ...(zeroReadsBelow >= 0x1000 && closedBelow >= 0x1000 && own.ramBase === 0
-                && (enginePages.to <= enginePages.from || enginePages.from >= 0x1000)
-                ? { zeroPage: true } : {}),
             ...corkConfig,
             // On the guest's clock the translation is done on this thread: a
             // worker's answers come back when the event loop has them.
@@ -1406,10 +1392,10 @@ export function createCorkHost(config){
             // not present, and whether the access wrote.
             ...page === null ? {} : { errorCode: page.write ? 2 : 0, address: page.address >>> 0 },
         };
-        // A page the program closed itself, inside RAM: translated reads that
-        // wrap into RAM would read it as zeros, so they test from now on.
-        if (page !== null && page.address >>> 0 >= closedBelow && page.address >>> 0 < held
-            && !engineHolds(page.address >>> 0))
+        // A closed page inside RAM, the null range's or one the program closed
+        // itself: translated reads that wrap into RAM would read it as zeros,
+        // so they test from now on.
+        if (page !== null && page.address >>> 0 < held && !engineHolds(page.address >>> 0))
         {
             runtime.readsFaulted?.();
         }
@@ -1694,7 +1680,6 @@ export function createCorkHost(config){
             layout,
             rdtsc: readTsc,
             atomic: corkConfig?.atomic === true,
-            zeroReadsBelow,
             readThrough,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             // An interpreted store into a page a region was translated on
@@ -1758,7 +1743,6 @@ export function createCorkHost(config){
             ...ramMemory === undefined ? {} : { ram: ramMemory },
             layout,
             rdtsc: readTsc,
-            zeroReadsBelow,
             readThrough,
             atomic: corkConfig?.atomic === true,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),

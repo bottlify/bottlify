@@ -805,10 +805,22 @@ export function createSeh(host){
         // the call's return address.
         // Met in a host function, that function is named: its address is a
         // trap's, which says nothing.
+        // The call's own bytes and the registers say which slot it went
+        // through (`ff 50 18` is [eax+0x18]) and whose table held the null.
+        const nullCall = ()=>{
+            const back = readU32(wholeAddress(registers.esp)) >>> 0;
+            const bytes = host.isMapped((back - 7) >>> 0)
+                ? ` (${[...host.readMemory(wholeAddress((back - 7) >>> 0), 7)]
+                    .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')}`
+                    + ` eax=${hex(registers.eax)} ecx=${hex(registers.ecx)}`
+                    + ` edx=${hex(registers.edx)} esi=${hex(registers.esi)}`
+                    + ` edi=${hex(registers.edi)})` : '';
+            return `, called from ${hex(back)}${bytes}`;
+        };
         const caller = what.raisedFrom !== undefined
             ? `${what.call ? ` in ${what.call}` : ''}, raised from ${hex(what.raisedFrom)}`
             : (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
-                ? `, called from ${hex(readU32(wholeAddress(registers.esp)))}` : '';
+                ? nullCall() : '';
         // An instruction the processor refused is named by its bytes: a
         // deliberate trap and an opcode the translator lacks look alike
         // otherwise.

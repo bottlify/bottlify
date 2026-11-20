@@ -166,7 +166,6 @@ export function createTranslators(state){
         resume: resumable,
         precise: settings.precise === true,
         checkReads: rt.readsChecked,
-        zeroPage: settings.zeroPage === true,
         atomic: settings.atomic === true,
         looseStacks: rt.loose,
         leaveOut,

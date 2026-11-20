@@ -113,13 +113,12 @@ export async function layerConfig(deps){
                         : [STACK_POOL_START, STACK_POOL_BASE],
                     heapBase: HEAP_BASE }) } : undefined,
             initialStack: mainStack.initialStack,
-            // The first 64 KiB, which Windows never maps: a store there faults,
-            // as PECompact2's deliberate store through NULL needs to reach the
-            // handler it installed, and a read finds zeros, as FMOD's mixer
-            // thread reads NULL+0x54 before its creator has set the pointer.
-            // Reading zeros where Windows faults is decisions.md's A79.
+            // The first 64 KiB, which Windows never maps: every access there
+            // faults, as PECompact2's deliberate store through NULL needs to
+            // reach the handler it installed and the .NET runtime's JIT, which
+            // emits no null test, needs a field read through NULL to become its
+            // NullReferenceException (decisions.md A79).
             closedBelow: 0x10000,
-            zeroReadsBelow: 0x10000,
             // The system's shared page in a RAM short of it, read where RAM keeps
             // it (`sharedPageAt`).
             readThrough: memorySize > SHARED_USER_DATA && engineArea === undefined ? []
