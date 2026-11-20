@@ -1573,9 +1573,27 @@ async function buildApp(options){
         slice: /** @type {{ next: number, end: number } | null} */ (null),
         /** Counts the parts placing began (`within`): the code arena's page per part. */
         part: 0,
-        /** @param {number} bytes */
+        /**
+         * A block of the span, reading as zeroes as a heap block does: what the
+         * engine keeps there (a routine's tables, the clock's last answer) is
+         * read before it is written. A memory just made is zero; one a gone
+         * process left holds what that process kept at the same addresses
+         * (`reusedMemory`), and the clock's last answer read from it held the
+         * counter still for as long as the gone process had lived.
+         *
+         * @param {number} bytes
+         */
         take(bytes){
             const size = Math.ceil(bytes / 16) * 16;
+            const at = this.from(size);
+            if (at !== null && options.reusedMemory)
+            {
+                memory.fillBytes(at, 0, size);
+            }
+            return at;
+        },
+        /** @param {number} size */
+        from(size){
             const slice = this.slice;
             if (slice && slice.next + size <= slice.end)
             {

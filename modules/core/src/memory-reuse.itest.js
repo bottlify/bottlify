@@ -310,3 +310,52 @@ for (const [seed, cores, concurrency] of /** @type {[number, number, 1 | 2][]} *
         assert.equal(again, alone, 'and after the reader');
     });
 }
+
+/**
+ * A program that reads the performance counter and exits with where it
+ * stands, in milliseconds of its own frequency (at most 65535), after
+ * spinning on it until it stood past `runMs` (0: at once).
+ *
+ * @param {number} runMs
+ */
+function clockProgram(runMs){
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['QueryPerformanceCounter', 'QueryPerformanceFrequency',
+            'ExitProcess'] },
+        data: { frequency: new Array(8).fill(0), now: new Array(8).fill(0) },
+        codeSize: 0x80,
+        code: ({ iat, at })=>assemble([
+            0x68, ...u32(at('frequency')), 0xff, 0x15, ...u32(iat('QueryPerformanceFrequency')),
+            { label: 'spin' },
+            0x68, ...u32(at('now')), 0xff, 0x15, ...u32(iat('QueryPerformanceCounter')),
+            // edx:eax = now * 1000, then / frequency (its low word: a counter
+            // of up to 4.29e9 ticks a second).
+            0xa1, ...u32(at('now')), 0xb9, ...u32(1000), 0xf7, 0xe1,
+            0x8b, 0x0d, ...u32(at('now') + 4), 0x69, 0xc9, ...u32(1000), 0x01, 0xca,
+            0xf7, 0x35, ...u32(at('frequency')),
+            0x3d, ...u32(runMs), { jump: 'jb', to: 'spin' },
+            0x3d, ...u32(0xffff), { jump: 'jb', to: 'out' }, 0xb8, ...u32(0xffff),
+            { label: 'out' },
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ]),
+    });
+}
+
+for (const [cores, concurrency] of /** @type {[number, 1 | 2][]} */ ([[1, 1], [3, 1], [1, 2]]))
+{
+    test(`a process in a gone one's memory reads its own performance counter, not the gone one's`
+        + ` (${cores} executor${cores > 1 ? 's' : ''}${concurrency > 1
+            ? ', each in a worker of its own' : ''})`, { timeout: 300_000 }, async t=>{
+        const files = [{ path: 'C:\\App\\long.exe', bytes: clockProgram(1500) },
+            { path: 'C:\\App\\clock.exe', bytes: clockProgram(0) }];
+        const [alone] = await runChildren(['C:\\App\\clock.exe'], files, cores, concurrency);
+        const [lived, after] = await runChildren(['C:\\App\\long.exe', 'C:\\App\\clock.exe'],
+            files, cores, concurrency);
+        t.diagnostic(`alone ${alone} ms, after one that lived ${lived} ms: ${after} ms`);
+        assert.ok(lived >= 1500);
+        // The counter's last answer is kept beside it (CLOCK.LAST), the next
+        // never earlier: left as the gone process left it, the counter stood at
+        // its last answer until the new process's own time passed it.
+        assert.ok(after < lived, `the counter starts at ${after} ms, where the gone one ended`);
+    });
+}

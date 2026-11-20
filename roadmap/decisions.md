@@ -2636,7 +2636,10 @@ took in the first process (`engineCode.within`), its code on pages of that part 
 and a stub takes the slot its name took there (`thunks.js` `follow`); what does not fit, or a
 helper shared by several modules and made by whichever is placed first, goes past every part, at
 an address that may differ - a translation through it is made again, nothing more. The program's
-heap is no longer where these routines lie, so it starts the same whatever the engine built.
+heap is no longer where these routines lie, so it starts the same whatever the engine built. A
+block of that span reads as zeroes, as a heap block does: in a memory a gone process left it is
+cleared as it is handed out (the clock's last answer read from there held a new process's
+performance counter still for as long as the gone one had lived).
 The tables themselves are made when first read (`win32/lazy-libraries.js`): what one library takes
 from another is a patch applied when it is made. A library whose factory registers a COM class a
 program may ask for by its CLSID alone (ole32, shell32, windowscodecs: `CLASS_SERVERS`) is made
