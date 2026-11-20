@@ -111,6 +111,8 @@ function setup(options = {}){
     const records = new Map();
     /** @type {any[]} */
     const timers = [];
+    /** What each timer asks before it sets its event. @type {(undefined | (()=>boolean))[]} */
+    const whens = [];
     /** @type {any[]} */
     const tracks = [];
     /** @param {any} object @param {string} id */
@@ -152,8 +154,9 @@ function setup(options = {}){
             },
         }) : undefined,
         timers: {
-            set: (delay, target, user, flags)=>{
+            set: (delay, target, user, flags, when)=>{
                 timers.push({ delay, target, flags, live: true });
+                whens.push(when);
                 return timers.length;
             },
             kill: id=>{
@@ -179,7 +182,7 @@ function setup(options = {}){
         return out;
     };
     const s = {
-        view, timers, tracks,
+        view, timers, whens, tracks,
         /** The same object's other interface. @param {number} pointer @param {string} id */
         as: (pointer, id)=>publish(records.get(pointer).object, `{${id}}`),
         /** @param {number} ms */
@@ -388,20 +391,130 @@ test('what a stream releases reaches its track, which says how far it has played
     assert.equal(track.gain, 0);
 });
 
-test('an event-driven stream has its event set every period from Start until the client goes', ()=>{
+test('an event-driven stream has the engine look twice a period from Start until the client'
+    + ' goes', ()=>{
     const s = setup({ output: true });
     const client = s.initialized(format(), EVENTCALLBACK);
     assert.equal(s.call(client, 'Start'), AUDCLNT_E_EVENTHANDLE_NOT_SET);
     assert.equal(s.call(client, 'SetEventHandle', [0x44]), S_OK);
     assert.equal(s.call(client, 'SetEventHandle', [0x44]), 0x8007007b | 0);
     assert.equal(s.call(client, 'Start'), S_OK);
-    assert.deepEqual(s.timers, [{ delay: 10, target: 0x44, flags: 0x11, live: true }]);
+    assert.deepEqual(s.timers, [{ delay: 5, target: 0x44, flags: 0x11, live: true }]);
     s.call(client, 'Stop');
     assert.equal(s.timers[0].live, true, 'on through Stop, as the engine goes on');
     assert.equal(s.call(client, 'Release'), 0);
     assert.equal(s.timers[0].live, false);
     assert.equal(s.tracks[0].closed, 1);
 });
+
+/**
+ * The device's clock against the guest's, how much it takes at once, and how
+ * late the engine's tick comes. The guest's clock is credited between turns
+ * and the page's audio thread keeps its own: the two drift apart, and the
+ * device is the one heard. It takes in bursts of its own, and a tick waits
+ * behind whatever the engine's thread was doing.
+ */
+const DEVICES = [
+    { rate: 0.97, burstMs: 1, lateMs: 0 },
+    { rate: 1, burstMs: 1, lateMs: 0 },
+    { rate: 1.03, burstMs: 1, lateMs: 0 },
+    { rate: 1, burstMs: 10, lateMs: 10 },
+    { rate: 1.03, burstMs: 20, lateMs: 10 },
+    { rate: 1.03, burstMs: 20, lateMs: 40 },
+];
+
+/**
+ * How a program refills at its event: as SDL does, half its buffer while
+ * there is that much room; or a period at each event, as a mixer that makes a
+ * period of sound a wake does - one that only keeps up if the events come as
+ * often as the device plays a period.
+ */
+const WRITERS = ['half its buffer while it fits', 'a period an event'];
+
+for (const writer of WRITERS)
+{
+    for (const { rate: deviceRate, burstMs, lateMs } of DEVICES)
+    {
+        test(`an event-driven stream written ${writer} keeps a device fed whose clock runs`
+            + ` ${deviceRate}x the guest's, taking ${burstMs} ms at once, one tick in ten`
+            + ` ${lateMs} ms late`, ()=>fed(writer === WRITERS[0], deviceRate, burstMs, lateMs));
+    }
+}
+
+/**
+ * @param {boolean} halves @param {number} deviceRate @param {number} burstMs
+ * @param {number} lateMs
+ */
+function fed(halves, deviceRate, burstMs, lateMs){
+    const s = setup({ output: true });
+    const client = s.activate();
+    s.bytes.set(format(), FORMAT);
+    const shared = [0, EVENTCALLBACK, 0, 0, 0, 0, FORMAT, 0];
+    assert.equal(s.call(client, 'Initialize', shared), S_OK);
+    assert.equal(s.call(client, 'GetBufferSize', [OUT]), S_OK);
+    const size = s.view.getUint32(OUT, true);
+    const chunk = size / 2;
+    const render = s.service(client, 'IAudioRenderClient');
+    assert.equal(s.call(client, 'SetEventHandle', [0x44]), S_OK);
+    s.write(render, size);
+    assert.equal(s.call(client, 'Start'), S_OK);
+    const [track] = s.tracks;
+    const pull = /** @type {()=>boolean} */ (s.whens[0]);
+    const every = s.timers[0].delay;
+    const period = RATE / 100;
+    let owed = 0;
+    let starved = 0;
+    let nextTick = every;
+    let late = 0;
+    let ticks = 0;
+    for (let ms = 1; ms <= 3000; ms++)
+    {
+        s.advance(1);
+        if (!track.paused)
+        {
+            owed += RATE / 1000 * deviceRate;
+        }
+        if (ms % burstMs === 0)
+        {
+            const want = Math.floor(owed);
+            owed -= want;
+            const heard = Math.min(want, track.pending());
+            track.heard += heard * BLOCK;
+            if (ms > 200)
+            {
+                starved += want - heard;
+            }
+        }
+        if (ms >= nextTick + late)
+        {
+            if (pull())
+            {
+                if (halves)
+                {
+                    while (size - s.padding(client) >= chunk)
+                    {
+                        s.write(render, chunk);
+                    }
+                }
+                else if (size - s.padding(client) >= period)
+                {
+                    s.write(render, period);
+                }
+            }
+            // A periodic tick keeps its grid, and one gone by while it
+            // was late is not made up.
+            while (nextTick <= ms)
+            {
+                nextTick += every;
+            }
+            // One tick in ten waits the whole of it.
+            ticks++;
+            late = ticks % 10 === 9 ? lateMs : 0;
+        }
+    }
+    assert.equal(starved, 0, 'no frame the device asked for found the track empty');
+}
+
 
 test('a service holds its client: the stream goes with the last of them', ()=>{
     const s = setup({ output: true });

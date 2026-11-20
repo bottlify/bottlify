@@ -11,7 +11,11 @@ import { createTimerService, longTimerLoopCode, timerLoopCode } from './timers.j
 const PARKED = Object.freeze({ parked: true });
 
 /** A machine with one timer thread, a clock the test moves, and a shared memory. */
-function machine(){
+/**
+ * @param {{ clock?: boolean }} [options]  With the kernel's clock timers, as
+ *     the engine gives them.
+ */
+function machine({ clock = false } = {}){
     const memory = new Uint8Array(0x2000);
     let free = 0x1100;
     /** @type {Record<string, { argBytes: number, handler: () => any }>} */
@@ -29,8 +33,22 @@ function machine(){
     let now = 1000;
     /** @type {any} */
     let current = null;
+    /** @type {{ due: number, period: number, fired: ((at: number) => void) | null }[]} */
+    const clocks = [];
+    const clockDeps = clock ? {
+        clockTimer: ()=>{
+            const one = { due: 0, period: 0, fired: null };
+            clocks.push(one);
+            return one;
+        },
+        /** @param {any} one @param {number} due @param {number} period @param {any} fired */
+        armClockTimer: (one, due, period, fired)=>Object.assign(one, { due, period, fired }),
+        /** @param {any} one */
+        cancelClockTimer: one=>Object.assign(one, { fired: null }),
+    } : {};
 
     const timers = createTimerService({
+        ...clockDeps,
         allocate: bytes=>{
             const at = free;
             free += bytes;
@@ -73,7 +91,32 @@ function machine(){
     /** @param {number} ms */
     const tick = ms=>{ now += ms; };
 
-    return { memory, timers, created, woken, blocked, signalled, pulsed, record, ask, tick };
+    /**
+     * The kernel's clock at `now`: each clock timer due fires, a periodic one
+     * moved on to its next boundary.
+     */
+    const runClock = ()=>{
+        for (const one of clocks)
+        {
+            if (one.fired && one.due <= now)
+            {
+                const at = one.due;
+                const fire = one.fired;
+                if (one.period > 0)
+                {
+                    one.due += (Math.floor((now - one.due) / one.period) + 1) * one.period;
+                }
+                else
+                {
+                    one.fired = null;
+                }
+                fire(at);
+            }
+        }
+    };
+
+    return { memory, timers, created, woken, blocked, signalled, pulsed, record, ask, tick,
+        clocks, runClock };
 }
 
 test('the loop is the bytes it says it is, and a wake below a record address asks again', ()=>{
@@ -222,4 +265,35 @@ test('an event the engine sets is set at a tick only while its condition holds, 
     assert.equal(late.under1, 1, 'the first tick on time');
     assert.equal(late.under5, 1, 'the second three milliseconds late');
     assert.equal(late.worstMs, 3);
+});
+
+test('with the kernel\'s clock, an event timer is fired by it on the host, needing no thread', ()=>{
+    // Left to the timer thread, a tick waited for the thread to be given the
+    // processor; the clock fires it at the turn it comes due.
+    const m = machine({ clock: true });
+    let open = true;
+    const periodic = m.timers.set(5, 0x77, 0, 0x0001 | 0x0010, ()=>open);
+    m.timers.set(3, 0x78, 0, 0x0020);
+    assert.equal(m.created.length, 0, 'no timer thread made');
+    m.tick(5);
+    m.runClock();
+    assert.deepEqual(m.signalled, [0x77], 'set at its tick');
+    assert.deepEqual(m.pulsed, [0x78], 'the one shot pulsed');
+    open = false;
+    m.tick(5);
+    m.runClock();
+    assert.deepEqual(m.signalled, [0x77], 'not while its condition does not hold');
+    open = true;
+    m.tick(7);
+    m.runClock();
+    assert.deepEqual(m.signalled, [0x77, 0x77]);
+    assert.equal(m.timers.diagnostics().late.under5, 2, 'it and the one shot two milliseconds late,'
+        + ' counted');
+    assert.equal(m.timers.kill(periodic), 0);
+    m.tick(5);
+    m.runClock();
+    assert.deepEqual(m.signalled, [0x77, 0x77], 'killed: fired no more');
+    m.timers.set(5, 0x79, 0, 0x0010);
+    assert.equal(m.clocks.length, 2, 'the clock timers of timers gone are armed again');
+    assert.equal(m.timers.diagnostics().armed, 1, 'the one shot left the table when it fired');
 });

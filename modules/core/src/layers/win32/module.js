@@ -2416,6 +2416,13 @@ export function createWin32Module(){
                 /** @param {any} thread */
                 park: thread=>bridge.park(thread),
                 now: ()=>kernel.clock.virtualTime(),
+                clockTimer: ()=>kernel.createTimer({ name: 'multimedia timer' }),
+                /** @param {any} timer @param {number} due @param {number} period
+                 *  @param {(at: number) => void} fired */
+                armClockTimer: (timer, due, period, fired)=>kernel.armTimer(timer, due, period,
+                    fired),
+                /** @param {any} timer */
+                cancelClockTimer: timer=>kernel.cancelTimer(timer),
                 // A stale handle is the program's mistake, as for the notices.
                 /** @param {number} handle */
                 setEvent: handle=>{
