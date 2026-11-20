@@ -467,6 +467,8 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 ### `fixtures/`
 
 - [`fixtures/make-pe.mjs`](fixtures/make-pe.mjs) - Build PE programs for the packages' tests
+- [`fixtures/tone-program.mjs`](fixtures/tone-program.mjs) - Programs that play a tone of a known pitch and length through WASAPI, waveOut and DirectSound, for the sound delivery test
+- [`fixtures/sound-delivery-run.mjs`](fixtures/sound-delivery-run.mjs) - One run of the sound delivery test in a worker of its own: the engine, the real audio worklet on its own clock, and what it played measured
 - [`fixtures/managed-exe.mjs`](fixtures/managed-exe.mjs) - A managed (.NET) program image for the packages' tests
 - [`fixtures/d3d9-program.mjs`](fixtures/d3d9-program.mjs) - A Direct3D 9 test program
 - [`fixtures/gl-program.mjs`](fixtures/gl-program.mjs) - The pieces of an OpenGL test program

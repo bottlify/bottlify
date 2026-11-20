@@ -105,6 +105,12 @@ const MINIMUM_PERIOD = 30000;
  */
 const MINIMUM_PERIODS = 2;
 
+/**
+ * The periods of sound the track of a stream the engine takes from keeps ahead
+ * of the page's audio thread, gathered whenever it ran dry (`pullForEngine`).
+ */
+const PRIMING_PERIODS = 2;
+
 /** timeSetEvent's flags: periodic, and setting an event rather than calling back. */
 const TIME_PERIODIC = 0x1;
 const TIME_CALLBACK_EVENT_SET = 0x10;
@@ -231,7 +237,8 @@ export function validateFormat(format, compatible){
  * @property {(at: number, value: number) => void} writePointer
  * @property {() => number} now  The guest's clock, in milliseconds.
  * @property {() => any} [output]  The machine's mixer, when anything is listening.
- * @property {{ set: (delay: number, target: number, user: number, flags: number) => number,
+ * @property {{ set: (delay: number, target: number, user: number, flags: number,
+ *     when?: () => boolean) => number,
  *     kill: (id: number) => number }} [timers]  The multimedia timers, which set an event.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => number} [processId]  This process's id, which a session names.
@@ -248,6 +255,8 @@ export function validateFormat(format, compatible){
  *     of a channel (IAudioEndpointVolume), which every stream to it plays at
  */
 export function createAudioClients(host, endpoint){
+    /** Every stream handed out, for diagnostics. @type {Set<any>} */
+    const streams = new Set();
     /** @param {number} at @param {number} value */
     const writeU32 = (at, value)=>host.writeMemory(at >>> 0,
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
@@ -343,22 +352,33 @@ export function createAudioClients(host, endpoint){
     };
 
     /**
-     * Hands the track as much of what the program released as it takes now:
-     * a track holds a fifth of a second, and a stream's buffer may be longer.
+     * Whether the stream's frames reach the track only as the engine takes
+     * them (`pullForEngine`): an event-driven stream with a track.
      *
      * @param {any} stream
      */
-    const feed = stream=>{
+    const engineFed = stream=>stream.track !== null && stream.event !== 0;
+
+    /**
+     * Hands the track as much of what the program released as it takes now,
+     * or up to `most` bytes of it: a track holds a fifth of a second, and a
+     * stream's buffer may be longer.
+     *
+     * @param {any} stream @param {number} [most]
+     * @returns {number} the bytes handed over
+     */
+    const feed = (stream, most = Infinity)=>{
         const track = stream.track;
         if (!track)
         {
-            return;
+            return 0;
         }
         const room = track.capacityFrames ?? Math.round(stream.format.rate / 5);
         const block = stream.format.blockAlign;
-        while (stream.queue.length > 0)
+        let given = 0;
+        while (stream.queue.length > 0 && given < most)
         {
-            const free = Math.floor(room - track.pending()) * block;
+            const free = Math.min(Math.floor(room - track.pending()) * block, most - given);
             if (free <= 0)
             {
                 break;
@@ -367,13 +387,62 @@ export function createAudioClients(host, endpoint){
             if (head.length <= free)
             {
                 track.write(stream.queue.shift());
+                given += head.length;
             }
             else
             {
                 track.write(head.subarray(0, free));
                 stream.queue[0] = head.subarray(free);
+                given += free;
             }
         }
+        return given;
+    };
+
+    /**
+     * Windows' engine, for a stream that asked to be woken: once a period by
+     * the guest's clock it takes the frames that period is owed from the
+     * buffer - those of a late tick too - and sets the event, so the program
+     * woken finds a period's room and the program's padding is what the engine
+     * has yet to take. What it takes goes to the track, which the page's audio
+     * thread reads on its own clock and in bursts of its own: the track keeps
+     * PRIMING_PERIODS ahead of it, waiting, paused, until it has that much
+     * whenever it ran dry, so those bursts are met there and not in the
+     * program's buffer. Read straight off the buffer, a program writing half
+     * its buffer at an event (SDL) had ten milliseconds of sound ahead of a
+     * device that took fourteen at a time: a second of tone played with
+     * fifteen gaps.
+     *
+     * @param {any} stream
+     * @returns {boolean} whether to set the event
+     */
+    const pullForEngine = stream=>{
+        if (!stream.started)
+        {
+            return false;
+        }
+        const owed = Math.floor((host.now() - stream.since) * stream.rate / 1000);
+        const take = Math.max(0, Math.min(owed - stream.engineAt, stream.written - stream.pulled));
+        // A period the buffer had nothing for is silence, not a debt: the
+        // engine's clock goes on whether or not the program kept up.
+        stream.engineAt = owed;
+        const given = feed(stream, take * stream.format.blockAlign) / stream.format.blockAlign;
+        stream.pulled += given;
+        const track = stream.track;
+        const waiting = track.pending();
+        if (!stream.priming && waiting === 0)
+        {
+            stream.priming = true;
+        }
+        if (stream.priming)
+        {
+            // Under way once the cushion is there, or once the program has
+            // no more to give: the end of a sound plays out.
+            const cushion = PRIMING_PERIODS * Math.round(stream.rate * DEFAULT_PERIOD / 10_000_000);
+            stream.priming = waiting < cushion && given > 0;
+        }
+        track.paused = stream.priming;
+        return true;
     };
 
     /**
@@ -388,7 +457,10 @@ export function createAudioClients(host, endpoint){
         let frames;
         if (stream.track)
         {
-            feed(stream);
+            if (!engineFed(stream))
+            {
+                feed(stream);
+            }
             frames = Math.floor(stream.track.playedBytes() / stream.format.blockAlign);
         }
         else
@@ -412,8 +484,13 @@ export function createAudioClients(host, endpoint){
         return frames;
     };
 
-    /** @param {any} stream */
-    const padding = stream=>stream.written - played(stream);
+    /**
+     * What the program has written and is still to be played: for a stream the
+     * engine takes from (`pullForEngine`), what it has not taken yet.
+     *
+     * @param {any} stream
+     */
+    const padding = stream=>stream.written - (engineFed(stream) ? stream.pulled : played(stream));
 
     /** Closes what a stream held, when its client goes. @param {any} stream */
     const close = stream=>{
@@ -473,8 +550,10 @@ export function createAudioClients(host, endpoint){
                 {
                     return S_OK;
                 }
+                stream.counts.gets++;
                 if ((frames >>> 0) > stream.bufferFrames - padding(stream))
                 {
+                    stream.counts.refused++;
                     return AUDCLNT_E_BUFFER_TOO_LARGE;
                 }
                 const bytes = (frames >>> 0) * stream.format.blockAlign;
@@ -508,7 +587,10 @@ export function createAudioClients(host, endpoint){
                     if (stream.track)
                     {
                         stream.queue.push(data);
-                        feed(stream);
+                        if (!engineFed(stream))
+                        {
+                            feed(stream);
+                        }
                     }
                 }
                 return S_OK;
@@ -956,7 +1038,10 @@ export function createAudioClients(host, endpoint){
                 {
                     return E_POINTER;
                 }
-                writeU32(out, padding(stream));
+                const frames = padding(stream);
+                stream.counts.paddings++;
+                stream.counts.paddingSum += frames;
+                writeU32(out, frames);
                 return S_OK;
             } },
             /**
@@ -1048,15 +1133,18 @@ export function createAudioClients(host, endpoint){
                 played(stream);
                 stream.started = true;
                 stream.since = host.now();
+                stream.engineAt = 0;
+                stream.priming = true;
                 if (stream.track)
                 {
                     stream.track.paused = false;
                 }
                 if (stream.event !== 0 && stream.timer === 0)
                 {
+                    // The engine's period, the event set as it takes it (`pullForEngine`).
                     const period = Math.max(1, Math.round(DEFAULT_PERIOD / 10000));
                     stream.timer = host.timers?.set(period, stream.event, 0,
-                        TIME_PERIODIC | TIME_CALLBACK_EVENT_SET) ?? 0;
+                        TIME_PERIODIC | TIME_CALLBACK_EVENT_SET, ()=>pullForEngine(stream)) ?? 0;
                     if (stream.timer === 0)
                     {
                         host.divergence?.('IAudioClient::Start',
@@ -1100,6 +1188,7 @@ export function createAudioClients(host, endpoint){
                 stream.queue = [];
                 stream.track?.reset?.();
                 stream.written = 0;
+                stream.pulled = 0;
                 stream.clockFrames = 0;
                 return S_OK;
             } },
@@ -1324,6 +1413,10 @@ export function createAudioClients(host, endpoint){
                 initialized: false, started: false, flags: 0, format: null, rate: 0,
                 bufferFrames: 0, scratch: 0, silence: 0, held: null, written: 0,
                 clockFrames: 0, since: 0, event: 0, timer: 0, track: null,
+                /** Frames the engine took, the engine's clock in frames since Start, and whether the track waits for its cushion (`pullForEngine`). */
+                pulled: 0, engineAt: 0, priming: true,
+                /** GetBuffer asked and refused for room, GetCurrentPadding asked and what it summed. */
+                counts: { gets: 0, refused: 0, paddings: 0, paddingSum: 0 },
                 /** @type {Uint8Array[]} */
                 queue: [],
                 /** @type {number[]} */
@@ -1335,8 +1428,24 @@ export function createAudioClients(host, endpoint){
                 /** @type {any} */
                 made: null,
             };
+            streams.add(stream);
             return handOut(stream, [client, clockAdjustment], out);
         },
+
+        /**
+         * Each initialized stream: its rate and buffer, what was released and
+         * played, what waits for the track, and how the program asked for room.
+         */
+        diagnostics: ()=>[...streams].filter(stream=>stream.initialized).map(stream=>({
+            rate: stream.format.rate, bufferFrames: stream.bufferFrames,
+            event: stream.event !== 0, started: stream.started, written: stream.written,
+            played: stream.track ? Math.floor(stream.track.playedBytes()
+                / stream.format.blockAlign) : Math.floor(stream.clockFrames),
+            trackPending: stream.track?.pending() ?? null,
+            queuedBytes: stream.queue.reduce((/** @type {number} */ sum,
+                /** @type {Uint8Array} */ chunk)=>sum + chunk.length, 0),
+            ...stream.counts,
+        })),
     };
 }
 

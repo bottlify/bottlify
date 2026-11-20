@@ -187,3 +187,32 @@ test('a message posted to the thread is heard by its count: the yield is now, no
     assert.deepEqual(blocked, [], 'not slept through');
     assert.equal(pacing.counts().heard, 2);
 });
+
+test('a wait on the event loop ends at the deadline by the doorbell wait\'s own timeout, with'
+    + ' no timer beside it', { timeout: 5000 }, async()=>{
+    // A setTimeout nested in the loop's turns is clamped to 4 ms and more:
+    // a guest timer due in one woke two to five late a third of the time.
+    /** @type {any[]} */
+    const received = [];
+    const { pacing } = pacingOver(received);
+    pacing.machines?.(2);
+    const timeouts = globalThis.setTimeout;
+    let timers = 0;
+    globalThis.setTimeout = /** @type {any} */ ((/** @type {any[]} */ ...args)=>{
+        timers++;
+        return /** @type {any} */ (timeouts)(...args);
+    });
+    try
+    {
+        const from = performance.now();
+        await pacing.wait({ ...idle, deadlineMs: 3 });
+        const waited = performance.now() - from;
+        assert.equal(timers, 0, 'no setTimeout');
+        assert.ok(waited >= 2.5 && waited < 50, `the deadline ended it: ${waited.toFixed(1)} ms`);
+    }
+    finally
+    {
+        globalThis.setTimeout = timeouts;
+        pacing.machines?.(1);
+    }
+});

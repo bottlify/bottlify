@@ -164,6 +164,7 @@ export function createTimerService(deps){
      * @property {number} target  the routine, or the event handle
      * @property {number} user
      * @property {number} flags
+     * @property {() => boolean} [when]  An event set only while this holds.
      * @property {boolean} [firing]  A one shot whose routine is running now.
      */
     /** @type {Map<number, Timer>} */
@@ -193,6 +194,20 @@ export function createTimerService(deps){
         value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
     ]);
 
+    /**
+     * How late each tick was fired past its due time, in guest ms, counted
+     * under each bound and past the last, and the worst: a tick a whole period
+     * late is a refill a sound thread woken by it never makes.
+     */
+    const late = { under1: 0, under2: 0, under5: 0, under10: 0, more: 0, worstMs: 0 };
+    /** @param {number} ms */
+    const noteLate = ms=>{
+        const key = ms < 1 ? 'under1' : ms < 2 ? 'under2' : ms < 5 ? 'under5'
+            : ms < 10 ? 'under10' : 'more';
+        late[key]++;
+        late.worstMs = Math.max(late.worstMs, Math.round(ms * 10) / 10);
+    };
+
     /** The timer due soonest, or null. */
     const earliest = ()=>{
         /** @type {Timer | null} */
@@ -219,6 +234,7 @@ export function createTimerService(deps){
      */
     const advance = timer=>{
         fired++;
+        noteLate(deps.now() - timer.due);
         if (timer.period > 0)
         {
             timer.due += timer.period;
@@ -272,7 +288,10 @@ export function createTimerService(deps){
             const kind = timer.flags & CALLBACK_MASK;
             if (kind === TIME_CALLBACK_EVENT_SET)
             {
-                deps.setEvent(timer.target);
+                if (!timer.when || timer.when())
+                {
+                    deps.setEvent(timer.target);
+                }
                 advance(timer);
                 continue;
             }
@@ -321,9 +340,11 @@ export function createTimerService(deps){
          *
          * @param {number} delay @param {number} target @param {number} user
          * @param {number} flags
+         * @param {() => boolean} [when]  for an event the engine sets, the host's own
+         *     timer (WASAPI's): the event is set at a tick only while this holds
          * @returns {number} the timer's id, or 0
          */
-        set(delay, target, user, flags){
+        set(delay, target, user, flags, when){
             if (delay < 1 || delay > MAX_PERIOD || target === 0 || timers.size >= MAX_TIMERS)
             {
                 return 0;
@@ -331,7 +352,7 @@ export function createTimerService(deps){
             const id = nextId++;
             timers.set(id, {
                 id, due: deps.now() + delay, period: (flags & TIME_PERIODIC) ? delay : 0,
-                target, user, flags,
+                target, user, flags, when,
             });
             if (thread === null)
             {
@@ -363,6 +384,7 @@ export function createTimerService(deps){
             armed: timers.size,
             fired,
             skipped,
+            late: { ...late },
             // Each armed timer's period and how far its next due time lies
             // behind now: a periodic timer whose callbacks take longer than its
             // period falls further behind with every one.

@@ -107,18 +107,28 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
                 // deadline or the doorbell.
                 /** @type {Promise<unknown>[]} */
                 const waits = [...wakes];
+                // The deadline is the doorbell wait's own timeout, not a timer
+                // beside it: a setTimeout nested in the loop's turns is clamped
+                // to 4 ms and more, and a guest timer due in one woke two to
+                // five late a third of the time, and one tick in sixty past its
+                // whole period - a game's sound thread, refilled once a tick,
+                // starved by as much.
                 const bell = /** @type {any} */ (Atomics).waitAsync?.(
-                    new Int32Array(inbound.bell.buffer), inbound.bell.index, seen);
+                    new Int32Array(inbound.bell.buffer), inbound.bell.index, seen,
+                    Math.min(deadlineMs ?? IDLE_SLEEP_MS, IDLE_SLEEP_MS));
+                /** @type {ReturnType<typeof setTimeout> | null} */
+                let timer = null;
                 if (bell?.async)
                 {
                     waits.push(bell.value);
                 }
-                /** @type {ReturnType<typeof setTimeout> | null} */
-                let timer = null;
-                waits.push(new Promise(resolve=>{
-                    timer = setTimeout(resolve, Math.min(deadlineMs ?? IDLE_SLEEP_MS,
-                        bell?.async ? IDLE_SLEEP_MS : intervalMs));
-                }));
+                else
+                {
+                    waits.push(new Promise(resolve=>{
+                        timer = setTimeout(resolve, Math.min(deadlineMs ?? IDLE_SLEEP_MS,
+                            intervalMs));
+                    }));
+                }
                 counts.yields++;
                 return Promise.race(waits).then(()=>{
                     if (timer !== null)

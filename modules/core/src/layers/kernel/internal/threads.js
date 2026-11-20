@@ -146,6 +146,12 @@ const RECENT_TURNS = 256;
 export const EXECUTORS_WAIT_MS = 4;
 
 /**
+ * The fewest instructions a turn cut short by a deadline still runs: a deadline
+ * already past ends the turn at once, never with nothing run.
+ */
+const DEADLINE_SLICE = 1000;
+
+/**
  * Crossings into the host inside one slice between two moves of the guest's
  * clock (`refreshClock`). The clock is otherwise moved between slices, and a
  * slice of a program that calls the host in a loop lasts many milliseconds:
@@ -1732,10 +1738,18 @@ export function createScheduler(options){
         const others = placed.size === 0 || cpu.interruptible?.() === true;
         const solo = (!shared || others) && readyAtSlice.size === 0
             && clear > SOLO_CLEAR_MS;
-        const asked = solo ? soloQuantum
+        // No turn past the soonest deadline, at this executor's measured rate:
+        // the wait due then ends at the turn's end, as a timer's interrupt
+        // ends a slice on Windows, not a quantum later. A multimedia timer
+        // thread, time-critical, woke behind a game thread's 100 000
+        // instructions, a tick 2 to 5 ms late one time in three, and the
+        // sound thread it wakes ran dry.
+        const untilDeadline = clear === Infinity || perMs === 0 ? Infinity
+            : Math.max(DEADLINE_SLICE, Math.floor(perMs * Math.max(0, clear)));
+        const asked = Math.min(untilDeadline, solo ? soloQuantum
             : turnMs > 0 && others && clear > turnMs * TURN_CLEAR
                 ? Math.min(soloQuantum, Math.max(quantum, Math.floor(perMs * turnMs)))
-                : quantum;
+                : quantum);
         soloShared = shared && solo;
         longTurn = !solo && asked > quantum;
         publishReady();
@@ -2098,6 +2112,14 @@ export function createScheduler(options){
                     return { ran: null, instructions, switched: false, elsewhere: true };
                 }
             }
+            // Round again, as a turn of its own would begin: the clock moved
+            // on and the deadlines it passed woken. While another executor's
+            // thread kept ringing, this loop did not end, and a thread asleep
+            // here woke only with it: a game's Sleep(1) between frames lasted
+            // 2 ms at the median and 10 at the 99th percentile, waking with the
+            // sound thread's timer, and drew a frame late each time.
+            options.refreshClock?.();
+            expire();
         }
     };
 

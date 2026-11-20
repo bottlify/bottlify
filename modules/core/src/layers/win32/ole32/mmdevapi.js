@@ -195,7 +195,11 @@ const deviceFormat = ()=>endpointFormat(16, SUBTYPE_PCM);
  *     A method of a guest object, by its vtable slot.
  */
 
-/** @param {MmDevApiHost} host */
+/**
+ * @param {MmDevApiHost} host
+ * @returns {{ streams: () => any[] } | undefined}  the WASAPI streams' account, where
+ *     there is an endpoint
+ */
 export function registerMmDevApiClasses(host){
     // On an XP CoCreateInstance answers REGDB_E_CLASSNOTREG, and a program
     // that would play to an endpoint plays through DirectSound instead, as
@@ -632,4 +636,5 @@ export function registerMmDevApiClasses(host){
             }],
         };
     }, { single: true });
+    return { streams: ()=>audioClients.diagnostics() };
 }

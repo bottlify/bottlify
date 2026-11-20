@@ -980,6 +980,24 @@
    "tests": []
   },
   {
+   "path": "tools/fixtures/tone-program.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "Programs that play a tone of a known pitch and length through WASAPI, waveOut and DirectSound, for the sound delivery test",
+   "command": "",
+   "tests": []
+  },
+  {
+   "path": "tools/fixtures/sound-delivery-run.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "One run of the sound delivery test in a worker of its own: the engine, the real audio worklet on its own clock, and what it played measured",
+   "command": "",
+   "tests": []
+  },
+  {
    "path": "tools/fixtures/managed-exe.mjs",
    "category": "fixtures",
    "kind": "fixture",
