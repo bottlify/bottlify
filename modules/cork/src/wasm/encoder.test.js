@@ -394,3 +394,68 @@ test('a guest access in a wide window: the i32 address widened by the high local
     assert.equal(new Body().load('i32', { guest: true }).length, 3,
         'a 4 GiB window\'s guest access is a plain one');
 }));
+
+test('a wide window\'s lane and zero-extending accesses: as they are where the engine reads them, '
+    + 'else their scalar forms, the same bytes either way', ifRoom(()=>{
+    allowMemory64();
+    const ram = memory64(2 ** 33);
+    const at = 2 ** 32 + 0x7000;
+    const source = Uint8Array.from({ length: 16 }, (_, i)=>0xa0 + i);
+    // movss's load, movsd's, pinsrd's lane load and pextrq's lane store, past 4 GiB.
+    const forms = [[92, 2], [93, 3], [86, 2], [91, 3]];
+    /** @param {boolean} lanes */
+    const built = lanes=>{
+        const m = new ModuleBuilder();
+        m.importMemory('env', 'state', { min: 1 });
+        m.importMemory('env', 'ram', { min: 2 ** 17, max: 2 ** 17, index64: true });
+        const type = m.type({ params: [ValType.i32, ValType.i64], results: [] });
+        const b = new Body();
+        b.guest = { memory: 1, whole: 1, lanes,
+            scratch: t=>(t === ValType.v128 ? 2 : t === ValType.i32 ? 3 : 4) };
+        for (const [index, [opcode, align]] of forms.entries())
+        {
+            const lane = opcode === 92 || opcode === 93 ? undefined : 0;
+            const store = opcode === 91;
+            if (!store)
+            {
+                b.i32const(index * 16);
+            }
+            b.localGet(0);
+            if (lane !== undefined)
+            {
+                b.v128const(store ? source : new Array(16).fill(0x55));
+            }
+            b.simdMem(opcode, { align, offset: store ? 32 : 0, lane, guest: true });
+            if (!store)
+            {
+                b.storeV128();
+            }
+        }
+        m.function(type, [ValType.v128, ValType.i32, ValType.i64], b.toBytes(), { exportAs: 'f' });
+        return /** @type {any} */ (instantiate(m, { env: { state, ram } })).f;
+    };
+    const state = new WebAssembly.Memory({ initial: 1 });
+    const answers = [];
+    const view = new Uint8Array(ram.buffer);
+    for (const lanes of [true, false])
+    {
+        view.set(source, at);
+        view.fill(0, at + 32, at + 48);
+        new Uint8Array(state.buffer).fill(0);
+        built(lanes)(at % 2 ** 32, BigInt(at - at % 2 ** 32));
+        answers.push([...new Uint8Array(state.buffer, 0, 48), ...view.subarray(at + 32, at + 48)]);
+    }
+    const lane = (/** @type {number} */ size, /** @type {number} */ rest)=>[
+        ...source.subarray(0, size), ...new Array(16 - size).fill(rest)];
+    assert.deepEqual(answers[0], [...lane(4, 0), ...lane(8, 0), ...lane(4, 0x55),
+        ...lane(8, 0)], 'as they are');
+    assert.deepEqual(answers[1], answers[0], 'the scalar forms');
+    /** A movss load's wasm bytes, @param {boolean} lanes */
+    const movss = lanes=>{
+        const b = new Body();
+        b.guest = { memory: 1, whole: 1, scratch: ()=>2, lanes };
+        return b.localGet(0).simdMem(92, { align: 2, offset: 0, guest: true }).length;
+    };
+    assert.ok(movss(true) < movss(false) - 16, `the access alone: ${movss(true)} bytes`
+        + ` against ${movss(false)}`);
+}));

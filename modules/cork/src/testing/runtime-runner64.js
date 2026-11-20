@@ -35,13 +35,16 @@ import { features as probeFeatures } from '../wasm/features.js';
  *     layout: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     low?: import('../../../core/src/layers/cpu/engine.js').StateLayout,
  *     config?: Record<string, unknown>, defaultNaNNegative?: boolean,
+ *     features?: Record<string, boolean>,
  *     tier?: import('../../../core/src/layers/cpu/engine.js').WasmInterpreter | null }} settings
  *     `defaultNaNNegative`: the float code as for that host (false: an arm64 one), the
  *     host's own unless given; `ram`: a wide window's RAM (`ramMemory`); `low`: the layout
- *     of the block below 4 GiB, its tables apart (`wideLayout`)
+ *     of the block below 4 GiB, its tables apart (`wideLayout`); `features`: the engine's
+ *     as the runtime is told them, over its own probe's (`wideLanes` false: a wide window's
+ *     lane accesses made their scalar forms, as for an engine that misreads them)
  */
 export function createRuntimeRunner64({ memory, ram, layout, low = undefined, config = {},
-    defaultNaNNegative = undefined, tier = null })
+    defaultNaNNegative = undefined, features = undefined, tier = null })
 {
     const flagsAt = pageFlagsAt(layout);
     const bytes = ()=>new Uint8Array(memory.buffer);
@@ -62,8 +65,9 @@ export function createRuntimeRunner64({ memory, ram, layout, low = undefined, co
     /** @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} of */
     const runtimeOf = of=>createCorkRuntime({
         memory, ram, layout: of,
-        ...defaultNaNNegative === undefined ? {}
-            : { features: { ...probeFeatures(), defaultNaNNegative } },
+        ...defaultNaNNegative === undefined && features === undefined ? {}
+            : { features: { ...probeFeatures(), ...defaultNaNNegative === undefined ? {}
+                : { defaultNaNNegative }, ...features } },
         config: { feed: 'slice', precise: true, hotThreshold: 1, missThreshold: 1,
             // The harness rewrites one code page for every case: never left to the interpreter.
             volatileWindowMs: 0, ...exact, ...config },

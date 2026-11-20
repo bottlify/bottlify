@@ -174,12 +174,12 @@ const SIMD_STORE = 11;
 const SIMD_AND = 78;
 /**
  * The lane and zero-extending vector accesses by opcode as a wide window
- * makes them (`Body.simdScalar`): the scalar access, whether it stores, and
- * the splat (with the bytes of its first lane kept, `zero`) or the lane's
- * replace or extract.
+ * makes them on an engine that misreads them there (`Body.simdScalar`): the
+ * scalar access, whether it stores, and the splat (with the bytes of its first
+ * lane kept, `zero`) or the lane's replace or extract.
  * @type {Map<number, { kind: string, store: boolean, zero?: number, lane: number }>}
  */
-const SIMD_SCALAR = new Map([
+export const SIMD_SCALAR = new Map([
     [92, { kind: 'i32', store: false, zero: 4, lane: 17 }],
     [93, { kind: 'i64', store: false, zero: 8, lane: 18 }],
     [84, { kind: 'i32_8u', store: false, lane: 23 }],
@@ -247,8 +247,11 @@ export class Body {
          * access marked `guest` goes to `memory`, a `memory64` one, at the i64
          * address the local `whole` holds with the i32 it was given for its low
          * half (`widenGuest`), the value a store writes kept meanwhile in
-         * `scratch(type)`.
-         * @type {{ memory: number, whole: number, scratch: (type: number) => number } | null}
+         * `scratch(type)`; `lanes` where the engine reads and writes the lane and
+         * zero-extending vector accesses there as they are (`wideLanes`), else
+         * each is made its scalar access (`simdScalar`).
+         * @type {{ memory: number, whole: number, scratch: (type: number) => number,
+         *     lanes?: boolean } | null}
          */
         this.guest = null;
     }
@@ -476,7 +479,7 @@ export class Body {
      */
     simdMem(opcode, { align, offset, lane, memory, guest = false }){
         const scalar = SIMD_SCALAR.get(opcode);
-        if (guest && this.guest !== null && scalar !== undefined)
+        if (guest && this.guest !== null && !this.guest.lanes && scalar !== undefined)
         {
             return this.simdScalar(opcode, scalar, offset, lane ?? 0);
         }
@@ -489,9 +492,11 @@ export class Body {
 
     /**
      * A wide window's lane and zero-extending vector access as the scalar access
-     * and the lane operation it comes to: V8 12 (node 22) reads a `load64_zero`,
+     * and the lane operation it comes to, on an engine that misreads the access
+     * itself there (`wideLanes`, false): V8 12 (node 22.21) read a `load64_zero`,
      * `load32_zero` or lane load from a `memory64` memory at a computed address
-     * past 4 GiB as zeros, where its scalar loads read the bytes there.
+     * past 4 GiB as zeros, where its scalar loads read the bytes there. Seven
+     * machine instructions more a `movss` load than the access alone.
      *
      * @param {number} opcode @param {{ kind: string, store: boolean, zero?: number,
      *     lane: number }} scalar  the access, and the splat or the lane's replace or

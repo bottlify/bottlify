@@ -62,7 +62,7 @@ export function fill(seed, size){
  * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
  *     high?: number, codeHigh?: number, processors?: number, lowBlock?: boolean,
- *     tierHot?: number }} [options]
+ *     tierHot?: number, features?: Record<string, boolean> }} [options]
  *     `processors`: the layout's (the first executor's, with the process's lock word);
  *     `lowBlock`: with a code block past 4 GiB, the block below it translated by a runtime
  *     of its own (`wideLayout`), as the core's host has it; `tierHot`: the tier's hot
@@ -74,11 +74,13 @@ export function fill(seed, size){
  *     wrapped with one `and`, a struct's field reads off one wrapped sum); `window`: a wide
  *     window's bytes (`wideLayout`), its RAM a memory of its own; `high`: how far past its
  *     place the data area lies, and the registers pointing into it (`load`); `codeHigh`: the
- *     code area's, which translated code takes only below 4 GiB so far
+ *     code area's, which translated code takes only below 4 GiB so far; `features`: the
+ *     engine's (`features`) as the runtime is told them, over its own probe's
  */
 export function machine({ config = {}, trapPort = undefined, tiered = false,
     makeRunner = null, ramSize = CORPUS.codeAt + 0x100000, closed = [], window = undefined,
-    high = 0, codeHigh = 0, processors = 1, lowBlock = false, tierHot = 1 } = {})
+    high = 0, codeHigh = 0, processors = 1, lowBlock = false, tierHot = 1,
+    features = undefined } = {})
 {
     if (window !== undefined)
     {
@@ -114,7 +116,7 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
         parkBase: 0, ...low === undefined ? {} : { lowHash: low.tables + Tables.HASH } })
         : null;
     const runner = makeRunner !== null ? makeRunner(memory, layout, tier)
-        : createRuntimeRunner64({ memory, ram, layout, low, tier,
+        : createRuntimeRunner64({ memory, ram, layout, low, tier, features,
             config: { ...config, ...(trapPort === undefined ? {} : { trapPort }) } });
     /** The writes to ports other than the trap port, each port and value. @type {number[][]} */
     const writes = [];
@@ -551,7 +553,7 @@ export function run(m, translated, budget = 7){
  * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
  *     high?: number, codeHigh?: number, processors?: number, lowBlock?: boolean,
- *     tierHot?: number }} [options]
+ *     tierHot?: number, features?: Record<string, boolean> }} [options]
  *     `budget`: each translated run's; `closed` both machines'; the rest the translated
  *     machine's (`machine`)
  */

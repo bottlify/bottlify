@@ -187,13 +187,14 @@ export function arenaEmitCache(buffer){
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
- *     armHost?: boolean }} features
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {NonNullable<Parameters<typeof emitBatch>[3]>} options
  * @param {Set<string>} leaveOut
  */
 function contextKey(layout, features, options, leaveOut){
     return JSON.stringify([layout.id ?? layout, features.simd, features.tailCalls,
-        features.defaultNaNNegative === true, features.armHost === true, options.hash === true,
+        features.defaultNaNNegative === true, features.armHost === true,
+        features.wideLanes === true, options.hash === true,
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true,
         options.precise === true, options.place === true, options.profileCalls === true,
@@ -301,7 +302,7 @@ function sameShape(kept, shape){
  *     compiled for single, its arithmetic on floats (`emitRegion`)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
- *     armHost?: boolean }} features
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {{ hash?: boolean, trapPort?: number, countTransfers?: boolean,
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
@@ -464,7 +465,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  *     `formable` the ones a job without its own may span (all of `pages` when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
- *     armHost?: boolean }} features
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {Parameters<typeof emitBatch>[3]} [options]
  * @param {EmitCache} [cache]
  * @returns {BuiltBatch}
@@ -535,7 +536,7 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
  * @param {number} entryTop
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
- *     armHost?: boolean }} features
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {{ hash?: boolean, trapPort?: number,
  *     leaveOut?: Set<string> | string[] }} [options]
  * @returns {BuiltRegion}
