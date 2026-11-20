@@ -161,6 +161,9 @@ const EMITTED = {
     172: 'bc0029bcb0842fa4',
     // The same code: 173 is for a wide window's (the resume's block test, far exits).
     173: 'bc0029bcb0842fa4',
+    // The same code: 174 is for a wide window's (its lane accesses as they are where the
+    // engine reads them past 4 GiB, `wideLanes`).
+    174: 'bc0029bcb0842fa4',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

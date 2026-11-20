@@ -18,7 +18,7 @@
 
 import { formRegion } from './region.js';
 import { ModuleBuilder } from './wasm/encoder.js';
-import { features } from './wasm/features.js';
+import { features, memory64, wideLanes } from './wasm/features.js';
 import { emitRegion, finishModule, prepareModule } from './emit/region.js';
 import { ownLayout, PAGE } from './runtime/layout.js';
 import { MODE_64 } from './decode/decoder.js';
@@ -64,7 +64,10 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
     const m = new ModuleBuilder();
     const layout = window !== undefined ? ownLayout({ ramSize, bits: 64, window, ramBase: 0 })
         : ownLayout({ ramSize, processors, ramBase, ...bits === 64 ? { bits: 64 } : {} });
-    const context = prepareModule(m, layout, { ...features(), ...hostFeatures }, {},
+    // A wide window's lane accesses as the runtime makes them on this engine (`wideLanes`).
+    const lanes = window === undefined || 'wideLanes' in hostFeatures ? {}
+        : { wideLanes: wideLanesOf(window) };
+    const context = prepareModule(m, layout, { ...features(), ...lanes, ...hostFeatures }, {},
         { precise, atomic, hash, callReturn: hash && callReturn, looseStacks,
             expansion, wide, markBlocks });
     const translation = emitRegion(context, region, { entryTop: 0, checked });
@@ -79,4 +82,15 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
         bytes: region.bytes,
         refused: Object.fromEntries(region.refused),
     };
+}
+
+/** `wideLanes` over a window of so many bytes, asked once a size. @type {Map<number, boolean>} */
+const lanesAsked = new Map();
+/** @param {number} window */
+function wideLanesOf(window){
+    if (!lanesAsked.has(window))
+    {
+        lanesAsked.set(window, wideLanes(memory64(window)));
+    }
+    return /** @type {boolean} */ (lanesAsked.get(window));
 }

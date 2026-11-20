@@ -29,7 +29,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 173;
+export const CACHE_VERSION = 174;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -39,15 +39,16 @@ const MAGIC = 0x4b524f43; // 'CORK'
  * store taken with other ones must not answer.
  *
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
- *     armHost?: boolean }} features
+ *     armHost?: boolean, wideLanes?: boolean }} features
  * @param {string} variant  the emitting settings, as the runtime names them
  */
 const flagsOf = (features, variant)=>(features.simd ? 's' : '-') + (features.tailCalls ? 't' : '-')
-    + (features.defaultNaNNegative ? 'n' : '-') + (features.armHost ? 'a' : '') + variant;
+    + (features.defaultNaNNegative ? 'n' : '-') + (features.armHost ? 'a' : '')
+    + (features.wideLanes ? 'w' : '') + variant;
 
 /**
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean,
+ *     defaultNaNNegative?: boolean, wideLanes?: boolean,
  *     armHost?: boolean }, variant?: string, layoutId: string, bundleId: string,
  *     entry: number, kept: string }} of  kept: what the region is kept under at its entry
  */
@@ -82,7 +83,7 @@ export function moduleDigest(bytes){
  * other regions later never takes a record's name.
  *
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean,
+ *     defaultNaNNegative?: boolean, wideLanes?: boolean,
  *     armHost?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
  * @param {Uint8Array} bytes
  * @param {string} [digest]  `moduleDigest` of the bytes, where it was taken already (a

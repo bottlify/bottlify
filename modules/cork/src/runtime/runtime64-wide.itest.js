@@ -72,6 +72,23 @@ test('code past 4 GiB: the corpus translated as interpreted', ifRoom(()=>{
     assert.ok(stats.translated > stats.interpreted * 4, JSON.stringify(stats));
 }));
 
+test('an engine that misreads a wide window\'s lane accesses (`wideLanes` false): their scalar'
+    + ' forms, the corpus and seeded programs with the data and code past 4 GiB as interpreted',
+ifRoom(()=>{
+    const instructions = pool();
+    const straight = Array.from({ length: 100 },
+        (_, i)=>program(instructions, 0x1a7e + i, 20 + i % 60));
+    const dataPast = { window: 2 ** 33, high: 2 ** 32 };
+    for (const [cases, placed] of /** @type {const} */ ([[CORPUS.cases, dataPast],
+        [CORPUS.cases, PAST], [straight, PAST]]))
+    {
+        const { failures, stats } = compare(cases, { budget: 7, ...placed,
+            features: { wideLanes: false } });
+        assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+        assert.ok(stats.translated > stats.interpreted * 2, JSON.stringify(stats));
+    }
+}));
+
 test('code past 4 GiB: calls, returns and switches as interpreted', ifRoom(()=>{
     /** @param {any} one @param {number} i @param {string} name @param {string} code */
     const variant = (one, i, name, code)=>{

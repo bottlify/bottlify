@@ -16,7 +16,7 @@
 
 import { TIER_SLOT } from '../emit/region.js';
 import { MODE_64 } from '../decode/decoder.js';
-import { features as probeFeatures } from '../wasm/features.js';
+import { features as probeFeatures, wideLanes } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
 import { SHARED_MAX_PAGES } from '../wasm/shared-import.js';
 import { RUNTIME_HELPERS, routineHelper } from '../helpers.js';
@@ -108,7 +108,10 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
         throw new Error(`cork: the memory ends at ${memory.buffer.byteLength}, before the tables`
             + ` at ${layout.tables} + ${tablesSize(layout)}`);
     }
-    const probed = features ?? probeFeatures();
+    // A wide window's lane accesses as they are where the engine reads them past 4 GiB.
+    const given = features ?? probeFeatures();
+    const probed = ram === undefined || given.wideLanes !== undefined ? given
+        : { ...given, wideLanes: wideLanes(ram) };
     // An arm64 host is known by its default NaN, whatever NaN the emitter makes for it.
     const found = probed.defaultNaNNegative || settings.exactNaN === true ? probed
         : { ...probed, defaultNaNNegative: true, armHost: true };
