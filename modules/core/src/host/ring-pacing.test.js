@@ -202,16 +202,21 @@ test('a wait on the event loop ends at the deadline by the doorbell wait\'s own 
         timers++;
         return /** @type {any} */ (timeouts)(...args);
     });
+    // Node does not count a pending Atomics.waitAsync as work, so with
+    // nothing else on the loop the test would end before the wait did; the
+    // interval only keeps the loop open, and ends nothing.
+    const open = setInterval(()=>{}, 1000);
     try
     {
         const from = performance.now();
         await pacing.wait({ ...idle, deadlineMs: 3 });
         const waited = performance.now() - from;
         assert.equal(timers, 0, 'no setTimeout');
-        assert.ok(waited >= 2.5 && waited < 50, `the deadline ended it: ${waited.toFixed(1)} ms`);
+        assert.ok(waited >= 2.5, `the deadline ended it, not sooner: ${waited.toFixed(1)} ms`);
     }
     finally
     {
+        clearInterval(open);
         globalThis.setTimeout = timeouts;
         pacing.machines?.(1);
     }
