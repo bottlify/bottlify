@@ -130,6 +130,12 @@ Nothing is done until it is tested: unit, contract (Wine's expectations), graphi
 frames) and end to end. Tests use `node:test`, colocated as `*.test.js` (unit) and `*.itest.js`
 (integration and gates); no test dependencies.
 
+**A defect found in a program is reproduced by a test first.** A regression or a breakage seen
+in a game goes in this order: a test that reproduces it on the engine, outside the game (it fails
+before the fix); then the fix, in the generic contract it broke; then the same test over every
+condition like it - the other APIs, widths, Windows versions and host paths it could meet; and a
+fix again for whatever that finds. A fix judged only by the game is not done.
+
 **Every second path has a gate.** An optimisation that puts a fast path beside a slow one — guest
 routines beside host traps, a command ring beside direct calls, a recording replayed in a worker
 beside a device that draws itself, a device mixer beside the guest clock — lands with a
@@ -155,7 +161,7 @@ build.
 | --- | --- |
 | cork | `npm test -w @bottlify/cork` and `npm run test:integration -w @bottlify/cork` — the x86 corpus a real processor answered, kept in the repository (`modules/cork/src/x86-corpus.json.gz`, made by `tools/generators/x86-corpus.mjs`) |
 | a core layer (gdi32, d3d9, dsound, …) | that layer's unit tests by interface and its gates: `node --test "src/layers/<layer>/**/*.test.js" "src/layers/<layer>/**/*.itest.js"` in `modules/core` |
-| anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
+| anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run test:realtime` (the tests timed against a clock, alone), `npm run check:boundaries`, `npm run build` |
 
 CI (`.github/workflows/ci.yml`) runs the full set, the tools' tests and the `npm run cdp:*` gates
 in a real headless Chrome; every job must be green. It runs on a push to main and by hand (`gh

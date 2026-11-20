@@ -389,7 +389,13 @@ export function buildExe(options){
     // --- data ---
     for (const [name, bytes] of Object.entries(data))
     {
-        text.pad(dataOffsets[name]).push(...bytes);
+        // A piece at a time: a blob of a second of sound is more arguments
+        // than one call may spread.
+        const into = text.pad(dataOffsets[name]);
+        for (let at = 0; at < bytes.length; at += 0x8000)
+        {
+            into.push(...bytes.slice(at, at + 0x8000));
+        }
     }
     if (tls !== null)
     {

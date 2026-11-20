@@ -103,6 +103,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
       - run: npm run test:integration -w @bottlify/core
+      - run: npm run test:realtime -w @bottlify/core
       - run: npm run build
 
   installer:

@@ -2418,6 +2418,8 @@ export function createWin32Module(){
 
             // Multimedia timers fire on a thread of their own, like the notices
             // above, but the kernel's clock is what wakes it.
+            /** The WASAPI endpoint's account, once registered. @type {{ streams: () => any[] } | undefined} */
+            let mmDevApi;
             const mmTimers = createTimerService({
                 long: pointerSize === 8,
                 /** @param {number} bytes */
@@ -2951,7 +2953,7 @@ export function createWin32Module(){
                 }
             };
 
-            registerMmDevApiClasses({
+            mmDevApi = registerMmDevApiClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 pointerSize, windows, divergence: config?.divergence,
                 // A stream plays into the mixer waveOut writes to, against the
@@ -3857,6 +3859,7 @@ export function createWin32Module(){
                         processors,
                         pointerSize,
                         performanceFrequency: config?.performanceFrequency,
+                        timeStampMhz: config?.processorMhz,
                         readMemory,
                         processId,
                         writeMemory,
@@ -7481,6 +7484,8 @@ export function createWin32Module(){
                 waveThread: ()=>waveNotices.diagnostics(),
                 /** The multimedia timers: each one's period and how far behind it is. */
                 multimediaTimers: ()=>mmTimers.diagnostics(),
+                /** The WASAPI streams: rate, buffer, released and played, how room was asked for. */
+                wasapiStreams: ()=>mmDevApi?.streams() ?? null,
                 /**
                  * How many sections were entered and left without crossing into
                  * the host, and how many crossings the contended ones cost.
@@ -7771,6 +7776,7 @@ export function createWin32Module(){
                     waveDevices: current ? current.waveDevices() : [],
                     waveThread: current ? current.waveThread() : null,
                     multimediaTimers: current ? current.multimediaTimers() : null,
+                    wasapiStreams: current ? current.wasapiStreams() : null,
                     criticalSections: current ? current.criticalSections() : null,
                     com: current ? current.comChannel() : null,
                     messages: current ? current.messages() : {},

@@ -148,3 +148,62 @@ test('the clock routines answer out of the block and leave a null pointer alone'
 
     host.stop();
 });
+
+test('the counter read off the time-stamp counter moves while the guest clock stands, '
+    + 'as inside one long slice', async()=>{
+    const host = createCorkHost({
+        engine: cork,
+        memorySize: 64 * 1024 * 1024,
+        trapPort: 0xb077,
+        entryVector: 0x7000,
+        initialStack: STACK,
+        cork: { sliceMs: Infinity },
+    });
+    // The guest's clock as a turn leaves it: moved once, then still.
+    host.useGuestClock(()=>UPTIME_MS);
+    // 3000 MHz of time-stamp ticks over a 1 GHz counter: three a count.
+    host.writePhysical(COUNTER, queryPerformanceCounterCode(COUNTER, TRAP, BLOCK, 3));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(BLOCK, new Uint8Array(CLOCK.SIZE));
+    const code = [0xf4];
+    const first = PROGRAM + code.length;
+    code.push(...call(first, COUNTER, [OUT]));
+    const second = PROGRAM + code.length;
+    code.push(...call(second, COUNTER, [OUT + 8]));
+    const nullAt = PROGRAM + code.length;
+    code.push(...call(nullAt, COUNTER, [0]));
+    host.writePhysical(PROGRAM, new Uint8Array(code));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    runToHalt(host, 1000);
+    /** @param {number} at */
+    const read = at=>new DataView(host.readPhysical(at, 8).slice().buffer).getBigUint64(0, true);
+    /** @param {number} at */
+    const run = at=>{
+        host.writeReg32('eip', at);
+        host.writeReg32('esp', STACK);
+        host.wake();
+        runToHalt(host, 1000);
+        return host.readReg32('eip');
+    };
+
+    run(first);
+    assert.equal(host.readReg32('eax'), 1, 'the counter answered TRUE');
+    assert.equal(host.readReg32('esp'), STACK, 'popping its one argument');
+    const before = read(OUT);
+    // At 1 GHz, a nanosecond a count.
+    const uptime = BigInt(UPTIME_MS) * 1_000_000n;
+    assert.ok(before >= uptime && before < uptime + 20_000_000n,
+        `on the guest's clock, in the counter's ticks: ${before}`);
+    const from = performance.now();
+    while (performance.now() - from < 5)
+    {
+        // Real time passes; the guest's clock does not move.
+    }
+    run(second);
+    const moved = Number(read(OUT + 8) - before) / 1e6;
+    assert.ok(moved >= 4 && moved < 20,
+        `the second read is the time that passed later, not one count: ${moved} ms`);
+    assert.equal(run(nullAt), TRAP + 1, 'a null pointer is the host to answer for');
+
+    host.stop();
+});

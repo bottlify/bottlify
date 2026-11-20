@@ -202,3 +202,24 @@ test('a bad delay or a null routine is refused with no timer made', ()=>{
     assert.equal(m.timers.set(10, 0, 0, 0), 0);
     assert.equal(m.created.length, 0);
 });
+
+test('an event the engine sets is set at a tick only while its condition holds, and each tick\'s'
+    + ' lateness is counted', ()=>{
+    // WASAPI's engine sets a stream's event as it takes a period: the timer
+    // ticks, and the stream says whether there is an event to set.
+    const m = machine();
+    let open = false;
+    m.timers.set(10, 0x77, 0, 0x0001 | 0x0010, ()=>open);
+    m.ask();
+    m.tick(10);
+    m.ask();
+    assert.deepEqual(m.signalled, [], 'the tick came; its condition did not hold');
+    open = true;
+    m.tick(13);
+    m.ask();
+    assert.deepEqual(m.signalled, [0x77], 'the next tick, with it holding: set');
+    const late = m.timers.diagnostics().late;
+    assert.equal(late.under1, 1, 'the first tick on time');
+    assert.equal(late.under5, 1, 'the second three milliseconds late');
+    assert.equal(late.worstMs, 3);
+});

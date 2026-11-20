@@ -166,6 +166,9 @@ const ERROR_NOACCESS = 998;
  *     turns leaves its error where GetLastError then reads it.
  * @property {number} [performanceFrequency]  Ticks a second of the performance counter
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
+ * @property {number} [timeStampMhz]  The rate the processor's rdtsc advances at, in MHz:
+ *     where it is a whole multiple of the performance frequency, the counter's guest
+ *     code reads it and moves inside a slice.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
@@ -508,7 +511,11 @@ export function tlsSetValueLongCode(){
  * @param {number} trap   The host's QueryPerformanceCounter.
  * @param {number} block  The clock block.
  */
-export function queryPerformanceCounterCode(at, trap, block){
+export function queryPerformanceCounterCode(at, trap, block, perCount = 0){
+    if (perCount > 0)
+    {
+        return queryPerformanceCounterTscCode(at, trap, block, perCount);
+    }
     const slow = 114;
     const sequence = block + CLOCK.SEQUENCE;
     const counter = block + CLOCK.COUNTER;
@@ -529,33 +536,99 @@ export function queryPerformanceCounterCode(at, trap, block){
         0x75, (18 - 47) & 0xff,                                      // jne read
         0xa1, ...dword(last),                                        // mov eax, [last]
         0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
-        // next: (58)
-        0x89, 0xfb,                                                  // mov ebx, edi
-        0x89, 0xf1,                                                  // mov ecx, esi
-        0x39, 0xd1,                                                  // cmp ecx, edx
-        0x77, 82 - 66,                                               // ja swap
-        0x72, 72 - 68,                                               // jb bump
-        0x39, 0xc3,                                                  // cmp ebx, eax
-        0x77, 82 - 72,                                               // ja swap
-        // bump: (72)
-        0x89, 0xc3,                                                  // mov ebx, eax
-        0x89, 0xd1,                                                  // mov ecx, edx
-        0x83, 0xc3, 0x01,                                            // add ebx, 1
-        0x83, 0xd1, 0x00,                                            // adc ecx, 0
-        // swap: (82)
-        0xf0, 0x0f, 0xc7, 0x0d, ...dword(last),                      // lock cmpxchg8b [last]
-        0x75, (58 - 92) & 0xff,                                      // jne next
-        0x89, 0x5d, 0x00,                                            // mov [ebp], ebx
-        0x89, 0x4d, 0x04,                                            // mov [ebp+4], ecx
-        0x5d, 0x5f, 0x5e, 0x5b,                                      // pop ebp, edi, esi, ebx
-        0xb8, ...dword(1),                                           // mov eax, 1
-        0xc2, 0x04, 0x00,                                            // ret 4
+        ...counterTail(last),
         // spin: (110)
         0xf3, 0x90,                                                  // pause
         0xeb, (18 - 114) & 0xff,                                     // jmp read
         // slow: (114)
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
     ]);
+}
+
+/**
+ * The counter's answer from the time-stamp counter rather than the block:
+ * `rdtsc` divided by the time-stamp ticks of one count.
+ *
+ * The block moves only between slices, and a thread nobody else is ready
+ * beside runs a turn of a million instructions: a game waiting for its next
+ * frame by reading the counter in a loop that never calls the host read the
+ * same count for the whole turn - 5 to 20 ms - and drew late, at intervals of
+ * 12 and 21 ms where it meant 16.7, with a frame of 30 to 50 now and then.
+ * The time-stamp counter is the guest's clock too, moving on at the page's
+ * rate inside a slice (`readTsc` in cork-host.js), the same on every
+ * executor and never backward; the last answer is kept as before, so every
+ * answer is later than every one before it, the trap's included.
+ *
+ *     ...as above, to read:
+ *     rdtsc                       ; edx:eax the time-stamp count
+ *     mov ecx, eax / mov eax, edx / xor edx, edx / mov ebx, perCount
+ *     div ebx / mov esi, eax      ; the high word's quotient
+ *     mov eax, ecx / div ebx / mov edi, eax   ; and the low's, the remainder carried
+ *     mov eax, [last] / mov edx, [last+4]
+ *     ...as above, from next:
+ *
+ * @param {number} at @param {number} trap @param {number} block
+ * @param {number} perCount  time-stamp ticks a count, a whole number
+ */
+function queryPerformanceCounterTscCode(at, trap, block, perCount){
+    const slow = 104;
+    const last = block + CLOCK.LAST;
+    return new Uint8Array([
+        0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
+        0x85, 0xc9,                                                  // test ecx, ecx
+        0x0f, 0x84, ...dword(slow - 12),                             // jz slow
+        0x53, 0x56, 0x57, 0x55,                                      // push ebx, esi, edi, ebp
+        0x89, 0xcd,                                                  // mov ebp, ecx
+        // read: (18)
+        0x0f, 0x31,                                                  // rdtsc
+        0x89, 0xc1,                                                  // mov ecx, eax
+        0x89, 0xd0,                                                  // mov eax, edx
+        0x31, 0xd2,                                                  // xor edx, edx
+        0xbb, ...dword(perCount),                                    // mov ebx, perCount
+        0xf7, 0xf3,                                                  // div ebx
+        0x89, 0xc6,                                                  // mov esi, eax
+        0x89, 0xc8,                                                  // mov eax, ecx
+        0xf7, 0xf3,                                                  // div ebx
+        0x89, 0xc7,                                                  // mov edi, eax
+        0xa1, ...dword(last),                                        // mov eax, [last]
+        0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
+        ...counterTail(last),
+        // slow: (104)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * Both 32-bit counters' end, 52 bytes from `next`: edi:esi the count read,
+ * edx:eax the last answer; the later of the count and the last answer and
+ * one, moved into the last answer and the caller's LARGE_INTEGER.
+ *
+ * @param {number} last  the last answer's address
+ */
+function counterTail(last){
+    return [
+        // next: (+0)
+        0x89, 0xfb,                                                  // mov ebx, edi
+        0x89, 0xf1,                                                  // mov ecx, esi
+        0x39, 0xd1,                                                  // cmp ecx, edx
+        0x77, 24 - 8,                                                // ja swap
+        0x72, 14 - 10,                                               // jb bump
+        0x39, 0xc3,                                                  // cmp ebx, eax
+        0x77, 24 - 14,                                               // ja swap
+        // bump: (+14)
+        0x89, 0xc3,                                                  // mov ebx, eax
+        0x89, 0xd1,                                                  // mov ecx, edx
+        0x83, 0xc3, 0x01,                                            // add ebx, 1
+        0x83, 0xd1, 0x00,                                            // adc ecx, 0
+        // swap: (+24)
+        0xf0, 0x0f, 0xc7, 0x0d, ...dword(last),                      // lock cmpxchg8b [last]
+        0x75, (0 - 34) & 0xff,                                       // jne next
+        0x89, 0x5d, 0x00,                                            // mov [ebp], ebx
+        0x89, 0x4d, 0x04,                                            // mov [ebp+4], ecx
+        0x5d, 0x5f, 0x5e, 0x5b,                                      // pop ebp, edi, esi, ebx
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc2, 0x04, 0x00,                                            // ret 4
+    ];
 }
 
 /**
@@ -584,7 +657,40 @@ export function queryPerformanceCounterCode(at, trap, block){
  *
  * @param {number} at @param {number} trap @param {number} block  below 4 GiB
  */
-export function queryPerformanceCounterCode64(at, trap, block){
+export function queryPerformanceCounterCode64(at, trap, block, perCount = 0){
+    if (perCount > 0)
+    {
+        // As the 32-bit routine's: rdtsc / perCount for the count read
+        // (`queryPerformanceCounterTscCode`), and the same end from next.
+        const slow = 77;
+        return new Uint8Array([
+            0x48, 0x85, 0xc9,                                        // test rcx, rcx
+            0x0f, 0x84, ...dword(slow - 9),                          // jz slow
+            0x41, 0xb8, ...dword(block),                             // mov r8d, block
+            // read: (15)
+            0x0f, 0x31,                                              // rdtsc
+            0x48, 0xc1, 0xe2, 0x20,                                  // shl rdx, 32
+            0x48, 0x09, 0xd0,                                        // or rax, rdx
+            0x31, 0xd2,                                              // xor edx, edx
+            0x41, 0xb9, ...dword(perCount),                          // mov r9d, perCount
+            0x49, 0xf7, 0xf1,                                        // div r9
+            0x49, 0x89, 0xc1,                                        // mov r9, rax
+            0x49, 0x8b, 0x80, ...dword(CLOCK.LAST),                  // mov rax, [r8+last]
+            // next: (45)
+            0x4c, 0x89, 0xca,                                        // mov rdx, r9
+            0x48, 0x39, 0xc2,                                        // cmp rdx, rax
+            0x77, 57 - 53,                                           // ja swap
+            0x48, 0x8d, 0x50, 0x01,                                  // lea rdx, [rax+1]
+            // swap: (57)
+            0xf0, 0x49, 0x0f, 0xb1, 0x90, ...dword(CLOCK.LAST),      // lock cmpxchg [r8+last], rdx
+            0x75, (45 - 68) & 0xff,                                  // jne next
+            0x48, 0x89, 0x11,                                        // mov [rcx], rdx
+            0xb8, ...dword(1),                                       // mov eax, 1
+            0xc3,                                                    // ret
+            // slow: (77)
+            0xe9, ...dword(trap - (at + slow + 5)),                  // jmp trap
+        ]);
+    }
     const slow = 85;
     return new Uint8Array([
         0x48, 0x85, 0xc9,                                            // test rcx, rcx
@@ -748,6 +854,11 @@ export function createProcessFunctions(host){
         throw new Error(`kernel32: the performance frequency is a whole number of ticks `
             + `from 1 to 4294967295 a second, not ${performanceFrequency}`);
     }
+    // Time-stamp ticks a count, where they are a whole number: the counter's
+    // guest code then reads rdtsc (`queryPerformanceCounterTscCode`), else the block.
+    const perCount = (host.timeStampMhz ?? 0) * 1_000_000 / performanceFrequency;
+    const timeStampPerCount = Number.isInteger(perCount) && perCount >= 1
+        && perCount <= 0xffffffff ? perCount : 0;
     /**
      * Slot bookkeeping is process-wide, the values in them are not.
      *
@@ -1056,7 +1167,7 @@ export function createProcessFunctions(host){
         clocks = {
             counter: place('<performance-counter>', 'QueryPerformanceCounter',
                 (at, trap)=>(long ? queryPerformanceCounterCode64 : queryPerformanceCounterCode)(
-                    at, trap, block)),
+                    at, trap, block, timeStampPerCount)),
             frequency: place('<performance-frequency>', 'QueryPerformanceFrequency',
                 (at, trap)=>(long ? queryPerformanceFrequencyCode64
                     : queryPerformanceFrequencyCode)(at, trap, performanceFrequency)),

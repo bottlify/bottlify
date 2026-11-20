@@ -45,6 +45,7 @@
     "./programs": "./src/layers/win32/programs/table.js",
     "./storage": "./src/storage.js",
     "./frame-clock": "./src/host/frame-clock.js",
+    "./sound-meter": "./src/host/sound-meter.js",
     "./jpeg": "./src/layers/media/internal/jpeg.js",
     "./icon": "./src/icon.js",
     "./engine.worker.js": "./dist/engine.worker.js",
@@ -57,6 +58,7 @@
     "LICENSE",
     "THIRD-PARTY-NOTICES.md",
     "src/layers/audio/asi/minimp3.LICENSE",
+    "src/layers/audio/output/mix.js",
     "src/bundle-in-place.js",
     "src/bundle-node.js",
     "src/bundle.js",
@@ -134,6 +136,7 @@
     "src/layers/win32/version/functions.js",
     "src/gog/content.js",
     "src/gog/install.js",
+    "src/host/sound-meter.js",
     "src/steam/depot.js",
     "src/steam/index.js",
     "src/steam/install.js",
@@ -160,6 +163,7 @@
     "typecheck": "tsc --project jsconfig.json",
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=1200000 \"src/**/*.itest.js\"",
+    "test:realtime": "node scripts/test-realtime.mjs",
     "prepublishOnly": "npm run build && npm run check:package"
   }
 }

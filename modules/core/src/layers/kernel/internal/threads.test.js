@@ -1780,3 +1780,63 @@ test('a thread elsewhere that wakes none of this executor\'s is called back only
         clock += 25;
         assert.equal(sched.runOnce().ran, loader, 'idle past 20 ms, it is called back');
     });
+
+test('no turn runs past the soonest deadline at the executor\'s rate: the wait due then ends'
+    + ' at the turn\'s end, not a quantum later', ()=>{
+    // A multimedia timer thread, time-critical, woke behind a game thread's
+    // whole quantum: a tick late by milliseconds one time in three.
+    let wall = 0;
+    let clock = 0;
+    const cpu = fakeCpu(Infinity);
+    cpu.runSlice = max=>{
+        // A thousand instructions a millisecond, by both clocks.
+        wall += max / 1000;
+        clock += max / 1000;
+        return max;
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        soloQuantum: 40_000, wall: ()=>wall, now: ()=>clock });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const timer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'timer' });
+    sched.block(timer, 'an event nobody sets');
+    assert.equal(sched.runOnce().instructions, 40_000, 'alone and no deadline: a solo turn');
+    sched.block(timer, 'a timed wait', { deadline: clock + 3 });
+    const turn = sched.runOnce();
+    assert.equal(turn.ran, a);
+    assert.equal(turn.instructions, 3000, 'three milliseconds of a, to the deadline');
+    sched.runOnce();
+    assert.equal(timer.state === ThreadState.READY || sched.current() === timer, true,
+        'and the wait ended there');
+});
+
+test('a thread here whose deadline passes while another executor\'s thread keeps ringing runs'
+    + ' in that same turn', ()=>{
+    // The turn waited for the other executor round and round while its thread
+    // rang, and moved neither the clock nor the deadlines: a game's Sleep(1)
+    // lasted until the sound thread beside it stopped, 10 ms and more.
+    const { cpu } = twoExecutors();
+    let clock = 0;
+    let rings = 0;
+    const bell = cpu.executorBell();
+    // Twenty rings, then quiet: the turn has to have run main by then.
+    bell.rung = ()=>Math.min(rings, 20);
+    bell.wait = ()=>{
+        rings++;
+        return 0;
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        now: ()=>clock, refreshClock: ()=>{
+            clock += 0.5;
+        } });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+    const [remote] = cpu.executors();
+    // The worker's slice goes on, a word rung each time it is looked at.
+    remote.step = ()=>null;
+    sched.block(main, 'Sleep', { deadline: clock + 1 });
+    const turn = sched.runOnce();
+    assert.equal(turn.ran, main, 'main woke at its deadline and ran in the same turn');
+    assert.ok(rings <= 4, `after the rings that took the clock past it: ${rings}`);
+});
