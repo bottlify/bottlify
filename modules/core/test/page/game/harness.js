@@ -2255,6 +2255,8 @@ export function createHarness(canvas, how = {}){
             handoff: graphics.worker?.handoff ?? null,
             dropped: graphics.worker?.dropped ?? null,
             latency: graphics.worker?.latency ?? null,
+            // What the worker's device holds, by kind (`webgpu/ledger.js`).
+            gpuMemory: graphics.worker?.gpuMemory ?? null,
             // Direct3D 8/9's guest block: why locks and routines reached the host.
             shadow: graphics.shadow ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
