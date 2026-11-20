@@ -129,9 +129,9 @@ test('diagnostics describe the run afterwards', { timeout: 15000 }, async t=>{
 
     assert.ok(byName.cpu.metrics.instructions > 0);
     // Every function of every library gets a stub, whether the program calls it
-    // or not: the modules exist in guest memory before the first instruction, so
-    // an address taken early is the address that works later (§13.3). Plus the
-    // park slot and the callback sentinel.
+    // or not: the modules are laid out before the first instruction, so an
+    // address taken early is the address that works later (A280). Plus the park
+    // slot and the callback sentinel.
     //
     // Counted against what the bridge registered rather than against one
     // layer's tally: the drawing libraries are exported to a program exactly as

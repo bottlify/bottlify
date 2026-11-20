@@ -134,6 +134,14 @@ export function createSystemModules(host){
     // megabyte apart, sixty of them left a third of the window to those.
     let next = host.start;
     /**
+     * The modules whose addresses the exports being made now write into their
+     * code (GLU32's into OPENGL32's): placed with the module being made, not
+     * while its layout is, so a process that loads neither holds neither.
+     *
+     * @type {Set<{ place: () => void }> | null}
+     */
+    let embedded = null;
+    /**
      * The exports a 64-bit process's modules leave out: i386 alone -- guest
      * code with neither x86-64 (`long`) nor a host handler to trap into, as
      * `_chkesp` and the __fastcall entries are. Bound, its i386 would run as
@@ -283,7 +291,19 @@ export function createSystemModules(host){
         const engineFrom = host.engine?.at() ?? 0;
         // A part of its own (`within` with no slice): its code starts a page.
         const made = ()=>exportsOf(name, table, qualified=>left.push(qualified));
-        const exports = host.engine ? host.engine.within(0, 0, made) : made();
+        const outer = embedded;
+        /** @type {Set<{ place: () => void }>} */
+        const needs = new Set();
+        embedded = needs;
+        let exports;
+        try
+        {
+            exports = host.engine ? host.engine.within(0, 0, made) : made();
+        }
+        finally
+        {
+            embedded = outer;
+        }
         const engineTo = host.engine?.at() ?? 0;
         leftOutAt64.push(...left);
 
@@ -341,7 +361,13 @@ export function createSystemModules(host){
             });
         }
         return recordOf(name, base, placed.size, placed.entryPoint, new Map(entries),
-            ordinal=>placed.addressOfOrdinal(ordinal), placed.place);
+            ordinal=>placed.addressOfOrdinal(ordinal), ()=>{
+                placed.place();
+                for (const module of needs)
+                {
+                    module.place();
+                }
+            });
     };
 
     /**
@@ -424,7 +450,14 @@ export function createSystemModules(host){
             {
                 return null;
             }
-            record.place();
+            if (embedded)
+            {
+                embedded.add(record);
+            }
+            else
+            {
+                record.place();
+            }
             return address;
         };
         const record = {

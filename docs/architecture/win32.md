@@ -8,7 +8,8 @@ stated). For example, `AddAtomA: { argBytes: 4, handler: ([p]) => add(p) }` in
 When a process starts, the loader lays out real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
 from these tables (PE32+, AMD64, in a 64-bit process): each module's span and every export's address
 are fixed then, in the same order in every process, and its bytes are written into the program's
-memory when something first loads it or is first handed one of its addresses
+memory when something first loads it or is first handed one of its addresses; a module whose code
+holds another's addresses (GLU32's calls into OPENGL32) writes that one with its own
 ([`process/system-modules.js`](../../modules/core/src/process/system-modules.js), decision A280).
 The first process of a runtime lays the modules out and keeps the layout; a later one with the
 same tables takes it and builds a module's exports only when it places it. What a module's

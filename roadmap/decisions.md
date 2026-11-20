@@ -2618,6 +2618,10 @@ translated in one process calls the same addresses in the next. Laid out on dema
 bases would follow each program's load order: a warm translation store measured on wine-d3d9's
 device test kept 286 of its regions with every module moved 64 KiB, against 357 in place, its
 misses 97 against 8. Until written a module's span is a reserved region nothing else is given.
+An address one module's code is built with (GLU32's of OPENGL32's exports) is no address handed
+out: the module it names is written with the one that holds it, not when the layout is made
+(OPENGL32, 88 KiB, was written into every process that way: a kernel32 program's system modules
+212 KiB, 124 without it).
 *2026-11-19.*
 
 **A281. A runtime's processes share one layout of the engine's libraries, routines and stubs.**
