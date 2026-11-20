@@ -2633,4 +2633,11 @@ and a stub takes the slot its name took there (`thunks.js` `follow`); what does 
 helper shared by several modules and made by whichever is placed first, goes past every part, at
 an address that may differ - a translation through it is made again, nothing more. The program's
 heap is no longer where these routines lie, so it starts the same whatever the engine built.
+The tables themselves are made when first read (`win32/lazy-libraries.js`): what one library takes
+from another is a patch applied when it is made, and a library whose factory registers something a
+program asks for without loading it (USER32's window classes, ole32's, shell32's and WIC's COM
+classes) is made at the start. The layout is keyed by what is known before a table is made - the
+libraries' names, the faces, the ordinals, the Windows and the window - and a module made otherwise
+than its layout says is refused where it is placed (`shapeOf`), loudly. 50 hello processes in one
+node: heap 13.1 MiB a process before the lazy tables, 10.3 after; 125 ms a start, 92.
 *2026-11-20.*

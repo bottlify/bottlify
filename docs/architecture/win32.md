@@ -16,6 +16,9 @@ routines take for themselves - their code and data - comes from the engine's spa
 modules (`engineCode` in [`app.js`](../../modules/core/src/app.js)), each module from its own part
 of it, and the stubs they fall back to take the slots their names took in the first process, so
 a routine lies at the same address in every process and its translations are shared (A281).
+The tables are made when first read ([`lazy-libraries.js`](../../modules/core/src/layers/win32/lazy-libraries.js)):
+a process that imports kernel32 alone makes a dozen of the ~140, those its start needs and those
+whose factories register a class a program may ask for without loading them.
 To the program they are ordinary DLLs, with headers, an export table and code. So the address
 `GetProcAddress` returns is the one the import was bound to.
 

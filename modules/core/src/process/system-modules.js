@@ -54,8 +54,9 @@ import { imagePlacementOf, installedHeaders } from '../layers/loader/internal/sy
  *
  * @typedef {{ base: number, size: number, entryPoint: number,
  *     addresses: Map<string, number>, ordinals: Map<number, number>,
- *     leftOut: string[], engine: [number, number] }} ModuleLayout
- *     `engine`: the part of the engine's span its exports took for themselves
+ *     leftOut: string[], engine: [number, number], shape: string }} ModuleLayout
+ *     `engine`: the part of the engine's span its exports took for themselves;
+ *     `shape`: its table's names and kinds (`shapeOf`)
  * @typedef {{ names: Map<string, number[]>, end: number }} TrapLayout
  * @typedef {{ modules: Map<string, ModuleLayout>, end: number, engineEnd: number,
  *     traps: TrapLayout | null }}
@@ -74,6 +75,28 @@ import { imagePlacementOf, installedHeaders } from '../layers/loader/internal/sy
  * @type {Map<string, MachineLayout>}
  */
 const LAYOUTS = new Map();
+
+/**
+ * A table's names and what each is - code, data, a handler, guest code, its
+ * arguments' bytes - hashed: two tables of one shape make the same module.
+ *
+ * @param {Record<string, any>} table
+ * @returns {string}
+ */
+export function shapeOf(table){
+    let hash = 0x811c9dc5;
+    for (const [exported, fn] of Object.entries(table))
+    {
+        const text = `;${exported}:${fn.code ? 'c' : ''}${fn.long ? 'l' : ''}${fn.data ? 'd' : ''}`
+            + `${fn.handler ? 'h' : ''}${fn.guest ? 'g' : ''}${fn.guestLong ? 'G' : ''}`
+            + `${fn.argBytes ?? ''}`;
+        for (let index = 0; index < text.length; index++)
+        {
+            hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+        }
+    }
+    return (hash >>> 0).toString(16);
+}
 
 /**
  * @param {SystemModulesHost} host
@@ -242,16 +265,19 @@ export function createSystemModules(host){
 
     /**
      * A table of ours made a module in guest memory, after the ones before it.
+     * The table may be given as what makes it: where the machine's layout has
+     * the module, nothing makes it until the module is placed.
      *
-     * @param {string} name @param {Record<string, any>} table
+     * @param {string} name @param {Record<string, any> | (() => Record<string, any>)} tableOf
      * @param {string} [region]  Its region's name, for one beside a library of the same name.
      */
-    const build = (name, table, region = name)=>{
+    const build = (name, tableOf, region = name)=>{
         const known = layout?.modules.get(region);
         if (known && known.base === next)
         {
-            return follow(name, table, region, known);
+            return follow(name, tableOf, region, known);
         }
+        const table = typeof tableOf === 'function' ? tableOf() : tableOf;
         /** @type {string[]} */
         const left = [];
         const engineFrom = host.engine?.at() ?? 0;
@@ -311,6 +337,7 @@ export function createSystemModules(host){
                     Number(placed.ordinalOf(exported)), at])),
                 leftOut: left,
                 engine: [engineFrom, engineTo],
+                shape: shapeOf(table),
             });
         }
         return recordOf(name, base, placed.size, placed.entryPoint, new Map(entries),
@@ -324,14 +351,23 @@ export function createSystemModules(host){
      * every process was told; where they jump - a stub, a guest routine - is
      * this process's own, written with them.
      *
-     * @param {string} name @param {Record<string, any>} table @param {string} region
-     * @param {ModuleLayout} known
+     * @param {string} name @param {Record<string, any> | (() => Record<string, any>)} tableOf
+     * @param {string} region @param {ModuleLayout} known
      */
-    const follow = (name, table, region, known)=>{
+    const follow = (name, tableOf, region, known)=>{
         leftOutAt64.push(...known.leftOut);
         const held = loader.hold({
             name, base: known.base, size: known.size, entryPoint: known.entryPoint, long, region,
             exportsAt: ()=>{
+                const table = typeof tableOf === 'function' ? tableOf() : tableOf;
+                // The layout was keyed by what can be known before a table is
+                // made (`tablesFingerprint`); a table made otherwise here
+                // would be written over addresses laid out for another.
+                if (shapeOf(table) !== known.shape)
+                {
+                    throw new Error(`system modules: ${name} is not the table the machine's`
+                        + ' layout was made of');
+                }
                 const made = ()=>exportsOf(name, table, ()=>{});
                 const exports = host.engine
                     ? host.engine.within(known.engine[0], known.engine[1], made) : made();

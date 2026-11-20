@@ -98,7 +98,7 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
 import { createInputRoute } from './layers/input/route.js';
 import { mobileOrSafari, tailCallsFault, withoutFaultingTailCalls } from './tail-calls.js';
 import { createModuleTable, pathKey } from './process/module-table.js';
-import { createSystemModules } from './process/system-modules.js';
+import { createSystemModules, shapeOf } from './process/system-modules.js';
 
 /** FNV-1a, 32 bits: a call's number for telling its repeats apart in the journal. */
 const FNV_OFFSET = 0x811c9dc5;
@@ -2680,16 +2680,18 @@ const LIBRARY_ALIGN = 0x10000;
 const ENGINE_CODE_BYTES = 0x400000;
 
 /**
- * What a process's engine libraries are, as one string: every library's name
- * and each export's name and what it is (code, x86-64 code, data, a trap,
- * guest code, its argument bytes), the numbers they are imported by and the
- * window they are laid out in. Two processes with the same lay their modules
- * out the same (`process/system-modules.js`): a hash, not the text.
+ * What a process's engine libraries are, as far as is known before any of
+ * them is made (`win32/lazy-libraries.js`): every library's name, the faces'
+ * tables whole, the numbers they are imported by, the Windows the machine is
+ * and the window they are laid out in. Two processes with the same lay their
+ * modules out the same (`process/system-modules.js`), and a module made
+ * otherwise than its layout says is refused where it is placed (`shapeOf`):
+ * a hash, not the text.
  *
- * @param {Record<string, Record<string, any>>} libraries
+ * @param {string[]} libraries
  * @param {Record<string, Record<string, any>>} faces
  * @param {Record<string, Record<number, string>>} ordinals
- * @param {{ long: boolean, start: number, end: number }} window
+ * @param {{ long: boolean, start: number, end: number, windows: string }} window
  */
 export function tablesFingerprint(libraries, faces, ordinals, window){
     let hash = 0x811c9dc5;
@@ -2700,19 +2702,14 @@ export function tablesFingerprint(libraries, faces, ordinals, window){
             hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
         }
     };
-    mix(`${window.long}|${window.start}|${window.end}`);
-    for (const [kind, tables] of /** @type {const} */ ([['library', libraries], ['face', faces]]))
+    mix(`${window.long}|${window.start}|${window.end}|${window.windows}`);
+    for (const name of libraries)
     {
-        for (const [name, table] of Object.entries(tables))
-        {
-            mix(`|${kind}:${name}:${JSON.stringify(ordinals[name] ?? {})}`);
-            for (const [exported, fn] of Object.entries(table))
-            {
-                mix(`;${exported}:${fn.code ? 'c' : ''}${fn.long ? 'l' : ''}${fn.data ? 'd' : ''}`
-                    + `${fn.handler ? 'h' : ''}${fn.guest ? 'g' : ''}${fn.guestLong ? 'G' : ''}`
-                    + `${fn.argBytes ?? ''}`);
-            }
-        }
+        mix(`|library:${name}:${JSON.stringify(ordinals[name] ?? {})}`);
+    }
+    for (const [name, table] of Object.entries(faces))
+    {
+        mix(`|face:${name}:${JSON.stringify(ordinals[name] ?? {})}:${shapeOf(table)}`);
     }
     return (hash >>> 0).toString(16);
 }
@@ -6973,13 +6970,16 @@ async function buildApp(options){
     // The drawing APIs are libraries like any other as far as a program is
     // concerned: it imports Direct3DCreate8 exactly as it imports CreateFileA,
     // and nothing about how they are reached should differ.
-    const allLibraries = {
-        ...win32.libraries(),
-        ...graphics.libraries?.() ?? {},
-        ...audio.libraries?.() ?? {},
-        ...input.libraries?.() ?? {},
-        ...core.api('media').libraries?.() ?? {},
-    };
+    // Merged name by name as each layer keeps it: win32's are made when first
+    // read, and a spread would make them all.
+    /** @type {Record<string, Record<string, any>>} */
+    const allLibraries = {};
+    for (const tables of [win32.libraries(), graphics.libraries?.() ?? {},
+        audio.libraries?.() ?? {}, input.libraries?.() ?? {},
+        core.api('media').libraries?.() ?? {}])
+    {
+        Object.defineProperties(allLibraries, Object.getOwnPropertyDescriptors(tables));
+    }
     /**
      * The names answered from this engine's table even beside a file the
      * program brought: the KnownDLLs, and the redistributable runtimes the
@@ -7123,14 +7123,15 @@ async function buildApp(options){
             within: (from, to, place)=>engineCode.within(from, to, place),
         },
         traps: cpu.trapLayout,
-        fingerprint: tablesFingerprint(allLibraries, faceTables,
-            ordinalsOf, { long, start: MODULE_BASE, end: LIBRARIES_END }),
+        fingerprint: tablesFingerprint(Object.keys(allLibraries), faceTables, ordinalsOf,
+            { long, start: MODULE_BASE, end: LIBRARIES_END,
+                windows: JSON.stringify(options.windows ?? null) }),
     });
     const { leftOutAt64 } = systemModules;
     builtLibraries = allLibraries;
-    for (const [name, table] of Object.entries(allLibraries))
+    for (const name of Object.keys(allLibraries))
     {
-        const record = systemModules.build(name, table);
+        const record = systemModules.build(name, ()=>allLibraries[name]);
         modules.add(record, moduleKeyOf(name));
     }
     /**
