@@ -11,7 +11,10 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { createMixer } from './mixer.js';
-import { GLOBAL_HEADER_INT32, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES } from './mix.js';
+import {
+    GLOBAL_HEADER_INT32, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES, READ, SLOT_HEADER_INT32,
+    slotHeaderOffset,
+} from './mix.js';
 import { readSoundTable } from '../../../host/sound-meter.js';
 
 const MIX_PATH = fileURLToPath(new URL('./mix.js', import.meta.url));
@@ -167,13 +170,14 @@ test('MIXED_FRAMES and READ advance by exactly what was mixed', ()=>{
 
     const Processor = loadWorkletClass();
     const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
+    const header = new Int32Array(mixer.table, slotHeaderOffset(track.slot), SLOT_HEADER_INT32);
     processor.process([], [outputBlock(16)]);
     assert.equal(track.played(), 16);
-    assert.equal(track.playedBytes(), 32);
+    assert.equal(Atomics.load(header, READ), 32);
 
     processor.process([], [outputBlock(16)]);
     assert.equal(track.played(), 32);
-    assert.equal(track.playedBytes(), 64);
+    assert.equal(Atomics.load(header, READ), 64);
 
     // The last 8 frames: a short block, the rest of the output left silent.
     const outputs = [outputBlock(16)];

@@ -5446,6 +5446,7 @@ export function createWin32Module(){
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
                     divergence: config?.divergence,
+                    windows,
                 }),
 
                 // The Windows Installer: packages read where they lie and

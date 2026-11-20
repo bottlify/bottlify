@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAudioClients, readStreamFormat, validateFormat } from './audio-client.js';
 import { LONG_RSP, callLong } from '../../bridge/internal/long-machine.fixture.js';
+import { createMixer } from '../../audio/output/mixer.js';
+import { READ, WRITTEN, SLOT_HEADER_INT32, slotHeaderOffset } from '../../audio/output/mix.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -100,8 +102,12 @@ function fakeTrack(){
     };
 }
 
-/** @param {{ output?: boolean }} [options] */
+/**
+ * @param {{ output?: boolean | 'table' }} [options]  `table`: the tracks the
+ *     audio layer's shared table gives, the audio adapter's, not fakes.
+ */
 function setup(options = {}){
+    const table = options.output === 'table' ? createMixer({ shared: true }) : null;
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let time = 1000;
@@ -148,7 +154,8 @@ function setup(options = {}){
         now: ()=>time,
         output: options.output ? ()=>({
             open: (/** @type {any} */ wanted)=>{
-                const track = Object.assign(fakeTrack(), { format: wanted });
+                const track = table ? table.open(wanted)
+                    : Object.assign(fakeTrack(), { format: wanted });
                 tracks.push(track);
                 return track;
             },
@@ -182,7 +189,7 @@ function setup(options = {}){
         return out;
     };
     const s = {
-        view, timers, whens, tracks,
+        view, timers, whens, tracks, table,
         /** The same object's other interface. @param {number} pointer @param {string} id */
         as: (pointer, id)=>publish(records.get(pointer).object, `{${id}}`),
         /** @param {number} ms */
@@ -446,7 +453,7 @@ for (const writer of WRITERS)
  * @param {number} lateMs
  */
 function fed(halves, deviceRate, burstMs, lateMs){
-    const s = setup({ output: true });
+    const s = setup({ output: 'table' });
     const client = s.activate();
     s.bytes.set(format(), FORMAT);
     const shared = [0, EVENTCALLBACK, 0, 0, 0, 0, FORMAT, 0];
@@ -459,6 +466,9 @@ function fed(halves, deviceRate, burstMs, lateMs){
     s.write(render, size);
     assert.equal(s.call(client, 'Start'), S_OK);
     const [track] = s.tracks;
+    // The audio thread's end of the slot: what it read, against what was written.
+    const header = new Int32Array(/** @type {any} */ (s.table).table, slotHeaderOffset(track.slot),
+        SLOT_HEADER_INT32);
     const pull = /** @type {()=>boolean} */ (s.whens[0]);
     const every = s.timers[0].delay;
     const period = RATE / 100;
@@ -478,8 +488,9 @@ function fed(halves, deviceRate, burstMs, lateMs){
         {
             const want = Math.floor(owed);
             owed -= want;
-            const heard = Math.min(want, track.pending());
-            track.heard += heard * BLOCK;
+            const there = (Atomics.load(header, WRITTEN) - Atomics.load(header, READ)) / BLOCK;
+            const heard = Math.min(want, there);
+            Atomics.add(header, READ, heard * BLOCK);
             if (ms > 200)
             {
                 starved += want - heard;

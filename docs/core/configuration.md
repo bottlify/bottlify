@@ -93,7 +93,7 @@ at a time. `quantum` (Debugging) fixes every turn at the number given.
 | --- | --- | --- |
 | `windows` | `'winxp'` | The Windows version the program sees ([api.md](api.md)). |
 | `machine` | the first program's width | A 32- or 64-bit Windows ([api.md](api.md)). |
-| `win32.trustedRoots` | Microsoft Root Authority | The machine's trusted roots, as DER bytes or base64: what `WinVerifyTrust` accepts and what crypt32's ROOT store holds, which `CertGetCertificateChain` ends a chain at. An empty list trusts nothing. |
+| `win32.trustedRoots` | the roots a Windows 7 machine whose roots are kept up to date carries for code signing: Microsoft's (Root Authority, Root Certificate Authority, its 2010 and 2011), Thawte Timestamping CA, DigiCert Assured ID Root CA and VeriSign Universal Root (`wintrust/roots.js`) | The machine's trusted roots, as DER bytes or base64: what `WinVerifyTrust` accepts and what crypt32's ROOT store holds, which `CertGetCertificateChain` ends a chain at. An empty list trusts nothing. |
 | `win32.steam` | none | A signed-in Steam account (its Steam ID, name and the app ids its licences grant, as the page established with the person's own sign-in): the run then has a Steam client running, which a game's Steamworks calls reach, answering an app as owned only when it is listed. |
 | `win32.network` | loopback | The transport under Winsock, when the engine runs on the calling thread; from a page, `network` ([api.md](api.md#network)). |
 

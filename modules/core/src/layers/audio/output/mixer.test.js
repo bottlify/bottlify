@@ -12,7 +12,7 @@ import { createRing } from './ring.js';
 import {
     WRITTEN, DROP_TO, READ, STATE, STATE_FREE, SLOTS, MIXED_FRAMES, slotHeaderOffset, slotPcmOffset,
     SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto, FRESH, STREAMING, BASE,
-    STATE_OPEN, STATE_CLOSING,
+    STATE_OPEN, STATE_CLOSING, DEVICE_LEAD_MS,
 } from './mix.js';
 
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
@@ -428,11 +428,12 @@ test('with a shared table, pump() allocates no Float32Array', ()=>{
     }
 });
 
-test('with a shared table, playedBytes() credits a one-frame probe whole '
-    + 'once the reader\'s READ passes it', ()=>{
+test('with a shared table, playedBytes() credits a one-frame probe whole: held, once the '
+    + 'reader\'s READ passes it; playing, at once, within the adapter\'s lead', ()=>{
     const mixer = createMixer({ shared: true });
     const track = mixer.open(DIRECT); // the output's own rate: no resampling in the way
     const probe = pcm16([1000, -1000]);
+    track.paused = true;
     track.write(probe);
     assert.equal(track.playedBytes(), 0, 'not played until the reader has looked at it');
 
@@ -441,6 +442,41 @@ test('with a shared table, playedBytes() credits a one-frame probe whole '
     Atomics.store(header, READ, probe.length);
 
     assert.equal(track.playedBytes(), probe.length, 'credited whole once READ passed it');
+
+    const playing = mixer.open(DIRECT);
+    playing.write(probe);
+    assert.equal(playing.playedBytes(), probe.length, 'playing: taken whole at once');
+});
+
+test('the audio adapter: a track tells what it took DEVICE_LEAD_MS ahead of the audio thread,'
+    + ' never past what was written, never back, and not while it is held', ()=>{
+    const lead = 48000 * DEVICE_LEAD_MS / 1000 * 4;
+    const shared = createMixer({ shared: true });
+    const table = shared.open(DIRECT);
+    const { header } = slotView(shared, table.slot);
+    table.paused = true;
+    table.write(new Uint8Array(lead * 2));
+    assert.equal(table.playedBytes(), 0, 'held, as a stream before its Start: not taken');
+    table.paused = false;
+    assert.equal(table.playedBytes(), lead, 'let go: the lead taken at once');
+    Atomics.store(header, READ, 1000);
+    assert.equal(table.playedBytes(), 1000 + lead, 'the lead ahead of what the reader read');
+    Atomics.store(header, READ, lead * 2 - 4);
+    assert.equal(table.playedBytes(), lead * 2, 'never past what was written');
+    table.paused = true;
+    Atomics.store(header, READ, lead);
+    assert.equal(table.playedBytes(), lead * 2, 'never back');
+    table.reset();
+    assert.equal(table.playedBytes(), 0, 'from zero after a reset');
+
+    // The engine's own ring, where there is no shared memory: the same rule.
+    const engine = createMixer({ sampleRate: 48000 });
+    const ring = engine.open(DIRECT);
+    ring.paused = true;
+    ring.write(new Uint8Array(lead * 2));
+    assert.equal(ring.playedBytes(), 0, 'not while held');
+    ring.paused = false;
+    assert.equal(ring.playedBytes(), lead, 'the lead ahead of a device that played nothing');
 });
 
 test('with a shared table, a backlog past the depth sets DROP_TO', ()=>{

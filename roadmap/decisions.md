@@ -1408,6 +1408,20 @@ a managed framework's SetData on a render target threw. A source that will not l
 answered as its lock was: D3DX reads one through GetRenderTargetData, which is not done here.
 *2026-11-18.*
 
+**A281. A queue track tells its sound taken 80 ms before the audio thread plays it (the audio adapter).**
+Windows tells a program its sound was played when its audio engine took it from the buffer, and
+what the engine took sits in the engine and the card ahead of the speaker. Here the speaker is the
+page's audio thread, which plays on its own clock whatever the engine's thread is doing, and that
+thread is held now and then - a busy frame's turn, 38-42 ms at worst measured in a game under a
+virtual machine. Told only what the audio thread had read, a program with a short queue went
+short there: waveOut's three buffers of 20 ms on every Windows, WASAPI's 20 ms buffer a dozen
+blocks a second. So `playedBytes` of every queue track runs `DEVICE_LEAD_MS` (80 ms,
+`audio/output/mix.js`) ahead of the audio thread, never past what was written and not while the
+track is held (a stream before its Start); `played()`, by which films are timed, stays what was
+heard. The sound comes that much later than it was written. A DirectSound voice is read straight
+from its copy and keeps its own cursor (its write cursor 30 ms ahead).
+*2026-11-20.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
