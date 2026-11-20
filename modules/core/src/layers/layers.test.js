@@ -124,3 +124,24 @@ test('two graphs in one realm each answer for their own layers, and one going le
         (/** @type {any} */ error)=>error.code === 'NOT_IMPLEMENTED',
         'the parent\'s own dispose reached the parent\'s instance');
 });
+
+test('a build is taken down once however many times it is disposed', async()=>{
+    const core = await assembleModules({});
+    /** @type {Map<string, number>} */
+    const calls = new Map();
+    for (const module of core.modules)
+    {
+        const own = module.dispose.bind(module);
+        module.dispose = async()=>{
+            calls.set(module.name, (calls.get(module.name) ?? 0) + 1);
+            // A teardown that waits, as the cpu layer's waits for its store.
+            await new Promise(resolve=>setTimeout(resolve, 1));
+            return own();
+        };
+    }
+    await Promise.all([core.dispose(), core.dispose()]);
+    await core.dispose();
+    assert.deepEqual([...calls.values()].filter(count=>count !== 1), [],
+        'each layer is disposed exactly once');
+    assert.equal(calls.size, core.modules.length);
+});

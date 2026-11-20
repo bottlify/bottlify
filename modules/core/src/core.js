@@ -35,6 +35,15 @@ export async function assembleModules(config = {}){
         host.provide(entry.name, api);
     }
 
+    /**
+     * The teardown under way, once begun: a second dispose - the process's own
+     * and the run's ending every process it stands - waits for the first
+     * rather than taking down modules already halfway gone.
+     *
+     * @type {Promise<void> | null}
+     */
+    let disposing = null;
+
     /** @type {import("./system/contract.js").CoreInstance} */
     return {
         modules: plan.map(entry=>entry.module),
@@ -51,11 +60,14 @@ export async function assembleModules(config = {}){
             return plan.filter(entry=>only === null || entry.module.name === only)
                 .map(entry=>entry.module.diagnostics());
         },
-        async dispose(){
-            for (const entry of [...plan].reverse())
-            {
-                await entry.module.dispose();
-            }
+        dispose(){
+            disposing ??= (async()=>{
+                for (const entry of [...plan].reverse())
+                {
+                    await entry.module.dispose();
+                }
+            })();
+            return disposing;
         },
     };
 }

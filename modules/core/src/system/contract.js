@@ -65,7 +65,8 @@
  * @property {(name: string) => ModuleApi} api  Public API of a module by name.
  * @property {(only?: string | null) => ModuleDiagnostics[]} diagnostics  Diagnostics of all
  *           modules, or of the one named.
- * @property {() => Promise<void>} dispose  Stop all modules in reverse order.
+ * @property {() => Promise<void>} dispose  Stop all modules in reverse order, once: a call
+ *           while it runs or after waits for the same teardown.
  */
 
 // Intentionally no runtime exports: types are used through JSDoc-import.
