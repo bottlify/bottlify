@@ -130,7 +130,9 @@ const slashed = path=>(path.endsWith('\\') ? path : `${path}\\`);
  */
 export function machineProperties(machine){
     const { windows } = machine;
-    const folders = shellFolders(windows);
+    // The 32-bit components' folders, ProgramFilesFolder Program Files (x86) on a
+    // 64-bit Windows; the 64-bit ones' are the ...64Folder properties.
+    const folders = shellFolders(windows, { machine64: machine.amd64 === true });
     const version = installerVersion(windows);
     const now = machine.now();
     /** @param {number} value */
@@ -158,8 +160,8 @@ export function machineProperties(machine){
         ['TempFolder', slashed(machine.tempFolder)],
         ['ProgramFilesFolder', slashed(folders.ProgramFiles)],
         ['CommonFilesFolder', slashed(folders.CommonFiles)],
-        ['ProgramFiles64Folder', amd64 ? slashed(folders.ProgramFiles) : ''],
-        ['CommonFiles64Folder', amd64 ? slashed(folders.CommonFiles) : ''],
+        ['ProgramFiles64Folder', amd64 ? slashed(folders.ProgramFiles64) : ''],
+        ['CommonFiles64Folder', amd64 ? slashed(folders.CommonFiles64) : ''],
         ['FontsFolder', slashed(folders.Fonts)],
         ['AppDataFolder', slashed(folders.AppData)],
         ['LocalAppDataFolder', slashed(folders['Local AppData'])],

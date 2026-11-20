@@ -320,6 +320,11 @@ flowchart TD
   Installer writes each component's keys where its width's view has them (`registryPath`), as
   the 64-bit service does, and describes the 64-bit machine (`VersionNT64`, `Msix64`,
   `System64Folder`, `ProgramFiles64Folder`; `SystemFolder` is SysWOW64 there).
+- **Program Files (x86)**: on a 64-bit machine a 32-bit process's program folders are
+  `Program Files (x86)` - SHGetFolderPath's, the `ProgramFiles` variable's, the Windows
+  Installer's `ProgramFilesFolder` and the `ProgramFilesDir` its registry view reads - and both
+  widths' are named (`ProgramFiles(x86)`, `ProgramW6432`, CSIDL_PROGRAM_FILESX86,
+  `ProgramFilesDir (x86)`), as `shellFolders` lays them out for the process's width.
 - **A custom action library of the other width** - a 64-bit one in a 32-bit installation, as the
   .NET Framework's x64 package has - runs as Windows Installer runs it: in a custom action server,
   `msiexec.exe -Embedding` of the library's width, which loads it and calls its entry while the

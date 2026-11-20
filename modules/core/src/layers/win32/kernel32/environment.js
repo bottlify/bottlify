@@ -93,7 +93,7 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  */
 export function defaultEnvironment(windows, folders, processors = 1, process = {}){
     const { allUsers, public: shared } = windows.profiles;
-    return {
+    return sortedBlock({
         ALLUSERSPROFILE: allUsers,
         APPDATA: folders.AppData,
         ...shared === null ? {} : { LOCALAPPDATA: folders['Local AppData'] },
@@ -111,13 +111,34 @@ export function defaultEnvironment(windows, folders, processors = 1, process = {
             ProgramData: folders['Common AppData'],
             PUBLIC: shared,
         },
+        // The program folders, the process's own: on a 64-bit Windows a
+        // 32-bit process's are Program Files (x86), and both widths are named
+        // too, as WOW64 sets them.
+        ProgramFiles: folders.ProgramFiles,
+        CommonProgramFiles: folders.CommonFiles,
+        ...process.long || process.wow64 ? {
+            'ProgramFiles(x86)': folders.ProgramFilesX86,
+            'CommonProgramFiles(x86)': folders.CommonFilesX86,
+            ProgramW6432: folders.ProgramFiles64,
+            CommonProgramW6432: folders.CommonFiles64,
+        } : {},
         SystemRoot: WINDOWS_DIRECTORY,
         TEMP: `${WINDOWS_DIRECTORY}\\TEMP`,
         TMP: `${WINDOWS_DIRECTORY}\\TEMP`,
         USERPROFILE: folders.Profile,
         windir: WINDOWS_DIRECTORY,
-    };
+    });
 }
+
+/**
+ * Variables in the order Windows keeps the block: sorted by name, without
+ * regard to case.
+ *
+ * @param {Record<string, string>} variables
+ * @returns {Record<string, string>}
+ */
+const sortedBlock = variables=>Object.fromEntries(Object.entries(variables)
+    .sort(([left], [right])=>(left.toUpperCase() < right.toUpperCase() ? -1 : 1)));
 
 /**
  * A registry value an environment block is built from: its name, its text,

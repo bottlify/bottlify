@@ -88,7 +88,9 @@ test('a 64-bit Windows names both widths\' folders: SystemFolder is SysWOW64, Sy
     assert.equal(wide.getProperty('VersionNT64'), '601');
     assert.equal(wide.getProperty('Msix64'), '6');
     assert.equal(wide.getProperty('Intel'), '6', 'Intel is set on either');
-    assert.equal(wide.getProperty('ProgramFiles64Folder'), wide.getProperty('ProgramFilesFolder'));
+    assert.equal(wide.getProperty('ProgramFilesFolder'), 'C:\\Program Files (x86)\\');
+    assert.equal(wide.getProperty('ProgramFiles64Folder'), 'C:\\Program Files\\');
+    assert.equal(wide.getProperty('CommonFilesFolder'), 'C:\\Program Files (x86)\\Common Files\\');
     const narrow = session(false);
     assert.equal(narrow.getProperty('SystemFolder'), `${windows}system32\\`);
     for (const name of ['System64Folder', 'VersionNT64', 'Msix64', 'ProgramFiles64Folder',

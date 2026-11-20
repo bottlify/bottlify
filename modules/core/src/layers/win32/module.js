@@ -600,12 +600,14 @@ export function createWin32Module(){
             // What the running program is told, which Windows 10 decides from
             // what the program says it knows; everything else keeps the truth.
             const reported = reportedVersion(windows, config?.compatibility);
-            const folders = shellFolders(windows);
             const pointerSize = config?.bits === 64 ? 8 : 4;
             // The machine is a 64-bit Windows when the run says so, which its
             // 64-bit processes always do: a 32-bit process on it runs under
             // WOW64 (`roadmap/x64.md`).
             const machine64 = config?.machine === 'amd64' || pointerSize === 8;
+            // The shell's folders as this process has them: a 32-bit one's
+            // program folder on a 64-bit Windows is Program Files (x86).
+            const folders = shellFolders(windows, { machine64, long: pointerSize === 8 });
             /**
              * The programs this build runs in place of the system's, standing as
              * files where Windows keeps them, each as wide as it is there.
@@ -4670,7 +4672,7 @@ export function createWin32Module(){
                         volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
                         systemLibraries: systemLibraryNames,
                         systemPrograms: systemProgramFiles,
-                        directories: shellFolderDirectories(windows),
+                        directories: shellFolderDirectories(windows, machine64),
                         machine64,
                         asSystem: unredirectedRun,
                         imagePath: ()=>modules.imagePath(),

@@ -92,3 +92,22 @@ test('a 64-bit Windows has its machine keys in both views: a 32-bit process find
     assert.equal(plain.open(/** @type {any} */ (plain.root(HKEY_LOCAL_MACHINE)),
         'SOFTWARE\\Wow6432Node'), null, 'a 32-bit Windows has one view');
 });
+
+test('each view\'s CurrentVersion names its own program folder, and both widths\'', ()=>{
+    const hive = createHive({ machine64: true });
+    /** @param {32 | 64} width @param {string} name */
+    const value = (width, name)=>{
+        const view = wow64Hive(hive, width);
+        const key = view.open(view.root(HKEY_LOCAL_MACHINE),
+            'SOFTWARE\\Microsoft\\Windows\\CurrentVersion');
+        const found = view.getValue(key, name);
+        return found ? new TextDecoder('latin1').decode(found.data).replace(/\0.*$/, '') : null;
+    };
+    assert.equal(value(32, 'ProgramFilesDir'), 'C:\\Program Files (x86)');
+    assert.equal(value(64, 'ProgramFilesDir'), 'C:\\Program Files');
+    for (const width of /** @type {(32 | 64)[]} */ ([32, 64]))
+    {
+        assert.equal(value(width, 'ProgramFilesDir (x86)'), 'C:\\Program Files (x86)');
+        assert.equal(value(width, 'ProgramW6432Dir'), 'C:\\Program Files');
+    }
+});
