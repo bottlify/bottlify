@@ -371,8 +371,12 @@ export function createFakeDevice(options = {}){
             calls.push({ op: 'createView', texture, view });
             return view;
         };
+        // A destroyed texture's memory goes at once, as a device's does,
+        // whoever still holds the object.
         texture.destroy = ()=>{
             calls.push({ op: 'destroyTexture', texture });
+            texture.destroyed = true;
+            texture.bytes = null;
         };
         calls.push({ op: 'createTexture', texture, descriptor });
         return texture;
@@ -404,6 +408,11 @@ export function createFakeDevice(options = {}){
                 const y = side.origin?.y ?? 0;
                 return { bytes: texture.bytes, pitch, at: y * pitch + x * texture.bytesPerPixel,
                     bytesPerPixel: texture.bytesPerPixel };
+            }
+            if (!side.buffer.bytes)
+            {
+                refuse('a copy names a destroyed buffer');
+                return null;
             }
             return { bytes: side.buffer.bytes, pitch: side.bytesPerRow ?? 0,
                 at: side.offset ?? 0, bytesPerPixel: 0 };
@@ -695,8 +704,15 @@ export function createFakeDevice(options = {}){
          * @param {number} destinationOffset @param {number} size
          */
         encoder.copyBufferToBuffer = (source, sourceOffset, destination, destinationOffset, size)=>{
-            deferred.push(()=>destination.bytes.set(
-                source.bytes.subarray(sourceOffset, sourceOffset + size), destinationOffset));
+            deferred.push(()=>{
+                if (!source.bytes || !destination.bytes)
+                {
+                    refuse('copyBufferToBuffer: a destroyed buffer');
+                    return;
+                }
+                destination.bytes.set(source.bytes.subarray(sourceOffset, sourceOffset + size),
+                    destinationOffset);
+            });
             calls.push({ op: 'copyBufferToBuffer', encoder, source, sourceOffset,
                 destination, destinationOffset, size });
         };
@@ -712,6 +728,11 @@ export function createFakeDevice(options = {}){
         encoder.resolveQuerySet = (querySet, firstQuery, queryCount, destination, at)=>{
             const destinationOffset = at;
             deferred.push(()=>{
+                if (!destination.bytes)
+                {
+                    refuse('resolveQuerySet: a destroyed buffer');
+                    return;
+                }
                 const view = new DataView(destination.bytes.buffer);
                 for (let index = 0; index < queryCount; index++)
                 {
@@ -768,8 +789,11 @@ export function createFakeDevice(options = {}){
         };
         buffer.getMappedRange = ()=>buffer.bytes.buffer;
         buffer.unmap = ()=>{};
+        // A destroyed buffer's memory goes at once, as a device's does.
         buffer.destroy = ()=>{
             calls.push({ op: 'destroy', buffer });
+            buffer.destroyed = true;
+            buffer.bytes = null;
         };
         calls.push({ op: 'createBuffer', createBuffer: buffer, descriptor });
         return buffer;
@@ -874,6 +898,11 @@ export function createFakeDevice(options = {}){
             const length = size === undefined ? data.byteLength - dataOffset : size;
             stats.writes++;
             stats.written += length;
+            if (buffer.destroyed)
+            {
+                refuse('writeBuffer: a destroyed buffer');
+                return;
+            }
             if (quiet)
             {
                 // One copy, as a device makes of what it is handed.

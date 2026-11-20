@@ -1410,6 +1410,19 @@ function describe(result, context, calls, symbols){
             say(`    texture uploads=${graphics.uploads.textures}`
                 + ` staged=${graphics.uploads.staged} bytes=${graphics.uploads.bytes}`);
         }
+        // What the graphics worker's device holds at the end, by label: a
+        // run that made and let go of several devices should hold one's.
+        const gpuHeld = result.gpuMemory;
+        if (gpuHeld)
+        {
+            const mb = (/** @type {number} */ bytes)=>(bytes / 2 ** 20).toFixed(1);
+            say(`    GPU holds: buffers ${gpuHeld.buffers.count} (${mb(gpuHeld.buffers.bytes)} MB),`
+                + ` textures ${gpuHeld.textures.count} (${mb(gpuHeld.textures.bytes)} MB);`
+                + ` made ${gpuHeld.made.buffers} buffers, ${gpuHeld.made.textures} textures;`
+                + ` dropped without destroy: ${JSON.stringify(gpuHeld.droppedWithoutDestroy)}`);
+            say(`      heaviest buffer kinds: ${gpuHeld.heaviestBufferKinds.join(', ') || 'none'}`);
+            say(`      heaviest texture kinds: ${gpuHeld.heaviestTextureKinds.join(', ') || 'none'}`);
+        }
         // How often a present waited for the device, and how far behind the
         // device ever was: a run on a slow adapter goes at the device's pace.
         const latency = graphics.presenter?.latency;
