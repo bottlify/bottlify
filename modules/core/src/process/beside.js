@@ -1124,7 +1124,7 @@ export function processesBeside(deps){
  *
  * @returns {{ promise: Promise<void>, settle: () => void }}
  */
-export function settled(){
+function settled(){
     /** @type {() => void} */
     let settle = ()=>{};
     const promise = new Promise(resolve=>{
@@ -1134,14 +1134,14 @@ export function settled(){
 }
 
 /** What a process Windows found no memory for ends with (STATUS_NO_MEMORY). */
-export const STATUS_NO_MEMORY = 0xc0000017;
+const STATUS_NO_MEMORY = 0xc0000017;
 
 /**
  * What of a run's options never goes to a process in a worker of its own:
  * the system's -- its drives, session, bundle, devices and bus -- which the
  * process reaches across its link, and what a process is handed of its own.
  */
-export const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
+const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
     'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
     'executable', 'inheritedFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
     'com', 'memoryCredit', 'memoryHolder']);
@@ -1154,7 +1154,7 @@ export const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'b
  * @param {any} value @param {number} [depth]
  * @returns {any}
  */
-export function portable(value, depth = 0){
+function portable(value, depth = 0){
     if (value === null || typeof value !== 'object')
     {
         return typeof value === 'function' || typeof value === 'symbol' ? undefined : value;
@@ -1187,7 +1187,7 @@ export function portable(value, depth = 0){
  *
  * @param {import('../app-options.js').AppOptions} options
  */
-export function portableOptions(options){
+function portableOptions(options){
     return portable(Object.fromEntries(Object.entries(options)
         .filter(([key])=>!SYSTEM_OPTIONS.has(key))));
 }
