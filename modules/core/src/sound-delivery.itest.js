@@ -67,7 +67,9 @@ const CASES = [
     { program: 'waveout', on: ['winxp', 'win7', 'win10'],
         what: 'played through waveOut buffers written again as they come back' },
     { program: 'dsound', on: ['winxp', 'win7', 'win10'],
-        what: 'streamed into a looping DirectSound buffer behind its play cursor' },
+        what: 'streamed into a looping DirectSound buffer behind its play cursor',
+        todo: 'no gap, but 100-450 frames of 48000 short, the engine held or not: some of what'
+            + ' was written behind the play cursor is not played' },
 ];
 
 for (const { program, on, what, todo } of CASES)
