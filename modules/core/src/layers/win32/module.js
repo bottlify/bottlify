@@ -23,7 +23,7 @@ import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
 import { createRichedLibraries } from './riched/libraries.js';
-import { createLazyLibraries } from './lazy-libraries.js';
+import { createLazyLibraries, CLASS_SERVERS } from './lazy-libraries.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
@@ -875,7 +875,26 @@ export function createWin32Module(){
             };
 
             // The libraries, each made when first asked for (`lazy-libraries.js`).
-            const lazyLibraries = createLazyLibraries();
+            // One whose factory registers a COM class it is not known to
+            // register is a server nobody finds until it is made: refused.
+            // Counted apart from the libraries a making makes on its way.
+            let madeInside = 0;
+            const lazyLibraries = createLazyLibraries({
+                around: (name, make)=>{
+                    const before = com.count();
+                    const insideBefore = madeInside;
+                    const made = make();
+                    const all = com.count() - before;
+                    const own = all - (madeInside - insideBefore);
+                    madeInside = insideBefore + all;
+                    if (own !== 0 && !CLASS_SERVERS.includes(name))
+                    {
+                        throw new Error(`win32: ${name} registers COM classes as it is made;`
+                            + ' it belongs in CLASS_SERVERS');
+                    }
+                    return made;
+                },
+            });
             /** @type {Record<string, Record<string, any>>} */
             const libraries = lazyLibraries.table;
             /** @param {Record<string, () => Record<string, any>>} makers */
@@ -7097,13 +7116,16 @@ export function createWin32Module(){
             // a 64-bit caller's past 4 GiB reaches the handler whole.
             lazyLibraries.each((library, name)=>declareAddresses({ [name]: library },
                 POINTER_ARGUMENTS));
-            // Made at once: what their factories register - COM classes, window
-            // classes - is asked for by a CLSID or a class name by a program
-            // that never loaded the library.
-            for (const name of ['USER32.dll', 'ole32.dll', 'SHELL32.dll', 'windowscodecs.dll'])
-            {
-                void libraries[name];
-            }
+            // The libraries whose factories register COM classes, made when a
+            // class is first not found rather than at the start: a program
+            // may ask for one by its CLSID without loading the library
+            // (`CLASS_SERVERS`, checked by lazy-libraries.itest.js).
+            com.whenMissing(()=>{
+                for (const name of CLASS_SERVERS)
+                {
+                    void libraries[name];
+                }
+            });
 
             /**
              * A function by its name, whichever library exports it: the last

@@ -2634,10 +2634,13 @@ helper shared by several modules and made by whichever is placed first, goes pas
 an address that may differ - a translation through it is made again, nothing more. The program's
 heap is no longer where these routines lie, so it starts the same whatever the engine built.
 The tables themselves are made when first read (`win32/lazy-libraries.js`): what one library takes
-from another is a patch applied when it is made, and a library whose factory registers something a
-program asks for without loading it (USER32's window classes, ole32's, shell32's and WIC's COM
-classes) is made at the start. The layout is keyed by what is known before a table is made - the
+from another is a patch applied when it is made. A library whose factory registers a COM class a
+program may ask for by its CLSID alone (ole32, shell32, windowscodecs: `CLASS_SERVERS`) is made
+when a class is first not found, as Windows loads a class's server only then; one that registers
+a class without being listed there is refused as it is made, and lazy-libraries.itest.js makes
+every library in a later process. The layout is keyed by what is known before a table is made - the
 libraries' names, the faces, the ordinals, the Windows and the window - and a module made otherwise
 than its layout says is refused where it is placed (`shapeOf`), loudly. 50 hello processes in one
-node: heap 13.1 MiB a process before the lazy tables, 10.3 after; 125 ms a start, 92.
+node: heap 622 MiB before the lazy tables, 321 MiB with them and graphics' made the same way
+(and the trap layout shared, not copied); 125 ms a start, 67.
 *2026-11-20.*

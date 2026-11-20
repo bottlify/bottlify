@@ -30,8 +30,19 @@
  * }} LazyLibraries
  */
 
-/** @returns {LazyLibraries} */
-export function createLazyLibraries(){
+/**
+ * The libraries whose factories register COM classes: made when a CLSID is
+ * first not found (`ComRegistry.whenMissing`), so a program that asks for one
+ * by its CLSID alone finds it, as Windows finds its server in the registry.
+ */
+export const CLASS_SERVERS = Object.freeze(['ole32.dll', 'SHELL32.dll', 'windowscodecs.dll']);
+
+/**
+ * @param {{ around?: (name: string, make: () => Library) => Library }} [options]
+ *     `around`: runs each library's making, for a check of what it did
+ * @returns {LazyLibraries}
+ */
+export function createLazyLibraries({ around = (name, make)=>make() } = {}){
     /** @type {Record<string, Library>} */
     const table = {};
     /** @type {Map<string, () => Library>} */
@@ -51,7 +62,7 @@ export function createLazyLibraries(){
             return already;
         }
         const maker = /** @type {() => Library} */ (makers.get(name));
-        const library = maker();
+        const library = around(name, maker);
         // Known before its patches run, so one that reads it back - or reads
         // a library that reads it - finds it rather than making it twice.
         made.set(name, library);
