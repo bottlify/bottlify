@@ -241,6 +241,31 @@ test('an apartment\'s window is made for the apartment\'s thread, not the one th
     assert.deepEqual(windowsFor, ['sta']);
 });
 
+test('an export from the multithreaded apartment makes no window on any thread of it: its calls'
+    + ' go to the worker', async()=>{
+    // 3DMark06's SystemInfo service handed out an object while a thread of its
+    // multithreaded apartment was in a Sleep inside a call it served: the
+    // window was made as that thread's, and its creation's messages ran on it
+    // in the middle of its wait, where Windows runs nothing of the kind.
+    /** @type {unknown[]} */
+    const windowsFor = [];
+    const { remoting, table, calls, OBJECT } = channel({ exporter: 'main', window: true,
+        windowsFor });
+    const reference = await remoting.exportReference(OBJECT, IID_IUNKNOWN, 'main');
+    assert.deepEqual(windowsFor, [], 'no window for a thread of the multithreaded apartment');
+    calls.length = 0;
+    const endpoint = table.endpoint(reference.endpoint);
+    await endpoint?.deliver({ kind: 'addref', object: reference.object });
+    assert.deepEqual(await endpoint?.deliver({ kind: 'release', object: reference.object,
+        count: 2 }), { hr: 0 });
+    assert.ok(calls.length > 0 && calls.every(([, thread])=>thread === 'rpc thread'),
+        'its calls run on the worker');
+    // Without a worker the exporting thread's window is the way in.
+    const without = channel({ exporter: 'main', window: true, worker: false, windowsFor });
+    await without.remoting.exportReference(without.OBJECT, IID_IUNKNOWN, 'main');
+    assert.deepEqual(windowsFor, ['main']);
+});
+
 test('a registered class object is held by the registration\'s count alone', async()=>{
     // ole_server.c: once its clients are gone, a server's class object has
     // the one count CoRegisterClassObject took; the channel takes none of

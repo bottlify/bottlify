@@ -11,7 +11,11 @@
  * it, lets go and exits. Started with -Service, as the manager starts it for
  * COM, it connects its dispatcher, reports itself running from ServiceMain,
  * registers its class object and serves calls from its message loop; like a
- * service it does not leave when its client lets go, only when stopped.
+ * service it does not leave when its client lets go, only when stopped. With
+ * -Mta the client registers the service to start with it too, and the service
+ * joins the multithreaded apartment, where COM hands its calls to a thread of
+ * its own rather than to the message loop. The call it serves waits on the way,
+ * as a service polling a pipe does.
  */
 
 #include "rt.h"
@@ -39,6 +43,8 @@ __declspec(dllimport) long __stdcall RegSetValueExA(void *key, const char *name,
     unsigned type, const void *data, unsigned size);
 __declspec(dllimport) long __stdcall RegCloseKey(void *key);
 __declspec(dllimport) long __stdcall CoInitialize(void *reserved);
+__declspec(dllimport) long __stdcall CoInitializeEx(void *reserved, unsigned model);
+__declspec(dllimport) void __stdcall Sleep(unsigned milliseconds);
 __declspec(dllimport) void __stdcall CoUninitialize(void);
 __declspec(dllimport) long __stdcall CoRegisterClassObject(const GUID *clsid, Object *factory,
     unsigned context, unsigned flags, unsigned *cookie);
@@ -118,6 +124,10 @@ static unsigned __stdcall ObjectRelease(Object *self)
 static long __stdcall GetTypeInfoCount(Object *self, void *count)
 {
     (void)self;
+    for (int i = 0; i < 3; i++)
+    {
+        Sleep(20);
+    }
     *(unsigned *)count = TYPE_INFO_COUNT;
     return S_OK;
 }
@@ -174,17 +184,25 @@ static Object factory = { &factoryVtbl };
 #define SERVICE_ACCEPT_STOP 1
 static const char SERVICE_NAME[] = "BottlifyServed";
 
-static int serviceStart(void)
+/** Whether the command line holds `flag`. */
+static int given(const char *flag)
 {
     for (const char *at = GetCommandLineA(); *at; at++)
     {
-        if (at[0] == '-' && at[1] == 'S' && at[2] == 'e' && at[3] == 'r' && at[4] == 'v')
+        int i = 0;
+        while (flag[i] && at[i] == flag[i])
+        {
+            i++;
+        }
+        if (!flag[i])
         {
             return 1;
         }
     }
     return 0;
 }
+
+#define COINIT_MULTITHREADED 0
 
 static void __stdcall Handler(unsigned control)
 {
@@ -199,7 +217,14 @@ static void __stdcall ServiceMain(unsigned count, char **args)
         0, 0, 0, 0 };
     SetServiceStatus(status, &running);
     unsigned cookie = 0;
-    CoInitialize(0);
+    if (given("-Mta"))
+    {
+        CoInitializeEx(0, COINIT_MULTITHREADED);
+    }
+    else
+    {
+        CoInitialize(0);
+    }
     check("service: class object registered", CoRegisterClassObject(&CLSID_Served, &factory,
         CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &cookie) == S_OK);
     MSG message;
@@ -229,10 +254,15 @@ static void put(void *root, const char *path, const char *name, unsigned type, c
 static int use(void)
 {
     static const char appId[] = "{6B2F0C1E-3D4A-4E8B-9A51-2C7D10E348B7}";
-    static const char image[] = "C:\\App\\comservice.exe -Service";
+    const char *image = given("-Mta") ? "C:\\App\\comservice.exe -Service -Mta"
+        : "C:\\App\\comservice.exe -Service";
+    unsigned length = 0;
+    while (image[length++])
+    {
+    }
     static const unsigned own = SERVICE_WIN32_OWN_PROCESS;
     put(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\BottlifyServed", "ImagePath",
-        REG_SZ, image, sizeof image);
+        REG_SZ, image, length);
     put(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\BottlifyServed", "Type",
         REG_DWORD, &own, sizeof own);
     put(HKEY_CLASSES_ROOT, "AppID\\{6B2F0C1E-3D4A-4E8B-9A51-2C7D10E348B7}", "LocalService",
@@ -258,6 +288,6 @@ static int use(void)
 
 int mainCRTStartup(void)
 {
-    ExitProcess(serviceStart() ? serve() : use());
+    ExitProcess(given("-Service") ? serve() : use());
     return 0;
 }

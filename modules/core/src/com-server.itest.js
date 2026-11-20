@@ -159,16 +159,21 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
     });
 }
 
-for (const concurrency of /** @type {const} */ ([1, 2]))
+for (const [concurrency, apartment] of /** @type {const} */ ([[1, 'sta'], [2, 'sta'], [1, 'mta'],
+    [2, 'mta']]))
 {
+    // In the multithreaded apartment COM hands the call to a thread of the
+    // server's own, and the call waits on the way, as 3DMark06's SystemInfo
+    // service polls its scanner's pipe inside one.
     test('a class served by a service: COM starts the service for it, and the run ends with its'
-        + ` client, the service ended with it (concurrency ${concurrency})`,
+        + ` client, the service ended with it (concurrency ${concurrency}, ${apartment})`,
     { timeout: 120000 }, async t=>{
         const program = new Uint8Array(await readFile(new URL('../test/fixtures/comservice.exe',
             import.meta.url)));
         const app = await createApp({
             executable: program,
             imagePath: 'C:\\App\\comservice.exe',
+            ...apartment === 'mta' ? { commandLine: 'C:\\App\\comservice.exe -Mta' } : {},
             concurrency,
             storage: { load: async()=>({
                 files: [{ path: 'C:\\App\\comservice.exe', bytes: program }],

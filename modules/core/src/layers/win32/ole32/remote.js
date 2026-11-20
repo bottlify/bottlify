@@ -733,7 +733,11 @@ export function createRemoting(host){
      */
     const ensureWindow = async thread=>{
         const home = apartment(thread);
-        if (home.window !== 0 || !host.apartmentWindow)
+        // The multithreaded apartment has no window: its calls are the
+        // worker's (`enqueue`), as COM's RPC threads serve it. One made as a
+        // thread of it ran its creation's messages on that thread wherever it
+        // was - in a Sleep inside a call it served.
+        if (home.window !== 0 || !host.apartmentWindow || servedByWorker(thread) && startWorker())
         {
             return;
         }
