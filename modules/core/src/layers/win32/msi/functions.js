@@ -43,6 +43,9 @@ import {
     ERROR_PATCH_PACKAGE_OPEN_FAILED, applyPatch, effectivePatches, openPatch,
 } from './patch.js';
 import { finishAsync } from './custom.js';
+import { createChannel, fieldsOf, recordFrom, serveCustomAction, sessionClient } from './remote.js';
+import { SYSNATIVE_DIRECTORY, WOW64_DIRECTORY } from '../programs/table.js';
+import { parsePe } from '../../loader/internal/pe.js';
 import { createRegistration, squashGuid, valueText } from './registration.js';
 import { installerVersion } from './version.js';
 import { encodeAnsi } from '../kernel32/locale.js';
@@ -209,14 +212,28 @@ const IDOK = 1;
  * @property {(commandLine: string, directory: string | null, thread: unknown)
  *     => Promise<{ settle: () => Promise<number> } | null>} [startExe]
  *     One that runs beside the installation; `settle` waits for it and answers its exit code.
+ * @property {32 | 64} [bits]  This process's width: a library of the other runs in a
+ *     custom action server (`remote.js`).
+ * @property {(commandLine: string, thread: unknown) => Promise<{
+ *     channel: import('./remote.js').PipeIo, settle: () => Promise<number> } | null>}
+ *     [startServer]  A program started on its standard input and output's pipes,
+ *     as Windows Installer starts a custom action server.
  * @property {(path: string) => Uint8Array | null | Promise<Uint8Array | null>} [versionInfo]
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(text: string) => void} [log]
  */
 
 /**
+ * Where the table keeps the custom action server's side (msiexec.exe
+ * -Embedding): a key no export name can be.
+ */
+export const SERVE_CUSTOM_ACTIONS = Symbol('serve custom actions');
+
+/**
  * @param {MsiHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>
+ *     & { [SERVE_CUSTOM_ACTIONS]: (io: import('./remote.js').PipeIo, thread: unknown)
+ *     => Promise<number> }}
  */
 export function createMsiFunctions(host){
     /** @type {Map<number, { kind: string, object: any }>} */
@@ -755,6 +772,11 @@ export function createMsiFunctions(host){
      * @returns {Promise<number | null>}
      */
     async function callDll(path, entry, args, thread){
+        const width = await libraryBits(path);
+        if (width !== null && host.bits !== undefined && width !== host.bits)
+        {
+            return callInServer(path, entry, args[0] ?? 0, width, thread);
+        }
         const module = await withString(path, name=>on(thread, ()=>host.libraries.loadAnsi(name)));
         if (!module)
         {
@@ -779,6 +801,193 @@ export function createMsiFunctions(host){
     }
 
     /**
+     * A library's width from its headers, or null when it is not one.
+     *
+     * @param {string} path
+     * @returns {Promise<32 | 64 | null>}
+     */
+    const libraryBits = async path=>{
+        const bytes = await readPath(path);
+        try
+        {
+            return bytes ? parsePe(bytes, { wide: true }).bits === 64 ? 64 : 32 : null;
+        }
+        catch {
+            return null;
+        }
+    };
+
+    /**
+     * A library action of the other width, as Windows Installer runs one: in
+     * a custom action server of the library's width, msiexec.exe from the
+     * system folder that has it, handed the library and entry and answered
+     * for each call the action makes on its session (`remote.js`).
+     *
+     * @param {string} path @param {string} entry @param {number} handle
+     * @param {32 | 64} width @param {unknown} thread
+     * @returns {Promise<number | null>}
+     */
+    async function callInServer(path, entry, handle, width, thread){
+        const owner = sessionOf(handle);
+        const server = owner && host.startServer ? await host.startServer(
+            `"${width === 64 ? SYSNATIVE_DIRECTORY : WOW64_DIRECTORY}\\msiexec.exe" -Embedding`,
+            thread) : null;
+        if (!owner || !server)
+        {
+            note(`Library ${path} is ${width}-bit and no custom action server started.`);
+            return null;
+        }
+        const channel = createChannel(server.channel);
+        try
+        {
+            const code = await serveCustomAction(channel, { library: path, entry },
+                sessionCalls(owner, thread), detail=>host.divergence?.('MSI', detail));
+            if (code === null)
+            {
+                note(`The custom action server for ${path} ended without an answer.`);
+            }
+            return code;
+        }
+        finally
+        {
+            await channel.close();
+            await server.settle();
+        }
+    }
+
+    /**
+     * What a custom action server asks of the session it acts for, answered
+     * in values: the calls the action made on its session handle, and on the
+     * views it opened on the active database, which are kept here by number.
+     *
+     * @param {{ session: import('./session.js').Session, deferred: string | null }} owner
+     * @param {unknown} thread  The installation's, which an action, a
+     *     message's handler and the installer's own calls run on.
+     */
+    const sessionCalls = (owner, thread)=>{
+        const db = owner.session.active;
+        /** @type {Map<number, any>} */
+        const views = new Map();
+        let nextView = 1;
+        return {
+            /** @param {string} name */
+            getProperty: name=>propertyOf(owner, name),
+            /** @param {string} name @param {string | null} value */
+            setProperty: (name, value)=>{
+                if (!name)
+                {
+                    return ERROR_FUNCTION_FAILED;
+                }
+                if (owner.deferred === null)
+                {
+                    owner.session.setProperty(name, value);
+                }
+                return ERROR_SUCCESS;
+            },
+            /** @param {string} text */
+            evaluate: text=>owner.session.evaluate(text),
+            /** @param {string} name */
+            doAction: name=>{
+                const engine = engineFor(owner.session, thread);
+                return asCallOf(engine, thread, ()=>doAction(engine, name));
+            },
+            /** @param {number} mode */
+            mode: mode=>modeOf(owner, mode),
+            language: ()=>Number(owner.session.getProperty('ProductLanguage')) || 0,
+            /** @param {string} folder */
+            targetPath: folder=>owner.session.folders.get(folder)?.target ?? null,
+            /** @param {string} name */
+            componentState: name=>{
+                const component = owner.session.components.get(name);
+                return component ? [component.installed, component.action] : null;
+            },
+            /** @param {any[]} fields */
+            format: fields=>owner.session.format(recordFrom(fields), owner.deferred !== null),
+            /** @param {number} type @param {any[]} fields */
+            message: (type, fields)=>deliver(type >>> 0, recordFrom(fields), owner.session,
+                thread),
+            /** @param {string} query */
+            openView: query=>{
+                const result = openView(db, query);
+                if ('error' in result)
+                {
+                    return [result.error, 0];
+                }
+                views.set(nextView, result.view);
+                return [ERROR_SUCCESS, nextView++];
+            },
+            /** @param {number} id @param {any[] | null} fields */
+            execute: (id, fields)=>views.get(id)?.execute(fields === null ? null
+                : recordFrom(fields)) ?? ERROR_INVALID_HANDLE,
+            /** @param {number} id */
+            fetch: async id=>{
+                const view = views.get(id);
+                if (!view)
+                {
+                    return [ERROR_INVALID_HANDLE, null];
+                }
+                if (!view.executed)
+                {
+                    return [ERROR_FUNCTION_FAILED, null];
+                }
+                const record = view.fetch();
+                return record ? [ERROR_SUCCESS, await fieldsOf(record)]
+                    : [view.kind === 'select' ? ERROR_NO_MORE_ITEMS : ERROR_FUNCTION_FAILED, null];
+            },
+            /** @param {number} id */
+            closeView: id=>{
+                const view = views.get(id);
+                view?.close();
+                return view ? ERROR_SUCCESS : ERROR_INVALID_HANDLE;
+            },
+            /** @param {number} id */
+            release: id=>{
+                views.delete(id);
+                return ERROR_SUCCESS;
+            },
+            // As a commit of the active database through its own handle does.
+            commit: ()=>(db.readOnly ? ERROR_SUCCESS
+                : saveDatabase(db, owner.session.packagePath)),
+            /** @param {string} table */
+            primaryKeys: table=>{
+                const found = db.table(table);
+                return found ? [ERROR_SUCCESS, [table, ...found.columns.filter(isKey)
+                    .map((/** @type {any} */ column)=>column.name)]] : [ERROR_INVALID_TABLE, null];
+            },
+        };
+    };
+
+    /**
+     * The custom action server's side (msiexec.exe -Embedding): the library
+     * and entry the installation hands it, loaded and called with a session
+     * handle whose calls go back to the installation; its answer handed back.
+     *
+     * @param {import('./remote.js').PipeIo} io  standard input and output
+     * @param {unknown} thread  the server's own, which the action runs on
+     * @returns {Promise<number>}  the server's exit code
+     */
+    async function serveAsServer(io, thread){
+        const channel = createChannel(io);
+        const start = await channel.receive();
+        if (!start)
+        {
+            return 1;
+        }
+        const client = sessionClient(channel);
+        const handle = open('remote-session', { client });
+        try
+        {
+            const code = await callDll(start.library, start.entry, [handle], thread);
+            await channel.send({ done: code ?? ERROR_INSTALL_FAILURE });
+            return 0;
+        }
+        finally
+        {
+            handles.delete(handle);
+        }
+    }
+
+    /**
      * Loads a library and starts one of its exports on a thread of its own,
      * which goes on after this returns: a library action that runs beside the
      * installation. The library is freed when the installation asks, where
@@ -797,6 +1006,13 @@ export function createMsiFunctions(host){
         {
             host.divergence?.('MSI', 'a custom action that runs beside the installation has no'
                 + ' thread to run on');
+            return null;
+        }
+        const width = await libraryBits(path);
+        if (width !== null && host.bits !== undefined && width !== host.bits)
+        {
+            host.divergence?.('MSI', `${path} is ${width}-bit and runs beside the installation:`
+                + ' a custom action server runs a library of the other width only in sequence');
             return null;
         }
         const module = await withString(path,
@@ -1505,6 +1721,35 @@ export function createMsiFunctions(host){
     const recordOf = handle=>get(handle, 'record');
 
     /**
+     * A custom action server's handle: its session's, the active database's, or
+     * a view the installation keeps for it by `id`.
+     *
+     * @param {number} handle @param {'remote-session' | 'remote-database' | 'remote-view'} kind
+     * @returns {{ client: ReturnType<typeof sessionClient>, id: number } | null}
+     */
+    const remoteOf = (handle, kind)=>get(handle, kind);
+
+    /**
+     * MsiGetMode's answer for a session: 1 when it runs in that mode.
+     *
+     * @param {{ session: any, deferred: string | null }} owner @param {number} mode
+     */
+    const modeOf = (owner, mode)=>{
+        const name = /** @type {Record<number, string>} */ (RUN_MODES)[mode];
+        if (!name)
+        {
+            return 0;
+        }
+        // Only an action the script runs is scheduled; one run while the
+        // script is written is immediate, and reads no CustomActionData.
+        if (name === 'scheduled')
+        {
+            return owner.deferred !== null ? 1 : 0;
+        }
+        return /** @type {Record<string, boolean>} */ (owner.session.mode)[name] ? 1 : 0;
+    };
+
+    /**
      * A string into a buffer the caller sized for it, as the calls that hand
      * back a GUID or a feature's name take one: the text and its terminator.
      *
@@ -1514,7 +1759,8 @@ export function createMsiFunctions(host){
         host.writeMemory(wholeAddress(buffer), wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`));
     };
 
-    return {
+    /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */
+    const exports = {
         ...createProductFunctions({
             registration, hive: host.hive, files: host.files, fullPath: host.fullPath, reader,
             statPath, readPath, putString, putFixed, readU32, writeU32, get,
@@ -1555,6 +1801,12 @@ export function createMsiFunctions(host){
                 if ((handle >>> 0) === 0)
                 {
                     return ERROR_SUCCESS;
+                }
+                // A view the installation keeps for a custom action server goes there too.
+                const remote = remoteOf(handle, 'remote-view');
+                if (remote)
+                {
+                    void remote.client.ask('release', remote.id);
                 }
                 return handles.delete(handle >>> 0) ? ERROR_SUCCESS : ERROR_INVALID_HANDLE;
             },
@@ -1715,6 +1967,12 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_HANDLE;
             }
+            const remote = remoteOf(install, 'remote-session');
+            if (remote)
+            {
+                return fieldsOf(record).then(fields=>remote.client.ask('format', fields))
+                    .then(text=>putString(wide, text ?? '', buffer, size));
+            }
             const owner = sessionOf(install);
             const text = owner ? owner.session.format(record, owner.deferred !== null)
                 : formatRecord({ count: record.fields.length - 1, field: index=>{
@@ -1757,8 +2015,9 @@ export function createMsiFunctions(host){
             return ERROR_SUCCESS;
         }),
         ...both('MsiDatabaseOpenView', 12, wide=>([database, query, out])=>{
+            const remote = remoteOf(database, 'remote-database');
             const opened = get(database, 'database');
-            if (!opened)
+            if (!opened && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
@@ -1766,6 +2025,21 @@ export function createMsiFunctions(host){
             if (text === null || (out >>> 0) === 0)
             {
                 return ERROR_BAD_QUERY_SYNTAX;
+            }
+            if (remote)
+            {
+                return remote.client.ask('openView', text).then(answer=>{
+                    const [code, id] = answer ?? [ERROR_FUNCTION_FAILED, 0];
+                    if (code === ERROR_SUCCESS)
+                    {
+                        writeU32(out, open('remote-view', { client: remote.client, id }));
+                    }
+                    return code;
+                });
+            }
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
             }
             const result = openView(opened.db, text);
             if ('error' in result)
@@ -1778,6 +2052,14 @@ export function createMsiFunctions(host){
         MsiViewExecute: {
             argBytes: 8,
             handler: ([view, params])=>{
+                const remote = remoteOf(view, 'remote-view');
+                if (remote)
+                {
+                    const record = (params >>> 0) === 0 ? null : recordOf(params);
+                    return (record ? fieldsOf(record) : Promise.resolve(null))
+                        .then(fields=>remote.client.ask('execute', remote.id, fields))
+                        .then(code=>code ?? ERROR_FUNCTION_FAILED);
+                }
                 const opened = get(view, 'view');
                 if (!opened)
                 {
@@ -1789,6 +2071,19 @@ export function createMsiFunctions(host){
         MsiViewFetch: {
             argBytes: 8,
             handler: ([view, out])=>{
+                const remote = remoteOf(view, 'remote-view');
+                if (remote)
+                {
+                    if ((out >>> 0) === 0)
+                    {
+                        return ERROR_INVALID_PARAMETER;
+                    }
+                    return remote.client.ask('fetch', remote.id).then(answer=>{
+                        const [code, fields] = answer ?? [ERROR_FUNCTION_FAILED, null];
+                        writeU32(out, fields ? open('record', recordFrom(fields)) : 0);
+                        return code;
+                    });
+                }
                 const opened = get(view, 'view');
                 if (!opened)
                 {
@@ -1816,6 +2111,12 @@ export function createMsiFunctions(host){
         MsiViewClose: {
             argBytes: 4,
             handler: ([view])=>{
+                const remote = remoteOf(view, 'remote-view');
+                if (remote)
+                {
+                    return remote.client.ask('closeView', remote.id)
+                        .then(code=>code ?? ERROR_FUNCTION_FAILED);
+                }
                 const opened = get(view, 'view');
                 if (!opened)
                 {
@@ -1866,6 +2167,11 @@ export function createMsiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([database])=>{
+                const remote = remoteOf(database, 'remote-database');
+                if (remote)
+                {
+                    return (await remote.client.ask('commit')) ?? ERROR_FUNCTION_FAILED;
+                }
                 const opened = get(database, 'database');
                 if (!opened)
                 {
@@ -1879,12 +2185,28 @@ export function createMsiFunctions(host){
             },
         },
         ...both('MsiDatabaseGetPrimaryKeys', 12, wide=>([database, table, out])=>{
+            const remote = remoteOf(database, 'remote-database');
             const opened = get(database, 'database');
-            if (!opened)
+            if (!opened && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
             const name = reader(wide)(table) ?? '';
+            if (remote)
+            {
+                return remote.client.ask('primaryKeys', name).then(answer=>{
+                    const [code, fields] = answer ?? [ERROR_FUNCTION_FAILED, null];
+                    if (fields)
+                    {
+                        writeU32(out, open('record', recordFrom(fields)));
+                    }
+                    return code;
+                });
+            }
+            if (!opened)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
             const found = opened.db.table(name);
             if (!found)
             {
@@ -1912,6 +2234,11 @@ export function createMsiFunctions(host){
         MsiGetActiveDatabase: {
             argBytes: 4,
             handler: ([install])=>{
+                const remote = remoteOf(install, 'remote-session');
+                if (remote)
+                {
+                    return open('remote-database', remote);
+                }
                 const owner = sessionOf(install);
                 return owner ? open('database', { db: owner.session.active,
                     path: owner.session.packagePath }) : 0;
@@ -2091,8 +2418,9 @@ export function createMsiFunctions(host){
             return ERROR_SUCCESS;
         }),
         ...both('MsiGetProperty', 16, wide=>([install, name, buffer, size])=>{
+            const remote = remoteOf(install, 'remote-session');
             const owner = sessionOf(install);
-            if (!owner)
+            if (!owner && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
@@ -2101,11 +2429,14 @@ export function createMsiFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            return putString(wide, propertyOf(owner, key), buffer, size);
+            return remote ? remote.client.ask('getProperty', key)
+                .then(value=>putString(wide, value ?? '', buffer, size))
+                : putString(wide, propertyOf(/** @type {any} */ (owner), key), buffer, size);
         }),
         ...both('MsiSetProperty', 12, wide=>([install, name, value])=>{
+            const remote = remoteOf(install, 'remote-session');
             const owner = sessionOf(install);
-            if (!owner)
+            if (!owner && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
@@ -2113,6 +2444,15 @@ export function createMsiFunctions(host){
             if (key === null || key === '')
             {
                 return ERROR_FUNCTION_FAILED;
+            }
+            if (remote)
+            {
+                return remote.client.ask('setProperty', key, reader(wide)(value))
+                    .then(answer=>answer ?? ERROR_FUNCTION_FAILED);
+            }
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
             }
             if (owner.deferred !== null)
             {
@@ -2122,17 +2462,25 @@ export function createMsiFunctions(host){
             return ERROR_SUCCESS;
         }),
         ...both('MsiEvaluateCondition', 8, wide=>([install, text])=>{
+            const remote = remoteOf(install, 'remote-session');
             const owner = sessionOf(install);
-            if (!owner)
+            if (!owner && !remote)
             {
                 return MSICONDITION.ERROR;
             }
             const condition = reader(wide)(text);
-            return condition === null ? MSICONDITION.NONE : owner.session.evaluate(condition);
+            if (condition === null)
+            {
+                return MSICONDITION.NONE;
+            }
+            return remote ? remote.client.ask('evaluate', condition)
+                .then(answer=>answer ?? MSICONDITION.ERROR)
+                : /** @type {any} */ (owner).session.evaluate(condition);
         }),
         ...both('MsiDoAction', 8, wide=>async([install, action])=>{
+            const remote = remoteOf(install, 'remote-session');
             const owner = sessionOf(install);
-            if (!owner)
+            if (!owner && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
@@ -2140,6 +2488,14 @@ export function createMsiFunctions(host){
             if (name === null)
             {
                 return ERROR_INVALID_PARAMETER;
+            }
+            if (remote)
+            {
+                return (await remote.client.ask('doAction', name)) ?? ERROR_FUNCTION_FAILED;
+            }
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
             }
             const thread = host.callerThread();
             const engine = engineFor(owner.session, thread);
@@ -2158,19 +2514,13 @@ export function createMsiFunctions(host){
         MsiGetMode: {
             argBytes: 8,
             handler: ([install, mode])=>{
+                const remote = remoteOf(install, 'remote-session');
+                if (remote)
+                {
+                    return remote.client.ask('mode', mode >>> 0).then(answer=>answer ?? 0);
+                }
                 const owner = sessionOf(install);
-                const name = /** @type {Record<number, string>} */ (RUN_MODES)[mode >>> 0];
-                if (!owner || !name)
-                {
-                    return 0;
-                }
-                // Only an action the script runs is scheduled; one run while the
-                // script is written is immediate, and reads no CustomActionData.
-                if (name === 'scheduled')
-                {
-                    return owner.deferred !== null ? 1 : 0;
-                }
-                return /** @type {Record<string, boolean>} */ (owner.session.mode)[name] ? 1 : 0;
+                return owner ? modeOf(owner, mode >>> 0) : 0;
             },
         },
         MsiSetMode: {
@@ -2193,17 +2543,32 @@ export function createMsiFunctions(host){
         MsiGetLanguage: {
             argBytes: 4,
             handler: ([install])=>{
+                const remote = remoteOf(install, 'remote-session');
+                if (remote)
+                {
+                    return remote.client.ask('language').then(answer=>answer ?? 0);
+                }
                 const owner = sessionOf(install);
                 return owner ? Number(owner.session.getProperty('ProductLanguage')) || 0 : 0;
             },
         },
         ...both('MsiGetTargetPath', 16, wide=>([install, folder, buffer, size])=>{
+            const remote = remoteOf(install, 'remote-session');
             const owner = sessionOf(install);
-            if (!owner)
+            if (!owner && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
             const key = reader(wide)(folder) ?? '';
+            if (remote)
+            {
+                return remote.client.ask('targetPath', key).then(target=>(target === null
+                    ? ERROR_DIRECTORY : putString(wide, target, buffer, size)));
+            }
+            if (!owner)
+            {
+                return ERROR_INVALID_HANDLE;
+            }
             const target = owner.session.folders.get(key)?.target;
             if (!target)
             {
@@ -2242,25 +2607,35 @@ export function createMsiFunctions(host){
             return putString(wide, source, buffer, size);
         }),
         ...both('MsiGetComponentState', 16, wide=>([install, name, installed, action])=>{
+            const remote = remoteOf(install, 'remote-session');
             const owner = sessionOf(install);
-            if (!owner)
+            if (!owner && !remote)
             {
                 return ERROR_INVALID_HANDLE;
             }
-            const component = owner.session.components.get(reader(wide)(name) ?? '');
-            if (!component)
+            /** @param {[number, number] | null} states */
+            const put = states=>{
+                if (!states)
+                {
+                    return ERROR_UNKNOWN_COMPONENT;
+                }
+                if ((installed >>> 0) !== 0)
+                {
+                    writeI32(installed, states[0]);
+                }
+                if ((action >>> 0) !== 0)
+                {
+                    writeI32(action, states[1]);
+                }
+                return ERROR_SUCCESS;
+            };
+            const key = reader(wide)(name) ?? '';
+            if (remote)
             {
-                return ERROR_UNKNOWN_COMPONENT;
+                return remote.client.ask('componentState', key).then(put);
             }
-            if ((installed >>> 0) !== 0)
-            {
-                writeI32(installed, component.installed);
-            }
-            if ((action >>> 0) !== 0)
-            {
-                writeI32(action, component.action);
-            }
-            return ERROR_SUCCESS;
+            const component = /** @type {any} */ (owner).session.components.get(key);
+            return put(component ? [component.installed, component.action] : null);
         }),
         ...both('MsiSetComponentState', 12, wide=>([install, name, state])=>{
             const owner = sessionOf(install);
@@ -2381,13 +2756,16 @@ export function createMsiFunctions(host){
         MsiProcessMessage: {
             argBytes: 12,
             handler: async([install, type, handle])=>{
+                const remote = remoteOf(install, 'remote-session');
                 const owner = sessionOf(install);
                 const record = recordOf(handle);
-                if (!owner || !record)
+                if ((!owner && !remote) || !record)
                 {
                     return -1;
                 }
-                return deliver(type >>> 0, record, owner.session);
+                return remote ? (await remote.client.ask('message', type >>> 0,
+                    await fieldsOf(record))) ?? -1
+                    : deliver(type >>> 0, record, /** @type {any} */ (owner).session);
             },
         },
 
@@ -2714,6 +3092,27 @@ export function createMsiFunctions(host){
             },
         },
     };
+    // A custom action server's handles carry the calls `sessionCalls` answers; any
+    // other a library makes on one finds no handle, and that is said, once each.
+    /** @type {Set<string>} */
+    const uncarried = new Set();
+    for (const [name, entry] of Object.entries(exports))
+    {
+        const handler = entry.handler;
+        entry.handler = args=>{
+            const answer = handler(args);
+            const kind = handles.get(args[0] >>> 0)?.kind ?? '';
+            if (answer === ERROR_INVALID_HANDLE && kind.startsWith('remote-')
+                && !uncarried.has(name))
+            {
+                uncarried.add(name);
+                host.divergence?.('MSI', `${name} on a custom action server's handle is not`
+                    + ' carried to the installation');
+            }
+            return answer;
+        };
+    }
+    return Object.assign(exports, { [SERVE_CUSTOM_ACTIONS]: serveAsServer });
 }
 
 /**

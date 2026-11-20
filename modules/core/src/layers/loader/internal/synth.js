@@ -345,6 +345,8 @@ function lookupsOf(table){
 const IMPORT_DESCRIPTOR_SIZE = 20;
 const CALL_INDIRECT = [0xff, 0x15];
 const PUSH_EAX = 0x50;
+const SUB_RSP_28 = [0x48, 0x83, 0xec, 0x28];
+const MOV_ECX_EAX = [0x89, 0xc1];
 
 /**
  * @typedef {Object} SynthesisedProgram
@@ -369,9 +371,11 @@ const PUSH_EAX = 0x50;
  * @param {Object} options
  * @param {string} options.library  As an import descriptor names it.
  * @param {string} options.routine  The export of `library` that is the program.
+ * @param {boolean} [options.long]  A 64-bit program (PE32+, AMD64), as the
+ *     system folder of a 64-bit machine holds them; a 32-bit one otherwise.
  * @returns {SynthesisedProgram}
  */
-export function synthesiseProgram({ library, routine }){
+export function synthesiseProgram({ library, routine, long = false }){
     requireAscii(library, 'library name');
     requireAscii(routine, 'routine name');
     const base = PROGRAM_BASE;
@@ -386,9 +390,11 @@ export function synthesiseProgram({ library, routine }){
     // each name's hint and text, and the libraries' names.
     const dataRva = SECTION_RVA + PAGE;
     const descriptorsSize = (imports.length + 1) * IMPORT_DESCRIPTOR_SIZE;
+    // Each table one entry and its terminator: two dwords, or two quadwords in PE32+.
+    const table = long ? 16 : 8;
     const iatRva = dataRva + descriptorsSize;
-    const iltRva = iatRva + imports.length * 8;
-    let cursor = iltRva + imports.length * 8;
+    const iltRva = iatRva + imports.length * table;
+    let cursor = iltRva + imports.length * table;
     const hintRvas = imports.map(entry=>{
         const at = align(cursor, 2);
         cursor = at + 2 + entry.name.length + 1;
@@ -402,8 +408,17 @@ export function synthesiseProgram({ library, routine }){
     const dataSize = cursor - dataRva;
 
     /** @param {number} index */
-    const iatSlot = index=>iatRva + index * 8;
-    const code = [
+    const iatSlot = index=>iatRva + index * table;
+    // 64-bit: the shadow space and the stack aligned to 16 for the calls
+    // (sub rsp, 0x28), each import through its slot relative to the next
+    // instruction, and the routine's answer handed on in ecx.
+    const code = long ? [
+        ...SUB_RSP_28,
+        ...CALL_INDIRECT, ...le32(iatSlot(0) - (SECTION_RVA + 10)),
+        ...MOV_ECX_EAX,
+        ...CALL_INDIRECT, ...le32(iatSlot(1) - (SECTION_RVA + 18)),
+        INT3,
+    ] : [
         ...CALL_INDIRECT, ...le32(base + iatSlot(0)),
         PUSH_EAX,
         ...CALL_INDIRECT, ...le32(base + iatSlot(1)),
@@ -414,10 +429,10 @@ export function synthesiseProgram({ library, routine }){
     const bytes = new Uint8Array(size);
     const view = new DataView(bytes.buffer);
     writeHeaders(bytes, view, {
-        base, size, sectionSize: code.length, dataRva, dataSize,
+        base, size, sectionSize: code.length, dataRva, dataSize, long,
         exportDirectoryRva: 0, exportDirectorySize: 0, entryPointRva: SECTION_RVA,
         program: { base, importDirectoryRva: dataRva, importDirectorySize: descriptorsSize,
-            iatRva, iatSize: imports.length * 8 },
+            iatRva, iatSize: imports.length * table },
     });
     bytes.set(code, SECTION_RVA);
 
@@ -425,10 +440,10 @@ export function synthesiseProgram({ library, routine }){
     // address table of one entry and a terminator.
     imports.forEach((entry, index)=>{
         const descriptor = dataRva + index * IMPORT_DESCRIPTOR_SIZE;
-        view.setUint32(descriptor, iltRva + index * 8, true); // OriginalFirstThunk
+        view.setUint32(descriptor, iltRva + index * table, true); // OriginalFirstThunk
         view.setUint32(descriptor + 12, libraryRvas[index], true); // Name
         view.setUint32(descriptor + 16, iatSlot(index), true); // FirstThunk
-        view.setUint32(iltRva + index * 8, hintRvas[index], true);
+        view.setUint32(iltRva + index * table, hintRvas[index], true);
         view.setUint32(iatSlot(index), hintRvas[index], true);
         bytes.set(encoder.encode(entry.name), hintRvas[index] + 2);
         bytes.set(encoder.encode(entry.library), libraryRvas[index]);
@@ -520,14 +535,13 @@ function writeHeaders(bytes, view, layout){
     view.setUint32(PE_OFFSET, PE_SIGNATURE, true);
 
     const coff = PE_OFFSET + 4;
-    const plus = layout.long === true && !layout.program;
+    const plus = layout.long === true;
     view.setUint16(coff, plus ? MACHINE_AMD64 : MACHINE_I386, true);
     view.setUint16(coff + 2, layout.dataRva === 0 ? 1 : 2, true); // NumberOfSections
     view.setUint16(coff + 16, plus ? OPTIONAL_HEADER_SIZE_PLUS : OPTIONAL_HEADER_SIZE, true);
-    view.setUint16(coff + 18, layout.program
-        ? COFF_EXECUTABLE_IMAGE | COFF_32BIT_MACHINE | COFF_RELOCS_STRIPPED
-        : COFF_EXECUTABLE_IMAGE | (plus ? COFF_LARGE_ADDRESS_AWARE : COFF_32BIT_MACHINE)
-            | COFF_DLL, true);
+    view.setUint16(coff + 18, COFF_EXECUTABLE_IMAGE
+        | (plus ? COFF_LARGE_ADDRESS_AWARE : COFF_32BIT_MACHINE)
+        | (layout.program ? COFF_RELOCS_STRIPPED : COFF_DLL), true);
 
     const optional = coff + 20;
     if (plus)
@@ -546,10 +560,25 @@ function writeHeaders(bytes, view, layout){
         view.setUint16(optional + 48, 6, true); // MajorSubsystemVersion
         view.setUint32(optional + 56, layout.size, true); // SizeOfImage
         view.setUint32(optional + 60, HEADERS_SIZE, true); // SizeOfHeaders
-        view.setUint16(optional + 68, SUBSYSTEM_CONSOLE, true);
+        view.setUint16(optional + 68, layout.program ? SUBSYSTEM_WINDOWS_GUI : SUBSYSTEM_CONSOLE,
+            true);
+        if (layout.program)
+        {
+            view.setBigUint64(optional + 72, BigInt(PROGRAM_STACK_RESERVE), true);
+            view.setBigUint64(optional + 80, BigInt(PAGE), true);
+            view.setBigUint64(optional + 88, BigInt(PROGRAM_STACK_RESERVE), true);
+            view.setBigUint64(optional + 96, BigInt(PAGE), true);
+        }
         view.setUint32(optional + 108, 16, true); // NumberOfRvaAndSizes
         view.setUint32(optional + 112, layout.exportDirectoryRva, true);
         view.setUint32(optional + 116, layout.exportDirectorySize, true);
+        if (layout.program)
+        {
+            view.setUint32(optional + 120, layout.program.importDirectoryRva, true);
+            view.setUint32(optional + 124, layout.program.importDirectorySize, true);
+            view.setUint32(optional + 208, layout.program.iatRva, true); // IAT directory
+            view.setUint32(optional + 212, layout.program.iatSize, true);
+        }
         writeSections(bytes, view, layout, optional + OPTIONAL_HEADER_SIZE_PLUS, rawSize);
         return;
     }

@@ -560,6 +560,34 @@ test('a program is an executable whose entry calls one routine and exits with it
     assert.throws(()=>synthesiseProgram({ library: '', routine: 'x' }), /ASCII/);
 });
 
+test('a 64-bit program is a PE32+ executable whose entry calls its routine through its slots',
+    ()=>{
+        const program = synthesiseProgram({ library: 'bottlify.dll', routine: 'msiexec',
+            long: true });
+        const image = parsePe(program.bytes, { wide: true });
+        assert.equal(image.bits, 64);
+        assert.equal(image.library, false, 'an executable, not a library');
+        assert.equal(image.subsystem, 2);
+        assert.ok(image.stackReserve >= 0x10000);
+        assert.deepEqual(readImports(program.bytes, image).map(dll=>[dll.dll,
+            dll.entries.map(entry=>entry.name)]),
+        [['bottlify.dll', ['msiexec']], ['KERNEL32.dll', ['ExitProcess']]]);
+        const [routine, exit] = readImports(program.bytes, image).map(dll=>dll.entries[0].iatRva);
+        const iat = image.directories[12];
+        assert.ok(routine >= iat.address && exit + 8 <= iat.address + iat.size,
+            'both address tables lie in the range the IAT directory names');
+
+        // sub rsp, 0x28; call [rip+routine]; mov ecx, eax; call [rip+ExitProcess]
+        const entry = rvaToFileOffset(image, image.entryPointRva);
+        const view = new DataView(program.bytes.buffer);
+        assert.deepEqual([...program.bytes.subarray(entry, entry + 6)],
+            [0x48, 0x83, 0xec, 0x28, 0xff, 0x15]);
+        assert.equal(image.entryPointRva + 10 + view.getInt32(entry + 6, true), routine);
+        assert.deepEqual([...program.bytes.subarray(entry + 10, entry + 14)],
+            [0x89, 0xc1, 0xff, 0x15]);
+        assert.equal(image.entryPointRva + 18 + view.getInt32(entry + 14, true), exit);
+    });
+
 test('a module for a 64-bit process opens each trampoline with a no-op that is one there', ()=>{
     // `mov edi, edi` is a 32-bit move in long mode: it clears RDI's upper
     // half, and RDI is a register a callee keeps for its caller.

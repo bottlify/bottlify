@@ -84,10 +84,11 @@ const PROPERTY = /^[A-Za-z_][A-Za-z0-9_.]*=/;
 
 /**
  * @typedef {Object} MsiexecPlan
- * @property {MsiexecAction | 'service' | 'usage'} action
+ * @property {MsiexecAction | 'service' | 'server' | 'usage'} action
  *     `service` for the options that register msiexec as the installer's
- *     service, which there is nothing to do for; `usage` for a line msiexec
- *     would not take, or a request for its help.
+ *     service, which there is nothing to do for; `server` for -Embedding, a
+ *     custom action server an installation of another width started;
+ *     `usage` for a line msiexec would not take, or a request for its help.
  * @property {string} target    The package, the product code, or for a patch the
  *     patch -- several separated by semicolons.
  * @property {string} [image]   The administrative image a patch is applied to.
@@ -270,6 +271,11 @@ export function parseMsiexec(line){
             asked.push({ kind: 'service', target: '' });
             continue;
         }
+        if (word === 'embedding')
+        {
+            asked.push({ kind: 'server', target: '' });
+            continue;
+        }
         if (word === 'package' || word === 'uninstall' || word === 'update' || word === 'log')
         {
             const target = argumentOf('');
@@ -435,6 +441,9 @@ export function parseMsiexec(line){
  *     A message box, as the program shows one.
  * @property {(layer: string) => void} [need]  Asks the embedder for a layer the
  *     machine lacks, by its name (`layer-needed`).
+ * @property {() => Promise<number>} [serveCustomActions]  The custom action
+ *     server Windows Installer starts as `msiexec -Embedding`: a library action
+ *     of this process's width, for an installation in another (msi `remote.js`).
  */
 
 const USAGE = 'Windows Installer\n\n'
@@ -468,6 +477,10 @@ export async function runMsiexec(context){
     if (plan.action === 'service')
     {
         return ERROR_SUCCESS;
+    }
+    if (plan.action === 'server')
+    {
+        return context.serveCustomActions?.() ?? ERROR_INVALID_COMMAND_LINE;
     }
     // Without a /q option msiexec runs with the full interface, which is not
     // msi.dll's own default.

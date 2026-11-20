@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PROGRAMS_IN_PLACE, PROGRAMS_LIBRARY, SYSTEM_PROGRAMS, programInPlaceOf, systemProgramAt,
-    systemProgramImage } from './table.js';
+    systemProgramImage, wow64Spawned } from './table.js';
 import { createProgramFunctions } from './functions.js';
 import { parsePe, readImports } from '../../loader/internal/pe.js';
 import { synthesiseProgram } from '../../loader/internal/synth.js';
@@ -28,6 +28,31 @@ test('a program is one of the system folder\'s, however its path is spelled', ()
     assert.equal(systemProgramAt('C:\\WINDOWS\\system32\\calc.exe'), null);
     assert.equal(systemProgramAt('msiexec.exe'), null, 'a bare name is the spawner\'s to find');
 });
+
+test('a 64-bit machine keeps 64-bit programs in its system folder and 32-bit ones in SysWOW64',
+    ()=>{
+        assert.equal(systemProgramAt('C:\\WINDOWS\\SysWOW64\\msiexec.exe'), 'msiexec');
+        assert.equal(systemProgramAt('C:\\WINDOWS\\Sysnative\\msiexec.exe'), 'msiexec');
+        assert.equal(systemProgramAt('C:\\WINDOWS\\SysWOW64\\notepad.exe'), 'notepad');
+        assert.equal(systemProgramAt('C:\\WINDOWS\\SysWOW64\\regedit.exe'), null,
+            'regedit is the Windows directory\'s alone');
+        /** @param {string} path @param {'x86' | 'amd64'} [machine] */
+        const bits = (path, machine)=>parsePe(/** @type {Uint8Array} */ (
+            systemProgramImage(path, machine)), { wide: true }).bits;
+        assert.equal(bits('C:\\WINDOWS\\system32\\msiexec.exe'), 32, 'a 32-bit machine\'s');
+        assert.equal(bits('C:\\WINDOWS\\system32\\msiexec.exe', 'amd64'), 64);
+        assert.equal(bits('C:\\WINDOWS\\SysWOW64\\msiexec.exe', 'amd64'), 32);
+        assert.equal(bits('C:\\WINDOWS\\notepad.exe', 'amd64'), 64);
+
+        // A 32-bit process there: its system folder is SysWOW64, Sysnative the real one.
+        assert.equal(wow64Spawned('C:\\WINDOWS\\system32\\msiexec.exe'),
+            'C:\\WINDOWS\\SysWOW64\\msiexec.exe');
+        assert.equal(wow64Spawned('c:\\windows\\sysnative\\RunDll32.exe'),
+            'C:\\WINDOWS\\system32\\rundll32.exe');
+        assert.equal(wow64Spawned('C:\\WINDOWS\\notepad.exe'), 'C:\\WINDOWS\\notepad.exe');
+        assert.equal(wow64Spawned('C:\\WINDOWS\\system32\\calc.exe'),
+            'C:\\WINDOWS\\system32\\calc.exe', 'a file of the volume\'s is as named');
+    });
 
 test('every program\'s image calls its own routine, and every routine is in the library', ()=>{
     const routines = Object.keys(createProgramFunctions(/** @type {any} */ ({})));
