@@ -29,6 +29,7 @@ import {
 } from '../kernel32/processor.js';
 import { windowsVersion } from '../kernel32/versions.js';
 import { DOCUMENT_CLASSES } from '../msxml/dom.js';
+import { USER_SID_TEXT } from './tokens.js';
 
 /** The predefined roots. A guest names these by constant; it never opens them. */
 export const HKEY_CLASSES_ROOT = 0x80000000;
@@ -314,6 +315,39 @@ export function shellFolderDirectories(windows = windowsVersion()){
     }
     return [...directories];
 }
+
+/** Where Windows lists its profiles, by the SID of the account each belongs to. */
+export const PROFILE_LIST = 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList';
+
+/** The SID services run as, LocalSystem, whose profile lives in the system folder. */
+const LOCAL_SYSTEM_SID = 'S-1-5-18';
+
+/**
+ * The profile list of a Windows, as its setup leaves it: the folders profiles
+ * are made in (XP's `Documents and Settings`, Vista's `Users` beside
+ * `ProgramData` and the public profile), and one key for each account with a
+ * profile - the user's, its folder the shell's `Profile`, and LocalSystem's.
+ *
+ * @param {WindowsVersion} windows
+ * @param {Readonly<Record<string, string>>} folders  `shellFolders(windows)`
+ * @returns {MachineKey[]}
+ */
+const profileKeys = (windows, folders)=>{
+    const { user, allUsers, public: shared } = windows.profiles;
+    const directory = user.slice(0, user.lastIndexOf('\\'));
+    return [
+        { root: HKEY_LOCAL_MACHINE, path: PROFILE_LIST, values: shared === null
+            ? { ProfilesDirectory: directory, DefaultUserProfile: 'Default User',
+                AllUsersProfile: allUsers.slice(allUsers.lastIndexOf('\\') + 1) }
+            : { ProfilesDirectory: directory, Default: `${directory}\\Default`,
+                Public: shared, ProgramData: allUsers } },
+        { root: HKEY_LOCAL_MACHINE, path: `${PROFILE_LIST}\\${USER_SID_TEXT}`,
+            values: { ProfileImagePath: folders.Profile, Flags: 0, State: 0 } },
+        { root: HKEY_LOCAL_MACHINE, path: `${PROFILE_LIST}\\${LOCAL_SYSTEM_SID}`,
+            values: { ProfileImagePath: `${folders.System}\\config\\systemprofile`, Flags: 12,
+                State: 0 } },
+    ];
+};
 
 /** What NT 4, 2000 and XP keep in CurrentBuild; Vista put the build number there. */
 const OBSOLETE_BUILD = '1.511.1 () (Obsolete data - do not use)';
@@ -632,6 +666,12 @@ const machineKeys = (windows, directx, processors)=>{
                 PathName: 'C:\\WINDOWS',
             },
             owned: VERSION_VALUES },
+        // The profiles the machine keeps, under the account that owns each:
+        // the user's, by its SID (the token's), and the system's, which
+        // services run as. A program that keeps its settings by user looks
+        // its user up here, the profile's folder by the SID its token gives,
+        // and finds no profile on a machine without the key.
+        ...profileKeys(windows, folders),
         // The video codecs Windows installs, as the compressor manager finds
         // them (msvfw32/icm.js): a codec a game installs is a value beside them.
         { root: HKEY_LOCAL_MACHINE,
