@@ -302,9 +302,13 @@ export function settledAfter(shadow, call){
  * @property {(stage: number, type: number, out: { value?: number }) => number
  *     } GetTextureStageState
  * @property {(out: { viewport?: any }) => number} [GetViewport]
+ * @property {(out: { rect?: ScissorRect }) => number} [GetScissorRect]
+ * @property {(out: { parameters?: any }) => number} [GetCreationParameters]
  * @property {(sampler: number, type: number, out: { value?: number }) => number
  *     } [GetSamplerState]
  * @property {() => ShadowRingState} [ringState]
+ *
+ * @typedef {{ left: number, top: number, right: number, bottom: number }} ScissorRect
  *
  * @typedef {Object} ShadowRingState  What the command routines check a call against.
  * @property {number} drawable  the `DRAW` bits the device has

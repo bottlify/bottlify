@@ -1421,7 +1421,8 @@ function describe(result, context, calls, symbols){
                 + ` made ${gpuHeld.made.buffers} buffers, ${gpuHeld.made.textures} textures;`
                 + ` dropped without destroy: ${JSON.stringify(gpuHeld.droppedWithoutDestroy)}`);
             say(`      heaviest buffer kinds: ${gpuHeld.heaviestBufferKinds.join(', ') || 'none'}`);
-            say(`      heaviest texture kinds: ${gpuHeld.heaviestTextureKinds.join(', ') || 'none'}`);
+            const kinds = gpuHeld.heaviestTextureKinds.join(', ') || 'none';
+            say(`      heaviest texture kinds: ${kinds}`);
         }
         // How often a present waited for the device, and how far behind the
         // device ever was: a run on a slow adapter goes at the device's pace.

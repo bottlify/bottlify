@@ -757,7 +757,8 @@ test('Direct3D 9: the device\'s own surfaces cross zero in the guest, and move t
     assert.ok((inGuest.get('GetRenderTarget') ?? 0) >= 3, `GetRenderTarget in the guest:`
         + ` ${inGuest.get('GetRenderTarget') ?? 0}`);
     assert.ok((inGuest.get('GetDepthStencilSurface') ?? 0) >= 3);
-    assert.ok((inGuest.get('Release') ?? 0) >= 12, `Release in the guest: ${inGuest.get('Release')}`);
+    const released = inGuest.get('Release') ?? 0;
+    assert.ok(released >= 12, `Release in the guest: ${released}`);
 });
 
 for (const { label, version, program } of PROGRAMS_WRITTEN)

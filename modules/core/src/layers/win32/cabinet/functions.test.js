@@ -10,6 +10,7 @@ import { deflateRawSync } from 'node:zlib';
 import { COMPRESSION } from './cabinet.js';
 import { buildCabinet } from './cabinet.fixture.js';
 import { FDIERROR, FDINT, createCabinetFunctions } from './functions.js';
+import { windowsVersion } from '../kernel32/versions.js';
 
 /** @param {number} length @param {number} seed */
 const pattern = (length, seed)=>Uint8Array.from({ length }, (_, at)=>(at * 13 + seed) % 247);
@@ -251,7 +252,7 @@ test('DllGetVersion answers the machine\'s own build on the NT platform, in eith
             memory.subarray(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
             memory.set(bytes, at),
-        windows: 'win7',
+        windows: windowsVersion('win7'),
     }));
     view.setUint32(0x10, 20, true);
     assert.equal(fns.DllGetVersion.handler([0x10]), 0);

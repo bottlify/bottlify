@@ -81,7 +81,8 @@ const READ_CHUNK = 64 * 1024;
  * @property {() => any} callerThread
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {string} [windows]  The Windows the machine is, whose build the library is.
+ * @property {import('../kernel32/versions.js').WindowsVersion} [windows]  The Windows the
+ *     machine is, whose build the library is.
  */
 
 /**
@@ -197,7 +198,7 @@ export function createCabinetFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const { major, minor, build } = windowsVersion(host.windows);
+                const { major, minor, build } = host.windows ?? windowsVersion(null);
                 const fields = new DataView(new ArrayBuffer(size - 4));
                 fields.setUint32(0, major, true);
                 fields.setUint32(4, minor, true);

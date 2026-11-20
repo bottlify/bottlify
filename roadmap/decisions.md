@@ -1408,7 +1408,7 @@ a managed framework's SetData on a render target threw. A source that will not l
 answered as its lock was: D3DX reads one through GetRenderTargetData, which is not done here.
 *2026-11-18.*
 
-**A281. A queue track tells its sound taken 80 ms before the audio thread plays it (the audio adapter).**
+**A282. A queue track tells its sound taken 80 ms before the audio thread plays it (the audio adapter).**
 Windows tells a program its sound was played when its audio engine took it from the buffer, and
 what the engine took sits in the engine and the card ahead of the speaker. Here the speaker is the
 page's audio thread, which plays on its own clock whatever the engine's thread is doing, and that
