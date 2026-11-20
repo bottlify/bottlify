@@ -729,9 +729,16 @@ const machineKeys = (windows, directx, processors, machine64 = false)=>{
         // write with the shim they carry (mscoree, A247): the shim and its
         // implementation look under it, and the Framework 4's setup there
         // leaves it as it found it.
+        // A 64-bit Windows's 64-bit view names Framework64, its 32-bit view
+        // Framework.
         ...windows.major >= 6 ? [{ root: HKEY_LOCAL_MACHINE,
             path: 'SOFTWARE\\Microsoft\\.NETFramework',
-            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework\\` } }] : [],
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework`
+                + `${machine64 ? '64' : ''}\\` } },
+        ...machine64 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Wow6432Node\\Microsoft\\.NETFramework',
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework\\` } }] : []]
+            : [],
         ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
             path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
             values: { Type: type, 'Image Path': image } })),

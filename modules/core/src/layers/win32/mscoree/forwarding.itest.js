@@ -112,6 +112,62 @@ test('mscoree forwards each call to mscoreei as it came, crossing into the host 
             'the second call stayed in the guest');
     });
 
+const SHIM64 = 'C:\\WINDOWS\\Microsoft.NET\\Framework64\\v4.0.30319\\mscoreei.dll';
+
+/** The same two calls from a 64-bit program: GetCORVersion(buffer, 32, &length). */
+const twice64 = buildExe({
+    bits: 64,
+    imageBase: 0x140000000,
+    imports: { 'mscoree.dll': ['GetCORVersion'], 'KERNEL32.dll': ['ExitProcess'] },
+    data: { buffer: new Array(64).fill(0), length: u32(0) },
+    codeSize: 0x80,
+    code: ({ iat, at, code })=>{
+        /** @param {number} target @param {number} next */
+        const rel = (target, next)=>u32((target - code(next)) | 0);
+        /** @param {number} from */
+        const call = from=>[
+            0x48, 0x8d, 0x0d, ...rel(at('buffer'), from + 7), //   lea rcx, [buffer]
+            0xba, ...u32(0x20), //                               mov edx, 0x20
+            0x4c, 0x8d, 0x05, ...rel(at('length'), from + 19), // lea r8, [length]
+            0xff, 0x15, ...rel(iat('GetCORVersion'), from + 25), // call [GetCORVersion]
+        ];
+        return [
+            0x48, 0x83, 0xec, 0x28, //                           sub rsp, 0x28
+            ...call(4), //                                       0x04..0x1d
+            0x89, 0xc6, //                                       mov esi, eax
+            ...call(31), //                                      0x1f..0x38
+            0x01, 0xc6, //                                       add esi, eax
+            0x89, 0xf1, //                                       mov ecx, esi
+            0xff, 0x15, ...rel(iat('ExitProcess'), 66), //       call [ExitProcess]
+        ];
+    },
+});
+
+/** The 64-bit shim's GetCORVersion: its second argument plus 0x100. */
+const shim64 = buildExe({
+    dll: true,
+    bits: 64,
+    imageBase: 0x180000000,
+    imports: { 'KERNEL32.dll': ['GetCurrentThreadId'] },
+    exports: [{ name: 'GetCORVersion', offset: 0x10 }],
+    codeSize: 0x20,
+    code: ()=>[
+        0xb8, ...u32(1), 0xc3, //                 DllMain: mov eax, TRUE; ret
+        ...new Array(0x10 - 6).fill(0xcc),
+        0x8d, 0x82, ...u32(0x100), //            lea eax, [rdx+0x100]
+        0xc3, //                                 ret
+    ],
+});
+
+test('in a 64-bit program mscoree forwards each call to the Framework64 mscoreei as it came,'
+    + ' its arguments in their registers', { timeout: 120_000 }, async()=>{
+    const { code, crossings } = await run(twice64,
+        { files: [{ path: SHIM64, bytes: shim64 }] });
+    assert.equal(code, 2 * (0x20 + 0x100), 'both calls reached the shim with their arguments');
+    assert.equal(crossings('mscoree.dll!GetCORVersion'), 1,
+        'the second call stayed in the guest');
+});
+
 test('without the .NET Framework, mscoree answers that the runtime cannot be loaded',
     { timeout: 120_000 }, async()=>{
         const { code, said } = await run(twice);

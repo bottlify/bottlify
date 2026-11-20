@@ -224,7 +224,8 @@ export function createSystemModules(host){
         const declared = new Map(Object.entries(byOrdinal)
             .map(([ordinal, exported])=>[exported, Number(ordinal)]));
         return Object.entries(table).filter(([exported, fn])=>{
-            const runs = !long || fn.long || fn.handler || fn.data;
+            // Guest code that places its x86-64 itself (`guestLong`) runs there too.
+            const runs = !long || fn.long || fn.handler || fn.data || (fn.guest && fn.guestLong);
             if (!runs)
             {
                 left(`${name}!${exported}`);

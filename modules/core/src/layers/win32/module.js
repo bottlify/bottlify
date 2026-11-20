@@ -7031,7 +7031,10 @@ export function createWin32Module(){
                 return value ? decodeAnsi(value.data.subarray(0,
                     end < 0 ? value.data.length : end)) || null : null;
             };
-            const frameworkRoot = 'C:\\WINDOWS\\Microsoft.NET\\Framework\\';
+            // A 64-bit process's runtime is the Framework64 one, as its view of
+            // the registry names it.
+            const frameworkRoot = pointerSize === 8 ? 'C:\\WINDOWS\\Microsoft.NET\\Framework64\\'
+                : 'C:\\WINDOWS\\Microsoft.NET\\Framework\\';
             // Decided when the table is first asked for, not here: the
             // bottle's files and registry are laid down after the layers are
             // made, and before any library is.
@@ -7072,6 +7075,7 @@ export function createWin32Module(){
                     }
                 };
                 libraries['mscoree.dll'] = { ...createMscoreeFunctions({
+                    pointerSize,
                     allocate: bytes=>heap.allocate(bytes),
                     allocateCode: bytes=>heap.allocateCode(bytes),
                     writeMemory,
