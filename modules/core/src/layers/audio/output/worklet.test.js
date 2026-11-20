@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 import { createMixer } from './mixer.js';
 import { GLOBAL_HEADER_INT32, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES } from './mix.js';
+import { readSoundTable } from '../../../host/sound-meter.js';
 
 const MIX_PATH = fileURLToPath(new URL('./mix.js', import.meta.url));
 const WORKLET_PATH = fileURLToPath(new URL('./worklet.js', import.meta.url));
@@ -202,4 +203,20 @@ test('without a table, the processor plays what is posted to the port it is hand
     assert.deepEqual({ ...said.at(-1) },
         { played: 13, blocks: 4, starvedBlocks: 4, starvedFrames: 13 },
         'what it played, as a place in the engine\'s ring, and what it found missing');
+});
+
+test('a page reads the speaker\'s gaps off the table the worklet plays', ()=>{
+    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const music = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    music.gain = 1;
+    music.write(pcm16([1, 2, 3, 4, 5, 6]));
+    const Processor = loadWorkletClass();
+    const processor = new Processor({ processorOptions: { table: mixer.table, channels: 2 } });
+    for (let block = 0; block < 3; block++)
+    {
+        processor.process([], [outputBlock(4)]);
+    }
+    assert.deepEqual(readSoundTable(/** @type {SharedArrayBuffer} */ (mixer.table)),
+        { rate: 48000, blocks: 3, starvedBlocks: 2, starvedFrames: 6 },
+        'four frames, then two of four, then none: two blocks short by six frames');
 });
