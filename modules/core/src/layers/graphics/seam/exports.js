@@ -379,17 +379,31 @@ export function createGraphicsLibraries(
     /** @param {string} library */
     const has = library=>!only || only.includes(library);
     /**
-     * What `make` builds, when the bottle has `library`; null otherwise, typed
-     * as built because every handler that reaches it leaves with the library.
+     * What `make` builds, made when first asked for - a process that never
+     * calls a library of these never makes its seam - and when the bottle has
+     * `library`; null otherwise, typed as built because every handler that
+     * reaches it leaves with the library. `made` answers it only when made,
+     * for a report that must not make one.
      *
      * @template T
      * @param {string | string[]} library  or any of these
      * @param {() => T} make
-     * @returns {T}
+     * @returns {(() => T) & { made: () => T | null }}
      */
     function built(library, make){
-        return (Array.isArray(library) ? library.some(has) : has(library)) ? make()
-            : /** @type {T} */ (/** @type {unknown} */ (null));
+        const there = Array.isArray(library) ? library.some(has) : has(library);
+        /** @type {T | null} */
+        let value = null;
+        let done = false;
+        const get = ()=>{
+            if (!done)
+            {
+                done = true;
+                value = there ? make() : null;
+            }
+            return /** @type {T} */ (value);
+        };
+        return Object.assign(get, { made: ()=>value });
     }
     // Without guest code, Direct3D 8 and 9 keep no block, ring or getters in
     // the guest: every call is a trap, which is what a regression in them is
@@ -444,17 +458,17 @@ export function createGraphicsLibraries(
         ringBytes,
     }));
     const d3dLegacy = built('DDRAW.dll', ()=>createLegacyDirect3DSeam({
-        publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,
+        publisher, memory, d3d7: d3d7().shared, callGuest, currentThread, scratch,
         // A first-generation device is asked of a surface, whose object the
         // DirectDraw seam knows; that seam is made next, beside these tables.
-        ownerOf: surface=>ddraw.ownerOf(surface),
+        ownerOf: surface=>ddraw().ownerOf(surface),
     }));
     const ddraw = built('DDRAW.dll', ()=>createDirectDrawSeam({
         publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
-        aroundCall: call=>d3d7.aroundDevices(call),
+        aroundCall: call=>d3d7().aroundDevices(call),
         now, schedule, refresh,
-        extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
-        extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
+        extraInterfaces: [d3d7().interface, ...d3dLegacy().interfaces],
+        extraSurfaceInterfaces: d3dLegacy().surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
         divergence,
@@ -491,7 +505,7 @@ export function createGraphicsLibraries(
             return DDERR_INVALIDPARAMS;
         }
         const object = graphics.create('ddraw',
-            ddraw.rootOptions(version, (guid >>> 0) === DDCREATE_EMULATIONONLY,
+            ddraw().rootOptions(version, (guid >>> 0) === DDCREATE_EMULATIONONLY,
                 (guid >>> 0) === DDCREATE_HARDWAREONLY));
         if (!object)
         {
@@ -499,7 +513,7 @@ export function createGraphicsLibraries(
             return E_OUTOFMEMORY;
         }
         created.push('ddraw');
-        fields.writeU32(out >>> 0, ddraw.publishRoot(object, version));
+        fields.writeU32(out >>> 0, ddraw().publishRoot(object, version));
         return DD_OK;
     };
 
@@ -524,50 +538,53 @@ export function createGraphicsLibraries(
         return opengl;
     };
 
+    const openglTable = ()=>{
     /** @type {Record<string, any>} */
-    const openglTable = {};
-    for (const [words, names] of Object.entries(ARGUMENT_WORDS))
-    {
-        for (const name of names)
+        const openglEntries = {};
+        for (const [words, names] of Object.entries(ARGUMENT_WORDS))
         {
+            for (const name of names)
+            {
             // Resolved at the first call, not looked up by name on every one:
             // the runtime's table is fixed once it is built.
             /** @type {((args: number[]) => number) | null} */
-            let resolved = null;
-            const floats = floatArguments(name);
-            openglTable[name] = {
-                argBytes: Number(words) * 4,
-                // Where a 64-bit caller's floats and doubles are (`floatArguments`).
-                ...floats ? { floats } : {},
-                // GL reports through glGetError and touches nothing of
-                // Win32's; only the wgl half of this library is a Windows
-                // API and may set the thread's last error.
-                ...(name.startsWith('gl') ? { lastError: false } : {}),
-                /** @param {number[]} args */
-                handler: args=>(resolved ??= openglRuntime().table[name].handler)(args),
-            };
+                let resolved = null;
+                const floats = floatArguments(name);
+                openglEntries[name] = {
+                    argBytes: Number(words) * 4,
+                    // Where a 64-bit caller's floats and doubles are (`floatArguments`).
+                    ...floats ? { floats } : {},
+                    // GL reports through glGetError and touches nothing of
+                    // Win32's; only the wgl half of this library is a Windows
+                    // API and may set the thread's last error.
+                    ...(name.startsWith('gl') ? { lastError: false } : {}),
+                    /** @param {number[]} args */
+                    handler: args=>(resolved ??= openglRuntime().table[name].handler)(args),
+                };
+            }
         }
-    }
-    // The calls the command ring carries are routines that write them into
-    // the ring of the calling thread's context (`opengl/commands.js`),
-    // falling back on the same handler when it has none or no room. They run
-    // unbroken: another thread's entry into the host may read what they write.
-    for (const [name, shape] of Object.entries(GL_COMMANDS.COMMANDS))
-    {
-        const entry = openglTable[name];
-        Object.assign(entry, {
-            unbroken: true,
-            /** @param {import('../../win32/msvcrt/guest-code.js').CodeBuilder} builder */
-            code: builder=>{
-                const trap = builder.register({ convention: 'stdcall', argBytes: entry.argBytes,
-                    lastError: false, handler: entry.handler });
-                const code = commandCode(0, 0,
-                    { ...shape, slot: GL_COMMANDS.commandSlot(name), thread: true });
-                builder.jump(code.length - 4, trap);
-                return code;
-            },
-        });
-    }
+        // The calls the command ring carries are routines that write them into
+        // the ring of the calling thread's context (`opengl/commands.js`),
+        // falling back on the same handler when it has none or no room. They run
+        // unbroken: another thread's entry into the host may read what they write.
+        for (const [name, shape] of Object.entries(GL_COMMANDS.COMMANDS))
+        {
+            const entry = openglEntries[name];
+            Object.assign(entry, {
+                unbroken: true,
+                /** @param {import('../../win32/msvcrt/guest-code.js').CodeBuilder} builder */
+                code: builder=>{
+                    const trap = builder.register({ convention: 'stdcall', argBytes: entry.argBytes,
+                        lastError: false, handler: entry.handler });
+                    const code = commandCode(0, 0,
+                        { ...shape, slot: GL_COMMANDS.commandSlot(name), thread: true });
+                    builder.jump(code.length - 4, trap);
+                    return code;
+                },
+            });
+        }
+        return openglEntries;
+    };
 
     /** IDirect3D9* Direct3DCreate9(UINT SDKVersion) */
     const d3d9Create = ()=>{
@@ -577,7 +594,7 @@ export function createGraphicsLibraries(
             return 0;
         }
         created.push('d3d9');
-        return d3d9.publishRoot(root);
+        return d3d9().publishRoot(root);
     };
     /**
      * A device's vtable copied into the table the store in `Direct3DCreate9`'s
@@ -598,12 +615,16 @@ export function createGraphicsLibraries(
         }
     };
 
-    const table = {
+    // What makes each library: a library is made when the module is placed
+    // or its table is first read, so a process that never loads OpenGL never
+    // makes its 1,400 entries, nor a Direct3D seam it never calls.
+    /** @type {Record<string, () => any>} */
+    const makers = {
         'OPENGL32.dll': openglTable,
 
         // After OPENGL32, so that where its exports are placed is known when
         // GLU32's code, which calls them, is placed.
-        'GLU32.dll': has('GLU32.dll') && createGlu({
+        'GLU32.dll': ()=>createGlu({
             memory,
             exportAddress,
             withContext: body=>openglRuntime().withContext(body),
@@ -614,7 +635,7 @@ export function createGraphicsLibraries(
             divergence,
         }),
 
-        'D3D8.dll': {
+        'D3D8.dll': ()=>({
             /**
              * IDirect3D8* Direct3DCreate8(UINT SDKVersion)
              *
@@ -632,7 +653,7 @@ export function createGraphicsLibraries(
                         return 0;
                     }
                     created.push('d3d8');
-                    return d3d8.publishRoot(root);
+                    return d3d8().publishRoot(root);
                 },
             },
 
@@ -682,9 +703,9 @@ export function createGraphicsLibraries(
              * it as a call that does nothing, and nothing here prints.
              */
             DebugSetMute: { argBytes: 0, handler: ()=>0 },
-        },
+        }),
 
-        'D3D9.dll': {
+        'D3D9.dll': ()=>({
             /** IDirect3D9* Direct3DCreate9(UINT SDKVersion) */
             Direct3DCreate9: {
                 returns: 'pointer',
@@ -787,17 +808,17 @@ export function createGraphicsLibraries(
                     {
                         created.push('d3d9');
                     }
-                    return d3d9.publishRootEx(root, out);
+                    return d3d9().publishRootEx(root, out);
                 },
             },
-        },
+        }),
 
-        ...Object.fromEntries(Object.entries(d3d10?.libraries ?? {})
-            .filter(([library])=>has(library))),
+        ...Object.fromEntries(DXGI_LIBRARIES.map(library=>[library,
+            ()=>/** @type {Record<string, any>} */ (d3d10().libraries)[library]])),
 
-        'vulkan-1.dll': vulkan?.library,
+        'vulkan-1.dll': ()=>vulkan().library,
 
-        'DDRAW.dll': {
+        'DDRAW.dll': ()=>({
             /**
              * HRESULT DirectDrawCreate(GUID*, LPDIRECTDRAW*, IUnknown*)
              *
@@ -845,28 +866,28 @@ export function createGraphicsLibraries(
             DirectDrawEnumerateA: {
                 argBytes: 8,
                 /** @param {number[]} args */
-                handler: ([callback, context])=>ddraw.enumerate.ansi(callback, context),
+                handler: ([callback, context])=>ddraw().enumerate.ansi(callback, context),
             },
             DirectDrawEnumerateExA: {
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([callback, context, flags])=>
-                    ddraw.enumerate.ansiEx(callback, context, flags),
+                    ddraw().enumerate.ansiEx(callback, context, flags),
             },
             DirectDrawEnumerateW: {
                 argBytes: 8,
                 /** @param {number[]} args */
-                handler: ([callback])=>ddraw.enumerate.wide(callback),
+                handler: ([callback])=>ddraw().enumerate.wide(callback),
             },
-            DirectDrawEnumerateExW: { argBytes: 12, handler: ()=>ddraw.enumerate.wideEx() },
+            DirectDrawEnumerateExW: { argBytes: 12, handler: ()=>ddraw().enumerate.wideEx() },
 
             /** HRESULT DllGetClassObject(REFCLSID, REFIID, LPVOID *ppv) */
             DllGetClassObject: {
                 argBytes: 12,
                 /** @param {number[]} args */
-                handler: ([clsid, riid, out])=>ddraw.classObject(clsid, riid, out,
+                handler: ([clsid, riid, out])=>ddraw().classObject(clsid, riid, out,
                     version=>{
-                        const root = graphics.create('ddraw', ddraw.rootOptions(version));
+                        const root = graphics.create('ddraw', ddraw().rootOptions(version));
                         if (root)
                         {
                             created.push('ddraw');
@@ -878,7 +899,7 @@ export function createGraphicsLibraries(
             GetSurfaceFromDC: {
                 argBytes: 12,
                 /** @param {number[]} args */
-                handler: ([hdc, out, deviceOut])=>ddraw.surfaceFromDc(hdc, out, deviceOut),
+                handler: ([hdc, out, deviceOut])=>ddraw().surfaceFromDc(hdc, out, deviceOut),
             },
             /** HRESULT DllCanUnloadNow(void), which COM asks for. */
             DllCanUnloadNow: { argBytes: 0, handler: ()=>S_OK },
@@ -898,23 +919,32 @@ export function createGraphicsLibraries(
                     {
                         return DDERR_INVALIDPARAMS;
                     }
-                    const object = graphics.create('ddraw', ddraw.rootOptions(7));
+                    const object = graphics.create('ddraw', ddraw().rootOptions(7));
                     const made = object.createClipper(flags >>> 0, { outer: outer >>> 0 });
                     if (made.hr !== DD_OK)
                     {
                         return made.hr;
                     }
                     fields.writeU32(out >>> 0, publisher.publish(
-                        made.clipper, ddraw.interfaces.clipper, IID_IDirectDrawClipper));
+                        made.clipper, ddraw().interfaces.clipper, IID_IDirectDrawClipper));
                     return DD_OK;
                 },
             },
-        },
+        }),
     };
     // The bottle's libraries alone: one it lacks is absent as a missing file
-    // is, and nothing behind it was built.
-    const libraries = /** @type {Record<string, Record<string, any>>} */ (Object.fromEntries(
-        Object.entries(table).filter(([name, exports])=>exports && has(name))));
+    // is, and nothing behind it was built. Each is made when first read.
+    /** @type {Record<string, Record<string, any>>} */
+    const libraries = {};
+    for (const [name, make] of Object.entries(makers))
+    {
+        if (has(name))
+        {
+            const made = built(name, make);
+            Object.defineProperty(libraries, name, { enumerable: true, configurable: true,
+                get: made });
+        }
+    }
 
     return {
         libraries,
@@ -960,7 +990,7 @@ export function createGraphicsLibraries(
          *
          * @returns {import('../figures.js').FrameFigures | null}
          */
-        figures: ()=>d3d8?.figures() ?? d3d9?.figures() ?? null,
+        figures: ()=>d3d8.made()?.figures() ?? d3d9.made()?.figures() ?? null,
 
         diagnostics: ()=>({
             created: [...created],
@@ -970,7 +1000,8 @@ export function createGraphicsLibraries(
             // nothing at all about what it drew through them. The OpenGL
             // runtime joins the answer when it is the one that drew: its
             // renderer is made lazily, so it is asked only if it exists.
-            device: d3d8?.diagnostics() ?? d3d9?.diagnostics() ?? d3d7?.diagnostics()
+            device: d3d8.made()?.diagnostics() ?? d3d9.made()?.diagnostics()
+                ?? d3d7.made()?.diagnostics()
                 ?? (opengl ? opengl.diagnostics().gpu : null),
             // Every compressed block the program handed OpenGL, as a digest.
             compressedTextures: opengl ? opengl.diagnostics().compressed : null,
@@ -986,10 +1017,10 @@ export function createGraphicsLibraries(
             // What OpenGL's textures hold on this side: their levels' texels
             // and compressed blocks.
             openglHeld: opengl ? opengl.diagnostics().held : null,
-            vulkan: vulkan?.diagnostics() ?? null,
-            direct3d10: d3d10?.diagnostics() ?? null,
+            vulkan: vulkan.made()?.diagnostics() ?? null,
+            direct3d10: d3d10.made()?.diagnostics() ?? null,
             // How the Presents of the version that presented were paced.
-            presentPacing: [d3d9?.presentPacing(), d3d8?.presentPacing()]
+            presentPacing: [d3d9.made()?.presentPacing(), d3d8.made()?.presentPacing()]
                 .find(pacing=>pacing && pacing.presents > 0) ?? null,
         }),
 
@@ -997,11 +1028,11 @@ export function createGraphicsLibraries(
          * What the guest set without crossing, and how much of it. Flat, so a
          * report prints it beside the crossings it stands in for.
          */
-        shadow: ()=>d3d9?.shadow() ?? d3d8?.shadow() ?? null,
+        shadow: ()=>d3d9.made()?.shadow() ?? d3d8.made()?.shadow() ?? null,
 
         /** The window a full-screen Direct3D 8 or 9 device holds the screen with, or 0. */
         screenHeld: ()=>focus?.screen() ?? 0,
         /** The window the last DXGI swap chain presented into, full screen or not. */
-        presentedWindow: ()=>d3d10?.presentedWindow?.() ?? null,
+        presentedWindow: ()=>d3d10.made()?.presentedWindow?.() ?? null,
     };
 }

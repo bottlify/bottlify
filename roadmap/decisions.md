@@ -2632,4 +2632,36 @@ translated in one process calls the same addresses in the next. Laid out on dema
 bases would follow each program's load order: a warm translation store measured on wine-d3d9's
 device test kept 286 of its regions with every module moved 64 KiB, against 357 in place, its
 misses 97 against 8. Until written a module's span is a reserved region nothing else is given.
+An address one module's code is built with (GLU32's of OPENGL32's exports) is no address handed
+out: the module it names is written with the one that holds it, not when the layout is made
+(OPENGL32, 88 KiB, was written into every process that way: a kernel32 program's system modules
+212 KiB, 124 without it).
 *2026-11-19.*
+
+**A281. A runtime's processes share one layout of the engine's libraries, routines and stubs.**
+A process used to build every system module's exports - their guest routines, their data, a trap
+stub each - at its start, whether it loaded the module or not: ~15 MiB of descriptions and ~20 MiB
+of a node process's memory each, which a setup of dozens of processes paid again and again. Now
+the first process of a runtime with the same tables (`tablesFingerprint` in `app.js`) builds them
+all and keeps the layout; a later one builds a module only when it places it. For translations
+made in one process to be taken in another the addresses must agree, so what a module's exports
+take for themselves comes from the engine's span before the modules, a module from the part it
+took in the first process (`engineCode.within`), its code on pages of that part (`code-arena.js`),
+and a stub takes the slot its name took there (`thunks.js` `follow`); what does not fit, or a
+helper shared by several modules and made by whichever is placed first, goes past every part, at
+an address that may differ - a translation through it is made again, nothing more. The program's
+heap is no longer where these routines lie, so it starts the same whatever the engine built. A
+block of that span reads as zeroes, as a heap block does: in a memory a gone process left it is
+cleared as it is handed out (the clock's last answer read from there held a new process's
+performance counter still for as long as the gone one had lived).
+The tables themselves are made when first read (`win32/lazy-libraries.js`): what one library takes
+from another is a patch applied when it is made. A library whose factory registers a COM class a
+program may ask for by its CLSID alone (ole32, shell32, windowscodecs: `CLASS_SERVERS`) is made
+when a class is first not found, as Windows loads a class's server only then; one that registers
+a class without being listed there is refused as it is made, and lazy-libraries.itest.js makes
+every library in a later process. The layout is keyed by what is known before a table is made - the
+libraries' names, the faces, the ordinals, the Windows and the window - and a module made otherwise
+than its layout says is refused where it is placed (`shapeOf`), loudly. 50 hello processes in one
+node: heap 622 MiB before the lazy tables, 321 MiB with them and graphics' made the same way
+(and the trap layout shared, not copied); 125 ms a start, 67.
+*2026-11-20.*

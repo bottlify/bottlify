@@ -13,7 +13,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createApp, moduleKeyOf } from './app.js';
+import { createApp } from './app.js';
+import { moduleKeyOf } from './process/libraries.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */

@@ -12,51 +12,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden,
-    withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
-    fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
-    withLibraryExtension, timedWait,
-    pathDirectories, divergenceReporter,
-    pagePacing,
-    PAGE_YIELD_MS,
-    PENDING_YIELD_MS,
-    retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, filmSoundOwed,
-    heapSizeFor,
-    spaceAbove, engineAreaFor, ENGINE_CUT_AT,
-    placeMainStack,
-    stackReserveOf,
-    resourceLookup,
-    createMissingImports,
-    shippedLibraryReader,
-    areaOf,
-    createGuestView,
-    createKernelGl,
-    resolveOpenglEntry,
-    describeEvent,
-    journalEvents,
-    answeredByEngine,
-    mapShippedLibraries,
-    placeLibrary,
-    missingImportCall,
-    compatibilityOf,
-    createApp,
-    versionResourceOf,
-    imageInMemory,
+    createMacrotask, pacedYield, pageIsHidden, timedWait, divergenceReporter, pagePacing,
+    PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
+    filmSoundOwed, heapSizeFor, spaceAbove, engineAreaFor, ENGINE_CUT_AT, placeMainStack,
+    stackReserveOf, shippedLibraryReader, areaOf, answeredByEngine, mapShippedLibraries, createApp,
     runProcessId,
-    withCpuSetup,
-    withoutFaultingTailCalls,
-    tailCallsFault,
-    mobileOrSafari,
-    automaticCores,
+    withCpuSetup, withoutFaultingTailCalls, tailCallsFault, mobileOrSafari, automaticCores,
     translatorsBeside,
-    allocateCleared,
-    RESOURCE_ALIGNMENT,
-    liveDumpOf,
-    readWholeFile,
-    WHOLE_READ_BYTES,
-    answeringWhile,
 } from './app.js';
+import {
+    createGuestView, createKernelGl, resolveOpenglEntry,
+} from './process/sidecar.js';
+import { idleWait, answeringWhile } from './process/run-waits.js';
+import { allocateCleared, RESOURCE_ALIGNMENT } from './process/process-layout.js';
+import {
+    resourceLookup, compatibilityOf, versionResourceOf, imageInMemory,
+} from './process/image-resources.js';
+import { journalEvents } from './process/system-host.js';
+import { liveDumpOf } from './process/live-dump.js';
+import {
+    groupBlocks, inParallel, withReadAhead, withWindow, refetchedIn, windowFor,
+    NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
+} from './process/bundle-mount.js';
+import {
+    fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
+    withLibraryExtension, pathDirectories, moduleKeyOf, createMissingImports, describeEvent,
+    placeLibrary, missingImportCall, readWholeFile, WHOLE_READ_BYTES,
+} from './process/libraries.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
 import { HEAP_POOLS } from './memory-zones.js';
 import { writeBundle } from './bundle-node.js';

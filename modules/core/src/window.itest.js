@@ -19,7 +19,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { IDLE_LOOK_MS, createApp } from './app.js';
+import { createApp } from './app.js';
+import { IDLE_LOOK_MS } from './process/run-waits.js';
 
 const FIXTURE = new URL('../test/fixtures/window.exe', import.meta.url);
 

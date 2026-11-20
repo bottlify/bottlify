@@ -129,10 +129,48 @@ test('a process writes only the system modules something loads: the rest keep th
             + ` held unwritten ${(held / 2 ** 20).toFixed(2)} MiB`);
         assert.ok(placed.includes('KERNEL32.dll') && placed.includes('ntdll.dll'),
             'what the program imports, and what is always loaded');
-        assert.ok(!placed.includes('D3D9.dll') && !placed.includes('USER32.dll'),
-            'nothing the program never asked for');
+        assert.ok(!placed.includes('D3D9.dll') && !placed.includes('USER32.dll')
+            && !placed.includes('OPENGL32.dll'), 'nothing the program never asked for');
         // Every module written at once was 12.9 MiB.
         assert.ok(written < 2 ** 20, `${(written / 2 ** 20).toFixed(2)} MiB written`);
+    });
+
+/** The system modules a process wrote, by name. @param {any} app */
+function writtenModules(app){
+    const memory = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'memory');
+    return (/** @type {string[]} */ (memory?.metrics?.layout ?? [])).map(line=>
+        /^(.*) 0x[0-9a-f]+\+0x[0-9a-f]+ \S+$/.exec(line)?.[1] ?? '')
+        .filter(name=>/\.dll$/i.test(name));
+}
+
+test('a module whose code holds another\'s addresses places that one with it, and only then',
+    { timeout: 120000 }, async t=>{
+        /**
+         * @param {Record<string, string[]>} imports
+         * @param {'win2000' | 'win10'} windows
+         */
+        const written = async(imports, windows)=>{
+            const executable = buildExe({
+                imports: { 'KERNEL32.dll': ['ExitProcess'], ...imports },
+                codeSize: 0x10,
+                code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+            });
+            const app = await createApp({ executable, windows });
+            t.after(()=>app.dispose());
+            return writtenModules(app);
+        };
+        // GLU32's code calls OPENGL32's exports by address. A Windows no other
+        // test asks for makes the machine's layout here, both ways: the
+        // process that lays the modules out and the one that follows it.
+        const laidOut = await written({}, 'win2000');
+        assert.ok(!laidOut.includes('OPENGL32.dll') && !laidOut.includes('GLU32.dll'),
+            `laying the modules out writes neither (${laidOut.join(', ')})`);
+        const following = await written({ 'GLU32.dll': ['gluOrtho2D'] }, 'win2000');
+        assert.ok(following.includes('GLU32.dll') && following.includes('OPENGL32.dll'),
+            `a process that loads GLU32 after the layout (${following.join(', ')})`);
+        const laying = await written({ 'GLU32.dll': ['gluOrtho2D'] }, 'win10');
+        assert.ok(laying.includes('GLU32.dll') && laying.includes('OPENGL32.dll'),
+            `a process that loads GLU32 as it lays the modules out (${laying.join(', ')})`);
     });
 
 test('a system module has the same base whatever order a process loads them in',
@@ -335,3 +373,31 @@ test('a program importing d3dx9_30, d3dx9_43 and msvcrt finds each and computes'
         [Math.fround(0.6), 0, Math.fround(-0.8)], 'the vector normalised');
     assert.equal(bytes(at.number, 8).getFloat64(0, true), 2500, 'atof read its number');
 });
+
+test('a later process takes the machine\'s layout and builds only the modules it loads',
+    { timeout: 120000 }, async t=>{
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'], 'USER32.dll': ['GetDesktopWindow'] },
+            codeSize: 0x10,
+            code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        /** The traps a process registered, and where its modules lie. */
+        const made = async()=>{
+            const app = await createApp({ executable });
+            t.after(()=>app.dispose());
+            const bridge = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'bridge');
+            return {
+                traps: Number(bridge?.metrics?.implemented ?? NaN),
+                bases: Object.fromEntries(['KERNEL32.dll', 'USER32.dll', 'D3D9.dll', 'MSVCRT.dll']
+                    .map(dll=>[dll, baseOf(app, dll)])),
+            };
+        };
+        // Whichever process of this test file came first laid the layout out;
+        // one more makes sure the two compared both took it.
+        await made();
+        const first = await made();
+        const second = await made();
+        assert.deepEqual(second.bases, first.bases, 'every module where the layout put it');
+        t.diagnostic(`traps registered: ${first.traps} and ${second.traps}`);
+        assert.ok(first.traps < 4000, `${first.traps} traps: only the loaded modules' are made`);
+    });

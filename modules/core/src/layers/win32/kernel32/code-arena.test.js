@@ -69,3 +69,15 @@ test('code larger than a page gets pages enough, and an empty heap answers 0', (
     assert.ok(at >= span && at + PAGE + 100 <= span + bytes);
     assert.equal(createCodeArena(()=>0)(64), 0);
 });
+
+test('code placed in another part starts a span of its own there', ()=>{
+    const memory = heap();
+    let part = 1;
+    const place = createCodeArena(bytes=>memory.allocate(bytes), ()=>part);
+    const one = place(16);
+    assert.equal(place(16), one + 16, 'the same part goes on in its span');
+    part = 2;
+    const two = place(16);
+    assert.equal(two % PAGE, 0);
+    assert.ok(two >= one + PAGE, 'a new span, though the old one had room');
+});

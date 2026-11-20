@@ -411,6 +411,11 @@ export function createComObject(clsid, definition, aggregation = null){
  * @property {(clsid: string, aggregation: Aggregation) =>
  *     ComObject | null | false} createAggregated
  *           Made inside a controlling unknown; false where the class may not be.
+ * @property {() => number} count  How many classes are registered.
+ * @property {(provide: () => void) => void} whenMissing
+ *           What is asked once a CLSID is not found: the libraries whose
+ *           factories register classes are made then, not at the start, and the
+ *           search goes on - as Windows loads a class's server only when asked.
  * @property {{ enter: () => void, leave: () => void, readonly users: number }} mtaUsage
  *           Holds the multithreaded apartment open with no thread in it, as
  *           CoIncrementMTAUsage does -- and as a system object with worker
@@ -430,6 +435,27 @@ export function createComObject(clsid, definition, aggregation = null){
 export function createComRegistry(){
     /** @type {Map<string, () => ComClassDefinition | null>} */
     const classes = new Map();
+    /** @type {(() => void) | null} */
+    let provide = null;
+    /**
+     * The factory of a canonical CLSID, the providers asked once when it is
+     * not known yet.
+     *
+     * @param {string | null} key
+     */
+    const factoryOf = key=>{
+        if (key === null)
+        {
+            return undefined;
+        }
+        if (!classes.has(key) && provide)
+        {
+            const asked = provide;
+            provide = null;
+            asked();
+        }
+        return classes.get(key);
+    };
     /**
      * The one object of a class that has one per process: made the first time
      * it is asked for, holding a reference of its own for good, every later
@@ -464,6 +490,12 @@ export function createComRegistry(){
             }
         },
 
+        count: ()=>classes.size,
+
+        whenMissing(asked){
+            provide = asked;
+        },
+
         mtaUsage: {
             enter(){
                 mtaUsers++;
@@ -479,7 +511,7 @@ export function createComRegistry(){
         /** @param {string} clsid @returns {boolean} */
         isRegistered(clsid){
             const key = canonicalGuid(clsid);
-            return key !== null && classes.has(key);
+            return factoryOf(key) !== undefined;
         },
 
         /**
@@ -488,7 +520,7 @@ export function createComRegistry(){
          */
         create(clsid){
             const key = canonicalGuid(clsid);
-            const factory = key === null ? undefined : classes.get(key);
+            const factory = factoryOf(key);
             if (!factory)
             {
                 return null;
@@ -526,7 +558,7 @@ export function createComRegistry(){
                 // The one object of the process is nobody's inner object.
                 return false;
             }
-            const factory = key === null ? undefined : classes.get(key);
+            const factory = factoryOf(key);
             const definition = factory?.();
             if (!definition)
             {

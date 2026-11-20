@@ -23,6 +23,7 @@ import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions, withSystemLibraries } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
 import { createRichedLibraries } from './riched/libraries.js';
+import { createLazyLibraries, CLASS_SERVERS } from './lazy-libraries.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
@@ -873,8 +874,43 @@ export function createWin32Module(){
                 }
             };
 
+            // The libraries, each made when first asked for (`lazy-libraries.js`).
+            // One whose factory registers a COM class it is not known to
+            // register is a server nobody finds until it is made: refused.
+            // Counted apart from the libraries a making makes on its way.
+            let madeInside = 0;
+            const lazyLibraries = createLazyLibraries({
+                around: (name, make)=>{
+                    const before = com.count();
+                    const insideBefore = madeInside;
+                    const made = make();
+                    const all = com.count() - before;
+                    const own = all - (madeInside - insideBefore);
+                    madeInside = insideBefore + all;
+                    if (own !== 0 && !CLASS_SERVERS.includes(name))
+                    {
+                        throw new Error(`win32: ${name} registers COM classes as it is made;`
+                            + ' it belongs in CLASS_SERVERS');
+                    }
+                    return made;
+                },
+            });
             /** @type {Record<string, Record<string, any>>} */
-            let libraries = {};
+            const libraries = lazyLibraries.table;
+            /** @param {Record<string, () => Record<string, any>>} makers */
+            const defineAll = makers=>{
+                for (const [name, make] of Object.entries(makers))
+                {
+                    lazyLibraries.define(name, make);
+                }
+            };
+            /**
+             * Libraries a factory has made together, as makers.
+             *
+             * @param {Record<string, Record<string, any>>} made
+             */
+            const lazily = made=>Object.fromEntries(Object.entries(made)
+                .map(([name, library])=>[name, ()=>library]));
             /** @type {ReturnType<typeof createDebuggerFunctions> | null} */
             let debuggerSide = null;
             /**
@@ -2020,7 +2056,31 @@ export function createWin32Module(){
                         memory.compareExchangeU32(address, expected, value),
                 },
             });
-            const allocator = guestHeap.wrap();
+            /**
+             * How deep the engine is in placing a system module (`placing`):
+             * what a module's exports allocate for themselves while it is
+             * placed - routines' tables, counters, clocks, a runtime's strings -
+             * is the engine's, in its own span (`engineCode`), not the program's
+             * heap, so where the program's own allocations land does not hang on
+             * which modules it loaded before them. Such a block is never given
+             * back: a free of one is a free of nothing.
+             */
+            let placingDepth = 0;
+            const heapAllocator = guestHeap.wrap();
+            /** @param {number} address */
+            const engineOwns = address=>config?.engineHolds?.(address >>> 0) === true;
+            const allocator = Object.assign(Object.create(heapAllocator), {
+                // An owner may be named by a function, asked only when the heap
+                // gives the block: a runtime's own heap is not made for a block
+                // the engine's span gives instead.
+                /** @param {number} bytes @param {any} [options] */
+                allocate: (bytes, options)=>(placingDepth > 0
+                    ? config?.engineCode?.(bytes) ?? null : null)
+                    ?? heapAllocator.allocate(bytes, typeof options?.owner === 'function'
+                        ? { ...options, owner: options.owner() } : options),
+                /** @param {number} address */
+                free: address=>(engineOwns(address) ? true : heapAllocator.free(address)),
+            });
             // Counted by the mapping calls as they go.
             const mappings = { views: 0, waited: 0, failed: 0 };
             /**
@@ -2032,7 +2092,8 @@ export function createWin32Module(){
             const refusedOpens = [];
             // The guest code the engine writes itself, on pages nothing else is
             // handed (`code-arena.js`).
-            const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
+            const placeCode = createCodeArena(bytes=>config?.engineCode?.(bytes)
+                ?? allocator.allocate(bytes), ()=>config?.enginePart?.() ?? 0);
             // COM's method tables on pages of their own, which VirtualQuery
             // calls writable data rather than code.
             const placeTable = createCodeArena(bytes=>allocator.allocate(bytes,
@@ -3691,8 +3752,8 @@ export function createWin32Module(){
             // file calls and setupapi's alike. Every layer's, not only this
             // one's: DDRAW.dll stands there as much as KERNEL32.dll does, and
             // VERSION already answers for both.
-            libraries = {
-                'KERNEL32.dll': {
+            defineAll({
+                'KERNEL32.dll': ()=>({
                     ...createConsoleFunctions({
                         write: (handle, text)=>sink(handle, text),
                         exit: code=>{
@@ -4446,9 +4507,9 @@ export function createWin32Module(){
                             bound: file=>ports.bound(file),
                         },
                     }),
-                },
+                }),
 
-                'msvcrt.dll': {
+                'msvcrt.dll': ()=>({
                     ...createCrtSeh({
                         readMemory,
                         writeMemory,
@@ -4490,7 +4551,7 @@ export function createWin32Module(){
                         // allocated with `malloc`, and Windows lets it. The
                         // runtime's blocks are a heap of its own, as msvcrt's
                         // are, made the first time it is asked for one.
-                        allocate: bytes=>allocator.allocate(bytes, { owner: crtHeap() }),
+                        allocate: bytes=>allocator.allocate(bytes, { owner: crtHeap }),
                         free: address=>allocator.free(address),
                         block: address=>allocator.block(address),
                         resize: (address, bytes)=>allocator.resize(address, bytes),
@@ -4612,18 +4673,18 @@ export function createWin32Module(){
                     // tables and funclets are not the 32-bit handler's.
                     ...cxx64 ? Object.fromEntries(Object.entries(cxx64.table)
                         .filter(([name])=>name !== '__CxxFrameHandler4')) : {},
-                },
+                }),
 
                 // One registry behind all three, as on a real machine: a socket
                 // opened through one of these names is the same socket seen through
                 // another, and they share one error domain.
                 // With the extensions it forwards to mswsock.
-                'WSOCK32.dll': { ...winsock.sockets,
+                'WSOCK32.dll': ()=>({ ...winsock.sockets,
                     AcceptEx: winsock.extensions.AcceptEx,
-                    GetAcceptExSockaddrs: winsock.extensions.GetAcceptExSockaddrs },
+                    GetAcceptExSockaddrs: winsock.extensions.GetAcceptExSockaddrs }),
 
                 // The adapters behind the sockets: one, on the network they reach.
-                'IPHLPAPI.dll': createIphlpapiFunctions({
+                'IPHLPAPI.dll': ()=>createIphlpapiFunctions({
                     pointerSize,
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                     // MIB tables the caller frees with FreeMibTable.
@@ -4639,12 +4700,12 @@ export function createWin32Module(){
                         kernel.createEvent({ manualReset: true, signalled: false, name })),
                 }),
                 // TransmitFile is wsock32's and mswsock's, never ws2_32's.
-                'WS2_32.dll': Object.fromEntries(Object.entries(winsock.sockets)
+                'WS2_32.dll': ()=>Object.fromEntries(Object.entries(winsock.sockets)
                     .filter(([name])=>name !== 'TransmitFile')),
-                'MSWSOCK.dll': { ...winsock.extensions,
-                    TransmitFile: winsock.sockets.TransmitFile },
+                'MSWSOCK.dll': ()=>({ ...winsock.extensions,
+                    TransmitFile: winsock.sockets.TransmitFile }),
 
-                'WINMM.dll': {
+                'WINMM.dll': ()=>({
                     ...winmm.table,
                     // The files a program reads its sounds from are the volume's.
                     ...createMmioFunctions({
@@ -4677,14 +4738,14 @@ export function createWin32Module(){
                         callerThread: ()=>bridge.callerThread(),
                         divergence: config?.divergence,
                     }),
-                },
+                }),
 
                 // system32's 5.82; Common Controls 6, the other face of the
                 // same controls, is bound where a context asks for it
                 // (`faces` below).
-                'COMCTL32.dll': commonControls.system,
+                'COMCTL32.dll': ()=>commonControls.system,
 
-                'SHELL32.dll': createShellFunctions({
+                'SHELL32.dll': ()=>createShellFunctions({
                     pointerSize,
                     writeMemory, readMemory, readCString, readWideString,
                     /** @param {number} address */
@@ -4730,7 +4791,7 @@ export function createWin32Module(){
                     publish: comVtables.publish,
                 }),
 
-                'VERSION.dll': createVersionFunctions({
+                'VERSION.dll': ()=>createVersionFunctions({
                     readMemory,
                     writeMemory,
                     readCString,
@@ -4755,12 +4816,12 @@ export function createWin32Module(){
                     directx: directx?.version,
                 }),
 
-                'LZ32.dll': createLzFunctions({
+                'LZ32.dll': ()=>createLzFunctions({
                     readCString, readWideString, writeMemory, files: volume }),
 
                 // The Patch API's applying half: the delta patches a Windows
                 // Installer patch's PatchFiles action and setups apply.
-                'MSPATCHA.dll': createMspatchaFunctions({
+                'MSPATCHA.dll': ()=>createMspatchaFunctions({
                     readMemory, writeMemory, readCString, readWideString,
                     setLastError: setError,
                     setLastErrorFor: setErrorOn,
@@ -4789,7 +4850,7 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'COMDLG32.dll': createCommonDialogFunctions({
+                'COMDLG32.dll': ()=>createCommonDialogFunctions({
                     readMemory, readCString, writeMemory,
                     // Whether a dialog's owner is a window, asked when it is
                     // called: user32's table is built after this one.
@@ -4798,7 +4859,7 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'IMM32.dll': createImmFunctions({
+                'IMM32.dll': ()=>createImmFunctions({
                     writeMemory, setLastError: setError,
                     // ImmIsUIMessage hands an IME message to the window named,
                     // through user32's SendMessageA, looked up when called.
@@ -4811,7 +4872,7 @@ export function createWin32Module(){
                             .handler([hwnd, message, wParam, lParam]),
                 }),
 
-                'SHLWAPI.dll': { ...createShlwapiFunctions({
+                'SHLWAPI.dll': ()=>({ ...createShlwapiFunctions({
                     readCString, readWideString, readMemory, writeMemory,
                     // The COM helpers call methods of the program's own objects.
                     drive: steps=>bridge.drive(steps),
@@ -4881,9 +4942,9 @@ export function createWin32Module(){
                     // SHCreateThread's thread is kernel32's CreateThread's.
                     library: name=>libraries[name],
                     divergence: config?.divergence,
-                }) },
+                }) }),
 
-                'ADVPACK.dll': createAdvpackFunctions({
+                'ADVPACK.dll': ()=>createAdvpackFunctions({
                     isAdministrator: ()=>isTokenMember(ADMINISTRATORS_SID),
                     hive,
                     folders,
@@ -4900,7 +4961,7 @@ export function createWin32Module(){
 
                 // The process status library: kernel32's K32 entries under
                 // their original names.
-                'PSAPI.DLL': {
+                'PSAPI.DLL': ()=>({
                     EnumProcesses: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
                         libraries['KERNEL32.dll'].K32EnumProcesses.handler(args) },
                     EmptyWorkingSet: { argBytes: 4, handler: (/** @type {number[]} */ args)=>
@@ -4924,11 +4985,11 @@ export function createWin32Module(){
                             handler: (/** @type {number[]} */ args)=>
                                 libraries['KERNEL32.dll'][`K32${name}`].handler(args),
                         }])),
-                },
+                }),
 
                 // The debug help library with no symbol files: what a crash
                 // reporter walks the faulting stack with.
-                'DBGHELP.dll': createDbghelpFunctions({
+                'DBGHELP.dll': ()=>createDbghelpFunctions({
                     writeMemory, readMemory, files: volume, setRegisters,
                     readCString: (/** @type {number} */ address)=>readCString(address, 260),
                     readWide: (/** @type {number} */ address)=>readWideString(address, 260 * 2),
@@ -4936,7 +4997,7 @@ export function createWin32Module(){
                     setLastError: setError,
                 }),
 
-                'CRYPT32.dll': createCrypt32Functions({
+                'CRYPT32.dll': ()=>createCrypt32Functions({
                     readMemory, writeMemory, readWideString, setLastError: setError,
                     readCString,
                     pointerSize,
@@ -4975,16 +5036,16 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'POWRPROF.dll': createPowrprofFunctions({ writeMemory, readMemory,
+                'POWRPROF.dll': ()=>createPowrprofFunctions({ writeMemory, readMemory,
                     setLastError: setError,
                     processors: processors.count(), mhz: config?.processorMhz ?? PROCESSOR.mhz,
                     localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
                         .handler([0x40, bytes]) >>> 0 }),
-                'pdh.dll': createPdhFunctions({ writeMemory }),
+                'pdh.dll': ()=>createPdhFunctions({ writeMemory }),
                 // CNG's generator, where a program built for Vista on takes its seeds.
-                'bcrypt.dll': createBcryptFunctions({ writeMemory, readMemory }),
+                'bcrypt.dll': ()=>createBcryptFunctions({ writeMemory, readMemory }),
                 // GDI+'s bitmaps over guest memory; its codecs and drawing say they are not here.
-                'gdiplus.dll': createGdiplusFunctions({ writeMemory, readMemory, pointerSize,
+                'gdiplus.dll': ()=>createGdiplusFunctions({ writeMemory, readMemory, pointerSize,
                     allocate: bytes=>allocator.allocate(bytes),
                     free: address=>allocator.free(address),
                     readWideString: address=>readWideString(address, 0x8000),
@@ -5031,16 +5092,16 @@ export function createWin32Module(){
                 // and then finds by GetModuleHandle: it must be a module.
                 // The Windows Runtime's start and strings, and no class of it:
                 // what a desktop program falls back from (the winrt API sets).
-                'combase.dll': createCombaseFunctions({ readMemory, writeMemory,
+                'combase.dll': ()=>createCombaseFunctions({ readMemory, writeMemory,
                     allocate: bytes=>heap.allocate(bytes), free: address=>heap.free(address),
                     divergence: config?.divergence }),
-                'bcryptprimitives.dll': createBcryptPrimitivesFunctions({ writeMemory,
+                'bcryptprimitives.dll': ()=>createBcryptPrimitivesFunctions({ writeMemory,
                     readMemory }),
                 // No security package and no key storage provider: what a library
                 // that offers the system's TLS or a proxy sign-in falls back from.
-                'Secur32.dll': createSecur32Functions({ writeMemory, readMemory,
+                'Secur32.dll': ()=>createSecur32Functions({ writeMemory, readMemory,
                     setLastError: setError }),
-                'ncrypt.dll': createNcryptFunctions({ writeMemory, readMemory,
+                'ncrypt.dll': ()=>createNcryptFunctions({ writeMemory, readMemory,
                     setLastError: setError }),
 
                 // Libraries every Windows has and nothing here calls into: a
@@ -5050,22 +5111,22 @@ export function createWin32Module(){
                 // NVIDIA's: it offers no function, so a program takes the path
                 // it takes on a driver without the one it asks for. Missing,
                 // the library linked into a program loads it at every call.
-                'nvapi.dll': nvapi('nvapi.dll'),
-                'nvapi64.dll': nvapi('nvapi64.dll'),
-                'cryptbase.dll': {},
-                'cryptnet.dll': {},
-                'msasn1.dll': {},
+                'nvapi.dll': ()=>nvapi('nvapi.dll'),
+                'nvapi64.dll': ()=>nvapi('nvapi64.dll'),
+                'cryptbase.dll': ()=>({}),
+                'cryptnet.dll': ()=>({}),
+                'msasn1.dll': ()=>({}),
 
-                'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+                'SFC.dll': ()=>createSfcFunctions({ writeMemory, readCString, files: volume }),
                 // The OLE dialogs MFC's library imports by number, embedding or not.
-                'OLEDLG.dll': createOledlgFunctions({ readMemory, writeMemory, pointerSize,
+                'OLEDLG.dll': ()=>createOledlgFunctions({ readMemory, writeMemory, pointerSize,
                     user32: ()=>libraries['USER32.dll'], lent, divergence: config?.divergence }),
-                'faultrep.dll': createFaultrepFunctions({ reported: ()=>{
+                'faultrep.dll': ()=>createFaultrepFunctions({ reported: ()=>{
                     faultReported = true;
                 } }),
                 // What Internet Explorer calls itself, for a module that
                 // embeds a browser or fetches with the system's identity.
-                'urlmon.dll': {
+                'urlmon.dll': ()=>({
                     ...createUrlmonFunctions({ windows: windows.name,
                         divergence: config?.divergence,
                         readU32: address=>memory.readU32(address),
@@ -5109,27 +5170,27 @@ export function createWin32Module(){
                     ...createSecurityManager({ readMemory, writeMemory, readWideString,
                         vtables: comVtables, makeObject: createComObject,
                         divergence: config?.divergence }),
-                },
-                'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
+                }),
+                'HID.DLL': ()=>createHidFunctions({ writeMemory, setLastError: setError }),
 
                 // The ODBC Driver Manager, with no driver and no data source set up.
-                'ODBC32.dll': createOdbcFunctions({ writeMemory }),
+                'ODBC32.dll': ()=>createOdbcFunctions({ writeMemory }),
 
                 // XP's registry of OS components, which DirectX's setup
                 // registers its exception package with.
-                'SYSSETUP.dll': createSyssetupFunctions({ readMemory, writeMemory,
+                'SYSSETUP.dll': ()=>createSyssetupFunctions({ readMemory, writeMemory,
                     setLastError: setError }),
 
                 // What MFC links of Active Accessibility, which nothing here asks for.
-                'OLEACC.dll': createOleaccFunctions({ writeMemory,
+                'OLEACC.dll': ()=>createOleaccFunctions({ writeMemory,
                     divergence: config?.divergence }),
 
                 // The device tree: its root alone, with no bus resources.
-                'CFGMGR32.dll': createCfgmgrFunctions({ writeMemory, readCString }),
+                'CFGMGR32.dll': ()=>createCfgmgrFunctions({ writeMemory, readCString }),
 
                 // Video for Windows: the compressor manager with the codecs
                 // Windows installs, DrawDib, and no MCI video device.
-                'MSVFW32.dll': createMsvfwFunctions({
+                'MSVFW32.dll': ()=>createMsvfwFunctions({
                     readMemory, writeMemory, readCString, readWideString,
                     // The registry's list of codec drivers, its values strings.
                     drivers: {
@@ -5195,11 +5256,11 @@ export function createWin32Module(){
                 }),
 
                 // The AVIFile library with no file handlers registered.
-                'AVIFIL32.dll': createAvifilFunctions({ writeMemory }),
+                'AVIFIL32.dll': ()=>createAvifilFunctions({ writeMemory }),
 
                 // The DMOs' registry, kept under the classes root where Windows
                 // keeps it, and the media type helpers in task memory.
-                'msdmo.dll': createMsdmoFunctions({
+                'msdmo.dll': ()=>createMsdmoFunctions({
                     readMemory, writeMemory, readWideString,
                     allocate: bytes=>heap.allocate(bytes),
                     free: address=>heap.free(address),
@@ -5209,17 +5270,17 @@ export function createWin32Module(){
 
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.
-                'DPLAYX.dll': createDplayFunctions({ ...dplayHost, vtables: comVtables }),
+                'DPLAYX.dll': ()=>createDplayFunctions({ ...dplayHost, vtables: comVtables }),
 
                 // The rich edit classes are always registered; these are the
                 // libraries a program loads before it makes one.
-                ...createRichedLibraries({ writeMemory }),
+                ...lazily(createRichedLibraries({ writeMemory })),
 
                 // The old iostream library: its objects live in the program's
                 // memory and its methods run over the C runtime's heap, locks
                 // and descriptors, calling the program's own overrides through
                 // their vtables.
-                'MSVCIRT.dll': createIostreamFunctions({
+                'MSVCIRT.dll': ()=>createIostreamFunctions({
                     readMemory,
                     writeMemory,
                     readCString,
@@ -5254,20 +5315,20 @@ export function createWin32Module(){
 
                 // The DirectX setup library a game's autorun asks for the
                 // installed runtime's version before it decides to install one.
-                'DSETUP.dll': createDsetupFunctions({ writeMemory, directx: directx?.version,
+                'DSETUP.dll': ()=>createDsetupFunctions({ writeMemory, directx: directx?.version,
                     divergence: config?.divergence, setLastError: setError,
                     brought: ()=>modules.broughtLibrary?.('DSETUP.dll') ?? null,
                     readFile: path=>modules.readFile?.(path) ?? Promise.resolve(null) }),
 
                 // DirectX 8.1's DirectPlay NAT helper: a version check finds
                 // DirectX 8.1 by this library being there beside d3d8.dll.
-                'DPNHPAST.dll': createDpnhpastFunctions({ writeMemory,
+                'DPNHPAST.dll': ()=>createDpnhpastFunctions({ writeMemory,
                     divergence: config?.divergence }),
 
                 // An installer's INF files, cabinets and file queues, over the
                 // volume every file call uses; a queue's notifications go to the
                 // program's own callback on the thread that asked.
-                'SETUPAPI.dll': createSetupapiFunctions({
+                'SETUPAPI.dll': ()=>createSetupapiFunctions({
                     pointerSize,
                     readMemory,
                     writeMemory,
@@ -5374,7 +5435,7 @@ export function createWin32Module(){
 
                 // The File Decompression Interface a setup unpacks its own
                 // cabinets with, over the program's callbacks.
-                'CABINET.dll': createCabinetFunctions({
+                'CABINET.dll': ()=>createCabinetFunctions({
                     readMemory,
                     writeMemory,
                     readCString,
@@ -5389,7 +5450,7 @@ export function createWin32Module(){
 
                 // The Windows Installer: packages read where they lie and
                 // installed from their own tables, in this process.
-                'MSI.dll': createMsiFunctions({
+                'MSI.dll': ()=>createMsiFunctions({
                     readMemory,
                     writeMemory,
                     readCString,
@@ -5479,7 +5540,7 @@ export function createWin32Module(){
                 // Authenticode: whether a signed file is intact and its publisher
                 // chains to a root this machine trusts -- `trustedRoots`, read when
                 // a program asks, or Microsoft's root when it is not configured.
-                'WINTRUST.dll': createWintrustFunctions({
+                'WINTRUST.dll': ()=>createWintrustFunctions({
                     readMemory,
                     writeMemory,
                     readWideString,
@@ -5507,7 +5568,7 @@ export function createWin32Module(){
                 // The maths half of the Direct3D helper: pure vector and matrix
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
-                ...(()=>{
+                ...lazily((()=>{
                     /** @type {import('./d3dx9/functions.js').D3dxHost} */
                     const d3dxHost = { readMemory, writeMemory, pointerSize,
                         // A word read and written in place: an effect's commit reads
@@ -5598,14 +5659,14 @@ export function createWin32Module(){
                         ...Object.fromEntries(D3DX11_VERSIONS.map(version=>[
                             `d3dx11_${version}.dll`,
                             createD3dx11Functions({ ...d3dxHost, compiler }, version)])) };
-                })(),
+                })()),
 
                 // Media Foundation's objects, its source reader refused, and the
                 // property system's PROPVARIANT helpers: what wine-mono's FAudio
                 // and FNA link.
-                'mfplat.dll': mediaFoundation.table,
-                'mfreadwrite.dll': mfReadWrite.table,
-                'propsys.dll': createPropsysFunctions({
+                'mfplat.dll': ()=>mediaFoundation.table,
+                'mfreadwrite.dll': ()=>mfReadWrite.table,
+                'propsys.dll': ()=>createPropsysFunctions({
                     readMemory, writeMemory, heap,
                     bstr: text=>{
                         const at = heap.allocate((text.length + 1) * 2);
@@ -5651,39 +5712,39 @@ export function createWin32Module(){
                     },
                 }),
 
-                'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
+                'WINSPOOL.DRV': ()=>createSpoolerFunctions({ setLastError: setError, readMemory,
                     writeMemory }),
 
-                'MPR.dll': createNetworkFunctions({ setLastError: setError, writeMemory }),
+                'MPR.dll': ()=>createNetworkFunctions({ setLastError: setError, writeMemory }),
 
                 // Network adapters, modems and connectivity a game asks about
                 // for its online modes: none of them on this machine.
-                'NETAPI32.dll': { ...createNetbiosFunctions({ readMemory, writeMemory }),
+                'NETAPI32.dll': ()=>({ ...createNetbiosFunctions({ readMemory, writeMemory }),
                     // The workstation's name, workgroup and the system's own version.
                     ...createWorkstationFunctions({ readMemory, writeMemory,
                         allocate: bytes=>heap.allocate(bytes), release: address=>heap.free(address),
-                        computerName: COMPUTER_NAME, version: windows }) },
-                'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
+                        computerName: COMPUTER_NAME, version: windows }) }),
+                'TAPI32.dll': ()=>createTelephonyFunctions({ readMemory, writeMemory }),
                 // The HTTP Server API's configuration: a setup's URL reservations.
-                'HTTPAPI.dll': createHttpapiFunctions({ readMemory, writeMemory, readWideString,
+                'HTTPAPI.dll': ()=>createHttpapiFunctions({ readMemory, writeMemory, readWideString,
                     hive, divergence: config?.divergence }),
                 // Performance counter names a setup installs for its service.
-                'loadperf.dll': createLoadperfFunctions({ readWideString, readCString,
+                'loadperf.dll': ()=>createLoadperfFunctions({ readWideString, readCString,
                     divergence: config?.divergence }),
-                'WTSAPI32.dll': { ...createSessionNotificationFunctions(),
+                'WTSAPI32.dll': ()=>({ ...createSessionNotificationFunctions(),
                     ...createSessionInformationFunctions({ ...displayHost,
                         // The one user's token: the process's own, which every process has.
                         userToken: out=>libraries['ADVAPI32.dll'].OpenProcessToken
-                            .handler([0xffffffff, TOKEN_ALL_ACCESS, out]) !== 0 }) },
+                            .handler([0xffffffff, TOKEN_ALL_ACCESS, out]) !== 0 }) }),
                 // A monitor's DPI and the process's awareness, and the window
                 // manager's attributes: one 96-DPI display, composition on.
-                'SHCORE.dll': createShcoreFunctions(displayHost),
-                'dwmapi.dll': createDwmapiFunctions(displayHost),
+                'SHCORE.dll': ()=>createShcoreFunctions(displayHost),
+                'dwmapi.dll': ()=>createDwmapiFunctions(displayHost),
                 // The multimedia class scheduler (Vista on): a thread asks to be
                 // scheduled as audio or playback. The engine schedules its
                 // threads by itself, so a registration is taken and holds
                 // nothing; the task index it writes is the first task's.
-                'AVRT.dll': Object.fromEntries([
+                'AVRT.dll': ()=>Object.fromEntries([
                     ...['AvSetMmThreadCharacteristicsA', 'AvSetMmThreadCharacteristicsW']
                         .map(name=>[name, { argBytes: 8,
                             handler: (/** @type {number[]} */ [task, index])=>{
@@ -5704,7 +5765,7 @@ export function createWin32Module(){
                 ]),
                 // DirectWrite's fonts are gdi32's faces, measured and drawn by
                 // the same engine GDI's text is.
-                'DWrite.dll': createDwriteFunctions({ readMemory, writeMemory, heap,
+                'DWrite.dll': ()=>createDwriteFunctions({ readMemory, writeMemory, heap,
                     vtables: comVtables, objectAt: pointer=>bridge.interfaceObject(pointer),
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread(),
@@ -5722,25 +5783,25 @@ export function createWin32Module(){
                     },
                     gdi: (name, args)=>libraries['GDI32.dll'][name].handler(args) >>> 0 }),
                 // The monitor configuration API: one physical monitor, no DDC/CI.
-                'dxva2.dll': createDxva2Functions({ readMemory, writeMemory,
+                'dxva2.dll': ()=>createDxva2Functions({ readMemory, writeMemory,
                     setLastError: setError, isMonitor: monitor=>monitor === PRIMARY_MONITOR }),
                 // UI Automation's core, which WPF's automation peers register
                 // their identifiers with and raise events to (uiautomationcore/).
-                'UIAutomationCore.dll': createUiaFunctions({ readMemory, writeMemory,
+                'UIAutomationCore.dll': ()=>createUiaFunctions({ readMemory, writeMemory,
                     vtables: comVtables,
                     isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1,
                     divergence: config?.divergence }),
                 // The Windows Imaging Component, which .NET's WPF decodes and
                 // converts every bitmap through (windowscodecs/).
-                'windowscodecs.dll': createWindowscodecs(windowscodecsHost()),
+                'windowscodecs.dll': ()=>createWindowscodecs(windowscodecsHost()),
                 // The WebBrowser control's library, and shdocvw.dll, where it
                 // lived before Internet Explorer 7 and a program still loads it.
-                'ieframe.dll': ieframe.functions,
-                'shdocvw.dll': ieframe.functions,
+                'ieframe.dll': ()=>ieframe.functions,
+                'shdocvw.dll': ()=>ieframe.functions,
                 // The Steam client's side of a game's Steamworks calls, for the
                 // account the launcher signed in with (steamclient/): the
                 // library of the process's width, as the client installs both.
-                [steamClientDll(pointerSize)]: createSteamclientFunctions({ readMemory,
+                [steamClientDll(pointerSize)]: ()=>createSteamclientFunctions({ readMemory,
                     writeMemory, readCString, account: config?.steam ?? null, pointerSize,
                     allocate: displayHost.allocate,
                     register: (name, fn)=>bridge.register(name, fn),
@@ -5753,7 +5814,7 @@ export function createWin32Module(){
                     divergence: config?.divergence, log: text=>trace(`steamclient: ${text}`) }),
                 // Chromium's embedding API, answered by the host's own browser
                 // rather than by the framework a program ships (libcef/).
-                'libcef.dll': createLibcefFunctions({ readMemory, writeMemory,
+                'libcef.dll': ()=>createLibcefFunctions({ readMemory, writeMemory,
                     allocate: displayHost.allocate,
                     free: displayHost.free,
                     register: (name, fn)=>bridge.register(name, fn),
@@ -5763,7 +5824,7 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'].GetCommandLineW.handler([]) >>> 0, 0x8000),
                     log: text=>trace(`libcef: ${text}`),
                     divergence: config?.divergence }),
-                'USERENV.dll': createUserenvFunctions({
+                'USERENV.dll': ()=>createUserenvFunctions({
                     block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
                     free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW
                         .handler([block]),
@@ -5771,10 +5832,10 @@ export function createWin32Module(){
                         .ExpandEnvironmentStringsW.handler([source, target, size]),
                     writeMemory, setLastError: setError,
                 }),
-                'SensApi.dll': createSensFunctions({ readMemory, writeMemory,
+                'SensApi.dll': ()=>createSensFunctions({ readMemory, writeMemory,
                     setLastError: setError }),
 
-                'UXTHEME.dll': createThemeFunctions({
+                'UXTHEME.dll': ()=>createThemeFunctions({
                     setLastError: setError, readMemory, writeMemory,
                     // A null theme means the system's own value, which user32
                     // answers; read when called, as the tables are still being
@@ -5788,7 +5849,7 @@ export function createWin32Module(){
 
                 // The codec manager, with the drivers Windows installs: a sound
                 // engine that keeps its effects ADPCM finds its decoder here.
-                'MSACM32.dll': createAcmFunctions({
+                'MSACM32.dll': ()=>createAcmFunctions({
                     readMemory, writeMemory,
                     /** @param {number} entry @param {number[]} args @param {any} [thread] */
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
@@ -5805,11 +5866,11 @@ export function createWin32Module(){
                 // still be able to load.
                 // The proxy settings a browser reads, and a client that sends
                 // nothing: WinINet's transport is the embedder's, WinHTTP has none.
-                'WINHTTP.dll': createWinhttpFunctions({ readMemory, writeMemory,
+                'WINHTTP.dll': ()=>createWinhttpFunctions({ readMemory, writeMemory,
                     setLastError: setError, divergence: config?.divergence }),
-                'dhcpcsvc.dll': createDhcpFunctions({ writeMemory }),
+                'dhcpcsvc.dll': ()=>createDhcpFunctions({ writeMemory }),
 
-                'WININET.dll': createWininetFunctions({
+                'WININET.dll': ()=>createWininetFunctions({
                     readMemory, writeMemory, readCString, setLastError: setError,
                     request: config?.http ?? null,
                     // The guest's wall clock, which a cookie's expiry is read
@@ -5819,7 +5880,7 @@ export function createWin32Module(){
                     divergence: config?.divergence,
                 }),
 
-                'USER32.dll': { ...createWindowFunctions({
+                'USER32.dll': ()=>({ ...createWindowFunctions({
                     readMemory,
                     canWrite,
                     processId,
@@ -6180,9 +6241,9 @@ export function createWin32Module(){
                 // The process's DPI awareness, the one state shcore sets too.
                 ...createDpiFunctions(dpi, { setLastError: setError,
                     callerThread: ()=>bridge.callerThread(),
-                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1 }) },
+                    isWindow: hwnd=>libraries['USER32.dll'].IsWindow.handler([hwnd]) === 1 }) }),
 
-                'ADVAPI32.dll': {
+                'ADVAPI32.dll': ()=>({
                     ...createRegistryFunctions({
                         readMemory,
                         writeMemory,
@@ -6360,11 +6421,11 @@ export function createWin32Module(){
                                 0, 0, 0, flags, env, directory, startup, info]);
                         },
                     },
-                },
+                }),
 
-                'GDI32.dll': gdi.table,
+                'GDI32.dll': ()=>gdi.table,
 
-                'ole32.dll': createOleFunctions({
+                'ole32.dll': ()=>createOleFunctions({
                     readMemory,
                     writeMemory,
                     pointerSize,
@@ -6521,7 +6582,7 @@ export function createWin32Module(){
                     },
                 }),
 
-                'RPCRT4.dll': createRpcFunctions({
+                'RPCRT4.dll': ()=>createRpcFunctions({
                     writeMemory, readCString, readMemory,
                     readWideString: address=>readWideString(address, 1024 * 2),
                     divergence: config?.divergence,
@@ -6565,7 +6626,7 @@ export function createWin32Module(){
                     },
                 }),
 
-                'OLEAUT32.dll': createAutomationFunctions({
+                'OLEAUT32.dll': ()=>createAutomationFunctions({
                     errorSlots,
                     readMemory,
                     writeMemory,
@@ -6587,34 +6648,44 @@ export function createWin32Module(){
                     gdi32: name=>libraries['GDI32.dll']?.[name],
                     user32: name=>libraries['USER32.dll']?.[name],
                 }),
-            };
+            });
 
             // shfolder.dll is a forwarder and nothing else: the two exports it
             // has are shell32's folder calls under another library's name, so a
             // program that linked against this small library gets the same answers
             // as one that linked against shell32 directly.
-            libraries['USER32.dll'].MsgWaitForMultipleObjectsEx =
-                apcs.user32.MsgWaitForMultipleObjectsEx;
+            lazyLibraries.patch('USER32.dll', user32=>{
+                user32.MsgWaitForMultipleObjectsEx = apcs.user32.MsgWaitForMultipleObjectsEx;
+            });
 
             // ole32 answers the error-information calls oleaut32 does, the
             // same calls on the same per-thread state: either library's
             // SetErrorInfo is the other's GetErrorInfo.
-            for (const name of ['CreateErrorInfo', 'GetErrorInfo', 'SetErrorInfo'])
-            {
-                libraries['ole32.dll'][name] = libraries['OLEAUT32.dll'][name];
-            }
             // The active-object calls are oleaut32's exports, and ole32 has
             // none of them; they live with ole32's running object table,
             // which is what they register in.
-            for (const name of ['RegisterActiveObject', 'RevokeActiveObject', 'GetActiveObject'])
-            {
-                libraries['OLEAUT32.dll'][name] = libraries['ole32.dll'][name];
-                delete libraries['ole32.dll'][name];
-            }
+            const ACTIVE_OBJECT = ['RegisterActiveObject', 'RevokeActiveObject', 'GetActiveObject'];
+            /** @type {Record<string, any>} */
+            const activeObject = {};
+            lazyLibraries.patch('ole32.dll', ole32=>{
+                for (const name of ACTIVE_OBJECT)
+                {
+                    activeObject[name] = ole32[name];
+                    delete ole32[name];
+                }
+                for (const name of ['CreateErrorInfo', 'GetErrorInfo', 'SetErrorInfo'])
+                {
+                    ole32[name] = libraries['OLEAUT32.dll'][name];
+                }
+            });
+            lazyLibraries.patch('OLEAUT32.dll', oleaut32=>{
+                void libraries['ole32.dll'];
+                Object.assign(oleaut32, activeObject);
+            });
 
             // The programs the system folder holds and this engine provides,
             // each a routine of one library of its own (`programs/table.js`).
-            libraries[PROGRAMS_LIBRARY] = createProgramFunctions({
+            lazyLibraries.define(PROGRAMS_LIBRARY, ()=>createProgramFunctions({
                 /** @param {string} library */
                 exports: library=>libraries[library],
                 callerThread: ()=>bridge.callerThread(),
@@ -6630,7 +6701,7 @@ export function createWin32Module(){
                 /** @param {string} layer */
                 need: layer=>config?.onLayerNeeded?.(layer),
                 divergence: config?.divergence,
-            });
+            }));
 
             // The Windows Runtime's library came with Windows 8: on 7 and XP
             // a program that looks for it finds none, as there. The .NET
@@ -6643,21 +6714,28 @@ export function createWin32Module(){
             // The reference the process holds to keep its host alive is the
             // shell core's, and shell32's Explorer reference is the same one:
             // never shlwapi's own export.
-            const processReference = {
-                GetProcessReference: libraries['SHLWAPI.dll'].GetProcessReference,
-                SetProcessReference: libraries['SHLWAPI.dll'].SetProcessReference,
-            };
-            delete libraries['SHLWAPI.dll'].GetProcessReference;
-            delete libraries['SHLWAPI.dll'].SetProcessReference;
-            libraries['SHELL32.dll'].SHGetInstanceExplorer = processReference.GetProcessReference;
-            libraries['SHELL32.dll'].SHSetInstanceExplorer = processReference.SetProcessReference;
-            Object.assign(libraries['SHCORE.dll'], processReference);
+            /** @type {Record<string, any>} */
+            const processReference = {};
+            lazyLibraries.patch('SHLWAPI.dll', shlwapi=>{
+                for (const name of ['GetProcessReference', 'SetProcessReference'])
+                {
+                    processReference[name] = shlwapi[name];
+                    delete shlwapi[name];
+                }
+            });
+            lazyLibraries.patch('SHELL32.dll', shell32=>{
+                void libraries['SHLWAPI.dll'];
+                shell32.SHGetInstanceExplorer = processReference.GetProcessReference;
+                shell32.SHSetInstanceExplorer = processReference.SetProcessReference;
+            });
 
             // comctl32 registers a class of its own on user32's asking from
             // Vista on; XP's library has no such entry.
             if (windows.major < 6)
             {
-                delete libraries['COMCTL32.dll'].RegisterClassNameW;
+                lazyLibraries.patch('COMCTL32.dll', comctl32=>{
+                    delete comctl32.RegisterClassNameW;
+                });
                 delete commonControls.assembly.RegisterClassNameW;
             }
 
@@ -6672,22 +6750,25 @@ export function createWin32Module(){
             }
             else
             {
-                const shcore = libraries['SHCORE.dll'];
-                for (const name of SHCORE_FROM_SHLWAPI)
-                {
-                    shcore[name] ??= libraries['SHLWAPI.dll'][name];
-                }
-                for (const name of SHCORE_FROM_SHELL32)
-                {
-                    shcore[name] ??= libraries['SHELL32.dll'][name];
-                }
-                for (const name of Object.keys(shcore))
-                {
-                    if (shcore[name] === undefined)
+                lazyLibraries.patch('SHCORE.dll', shcore=>{
+                    void libraries['SHLWAPI.dll'];
+                    Object.assign(shcore, processReference);
+                    for (const name of SHCORE_FROM_SHLWAPI)
                     {
-                        delete shcore[name];
+                        shcore[name] ??= libraries['SHLWAPI.dll'][name];
                     }
-                }
+                    for (const name of SHCORE_FROM_SHELL32)
+                    {
+                        shcore[name] ??= libraries['SHELL32.dll'][name];
+                    }
+                    for (const name of Object.keys(shcore))
+                    {
+                        if (shcore[name] === undefined)
+                        {
+                            delete shcore[name];
+                        }
+                    }
+                });
             }
 
             // The .NET shim is part of the system from Windows 7 on, and the
@@ -6763,25 +6844,26 @@ export function createWin32Module(){
                 // Its export 142, which has no name, is kernel32's.
                 GetVersionExW: kernel32.GetVersionExW };
             };
-            libraries['SHFOLDER.dll'] = {
+            lazyLibraries.define('SHFOLDER.dll', ()=>({
                 SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
                 SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
-            };
+            }));
 
             // msimg32.dll is gdi32's blending under another name, its exports
             // forwarded there as Windows forwards them: a program that linked
             // AlphaBlend from it draws with gdi32's GdiAlphaBlend.
-            libraries['MSIMG32.dll'] = {
+            lazyLibraries.define('MSIMG32.dll', ()=>({
                 AlphaBlend: libraries['GDI32.dll'].GdiAlphaBlend,
                 GradientFill: libraries['GDI32.dll'].GdiGradientFill,
                 TransparentBlt: libraries['GDI32.dll'].GdiTransparentBlt,
-            };
+            }));
 
             // olepro32.dll is oleaut32's pictures, fonts, colours and property
             // frames under another name, every export forwarded there: an MFC
             // application imports them from it by number.
-            libraries['OLEPRO32.dll'] = Object.fromEntries(Object.values(OLEPRO32_ORDINALS)
-                .map(name=>[name, libraries['OLEAUT32.dll'][name]]));
+            lazyLibraries.define('OLEPRO32.dll', ()=>Object.fromEntries(
+                Object.values(OLEPRO32_ORDINALS)
+                    .map(name=>[name, libraries['OLEAUT32.dll'][name]])));
 
             // timeGetTime answers the milliseconds GetTickCount answers, off the
             // same clock and with the same wrap -- timeBeginPeriod changes nothing
@@ -6789,15 +6871,17 @@ export function createWin32Module(){
             // block, timeGetTime is the same routine: a frame loop reads it tens of
             // times a frame, each a crossing into the host for one dword. Its
             // handler stays for a build with no block to read.
-            const ticks = libraries['KERNEL32.dll'].GetTickCount;
-            if (ticks?.guest)
-            {
-                libraries['WINMM.dll'].timeGetTime = {
-                    ...libraries['WINMM.dll'].timeGetTime, guest: ticks.guest,
-                    // And at 64 bits where GetTickCount's routine is.
-                    ...ticks.guestLong ? { guestLong: true } : {},
-                };
-            }
+            lazyLibraries.patch('WINMM.dll', library=>{
+                const ticks = libraries['KERNEL32.dll'].GetTickCount;
+                if (ticks?.guest)
+                {
+                    library.timeGetTime = {
+                        ...library.timeGetTime, guest: ticks.guest,
+                        // And at 64 bits where GetTickCount's routine is.
+                        ...ticks.guestLong ? { guestLong: true } : {},
+                    };
+                }
+            });
 
             // SleepEx(0, FALSE) is Sleep(0), and answered where Sleep's guest code
             // answers it (`sleepCode`): the entry is the alertable waits', the word
@@ -6814,14 +6898,23 @@ export function createWin32Module(){
 
             // The runtime before msvcrt, built from it: the same entries under the
             // same names, and its own few beside them.
-            libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
+            // As msvcrt stood before its second names: what crtdll is made from.
+            /** @type {Record<string, any>} */
+            let msvcrtFirst = {};
+            lazyLibraries.define('CRTDLL.dll', ()=>{
+                void libraries['msvcrt.dll'];
+                return createCrtdllFunctions(msvcrtFirst);
+            });
             // msvcrt's second names for what it has, the locale forms above
             // all, before the runtimes built over it take its table.
-            addSecondNames(libraries['msvcrt.dll'], MSVCRT_SECOND_NAMES);
+            lazyLibraries.patch('msvcrt.dll', msvcrt=>{
+                msvcrtFirst = { ...msvcrt };
+                addSecondNames(msvcrt, MSVCRT_SECOND_NAMES);
+            });
             // Visual C++ 2005's, likewise, with the names that runtime added.
             // imagehlp, the older library dbghelp grew out of: the same
             // functions under the names it had then.
-            libraries['IMAGEHLP.dll'] = {
+            lazyLibraries.define('IMAGEHLP.dll', ()=>({
                 ...Object.fromEntries(Object.entries(libraries['DBGHELP.dll'])
                     .filter(([name])=>IMAGEHLP_EXPORTS.has(name))),
                 // A PE file's certificate table, through the file a handle names.
@@ -6837,78 +6930,80 @@ export function createWin32Module(){
                         }
                     },
                     files: volume }),
-            };
-            libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
+            }));
+            lazyLibraries.define('MSVCR80.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
                 { readMemory, writeMemory, pointerSize,
                     // What calls the program's invalid-parameter handler.
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
-                    currentThread: ()=>kernel.currentThread() });
+                    currentThread: ()=>kernel.currentThread() }));
             // And its C++ library, over that runtime's operator new and delete.
-            libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
+            lazyLibraries.define('MSVCP80.dll', ()=>createMsvcp80Functions(libraries['MSVCR80.dll'],
                 { readMemory, writeMemory, fillMemory, pointerSize,
-                    ...floatResults ? { fpu: floatResults } : {} });
+                    ...floatResults ? { fpu: floatResults } : {} }));
             // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
             // start under, and the C++ library's strings, laid out as 2005's.
             // The universal runtime of Visual C++ 2015 on, over 2005's: the same
             // functions, reached through the entries its headers call instead.
-            libraries['ucrtbase.dll'] = createUcrtbaseFunctions(libraries['MSVCR80.dll'], {
-                pointerSize,
-                readMemory,
-                writeMemory,
-                readCString,
-                commandLine: {
-                    narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
-                    wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
-                },
-                // `_except1` puts back the x87 control word the caller had.
-                ...floatResults ? { fpu: { ...floatResults,
-                    ...config?.fpu?.setControlWord
-                        ? { setControlWord: config.fpu.setControlWord } : {} } } : {},
-                ...cpuRegisters.readXmm && cpuRegisters.writeXmm
-                    ? { readXmm: cpuRegisters.readXmm, writeXmm: cpuRegisters.writeXmm } : {},
-                callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
-                currentThread: ()=>kernel.currentThread(),
-            });
+            lazyLibraries.define('ucrtbase.dll', ()=>createUcrtbaseFunctions(
+                libraries['MSVCR80.dll'], {
+                    pointerSize,
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    commandLine: {
+                        narrow: ()=>libraries['KERNEL32.dll'].GetCommandLineA.handler([]),
+                        wide: ()=>libraries['KERNEL32.dll'].GetCommandLineW.handler([]),
+                    },
+                    // `_except1` puts back the x87 control word the caller had.
+                    ...floatResults ? { fpu: { ...floatResults,
+                        ...config?.fpu?.setControlWord
+                            ? { setControlWord: config.fpu.setControlWord } : {} } } : {},
+                    ...cpuRegisters.readXmm && cpuRegisters.writeXmm
+                        ? { readXmm: cpuRegisters.readXmm, writeXmm: cpuRegisters.writeXmm } : {},
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
+                }));
             // Visual C++ 2015 on keeps the exception machinery and the memory
             // routines in vcruntime140, and a 64-bit build's compressed C++
             // tables' handler in vcruntime140_1.
-            libraries['VCRUNTIME140.dll'] = {
+            lazyLibraries.define('VCRUNTIME140.dll', ()=>({
                 ...Object.fromEntries(VCRUNTIME_EXPORTS
                     .filter(name=>Object.hasOwn(libraries['msvcrt.dll'], name))
                     .map(name=>[name, libraries['msvcrt.dll'][name]])),
                 // std::exception's message and typeid's names, ucrtbase's too.
                 .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_CXX] ?? {},
                 .../** @type {any} */ (libraries['msvcrt.dll'])[UNIVERSAL_EH] ?? {},
-            };
+            }));
             if (cxx64)
             {
-                libraries['VCRUNTIME140_1.dll'] = {
+                lazyLibraries.define('VCRUNTIME140_1.dll', ()=>({
                     __CxxFrameHandler4: cxx64.table.__CxxFrameHandler4,
-                };
+                }));
             }
             // Visual C++ 2008's: the 2005 runtime's table under its own name,
             // with its own invalid-parameter handler, and the C++ library over
             // it, whose string is laid out as 2005's. A program whose setup put
             // no copy in the bottle finds them here, as on a Windows the
             // redistributable was installed on.
-            libraries['MSVCR90.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
+            lazyLibraries.define('MSVCR90.dll', ()=>createMsvcr80Functions(libraries['msvcrt.dll'],
                 { readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
                     callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
-                    currentThread: ()=>kernel.currentThread() });
-            libraries['MSVCP90.dll'] = createMsvcp80Functions(libraries['MSVCR90.dll'],
+                    currentThread: ()=>kernel.currentThread() }));
+            lazyLibraries.define('MSVCP90.dll', ()=>createMsvcp80Functions(libraries['MSVCR90.dll'],
                 { readMemory, writeMemory, fillMemory, pointerSize,
-                    ...floatResults ? { fpu: floatResults } : {} });
-            libraries['MSVCR71.dll'] = { ...libraries['msvcrt.dll'],
-                __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
-            libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],
-                { readMemory, writeMemory, fillMemory });
+                    ...floatResults ? { fpu: floatResults } : {} }));
+            lazyLibraries.define('MSVCR71.dll', ()=>({ ...libraries['msvcrt.dll'],
+                __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter }));
+            lazyLibraries.define('MSVCP71.dll', ()=>createMsvcp80Functions(libraries['MSVCR71.dll'],
+                { readMemory, writeMemory, fillMemory }));
             // Visual C++ 6's C++ library, which Windows itself carries: its
             // strings are shared by count, as that compiler's headers inline.
-            libraries['MSVCP60.dll'] = createMsvcp60Functions(libraries['msvcrt.dll'], {
-                readMemory, writeMemory,
-                addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
-                divergence: config?.divergence,
-            });
+            lazyLibraries.define('MSVCP60.dll', ()=>createMsvcp60Functions(
+                libraries['msvcrt.dll'], {
+                    readMemory, writeMemory,
+                    addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
+                    divergence: config?.divergence,
+                }));
 
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already
@@ -6916,7 +7011,7 @@ export function createWin32Module(){
             // implementation. The heap is the clearest case -- kernel32's owns the
             // process-heap handle and the tag on every block, so a separate one
             // would reject the very handle GetProcessHeap hands out.
-            libraries['ntdll.dll'] = createNtdllFunctions({
+            lazyLibraries.define('ntdll.dll', ()=>createNtdllFunctions({
                 pointerSize,
                 readMemory,
                 writeMemory,
@@ -6973,7 +7068,10 @@ export function createWin32Module(){
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
                 processors,
-            });
+            }));
+            // Every process has it, and it is made of kernel32's, msvcrt's and
+            // advapi32's entries as they stand now, before the patches below.
+            void libraries['ntdll.dll'];
 
             // The table-based unwind ntdll exports and kernel32 forwards to it:
             // the function-table lookup, the virtual unwind, the unwind to a
@@ -7006,7 +7104,7 @@ export function createWin32Module(){
             // by name and asks it for a function -- an allocator looking for
             // VirtualAlloc2 -- finds kernel32's entries, one implementation
             // under the two names.
-            libraries['KERNELBASE.dll'] = libraries['KERNEL32.dll'];
+            lazyLibraries.define('KERNELBASE.dll', ()=>libraries['KERNEL32.dll']);
 
             // advapi32 exports the walk over the registry's time zones, which
             // Windows keeps beside the zone rules in kernelbase: one entry.
@@ -7023,10 +7121,36 @@ export function createWin32Module(){
 
             // Each function's address arguments, as its signature names them:
             // a 64-bit caller's past 4 GiB reaches the handler whole.
-            declareAddresses(libraries, POINTER_ARGUMENTS);
+            lazyLibraries.each((library, name)=>declareAddresses({ [name]: library },
+                POINTER_ARGUMENTS));
+            // The libraries whose factories register COM classes, made when a
+            // class is first not found rather than at the start: a program
+            // may ask for one by its CLSID without loading the library
+            // (`CLASS_SERVERS`, checked by lazy-libraries.itest.js).
+            com.whenMissing(()=>{
+                for (const name of CLASS_SERVERS)
+                {
+                    void libraries[name];
+                }
+            });
 
-            /** Every function, whichever library exports it. */
-            const flat = ()=>Object.assign({}, ...Object.values(libraries));
+            /**
+             * A function by its name, whichever library exports it: the last
+             * library that has it, as a merge of them all would answer.
+             *
+             * @param {string} name
+             */
+            const anyExport = name=>{
+                for (const library of Object.keys(libraries).reverse())
+                {
+                    const exports = libraries[library];
+                    if (exports && Object.hasOwn(exports, name))
+                    {
+                        return exports[name];
+                    }
+                }
+                return null;
+            };
 
             const api = {
                 /** @returns {Record<string, Record<string, any>>} library name -> its exports */
@@ -7215,6 +7339,30 @@ export function createWin32Module(){
                  *
                  * @returns {Record<string, Record<string, any>>}
                  */
+                /**
+                 * The C runtime's heap, made now if it is not yet: at the same
+                 * point of every process's start, whichever of its modules a
+                 * process builds or loads - its malloc's guest code is bound to
+                 * it, and where it lies shifts every block the program takes.
+                 */
+                runtimeHeap: ()=>crtHeap(),
+                /**
+                 * Runs `place` - a system module's exports made - with what its
+                 * exports allocate taken from the engine's span (`placingDepth`).
+                 *
+                 * @template T @param {() => T} place @returns {T}
+                 */
+                placing: place=>{
+                    placingDepth++;
+                    try
+                    {
+                        return place();
+                    }
+                    finally
+                    {
+                        placingDepth--;
+                    }
+                },
                 faces: ()=>({ 'COMCTL32.dll': commonControls.assembly }),
 
                 /**
@@ -7258,7 +7406,7 @@ export function createWin32Module(){
                  * @param {string} name
                  * @returns {{ argBytes: number, handler: Function } | null}
                  */
-                resolve: name=>flat()[name] ?? null,
+                resolve: name=>anyExport(name),
 
                 /**
                  * Where the guest's messages come from. The input layer posts here,
