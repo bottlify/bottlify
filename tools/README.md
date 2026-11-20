@@ -341,10 +341,10 @@ From `node tools/bench/stand.mjs --only vm,vcall,calls512-scatter on cork 94512c
 
 ### How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?
 
-[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)`
+[`bench/index.html`](bench/index.html): `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); the address takes ?only=NAME,NAME (workloads by their names' beginnings) and ?warmMs=N (guest work before the rounds, at least; more for a workload of many regions)`
 
 Needs the shared browser, a GPU or a phone: no sample yet from this
-machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side)` and put what it prints here.
+machine's data. Run `node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); the address takes ?only=NAME,NAME (workloads by their names' beginnings) and ?warmMs=N (guest work before the rounds, at least; more for a workload of many regions)` and put what it prints here.
 
 ### What does a title import, or look up by name, that this build does not export?
 

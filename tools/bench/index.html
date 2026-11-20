@@ -288,8 +288,12 @@ function render(runs, workRows){
 let report = null;
 async function start(timed){
     const runs = timed ? Number($('runs').value) : 1;
+    // A narrower or longer run by the page's address: `?only=calls4096,calls512` (names'
+    // beginnings) and `?warmMs=5000` (virtual ms of guest work after the warm iterations).
+    const asked = new URLSearchParams(location.search);
     const options = { bits: $('bits').value.split(',').map(Number), rounds: Number($('rounds').value),
-        timed };
+        timed, only: (asked.get('only') ?? '').split(',').filter(Boolean),
+        ...asked.has('warmMs') ? { warmMs: Number(asked.get('warmMs')) } : {} };
     for (const id of ['run', 'workOnly', 'copy'])
     {
         $(id).disabled = true;

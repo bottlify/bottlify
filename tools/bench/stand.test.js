@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createCorkHost } from '../../modules/core/src/layers/cpu/internal/cork-host.js';
 import * as engine from '../../modules/cork/src/index.js';
-import { quantile, recordFor, sameWork, workOf } from './stand.js';
+import { quantile, recordFor, sameWork, warmWorkMs, workOf } from './stand.js';
 import { withoutFaultingTailCalls } from '../../modules/core/src/tail-calls.js';
 
 const expected = JSON.parse(readFileSync(new URL('expected.json', import.meta.url), 'utf8'));
@@ -60,4 +60,12 @@ test('a different count is different work', ()=>{
     assert.ok(!sameWork(work, { ...work, mechanisms: { ...work.mechanisms, TRANSFER: 1 } }));
     assert.equal(quantile([3, 1, 2], 0.5), 2);
     assert.equal(quantile([1, 2, 3, 4], 0.25), 1.75);
+});
+
+test('a workload of many regions is warmed longer, up to a ceiling, never under what was'
+    + ' asked', ()=>{
+    assert.equal(warmWorkMs(200, 40), 200, 'a few regions: what was asked');
+    assert.equal(warmWorkMs(200, 4100), 4100, 'calls4096: a millisecond a region');
+    assert.equal(warmWorkMs(200, 1e6), 8000, 'and no more than the ceiling');
+    assert.equal(warmWorkMs(9000, 10), 9000, 'what was asked when it is more');
 });

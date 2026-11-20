@@ -32,6 +32,26 @@ const ENTRY_VECTOR = 0x7000;
 const PER_MS = 1e6;
 /** The most windows a build runs, warmed, for its speed to hold before the rounds. */
 const SETTLE_WINDOWS = 40;
+/**
+ * Virtual milliseconds of guest work a translated region asks before the
+ * rounds, and the most a workload is given: the engine optimises each region's
+ * function once that function has run enough, so a workload of many regions
+ * needs that much more work for its speed to hold. calls4096 (some 4100
+ * regions) after only 200 ms ran its rounds mid-optimisation: one arm's ratio
+ * read 1.00, 1.48, 1.53 and 0.75 in four runs of one checkout (node 26), and
+ * 1.07-1.11 in three after 5000 ms.
+ */
+const WARM_MS_PER_REGION = 1;
+const WARM_MS_MOST = 8000;
+
+/**
+ * The guest work a workload is run for after its warm iterations, before its
+ * speed is read: `warmMs` at least, more for a workload of many regions.
+ *
+ * @param {number} warmMs @param {number} regions  what the run has translated
+ */
+export const warmWorkMs = (warmMs, regions)=>Math.max(warmMs,
+    Math.min(WARM_MS_MOST, regions * WARM_MS_PER_REGION));
 /** A build's letter on the page, A for the first. @param {number} at */
 const letter = at=>String.fromCharCode(65 + at);
 
@@ -183,7 +203,8 @@ export async function timeOf(arms, workload, { warm, warmMs, rounds, windowMs, n
         // regions' functions after the translator is done (calls512-order's
         // rounds parted by 70 % without it, in Chromium 153).
         const settled = run.retired();
-        while (run.retired() - settled < warmMs * PER_MS)
+        const regions = Number(run.formed().split('/')[0]);
+        while (run.retired() - settled < warmWorkMs(warmMs, regions) * PER_MS)
         {
             await run.iteration();
         }
