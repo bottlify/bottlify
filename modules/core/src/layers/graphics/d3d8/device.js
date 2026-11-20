@@ -1616,6 +1616,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         retireImplicitResources();
         // The reference CreateDevice took on the object that made it.
         identity?.direct3D?.release?.();
+        // What its renderer still holds on the GPU: no present comes to give it back.
+        renderer?.dispose?.();
     };
 
     /**

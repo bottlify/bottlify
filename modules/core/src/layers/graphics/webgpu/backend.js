@@ -14,6 +14,7 @@ import { fullTarget, viewportState } from './internal/viewport.js';
 import { createPipelineCache, pipelineDescriptor } from './internal/pipeline.js';
 import { generateFixedFunction } from './internal/fixedfunction.js';
 import { decodeFvf } from './internal/vertexformat.js';
+import { scopeOf } from './internal/scope.js';
 import {
     DEPTH_WRITE_SHADER, depthHasStencil, depthReadGrid, depthReadShader, depthReadValues,
 } from './internal/depth.js';
@@ -1694,6 +1695,23 @@ export function createBackend(options){
 
         lastPresented(){
             return lastPresented;
+        },
+
+        /**
+         * A view of this backend for an owner that ends before it does
+         * (`scope.js`): what the owner made through it goes back at its end.
+         * Of the object it is called on, which may be a view itself (the
+         * graphics worker's of each process, which says whose frames end).
+         *
+         * @this {any}
+         */
+        scope(){
+            return scopeOf(this, (/** @type {any} */ surface)=>{
+                if (lastPresented?.surface === surface)
+                {
+                    lastPresented = null;
+                }
+            });
         },
 
         /** @returns {any} */

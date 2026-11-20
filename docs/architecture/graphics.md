@@ -75,6 +75,13 @@ flowchart TB
   instances, viewports of floats, a map through the context) a routine of the context's writes
   the record. Compute shaders run as WebGPU compute passes among the draws; a buffer a shader
   may write takes the program's bytes, copies and read backs in their turn among them.
+- **A device's GPU memory.** The backend is the module's and serves every device; a Direct3D 8
+  or 9 device's renderer makes its surfaces and buffers through a view of it of its own
+  (`webgpu/internal/scope.js`). A texture or buffer the program releases goes at the first
+  present that finds it bound nowhere; when the program lets go of the device itself, no present
+  comes, so whatever its renderer still holds (back buffers, depth, the last frame's releases,
+  its rings) goes back then, once what it queued is submitted. A program that makes a device for
+  each scene and drops it holds one device's memory, not one per scene.
 - **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
   after the `Unlock`, and draw from it with no lock between, so a draw sends what changed in the
   range it reads since the buffer was last sent. Only the part of the range on pages written

@@ -182,7 +182,8 @@ function rig(version, way, caps = {}){
     gpu.queue.submit = (/** @type {any[]} */ buffers)=>{
         submit(buffers);
         gpu.calls.push({ op: 'holds',
-            held: drawn.map(buffer=>({ buffer, bytes: buffer.bytes.slice() })) });
+            held: drawn.filter(buffer=>!buffer.destroyed)
+                .map(buffer=>({ buffer, bytes: buffer.bytes.slice() })) });
     };
     const services = {
         ...caps,
@@ -2995,5 +2996,88 @@ test('Direct3D 8: a render target copied into an image surface answers the progr
     finally
     {
         close();
+    }
+});
+
+test('Direct3D 9 and 8: a device let go of with its textures and buffers leaves nothing on the'
+    + ' GPU, made directly and played in the worker', async()=>{
+    for (const [version, way] of [9, 8].flatMap(one=>['direct', 'held', 'port']
+        .map(each=>/** @type {[9 | 8, string]} */ ([one, each]))))
+    {
+        const on = rig(version, way);
+        /** Every texture the GPU made, in order. @type {any[]} */
+        const textures = [];
+        /** Every buffer the GPU made, in order. @type {any[]} */
+        const buffers = [];
+        const { createTexture, createBuffer } = on.gpu.device;
+        on.gpu.device.createTexture = (/** @type {any} */ descriptor)=>{
+            const one = createTexture(descriptor);
+            textures.push(one);
+            return one;
+        };
+        on.gpu.device.createBuffer = (/** @type {any} */ descriptor)=>{
+            const one = createBuffer(descriptor);
+            buffers.push(one);
+            return one;
+        };
+        /** @param {any[]} made */
+        const left = made=>made.filter(one=>!one.destroyed)
+            .map(one=>String(one.descriptor?.label ?? ''));
+        const run = runner(on);
+        /** One device's frame of four textures, the device let go of after it or kept. @param {string} label @param {boolean} keep */
+        const round = async(label, keep)=>{
+            const { device, vertices, indices } = version === 9 ? await device9(run)
+                : await device8(run);
+            const held = [];
+            for (let index = 0; index < 4; index++)
+            {
+                held.push(await makeTexture(run, device, `${label}.${index}`,
+                    { size: 64, levels: 3 }));
+            }
+            if (version === 9)
+            {
+                await run.call('SetStreamSource', ()=>device.SetStreamSource(0, vertices, 0,
+                    STRIDE));
+                await run.call('SetIndices', ()=>device.SetIndices(indices));
+                await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+            }
+            const draw = version === 9 ? drawQuad9 : drawQuad8;
+            for (let frame = 0; frame < (keep ? 2 : 1); frame++)
+            {
+                await run.call('BeginScene', ()=>device.BeginScene());
+                for (const [index, texture] of held.entries())
+                {
+                    await draw(run, device, `${label}.${index}`, texture, index);
+                }
+                await run.call('EndScene', ()=>device.EndScene());
+                await run.call('Present', ()=>device.Present(null, null, 0, null));
+                await run.look(`${label} frame ${frame}`);
+            }
+            if (keep)
+            {
+                return;
+            }
+            // Released while still bound: the device lets go of what it holds.
+            for (const texture of held)
+            {
+                await run.call('Release texture', ()=>texture.release());
+            }
+            await run.call('Release vertices', ()=>vertices.release());
+            await run.call('Release indices', ()=>indices.release());
+            await run.call('Release device', ()=>device.release());
+            await run.look(`${label} let go`);
+            assert.deepEqual(left(textures), [], `${version} ${way}, ${label}: no texture left`);
+        };
+        for (let index = 0; index < 3; index++)
+        {
+            await round(`device ${index}`, false);
+        }
+        const before = buffers.length;
+        await round('kept', true);
+        // The pool of uniform blocks is the backend's, shared by every device.
+        const kept = left(buffers.slice(0, before)).filter(label=>!label.startsWith('uniforms'));
+        assert.deepEqual(kept, [],
+            `${version} ${way}: no buffer of a device let go of, once the next drew`);
+        on.close();
     }
 });

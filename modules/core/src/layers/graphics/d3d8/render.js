@@ -3301,7 +3301,9 @@ const uploadsOf = own=>({
  * @returns {any}
  */
 export function createRenderer(options){
-    const { backend, readMemory } = options;
+    const { readMemory } = options;
+    // The device's own view: what it still holds goes back when it goes (`dispose`).
+    const backend = options.backend.scope?.() ?? options.backend;
     const windowMemory = options.windowMemory ?? readMemory;
     const verify = options.verifyDynamic === true
         ? createDynamicVerify(windowMemory) : null;
@@ -11543,6 +11545,18 @@ export function createRenderer(options){
 
         /** @returns {Promise<void>} settled when every presented frame has been submitted */
         idle: ()=>chain,
+
+        /**
+         * The device is gone: every GPU object it still holds goes back once
+         * what it queued is submitted - nothing presents for it again to find
+         * them bound nowhere.
+         *
+         * @returns {Promise<void>}
+         */
+        dispose(){
+            chain = chain.then(()=>backend.giveBack?.()).catch(failure);
+            return chain;
+        },
 
         /**
          * The picture the last present showed, for GetFrontBuffer: the

@@ -1412,7 +1412,7 @@ function describe(result, context, calls, symbols){
         }
         // What the graphics worker's device holds at the end, by label: a
         // run that made and let go of several devices should hold one's.
-        const gpuHeld = result.gpuMemory;
+        const gpuHeld = graphics.worker?.gpuMemory;
         if (gpuHeld)
         {
             const mb = (/** @type {number} */ bytes)=>(bytes / 2 ** 20).toFixed(1);
