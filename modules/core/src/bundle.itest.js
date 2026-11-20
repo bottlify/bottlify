@@ -22,7 +22,10 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
+import { createApp } from './app.js';
+import {
+    BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, READ_AHEAD_BYTES,
+} from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
 import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';

@@ -12,17 +12,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, withReadAhead,
-    withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, timedWait,
-    divergenceReporter, pagePacing, PAGE_YIELD_MS, PENDING_YIELD_MS, retryingFetch,
-    relocatablePrefix, jumpBytes, clockCredit, feedFilmSound, filmSoundOwed, heapSizeFor,
-    spaceAbove, engineAreaFor, ENGINE_CUT_AT, placeMainStack, stackReserveOf, resourceLookup,
-    shippedLibraryReader, areaOf, createGuestView, createKernelGl, resolveOpenglEntry,
-    journalEvents, answeredByEngine, mapShippedLibraries, compatibilityOf, createApp,
-    versionResourceOf, imageInMemory, runProcessId, withCpuSetup, withoutFaultingTailCalls,
-    tailCallsFault, mobileOrSafari, automaticCores, translatorsBeside, allocateCleared,
-    RESOURCE_ALIGNMENT, liveDumpOf, answeringWhile,
+    createMacrotask, idleWait, pacedYield, pageIsHidden, timedWait, divergenceReporter,
+    pagePacing, PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit,
+    feedFilmSound, filmSoundOwed, heapSizeFor, spaceAbove, engineAreaFor, ENGINE_CUT_AT,
+    placeMainStack, stackReserveOf, resourceLookup, shippedLibraryReader, areaOf, createGuestView,
+    createKernelGl, resolveOpenglEntry, answeredByEngine, mapShippedLibraries, compatibilityOf,
+    createApp, versionResourceOf, imageInMemory, runProcessId, withCpuSetup,
+    withoutFaultingTailCalls, tailCallsFault, mobileOrSafari, automaticCores, translatorsBeside,
+    allocateCleared, RESOURCE_ALIGNMENT, answeringWhile,
 } from './app.js';
+import { journalEvents } from './process/system-host.js';
+import { liveDumpOf } from './process/live-dump.js';
+import {
+    groupBlocks, inParallel, withReadAhead, withWindow, refetchedIn, windowFor,
+    NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES, retryingFetch,
+} from './process/bundle-mount.js';
 import {
     fixedLibraryPath, searchedDirectories, startDirectoryOf, libraryCandidates,
     withLibraryExtension, pathDirectories, moduleKeyOf, createMissingImports, describeEvent,

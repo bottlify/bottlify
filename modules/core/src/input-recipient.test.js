@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inputRecipient } from './app.js';
+import { inputRecipient } from './process/system-host.js';
 import { createWindowManager } from './layers/win32/user32/manager.js';
 
 /**

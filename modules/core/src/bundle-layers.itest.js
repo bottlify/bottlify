@@ -23,7 +23,10 @@ import { mkdtemp, mkdir, writeFile, rm, open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { BOTTLE_DRIVE_PATH, BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp } from './app.js';
+import { createApp } from './app.js';
+import {
+    BOTTLE_DRIVE_PATH, BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH,
+} from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_DWORD, REG_SZ } from './layers/win32/advapi32/registry.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';

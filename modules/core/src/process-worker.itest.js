@@ -18,7 +18,8 @@ import { mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { READ_AHEAD_BYTES, createApp } from './app.js';
+import { createApp } from './app.js';
+import { READ_AHEAD_BYTES } from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
 import { Worker } from 'node:worker_threads';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';

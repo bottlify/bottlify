@@ -90,4 +90,7 @@ Where to look in the code: `ui/src/engine/session.js` (what the launcher passes)
 [`core/src/app.js`](../../modules/core/src/app.js) (`createApp`, `buildApp`), the process's modules in
 [`core/src/process/`](../../modules/core/src/process/) (`module-table.js`: by name, path and base; `system-modules.js`: the engine's
 libraries made modules; `library-loader.js`: imports resolved, libraries loaded and let go at run time;
-`libraries.js`: the names a load is tried under, the directories searched, where a library is placed).
+`libraries.js`: the names a load is tried under, the directories searched, where a library is placed;
+`system-host.js`: what a run's processes share, built once; `bundle-mount.js`: a bundle mounted as the
+volume; `session.js`: the session's layer, saved and opened again; `live-dump.js`: frames taken apart
+while a program runs), and what `createApp` is given in [`core/src/app-options.js`](../../modules/core/src/app-options.js).
