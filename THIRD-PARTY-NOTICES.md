@@ -84,6 +84,37 @@ FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
   whose roots are kept up to date carries them; they grant nothing beyond accepting a signature
   Windows would accept.
 
+## DigiCert Assured ID Root CA certificate: a default Authenticode trust anchor
+
+- What it is: the root certificate "DigiCert Assured ID Root CA" (2006-11-10 to 2031-11-10,
+  SHA-1 thumbprint 0563B8630D62D75ABBC8AB1E4BDFB5A899B24D43), DigiCert's. Code signing
+  certificates DigiCert issued from the 2010s on ("DigiCert SHA2 Assured ID Code Signing CA")
+  chain to it.
+- Source: DigiCert's publication, `https://cacerts.digicert.com/DigiCertAssuredIDRootCA.crt`,
+  taken unmodified; its thumbprint was checked against the one above before it was committed.
+- Location in this repository: `modules/core/src/layers/win32/wintrust/roots.js`, as base64
+  DER.
+- What is used: its names and public key, as data, as the roots above: default content of the
+  root store, which the `trustedRoots` configuration replaces. A Windows 7 installation's root
+  store carries it; it grants nothing beyond accepting a signature Windows would accept.
+
+## VeriSign Universal Root Certification Authority certificate: a default Authenticode trust anchor
+
+- What it is: the root certificate "VeriSign Universal Root Certification Authority"
+  (2008-04-02 to 2037-12-01, SHA-1 thumbprint 3679CA35668772304D30A5FB873B0FA77BB70D54),
+  VeriSign's (now DigiCert's). Symantec's "SHA256 TimeStamping CA", which countersigned
+  Authenticode signatures in the 2010s, chains to it.
+- Source: the root certificates Windows Update publishes
+  (`http://ctldl.windowsupdate.com/msdownload/update/v3/static/trustedr/en/<thumbprint>.crt`),
+  taken unmodified; its thumbprint was checked against the one above and its self-signature
+  verified before it was committed.
+- Location in this repository: `modules/core/src/layers/win32/wintrust/roots.js`, as base64
+  DER.
+- What is used: its names and public key, as data, as the roots above: default content of the
+  root store, which the `trustedRoots` configuration replaces. A Windows 7 installation whose
+  roots are kept up to date carries it; it grants nothing beyond accepting a signature Windows
+  would accept.
+
 ## Thawte Timestamping CA certificate: a default Authenticode trust anchor
 
 - What it is: the root certificate "Thawte Timestamping CA" (issued 1997-01-01, expired

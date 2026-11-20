@@ -14,6 +14,7 @@
  * @type {Readonly<Record<number, string>>}
  */
 export const CABINET_ORDINALS = Object.freeze({
+    2: 'DllGetVersion',
     10: 'FCICreate', 11: 'FCIAddFile', 12: 'FCIFlushFolder', 13: 'FCIFlushCabinet',
     14: 'FCIDestroy',
     20: 'FDICreate', 21: 'FDIIsCabinet', 22: 'FDICopy', 23: 'FDIDestroy',

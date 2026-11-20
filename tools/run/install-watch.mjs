@@ -17,7 +17,12 @@
  *       [--journal SECONDS] [--memory MB] [--machine MB] [--key Code@S]... [--click X,Y@S]...
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
- *       [--copy 'C:\WINDOWS\TEMP' temp]...
+ *       [--copy 'C:\WINDOWS\TEMP' temp]... [--layers dotnet48-x86,...]
+ *
+ * `--layers ID,ID` stands the run on the layer bundles in `bundles/ID` (the .NET
+ * Framework's), as the launcher does a bottle that needs one: a setup whose
+ * wizard or checks want the runtime finds it installed, and what it writes is
+ * the bottle's own, not the layer's.
  *
  * `--trace-box` prints the trace when the first box reporting an error is
  * shown instead, and `--trace-fault` when a process ends with an exception's
@@ -98,7 +103,9 @@
  * its own, a result it never shows included. Repeatable.
  *
  * `--windows win2000|winxp|win7|win10` is the Windows the machine is, over
- * the one a bundle's manifest names (XP when neither does).
+ * the one a bundle's manifest names (XP when neither does); `--arch x86|amd64`
+ * whether it is a 32- or a 64-bit one (createApp's `machine`; the first
+ * program's width when not named), a 32-bit setup on a 64-bit one under WOW64.
  *
  * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
  * as a page does; `--unshared` keeps guest memory out of a SharedArrayBuffer,
@@ -180,6 +187,28 @@ const [screenWidth, screenHeight] = argv.includes('--screen')
  *
  * @param {string} id
  */
+/**
+ * `--layers ID,ID`: the layers the run stands on (a runtime built once, the
+ * .NET Framework's), each a bundle in `bundles/ID` read from its file on this
+ * disk, as the launcher mounts them: `layers` for a setup, `bundle.layers`
+ * for an installed program.
+ */
+const layerIds = String(option(argv, '--layers', '')).split(',').filter(Boolean);
+const layerSpecs = await Promise.all(layerIds.map(async id=>{
+    const handle = await open(join(bundleDir(id), 'bundle.btl'), 'r');
+    return {
+        id,
+        /** @param {number} offset @param {number} length */
+        fetch: async(offset, length)=>{
+            const buffer = Buffer.alloc(length);
+            await handle.read(buffer, 0, length, offset);
+            return new Uint8Array(buffer);
+        },
+        store: await createOpfsStore({ root: diskDirectory(join(bundleDir(id), 'blocks')) }),
+        prefetch: false,
+    };
+}));
+
 const mountBundle = async id=>{
     const directory = bundleDir(id);
     const manifest = JSON.parse(readFileSync(join(directory, 'manifest.json'), 'utf8'));
@@ -217,6 +246,7 @@ const mountBundle = async id=>{
                 ? argv[argv.indexOf('--blocks') + 1] : join(directory, 'blocks')) }),
             prefetch: false,
             prefix: placement.prefix,
+            ...layerSpecs.length > 0 ? { layers: layerSpecs } : {},
         },
     };
 };
@@ -393,13 +423,15 @@ const runOptions = {
         ? { commandLine: `"${prefix.imagePath}" ${argv[argv.indexOf('--args') + 1]}` } : {},
     storage: prefix.storage,
     ...prefix.files?.length > 0 ? { files: prefix.files } : {},
-    ...'bundle' in prefix ? { bundle: prefix.bundle } : {},
+    ...'bundle' in prefix ? { bundle: prefix.bundle }
+        : layerSpecs.length > 0 ? { layers: layerSpecs } : {},
     // `--windows NAME`: the Windows the machine is, over the one a bundle's
     // manifest names -- a program that refuses an old one says so first.
     ...argv.includes('--windows') || prefix.windows
         ? { windows: argv.includes('--windows')
             ? argv[argv.indexOf('--windows') + 1] : prefix.windows }
         : {},
+    ...argv.includes('--arch') ? { machine: argv[argv.indexOf('--arch') + 1] } : {},
     // `--concurrency N`: processes at once, each child in a worker of its
     // own, as a page with concurrency runs them.
     ...argv.includes('--concurrency') ? { concurrency: number('--concurrency', 1) } : {},
@@ -1119,7 +1151,8 @@ for (const path of all('--cat'))
 {
     try
     {
-        console.log(`CAT ${path}\n${new TextDecoder('latin1').decode(app.files.read(path))}`);
+        console.log(`CAT ${path}\n${new TextDecoder('latin1')
+            .decode(await app.files.read(path))}`);
     }
     catch (e){
         console.log('cat failed:', path, e instanceof Error ? e.message : e);
@@ -1138,18 +1171,26 @@ for (let at = argv.indexOf('--peek'); at >= 0; at = argv.indexOf('--peek', at + 
     }
 }
 /** @param {string} from @param {string} to */
-const copyOut = (from, to)=>{
+const copyOut = async(from, to)=>{
     mkdirSync(to, { recursive: true });
     for (const entry of app.files.list(from))
     {
         const name = join(to, entry.path.slice(entry.path.lastIndexOf('\\') + 1));
         if (entry.directory)
         {
-            copyOut(entry.path, name);
+            await copyOut(entry.path, name);
         }
         else
         {
-            writeFileSync(name, app.files.read(entry.path));
+            const bytes = await app.files.read(entry.path);
+            if (bytes)
+            {
+                writeFileSync(name, bytes);
+            }
+            else
+            {
+                console.log('copy: nothing read at', entry.path);
+            }
         }
     }
 };
@@ -1157,7 +1198,7 @@ for (let at = argv.indexOf('--copy'); at >= 0; at = argv.indexOf('--copy', at + 
 {
     try
     {
-        copyOut(argv[at + 1], argv[at + 2]);
+        await copyOut(argv[at + 1], argv[at + 2]);
     }
     catch (e){
         console.log('copy failed:', argv[at + 1], e instanceof Error ? e.message : e);

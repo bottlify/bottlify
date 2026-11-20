@@ -242,3 +242,26 @@ test('the entry points are C calling convention and a context is destroyed once'
     assert.equal(fns.FDIDestroy.handler([ctx]), 0);
     assert.equal(fns.FDICreate.handler([0, 0, 0, 0, 0, 0, 0, 1, 0]), 0, 'no callbacks, no context');
 });
+
+test('DllGetVersion answers the machine\'s own build on the NT platform, in either structure', ()=>{
+    const memory = new Uint8Array(0x100);
+    const view = new DataView(memory.buffer);
+    const fns = createCabinetFunctions(/** @type {any} */ ({
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            memory.subarray(at, at + length),
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
+            memory.set(bytes, at),
+        windows: 'win7',
+    }));
+    view.setUint32(0x10, 20, true);
+    assert.equal(fns.DllGetVersion.handler([0x10]), 0);
+    assert.deepEqual([4, 8, 12, 16].map(at=>view.getUint32(0x10 + at, true)), [6, 1, 7601, 2],
+        'DLLVERSIONINFO: 6.1.7601, NT');
+    view.setUint32(0x40, 32, true);
+    assert.equal(fns.DllGetVersion.handler([0x40]), 0);
+    assert.equal(view.getBigUint64(0x40 + 24, true), (6n << 48n) | (1n << 32n) | (7601n << 16n),
+        'DLLVERSIONINFO2: the same as one 64-bit number');
+    view.setUint32(0x80, 12, true);
+    assert.equal(fns.DllGetVersion.handler([0x80]), 0x80070057 | 0, 'another size refused');
+    assert.equal(fns.DllGetVersion.handler([0]), 0x80070057 | 0, 'no structure refused');
+});

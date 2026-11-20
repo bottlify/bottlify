@@ -26,6 +26,11 @@ import { extractCabinet, readCabinetHead } from './stream.js';
 import { createFciFunctions } from './fci.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { windowsVersion } from '../kernel32/versions.js';
+
+const E_INVALIDARG = 0x80070057 | 0;
+/** DLLVERSIONINFO's dwPlatformID for the NT line. */
+const DLLVER_PLATFORM_NT = 2;
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -76,6 +81,7 @@ const READ_CHUNK = 64 * 1024;
  * @property {() => any} callerThread
  * @property {(code: number) => void} [setLastError]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {string} [windows]  The Windows the machine is, whose build the library is.
  */
 
 /**
@@ -166,6 +172,50 @@ export function createCabinetFunctions(host){
 
     return {
         ...createFciFunctions(host),
+
+        /**
+         * HRESULT DllGetVersion(DLLVERSIONINFO *pdvi)
+         *
+         * The library is the system's, at the machine's own version and build,
+         * on the NT platform. The caller says which structure it passed by its
+         * first field - DLLVERSIONINFO, 20 bytes, or DLLVERSIONINFO2, 32, which
+         * adds flags and the version as one 64-bit number - and any other size
+         * is refused. A setup engine (WiX's Burn) asks it of each library it
+         * loads, for its log.
+         */
+        DllGetVersion: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if ((info >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const head = host.readMemory(wholeAddress(info), 4);
+                const size = (head[0] | head[1] << 8 | head[2] << 16 | head[3] << 24) >>> 0;
+                if (size !== 20 && size !== 32)
+                {
+                    return E_INVALIDARG;
+                }
+                const { major, minor, build } = windowsVersion(host.windows);
+                const fields = new DataView(new ArrayBuffer(size - 4));
+                fields.setUint32(0, major, true);
+                fields.setUint32(4, minor, true);
+                fields.setUint32(8, build, true);
+                fields.setUint32(12, DLLVER_PLATFORM_NT, true);
+                if (size === 32)
+                {
+                    // dwFlags 0, wReserved, then ullVersion: major, minor,
+                    // build and QFE as four 16-bit words from the top.
+                    fields.setUint16(20, 0, true);
+                    fields.setUint16(22, build, true);
+                    fields.setUint16(24, minor, true);
+                    fields.setUint16(26, major, true);
+                }
+                host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
+                return 0;
+            },
+        },
 
         /**
          * HFDI FDICreate(PFNALLOC pfnalloc, PFNFREE pfnfree, PFNOPEN pfnopen,

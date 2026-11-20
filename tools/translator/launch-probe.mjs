@@ -951,7 +951,7 @@ async function main(){
     {
         try
         {
-            const text = new TextDecoder('latin1').decode(app.files.read(guestPath));
+            const text = new TextDecoder('latin1').decode(await app.files.read(guestPath));
             console.log(`CAT ${guestPath}\n${text}`);
         }
         catch (e){
