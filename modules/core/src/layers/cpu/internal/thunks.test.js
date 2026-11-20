@@ -170,9 +170,11 @@ test('a table following another\'s layout gives each name the slot it took there
     assert.equal(second.register('B!one', 0).id, 4);
     assert.equal(second.register('B!one', 0).id, 5);
     assert.equal(early.id, 1);
-    assert.equal(second.register('<shared>', 0).id, 6, 'its slot was taken here first: past the layout');
+    assert.equal(second.register('<shared>', 0).id, 6,
+        'its slot was taken here first: past the layout');
     assert.equal(second.register('A!two', 0).id, 3);
     assert.equal(second.register('B!one', 0).id, 7, 'a third take goes past the layout');
-    assert.equal(second.stubAt(base + 2 * STUB_SIZE), null, 'a slot nothing took here holds no stub');
+    assert.equal(second.stubAt(base + 2 * STUB_SIZE), null,
+        'a slot nothing took here holds no stub');
     assert.equal(second.image().length, 8 * STUB_SIZE);
 });

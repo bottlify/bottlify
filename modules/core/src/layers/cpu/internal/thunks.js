@@ -279,8 +279,8 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
          * @param {{ names: Map<string, number[]>, end: number }} layout
          */
         follow(layout){
-            laid = new Map([...layout.names]
-                .map(([name, ids])=>[name, ids.filter(id=>id >= next && entries[id] === undefined)]));
+            laid = new Map([...layout.names].map(([name, ids])=>[
+                name, ids.filter(id=>id >= next && entries[id] === undefined)]));
             next = Math.max(next, layout.end);
         },
 
