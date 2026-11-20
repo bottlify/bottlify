@@ -797,6 +797,21 @@ export const VIEWPORT_MIRROR = Object.freeze([
     restoreOf([EDI, ESI]),                                       // pop edi; pop esi
 ]);
 
+/** The same for Direct3D 9's SetScissorRect: the rectangle's four dwords into the block. */
+export const SCISSOR_MIRROR = Object.freeze([
+    pointerAt(EDX, 1),                                           // mov edx, [esp+8]
+    testPointerOf(EDX),                                          // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    saveOf([ESI, EDI]),                                          // push esi; push edi
+    movePointerOf(ESI, EDX),                                     // mov esi, edx
+    [0x8d, 0xb9, ...dword(SHADOW.SCISSOR)],                      // lea edi, [ecx+disp]
+    [0x89, 0xca],                                                // mov edx, ecx
+    [0xb9, ...dword(4)],                                         // mov ecx, 4
+    [0xf3, 0xa5],                                                // rep movsd
+    [0x89, 0xd1],                                                // mov ecx, edx
+    restoreOf([EDI, ESI]),                                       // pop edi; pop esi
+]);
+
 /**
  * The same for a SetRenderTarget, after its checks have found the surface a
  * target with a block: the viewport a new target brings -- all of it, depths
@@ -834,6 +849,13 @@ export const renderTargetMirror = at=>Object.freeze([
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 4), ...dword(0)],    // Y 0
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 16), ...dword(0)],   // MinZ 0
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 20), ...dword(0x3f800000)], // MaxZ 1
+    // Direct3D 9's scissor rectangle goes to the whole target with it.
+    [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
+    [0x89, 0x91, ...dword(SHADOW.SCISSOR + 8)],                  // mov [ecx+scissor right], edx
+    [0x8b, 0x90, ...dword(SURFACE.DESC + 28)],                   // mov edx, [eax+Height]
+    [0x89, 0x91, ...dword(SHADOW.SCISSOR + 12)],                 // mov [ecx+scissor bottom], edx
+    [0xc7, 0x81, ...dword(SHADOW.SCISSOR), ...dword(0)],         // left 0
+    [0xc7, 0x81, ...dword(SHADOW.SCISSOR + 4), ...dword(0)],     // top 0
 ]);
 export const RENDER_TARGET_MIRROR = renderTargetMirror(2);
 

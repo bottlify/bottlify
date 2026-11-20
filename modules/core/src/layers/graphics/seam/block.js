@@ -177,7 +177,20 @@ export const SHADOW = {
      * into the new one (`moveCopyCode`), as two words, low then high.
      */
     MOVE_COPIED: 5424 + 112,
-    SIZE: 5424 + 120,
+    /**
+     * The device's creation parameters as GetCreationParameters answers them
+     * -- adapter, device type, focus window, behaviour flags -- written by the
+     * host when the block is made: they never change, and a program asks for
+     * them every frame. A device type of zero is a block that holds none.
+     */
+    CREATION: 5424 + 120,
+    /**
+     * Direct3D 9's scissor rectangle as GetScissorRect answers it: kept by
+     * SetScissorRect's and SetRenderTarget's command routines and written by
+     * the host after each of its entries.
+     */
+    SCISSOR: 5424 + 136,
+    SIZE: 5424 + 152,
 };
 
 /** Byte offsets within a query's block. */

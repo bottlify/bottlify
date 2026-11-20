@@ -132,7 +132,9 @@ sequenceDiagram
   object's first word points at its method table, and each method there is a stub like any
   other, except those that run in the guest: IUnknown's `AddRef` and `Release` for an object
   whose count lives in guest memory, and the Direct3D 8 and 9 methods a program calls most
-  (section 7). Methods are stdcall, with the interface pointer as the first argument on the
+  (section 7). A count's crossings of zero are the host's, but for an object whose first
+  reference is one on its owner (a device's back buffer, depth surface, swap chain): the
+  guest moves the owner's count with it, unless that is the owner's last reference. Methods are stdcall, with the interface pointer as the first argument on the
   stack. An object whose documented layout goes on past that first word (Media Foundation's
   `MFASYNCRESULT`, whose status and callback a program reads and writes itself) is given the
   bytes it needs after it, zeroed, and keeps its fields there.

@@ -11,6 +11,8 @@
  * resource first makes the device's command ring, a pause of the program's
  * that compares every dynamic buffer a draw reads.
  *
+ * - GetCreationParameters answers what the host wrote into the device's
+ *   block when it made it (`SHADOW.CREATION`): they never change.
  * - TestCooperativeLevel answers D3D_OK from the device's block while the
  *   host's last answer was that (`SHADOW.COOPERATIVE`); a lost device is the
  *   host's.
@@ -61,6 +63,8 @@ const D3DGETDATA_FLUSH = 1;
 const S_FALSE = 1;
 const D3DISSUE_BEGIN = 2;
 const FLAG_SLOW_PATH = 1;
+/** `SHADOW.CREATION`. */
+const CREATION = 5544;
 
 /**
  * HRESULT TestCooperativeLevel(this)
@@ -74,6 +78,37 @@ export function TestCooperativeLevel({ u32, host, pointerBytes }, self){
     if (block === 0 || (u32(block) & FLAG_SLOW_PATH) !== 0 || u32(block + COOPERATIVE) !== 0)
     {
         return host();
+    }
+    return 0;
+}
+
+/**
+ * HRESULT GetCreationParameters(this, D3DDEVICE_CREATION_PARAMETERS *out),
+ * from the device's block (`SHADOW.CREATION`), laid out for the process's
+ * width: the focus window a pointer's size, the behaviour flags after it. A
+ * null pointer and a block that holds none are the host's.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {ptr} self @param {ptr} out
+ * @returns {u32}
+ */
+export function GetCreationParameters({ u32, setU32, host, pointerBytes }, self, out){
+    const block = u32(self + pointerBytes);
+    if (out === 0 || block === 0 || u32(block + CREATION + 4) === 0)
+    {
+        return host();
+    }
+    setU32(out, u32(block + CREATION));
+    setU32(out + 4, u32(block + CREATION + 4));
+    setU32(out + 8, u32(block + CREATION + 8));
+    if (pointerBytes === 8)
+    {
+        setU32(out + 12, 0);
+        setU32(out + 16, u32(block + CREATION + 12));
+    }
+    else
+    {
+        setU32(out + 12, u32(block + CREATION + 12));
     }
     return 0;
 }

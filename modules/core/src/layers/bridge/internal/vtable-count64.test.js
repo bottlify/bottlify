@@ -32,7 +32,7 @@ const TRAPS = 0x0c00;
  *
  * @param {number} cell
  */
-const world = cell=>{
+const world = (cell, owner = 0)=>{
     const m = longMachine();
     m.write(RETURN, [0xf4]);
     let next = HEAP;
@@ -79,6 +79,7 @@ const world = cell=>{
         addRef: ()=>2,
         release: ()=>1,
         countCell: ()=>cell,
+        ownerCell: ()=>owner,
     };
     const pointer = table.publish(object, IID);
     const vtable = Number(m.quad(pointer));
@@ -91,6 +92,11 @@ const world = cell=>{
 const setCell = (m, value)=>m.write(CELL, [value & 0xff, value >>> 8 & 0xff, 0, 0]);
 /** @param {ReturnType<typeof longMachine>} m */
 const cellOf = m=>new DataView(m.read(CELL, 4).buffer).getUint32(0, true);
+const OWNER = 0x280040;
+/** @param {ReturnType<typeof longMachine>} m @param {number} value */
+const setOwner = (m, value)=>m.write(OWNER, [value & 0xff, value >>> 8 & 0xff, 0, 0]);
+/** @param {ReturnType<typeof longMachine>} m */
+const ownerOf = m=>new DataView(m.read(OWNER, 4).buffer).getUint32(0, true);
 
 test('a 64-bit interface keeps its count\'s word at [this+16], and both counts are code', ()=>{
     const { m, pointer, addRef, release } = world(CELL);
@@ -134,5 +140,46 @@ for (const [why, name, value, cell] of /** @type {[string, string, number, numbe
         assert.equal(m.reg('rcx'), call.entry.rcx);
         assert.equal(m.reg('rsp'), call.entry.rsp);
         assert.equal(cellOf(m), value, 'the word untouched');
+    });
+}
+
+for (const [name, from, to, owner, after] of /** @type {[string, number, number, number, number][]} */ ([
+    ['AddRef', 0, 1, 3, 4], ['Release', 1, 0, 3, 2],
+]))
+{
+    test(`${name} at 64 bits takes an owned count from ${from} to ${to} in the guest, and the`
+        + ` owner's from ${owner} to ${after}`, ()=>{
+        const { m, pointer, addRef, release } = world(CELL, OWNER);
+        assert.equal(m.quad(pointer + 24), BigInt(OWNER));
+        setCell(m, from);
+        setOwner(m, owner);
+        const call = callLong(m, name === 'AddRef' ? addRef : release,
+            { args: [BigInt(pointer)], returnTo: RETURN });
+        assert.equal(m.rip(), RETURN + 1);
+        assert.equal(cellOf(m), to);
+        assert.equal(ownerOf(m), after);
+        assert.equal(m.reg('rax') & 0xffffffffn, BigInt(to));
+        assert.equal(m.reg('rcx'), call.entry.rcx);
+        assert.equal(m.reg('rsp'), BigInt(STACK_64 + 8));
+    });
+}
+
+for (const [why, name, value, owner] of /** @type {[string, string, number, number][]} */ ([
+    ['the owner\'s last reference', 'Release', 1, 1],
+    ['an owner at none', 'AddRef', 0, 0],
+    ['a count at none', 'Release', 0, 3],
+]))
+{
+    test(`${name} at 64 bits leaves ${why} to its trap, both words untouched`, ()=>{
+        const { m, pointer, addRef, release, trapOf } = world(CELL, OWNER);
+        setCell(m, value);
+        setOwner(m, owner);
+        const call = callLong(m, name === 'AddRef' ? addRef : release,
+            { args: [BigInt(pointer)], returnTo: RETURN });
+        assert.equal(m.rip(), trapOf(name === 'AddRef' ? 1 : 2));
+        assert.equal(m.reg('rcx'), call.entry.rcx);
+        assert.equal(m.reg('rsp'), call.entry.rsp);
+        assert.equal(cellOf(m), value);
+        assert.equal(ownerOf(m), owner);
     });
 }

@@ -729,6 +729,37 @@ const PROGRAMS_WRITTEN = [
     },
 ];
 
+test('Direct3D 9: the device\'s own surfaces cross zero in the guest, and move the device\'s'
+    + ' count there', ()=>{
+    const label = 'the back buffer and the depth surface taken and given back';
+    const machines = pair(D3D9, label);
+    assert.equal(machines.both(createDevice(D3D9)).out, DEVICE);
+    /** @param {string} on @param {string} kind @param {string} method @param {Call['args']} args */
+    const call = (on, kind, method, args)=>machines.both({ on, kind, method, args });
+    // The first round's GetRenderTarget is the host's: the pair is not in the
+    // block before the host has looked once.
+    for (let round = 0; round < 4; round++)
+    {
+        const target = call(DEVICE, 'device', 'GetRenderTarget', D3D9.getRenderTarget).out;
+        call(String(target), 'surface', 'AddRef', []);
+        call(String(target), 'surface', 'Release', []);
+        call(String(target), 'surface', 'Release', []);
+        const depth = call(DEVICE, 'device', 'GetDepthStencilSurface', ['out']).out;
+        call(String(depth), 'depthSurface', 'Release', []);
+        call(DEVICE, 'device', 'AddRef', []);
+        call(DEVICE, 'device', 'Release', []);
+    }
+    call(DEVICE, 'device', 'Release', []);
+    machines.finish();
+    assert.deepEqual(machines.differences, []);
+    const { inGuest } = machines.counts();
+    // Three rounds' worth of each, the first reference and the last among them.
+    assert.ok((inGuest.get('GetRenderTarget') ?? 0) >= 3, `GetRenderTarget in the guest:`
+        + ` ${inGuest.get('GetRenderTarget') ?? 0}`);
+    assert.ok((inGuest.get('GetDepthStencilSurface') ?? 0) >= 3);
+    assert.ok((inGuest.get('Release') ?? 0) >= 12, `Release in the guest: ${inGuest.get('Release')}`);
+});
+
 for (const { label, version, program } of PROGRAMS_WRITTEN)
 {
     test(`${version === D3D9 ? 'Direct3D 9' : 'Direct3D 8'}: ${label}`, ()=>{

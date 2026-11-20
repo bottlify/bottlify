@@ -112,8 +112,14 @@ const LONG_WORD = 8;
  * that is not a zero crossing changes only the word: the first reference and
  * the last are the object's own business (what it holds, what it gives back),
  * and those come to the host through the method's trap, as everything does
- * when there is no word. The word is changed with `lock cmpxchg`, so a slice
- * that ends inside the routine leaves nothing half-done for another thread.
+ * when there is no word -- unless the object names an owner, the fourth word
+ * (`ownerCell`): a resource its device owns, whose crossings do nothing but
+ * take a reference on the owner and give it back, which the routine does with
+ * the owner's word. An owner at its last reference is the host's to let go.
+ * Every word is changed with `lock cmpxchg`, and the owner's moved before the
+ * count's and moved back if the count's move fails, so a slice that ends
+ * inside the routine leaves nothing half-done for another thread, and a
+ * crossing moves the owner once whoever made it (`ReferenceCount.owner`).
  *
  *     AddRef(this)                       Release(this)
  *     mov ecx, [esp+4]                   mov ecx, [esp+4]
@@ -123,30 +129,66 @@ const LONG_WORD = 8;
  *   again:                             again:
  *     mov eax, [ecx]                     mov eax, [ecx]
  *     test eax, eax                      cmp eax, 2
- *     jz host                            jb host
+ *     jz first                           jb low
  *     lea edx, [eax+1]                   lea edx, [eax-1]
  *     lock cmpxchg [ecx], edx            lock cmpxchg [ecx], edx
  *     jne again                          jne again
  *     mov eax, edx                       mov eax, edx
  *     ret 4                              ret 4
- *   host:                              host:
- *     jmp trap                           jmp trap
+ *   first:                             low:
+ *     mov edx, [esp+4]                   test eax, eax
+ *     mov edx, [edx+12]  ; owner         jz host
+ *     test edx, edx                      mov edx, [esp+4]
+ *     jz host                            mov edx, [edx+12]   ; owner
+ *     cmp dword [edx], 0                 test edx, edx
+ *     je host                            jz host
+ *     lock inc dword [edx]               push ebx
+ *     lea edx, [eax+1]                 take:
+ *     lock cmpxchg [ecx], edx            mov eax, [edx]
+ *     je took                            cmp eax, 2
+ *     mov edx, [esp+4]                   jb busy            ; its last
+ *     mov edx, [edx+12]                  lea ebx, [eax-1]
+ *     lock dec dword [edx]               lock cmpxchg [edx], ebx
+ *     jmp again                          jne take
+ *   took:                                mov eax, 1
+ *     mov eax, 1                         xor ebx, ebx
+ *     ret 4                              lock cmpxchg [ecx], ebx
+ *   host:                                jne undo
+ *     jmp trap                           pop ebx
+ *                                        xor eax, eax
+ *                                        ret 4
+ *                                      undo:
+ *                                        lock inc dword [edx]
+ *                                        pop ebx
+ *                                        jmp again
+ *                                      busy:
+ *                                        pop ebx
+ *                                      host:
+ *                                        jmp trap
  */
 const COUNT_CODE = {
-    addRef: [0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x49, 0x08, 0x85, 0xc9, 0x74, 0x14,
-        0x8b, 0x01, 0x85, 0xc0, 0x74, 0x0e, 0x8d, 0x50, 0x01, 0xf0, 0x0f, 0xb1, 0x11, 0x75, 0xf1,
-        0x89, 0xd0, 0xc2, 0x04, 0x00],
-    release: [0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x49, 0x08, 0x85, 0xc9, 0x74, 0x15,
-        0x8b, 0x01, 0x83, 0xf8, 0x02, 0x72, 0x0e, 0x8d, 0x50, 0xff, 0xf0, 0x0f, 0xb1, 0x11,
-        0x75, 0xf0, 0x89, 0xd0, 0xc2, 0x04, 0x00],
+    addRef: [0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x49, 0x08, 0x85, 0xc9, 0x74, 0x44, 0x8b, 0x01,
+        0x85, 0xc0, 0x74, 0x0e, 0x8d, 0x50, 0x01, 0xf0, 0x0f, 0xb1, 0x11, 0x75, 0xf1, 0x89,
+        0xd0, 0xc2, 0x04, 0x00, 0x8b, 0x54, 0x24, 0x04, 0x8b, 0x52, 0x0c, 0x85, 0xd2, 0x74,
+        0x25, 0x83, 0x3a, 0x00, 0x74, 0x20, 0xf0, 0xff, 0x02, 0x8d, 0x50, 0x01, 0xf0, 0x0f,
+        0xb1, 0x11, 0x74, 0x0c, 0x8b, 0x54, 0x24, 0x04, 0x8b, 0x52, 0x0c, 0xf0, 0xff, 0x0a,
+        0xeb, 0xc4, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc2, 0x04, 0x00],
+    release: [0x8b, 0x4c, 0x24, 0x04, 0x8b, 0x49, 0x08, 0x85, 0xc9, 0x74, 0x4f, 0x8b, 0x01,
+        0x83, 0xf8, 0x02, 0x72, 0x0e, 0x8d, 0x50, 0xff, 0xf0, 0x0f, 0xb1, 0x11, 0x75, 0xf0,
+        0x89, 0xd0, 0xc2, 0x04, 0x00, 0x85, 0xc0, 0x74, 0x36, 0x8b, 0x54, 0x24, 0x04, 0x8b,
+        0x52, 0x0c, 0x85, 0xd2, 0x74, 0x2b, 0x53, 0x8b, 0x02, 0x83, 0xf8, 0x02, 0x72, 0x22,
+        0x8d, 0x58, 0xff, 0xf0, 0x0f, 0xb1, 0x1a, 0x75, 0xf0, 0xb8, 0x01, 0x00, 0x00, 0x00,
+        0x31, 0xdb, 0xf0, 0x0f, 0xb1, 0x19, 0x75, 0x06, 0x5b, 0x31, 0xc0, 0xc2, 0x04, 0x00,
+        0xf0, 0xff, 0x02, 0x5b, 0xeb, 0xb2, 0x5b],
 };
 
 /**
  * The same in a 64-bit process, where `this` comes in RCX and the interface is
- * three quadwords, the count's word at [this+16]. RCX and RSP are left as they
- * came, so the slow way reaches the trap with the call as it was made; the
- * work is done in RAX, R10 and R11, which the convention lets a callee change
- * and the trap's stub does not read.
+ * four quadwords, the count's word at [this+16] and the owner's at [this+24].
+ * RCX and RSP are left as they came, so the slow way reaches the trap with the
+ * call as it was made; the work is done in RAX, R8 to R11, which the
+ * convention lets a callee change and the trap's stub does not read for a call
+ * of one argument.
  *
  *     AddRef(this)                       Release(this)
  *     mov r10, [rcx+16]                  mov r10, [rcx+16]
@@ -155,22 +197,51 @@ const COUNT_CODE = {
  *   again:                             again:
  *     mov eax, [r10]                     mov eax, [r10]
  *     test eax, eax                      cmp eax, 2
- *     jz host                            jb host
+ *     jz first                           jb low
  *     lea r11d, [rax+1]                  lea r11d, [rax-1]
  *     lock cmpxchg [r10], r11d           lock cmpxchg [r10], r11d
  *     jne again                          jne again
  *     mov eax, r11d                      mov eax, r11d
  *     ret                                ret
- *   host:                              host:
- *     jmp trap                           jmp trap
+ *   first:                             low:
+ *     mov r8, [rcx+24]                   test eax, eax
+ *     test r8, r8                        jz host
+ *     jz host                            mov r8, [rcx+24]
+ *     cmp dword [r8], 0                  test r8, r8
+ *     je host                            jz host
+ *     lock inc dword [r8]              take:
+ *     lea r11d, [rax+1]                  mov eax, [r8]
+ *     lock cmpxchg [r10], r11d           cmp eax, 2
+ *     je took                            jb host
+ *     lock dec dword [r8]                lea r9d, [rax-1]
+ *     jmp again                          lock cmpxchg [r8], r9d
+ *   took:                                jne take
+ *     mov eax, 1                         mov eax, 1
+ *     ret                                xor r9d, r9d
+ *   host:                                lock cmpxchg [r10], r9d
+ *     jmp trap                           jne undo
+ *                                        xor eax, eax
+ *                                        ret
+ *                                      undo:
+ *                                        lock inc dword [r8]
+ *                                        jmp again
+ *                                      host:
+ *                                        jmp trap
  */
 const COUNT_CODE_64 = {
-    addRef: [0x4c, 0x8b, 0x51, 0x10, 0x4d, 0x85, 0xd2, 0x74, 0x16,
-        0x41, 0x8b, 0x02, 0x85, 0xc0, 0x74, 0x0f, 0x44, 0x8d, 0x58, 0x01,
-        0xf0, 0x45, 0x0f, 0xb1, 0x1a, 0x75, 0xee, 0x44, 0x89, 0xd8, 0xc3],
-    release: [0x4c, 0x8b, 0x51, 0x10, 0x4d, 0x85, 0xd2, 0x74, 0x17,
-        0x41, 0x8b, 0x02, 0x83, 0xf8, 0x02, 0x72, 0x0f, 0x44, 0x8d, 0x58, 0xff,
-        0xf0, 0x45, 0x0f, 0xb1, 0x1a, 0x75, 0xed, 0x44, 0x89, 0xd8, 0xc3],
+    addRef: [0x4c, 0x8b, 0x51, 0x10, 0x4d, 0x85, 0xd2, 0x74, 0x40, 0x41, 0x8b, 0x02, 0x85,
+        0xc0, 0x74, 0x0f, 0x44, 0x8d, 0x58, 0x01, 0xf0, 0x45, 0x0f, 0xb1, 0x1a, 0x75, 0xee,
+        0x44, 0x89, 0xd8, 0xc3, 0x4c, 0x8b, 0x41, 0x18, 0x4d, 0x85, 0xc0, 0x74, 0x21, 0x41,
+        0x83, 0x38, 0x00, 0x74, 0x1b, 0xf0, 0x41, 0xff, 0x00, 0x44, 0x8d, 0x58, 0x01, 0xf0,
+        0x45, 0x0f, 0xb1, 0x1a, 0x74, 0x06, 0xf0, 0x41, 0xff, 0x08, 0xeb, 0xc6, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0xc3],
+    release: [0x4c, 0x8b, 0x51, 0x10, 0x4d, 0x85, 0xd2, 0x74, 0x4f, 0x41, 0x8b, 0x02, 0x83,
+        0xf8, 0x02, 0x72, 0x0f, 0x44, 0x8d, 0x58, 0xff, 0xf0, 0x45, 0x0f, 0xb1, 0x1a, 0x75,
+        0xed, 0x44, 0x89, 0xd8, 0xc3, 0x85, 0xc0, 0x74, 0x34, 0x4c, 0x8b, 0x41, 0x18, 0x4d,
+        0x85, 0xc0, 0x74, 0x2b, 0x41, 0x8b, 0x00, 0x83, 0xf8, 0x02, 0x72, 0x23, 0x44, 0x8d,
+        0x48, 0xff, 0xf0, 0x45, 0x0f, 0xb1, 0x08, 0x75, 0xed, 0xb8, 0x01, 0x00, 0x00, 0x00,
+        0x45, 0x31, 0xc9, 0xf0, 0x45, 0x0f, 0xb1, 0x0a, 0x75, 0x03, 0x31, 0xc0, 0xc3, 0xf0,
+        0x41, 0xff, 0x00, 0xeb, 0xb1],
 };
 
 /**
@@ -465,10 +536,13 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         // (`COUNT_CODE`); a program sees only the vtable pointer and assumes
         // nothing after it.
         const word = wordSize();
+        const cell = (object.countCell?.() ?? 0) >>> 0;
         // An object whose documented layout goes on past the vtable pointer
         // (MFASYNCRESULT's fields after IMFAsyncResult's) asks for the bytes
-        // it needs; they start zeroed and are the object's to write.
-        const words = Math.max(3, Math.ceil((object.bodyBytes?.() ?? 0) / word));
+        // it needs; they start zeroed and are the object's to write. One whose
+        // count is the guest's has the owner's word too, which the count's
+        // routines read at a crossing of zero.
+        const words = Math.max(cell === 0 ? 3 : 4, Math.ceil((object.bodyBytes?.() ?? 0) / word));
         const block = heap.allocate(words * word);
         if (block === 0)
         {
@@ -483,10 +557,14 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         }
         writeWord(block, vtable);
         writeWord(block + word, (object.guestState?.() ?? 0) >>> 0);
-        writeWord(block + 2 * word, (object.countCell?.() ?? 0) >>> 0);
+        writeWord(block + 2 * word, cell);
         for (let at = 3; at < words; at++)
         {
             writeWord(block + at * word, 0);
+        }
+        if (cell !== 0)
+        {
+            writeWord(block + 3 * word, (object.ownerCell?.() ?? 0) >>> 0);
         }
         owners.set(block, { object, interfaceId, methods: table, vtable });
         byInterface.set(interfaceId, block);

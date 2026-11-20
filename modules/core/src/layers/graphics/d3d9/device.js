@@ -1254,11 +1254,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /** A resource the device owns: its first reference is one on the device. */
-    const implicitCount = ()=>createReferenceCount({
-        implicit: true,
-        onFirstRef: ()=>count.addRef(),
-        onLastRef: ()=>count.release(),
-    });
+    const implicitCount = ()=>createReferenceCount({ implicit: true, owner: count });
 
     /**
      * A surface made on its own, not a level of anything: its storage goes
@@ -2487,6 +2483,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
         addRef: ()=>count.addRef(),
         release: ()=>count.release(),
+        // Where the guest's AddRef and Release find the device's count, and
+        // its implicit resources' crossings of zero move it (`owner`).
+        counter: count,
 
         /** The state machine's only input, and deliberately not a D3D method. */
         injectDeviceLoss(restorable = false){

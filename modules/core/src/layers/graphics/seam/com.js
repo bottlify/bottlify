@@ -172,6 +172,9 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells, settle
         // Where the guest's AddRef and Release find the object's count, or
         // nothing for an object that keeps it on the host.
         countCell: ()=>(cells ? cells.of(api.counter) : 0),
+        // Where the count its crossings of zero move is kept, for an object
+        // whose first reference is one on another (`ReferenceCount.owner`).
+        ownerCell: ()=>(cells && api.counter?.owner ? cells.of(api.counter.owner) : 0),
         // The calls into the program a release left owing (`owe`), which the
         // bridge makes and waits for before it answers the Release.
         afterRelease: ()=>settleOwed?.(),

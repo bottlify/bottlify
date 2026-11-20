@@ -78,6 +78,10 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  * @property {(cell: CountCell | null) => void} place  Keeps the count in the
  *           cell from now on, or, given null, back on the host.
  * @property {number} placed  The address of the cell it is kept in, or 0.
+ * @property {ReferenceCount} [owner]  The count a first reference is one on:
+ *           an implicit resource's device, whose count its crossings of zero
+ *           move by one -- here, or in the guest's AddRef and Release when
+ *           both counts are kept in cells.
  */
 
 /**
@@ -124,7 +128,7 @@ export class HeldBindings extends Map {
  * probe through memory long out of the cache.
  */
 class Count {
-    /** @type {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void, onZero?: () => void }} */
+    /** @type {CountOptions} */
     #options;
     #implicit;
     /** The program's count while no cell keeps it. */
@@ -140,7 +144,7 @@ class Count {
      */
     #held = 0;
 
-    /** @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void, onZero?: () => void }} options */
+    /** @param {CountOptions} options */
     constructor(options){
         this.#options = options;
         this.#implicit = options.implicit === true;
@@ -198,7 +202,12 @@ class Count {
 
     #gone(){
         this.#options.onLastRef?.();
+        this.#options.owner?.release();
         this.#destroyed = !this.#implicit;
+    }
+
+    get owner(){
+        return this.#options.owner;
     }
 
     /**
@@ -215,13 +224,16 @@ class Count {
         {
             throw new Error('AddRef on a resource whose last reference was released');
         }
-        // A count at 0 moves only here -- the guest's AddRef asks the host
-        // there -- so what is read as 0 stays 0 until this step.
-        if (this.value === 0)
+        // The first reference is whoever's step took the count from 0: the
+        // guest's AddRef takes it too for a count with an owner, and moves
+        // the owner's as this does, once for the one crossing.
+        const { was, now } = this.#move(1);
+        if (was === 0)
         {
             this.#options.onFirstRef?.();
+            this.#options.owner?.addRef();
         }
-        return this.#move(1).now;
+        return now;
     }
 
     release(){
@@ -282,10 +294,16 @@ class Count {
 }
 
 /**
- * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void,
- *           onZero?: () => void }} [options]
+ * @typedef {{ implicit?: boolean, owner?: ReferenceCount, onFirstRef?: () => void,
+ *     onLastRef?: () => void, onZero?: () => void }} CountOptions
+ */
+
+/**
+ * @param {CountOptions} [options]
  *        `onZero`: the program's count reached zero, whether or not the device
- *        still holds the resource bound.
+ *        still holds the resource bound. `owner`: the count the first
+ *        reference takes one on and the last gives it back to
+ *        (`ReferenceCount.owner`).
  * @returns {ReferenceCount}
  */
 export function createReferenceCount(options = {}){
@@ -356,6 +374,10 @@ class SharedCount {
 
     get placed(){
         return this.#count.placed;
+    }
+
+    get owner(){
+        return this.#count.owner;
     }
 }
 

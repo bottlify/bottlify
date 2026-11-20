@@ -685,6 +685,10 @@ export function createRecording(options){
         {
             const number = next++;
             numbers.set(own, number);
+            if (/** @type {any} */ (own).counter?.owner)
+            {
+                crossers.add(own);
+            }
             const proxy = proxies.get(own);
             if (proxy)
             {
@@ -1395,6 +1399,16 @@ export function createRecording(options){
         {
             depth--;
         }
+        return sendCount(target, number, result);
+    };
+
+    /**
+     * The count an object is left with, sent as `REFS_TO` (`countTo`).
+     *
+     * @param {object} target @param {number} number @param {number} result
+     */
+    const sendCount = (target, number, result)=>{
+        countsSent.set(target, result >>> 0);
         if (refsToId < 0)
         {
             writer.u8(OP.CALL);
@@ -1410,6 +1424,35 @@ export function createRecording(options){
         writer.u8(0);
         transport.called(WAIT.NONE, REFS_TO);
         return result;
+    };
+
+    /**
+     * The objects whose crossings of zero the guest may make itself, with no
+     * call that comes here (`ReferenceCount.owner`: a device's own surfaces),
+     * and the count each was last sent with. A Reset is the played side's one
+     * reading of their counts -- whether the program still holds one -- so
+     * before it each is sent again where it moved.
+     *
+     * @type {Set<any>}
+     */
+    const crossers = new Set();
+    /** @type {WeakMap<object, number>} */
+    const countsSent = new WeakMap();
+    const sendCrossings = ()=>{
+        for (const object of crossers)
+        {
+            if (object.destroyed)
+            {
+                crossers.delete(object);
+                continue;
+            }
+            const count = object.refCount >>> 0;
+            const number = numbers.get(object);
+            if (number !== undefined && countsSent.get(object) !== count)
+            {
+                sendCount(object, number, count);
+            }
+        }
     };
 
     /**
@@ -1431,6 +1474,7 @@ export function createRecording(options){
         const making = handsOut(name);
         const pure = PURE_GETTERS.has(name);
         const counting = name === 'addRef' || name === 'release';
+        const resetting = name === 'Reset' || name === 'ResetEx';
         /** The method's number in the writer's table, once it has one. */
         let nameId = -1;
         /** @type {number | undefined} */
@@ -1442,6 +1486,10 @@ export function createRecording(options){
         /** @type {(...args: any[]) => any} */
         const call = (...args)=>{
             const count = args.length;
+            if (resetting && depth === 0)
+            {
+                sendCrossings();
+            }
             // A read of a surface a copy back from the GPU is still filling
             // waits for it, then is made: a lock or a DC on it, and a copy out
             // of it or of its texture, which moves the bytes it holds here.

@@ -6,7 +6,8 @@
 
 /**
  * The getters that answer in the guest, as a gate: GetRenderState,
- * GetTransform, GetTextureStageState, GetViewport, GetSamplerState and
+ * GetTransform, GetTextureStageState, GetViewport, GetSamplerState,
+ * Direct3D 9's GetScissorRect and GetCreationParameters and
  * Direct3D 8's GetVertexShader and GetPixelShader read the device's block,
  * a Direct3D 9 surface's GetDesc reads the surface's, and a texture's
  * GetLevelDesc the block of the level's surface the texture's block names,
@@ -540,6 +541,20 @@ const getters = version=>({
         label: `GetViewport(${none ? 'NULL' : ''})`,
         run: m=>m.call('device', 'GetViewport', [none ? 0 : OUT], { out: 24 }),
     }),
+    /** @param {boolean} [none] */
+    scissor: none=>/** @type {Step} */ ({
+        label: `GetScissorRect(${none ? 'NULL' : ''})`,
+        run: m=>(version.nine
+            ? m.call('device', 'GetScissorRect', [none ? 0 : OUT], { out: 16 })
+            : 'none'),
+    }),
+    /** @param {boolean} [none] */
+    creation: none=>/** @type {Step} */ ({
+        label: `GetCreationParameters(${none ? 'NULL' : ''})`,
+        run: m=>(version.nine
+            ? m.call('device', 'GetCreationParameters', [none ? 0 : OUT], { out: 16 })
+            : 'none'),
+    }),
     /** @param {number} sampler @param {number} type @param {boolean} [none] */
     samplerState: (sampler, type, none)=>/** @type {Step} */ ({
         label: `GetSamplerState(${hex(sampler)}, ${hex(type)}${none ? ', NULL' : ''})`,
@@ -789,6 +804,21 @@ function randomStep(version, states, rng, skip){
             } };
         }],
         ['GetViewport', 6, ()=>get.viewport(none())],
+        ['GetCreationParameters', version.nine ? 2 : 0, ()=>get.creation(none())],
+        ['SetScissorRect', version.nine ? 4 : 0, ()=>{
+            // Larger than the target, inverted and negative are kept as given.
+            const words = [0, 0, 0, 0].map(()=>(rng.chance(0.1) ? 0xfffffff0 + rng.int(16)
+                : rng.int(96)));
+            const how = through('SetScissorRect');
+            const pointer = rng.chance(0.03) ? 0 : DATA;
+            return { label: `SetScissorRect(${pointer ? words.map(hex).join(' ') : 'NULL'})`
+                + `${how.host ? ' host' : ''}`,
+            run: m=>{
+                m.put(words);
+                return m.call('device', 'SetScissorRect', [pointer], how);
+            } };
+        }],
+        ['GetScissorRect', version.nine ? 5 : 0, ()=>get.scissor(none())],
         ['GetDesc', version.nine ? 4 : 0, ()=>get.desc(rng.pick(SURFACES), none())],
         ['GetLevelDesc', 5, ()=>get.levelDesc(rng.pick(TEXTURE_NAMES),
             rng.chance(0.85) ? rng.int(5) : rng.pick(EDGE_LEVELS), none())],
@@ -1090,6 +1120,14 @@ function passed(version, { wrong, split }){
         `GetLevelDesc: ${described.guest} in the guest, ${described.host} on the host`);
     if (version.nine)
     {
+        const scissor = split('device', 'GetScissorRect');
+        assert.ok(scissor.guest > 50 && scissor.host > 0,
+            `GetScissorRect: ${scissor.guest} in the guest, ${scissor.host} on the host`);
+        assert.ok(split('device', 'SetScissorRect').guest > 10,
+            `SetScissorRect taken in the ring: ${split('device', 'SetScissorRect').guest}`);
+        const created = split('device', 'GetCreationParameters');
+        assert.ok(created.guest > 5,
+            `GetCreationParameters: ${created.guest} in the guest, ${created.host} on the host`);
         const { guest } = split('surface', 'GetDesc');
         assert.ok(guest > 10, `GetDesc: ${guest} in the guest`);
         for (const name of ['Capture', 'Apply'])

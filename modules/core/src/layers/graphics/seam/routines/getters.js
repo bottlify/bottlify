@@ -7,7 +7,7 @@
 /**
  * The getters a device answers in the guest, from the block its setters and
  * the host keep: render, sampler and stage states, transforms, the viewport,
- * shaders, targets, a texture's levels and their descriptions.
+ * the scissor rectangle, shaders, targets, a texture's levels and their descriptions.
  */
 
 import {
@@ -206,8 +206,8 @@ export function getTextureStageStateCode(at, trap, types, width = I386){
 }
 
 /**
- * HRESULT GetViewport(this, D3DVIEWPORT *out), as guest code: the block
- * holds the device's viewport, which SetViewport's routine keeps and the
+ * A getter that copies a run of the block's dwords out, as guest code: the
+ * block holds what the device holds, which a setter's routine keeps and the
  * host mirrors whenever it changes it itself (a render target, a reset, a
  * state block). A null pointer and the host's flag go to the host.
  *
@@ -217,33 +217,54 @@ export function getTextureStageStateCode(at, trap, types, width = I386){
  *     jz slow
  *     push esi
  *     push edi
- *     lea esi, [ecx + VIEWPORT]
+ *     lea esi, [ecx + from]
  *     mov edi, edx
- *     mov ecx, 6
+ *     mov ecx, dwords
  *     rep movsd
  *     pop edi
  *     pop esi
  *     xor eax, eax                ; D3D_OK
  *     ret 8
  *
+ * @param {number} at @param {number} trap @param {number} from @param {number} dwords
+ * @param {import('./assemble.js').Width} width
+ * @returns {Uint8Array}
+ */
+function copyOutCode(at, trap, from, dwords, width){
+    return routine(at, trap, [
+        ...getterPrologue(width),
+        width.pointer(EDX, 1),                                   // mov edx, [esp+8]
+        width.testPointer(EDX),                                  // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        width.save([ESI, EDI]),                                  // push esi; push edi
+        [0x8d, 0xb1, ...dword(from)],                            // lea esi, [ecx+disp]
+        width.movePointer(EDI, EDX),                             // mov edi, edx
+        [0xb9, ...dword(dwords)],                                // mov ecx, dwords
+        [0xf3, 0xa5],                                            // rep movsd
+        width.restore([EDI, ESI]),                               // pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        width.ret(2),                                            // ret 8
+    ], {}, width);
+}
+
+/**
+ * HRESULT GetViewport(this, D3DVIEWPORT *out), as guest code (`copyOutCode`).
+ *
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
  */
 export function getViewportCode(at, trap, width = I386){
-    return routine(at, trap, [
-        ...getterPrologue(width),
-        width.pointer(EDX, 1),                                       // mov edx, [esp+8]
-        width.testPointer(EDX),                                            // test edx, edx
-        { jcc: 0x74, to: 'slow' },                               // jz slow
-        width.save([ESI, EDI]),                                  // push esi; push edi
-        [0x8d, 0xb1, ...dword(SHADOW.VIEWPORT)],                 // lea esi, [ecx+disp]
-        width.movePointer(EDI, EDX),                             // mov edi, edx
-        [0xb9, ...dword(6)],                                     // mov ecx, 6
-        [0xf3, 0xa5],                                            // rep movsd
-        width.restore([EDI, ESI]),                               // pop edi; pop esi
-        [0x31, 0xc0],                                            // xor eax, eax
-        width.ret(2),                                       // ret 8
-    ], {}, width);
+    return copyOutCode(at, trap, SHADOW.VIEWPORT, 6, width);
+}
+
+/**
+ * HRESULT GetScissorRect(this, RECT *out), as guest code (`copyOutCode`).
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getScissorCode(at, trap, width = I386){
+    return copyOutCode(at, trap, SHADOW.SCISSOR, 4, width);
 }
 
 /**
@@ -303,7 +324,9 @@ const D3DERR_NOTFOUND = 0x88760866;
  * pointer the program was handed for the surface, out of the device's block
  * (`SHADOW.TARGETS`) once the host has said the pair there is the device's,
  * and the reference the call owes taken in the word the surface counts in. A
- * count at zero -- the step the host takes, a first reference -- a null
+ * count at zero is a first reference, taken here for a surface whose first
+ * reference is one on its device, the device's word moved with it; for any
+ * other the step the host takes. A null
  * out-pointer, an index but the first and a pair the host has not written go
  * to the host. A depth pair of zeros is no depth surface: the out-pointer is
  * cleared, as the host clears it, and the answer is D3DERR_NOTFOUND.
@@ -327,7 +350,7 @@ const D3DERR_NOTFOUND = 0x88760866;
  *   retry:
  *     mov eax, [ebx]
  *     test eax, eax
- *     jz busy                     ; at zero: the host's
+ *     jz first                    ; at zero: the owner's, or the host's
  *     lea edx, [eax+1]
  *     lock cmpxchg [ebx], edx
  *     jne retry
@@ -345,6 +368,22 @@ const D3DERR_NOTFOUND = 0x88760866;
  *     mov dword [edx], 0
  *     mov eax, D3DERR_NOTFOUND
  *     ret n
+ *   first:                        ; one on the device, as the count's AddRef takes it
+ *     mov eax, [ecx + pair]
+ *     mov eax, [eax + owner]      ; the interface's fourth word
+ *     test eax, eax
+ *     jz busy
+ *     cmp dword [eax], 0
+ *     je busy
+ *     lock inc dword [eax]
+ *     mov edx, 1
+ *     xor eax, eax
+ *     lock cmpxchg [ebx], edx
+ *     je took
+ *     mov eax, [ecx + pair]
+ *     mov eax, [eax + owner]
+ *     lock dec dword [eax]
+ *     jmp retry
  *   busy:
  *     pop ebx
  *   held:
@@ -360,6 +399,8 @@ export function getTargetCode(at, trap, { depth, indexed }, width = I386){
     const out = indexed ? 2 : 1;
     const popped = indexed ? 12 : 8;
     const pair = SHADOW.TARGETS + (depth ? 8 : 0);
+    /** The interface's fourth word, where the count's owner's word is (`vtable.js`). */
+    const ownerAt = 3 * width.word;
     return routine(at, trap, [
         ...prologue('early', undefined, width),
         { jcc: 0xeb, to: 'body' },                               // jmp body
@@ -386,10 +427,11 @@ export function getTargetCode(at, trap, { depth, indexed }, width = I386){
         { label: 'retry' },
         [0x8b, 0x03],                                            // mov eax, [ebx]
         [0x85, 0xc0],                                            // test eax, eax
-        { jcc: 0x74, to: 'busy', near: true },                   // jz busy
+        { jcc: 0x74, to: 'first', near: true },                  // jz first
         [0x8d, 0x50, 0x01],                                      // lea edx, [eax+1]
         [0xf0, 0x0f, 0xb1, 0x13],                                // lock cmpxchg [ebx], edx
         { jcc: 0x75, to: 'retry' },                              // jne retry
+        { label: 'took' },
         [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
         width.restore([EBX]),                                    // pop ebx
         letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
@@ -406,6 +448,26 @@ export function getTargetCode(at, trap, { depth, indexed }, width = I386){
             [0xb8, ...dword(D3DERR_NOTFOUND)],                   // mov eax, D3DERR_NOTFOUND
             width.ret(popped / 4),                               // ret n
         ] : []),
+        // The first reference of a surface whose first reference is one on
+        // its device (`ReferenceCount.owner`): the device's word moved
+        // first, and back if the count's move fails, as the count's AddRef.
+        // In EAX: EDX is where the program's pointer is written, plainly.
+        { label: 'first' },
+        [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
+        [0x8b, 0x40, ownerAt],                                   // mov eax, [eax+owner]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'busy', near: true },                   // jz busy
+        [0x83, 0x38, 0x00],                                      // cmp dword [eax], 0
+        { jcc: 0x74, to: 'busy', near: true },                   // je busy
+        [0xf0, 0xff, 0x00],                                      // lock inc dword [eax]
+        [0xba, ...dword(1)],                                     // mov edx, 1
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xf0, 0x0f, 0xb1, 0x13],                                // lock cmpxchg [ebx], edx
+        { jcc: 0x74, to: 'took', near: true },                   // je took
+        [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
+        [0x8b, 0x40, ownerAt],                                   // mov eax, [eax+owner]
+        [0xf0, 0xff, 0x08],                                      // lock dec dword [eax]
+        { jcc: 0xeb, to: 'retry', near: true },                  // jmp retry
         { label: 'busy' },
         width.restore([EBX]),                                    // pop ebx
         { label: 'held' },

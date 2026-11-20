@@ -85,11 +85,12 @@ import { compiledAt, POLLS_BETWEEN, QUERY, COUNT_STATE } from './block.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
     DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
-    STRETCH_GUARD, stageStateMirror,
+    SCISSOR_MIRROR, STRETCH_GUARD, stageStateMirror,
 } from './routines/command.js';
 import {
     getLevelDescCode, getRenderStateCode, getTargetCode, getSamplerStateCode, getSurfaceDescCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, getViewportCode,
+    getScissorCode,
 } from './routines/getters.js';
 import { I386, X64 } from './routines/assemble.js';
 import {
@@ -140,6 +141,7 @@ export const COMMAND_MIRRORS = {
     SetTransform: [...TRANSFORM_MIRROR],
     SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_9),
     SetViewport: [...VIEWPORT_GUARD_9, ...VIEWPORT_MIRROR],
+    SetScissorRect: [...SCISSOR_MIRROR],
     SetSamplerState: [...SAMPLER_STATE_MIRROR],
     BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
     EndScene: [...DRAWABLE_MIRRORS.EndScene],
@@ -163,6 +165,7 @@ export const HOST_COMMAND_MIRRORS = {
     SetTransform: HOST_MIRRORS.transform,
     SetTextureStageState: HOST_MIRRORS.stageState(STAGE_STATE_TYPES_9),
     SetViewport: HOST_MIRRORS.viewport9,
+    SetScissorRect: HOST_MIRRORS.scissor,
     SetSamplerState: HOST_MIRRORS.samplerState,
     BeginScene: HOST_MIRRORS.beginScene,
     EndScene: HOST_MIRRORS.endScene,
@@ -282,7 +285,8 @@ export function createDirect3D9Seam(
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
     const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
-        'GetViewport', 'GetSamplerState', 'GetRenderTarget', 'GetDepthStencilSurface']);
+        'GetViewport', 'GetSamplerState', 'GetRenderTarget', 'GetDepthStencilSurface',
+        'GetCreationParameters', 'GetScissorRect']);
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
@@ -1393,6 +1397,7 @@ export function createDirect3D9Seam(
         transforms: record.transforms.keys(),
         stageStates: record.stageStates.keys(),
         viewport: Boolean(record.viewport),
+        scissor: Boolean(record.scissor),
         samplerStates: record.samplerStates.keys(),
     });
     /** The state blocks this seam handed out, which a run of records may name. */
@@ -2358,8 +2363,9 @@ export function createDirect3D9Seam(
                 return D3DERR_INVALIDCALL;
             }
             const hr = device.SetRenderTarget(index >>> 0, target);
-            // A new target is a new viewport, which the guest's GetViewport reads.
-            shadowOf(device)?.remirror({ viewport: true });
+            // A new target is a new viewport and scissor rectangle, which the
+            // guest's getters read.
+            shadowOf(device)?.remirror({ viewport: true, scissor: true });
             return hr;
         },
 
@@ -3173,6 +3179,8 @@ export function createDirect3D9Seam(
                 at, trap, STAGE_STATE_TYPES_9, routineWidth))),
             GetViewport: builtWide(({ trap })=>placeCode(at=>getViewportCode(at, trap,
                 routineWidth))),
+            GetScissorRect: builtWide(({ trap })=>placeCode(at=>getScissorCode(at, trap,
+                routineWidth))),
             GetSamplerState: builtWide(({ trap })=>placeCode(at=>getSamplerStateCode(at, trap,
                 routineWidth))),
             GetRenderTarget: builtWide(({ trap })=>placeCode(at=>getTargetCode(at, trap,
@@ -3181,6 +3189,8 @@ export function createDirect3D9Seam(
                 { depth: true, indexed: false }, routineWidth))),
             TestCooperativeLevel: builtWide(({ trap })=>placeCode(at=>compiledAt(
                 IN_GUEST.TestCooperativeLevel, at, trap))),
+            GetCreationParameters: builtWide(({ trap })=>placeCode(at=>compiledAt(
+                IN_GUEST.GetCreationParameters, at, trap))),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
                 builtWide((/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(
                     at, trap, { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] },
@@ -3726,7 +3736,7 @@ export function createDirect3D9Seam(
                                 shadow.remirror(touchedBy(object.record));
                             }
                         }
-                        shadow.remirror({ viewport: true });
+                        shadow.remirror({ viewport: true, scissor: true });
                         // And what a draw is checked against: the bindings
                         // the block set are the device's now.
                         shadow.settled();

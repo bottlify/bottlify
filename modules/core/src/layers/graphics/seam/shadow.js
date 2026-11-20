@@ -760,6 +760,7 @@ export function createShadow(deps){
         {
             return;
         }
+        mirrorScissor();
         const words = new Uint32Array((SHADOW.LOCK_RING - SHADOW.DRAWABLE) / 4);
         words[0] = state.drawable;
         words[1] = state.targetWidth;
@@ -833,6 +834,34 @@ export function createShadow(deps){
             deps.writeMemory(address + SHADOW.TARGETS, dwordsBytes([...target ?? [0, 0],
                 ...depth ?? [0, 0], (target ? 1 : 0) | (depth ? 2 : 0)]));
         }
+    };
+
+    /** Direct3D 9's scissor rectangle, as GetScissorRect answers it. */
+    const mirrorScissor = ()=>{
+        /** @type {{ rect?: { left: number, top: number, right: number, bottom: number } }} */
+        const out = {};
+        if (typeof device.GetScissorRect !== 'function' || device.GetScissorRect(out) !== 0
+            || !out.rect)
+        {
+            return;
+        }
+        const { left, top, right, bottom } = out.rect;
+        deps.writeMemory(address + SHADOW.SCISSOR, dwordsBytes([left >>> 0, top >>> 0,
+            right >>> 0, bottom >>> 0]));
+    };
+
+    /** What GetCreationParameters answers in the guest, once: it never changes. */
+    const mirrorCreation = ()=>{
+        /** @type {{ parameters?: any }} */
+        const held = {};
+        if (typeof device.GetCreationParameters !== 'function'
+            || device.GetCreationParameters(held) !== 0 || !held.parameters)
+        {
+            return;
+        }
+        const { AdapterOrdinal, DeviceType, hFocusWindow, BehaviorFlags } = held.parameters;
+        deps.writeMemory(address + SHADOW.CREATION, dwordsBytes([AdapterOrdinal >>> 0,
+            DeviceType >>> 0, hFocusWindow >>> 0, BehaviorFlags >>> 0]));
     };
 
     const mirror = ()=>{
@@ -1450,6 +1479,7 @@ export function createShadow(deps){
             if (address !== 0)
             {
                 deps.writeMemory(address, new Uint8Array(SHADOW.SIZE));
+                mirrorCreation();
                 mirror();
                 // Pages of its own, as the block's are: the routines write it
                 // on every command.
@@ -1509,7 +1539,7 @@ export function createShadow(deps){
      * of it (`remirror`).
      *
      * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-     *     stageStates?: true | Iterable<number>, viewport?: boolean,
+     *     stageStates?: true | Iterable<number>, viewport?: boolean, scissor?: boolean,
      *     samplerStates?: Iterable<number> }} [touched]
      */
     const remirrorNow = touched=>{
@@ -1533,6 +1563,10 @@ export function createShadow(deps){
         if (touched.viewport)
         {
             mirrorViewport();
+        }
+        if (touched.scissor)
+        {
+            mirrorScissor();
         }
         for (const key of touched.samplerStates ?? [])
         {
@@ -1608,7 +1642,7 @@ export function createShadow(deps){
          * each Apply hundreds of calls into the device.
          *
          * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
-         *     stageStates?: true | Iterable<number>, viewport?: boolean,
+         *     stageStates?: true | Iterable<number>, viewport?: boolean, scissor?: boolean,
          *     samplerStates?: Iterable<number> }} [touched]  stage states by
          *     (stage << 8) | type, or every one of them (true); sampler states
          *     by (sampler << 8) | type
@@ -2268,6 +2302,10 @@ export const HOST_MIRRORS = Object.freeze({
         m.setU32(block + SHADOW.VIEWPORT + 4, 0);
         m.setU32(block + SHADOW.VIEWPORT + 16, 0);
         m.setU32(block + SHADOW.VIEWPORT + 20, 0x3f800000);
+        m.setU32(block + SHADOW.SCISSOR, 0);
+        m.setU32(block + SHADOW.SCISSOR + 4, 0);
+        m.setU32(block + SHADOW.SCISSOR + 8, width);
+        m.setU32(block + SHADOW.SCISSOR + 12, height);
         m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~1);
         const cell = m.u32(surface + 8);
         if (cell !== 0)
@@ -2276,6 +2314,15 @@ export const HOST_MIRRORS = Object.freeze({
             m.setU32(block + SHADOW.TARGETS, surface);
             m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) | 1);
         }
+        return true;
+    },
+    /** @type {HostMirror} */
+    scissor: (m, block, [rect])=>{
+        if (rect === 0)
+        {
+            return false;
+        }
+        m.write(block + SHADOW.SCISSOR, m.read(rect, 16).slice());
         return true;
     },
     /** @type {HostMirror} */
