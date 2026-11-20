@@ -119,7 +119,12 @@ export function formatCall(call){
             : `0x${(value >>> 0).toString(16)}`)).join(', ');
     const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
     const left = call.error ? `  [err ${call.error}]` : '';
-    return `${from}  ${call.name}(${args}) = ${call.result}${left}`;
+    // Whose call: every process of a run writes to one log, and two copies of
+    // one program share every address.
+    const who = call.process === undefined ? ''
+        : `${String(call.image ?? '').split('\\').pop()}#${call.process.toString(16)}`
+            + `${call.thread === undefined ? '' : `/${call.thread}`}  `;
+    return `${who}${from}  ${call.name}(${args}) = ${call.result}${left}`;
 }
 
 /**
@@ -741,8 +746,10 @@ export function listen(app, collected){
                 const error = payload?.error;
                 const told = name === 'error' ? { message: error?.message ?? payload?.message,
                     stack: String(error?.stack ?? '').slice(0, 3000), ...payload } : payload;
+                // A last chance's dump - registers, the stack above esp - is
+                // a debug line, and the frames it names are the lead.
                 collected.events.push(`[${name}] ${JSON.stringify(told)
-                    .slice(0, name === 'error' ? 12000 : 300)}`);
+                    .slice(0, name === 'error' || name === 'debug' ? 12000 : 300)}`);
             }
         });
     }

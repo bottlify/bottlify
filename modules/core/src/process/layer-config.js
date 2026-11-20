@@ -177,6 +177,7 @@ export async function layerConfig(deps){
                     // and names its first thread "main": a call says whose
                     // image made it, beside the thread the bridge names.
                     call.image = callerImage;
+                    call.process = options.processId ?? FIRST_PROCESS_ID;
                     options.onCall(call);
                 }
             },
