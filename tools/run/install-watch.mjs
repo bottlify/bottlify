@@ -1194,11 +1194,23 @@ const copyOut = async(from, to)=>{
         }
     }
 };
+// `--copy FROM TO`: FROM's last part may be /REGEX/, every entry beside it whose name
+// matches -- a folder a setup names at random (`C:\/^[0-9a-f]{20,}$/`).
 for (let at = argv.indexOf('--copy'); at >= 0; at = argv.indexOf('--copy', at + 1))
 {
     try
     {
-        await copyOut(argv[at + 1], argv[at + 2]);
+        const from = argv[at + 1];
+        const pattern = /^(.*)\\\/(.+)\/$/.exec(from);
+        const sources = pattern === null ? [from] : app.files.list(pattern[1])
+            .filter((/** @type {any} */ entry)=>new RegExp(pattern[2], 'i')
+                .test(entry.path.slice(entry.path.lastIndexOf('\\') + 1)))
+            .map((/** @type {any} */ entry)=>entry.path);
+        for (const source of sources)
+        {
+            await copyOut(source, sources.length > 1 || pattern !== null
+                ? join(argv[at + 2], source.slice(source.lastIndexOf('\\') + 1)) : argv[at + 2]);
+        }
     }
     catch (e){
         console.log('copy failed:', argv[at + 1], e instanceof Error ? e.message : e);
