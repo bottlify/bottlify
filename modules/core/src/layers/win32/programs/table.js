@@ -47,6 +47,13 @@ export const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  */
 export const PROGRAMS_LIBRARY = 'bottlify.dll';
 
+/**
+ * A 64-bit machine's folder of 32-bit system programs, and the name a 32-bit
+ * process there reaches the 64-bit system folder by (`wow64Spawned`).
+ */
+export const WOW64_DIRECTORY = 'C:\\WINDOWS\\SysWOW64';
+export const SYSNATIVE_DIRECTORY = 'C:\\WINDOWS\\Sysnative';
+
 /** The Windows directory, where Notepad is too. */
 export const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
 
@@ -137,22 +144,51 @@ export function programInPlaceOf(executable){
  * @returns {string | null}  its routine
  */
 export function systemProgramAt(path){
+    const { folder, name } = splitPath(path);
+    const program = SYSTEM_PROGRAMS.get(name);
+    // What stands in the system folder stands in the 32-bit one too.
+    const directories = program?.directories ?? [SYSTEM_DIRECTORY];
+    const homes = directories.includes(SYSTEM_DIRECTORY)
+        ? [...directories, WOW64_DIRECTORY, SYSNATIVE_DIRECTORY] : directories;
+    return program && homes.some(each=>each.toLowerCase() === folder) ? program.routine : null;
+}
+
+/** @param {string} path */
+const splitPath = path=>{
     const normal = path.trim().replaceAll('/', '\\').replace(/\\+/g, '\\').toLowerCase();
     const cut = normal.lastIndexOf('\\');
-    const program = SYSTEM_PROGRAMS.get(normal.slice(cut + 1));
-    const directories = program?.directories ?? [SYSTEM_DIRECTORY];
-    return program && directories.some(each=>each.toLowerCase() === normal.slice(0, cut))
-        ? program.routine : null;
+    return { folder: normal.slice(0, cut), name: normal.slice(cut + 1) };
+};
+
+/**
+ * The image of the program a path names, or null when it names none: 32-bit
+ * in SysWOW64 and on a 32-bit machine, 64-bit elsewhere on a 64-bit one, as
+ * Windows keeps its programs.
+ *
+ * @param {string} path
+ * @param {'x86' | 'amd64'} [machine]
+ * @returns {Uint8Array | null}
+ */
+export function systemProgramImage(path, machine = 'x86'){
+    const routine = systemProgramAt(path);
+    return routine === null ? null : synthesiseProgram({ library: PROGRAMS_LIBRARY, routine,
+        long: machine === 'amd64' && splitPath(path).folder !== WOW64_DIRECTORY.toLowerCase() })
+        .bytes;
 }
 
 /**
- * The image of the program a path names, or null when it names none.
+ * Where a 32-bit process on a 64-bit machine starts a system program it
+ * names: the system folder's is SysWOW64's, as file system redirection hands
+ * it, and Sysnative's is the system folder's own. Any other path is as named.
  *
  * @param {string} path
- * @returns {Uint8Array | null}
  */
-export function systemProgramImage(path){
-    const routine = systemProgramAt(path);
-    return routine === null ? null
-        : synthesiseProgram({ library: PROGRAMS_LIBRARY, routine }).bytes;
+export function wow64Spawned(path){
+    if (systemProgramAt(path) === null)
+    {
+        return path;
+    }
+    const { folder, name } = splitPath(path);
+    return folder === SYSTEM_DIRECTORY.toLowerCase() ? `${WOW64_DIRECTORY}\\${name}`
+        : folder === SYSNATIVE_DIRECTORY.toLowerCase() ? `${SYSTEM_DIRECTORY}\\${name}` : path;
 }

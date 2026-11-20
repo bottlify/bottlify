@@ -229,7 +229,10 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   registers. Division by zero gives #DE, an unknown instruction #UD, an access to a page the program cannot
   reach #PF with its address (translated code leaves, and the JavaScript interpreter runs the
   instruction once more to name the address), a jump below `0x10000` (a call through a null
-  pointer, say) #PF. `int3` is finished by the
+  pointer, say) #PF. The first 64 KiB are closed, so a read through a null pointer is a #PF
+  too, as the .NET runtime's JIT counts on; translated reads test their page from the run's
+  first fault on a closed page, and one translated warm before it reads zeros there
+  ([A79](../../roadmap/decisions.md)). `int3` is finished by the
   interpreter. The exception then goes to the program's SEH, where #GP and #PF become
   `EXCEPTION_ACCESS_VIOLATION`.
 

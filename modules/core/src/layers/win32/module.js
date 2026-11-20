@@ -165,7 +165,7 @@ import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
 import { createDpnhpastFunctions } from './dpnhpast/functions.js';
 import { createSetupapiFunctions } from './setupapi/functions.js';
-import { createMsiFunctions } from './msi/functions.js';
+import { SERVE_CUSTOM_ACTIONS, createMsiFunctions } from './msi/functions.js';
 import { createProgramFunctions } from './programs/functions.js';
 import { PROGRAMS_LIBRARY, systemProgramAt, systemProgramImage } from './programs/table.js';
 import { createEventLogFunctions } from './advapi32/eventlog.js';
@@ -259,8 +259,6 @@ export function conversionsInGuest(table, memory){
     };
 }
 
-/** The programs this build runs in place of the system's, standing as files where Windows keeps them. */
-const SYSTEM_PROGRAM_FILES = Object.freeze({ at: systemProgramAt, image: systemProgramImage });
 /**
  * win32 — the API surface the guest was compiled against.
  *
@@ -339,6 +337,18 @@ const VCRUNTIME_EXPORTS = [
  * waits for it to end, in milliseconds of wall time.
  */
 const PROGRAM_POLL_MS = 5;
+/** STARTUPINFO's flag for the standard handles it carries, and a handle's inherit flag. */
+const STARTF_USESTDHANDLES = 0x100;
+const HANDLE_FLAG_INHERIT = 0x1;
+/** GetStdHandle's numbers for standard input and output. */
+const STD_INPUT_HANDLE = -10;
+const STD_OUTPUT_HANDLE = -11;
+/**
+ * What each pipe to a custom action server holds: enough for any message
+ * of its calls (a record with its streams) to be written whole, so a write
+ * from the host never waits for the reader.
+ */
+const SERVER_PIPE_BYTES = 16 * 1024 * 1024;
 
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
@@ -593,6 +603,13 @@ export function createWin32Module(){
             // 64-bit processes always do: a 32-bit process on it runs under
             // WOW64 (`roadmap/x64.md`).
             const machine64 = config?.machine === 'amd64' || pointerSize === 8;
+            /**
+             * The programs this build runs in place of the system's, standing as
+             * files where Windows keeps them, each as wide as it is there.
+             */
+            const systemProgramFiles = Object.freeze({ at: systemProgramAt,
+                image: (/** @type {string} */ path)=>systemProgramImage(path,
+                    machine64 ? 'amd64' : 'x86') });
             /**
              * This process's debugger while one hears it: from its start, or
              * since one attached (`debug-events.js`); null otherwise.
@@ -1225,7 +1242,7 @@ export function createWin32Module(){
             const volume = withSystemLibraries(
                 filesOnly,
                 ()=>systemLibraryNames(),
-                { homeOf: libraryHome, programs: SYSTEM_PROGRAM_FILES,
+                { homeOf: libraryHome, programs: systemProgramFiles,
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
@@ -3229,6 +3246,9 @@ export function createWin32Module(){
             // it named, which needs the image found the same way in both.
             const spawner = createSpawner({
                 kernel,
+                // A 32-bit process on a 64-bit machine: its system folder's
+                // programs are SysWOW64's.
+                wow64: machine64 && pointerSize === 4,
                 debugObject: ()=>/** @type {any} */ (debuggerSide).connect(),
                 /** @param {string} path */
                 stat: path=>volume.stat(path),
@@ -3592,21 +3612,84 @@ export function createWin32Module(){
             });
 
             /**
+             * A kernel32 call made from the host as a thread's own (`answering`).
+             *
+             * @param {unknown} thread @param {string} name @param {number[]} args
+             */
+            const callAs = async(thread, name, args)=>(await bridge.answering(thread,
+                ()=>libraries['KERNEL32.dll'][name].handler(args))) >>> 0;
+
+            /**
+             * Two pipe ends, read and written from the host on a thread's behalf:
+             * a read is asked only for what a peek found there, and a write
+             * fits what the pipe was made to hold (`SERVER_PIPE_BYTES`), so
+             * neither parks a thread already waiting for its handler.
+             *
+             * @param {unknown} thread @param {number} input @param {number} output
+             * @returns {import('./msi/remote.js').PipeIo}
+             */
+            const pipeIo = (thread, input, output)=>({
+                write: async bytes=>{
+                    const at = heap.allocate(bytes.length + 4);
+                    try
+                    {
+                        writeMemory(at + 4, bytes);
+                        return await callAs(thread, 'WriteFile',
+                            [output, at + 4, bytes.length, at, 0]) !== 0
+                            && memory.readU32(at) === bytes.length;
+                    }
+                    finally
+                    {
+                        heap.free(at);
+                    }
+                },
+                available: async()=>{
+                    const at = heap.allocate(4);
+                    try
+                    {
+                        return await callAs(thread, 'PeekNamedPipe', [input, 0, 0, 0, at, 0])
+                            ? memory.readU32(at) : -1;
+                    }
+                    finally
+                    {
+                        heap.free(at);
+                    }
+                },
+                read: async count=>{
+                    const at = heap.allocate(count + 4);
+                    try
+                    {
+                        return await callAs(thread, 'ReadFile', [input, at + 4, count, at, 0])
+                            ? readMemory(at + 4, memory.readU32(at)).slice() : null;
+                    }
+                    finally
+                    {
+                        heap.free(at);
+                    }
+                },
+                close: async()=>{
+                    await callAs(thread, 'CloseHandle', [input]);
+                    await callAs(thread, 'CloseHandle', [output]);
+                },
+            });
+
+            /**
              * A program started by CreateProcessW on a thread's behalf, as
              * Windows Installer starts a custom action's: `settle` waits for
              * it and answers its exit code, `leave` lets it run on; either
-             * gives the handles back. Null when it could not start.
+             * gives the handles back. Null when it could not start. With
+             * `stdio`, its standard input and output are a pipe each, whose
+             * other ends `channel` reads and writes, as a custom action
+             * server is started.
              *
              * @param {string} commandLine @param {string | null} directory
-             * @param {unknown} thread
-             * @returns {Promise<{ settle: () => Promise<number>, leave: () => Promise<number> }
-             *     | null>}
+             * @param {unknown} thread @param {{ stdio?: boolean }} [options]
+             * @returns {Promise<{ settle: () => Promise<number>, leave: () => Promise<number>,
+             *     channel: import('./msi/remote.js').PipeIo | null } | null>}
              */
-            const startProgram = async(commandLine, directory, thread)=>{
-                const kernel32 = libraries['KERNEL32.dll'];
+            const startProgram = async(commandLine, directory, thread, { stdio = false } = {})=>{
                 /** @param {string} name @param {number[]} args */
-                const call = async(name, args)=>(await bridge.answering(thread,
-                    ()=>kernel32[name].handler(args))) >>> 0;
+                const call = (name, args)=>callAs(thread, name, args);
                 /** @param {string} text */
                 const wide = text=>{
                     const bytes = new Uint8Array(
@@ -3617,20 +3700,46 @@ export function createWin32Module(){
                 };
                 const line = wide(commandLine);
                 const folder = directory ? wide(directory) : 0;
-                const STARTUPINFO = 68;
-                const startup = heap.allocate(STARTUPINFO + 16);
-                writeMemory(startup, new Uint8Array(STARTUPINFO + 16));
+                // STARTUPINFOW and PROCESS_INFORMATION as wide as this process's pointers.
+                const long = pointerSize === 8;
+                const STARTUPINFO = long ? 104 : 68;
+                const startup = heap.allocate(STARTUPINFO + 24);
+                writeMemory(startup, new Uint8Array(STARTUPINFO + 24));
                 writeMemory(startup, Uint8Array.of(STARTUPINFO, 0, 0, 0));
                 const information = startup + STARTUPINFO;
+                /** @param {number} at @param {number} value */
+                const setPointer = (at, value)=>writeMemory(at, long
+                    ? new Uint8Array(BigUint64Array.of(BigInt(value >>> 0)).buffer)
+                    : new Uint8Array(Uint32Array.of(value >>> 0).buffer));
+                /** @type {number[]} */
+                let theirs = [];
+                /** @type {import('./msi/remote.js').PipeIo | null} */
+                let channel = null;
                 try
                 {
-                    if (!await call('CreateProcessW', [0, line, 0, 0, 0, 0, 0, folder,
+                    if (stdio)
+                    {
+                        const ends = await serverPipes(call);
+                        if (!ends)
+                        {
+                            return null;
+                        }
+                        theirs = [ends.childInput, ends.childOutput];
+                        channel = pipeIo(thread, ends.input, ends.output);
+                        writeMemory(startup + (long ? 60 : 44),
+                            new Uint8Array(Uint32Array.of(STARTF_USESTDHANDLES).buffer));
+                        setPointer(startup + (long ? 80 : 56), ends.childInput);
+                        setPointer(startup + (long ? 88 : 60), ends.childOutput);
+                        setPointer(startup + (long ? 96 : 64), ends.childOutput);
+                    }
+                    if (!await call('CreateProcessW', [0, line, 0, 0, stdio ? 1 : 0, 0, 0, folder,
                         startup, information]))
                     {
+                        await channel?.close();
                         return null;
                     }
                     const process = memory.readU32(information);
-                    const mainThread = memory.readU32(information + 4);
+                    const mainThread = memory.readU32(information + pointerSize);
                     const close = async()=>{
                         await call('CloseHandle', [process]);
                         await call('CloseHandle', [mainThread]);
@@ -3662,16 +3771,66 @@ export function createWin32Module(){
                             await close();
                             return 0;
                         },
+                        channel,
                     };
                 }
                 finally
                 {
+                    // The child holds its own ends now, or never will.
+                    for (const end of theirs)
+                    {
+                        await call('CloseHandle', [end]);
+                    }
                     heap.free(startup);
                     heap.free(line);
                     if (folder)
                     {
                         heap.free(folder);
                     }
+                }
+            };
+
+            /**
+             * The two pipes a custom action server talks through: its input,
+             * which this process writes, and its output, which it reads. The
+             * child's ends are inheritable, this process's are not.
+             *
+             * @param {(name: string, args: number[]) => Promise<number>} call
+             * @returns {Promise<{ input: number, output: number, childInput: number,
+             *     childOutput: number } | null>}
+             */
+            const serverPipes = async call=>{
+                const long = pointerSize === 8;
+                // SECURITY_ATTRIBUTES with bInheritHandle set, and the two ends' slots.
+                const block = heap.allocate(24 + 16);
+                writeMemory(block, new Uint8Array(40));
+                writeMemory(block, Uint8Array.of(long ? 24 : 12));
+                writeMemory(block + (long ? 16 : 8), Uint8Array.of(1));
+                try
+                {
+                    if (!await call('CreatePipe', [block + 24, block + 32, block,
+                        SERVER_PIPE_BYTES]))
+                    {
+                        return null;
+                    }
+                    const childInput = memory.readU32(block + 24);
+                    const output = memory.readU32(block + 32);
+                    if (!await call('CreatePipe', [block + 24, block + 32, block,
+                        SERVER_PIPE_BYTES]))
+                    {
+                        await call('CloseHandle', [childInput]);
+                        await call('CloseHandle', [output]);
+                        return null;
+                    }
+                    const input = memory.readU32(block + 24);
+                    const childOutput = memory.readU32(block + 32);
+                    await call('SetHandleInformation', [output, HANDLE_FLAG_INHERIT, 0]);
+                    await call('SetHandleInformation', [input, HANDLE_FLAG_INHERIT, 0]);
+                    return { input, output, childInput, childOutput };
+                }
+                finally
+                {
+                    heap.free(block);
                 }
             };
 
@@ -4454,7 +4613,7 @@ export function createWin32Module(){
                         drives: ()=>filesystem.drives(),
                         volume: (/** @type {string} */ letter)=>filesystem.volume?.(letter) ?? null,
                         systemLibraries: systemLibraryNames,
-                        systemPrograms: SYSTEM_PROGRAM_FILES,
+                        systemPrograms: systemProgramFiles,
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
@@ -5531,6 +5690,15 @@ export function createWin32Module(){
                     startExe: async(commandLine, directory, thread)=>{
                         const started = await startProgram(commandLine, directory, thread);
                         return started === null ? null : { settle: started.settle };
+                    },
+                    // A library of the other width runs in a custom action
+                    // server, talked to through its standard input and output.
+                    bits: pointerSize === 8 ? 64 : 32,
+                    startServer: async(commandLine, thread)=>{
+                        const started = await startProgram(commandLine, null, thread,
+                            { stdio: true });
+                        return started?.channel ? { channel: started.channel,
+                            settle: started.settle } : null;
                     },
                     divergence: config?.divergence,
                     // The installer's own log, where a failed installation says why.
@@ -6701,6 +6869,15 @@ export function createWin32Module(){
                 readMemory,
                 /** @param {string} layer */
                 need: layer=>config?.onLayerNeeded?.(layer),
+                // msiexec -Embedding: the installation that started it talks
+                // through its standard input and output.
+                serveCustomActions: async thread=>{
+                    const input = await callAs(thread, 'GetStdHandle', [STD_INPUT_HANDLE]);
+                    const output = await callAs(thread, 'GetStdHandle', [STD_OUTPUT_HANDLE]);
+                    const msi = /** @type {ReturnType<typeof createMsiFunctions>} */ (
+                        libraries['MSI.dll']);
+                    return msi[SERVE_CUSTOM_ACTIONS](pipeIo(thread, input, output), thread);
+                },
                 divergence: config?.divergence,
             }));
 

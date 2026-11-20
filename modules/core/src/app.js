@@ -3617,6 +3617,8 @@ async function buildApp(options){
         options, ownsTranslationStore, pacing, pauseRun, reportDivergence, resumeRun, saver,
         showVideoFrame, sound, spare, stopSavingRegistry, systemLibraries, translationStore,
         wasDisposed, watches, win32, windowsLibraries,
+        // The machine its children run on: a system program's width there.
+        machine: options.machine ?? (processBits === 64 ? 'amd64' : 'x86'),
         blocks: ()=>blocks,
         fetched: ()=>fetched,
         fetching: ()=>fetching,

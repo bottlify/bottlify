@@ -785,15 +785,19 @@ that reads a result back after the event (a lock of a render target) waits on th
 Revisit if a program is found that times its work by how long an event stays pending.
 *2026-11-02.*
 
-**A79. A read of the first 64 KiB finds zeros; a store or a fetch there faults.** Windows maps
-nothing below 0x10000, so every access there is an access violation. A store through NULL is one a
-program may make on purpose: PECompact2's stub makes one to reach the handler it installed, and a
-packed setup goes no further unless it faults. A read through a structure pointer its owner has
-not set yet is one a program may make by accident and get away with on a fast machine: FMOD's
-mixer thread reads NULL+0x54 before its creator sets the pointer, and faulted here. Translated
-reads do not test their page (`emit/memory.js`), so a read faulting only where an interpreter
-happened to run it would answer the same instruction two ways; it reads zeros everywhere instead.
-Revisit if a program is found that relies on a read of the null range faulting. *2026-11-05.*
+**A79. Every access to the first 64 KiB faults, as on Windows; translated reads find it as any
+closed page.** Windows maps nothing below 0x10000, so every access there is an access violation,
+and programs rely on it: PECompact2's stub stores through NULL to reach the handler it installed,
+and the .NET runtime's JIT emits no null test, so a field read through NULL is its
+NullReferenceException (3DMark 11's shell catches one when it finds no licence key, and died of an
+AccessViolationException while the read found zeros). Translated reads that are not tested
+(`checkReads` unset, `emit/memory.js`) wrap into RAM and find zeros there until the run's first
+fault on a closed page, the null range's included, and test from then on; testing every read
+from the start cost 2.5 % of the stand's 32-bit geometric mean and 6 % of the 64-bit one (up to
+30 % on fmath and vcall), so a read translated warm before that first fault still finds zeros:
+the gap the todo cases in `cork-host.test.js` name. Until 2026-11-20 the range read as zeros
+everywhere, for FMOD's mixer thread, which reads NULL+0x54 before its creator sets the pointer,
+and 3DMark2001 SE's getters on a null object. *2026-11-05, reads faulting 2026-11-20.*
 
 **A80. Temporary: D3D11CreateDevice refuses D3D11_CREATE_DEVICE_VIDEO_SUPPORT with
 DXGI_ERROR_UNSUPPORTED.** A game that plays its videos through Media Foundation or D3D11 video

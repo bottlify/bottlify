@@ -104,11 +104,12 @@ export async function engineVersion(cork){
  * @param {any} filesystem
  * @param {any} blocks
  * @param {string} path
+ * @param {'x86' | 'amd64'} [machine]  the run's: a system program's width on it
  * @returns {Promise<Uint8Array | null>}
  */
-export async function readProgramImage(filesystem, blocks, path){
+export async function readProgramImage(filesystem, blocks, path, machine){
     const file = await readWholeFile(filesystem, blocks, path);
-    return file ? programInPlaceOf(file) ?? file : systemProgramImage(path);
+    return file ? programInPlaceOf(file) ?? file : systemProgramImage(path, machine);
 }
 
 export const SEVERITY = /** @type {Record<string, string>} */ ({
@@ -481,7 +482,7 @@ export async function buildSystemHost(deps){
             read: path=>readWholeFile(filesystem, blocks, path),
         },
         /** @param {string} path */
-        readImage: path=>readProgramImage(filesystem, blocks, path),
+        readImage: path=>readProgramImage(filesystem, blocks, path, options.machine),
         /**
          * The program's tables as it last answered -- asked again now, for the
          * next reader -- with the journal and the sound output this thread

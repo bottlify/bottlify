@@ -267,9 +267,9 @@ for (const wasmInterpreter of [false, true])
 {
     test(`a call through a null pointer faults where nothing runs, and the range still reads, `
         + `on the ${wasmInterpreter ? 'wasm' : 'JavaScript'} tier`, ()=>{
-        // The first 64 KiB stay open to reads, which a title leans on, but a
-        // call into them slid through zeroes into the entry vector and ran it --
-        // on the wasm tier, through zeroes into whatever lay above.
+        // noExecuteBelow alone leaves the range open to reads, but a call into
+        // it slid through zeroes into the entry vector and ran it -- on the wasm
+        // tier, through zeroes into whatever lay above.
         const h = host({ noExecuteBelow: 0x10000,
             cork: { wasmInterpreter, wasmInterpreterAfter: 0 } });
         // mov eax, [0x100]; xor ecx, ecx; call ecx -- at 0x20000.
@@ -286,39 +286,48 @@ for (const wasmInterpreter of [false, true])
     });
 }
 
-for (const [tier, cork] of /** @type {[string, any][]} */ ([
-    ['JavaScript', { wasmInterpreter: false }],
-    ['wasm', { wasmInterpreter: true, wasmInterpreterAfter: 0 }],
+// Wrapped reads (`checkReads` unset) test no page until the run's first fault on a
+// closed one: a read that ran warm before it reads the null range's zeros.
+const WARM_WRAPPED = 'a read translated before the run\'s first fault tests no page';
+for (const [tier, cork, warmTodo] of /** @type {[string, any, string | undefined][]} */ ([
+    ['JavaScript', { wasmInterpreter: false }, WARM_WRAPPED],
+    ['wasm', { wasmInterpreter: true, wasmInterpreterAfter: 0 }, WARM_WRAPPED],
     ['translated, reads tested', { checkReads: true, wasmInterpreter: true,
-        wasmInterpreterAfter: 0 }],
+        wasmInterpreterAfter: 0 }, undefined],
 ]))
 {
-    test(`the closed null range reads as zeros and a store there faults, on the ${tier} tier`,
-        async()=>{
-            const h = host({ closedBelow: 0x10000, zeroReadsBelow: 0x10000, cork });
-            // mov ecx, 3000; L: mov eax, [0x54]; add esi, eax; mov edx, [0xfffe];
-            // add edi, edx; dec ecx; jnz L; mov [0x10], eax; hlt -- at 0x20000. The
-            // read at 0xfffe takes its two upper bytes from the open page above.
-            // Nothing writes the range (its stores fault), so translated reads,
-            // which do not test their page, find the same zeros there.
-            load(h, 0x20000, [0xb9, 0xb8, 0x0b, 0, 0, 0xa1, 0x54, 0, 0, 0, 0x01, 0xc6,
-                0x8b, 0x15, 0xfe, 0xff, 0, 0, 0x01, 0xd7, 0x49, 0x75, 0xee,
-                0xa3, 0x10, 0, 0, 0, 0xf4]);
-            h.writePhysical(0x10000, Uint8Array.of(0x01, 0x02));
+    test(`a read of the null range faults with its address, on the ${tier} tier`, ()=>{
+        const h = host({ closedBelow: 0x10000, cork });
+        // xor ebx, ebx; mov eax, [ebx+0x54]; hlt -- at 0x20000.
+        load(h, 0x20000, [0x31, 0xdb, 0x8b, 0x43, 0x54, 0xf4]);
+        h.runSlice(100);
+        const fault = h.fault();
+        assert.equal(fault?.vector, 14, 'the read faulted');
+        assert.equal(fault?.address, 0x54);
+        assert.equal(fault?.errorCode, 0, 'as a read');
+        assert.equal(fault?.eip, 0x20002, 'at the read');
+    });
+
+    test(`a warm read of the null range faults with its address, on the ${tier} tier`,
+        { todo: warmTodo }, async()=>{
+            const h = host({ closedBelow: 0x10000, cork });
+            // mov ebx, 0x30000; mov ecx, 3000; L: mov eax, [ebx+0x54]; dec ecx; jnz L;
+            // xor ebx, ebx; jmp L -- at 0x20000: the read runs warm off a pointer, then
+            // the same instruction reads through NULL, as a JIT's field read with no null
+            // test of its own does (the .NET runtime's NullReferenceException).
+            load(h, 0x20000, [0xbb, 0, 0, 0x03, 0, 0xb9, 0xb8, 0x0b, 0, 0,
+                0x8b, 0x43, 0x54, 0x49, 0x75, 0xfa, 0x31, 0xdb, 0xeb, 0xf6, 0xf4]);
             for (let slices = 0; !h.halted() && slices < 10_000; slices++)
             {
                 h.runSlice(1000);
                 await h.cork().translatePending();
             }
-            assert.equal(h.readReg32('ecx'), 0, 'every round ran');
-            assert.equal(h.readReg32('esi'), 0, 'NULL+0x54 read as zeros');
-            assert.equal(h.readReg32('edi'), 0x02010000 * 3000 >>> 0,
-                'a read across into the open page took that page\'s bytes');
+            assert.equal(h.readReg32('ecx'), 0, 'every warm round ran, and no more');
             const fault = h.fault();
-            assert.equal(fault?.vector, 14, 'the store faulted');
-            assert.equal(fault?.address, 0x10);
-            assert.equal(fault?.errorCode, 2, 'as a write');
-            assert.equal(fault?.eip, 0x20017, 'at the store');
+            assert.equal(fault?.vector, 14, 'the read faulted');
+            assert.equal(fault?.address, 0x54);
+            assert.equal(fault?.errorCode, 0, 'as a read');
+            assert.equal(fault?.eip, 0x2000a, 'at the read');
         });
 }
 
@@ -1013,38 +1022,6 @@ test('interpretedSteps counts what the interpreters retired, not zero', ()=>{
     assert.ok(h.interpretedSteps() > 0, 'a frame can tell code met for the first time');
     assert.ok(h.interpretedSteps() <= h.instructionCount());
 });
-
-test('a tested read of the null page reads its zeros in translated code, not at the host',
-    async()=>{
-        // mov ebx, base; mov ecx, 3000; L: mov eax, [ebx+4]; add esi, eax;
-        // mov edx, [ebx+8]; add edi, edx; dec ecx; jnz L; hlt -- at 0x20000: a getter
-        // called on a null object, as 3DMark2001 SE's engine calls one.
-        /** @param {number} base @param {boolean} zeroPage */
-        const run = async(base, zeroPage)=>{
-            const h = host({ closedBelow: 0x10000, zeroReadsBelow: 0x10000,
-                cork: { checkReads: true, wasmInterpreter: true, wasmInterpreterAfter: 0,
-                    zeroPage } });
-            load(h, 0x20000, [0xbb, base & 0xff, base >>> 8 & 0xff, 0, 0, 0xb9, 0xb8, 0x0b, 0, 0,
-                0x8b, 0x43, 0x04, 0x01, 0xc6, 0x8b, 0x53, 0x08, 0x01, 0xd7, 0x49, 0x75, 0xf3,
-                0xf4]);
-            for (let slices = 0; !h.halted() && slices < 10_000; slices++)
-            {
-                h.runSlice(1000);
-                await h.cork().translatePending();
-            }
-            assert.ok(h.halted(), 'ran to its end');
-            assert.equal(h.readReg32('esi'), 0, 'read as zeros');
-            assert.equal(h.readReg32('edi'), 0, 'read as zeros, never the engine\'s bytes');
-            const { untranslatedBy, forcedSteps } = h.cork().diagnostics();
-            return { held: untranslatedBy.held, forcedSteps };
-        };
-        assert.deepEqual(await run(0, true), { held: 0, forcedSteps: 0 },
-            'the first page\'s reads stay in translated code');
-        const without = await run(0, false);
-        assert.ok(without.held > 1000, `without zeroPage each round left: ${without.held}`);
-        const engineState = await run(0x2000, true);
-        assert.ok(engineState.held > 1000, 'a read of the engine\'s state still leaves, for zeros');
-    });
 
 
 test('a memory with an engine range holds its floor, and grows as the host gives the guest more',

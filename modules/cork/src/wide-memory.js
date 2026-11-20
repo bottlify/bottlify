@@ -34,7 +34,6 @@ export class WideMemory {
         this.codeRanges = codeRangesAt(layout);
         this.onCodeWrite = onCodeWrite;
         this.owner = owner;
-        this.zeroReadsBelow = 0;
         /** @type {[number, number][]} */
         this.readThrough = [];
     }
@@ -64,10 +63,6 @@ export class WideMemory {
     read(address, size){
         if (this.inaccessible(address, size))
         {
-            if (address + size <= this.zeroReadsBelow)
-            {
-                return 0;
-            }
             throw this.fault(address, size, false);
         }
         return size === 1 ? this.ramBytes[address]

@@ -42,6 +42,8 @@ const MAX_COMMAND_LINE = 32768;
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  * @property {(layer: string) => void} [need]  Asks the embedder for a layer the
  *     machine lacks (`layer-needed`).
+ * @property {(thread: any) => Promise<number>} [serveCustomActions]  msi.dll's
+ *     custom action server over this process's standard input and output.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -111,6 +113,7 @@ export function createProgramFunctions(host){
             message: (text, caption, type)=>call('USER32.dll', 'MessageBoxW',
                 [0, wide(text), wide(caption), type]),
             need: layer=>host.need?.(layer),
+            serveCustomActions: ()=>host.serveCustomActions?.(thread) ?? Promise.resolve(1),
         });
         try
         {

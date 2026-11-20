@@ -197,11 +197,6 @@ export const SETTINGS = {
         doc: '`true` tests every read\'s pages from the start, `false` never closes a page;'
             + ' unset, reads are wrapped into RAM until the program first faults on a closed'
             + ' page, and tested from then on.' },
-    zeroPage: { kind: 'debug', value: false,
-        doc: 'Whether the guest\'s first page is the RAM\'s zeros that nothing writes and a'
-            + ' store to faults (the host\'s `zeroReadsBelow` over it): a tested read inside it'
-            + ' reads them in translated code rather than leaving to the host. The cpu layer'
-            + ' sets it where that holds.' },
     // A stack holds no code unless a program runs code there; the runtime
     // switches it off for good once translated code lies on one (`noteStack`).
     looseStacks: { kind: 'debug', value: true,

@@ -377,8 +377,6 @@ const recordFieldsOf = layout=>{
  *     finds another precision set
  * @property {boolean} [atomic]  locked instructions as wasm atomics (`locked.js`)
  * @property {boolean} [checkReads]  an instruction that only reads tests its pages too
- * @property {boolean} [zeroPage]  the guest's first page is the RAM's, zeros nothing writes
- *     (its stores fault): a tested window of reads that lies in it reads them there
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
  *     keeps them, the flags an instruction leaves undefined keeping the values the
@@ -431,7 +429,6 @@ const recordFieldsOf = layout=>{
  *     precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, checkReads?: boolean,
- *     zeroPage?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
  *     callDepth?: number }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
@@ -462,7 +459,7 @@ export function prepareModule(m, layout, features, memory = {},
         wide = false, narrow = false, blockProfile = false, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
         linkedCalls = true, looseStacks = false, atomic = false,
-        checkReads = false, zeroPage = false, expansion = null, markBlocks = false,
+        checkReads = false, expansion = null, markBlocks = false,
         crossTailCalls = true,
         callDepth = CallStack.LIMIT } = {})
 {
@@ -593,10 +590,6 @@ export function prepareModule(m, layout, features, memory = {},
     if (checkReads)
     {
         context.checkReads = true;
-    }
-    if (zeroPage)
-    {
-        context.zeroPage = true;
     }
     if (atomic)
     {

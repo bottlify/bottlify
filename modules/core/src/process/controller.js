@@ -52,7 +52,7 @@ export function processController(deps){
         lentTranslators, logSinks, mainThread, memory, missingCalls, modules, nextDeadlineMs,
         options, ownsTranslationStore, pacing, pauseRun, reportDivergence, resumeRun, saver,
         showVideoFrame, sound, spare, stopSavingRegistry, systemLibraries, translationStore,
-        wasDisposed, watches, win32, windowsLibraries,
+        wasDisposed, watches, win32, windowsLibraries, machine,
     } = deps;
     // Asked for: set after this controller is made.
     const { blocks, fetched, fetching, mainModule, mountedBlocks, paused } = deps;
@@ -1230,7 +1230,7 @@ export function processController(deps){
          *
          * @param {string} path
          */
-        readImage: path=>readProgramImage(filesystem, blocks(), path),
+        readImage: path=>readProgramImage(filesystem, blocks(), path, machine),
 
         // The zones' sums last (`memory-zones.js`), over what this thread holds.
         // One layer asked for builds that table alone, the zones excepted, which

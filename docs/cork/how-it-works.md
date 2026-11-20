@@ -56,7 +56,7 @@ at offset `a` in it, and cork's own state lies in the program's first 64 KiB, wh
 program never maps:
 
 ```
-0x00000   the program's first page: a read through a null pointer finds zeroes there
+0x00000   the program's first page: closed, so a read through a null pointer faults
 0x01000   registers and cork's own state, then the wasm interpreter's data, to 0x05000;
           a store of the program's there faults
 0x05000   the program's memory from here on (1 GiB in Bottlify)

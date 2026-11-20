@@ -484,8 +484,6 @@ export function createCpuModule(){
                 cork: config?.cork ?? {},
                 // Addresses below this are no-access; zero closes none.
                 closedBelow: config?.closedBelow ?? 0,
-                // Below this a closed page reads as zeros; its stores still fault.
-                zeroReadsBelow: config?.zeroReadsBelow ?? 0,
                 // Ranges past RAM a read finds where an untested one does.
                 readThrough: config?.readThrough ?? [],
                 // The guest range the engine keeps for its tables, where the memory
@@ -788,7 +786,6 @@ export function createCpuModule(){
                                 ? { arena: engineModule.createArena(ARENA_BYTES) }
                                 : {}) } : settings.cork,
                         closedBelow: settings.closedBelow,
-                        zeroReadsBelow: settings.zeroReadsBelow,
                         readThrough: settings.readThrough,
                         noExecuteBelow: settings.noExecuteBelow,
                         executors: settings.executors,

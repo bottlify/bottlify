@@ -298,7 +298,16 @@ flowchart TD
   place of the system's (`msiexec`, `rundll32`, `regsvr32`, `reg`, `regedit`, `notepad`, `winver`)
   stand the same way
   where Windows keeps them: a setup checks that the Windows Installer service's `msiexec.exe` is
-  there before it installs anything.
+  there before it installs anything. On a 64-bit machine the system folder's are 64-bit and
+  SysWOW64's 32-bit; a 32-bit process naming the system folder starts SysWOW64's, as file system
+  redirection hands it, and reaches the 64-bit one as `Sysnative`.
+- **A custom action library of the other width** - a 64-bit one in a 32-bit installation, as the
+  .NET Framework's x64 package has - runs as Windows Installer runs it: in a custom action server,
+  `msiexec.exe -Embedding` of the library's width, which loads it and calls its entry while the
+  session stays in the installation (`msi/remote.js`). The two talk through the server's standard
+  input and output, in values: properties, modes, messages, and the views the installation keeps
+  open on its database for the server. A process in a worker of its own has no pipes its
+  children inherit yet, so the server runs only for an installation on the run's thread.
 - **The Windows Imaging Component** (`windowscodecs.dll`) is the engine's too, its factory a COM
   class as on Windows: its decoders reuse the D3DX and media layers' readers, and a bitmap's
   pixels live in guest memory, since its lock hands the program a pointer into them. The
