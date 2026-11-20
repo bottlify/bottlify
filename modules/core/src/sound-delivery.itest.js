@@ -22,6 +22,13 @@ import { Worker } from 'node:worker_threads';
 import { TONE_FRAMES, TONE_HZ } from '../../../tools/fixtures/tone-program.mjs';
 
 /**
+ * Run alone, by `npm run test:realtime` (scripts/test-realtime.mjs): beside other
+ * tests the gaps are theirs.
+ */
+const REALTIME = process.env.BOTTLIFY_REALTIME === '1';
+const ALONE = 'runs alone, where nothing else takes the processor: npm run test:realtime';
+
+/**
  * @param {string} program @param {string} windows
  * @returns {Promise<{ exit: number | string, heard: { first: number, frames: number,
  *     hz: number, gaps: { at: number, frames: number }[] }, win32: any }>}
@@ -59,7 +66,7 @@ for (const { program, on, what, todo } of CASES)
     for (const windows of on)
     {
         test(`on ${windows}, a tone ${what} reaches the worklet whole: its length, its pitch,`
-            + ' no gap', { timeout: 60000, todo }, async()=>{
+            + ' no gap', { timeout: 60000, todo, skip: REALTIME ? false : ALONE }, async()=>{
             const { exit, heard, win32 } = await play(program, windows);
             if (process.env.SOUND_DEBUG)
             {

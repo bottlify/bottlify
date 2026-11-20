@@ -163,6 +163,7 @@
     "typecheck": "tsc --project jsconfig.json",
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=1200000 \"src/**/*.itest.js\"",
+    "test:realtime": "node scripts/test-realtime.mjs",
     "prepublishOnly": "npm run build && npm run check:package"
   }
 }
