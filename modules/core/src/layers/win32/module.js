@@ -43,6 +43,8 @@ import { VIRTUAL_MEMORY } from './kernel32/process-memory.js';
 import { CURRENT_PROCESS, createProcessTarget } from './kernel32/process-target.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions, imageBits } from './kernel32/system.js';
+import { wow64View } from './kernel32/wow64-files.js';
+import { wow64Hive } from './advapi32/wow64-registry.js';
 import { createActivationContexts } from './kernel32/actctx.js';
 import { PROCESSOR, createProcessors } from './kernel32/processor.js';
 import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
@@ -520,14 +522,15 @@ const SLEEP_ZERO_ASIDE_MS = 1;
  * any of them.
  *
  * @param {{ windows?: string, directx?: unknown, processorMhz?: number,
- *     processorName?: string, processors?: number }} [config]
+ *     processorName?: string, processors?: number, machine?: string, bits?: number }} [config]
  *     `processors`: how many the machine has -- the executors a process of
  *     the run is given, a CentralProcessor key for each; absent, one.
  */
 export function createRunRegistry(config){
     return createRegistryService(createHive({ processorMhz: config?.processorMhz,
         processorName: config?.processorName, processors: config?.processors,
-        windows: windowsVersion(config?.windows), directx: directxOf(config?.directx) }));
+        windows: windowsVersion(config?.windows), directx: directxOf(config?.directx),
+        machine64: config?.machine === 'amd64' || config?.bits === 64 }));
 }
 
 /** The win32 layer's module for one graph; see `defaultModules`. */
@@ -655,6 +658,57 @@ export function createWin32Module(){
             const bridge = host.requireApi('bridge');
             const filesystem = host.requireApi('filesystem');
             const journal = host.requireApi('log');
+            // WOW64's file system redirection (`wow64-files.js`): a 32-bit
+            // process on a 64-bit machine reaches SysWOW64 when it names the
+            // system folder, unless the calling thread turned that off. The
+            // installer's own work is the 64-bit Windows Installer service's
+            // and is never redirected (`unredirected`).
+            /** @type {WeakSet<object>} */
+            const redirectionOff = new WeakSet();
+            /** @param {boolean} off */
+            const setRedirectionOff = off=>{
+                const thread = kernel.currentThread();
+                if (thread)
+                {
+                    (off ? redirectionOff.add(thread) : redirectionOff.delete(thread));
+                }
+            };
+            const fsRedirection = {
+                disabled: ()=>{
+                    const thread = kernel.currentThread();
+                    return Boolean(thread) && redirectionOff.has(thread);
+                },
+                set: setRedirectionOff,
+            };
+            if (machine64 && pointerSize === 4)
+            {
+                const view = wow64View(folders.Windows);
+                filesystem.redirect?.((/** @type {string} */ drive,
+                    /** @type {string[]} */ components)=>(fsRedirection.disabled() ? null
+                    : view(drive, components)));
+            }
+            /**
+             * Runs `fn` on the volume as the system reaches it, through no
+             * redirection.
+             *
+             * @template T @param {() => T} fn @returns {T}
+             */
+            const unredirectedRun = fn=>(filesystem.unredirected
+                ? filesystem.unredirected(fn) : fn());
+            /**
+             * A volume whose calls are made unredirected, as the Windows
+             * Installer service, a 64-bit process, makes them.
+             *
+             * @template {object} T @param {T} volume @returns {T}
+             */
+            const unredirected = volume=>new Proxy(volume, {
+                get: (target, name)=>{
+                    const value = Reflect.get(target, name);
+                    return typeof value !== 'function' ? value
+                        : (/** @type {any[]} */ ...args)=>unredirectedRun(()=>
+                            value.apply(target, args));
+                },
+            });
             // The processors this process is told of -- one for each executor
             // the kernel runs its threads on -- and its affinity: one record,
             // which every interface that counts or sets them asks at the call.
@@ -1242,7 +1296,7 @@ export function createWin32Module(){
             const volume = withSystemLibraries(
                 filesOnly,
                 ()=>systemLibraryNames(),
-                { homeOf: libraryHome, programs: systemProgramFiles,
+                { homeOf: libraryHome, programs: systemProgramFiles, wow64: machine64,
                     imageOf: name=>(libraryHome(name) !== null
                         ? config?.steam?.clientFiles?.[name] : null)
                         ?? modules.systemImage?.(name) ?? null });
@@ -1286,12 +1340,16 @@ export function createWin32Module(){
             // names keys by number (`registry-service.js`): what a process in
             // a worker of its own will be able to call across a ring.
             const inheritedHive = system?.registry ?? null;
-            const hive = inheritedHive
+            const runHive = inheritedHive
                 ?? createRunRegistry({ ...config, processors: processors.count() });
             if (system)
             {
-                system.registry = hive;
+                system.registry = runHive;
             }
+            // The registry as this process reaches it: on a 64-bit Windows its
+            // width's view (`wow64-registry.js`), a 32-bit process's
+            // HKLM\SOFTWARE under Wow6432Node; the run's own elsewhere.
+            const hive = machine64 ? wow64Hive(runHive, pointerSize === 8 ? 64 : 32) : runHive;
             // A run made with a signed-in Steam account has its client running,
             // as a game finds one: a process that stays in the run's directory
             // for as long as the run lasts, and the registry saying so.
@@ -1309,7 +1367,7 @@ export function createWin32Module(){
                     completed: false, exitCode: kernel.processes.STILL_ACTIVE, started: true,
                     exited: kernel.createEvent({ manualReset: true, signalled: false,
                         name: `process ${pid}` }) });
-                announceSteamClient(hive, { pid, account: config.steam });
+                announceSteamClient(runHive, { pid, account: config.steam });
             }
             // The descriptors programs set on files are the run's, not a
             // process's: a setup that writes one and a service that reads it
@@ -3246,9 +3304,6 @@ export function createWin32Module(){
             // it named, which needs the image found the same way in both.
             const spawner = createSpawner({
                 kernel,
-                // A 32-bit process on a 64-bit machine: its system folder's
-                // programs are SysWOW64's.
-                wow64: machine64 && pointerSize === 4,
                 debugObject: ()=>/** @type {any} */ (debuggerSide).connect(),
                 /** @param {string} path */
                 stat: path=>volume.stat(path),
@@ -4392,6 +4447,7 @@ export function createWin32Module(){
                         processors,
                         pointerSize,
                         machine64,
+                        fsRedirection,
                         // Another process's width, off its image's headers: the
                         // machine of the optional header's magic.
                         imageBitsOf: async(/** @type {any} */ process)=>{
@@ -4615,6 +4671,8 @@ export function createWin32Module(){
                         systemLibraries: systemLibraryNames,
                         systemPrograms: systemProgramFiles,
                         directories: shellFolderDirectories(windows),
+                        machine64,
+                        asSystem: unredirectedRun,
                         imagePath: ()=>modules.imagePath(),
                         setLastError: setError,
                         streams: [mailslots, pipes],
@@ -5619,10 +5677,15 @@ export function createWin32Module(){
                     allocate: bytes=>heap.allocate(bytes),
                     /** @param {number} address */
                     free: address=>heap.free(address),
-                    files: volume,
+                    // The installer's files as the 64-bit service reaches them:
+                    // a component's folder is its width's already
+                    // (SystemFolder, System64Folder), never redirected.
+                    files: unredirected(volume),
                     /** @param {string} path */
-                    fullPath: path=>filesystem.resolve(path).path,
-                    hive,
+                    fullPath: path=>unredirected(filesystem).resolve(path).path,
+                    // The registry as the 64-bit service writes it: a component's
+                    // keys go where its width's view has them (`registryPath`).
+                    hive: runHive,
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
                     answering: (thread, fn)=>bridge.answering(thread, fn),
@@ -5658,6 +5721,7 @@ export function createWin32Module(){
                     },
                     machine: ()=>({
                         windows,
+                        amd64: machine64,
                         computerName: COMPUTER_NAME,
                         userName: USER_NAME,
                         userSid: USER_SID_TEXT,
@@ -7634,7 +7698,7 @@ export function createWin32Module(){
                 videoTick: (nowMs, soundOwedMs)=>quartz.tick(nowMs, soundOwedMs ?? null),
 
                 /** The registry, whose contents outlive the process (§9). */
-                registry: ()=>hive,
+                registry: ()=>runHive,
 
                 /**
                  * Whether the registry came from a process before this one,

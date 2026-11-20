@@ -177,7 +177,10 @@ export { USER_NAME };
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
- * @property {ReturnType<typeof import('./registry-service.js').createRegistryService>} hive
+ * @property {import('./wow64-registry.js').ProcessRegistry<
+ *     ReturnType<typeof import('./registry-service.js').createRegistryService>>} hive
+ *           The run's registry as this process reaches it: its width's view on a
+ *           64-bit Windows, whose open, create and remove take a REGSAM.
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory for the objects this library hands out by pointer -- a
  *           SID. Without it those calls fail as an out-of-memory would, which
@@ -247,32 +250,35 @@ export function createRegistryFunctions(host){
      */
     const hive = {
         ...host.hive,
-        /** @param {any} key @param {string | null} [path] @param {string} [keyClass] */
-        create(key, path, keyClass = ''){
+        /**
+         * @param {any} key @param {string | null} [path] @param {string} [keyClass]
+         * @param {number} [sam]  the call's REGSAM, whose KEY_WOW64_* names a view
+         */
+        create(key, path, keyClass = '', sam = 0){
             let parent = key;
             for (const part of typeof path === 'string' ? path.split('\\').filter(Boolean) : [])
             {
-                const next = host.hive.open(parent, part);
+                const next = host.hive.open(parent, part, sam);
                 if (!next)
                 {
                     break;
                 }
                 parent = next;
             }
-            const made = host.hive.create(key, path, keyClass);
+            const made = host.hive.create(key, path, keyClass, sam);
             if (made.created)
             {
                 notify(parent, REG_NOTIFY_CHANGE_NAME);
             }
             return made;
         },
-        /** @param {any} key @param {string | null} [path] */
-        remove(key, path){
+        /** @param {any} key @param {string | null} [path] @param {number} [sam] */
+        remove(key, path, sam = 0){
             const parts = typeof path === 'string' ? path.split('\\').filter(Boolean) : [];
-            const doomed = host.hive.open(key, path);
-            const parent = parts.length > 0 ? host.hive.open(key, parts.slice(0, -1).join('\\'))
-                : null;
-            const result = host.hive.remove(key, path);
+            const doomed = host.hive.open(key, path, sam);
+            const parent = parts.length > 0
+                ? host.hive.open(key, parts.slice(0, -1).join('\\'), sam) : null;
+            const result = host.hive.remove(key, path, sam);
             if (result === 'deleted')
             {
                 notify(parent ?? doomed, REG_NOTIFY_CHANGE_NAME);
@@ -898,7 +904,7 @@ export function createRegistryFunctions(host){
      *     ERROR_BADKEY, the older call's ERROR_INVALID_PARAMETER
      */
     const createKey = (key, subKey, result, disposition, keyClass = '',
-        missing = ERROR_INVALID_PARAMETER)=>
+        missing = ERROR_INVALID_PARAMETER, sam = 0)=>
     {
         if (result === 0)
         {
@@ -910,7 +916,9 @@ export function createRegistryFunctions(host){
         {
             return ERROR_BAD_PATHNAME;
         }
-        const made = hive.create(key, subKey, keyClass);
+        // The REGSAM's KEY_WOW64_* names the view on a 64-bit Windows
+        // (`wow64-registry.js`); the run's own hive takes no fourth argument.
+        const made = hive.create(key, subKey, keyClass, sam);
         writeDword(result, allocate(made.key));
         writeDwordIf(disposition,
             made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
@@ -918,9 +926,9 @@ export function createRegistryFunctions(host){
     };
     const createKeyEx = {
         argBytes: 36,
-        handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
+        handler: onKey((key, [, subKey, , keyClass, , sam, , result, disposition])=>
             createKey(key, readText(subKey), result, disposition, readText(keyClass) ?? '',
-                ERROR_BADKEY)),
+                ERROR_BADKEY, sam)),
     };
 
     /**
@@ -932,7 +940,7 @@ export function createRegistryFunctions(host){
     const openKeyExWith = read=>({
         argBytes: 20,
         /** @param {number[]} args */
-        handler: ([handle, subKey, , , result])=>{
+        handler: ([handle, subKey, , sam, result])=>{
             if (result === 0)
             {
                 return ERROR_INVALID_PARAMETER;
@@ -964,7 +972,7 @@ export function createRegistryFunctions(host){
                 }
                 name = name.slice(1);
             }
-            const found = hive.open(key, name);
+            const found = hive.open(key, name, sam);
             if (!found)
             {
                 // Windows leaves *phkResult undefined here; zeroing it keeps a
@@ -1399,13 +1407,15 @@ export function createRegistryFunctions(host){
      */
     const deleteKey = (text, argBytes)=>({
         argBytes,
-        handler: onKey((key, [, subKey])=>{
+        handler: onKey((key, [, subKey, sam])=>{
             const name = text.read(subKey);
             if (name === null)
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            switch (hive.remove(key, name)){
+            // RegDeleteKeyEx's REGSAM names the view; RegDeleteKey's second
+            // word is no REGSAM, and its argBytes leaves it unread.
+            switch (hive.remove(key, name, argBytes === 16 ? sam : 0)){
                 case 'deleted':
                     return ERROR_SUCCESS;
                 case 'has-subkeys':
@@ -1960,9 +1970,9 @@ export function createRegistryFunctions(host){
          */
         RegCreateKeyExW: {
             argBytes: 36,
-            handler: onKey((key, [, subKey, , keyClass, , , , result, disposition])=>
+            handler: onKey((key, [, subKey, , keyClass, , sam, , result, disposition])=>
                 createKey(key, readWideText(subKey), result, disposition,
-                    readWideText(keyClass) ?? '', ERROR_BADKEY)),
+                    readWideText(keyClass) ?? '', ERROR_BADKEY, sam)),
         },
 
         /**

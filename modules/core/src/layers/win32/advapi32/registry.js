@@ -24,6 +24,7 @@
  * code that only ever reads the classes root.
  */
 
+import { inView } from './wow64-registry.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME, processorCount,
 } from '../kernel32/processor.js';
@@ -824,6 +825,26 @@ const classesKey = path=>({
 });
 
 /**
+ * The machine's keys as a 64-bit Windows has them: each under HKLM\SOFTWARE
+ * that WOW64 redirects is there in the 32-bit view too (`wow64-registry.js`),
+ * as its setup writes it for its 32-bit programs - the classes the system
+ * serves, the version keys a program reads.
+ *
+ * @param {readonly MachineKey[]} keys
+ * @returns {readonly MachineKey[]}
+ */
+const bothViews = keys=>Object.freeze(keys.flatMap(key=>{
+    if (key.root !== HKEY_LOCAL_MACHINE)
+    {
+        return [key];
+    }
+    const narrow = inView(HKEY_LOCAL_MACHINE, key.path.split('\\').filter(Boolean), 32)
+        .join('\\');
+    return narrow.toLowerCase() === key.path.toLowerCase() ? [key]
+        : [key, { ...key, path: narrow }];
+}));
+
+/**
  * Builds a hive: the predefined roots with the machine's own keys under
  * them (see machineKeys), and nothing a program has put there yet.
  *
@@ -832,23 +853,25 @@ const classesKey = path=>({
  * leaves it where it was; only deleting and re-adding moves it to the end.
  *
  * @param {{ processorMhz?: number, processorName?: string, processors?: number,
- *     windows?: WindowsVersion, directx?: DirectXRelease }} [options]
+ *     windows?: WindowsVersion, directx?: DirectXRelease, machine64?: boolean }} [options]
  *        `processorMhz` is the speed the processor keys report: the rate the
  *        engine's rdtsc advances at, which is the engine's to say.
  *        `processors` is how many there are: the run's executors, a key for
  *        each. `windows` is the Windows the machine's keys describe, `directx`
- *        the DirectX; absent, the defaults.
+ *        the DirectX; absent, the defaults. `machine64`: a 64-bit Windows,
+ *        whose machine keys are in both views (`bothViews`).
  */
 export function createHive(
     { processorMhz = PROCESSOR.mhz, processorName = PROCESSOR_NAME, processors = 1,
-        windows = windowsVersion(), directx } = {},
+        windows = windowsVersion(), directx, machine64 = false } = {},
 )
 {
-    const furnishings = machineKeys(windows, directx, {
+    const native = machineKeys(windows, directx, {
         count: processorCount(processors),
         mhz: processorMhz,
         name: processorName,
     });
+    const furnishings = machine64 ? bothViews(native) : native;
     /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
 

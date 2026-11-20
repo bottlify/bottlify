@@ -56,6 +56,14 @@ export function processController(deps){
     } = deps;
     // Asked for: set after this controller is made.
     const { blocks, fetched, fetching, mainModule, mountedBlocks, paused } = deps;
+    /**
+     * The volume as the embedder sees it from outside: through no process's
+     * view of it (a 32-bit process's file system redirection on a 64-bit
+     * Windows), and a child's image at the path its parent resolved.
+     *
+     * @template T @param {() => T} fn @returns {T}
+     */
+    const outside = fn=>(filesystem.unredirected ? filesystem.unredirected(fn) : fn());
     return {
         /** Where the program was mapped and where it starts. */
         image,
@@ -1066,7 +1074,7 @@ export function processController(deps){
              * @returns {{ name: string, path: string, directory: boolean, size: number,
              *     modified: number }[]}
              */
-            list: path=>filesystem.list(path).map((/** @type {any} */ entry)=>({
+            list: path=>outside(()=>filesystem.list(path)).map((/** @type {any} */ entry)=>({
                 name: entry.name, path: entry.path, directory: entry.directory === true,
                 size: entry.size ?? 0, modified: entry.modified ?? 0 })),
             /**
@@ -1077,7 +1085,8 @@ export function processController(deps){
              * @param {string} path
              * @returns {Promise<Uint8Array | null>}
              */
-            read: path=>readWholeFile(filesystem, blocks(), path),
+            // Opened before its first wait, so through no view.
+            read: path=>outside(()=>readWholeFile(filesystem, blocks(), path)),
             /**
              * A directory made from outside, as a person makes one in Explorer
              * beside the running program: what an installer expects to find
@@ -1086,7 +1095,7 @@ export function processController(deps){
              * @param {string} path
              * @returns {boolean} true when it was made, false when it was there.
              */
-            createDirectory: path=>filesystem.createDirectory(path),
+            createDirectory: path=>outside(()=>filesystem.createDirectory(path)),
             /**
              * A file or a directory with everything in it, removed from outside: a
              * setting the program saved and would read back, taken away so it asks
@@ -1095,34 +1104,34 @@ export function processController(deps){
              * @param {string} path
              * @returns {boolean} true when there was something to remove.
              */
-            remove: function remove(path){
-                const entry = filesystem.stat(path);
+            remove: path=>outside(function remove(at = path){
+                const entry = filesystem.stat(at);
                 if (!entry)
                 {
                     return false;
                 }
                 if (entry.directory)
                 {
-                    for (const child of filesystem.list(path))
+                    for (const child of filesystem.list(at))
                     {
                         remove(child.path);
                     }
-                    filesystem.removeDirectory(path);
+                    filesystem.removeDirectory(at);
                 }
                 else
                 {
-                    filesystem.deleteFile(path);
+                    filesystem.deleteFile(at);
                 }
                 return true;
-            },
+            }),
             /**
              * A file written whole from outside, replacing one of that name.
              *
              * @param {string} path @param {Uint8Array} bytes
              */
             write: (path, bytes)=>{
-                const handle = filesystem.open(path,
-                    { read: false, write: true, disposition: 'create-always' });
+                const handle = outside(()=>filesystem.open(path,
+                    { read: false, write: true, disposition: 'create-always' }));
                 if (!handle)
                 {
                     throw new Error(`${path} could not be created`);
@@ -1230,7 +1239,7 @@ export function processController(deps){
          *
          * @param {string} path
          */
-        readImage: path=>readProgramImage(filesystem, blocks(), path, machine),
+        readImage: path=>outside(()=>readProgramImage(filesystem, blocks(), path, machine)),
 
         // The zones' sums last (`memory-zones.js`), over what this thread holds.
         // One layer asked for builds that table alone, the zones excepted, which

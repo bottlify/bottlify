@@ -33,7 +33,7 @@
  *   `game.exe` find an entry stored as `Game.exe`.
  */
 
-import { SYSTEM_DIRECTORY, systemProgramAt, wow64Spawned } from '../programs/table.js';
+import { SYSTEM_DIRECTORY, systemProgramAt } from '../programs/table.js';
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { STARTUPINFO, readStartupInfo } from './startup-info.js';
 import { childThread } from './cross-process.js';
@@ -219,8 +219,6 @@ const directoryOf = path=>path.slice(0, Math.max(
 /**
  * @typedef {Object} SpawnerHost
  * @property {any} kernel                        The kernel layer's API.
- * @property {boolean} [wow64]  A 32-bit process on a 64-bit machine, whose
- *           system folder's programs are SysWOW64's (`wow64Spawned`).
  * @property {() => any} [debugObject]  The calling thread's debug object, made if it has
  *           none: what a child started with DEBUG_PROCESS reports through.
  * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
@@ -316,13 +314,16 @@ export function createSpawner(host){
 
     /**
      * The same path as a full one, or itself when there is nothing to qualify
-     * it with -- no resolver, or a name the resolver refuses.
+     * it with -- no resolver, or a name the resolver refuses. A full one is
+     * resolved too: the resolver answers where the process reaches it, a
+     * 32-bit process's system folder SysWOW64 on a 64-bit Windows
+     * (`wow64-files.js`), and the child is that image.
      *
      * @param {string} path
      * @returns {string}
      */
     const qualify = path=>{
-        if (isQualified(path) || !host.resolve)
+        if (!host.resolve)
         {
             return path;
         }
@@ -388,8 +389,7 @@ export function createSpawner(host){
             {
                 if (isImage(candidate))
                 {
-                    const path = qualify(candidate);
-                    return host.wow64 === true ? wow64Spawned(path) : path;
+                    return qualify(candidate);
                 }
             }
         }

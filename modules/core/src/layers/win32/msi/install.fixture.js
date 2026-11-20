@@ -106,11 +106,15 @@ export async function machine(folders = [], files = {}){
  * @param {Awaited<ReturnType<typeof machine>>} host @param {Tables} tables
  * @param {string} commandLine @param {Record<string, any>} [extra]  More of the engine's host.
  * @param {Record<string, Uint8Array>} [streams]
+ * @param {import('./session.js').Machine} [described]  the machine the installer describes
  */
-export async function run(host, tables, commandLine, extra = {}, streams = {}){
+export async function run(host, tables, commandLine, extra = {}, streams = {},
+    described = MACHINE)
+{
     const { registration } = host;
     const session = createSession({
-        db: packageDatabase(tables, streams), packagePath: 'C:\\src\\test.msi', machine: MACHINE,
+        db: packageDatabase(tables, streams), packagePath: 'C:\\src\\test.msi',
+        machine: described,
         commandLine,
         isInstalled: code=>registration.productState(code) === INSTALLSTATE.DEFAULT,
         installed: {

@@ -299,8 +299,27 @@ flowchart TD
   stand the same way
   where Windows keeps them: a setup checks that the Windows Installer service's `msiexec.exe` is
   there before it installs anything. On a 64-bit machine the system folder's are 64-bit and
-  SysWOW64's 32-bit; a 32-bit process naming the system folder starts SysWOW64's, as file system
-  redirection hands it, and reaches the 64-bit one as `Sysnative`.
+  SysWOW64's 32-bit, and the engine's libraries stand in SysWOW64 too.
+- **WOW64's file system redirection** (`wow64-files.js`): a 32-bit process on a 64-bit machine
+  that names `%windir%\System32` reaches `SysWOW64`, except System32's folders both widths share
+  (catroot, catroot2, driverstore, drivers\etc, logfiles, spool), and names the 64-bit folder as
+  `Sysnative`. It is the process's view of the volume (the filesystem layer's `redirect`), so
+  every path it names goes through it - an open, a search, a library's load, a child's image.
+  Wow64DisableWow64FsRedirection and its siblings turn it off and back on for the calling
+  thread. The volume as the system reaches it - the machine's own folders, what the embedder
+  reads and writes, and the Windows Installer's files, a 64-bit service's - goes through no view
+  (`unredirected`).
+- **WOW64's registry redirection** (`wow64-registry.js`): on a 64-bit machine each process reaches
+  the run's registry through its width's view. A 32-bit one's HKLM\SOFTWARE is under
+  `Wow6432Node`, but for the keys both widths share (Windows 7's list), and in the classes only
+  CLSID, DirectShow, Interface, Media Type and MediaFoundation have a 32-bit view, under
+  `Classes\Wow6432Node`. KEY_WOW64_32KEY and KEY_WOW64_64KEY name a view per call, and a key keeps
+  the view it was reached through for the keys opened under it. Every layer of the process gets
+  the view, so COM's lookups and the rest read what the process's own calls would. A 64-bit
+  machine's own keys are in both views, as its setup writes them (`bothViews`). The Windows
+  Installer writes each component's keys where its width's view has them (`registryPath`), as
+  the 64-bit service does, and describes the 64-bit machine (`VersionNT64`, `Msix64`,
+  `System64Folder`, `ProgramFiles64Folder`; `SystemFolder` is SysWOW64 there).
 - **A custom action library of the other width** - a 64-bit one in a 32-bit installation, as the
   .NET Framework's x64 package has - runs as Windows Installer runs it: in a custom action server,
   `msiexec.exe -Embedding` of the library's width, which loads it and calls its entry while the

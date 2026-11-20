@@ -306,6 +306,9 @@ const EXECUTION_STATES = ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED | ES_USER_PRES
  * @property {boolean} [machine64]  The machine is a 64-bit Windows (`roadmap/x64.md`,
  *           WOW64): a 32-bit process on it runs under WOW64, and the WOW64
  *           directory is there. Absent, a 32-bit Windows.
+ * @property {{ disabled: () => boolean, set: (disabled: boolean) => void }} [fsRedirection]
+ *           The calling thread's file system redirection under WOW64
+ *           (`wow64-files.js`): whether it turned it off, and turning it.
  * @property {(process: any) => number | null | Promise<number | null>} [imageBitsOf]
  *           Whether another process's image is a 32- or a 64-bit one, read off
  *           its headers; null when it cannot be read.
@@ -1098,12 +1101,21 @@ export function createSystemFunctions(host){
     });
 
     /**
-     * The calls that turn a 32-bit process's file-system redirection off and
-     * on. On a 32-bit system there is no WOW64 and they fail as
-     * GetSystemWow64Directory is documented to, with ERROR_CALL_NOT_IMPLEMENTED.
-     * Under WOW64 they answer TRUE: this machine redirects nothing, a 32-bit
-     * process's System32 being System32, so turning redirection off is done,
-     * and turning it on is said as a divergence.
+     * The calling thread's redirection under WOW64: whether it turned it off.
+     * The value Wow64DisableWow64FsRedirection hands back, and Revert and
+     * RtlWow64EnableFsRedirectionEx take, is that flag, as Wine's are.
+     */
+    const redirectionOff = ()=>(host.fsRedirection?.disabled() ? 1 : 0);
+    /** @param {boolean} off */
+    const turnRedirection = off=>host.fsRedirection?.set(off);
+
+    /**
+     * The calls that turn a 32-bit process's file system redirection off and
+     * on, for the calling thread (`wow64-files.js`). On a 32-bit system there
+     * is no WOW64 and they fail as GetSystemWow64Directory is documented to,
+     * with ERROR_CALL_NOT_IMPLEMENTED. Disable writes the thread's state as it
+     * was through its pointer; Revert puts that state back; Enable sets it
+     * from its BOOLEAN.
      *
      * @param {'disable' | 'revert' | 'enable'} kind
      */
@@ -1116,14 +1128,22 @@ export function createSystemFunctions(host){
                 host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
                 return 0;
             }
-            if (kind === 'disable' && (argument >>> 0) !== 0)
+            if (kind === 'disable')
             {
-                host.writeMemory(wholeAddress(argument), Uint8Array.of(1, 0, 0, 0));
+                if ((argument >>> 0) !== 0)
+                {
+                    host.writeMemory(wholeAddress(argument),
+                        Uint8Array.of(redirectionOff(), 0, 0, 0));
+                }
+                turnRedirection(true);
             }
-            if (kind === 'enable' && (argument & 0xff) !== 0)
+            else if (kind === 'revert')
             {
-                host.divergence?.('kernel32',
-                    'Wow64EnableWow64FsRedirection: System32 is not redirected to SysWOW64');
+                turnRedirection((argument >>> 0) !== 0);
+            }
+            else
+            {
+                turnRedirection((argument & 0xff) === 0);
             }
             return 1;
         },
@@ -1393,13 +1413,21 @@ export function createSystemFunctions(host){
                 /** NTSTATUS RtlWow64EnableFsRedirection(BOOLEAN Enable) */
                 RtlWow64EnableFsRedirection: {
                     argBytes: 4,
-                    handler: ()=>(wow64 ? STATUS_SUCCESS : STATUS_NOT_IMPLEMENTED),
+                    /** @param {number[]} args */
+                    handler: ([enable])=>{
+                        if (!wow64)
+                        {
+                            return STATUS_NOT_IMPLEMENTED;
+                        }
+                        turnRedirection((enable & 0xff) === 0);
+                        return STATUS_SUCCESS;
+                    },
                 },
                 /** NTSTATUS RtlWow64EnableFsRedirectionEx(ULONG Disable, PULONG OldValue) */
                 RtlWow64EnableFsRedirectionEx: {
                     argBytes: 8,
                     /** @param {number[]} args */
-                    handler: ([, old])=>{
+                    handler: ([disable, old])=>{
                         if (!wow64)
                         {
                             return STATUS_NOT_IMPLEMENTED;
@@ -1408,7 +1436,9 @@ export function createSystemFunctions(host){
                         {
                             return STATUS_ACCESS_VIOLATION;
                         }
-                        host.writeMemory(wholeAddress(old), Uint8Array.of(0, 0, 0, 0));
+                        host.writeMemory(wholeAddress(old),
+                            Uint8Array.of(redirectionOff(), 0, 0, 0));
+                        turnRedirection((disable >>> 0) !== 0);
                         return STATUS_SUCCESS;
                     },
                 },

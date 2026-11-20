@@ -49,7 +49,7 @@ export const PROGRAMS_LIBRARY = 'bottlify.dll';
 
 /**
  * A 64-bit machine's folder of 32-bit system programs, and the name a 32-bit
- * process there reaches the 64-bit system folder by (`wow64Spawned`).
+ * process there reaches the 64-bit system folder by (`wow64-files.js`).
  */
 export const WOW64_DIRECTORY = 'C:\\WINDOWS\\SysWOW64';
 export const SYSNATIVE_DIRECTORY = 'C:\\WINDOWS\\Sysnative';
@@ -176,19 +176,3 @@ export function systemProgramImage(path, machine = 'x86'){
         .bytes;
 }
 
-/**
- * Where a 32-bit process on a 64-bit machine starts a system program it
- * names: the system folder's is SysWOW64's, as file system redirection hands
- * it, and Sysnative's is the system folder's own. Any other path is as named.
- *
- * @param {string} path
- */
-export function wow64Spawned(path){
-    if (systemProgramAt(path) === null)
-    {
-        return path;
-    }
-    const { folder, name } = splitPath(path);
-    return folder === SYSTEM_DIRECTORY.toLowerCase() ? `${WOW64_DIRECTORY}\\${name}`
-        : folder === SYSNATIVE_DIRECTORY.toLowerCase() ? `${SYSTEM_DIRECTORY}\\${name}` : path;
-}

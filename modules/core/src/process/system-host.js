@@ -251,6 +251,8 @@ export async function buildSystemHost(deps){
     journalEvents(events, journal.journal?.() ?? journal, { shaders: options.log?.shaders });
     system.registry = createRunRegistry({
         windows: options.windows,
+        // A 64-bit Windows keeps its machine keys in both views.
+        machine: options.machine,
         directx: options.graphicsApi
             ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
         processorMhz: CORK_TSC_MHZ,

@@ -75,3 +75,25 @@ test('ALLUSERS 2 becomes 1 for the administrator, nothing for a per-user install
         assert.equal(allUsers('ALLUSERS=1'), '1');
         assert.equal(allUsers(''), '', 'unset stays unset');
     });
+
+test('a 64-bit Windows names both widths\' folders: SystemFolder is SysWOW64, System64Folder the'
+    + ' system folder, and VersionNT64 and Msix64 are set', ()=>{
+    /** @param {boolean} amd64 */
+    const session = amd64=>createSession({ db: createEmptyDatabase(), packagePath: 'C:\\a.msi',
+        machine: { ...MACHINE, windows: windowsVersion('win7'), amd64 } });
+    const wide = session(true);
+    const windows = wide.getProperty('WindowsFolder');
+    assert.equal(wide.getProperty('SystemFolder'), `${windows}SysWOW64\\`);
+    assert.equal(wide.getProperty('System64Folder'), `${windows}system32\\`);
+    assert.equal(wide.getProperty('VersionNT64'), '601');
+    assert.equal(wide.getProperty('Msix64'), '6');
+    assert.equal(wide.getProperty('Intel'), '6', 'Intel is set on either');
+    assert.equal(wide.getProperty('ProgramFiles64Folder'), wide.getProperty('ProgramFilesFolder'));
+    const narrow = session(false);
+    assert.equal(narrow.getProperty('SystemFolder'), `${windows}system32\\`);
+    for (const name of ['System64Folder', 'VersionNT64', 'Msix64', 'ProgramFiles64Folder',
+        'CommonFiles64Folder'])
+    {
+        assert.equal(narrow.getProperty(name), '', `${name}: none on a 32-bit Windows`);
+    }
+});
