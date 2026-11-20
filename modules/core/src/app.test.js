@@ -12,14 +12,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, idleWait, pacedYield, pageIsHidden, timedWait, divergenceReporter,
-    pagePacing, PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit,
-    feedFilmSound, filmSoundOwed, heapSizeFor, spaceAbove, engineAreaFor, ENGINE_CUT_AT,
-    placeMainStack, stackReserveOf, shippedLibraryReader, areaOf, createGuestView, createKernelGl,
+    createMacrotask, pacedYield, pageIsHidden, timedWait, divergenceReporter, pagePacing,
+    PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit, feedFilmSound,
+    filmSoundOwed, heapSizeFor, spaceAbove, engineAreaFor, ENGINE_CUT_AT, placeMainStack,
+    stackReserveOf, shippedLibraryReader, areaOf, createGuestView, createKernelGl,
     resolveOpenglEntry, answeredByEngine, mapShippedLibraries, createApp, runProcessId,
     withCpuSetup, withoutFaultingTailCalls, tailCallsFault, mobileOrSafari, automaticCores,
-    translatorsBeside, answeringWhile,
+    translatorsBeside,
 } from './app.js';
+import { idleWait, answeringWhile } from './process/run-waits.js';
 import { allocateCleared, RESOURCE_ALIGNMENT } from './process/process-layout.js';
 import {
     resourceLookup, compatibilityOf, versionResourceOf, imageInMemory,

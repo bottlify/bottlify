@@ -91,7 +91,8 @@ Where to look in the code: `ui/src/engine/session.js` (what the launcher passes)
 [`core/src/process/`](../../modules/core/src/process/) (`module-table.js`: by name, path and base; `system-modules.js`: the engine's
 libraries made modules; `library-loader.js`: imports resolved, libraries loaded and let go at run time;
 `libraries.js`: the names a load is tried under, the directories searched, where a library is placed;
-`system-host.js`: what a run's processes share, built once; `layer-config.js`: what each layer of a
+`system-host.js`: what a run's processes share, built once; `controller.js`: the object a process is
+to whoever started it; `run-waits.js`: how it waits while it runs; `layer-config.js`: what each layer of a
 process is configured with; `image-resources.js`: an image's resources read without running it;
 `process-layout.js`: the layout's numbers; `bundle-mount.js`: a bundle mounted as the
 volume; `session.js`: the session's layer, saved and opened again; `live-dump.js`: frames taken apart
