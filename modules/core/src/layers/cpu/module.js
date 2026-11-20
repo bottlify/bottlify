@@ -1292,6 +1292,17 @@ export function createCpuModule(){
                 },
 
                 /**
+                 * The stub table's slots by name (`thunks.js` `laidOut`,
+                 * `follow`): what this process took, and the slots another's
+                 * layout gave each name taken here.
+                 */
+                trapLayout: {
+                    laidOut: ()=>(started(), state.thunks).laidOut(),
+                    /** @param {{ names: Map<string, number[]>, end: number }} layout */
+                    follow: layout=>(started(), state.thunks).follow(layout),
+                },
+
+                /**
                  * The stub table, to be written at `layout.thunkBase`.
                  *
                  * Reserve `layout.thunkCapacity` bytes for it rather than the

@@ -10,6 +10,12 @@ from these tables (PE32+, AMD64, in a 64-bit process): each module's span and ev
 are fixed then, in the same order in every process, and its bytes are written into the program's
 memory when something first loads it or is first handed one of its addresses
 ([`process/system-modules.js`](../../modules/core/src/process/system-modules.js), decision A280).
+The first process of a runtime lays the modules out and keeps the layout; a later one with the
+same tables takes it and builds a module's exports only when it places it. What a module's
+routines take for themselves - their code and data - comes from the engine's span before the
+modules (`engineCode` in [`app.js`](../../modules/core/src/app.js)), each module from its own part
+of it, and the stubs they fall back to take the slots their names took in the first process, so
+a routine lies at the same address in every process and its translations are shared (A281).
 To the program they are ordinary DLLs, with headers, an export table and code. So the address
 `GetProcAddress` returns is the one the import was bound to.
 

@@ -35,13 +35,76 @@ import { imagePlacementOf, installedHeaders } from '../layers/loader/internal/sy
  * @property {(record: any) => number | Promise<number>} release  a module let go of
  * @property {boolean} [later]  each module's bytes written when it is first loaded
  *     (`place`), its span and addresses fixed now; else at once
+ * @property {<T>(place: () => T) => T} [placing]  runs a module's exports made, what
+ *     they allocate for themselves taken from the engine's span
+ * @property {{ at: () => number, skipTo: (to: number) => void,
+ *     within: <T>(from: number, to: number, place: () => T) => T }} [engine]
+ *     the engine's span (`app.js` `engineCode`): where it is taken up to, and a
+ *     module's own part of it, where its routines go in every process
+ * @property {{ laidOut: () => TrapLayout, follow: (layout: TrapLayout) => void }} [traps]
+ *     the stub table's slots by name (`cpu` `trapLayout`): the stubs a
+ *     module's routines fall back to at the same addresses in every process
+ * @property {string} [fingerprint]  what the tables are, for a layout kept for the
+ *     runtime's next process (`LAYOUTS`); none keeps none
  */
+
+/**
+ * One module as a machine lays it out: where it lies, its exports' addresses
+ * and numbers, and the exports a 64-bit process leaves out.
+ *
+ * @typedef {{ base: number, size: number, entryPoint: number,
+ *     addresses: Map<string, number>, ordinals: Map<number, number>,
+ *     leftOut: string[], engine: [number, number] }} ModuleLayout
+ *     `engine`: the part of the engine's span its exports took for themselves
+ * @typedef {{ names: Map<string, number[]>, end: number }} TrapLayout
+ * @typedef {{ modules: Map<string, ModuleLayout>, end: number, engineEnd: number,
+ *     traps: TrapLayout | null }}
+ *     MachineLayout
+ */
+
+/**
+ * The machine's layout of the engine's libraries, kept by this runtime for
+ * its next processes, by what it was laid out from (`fingerprint`): the same
+ * tables, in the same order, lay out the same - a later process takes it and
+ * builds a module only where it places one. What a module's exports allocate
+ * for themselves is in the engine's span in every process (`placing`), so a
+ * program's own memory does not hang on which process of the runtime it is.
+ * Shared, never written after it is kept.
+ *
+ * @type {Map<string, MachineLayout>}
+ */
+const LAYOUTS = new Map();
 
 /**
  * @param {SystemModulesHost} host
  */
 export function createSystemModules(host){
     const { loader, bridge, cpu, long, ordinalsOf, librarySpace } = host;
+    /**
+     * The machine's layout an earlier process of this runtime laid out, where
+     * there is one; none where none may be kept (the Steam client's own file
+     * puts a module where the file says).
+     */
+    const layout = host.fingerprint === undefined || host.clientFiles
+        ? null : LAYOUTS.get(host.fingerprint) ?? null;
+    /**
+     * The layout this process lays out, kept for the next (`done`) where it
+     * found none.
+     *
+     * @type {MachineLayout | null}
+     */
+    const recording = layout === null && host.fingerprint !== undefined && !host.clientFiles
+        ? { modules: new Map(), end: 0, engineEnd: 0, traps: null } : null;
+    // What the engine's span holds for every module's routines lies before
+    // anything else this process takes of it.
+    if (layout)
+    {
+        host.engine?.skipTo(layout.engineEnd);
+        if (layout.traps)
+        {
+            host.traps?.follow(layout.traps);
+        }
+    }
     // Each system module where the one before it ends, at the granularity
     // every image is placed at: the window they share is the room left for
     // the libraries a program brings, and a module is a few pages -- a
@@ -93,25 +156,35 @@ export function createSystemModules(host){
      * @param {string} library @param {string} exported @param {any} fn
      */
     const trapExport = (library, exported, fn)=>{
+        const systemCall = !long && !fn.guest && library.toLowerCase() === 'ntdll.dll'
+            && /^(Nt|Zw)[A-Z]/.test(exported);
         const target = (fn.guest && (!long || fn.guestLong)
             ? fn.guest({
                 /** @param {string} label @param {any} trap */
                 register: (label, trap)=>bridge.register(label, trap),
             }) : 0)
             || bridge.register(`${library}!${exported}`, fn);
-        const systemCall = !long && !fn.guest && library.toLowerCase() === 'ntdll.dll'
-            && /^(Nt|Zw)[A-Z]/.test(exported);
         const own = systemCall ? cpu.stubAt(target) : null;
         return own ? { code: own } : { target };
     };
 
     /**
-     * A table of ours made a module in guest memory, after the ones before it.
+     * A table's exports as the loader takes them, their traps registered.
+     * The names a 64-bit process leaves out are told to `left`. What they
+     * allocate for themselves is the engine's (`placing`).
      *
      * @param {string} name @param {Record<string, any>} table
-     * @param {string} [region]  Its region's name, for one beside a library of the same name.
+     * @param {(qualified: string) => void} left
      */
-    const build = (name, table, region = name)=>{
+    const exportsOf = (name, table, left)=>{
+        const made = ()=>exportsMade(name, table, left);
+        return host.placing ? host.placing(made) : made();
+    };
+    /**
+     * @param {string} name @param {Record<string, any>} table
+     * @param {(qualified: string) => void} left
+     */
+    const exportsMade = (name, table, left)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
         // a different function, silently.
@@ -119,12 +192,11 @@ export function createSystemModules(host){
         const byOrdinal = ordinalsOf[name] ?? {};
         const declared = new Map(Object.entries(byOrdinal)
             .map(([ordinal, exported])=>[exported, Number(ordinal)]));
-
-        const exports = Object.entries(table).filter(([exported, fn])=>{
+        return Object.entries(table).filter(([exported, fn])=>{
             const runs = !long || fn.long || fn.handler || fn.data;
             if (!runs)
             {
-                leftOutAt64.push(`${name}!${exported}`);
+                left(`${name}!${exported}`);
             }
             return runs;
         }).map(([exported, fn])=>({
@@ -148,6 +220,46 @@ export function createSystemModules(host){
                     data: fn.data(), pointers: fn.pointers, entry: fn.entry,
                 } : trapExport(name, exported, fn),
         }));
+    };
+
+    /**
+     * What a module's exports do once its bytes are written: an export whose
+     * code writes what another thread's entry into the host reads, and never
+     * waits, runs unbroken (the kernel's atomicCode).
+     *
+     * @param {Record<string, any>} table @param {any[]} exports
+     * @param {(exported: string) => number | null} addressOf
+     */
+    const unbroken = (table, exports, addressOf)=>{
+        for (const entry of exports)
+        {
+            if (table[entry.name]?.unbroken && 'code' in entry)
+            {
+                host.atomicCode(Number(addressOf(entry.name)), entry.code.length);
+            }
+        }
+    };
+
+    /**
+     * A table of ours made a module in guest memory, after the ones before it.
+     *
+     * @param {string} name @param {Record<string, any>} table
+     * @param {string} [region]  Its region's name, for one beside a library of the same name.
+     */
+    const build = (name, table, region = name)=>{
+        const known = layout?.modules.get(region);
+        if (known && known.base === next)
+        {
+            return follow(name, table, region, known);
+        }
+        /** @type {string[]} */
+        const left = [];
+        const engineFrom = host.engine?.at() ?? 0;
+        // A part of its own (`within` with no slice): its code starts a page.
+        const made = ()=>exportsOf(name, table, qualified=>left.push(qualified));
+        const exports = host.engine ? host.engine.within(0, 0, made) : made();
+        const engineTo = host.engine?.at() ?? 0;
+        leftOutAt64.push(...left);
 
         // A table with a DllMain is a module with an entry point, run when a
         // program first loads it -- which is how a library the program did not
@@ -186,7 +298,59 @@ export function createSystemModules(host){
             region, headers: installed ? installedHeaders(installed, base) ?? undefined : undefined,
             later: host.later ?? false,
         });
-        const end = base + Math.ceil(placed.size / host.align) * host.align;
+        advance(base, placed.size);
+        unbroken(table, exports, placed.addressOf);
+        /** @type {[string, number][]} */
+        const entries = placed.entries();
+        if (recording && !installed)
+        {
+            recording.modules.set(region, {
+                base, size: placed.size, entryPoint: placed.entryPoint,
+                addresses: new Map(entries),
+                ordinals: new Map(entries.map(([exported, at])=>[
+                    Number(placed.ordinalOf(exported)), at])),
+                leftOut: left,
+                engine: [engineFrom, engineTo],
+            });
+        }
+        return recordOf(name, base, placed.size, placed.entryPoint, new Map(entries),
+            ordinal=>placed.addressOfOrdinal(ordinal), placed.place);
+    };
+
+    /**
+     * A module where the machine's layout put it, nothing of it built: its
+     * span held, its exports made and its traps registered at its first place.
+     * Its exports' addresses are the layout's, so its trampolines land where
+     * every process was told; where they jump - a stub, a guest routine - is
+     * this process's own, written with them.
+     *
+     * @param {string} name @param {Record<string, any>} table @param {string} region
+     * @param {ModuleLayout} known
+     */
+    const follow = (name, table, region, known)=>{
+        leftOutAt64.push(...known.leftOut);
+        const held = loader.hold({
+            name, base: known.base, size: known.size, entryPoint: known.entryPoint, long, region,
+            exportsAt: ()=>{
+                const made = ()=>exportsOf(name, table, ()=>{});
+                const exports = host.engine
+                    ? host.engine.within(known.engine[0], known.engine[1], made) : made();
+                unbroken(table, exports, exported=>known.addresses.get(exported) ?? null);
+                return { exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined };
+            },
+        });
+        advance(known.base, known.size);
+        return recordOf(name, known.base, known.size, known.entryPoint, known.addresses,
+            ordinal=>known.ordinals.get(ordinal) ?? null, ()=>void held.place());
+    };
+
+    /**
+     * Moves the next slot past a module laid out at `base`.
+     *
+     * @param {number} base @param {number} size
+     */
+    const advance = (base, size)=>{
+        const end = base + Math.ceil(size / host.align) * host.align;
         if (base === next)
         {
             next = end;
@@ -197,54 +361,54 @@ export function createSystemModules(host){
             // the ones laid out after it.
             next = Math.max(next, end);
         }
+    };
 
+    /**
+     * A module's record, as the process's table keeps it.
+     *
+     * @param {string} name @param {number} base @param {number} size @param {number} entryPoint
+     * @param {Map<string, number>} addresses
+     * @param {(ordinal: number) => number | null} byOrdinal
+     * @param {() => void} place
+     */
+    const recordOf = (name, base, size, entryPoint, addresses, byOrdinal, place)=>{
         // An export's address is its trampoline inside the module, and that is
         // what both the import table and GetProcAddress hand out -- so a program
-        // comparing the two finds them equal, as it does on Windows.
+        // comparing the two finds them equal, as it does on Windows. Its name,
+        // for a report, is made when one asks.
         /** @type {Map<number, string> | null} */
         let names = null;
-        bridge.labelSpan(base, placed.size, (/** @type {number} */ address)=>{
-            names ??= new Map(/** @type {[string, number][]} */ (placed.entries())
-                .map(([exported, at])=>[at, `${name}!${exported}`]));
+        bridge.labelSpan(base, size, (/** @type {number} */ address)=>{
+            names ??= new Map([...addresses].map(([exported, at])=>[at, `${name}!${exported}`]));
             return names.get(address) ?? null;
         });
-        // An export whose code writes what another thread's entry into the
-        // host reads, and never waits, runs unbroken (the kernel's atomicCode).
-        for (const entry of exports)
-        {
-            if (table[entry.name]?.unbroken && 'code' in entry)
-            {
-                host.atomicCode(Number(placed.addressOf(entry.name)), entry.code.length);
-            }
-        }
-
         /** @param {number | null | undefined} address */
         const handOut = address=>{
             if (address == null)
             {
                 return null;
             }
-            placed.place();
+            place();
             return address;
         };
         const record = {
             name,
             base,
-            size: placed.size,
+            size,
             // An address handed out is one the guest may run or read: the
             // module's bytes are there from the moment any is.
             /** @param {string} exported */
-            addressOf: exported=>handOut(placed.addressOf(exported)),
+            addressOf: exported=>handOut(addresses.get(exported)),
             /** @param {number} ordinal */
-            addressOfOrdinal: ordinal=>handOut(placed.addressOfOrdinal(ordinal)),
-            entryPoint: placed.entryPoint,
+            addressOfOrdinal: ordinal=>handOut(byOrdinal(ordinal)),
+            entryPoint,
             // Not until a program asks for it: a synthesised module exists
             // from the first instruction, but its entry point is a promise
             // to whoever loads it, and runs on that caller's thread.
             attached: false,
             loaded: false,
             /** Writes its bytes into guest memory, where its span is held; once. */
-            place: placed.place,
+            place,
             /** @returns {number | Promise<number>} */
             release: ()=>host.release(record),
         };
@@ -256,5 +420,15 @@ export function createSystemModules(host){
         /** Where the modules laid out so far end: the first address nothing claimed after them. */
         end: ()=>next,
         leftOutAt64,
+        /** Every module laid out: what this process laid out kept for the next of the runtime. */
+        done(){
+            if (recording && host.fingerprint !== undefined)
+            {
+                recording.end = next;
+                recording.engineEnd = host.engine?.at() ?? 0;
+                recording.traps = host.traps?.laidOut() ?? null;
+                LAYOUTS.set(host.fingerprint, recording);
+            }
+        },
     };
 }

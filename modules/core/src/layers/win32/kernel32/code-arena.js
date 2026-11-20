@@ -30,15 +30,21 @@ const ALIGN = 16;
 /**
  * @param {(bytes: number) => number} allocate  the heap, which hands back memory
  *     aligned to nothing in particular; 0 when it has none
+ * @param {() => number} [part]  which part of the memory `allocate` takes from
+ *     now: code placed in another part than the last starts a span of its own
+ *     there (the engine's span, a part a module: `app.js` `engineCode`), so
+ *     where a module's routines lie does not depend on what was placed before
  * @returns {(bytes: number) => number}  a place for `bytes` of code, 0 when the heap has
  *     none to give
  */
-export function createCodeArena(allocate){
+export function createCodeArena(allocate, part = ()=>0){
     let at = 0;
     let end = 0;
+    let taken = 0;
     return bytes=>{
         const size = Math.ceil(bytes / ALIGN) * ALIGN;
-        if (at === 0 || at + size > end)
+        const now = part();
+        if (at === 0 || at + size > end || now !== taken)
         {
             // A span one page longer than the pages wanted holds them whole,
             // wherever the heap puts it; the rest of the span is left unused.
@@ -50,6 +56,7 @@ export function createCodeArena(allocate){
             }
             at = Math.ceil(span / PAGE) * PAGE;
             end = at + pages * PAGE;
+            taken = now;
         }
         const placed = at;
         at += size;

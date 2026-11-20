@@ -174,6 +174,41 @@ export function createLoaderModule(){
             // what this one has.
             hookResults = { bound: [], refused: [], pending: [] };
 
+            /**
+             * A synthesised image written at `base`: its code read-only and
+             * executable, its variables, where it has any, writable beside it.
+             *
+             * @param {ReturnType<typeof synthesiseModule>} module
+             * @param {number} base @param {string} region
+             */
+            const writeModule = (module, base, region)=>{
+                const codeSize = module.dataRva || module.size;
+                memory.register({
+                    name: region,
+                    base,
+                    size: codeSize,
+                    kind: memory.RegionKind.IMAGE,
+                    // Written once, at assembly, and executable from then on:
+                    // the exports are jumps and the guest runs them.
+                    access: memory.Access.READ_WRITE_EXECUTE,
+                });
+                memory.writeBytes(base, module.bytes.subarray(0, codeSize));
+                memory.protect(region, memory.Access.READ_EXECUTE);
+                if (module.dataRva !== 0)
+                {
+                    // The variables are written by the program and by the
+                    // library's own functions alike, as a real `.data` is.
+                    memory.register({
+                        name: `${region} .data`,
+                        base: base + module.dataRva,
+                        size: module.size - module.dataRva,
+                        kind: memory.RegionKind.IMAGE,
+                        access: memory.Access.READ_WRITE,
+                    });
+                    memory.writeBytes(base + module.dataRva, module.bytes.subarray(module.dataRva));
+                }
+            };
+
             return {
                 /**
                  * Maps an executable and binds its imports.
@@ -340,34 +375,7 @@ export function createLoaderModule(){
                         return module;
                     };
                     /** @param {ReturnType<typeof synthesiseModule>} module */
-                    const write = module=>{
-                        const codeSize = module.dataRva || module.size;
-                        memory.register({
-                            name: region,
-                            base,
-                            size: codeSize,
-                            kind: memory.RegionKind.IMAGE,
-                            // Written once, at assembly, and executable from then on:
-                            // the exports are jumps and the guest runs them.
-                            access: memory.Access.READ_WRITE_EXECUTE,
-                        });
-                        memory.writeBytes(base, module.bytes.subarray(0, codeSize));
-                        memory.protect(region, memory.Access.READ_EXECUTE);
-                        if (module.dataRva !== 0)
-                        {
-                            // The variables are written by the program and by the
-                            // library's own functions alike, as a real `.data` is.
-                            memory.register({
-                                name: `${region} .data`,
-                                base: base + module.dataRva,
-                                size: module.size - module.dataRva,
-                                kind: memory.RegionKind.IMAGE,
-                                access: memory.Access.READ_WRITE,
-                            });
-                            memory.writeBytes(base + module.dataRva,
-                                module.bytes.subarray(module.dataRva));
-                        }
-                    };
+                    const write = module=>writeModule(module, base, region);
                     const module = built();
                     // Placed later (`later`): its span held now, so nothing else
                     // is given those addresses, its bytes not kept - they are
@@ -407,6 +415,54 @@ export function createLoaderModule(){
                             placed = true;
                             memory.unregister(/** @type {string} */ (pending));
                             write(built());
+                        },
+                    };
+                },
+
+                /**
+                 * Holds a system module's span for a module laid out before -
+                 * by an earlier process of the machine - whose exports are made
+                 * only when it is placed: nothing is built until then. place()
+                 * makes them (`exportsAt`), synthesises the image at `base` and
+                 * writes it, and refuses one that does not come out the size laid
+                 * out: the addresses every process was handed would be wrong.
+                 *
+                 * @param {{ name: string, base: number, size: number, entryPoint: number,
+                 *     long?: boolean, region?: string,
+                 *     exportsAt: () => { exports: import('./internal/synth.js').SynthExport[],
+                 *         entryPoint?: string, headers?: Uint8Array } }} options
+                 * @returns {{ placed: () => boolean,
+                 *     place: () => ReturnType<typeof synthesiseModule> | null }}
+                 */
+                hold({ name, base, size, entryPoint, long, region = name, exportsAt }){
+                    const pending = `${region} (not placed)`;
+                    memory.register({ name: pending, base, size,
+                        kind: memory.RegionKind.RESERVED, access: memory.Access.NONE });
+                    loaded.push({ base, entryPoint, unresolved: [], name });
+                    let placed = false;
+                    return {
+                        placed: ()=>placed,
+                        place: ()=>{
+                            if (placed)
+                            {
+                                return null;
+                            }
+                            placed = true;
+                            const made = exportsAt();
+                            const module = synthesiseModule({ name, base, exports: made.exports,
+                                entryPoint: made.entryPoint, long });
+                            if (module.size !== size)
+                            {
+                                throw new Error(`loader: ${name} came out ${module.size} bytes,`
+                                    + ` laid out as ${size}`);
+                            }
+                            if (made.headers)
+                            {
+                                module.bytes.set(made.headers, 0);
+                            }
+                            memory.unregister(pending);
+                            writeModule(module, base, region);
+                            return module;
                         },
                     };
                 },

@@ -2020,7 +2020,31 @@ export function createWin32Module(){
                         memory.compareExchangeU32(address, expected, value),
                 },
             });
-            const allocator = guestHeap.wrap();
+            /**
+             * How deep the engine is in placing a system module (`placing`):
+             * what a module's exports allocate for themselves while it is
+             * placed - routines' tables, counters, clocks, a runtime's strings -
+             * is the engine's, in its own span (`engineCode`), not the program's
+             * heap, so where the program's own allocations land does not hang on
+             * which modules it loaded before them. Such a block is never given
+             * back: a free of one is a free of nothing.
+             */
+            let placingDepth = 0;
+            const heapAllocator = guestHeap.wrap();
+            /** @param {number} address */
+            const engineOwns = address=>config?.engineHolds?.(address >>> 0) === true;
+            const allocator = Object.assign(Object.create(heapAllocator), {
+                // An owner may be named by a function, asked only when the heap
+                // gives the block: a runtime's own heap is not made for a block
+                // the engine's span gives instead.
+                /** @param {number} bytes @param {any} [options] */
+                allocate: (bytes, options)=>(placingDepth > 0
+                    ? config?.engineCode?.(bytes) ?? null : null)
+                    ?? heapAllocator.allocate(bytes, typeof options?.owner === 'function'
+                        ? { ...options, owner: options.owner() } : options),
+                /** @param {number} address */
+                free: address=>(engineOwns(address) ? true : heapAllocator.free(address)),
+            });
             // Counted by the mapping calls as they go.
             const mappings = { views: 0, waited: 0, failed: 0 };
             /**
@@ -2032,7 +2056,8 @@ export function createWin32Module(){
             const refusedOpens = [];
             // The guest code the engine writes itself, on pages nothing else is
             // handed (`code-arena.js`).
-            const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
+            const placeCode = createCodeArena(bytes=>config?.engineCode?.(bytes)
+                ?? allocator.allocate(bytes), ()=>config?.enginePart?.() ?? 0);
             // COM's method tables on pages of their own, which VirtualQuery
             // calls writable data rather than code.
             const placeTable = createCodeArena(bytes=>allocator.allocate(bytes,
@@ -4480,7 +4505,7 @@ export function createWin32Module(){
                         // allocated with `malloc`, and Windows lets it. The
                         // runtime's blocks are a heap of its own, as msvcrt's
                         // are, made the first time it is asked for one.
-                        allocate: bytes=>allocator.allocate(bytes, { owner: crtHeap() }),
+                        allocate: bytes=>allocator.allocate(bytes, { owner: crtHeap }),
                         free: address=>allocator.free(address),
                         block: address=>allocator.block(address),
                         resize: (address, bytes)=>allocator.resize(address, bytes),
@@ -7205,6 +7230,30 @@ export function createWin32Module(){
                  *
                  * @returns {Record<string, Record<string, any>>}
                  */
+                /**
+                 * The C runtime's heap, made now if it is not yet: at the same
+                 * point of every process's start, whichever of its modules a
+                 * process builds or loads - its malloc's guest code is bound to
+                 * it, and where it lies shifts every block the program takes.
+                 */
+                runtimeHeap: ()=>crtHeap(),
+                /**
+                 * Runs `place` - a system module's exports made - with what its
+                 * exports allocate taken from the engine's span (`placingDepth`).
+                 *
+                 * @template T @param {() => T} place @returns {T}
+                 */
+                placing: place=>{
+                    placingDepth++;
+                    try
+                    {
+                        return place();
+                    }
+                    finally
+                    {
+                        placingDepth--;
+                    }
+                },
                 faces: ()=>({ 'COMCTL32.dll': commonControls.assembly }),
 
                 /**

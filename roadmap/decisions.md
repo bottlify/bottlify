@@ -2619,3 +2619,18 @@ bases would follow each program's load order: a warm translation store measured 
 device test kept 286 of its regions with every module moved 64 KiB, against 357 in place, its
 misses 97 against 8. Until written a module's span is a reserved region nothing else is given.
 *2026-11-19.*
+
+**A281. A runtime's processes share one layout of the engine's libraries, routines and stubs.**
+A process used to build every system module's exports - their guest routines, their data, a trap
+stub each - at its start, whether it loaded the module or not: ~15 MiB of descriptions and ~20 MiB
+of a node process's memory each, which a setup of dozens of processes paid again and again. Now
+the first process of a runtime with the same tables (`tablesFingerprint` in `app.js`) builds them
+all and keeps the layout; a later one builds a module only when it places it. For translations
+made in one process to be taken in another the addresses must agree, so what a module's exports
+take for themselves comes from the engine's span before the modules, a module from the part it
+took in the first process (`engineCode.within`), its code on pages of that part (`code-arena.js`),
+and a stub takes the slot its name took there (`thunks.js` `follow`); what does not fit, or a
+helper shared by several modules and made by whichever is placed first, goes past every part, at
+an address that may differ - a translation through it is made again, nothing more. The program's
+heap is no longer where these routines lie, so it starts the same whatever the engine built.
+*2026-11-20.*

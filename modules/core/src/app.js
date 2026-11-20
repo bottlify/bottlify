@@ -2672,6 +2672,51 @@ export function resourceLookup(main, byBase, dataFiles = new Map(), readMemory, 
  */
 const LIBRARY_ALIGN = 0x10000;
 
+/**
+ * The span after the system modules the engine's own guest code is placed in
+ * and the data its routines keep (`engineCode`): a process that loads every
+ * engine library places some hundreds of kilobytes of it.
+ */
+const ENGINE_CODE_BYTES = 0x400000;
+
+/**
+ * What a process's engine libraries are, as one string: every library's name
+ * and each export's name and what it is (code, x86-64 code, data, a trap,
+ * guest code, its argument bytes), the numbers they are imported by and the
+ * window they are laid out in. Two processes with the same lay their modules
+ * out the same (`process/system-modules.js`): a hash, not the text.
+ *
+ * @param {Record<string, Record<string, any>>} libraries
+ * @param {Record<string, Record<string, any>>} faces
+ * @param {Record<string, Record<number, string>>} ordinals
+ * @param {{ long: boolean, start: number, end: number }} window
+ */
+export function tablesFingerprint(libraries, faces, ordinals, window){
+    let hash = 0x811c9dc5;
+    /** @param {string} text */
+    const mix = text=>{
+        for (let index = 0; index < text.length; index++)
+        {
+            hash = Math.imul(hash ^ text.charCodeAt(index), 0x01000193);
+        }
+    };
+    mix(`${window.long}|${window.start}|${window.end}`);
+    for (const [kind, tables] of /** @type {const} */ ([['library', libraries], ['face', faces]]))
+    {
+        for (const [name, table] of Object.entries(tables))
+        {
+            mix(`|${kind}:${name}:${JSON.stringify(ordinals[name] ?? {})}`);
+            for (const [exported, fn] of Object.entries(table))
+            {
+                mix(`;${exported}:${fn.code ? 'c' : ''}${fn.long ? 'l' : ''}${fn.data ? 'd' : ''}`
+                    + `${fn.handler ? 'h' : ''}${fn.guest ? 'g' : ''}${fn.guestLong ? 'G' : ''}`
+                    + `${fn.argBytes ?? ''}`);
+            }
+        }
+    }
+    return (hash >>> 0).toString(16);
+}
+
 /** What an LdrRegisterDllNotification callback is told: a library loaded, or unloaded. */
 /** What int3 raises (winnt.h's EXCEPTION_BREAKPOINT, STATUS_BREAKPOINT). */
 const EXCEPTION_BREAKPOINT = 0x80000003;
@@ -5024,6 +5069,81 @@ async function buildApp(options){
      * -- so it is handed lookups rather than the answers, and only ever calls
      * them while the guest is running.
      */
+    /**
+     * The span the guest code the engine writes itself is placed in - its
+     * routines and what they keep, a 64-bit process's call stubs - at the
+     * start of the modules' window, before the system modules
+     * (`ENGINE_CODE_BYTES`), written as modules are placed. Not the
+     * program's heap: a routine is placed when the module that has it is first
+     * loaded, and where the program's own allocations land must not hang on
+     * which modules it loaded before them. Past its end, the heap.
+     */
+    const engineCode = {
+        next: 0,
+        end: 0,
+        said: false,
+        /** Lays the span out at `base`: one region, its memory reached as it is taken. @param {number} base */
+        open(base){
+            this.next = base;
+            this.end = base + ENGINE_CODE_BYTES;
+            memory.register({ name: 'engine code', base, size: ENGINE_CODE_BYTES,
+                kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE });
+        },
+        /** A module's own part of the span while it is placed (`within`): [next, end). */
+        slice: /** @type {{ next: number, end: number } | null} */ (null),
+        /** Counts the parts placing began (`within`): the code arena's page per part. */
+        part: 0,
+        /** @param {number} bytes */
+        take(bytes){
+            const size = Math.ceil(bytes / 16) * 16;
+            const slice = this.slice;
+            if (slice && slice.next + size <= slice.end)
+            {
+                const at = slice.next;
+                slice.next += size;
+                return at;
+            }
+            if (this.next === 0 || this.next + size > this.end)
+            {
+                if (this.next !== 0 && !this.said)
+                {
+                    this.said = true;
+                    reportDivergence('engine code', `its ${ENGINE_CODE_BYTES} bytes are`
+                        + ' spent: the rest goes to the heap');
+                }
+                return null;
+            }
+            const at = this.next;
+            this.next += size;
+            memory.reach?.(this.next);
+            return at;
+        },
+        /**
+         * Runs `place` with what it takes from the span taken from [from, to) -
+         * the part a module took where the machine's layout was laid out - in
+         * the same order, so a routine lies at the address it has in every
+         * process; what does not fit goes on past every module's part.
+         *
+         * @template T @param {number} from @param {number} to @param {() => T} place @returns {T}
+         */
+        within(from, to, place){
+            const was = this.slice;
+            const wasPart = this.part;
+            this.slice = to > from ? { next: from, end: to } : null;
+            this.part = ++this.parts;
+            memory.reach?.(to);
+            try
+            {
+                return place();
+            }
+            finally
+            {
+                this.slice = was;
+                this.part = wasPart;
+            }
+        },
+        parts: 0,
+    };
     const modules = createModuleTable({
         keyOf: moduleKeyOf,
         placesNamed: (path, only)=>placesNamed(path, only),
@@ -6086,6 +6206,12 @@ async function buildApp(options){
         win32: {
             // A 64-bit process's structures hold 8-byte pointers.
             bits: processBits,
+            // Where the guest code the engine writes itself goes: a span of its
+            // own after the system modules (`engineCode`), not the program's heap.
+            engineCode: (/** @type {number} */ bytes)=>engineCode.take(bytes),
+            enginePart: ()=>engineCode.part,
+            engineHolds: (/** @type {number} */ address)=>address >= engineCode.end - ENGINE_CODE_BYTES
+                && address < engineCode.end,
             // And the machine it runs on (`AppOptions.machine`).
             machine: long ? 'amd64' : options.machine ?? 'x86',
             // The Windows the machine is, and what the program says it knows,
@@ -6961,10 +7087,19 @@ async function buildApp(options){
             });
         },
     };
+    /**
+     * The libraries an assembly of the engine's store carries in a version of
+     * its own (`win32.faces`): laid out beside system32's of the same name.
+     *
+     * @type {Record<string, Record<string, any>>}
+     */
+    const faceTables = /** @type {any} */ (win32).faces?.() ?? {};
+    engineCode.open(MODULE_BASE);
+    /** @type {any} */ (win32).runtimeHeap?.();
     const systemModules = createSystemModules({
         loader, bridge, cpu, long, ordinalsOf, librarySpace, placeLibrary,
         atomicCode: (address, length)=>core.api('kernel').atomicCode(address, length),
-        start: MODULE_BASE, end: LIBRARIES_END, align: LIBRARY_ALIGN,
+        start: MODULE_BASE + ENGINE_CODE_BYTES, end: LIBRARIES_END, align: LIBRARY_ALIGN,
         clientFiles: options.win32?.steam?.clientFiles,
         reportDivergence: (api, detail)=>reportDivergence(api, detail),
         release: record=>releaseLibrary(record),
@@ -6974,6 +7109,22 @@ async function buildApp(options){
         // loaded is the one that works after, and a translation of code that
         // calls it is the same in every process.
         later: true,
+        // The same tables lay out the same: a layout an earlier process of
+        // this runtime made is taken, and a module built only where placed.
+        placing: place=>/** @type {any} */ (win32).placing?.(place) ?? place(),
+        // Where a module's routines lie: each module's part of the engine's
+        // span as laid out.
+        engine: {
+            at: ()=>engineCode.next,
+            skipTo: to=>{
+                engineCode.next = Math.max(engineCode.next, to);
+                memory.reach?.(engineCode.next);
+            },
+            within: (from, to, place)=>engineCode.within(from, to, place),
+        },
+        traps: cpu.trapLayout,
+        fingerprint: tablesFingerprint(allLibraries, faceTables,
+            ordinalsOf, { long, start: MODULE_BASE, end: LIBRARIES_END }),
     });
     const { leftOutAt64 } = systemModules;
     builtLibraries = allLibraries;
@@ -6991,14 +7142,14 @@ async function buildApp(options){
      * @type {Map<string, any>}
      */
     const faces = new Map();
-    for (const [name, table] of Object.entries(
-        /** @type {any} */ (win32).faces?.() ?? {}))
+    for (const [name, table] of Object.entries(faceTables))
     {
         // Beside system32's library of the same name, so its region is its own.
         const record = systemModules.build(name, table, `${name} (assembly)`);
         modules.add(record, null);
         faces.set(moduleKeyOf(name), record);
     }
+    systemModules.done();
     /**
      * The face a load of `name` binds: where a context redirects the name to
      * an assembly of the engine's (no file of its own, `source` null), that
