@@ -136,7 +136,6 @@
     "src/layers/win32/version/functions.js",
     "src/gog/content.js",
     "src/gog/install.js",
-    "src/host/frame-clock.js",
     "src/host/sound-meter.js",
     "src/steam/depot.js",
     "src/steam/index.js",
