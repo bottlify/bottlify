@@ -683,6 +683,8 @@ export const imagePlace = (record, rect, shape)=>{
  *           measuring with; given back through endPaint.
  * @property {(record: any, hdc: number) => void} endPaint
  * @property {(record: any) => void} invalidate   The whole client area, erased.
+ * @property {(record: any) => boolean} [shown]
+ *           IsWindowVisible: it and every ancestor shown.
  * @property {(record: any, thread?: unknown) => number | Promise<number>} [update]
  *           Paints it now, as the call of `thread` -- the control's caller's,
  *           not whichever thread holds the processor past an await.
@@ -1369,7 +1371,9 @@ export function createControlProcedures(host){
      * @param {any} record @param {number} action @param {unknown} [thread]
      */
     const redrawOwnerButton = (record, action, thread)=>{
-        if ((record.style & WS_VISIBLE) === 0)
+        // IsWindowVisible, as Wine's button paints: under a parent not shown
+        // yet nothing is drawn and the parent is asked for no colour.
+        if (!(host.shown?.(record) ?? (record.style & WS_VISIBLE) !== 0))
         {
             return 0;
         }

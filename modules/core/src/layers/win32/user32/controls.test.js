@@ -1060,6 +1060,30 @@ test('an owner-drawn button is drawn by its parent, told what changed', async()=
     ]);
 });
 
+test('an owner-drawn button in a hidden window is not drawn as it is focused or pushed', async()=>{
+    // Wine's button.c paints a button's change at once only if IsWindowVisible:
+    // a window under a parent not shown yet draws nothing, and its parent is
+    // asked for no colour. 3DMark06's registration dialog sets the focus on an
+    // owner-drawn button while the dialog is still hidden; its MFC object
+    // handles the reflected WM_CTLCOLORBTN only once it is set up, and asked
+    // before, it read through a null pointer.
+    const BS_OWNERDRAW = 0x000b;
+    const BS_NOTIFY = 0x4000;
+    const BM_SETSTATE = 0x00f3;
+    const BN_SETFOCUS = 6;
+    const SW_HIDE = 0;
+    const { context, dialog, seen } = await ownerDrawDialog();
+    await context.fns.ShowWindow.handler([dialog, SW_HIDE]);
+    context.memory.putString(TEXT, 'Button');
+    const button = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | BS_NOTIFY, 150, 110, 50, 14, dialog, 0xe,
+        HINSTANCE, 0]);
+    seen.length = 0;
+    await context.fns.SetFocus.handler([button]);
+    await context.fns.SendMessageA.handler([button, BM_SETSTATE, 1, 0]);
+    assert.deepEqual(seen.map(one=>[one.message, one.code]), [['command', BN_SETFOCUS]]);
+});
+
 test('an owner-drawn static is drawn by its parent', async()=>{
     // As documented for SS_OWNERDRAW: the parent draws it on WM_DRAWITEM,
     // having been asked WM_CTLCOLORSTATIC first.

@@ -6945,6 +6945,7 @@ export function createWindowFunctions(host){
             return { hdc, rect: paint.clientArea(record) };
         },
         endPaint: (record, hdc)=>paint.endPaint(record, hdc),
+        shown,
         invalidate: record=>{
             const size = geometry.clientSize(record);
             paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
