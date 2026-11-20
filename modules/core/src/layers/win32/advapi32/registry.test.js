@@ -12,6 +12,7 @@ import {
     HKEY_CLASSES_ROOT,
     HKEY_CURRENT_USER,
     HKEY_LOCAL_MACHINE,
+    PROFILE_LIST,
     REG_BINARY,
     REG_DWORD,
     REG_MULTI_SZ,
@@ -20,6 +21,7 @@ import {
     shellFolders,
 } from './registry.js';
 import { WINDOWS_VERSIONS } from '../kernel32/versions.js';
+import { USER_SID_TEXT } from './tokens.js';
 
 /** A root id no hive hosts, used to prove a save cannot invent one. */
 const HKEY_UNKNOWN_ROOT = 0x80000050;
@@ -680,4 +682,23 @@ test('Windows 7 and 10 name the .NET install root with the shim they carry; XP d
     assert.deepEqual(root('win7'), latin1('C:\\WINDOWS\\Microsoft.NET\\Framework\\\0'));
     assert.deepEqual(root('win10'), root('win7'));
     assert.equal(root('winxp'), null);
+});
+
+test('the profile list has the user\'s profile by its token\'s SID, where the shell keeps it', ()=>{
+    for (const name of /** @type {const} */ (['winxp', 'win7']))
+    {
+        const version = WINDOWS_VERSIONS[name];
+        const hive = createHive({ windows: version });
+        assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, `${PROFILE_LIST}\\${USER_SID_TEXT}`,
+            'ProfileImagePath'), shellFolders(version).Profile, name);
+        assert.equal(valueOf(hive, HKEY_LOCAL_MACHINE, `${PROFILE_LIST}\\S-1-5-18`,
+            'ProfileImagePath'), 'C:\\WINDOWS\\system32\\config\\systemprofile', name);
+    }
+    const xp = createHive({ windows: WINDOWS_VERSIONS.winxp });
+    assert.equal(valueOf(xp, HKEY_LOCAL_MACHINE, PROFILE_LIST, 'ProfilesDirectory'),
+        'C:\\Documents and Settings');
+    const seven = createHive({ windows: WINDOWS_VERSIONS.win7 });
+    assert.equal(valueOf(seven, HKEY_LOCAL_MACHINE, PROFILE_LIST, 'ProfilesDirectory'),
+        'C:\\Users');
+    assert.equal(valueOf(seven, HKEY_LOCAL_MACHINE, PROFILE_LIST, 'Public'), 'C:\\Users\\Public');
 });
