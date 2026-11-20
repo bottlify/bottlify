@@ -115,6 +115,8 @@ const FEATURE_UI_DISALLOW_ABSENT = 0x10;
  * @property {string} tempFolder   With a trailing backslash.
  * @property {(name: string) => string | null} environment
  * @property {() => Date} now
+ * @property {boolean} [amd64]  A 64-bit Windows: its system folder is the 64-bit one, the
+ *     32-bit one SysWOW64.
  */
 
 /** @param {string} path */
@@ -128,12 +130,17 @@ const slashed = path=>(path.endsWith('\\') ? path : `${path}\\`);
  */
 export function machineProperties(machine){
     const { windows } = machine;
-    const folders = shellFolders(windows);
+    // The 32-bit components' folders, ProgramFilesFolder Program Files (x86) on a
+    // 64-bit Windows; the 64-bit ones' are the ...64Folder properties.
+    const folders = shellFolders(windows, { machine64: machine.amd64 === true });
     const version = installerVersion(windows);
     const now = machine.now();
     /** @param {number} value */
     const two = value=>String(value).padStart(2, '0');
     const windowsFolder = slashed(folders.Windows);
+    // A 64-bit Windows names both widths' folders, as the installer service does:
+    // a component goes where its width's are, SystemFolder the 32-bit one there.
+    const amd64 = machine.amd64 === true;
     /** @type {[string, string | number][]} */
     const entries = [
         ['VersionNT', windows.major * 100 + windows.minor],
@@ -142,14 +149,19 @@ export function machineProperties(machine){
         ['ServicePackLevelMinor', windows.servicePackMinor],
         ['MsiNTProductType', windows.productType],
         ['Intel', 6],
+        ['Msix64', amd64 ? 6 : ''],
+        ['VersionNT64', amd64 ? windows.major * 100 + windows.minor : ''],
         ['VersionMsi', `${version[0]}.${two(version[1])}`],
         ['WindowsFolder', windowsFolder],
         ['WindowsVolume', windowsFolder.slice(0, 3)],
-        ['SystemFolder', slashed(folders.System)],
+        ['SystemFolder', amd64 ? `${windowsFolder}SysWOW64\\` : slashed(folders.System)],
+        ['System64Folder', amd64 ? slashed(folders.System) : ''],
         ['System16Folder', `${windowsFolder}system\\`],
         ['TempFolder', slashed(machine.tempFolder)],
         ['ProgramFilesFolder', slashed(folders.ProgramFiles)],
         ['CommonFilesFolder', slashed(folders.CommonFiles)],
+        ['ProgramFiles64Folder', amd64 ? slashed(folders.ProgramFiles64) : ''],
+        ['CommonFiles64Folder', amd64 ? slashed(folders.CommonFiles64) : ''],
         ['FontsFolder', slashed(folders.Fonts)],
         ['AppDataFolder', slashed(folders.AppData)],
         ['LocalAppDataFolder', slashed(folders['Local AppData'])],

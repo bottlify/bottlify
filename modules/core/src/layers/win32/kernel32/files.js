@@ -699,6 +699,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           The shell folders the configured Windows names (the registry's
  *           `shellFolderDirectories`), parents first, made at start beside the
  *           system's own. Absent, only the system's are made.
+ * @property {boolean} [machine64]  A 64-bit Windows, which has SysWOW64 beside
+ *           its system folder and keeps the 32-bit system libraries there.
+ * @property {<T>(fn: () => T) => T} [asSystem]  Runs `fn` on the volume as the
+ *           system reaches it, through no process's file system redirection
+ *           (`wow64-files.js`): the machine's own folders are made so.
  * @property {() => string} [imagePath]
  *           The running program, whose directory is the first place a search
  *           with no path of its own looks. Absent, the search starts at the
@@ -748,6 +753,8 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  * @property {(name: string) => Uint8Array | null} [imageOf]
  *           The library's image as the engine made it, which its file holds.
  * @property {SystemPrograms} [programs]  The programs that stand as files beside them.
+ * @property {boolean} [wow64]  A 64-bit machine, whose SysWOW64 holds the
+ *           system libraries too.
  */
 
 /**
@@ -781,6 +788,7 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  * @returns {T & { standInImage?: (node: any) => Uint8Array | null }}
  */
 export function withSystemLibraries(real, libraries, where = {}){
+    const WOW64_FOLDER = 'c:\\windows\\syswow64';
     if (!libraries)
     {
         return real;
@@ -797,7 +805,9 @@ export function withSystemLibraries(real, libraries, where = {}){
             return null;
         }
         const home = where.homeOf?.(library)?.toLowerCase() ?? system;
-        return lower.slice(0, cut) === home ? library : null;
+        // A 64-bit machine keeps the 32-bit system libraries in SysWOW64 too.
+        const homes = home === system && where.wow64 ? [system, WOW64_FOLDER] : [home];
+        return homes.includes(lower.slice(0, cut)) ? library : null;
     };
     /**
      * The program this build runs in place of a system one there (`SYSTEM_PROGRAMS`):
@@ -950,7 +960,7 @@ export function createFileFunctions(host){
     const leastSize = type=>(type === FILE_INFO.RENAME || type === FILE_INFO.RENAME_EX
         ? renameLayout.size : FILE_INFO_SIZES.get(type));
     const files = withSystemLibraries(host.files, host.systemLibraries,
-        { programs: host.systemPrograms });
+        { programs: host.systemPrograms, wow64: host.machine64 === true });
 
     // A machine has these directories before any program runs: GetTempPath
     // and GetSystemDirectory promise them, the registry names the program
@@ -963,25 +973,30 @@ export function createFileFunctions(host){
     // and its INF into the INF directory. Windows Installer keeps its cache in
     // the Installer folder, and an installer's own deferred actions write
     // their scripts there (WiX's do).
-    for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
-        `${SYSTEM_DIRECTORY}\\drivers`, `${SYSTEM_DIRECTORY}\\drivers\\etc`,
-        `${WINDOWS_DIRECTORY}\\inf`, `${WINDOWS_DIRECTORY}\\Installer`, PROGRAM_FILES,
-        `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
-    {
-        try
+    // The machine's, so made as the system reaches the volume: a 32-bit
+    // process on a 64-bit Windows would make SysWOW64 for its system folder.
+    (host.asSystem ?? (fn=>fn()))(()=>{
+        for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
+            `${SYSTEM_DIRECTORY}\\drivers`, `${SYSTEM_DIRECTORY}\\drivers\\etc`,
+            ...host.machine64 ? [`${WINDOWS_DIRECTORY}\\SysWOW64`] : [],
+            `${WINDOWS_DIRECTORY}\\inf`, `${WINDOWS_DIRECTORY}\\Installer`, PROGRAM_FILES,
+            `${PROGRAM_FILES}\\Common Files`, ...host.directories ?? []])
         {
-            if (!files.stat(path)?.exists)
+            try
             {
-                files.mkdir(path);
+                if (!files.stat(path)?.exists)
+                {
+                    files.mkdir(path);
+                }
+            }
+            catch (e){
+                // A volume that cannot make a directory -- a build assembled
+                // without one -- has no directory to promise, and nothing to do
+                // about it here.
+                void e;
             }
         }
-        catch (e){
-            // A volume that cannot make a directory -- a build assembled
-            // without one -- has no directory to promise, and nothing to do
-            // about it here.
-            void e;
-        }
-    }
+    });
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{

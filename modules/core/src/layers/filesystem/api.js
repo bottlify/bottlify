@@ -40,6 +40,8 @@
  *
  * - `mount(letter, { source, writable })`, `drives()`
  * - `resolve(path)`, `currentDirectory()`, `setCurrentDirectory(path)`
+ * - `redirect(view)`: the process's view of the volume, a path's components
+ *   rewritten after it is made absolute (WOW64's file system redirection)
  * - `stat(path)`, `list(path, pattern?)`
  * - `createDirectory(path)`, `removeDirectory(path)`, `deleteFile(path)`
  * - `open(path, { read, write, shareRead, shareWrite, disposition })`

@@ -24,6 +24,7 @@
  * code that only ever reads the classes root.
  */
 
+import { inView } from './wow64-registry.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME, processorCount,
 } from '../kernel32/processor.js';
@@ -237,17 +238,34 @@ function keyFromJSON(stored){
  * `Users`, a roaming and a local `AppData` in it, and what every user shares
  * to `ProgramData` and `Users\Public`.
  *
+ * A 64-bit Windows keeps its 32-bit programs in `Program Files (x86)`: a
+ * 32-bit process's program folder is that one, a 64-bit one's `Program
+ * Files`, and either names the 32-bit one and the 32-bit system folder
+ * (SysWOW64) as the X86 folders, and the 64-bit program folder as the 64 ones
+ * (CSIDL_PROGRAM_FILESX86, the ProgramW6432 variable). On a 32-bit Windows they
+ * are all the one folder.
+ *
  * @param {WindowsVersion} [windows]
+ * @param {{ machine64?: boolean, long?: boolean }} [process]  a 64-bit Windows, and a
+ *     64-bit process on it
  * @returns {Readonly<Record<string, string>>}
  */
-export function shellFolders(windows = windowsVersion()){
+export function shellFolders(windows = windowsVersion(), { machine64 = false, long = false } = {}){
     const { user, allUsers, public: shared } = windows.profiles;
+    const native = 'C:\\Program Files';
+    const narrow = machine64 ? 'C:\\Program Files (x86)' : native;
+    const own = machine64 && !long ? narrow : native;
     const machine = {
         Fonts: 'C:\\WINDOWS\\Fonts',
         Windows: 'C:\\WINDOWS',
         System: 'C:\\WINDOWS\\system32',
-        ProgramFiles: 'C:\\Program Files',
-        CommonFiles: 'C:\\Program Files\\Common Files',
+        SystemX86: machine64 ? 'C:\\WINDOWS\\SysWOW64' : 'C:\\WINDOWS\\system32',
+        ProgramFiles: own,
+        CommonFiles: `${own}\\Common Files`,
+        ProgramFilesX86: narrow,
+        CommonFilesX86: `${narrow}\\Common Files`,
+        ProgramFiles64: native,
+        CommonFiles64: `${native}\\Common Files`,
     };
     if (shared === null)
     {
@@ -297,15 +315,16 @@ export function shellFolders(windows = windowsVersion()){
  * the user's, the shared and the public profile's, and the machine's own, the
  * fonts folder among them -- and the directories that hold them. A setup
  * copies into a folder it was told of without making it first, and a folder
- * promised and absent fails that copy.
+ * promised and absent fails that copy. A 64-bit Windows has both program
+ * folders and both system folders.
  *
- * @param {WindowsVersion} [windows]
+ * @param {WindowsVersion} [windows] @param {boolean} [machine64]
  * @returns {string[]}
  */
-export function shellFolderDirectories(windows = windowsVersion()){
+export function shellFolderDirectories(windows = windowsVersion(), machine64 = false){
     /** @type {Set<string>} */
     const directories = new Set();
-    for (const folder of Object.values(shellFolders(windows)))
+    for (const folder of Object.values(shellFolders(windows, { machine64 })))
     {
         const parts = folder.split('\\');
         for (let depth = 2; depth <= parts.length; depth++)
@@ -586,11 +605,12 @@ const DEVICE_MONIKER = Object.freeze([
  * @param {DirectXRelease | undefined} directx  A bottle's own; undefined, 9.0c.
  * @param {{ count: number, mhz: number, name: string }} processors  How many
  *     processors the machine has, their speed and their name.
+ * @param {boolean} [machine64]  a 64-bit Windows, with both views' program folders
  * @returns {readonly MachineKey[]}
  */
-const machineKeys = (windows, directx, processors)=>{
+const machineKeys = (windows, directx, processors, machine64 = false)=>{
     const numbers = Array.from({ length: processors.count }, (_, index)=>String(index));
-    const folders = shellFolders(windows);
+    const folders = shellFolders(windows, { machine64, long: true });
     const userFolders = pick(folders, ['Desktop', 'Programs', 'Start Menu', 'Startup',
         'Personal', 'AppData', 'Local AppData', 'Fonts']);
     const commonFolders = pick(folders, ['Common Desktop', 'Common Programs',
@@ -634,12 +654,24 @@ const machineKeys = (windows, directx, processors)=>{
                 path: `${MACHINE_CLASSES}\\${type}\\shell\\${verb}\\command`,
                 values: { '': `"${folders.Windows}\\system32\\msiexec.exe" ${option} "%1" %*` } })),
         { root: HKEY_LOCAL_MACHINE, path: windowsKey, values: {
-            ProgramFilesDir: folders.ProgramFiles,
-            ProgramFilesPath: folders.ProgramFiles,
-            CommonFilesDir: folders.CommonFiles,
+            ProgramFilesDir: folders.ProgramFiles64,
+            ProgramFilesPath: folders.ProgramFiles64,
+            CommonFilesDir: folders.CommonFiles64,
+            ...machine64 ? programFolders64(folders) : {},
             SystemRoot: folders.Windows,
             MediaPath: 'C:\\WINDOWS\\Media',
         } },
+        // The 32-bit view's own, as a 64-bit Windows writes it: its program
+        // folders are the 32-bit ones, which the redirection puts it under.
+        ...machine64 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: `SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion`, values: {
+                ProgramFilesDir: folders.ProgramFilesX86,
+                ProgramFilesPath: folders.ProgramFilesX86,
+                CommonFilesDir: folders.CommonFilesX86,
+                ...programFolders64(folders),
+                SystemRoot: folders.Windows,
+                MediaPath: 'C:\\WINDOWS\\Media',
+            } }] : [],
         // The browser and the player the release ships, as their own setups
         // record them: what a setup reads beside the files' versions, which
         // say the same (version/functions.js).
@@ -697,9 +729,16 @@ const machineKeys = (windows, directx, processors)=>{
         // write with the shim they carry (mscoree, A247): the shim and its
         // implementation look under it, and the Framework 4's setup there
         // leaves it as it found it.
+        // A 64-bit Windows's 64-bit view names Framework64, its 32-bit view
+        // Framework.
         ...windows.major >= 6 ? [{ root: HKEY_LOCAL_MACHINE,
             path: 'SOFTWARE\\Microsoft\\.NETFramework',
-            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework\\` } }] : [],
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework`
+                + `${machine64 ? '64' : ''}\\` } },
+        ...machine64 ? [{ root: HKEY_LOCAL_MACHINE,
+            path: 'SOFTWARE\\Wow6432Node\\Microsoft\\.NETFramework',
+            values: { InstallRoot: `${folders.Windows}\\Microsoft.NET\\Framework\\` } }] : []]
+            : [],
         ...CRYPTO_PROVIDERS.map(([name, type, image])=>({ root: HKEY_LOCAL_MACHINE,
             path: `SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider\\${name}`,
             values: { Type: type, 'Image Path': image } })),
@@ -824,6 +863,43 @@ const classesKey = path=>({
 });
 
 /**
+ * The machine's keys as a 64-bit Windows has them: each under HKLM\SOFTWARE
+ * that WOW64 redirects is there in the 32-bit view too (`wow64-registry.js`),
+ * as its setup writes it for its 32-bit programs - the classes the system
+ * serves, the version keys a program reads.
+ *
+ * @param {readonly MachineKey[]} keys
+ * @returns {readonly MachineKey[]}
+ */
+const bothViews = keys=>{
+    // A key the machine writes into the 32-bit view itself keeps its own values.
+    const own = new Set(keys.map(key=>key.path.toLowerCase()));
+    return Object.freeze(keys.flatMap(key=>{
+        if (key.root !== HKEY_LOCAL_MACHINE)
+        {
+            return [key];
+        }
+        const narrow = inView(HKEY_LOCAL_MACHINE, key.path.split('\\').filter(Boolean), 32)
+            .join('\\');
+        return narrow.toLowerCase() === key.path.toLowerCase() || own.has(narrow.toLowerCase())
+            ? [key] : [key, { ...key, path: narrow }];
+    }));
+};
+
+/**
+ * The values a 64-bit Windows adds to its CurrentVersion key in both views:
+ * where the 32-bit and the 64-bit programs go, whichever view reads them.
+ *
+ * @param {Readonly<Record<string, string>>} folders
+ */
+const programFolders64 = folders=>({
+    'ProgramFilesDir (x86)': folders.ProgramFilesX86,
+    'CommonFilesDir (x86)': folders.CommonFilesX86,
+    ProgramW6432Dir: folders.ProgramFiles64,
+    CommonW6432Dir: folders.CommonFiles64,
+});
+
+/**
  * Builds a hive: the predefined roots with the machine's own keys under
  * them (see machineKeys), and nothing a program has put there yet.
  *
@@ -832,23 +908,25 @@ const classesKey = path=>({
  * leaves it where it was; only deleting and re-adding moves it to the end.
  *
  * @param {{ processorMhz?: number, processorName?: string, processors?: number,
- *     windows?: WindowsVersion, directx?: DirectXRelease }} [options]
+ *     windows?: WindowsVersion, directx?: DirectXRelease, machine64?: boolean }} [options]
  *        `processorMhz` is the speed the processor keys report: the rate the
  *        engine's rdtsc advances at, which is the engine's to say.
  *        `processors` is how many there are: the run's executors, a key for
  *        each. `windows` is the Windows the machine's keys describe, `directx`
- *        the DirectX; absent, the defaults.
+ *        the DirectX; absent, the defaults. `machine64`: a 64-bit Windows,
+ *        whose machine keys are in both views (`bothViews`).
  */
 export function createHive(
     { processorMhz = PROCESSOR.mhz, processorName = PROCESSOR_NAME, processors = 1,
-        windows = windowsVersion(), directx } = {},
+        windows = windowsVersion(), directx, machine64 = false } = {},
 )
 {
-    const furnishings = machineKeys(windows, directx, {
+    const native = machineKeys(windows, directx, {
         count: processorCount(processors),
         mhz: processorMhz,
         name: processorName,
-    });
+    }, machine64);
+    const furnishings = machine64 ? bothViews(native) : native;
     /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
 

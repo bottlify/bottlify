@@ -248,7 +248,9 @@ export function createFilesystemModule(){
              *
              * @type {{ drives: Map<string, any>, writables: Map<string, any>,
              *     volumes: Map<string, any>, directories: any, files: any, disposed: boolean,
-             *     unwatch: () => void }}
+             *     unwatch: () => void,
+             *     view: ((drive: string, components: string[]) => string[] | null) | null,
+             *     bypass: number }}
              */
             const state = {
                 drives: shared?.drives ?? new Map(),
@@ -265,6 +267,28 @@ export function createFilesystemModule(){
                 files: createFileTable({ sharing: shared?.sharing }),
                 disposed: false,
                 unwatch: ()=>{},
+                /**
+                 * The process's view of the volume where it is not the volume's
+                 * own (`redirect`): a path's components as the process reaches
+                 * them, or null for the path as named.
+                 *
+                 * @type {((drive: string, components: string[]) => string[] | null) | null}
+                 */
+                view: /** @type {((drive: string, components: string[]) => string[] | null) | null} */ (null),
+                // Calls made as the system rather than the process, through no view.
+                bypass: 0,
+            };
+            /**
+             * A path resolved against the current directories, then through
+             * the process's view.
+             *
+             * @param {string} path
+             */
+            const resolveInView = path=>{
+                const resolved = state.directories.resolve(path);
+                const seen = state.bypass > 0 ? null
+                    : state.view?.(resolved.drive, resolved.components) ?? null;
+                return seen === null ? resolved : { ...resolved, components: seen };
             };
 
             // What has changed since anyone last asked. Kept as a set of paths
@@ -399,7 +423,7 @@ export function createFilesystemModule(){
              * @param {boolean} [allowWildcard]
              */
             const locate = (path, allowWildcard = false)=>{
-                const resolved = state.directories.resolve(path);
+                const resolved = resolveInView(path);
                 if (resolved.device)
                 {
                     throw Object.assign(
@@ -524,6 +548,9 @@ export function createFilesystemModule(){
                     }
                     saved = options?.saved === true;
                     quiet = saved || options?.quiet === true;
+                    // Changes from outside name the volume's own paths, through no
+                    // process's view of it.
+                    state.bypass++;
                     try
                     {
                         for (const entry of batch)
@@ -576,6 +603,7 @@ export function createFilesystemModule(){
                     }
                     finally
                     {
+                        state.bypass--;
                         quiet = false;
                         saved = false;
                     }
@@ -755,8 +783,41 @@ export function createFilesystemModule(){
                         return { drive: '', components: [], device: null, wildcard: false,
                             path: '' };
                     }
-                    const resolved = state.directories.resolve(path);
+                    const resolved = resolveInView(path);
                     return { ...resolved, path: formatPath(resolved.drive, resolved.components) };
+                },
+
+                /**
+                 * Sets the process's view of the volume: every path it names -
+                 * an open, a search, a resolve - goes through `view` after it is
+                 * made absolute, and reaches the components it answers, or the
+                 * path as named for null. What a 32-bit process on a 64-bit
+                 * Windows reaches of the system folder is win32's to say
+                 * (file system redirection); the volume knows nothing of it.
+                 *
+                 * @param {((drive: string, components: string[]) => string[] | null) | null} view
+                 */
+                redirect(view){
+                    state.view = view;
+                },
+
+                /**
+                 * Runs `fn` with the volume as the system sees it, through no
+                 * view: what the embedder reads, the machine's own folders, a
+                 * 64-bit service's files.
+                 *
+                 * @template T @param {() => T} fn @returns {T}
+                 */
+                unredirected(fn){
+                    state.bypass++;
+                    try
+                    {
+                        return fn();
+                    }
+                    finally
+                    {
+                        state.bypass--;
+                    }
                 },
 
                 /** @returns {string} the current directory, as a full path. */

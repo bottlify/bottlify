@@ -23,6 +23,7 @@ import { REG_SZ } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import {
     ERROR_SUCCESS, actionData, errorMessage, installing, progressed, readFile, registryRoot,
+    componentWide, registryPath,
     removing, schedule, writeFile, REGISTRY_TICKS,
 } from './steps.js';
 import { editIni, undoIniAction, INI_ACTION } from './ini.js';
@@ -294,8 +295,9 @@ async function removeRegistryValues(engine){
             // A key made on installation alone stays where it is.
             continue;
         }
-        await remove(root, session.formatText(String(row[2] ?? '')), name,
-            row[4] === null && (name === '-' || name === '*'));
+        await remove(root, registryPath(engine, Number(row[1] ?? -2),
+            session.formatText(String(row[2] ?? '')), componentWide(engine, String(row[5]))), name,
+        row[4] === null && (name === '-' || name === '*'));
     }
     for (const row of session.db.table('RemoveRegistry')?.rows ?? [])
     {
@@ -309,7 +311,9 @@ async function removeRegistryValues(engine){
             continue;
         }
         const name = row[3] === null ? null : session.formatText(String(row[3]));
-        await remove(root, session.formatText(String(row[2] ?? '')), name, name === '-');
+        await remove(root, registryPath(engine, Number(row[1] ?? -2),
+            session.formatText(String(row[2] ?? '')), componentWide(engine, String(row[4]))), name,
+        name === '-');
     }
     return ERROR_SUCCESS;
 }

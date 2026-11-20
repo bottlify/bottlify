@@ -393,8 +393,10 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(defaultEnvironment(xp, shellFolders(xp)), {
         ALLUSERSPROFILE: 'C:\\Documents and Settings\\All Users',
         APPDATA: 'C:\\Documents and Settings\\User\\Application Data',
+        CommonProgramFiles: 'C:\\Program Files\\Common Files',
         ...PROCESSOR_VARIABLES,
         Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem',
+        ProgramFiles: 'C:\\Program Files',
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
         TMP: 'C:\\WINDOWS\\TEMP',
@@ -409,10 +411,12 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(defaultEnvironment(seven, shellFolders(seven)), {
         ALLUSERSPROFILE: 'C:\\ProgramData',
         APPDATA: 'C:\\Users\\User\\AppData\\Roaming',
+        CommonProgramFiles: 'C:\\Program Files\\Common Files',
         LOCALAPPDATA: 'C:\\Users\\User\\AppData\\Local',
         ...PROCESSOR_VARIABLES,
         Path: 'C:\\WINDOWS\\system32;C:\\WINDOWS;C:\\WINDOWS\\System32\\Wbem',
         ProgramData: 'C:\\ProgramData',
+        ProgramFiles: 'C:\\Program Files',
         PUBLIC: 'C:\\Users\\Public',
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
@@ -430,6 +434,25 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
         assert.deepEqual(names, [...names].sort((a, b)=>(a.toUpperCase() < b.toUpperCase() ? -1
             : 1)), 'in the order Windows keeps the block, whatever the case');
     }
+});
+
+test('on a 64-bit Windows a 32-bit process\'s program folders are Program Files (x86), and both'
+    + ' widths\' are named', ()=>{
+    const seven = WINDOWS_VERSIONS.win7;
+    const narrow = defaultEnvironment(seven, shellFolders(seven, { machine64: true }), 1,
+        { wow64: true });
+    assert.equal(narrow.ProgramFiles, 'C:\\Program Files (x86)');
+    assert.equal(narrow.CommonProgramFiles, 'C:\\Program Files (x86)\\Common Files');
+    assert.equal(narrow['ProgramFiles(x86)'], 'C:\\Program Files (x86)');
+    assert.equal(narrow['CommonProgramFiles(x86)'], 'C:\\Program Files (x86)\\Common Files');
+    assert.equal(narrow.ProgramW6432, 'C:\\Program Files');
+    assert.equal(narrow.CommonProgramW6432, 'C:\\Program Files\\Common Files');
+    const wide = defaultEnvironment(seven, shellFolders(seven, { machine64: true, long: true }), 1,
+        { long: true });
+    assert.equal(wide.ProgramFiles, 'C:\\Program Files');
+    assert.equal(wide['ProgramFiles(x86)'], 'C:\\Program Files (x86)');
+    const names = Object.keys(narrow);
+    assert.deepEqual(names, [...names].sort((a, b)=>(a.toUpperCase() < b.toUpperCase() ? -1 : 1)));
 });
 
 test('NUMBER_OF_PROCESSORS is the machine\'s count, and the processor the registry names', ()=>{

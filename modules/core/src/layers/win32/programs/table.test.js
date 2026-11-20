@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PROGRAMS_IN_PLACE, PROGRAMS_LIBRARY, SYSTEM_PROGRAMS, programInPlaceOf, systemProgramAt,
-    systemProgramImage, wow64Spawned } from './table.js';
+    systemProgramImage } from './table.js';
 import { createProgramFunctions } from './functions.js';
 import { parsePe, readImports } from '../../loader/internal/pe.js';
 import { synthesiseProgram } from '../../loader/internal/synth.js';
@@ -44,14 +44,6 @@ test('a 64-bit machine keeps 64-bit programs in its system folder and 32-bit one
         assert.equal(bits('C:\\WINDOWS\\SysWOW64\\msiexec.exe', 'amd64'), 32);
         assert.equal(bits('C:\\WINDOWS\\notepad.exe', 'amd64'), 64);
 
-        // A 32-bit process there: its system folder is SysWOW64, Sysnative the real one.
-        assert.equal(wow64Spawned('C:\\WINDOWS\\system32\\msiexec.exe'),
-            'C:\\WINDOWS\\SysWOW64\\msiexec.exe');
-        assert.equal(wow64Spawned('c:\\windows\\sysnative\\RunDll32.exe'),
-            'C:\\WINDOWS\\system32\\rundll32.exe');
-        assert.equal(wow64Spawned('C:\\WINDOWS\\notepad.exe'), 'C:\\WINDOWS\\notepad.exe');
-        assert.equal(wow64Spawned('C:\\WINDOWS\\system32\\calc.exe'),
-            'C:\\WINDOWS\\system32\\calc.exe', 'a file of the volume\'s is as named');
     });
 
 test('every program\'s image calls its own routine, and every routine is in the library', ()=>{

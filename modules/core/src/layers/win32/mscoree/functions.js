@@ -235,6 +235,60 @@ export function forwardingStub(at, slot, resolve, failed){
     return code;
 }
 
+/** The 64-bit stub's length and where its slot's displacement and two traps' addresses are. */
+const STUB_LENGTH_64 = 63;
+const SLOT_AT_64 = 3;
+const RESOLVE_AT_64 = 22;
+const FAIL_AT_64 = 51;
+
+/**
+ * An export's guest code in a 64-bit process, at `at`, its slot (a
+ * quadword) at `slot`:
+ *
+ *     mov rax, [rip+slot]
+ *     test rax, rax
+ *     jnz go
+ *     push rcx / rdx / r8 / r9   ; the caller's arguments, kept across
+ *     sub rsp, 0x28              ; the trap's shadow space, the stack aligned
+ *     mov rax, resolve
+ *     call rax                   ; finds it and fills the slot, or answers 0
+ *     add rsp, 0x28
+ *     pop r9 / r8 / rdx / rcx
+ *     test rax, rax
+ *     jz fail
+ *     go: jmp rax
+ *     fail: mov rax, failed
+ *     jmp rax
+ *
+ * The four argument registers come back as they were; RAX, which the
+ * convention keeps for nothing, is the only one changed.
+ *
+ * @param {number} at @param {number} slot @param {number} resolve @param {number} failed
+ * @returns {Uint8Array}
+ */
+export function forwardingStub64(at, slot, resolve, failed){
+    const code = Uint8Array.of(
+        0x48, 0x8b, 0x05, 0, 0, 0, 0,          // mov rax, [rip+slot]
+        0x48, 0x85, 0xc0,                      // test rax, rax
+        0x75, 0x25,                            // jnz go
+        0x51, 0x52, 0x41, 0x50, 0x41, 0x51,    // push rcx, rdx, r8, r9
+        0x48, 0x83, 0xec, 0x28,                // sub rsp, 0x28
+        0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,    // mov rax, resolve
+        0xff, 0xd0,                            // call rax
+        0x48, 0x83, 0xc4, 0x28,                // add rsp, 0x28
+        0x41, 0x59, 0x41, 0x58, 0x5a, 0x59,    // pop r9, r8, rdx, rcx
+        0x48, 0x85, 0xc0,                      // test rax, rax
+        0x74, 0x02,                            // jz fail
+        0xff, 0xe0,                            // go: jmp rax
+        0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,    // fail: mov rax, failed
+        0xff, 0xe0);                           // jmp rax
+    const view = new DataView(code.buffer);
+    view.setInt32(SLOT_AT_64, Number(BigInt(slot) - BigInt(at + SLOT_AT_64 + 4)), true);
+    view.setBigUint64(RESOLVE_AT_64 + 2, BigInt(resolve), true);
+    view.setBigUint64(FAIL_AT_64 + 2, BigInt(failed), true);
+    return code;
+}
+
 /**
  * @typedef {Object} MscoreeHost
  * @property {(bytes: number) => number} allocate      Writable guest memory, 0 when none.
@@ -248,6 +302,8 @@ export function forwardingStub(at, slot, resolve, failed){
  *           GetProcAddress's answer, for a name or a number.
  * @property {(code: number) => any} exitProcess  ExitProcess, called by the program.
  * @property {(api: string, detail: string, kind?: 'loss') => void} [divergence]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its stubs are x86-64
+ *           (`forwardingStub64`), its slots quadwords.
  */
 
 /**
@@ -270,8 +326,10 @@ export function createMscoreeFunctions(host){
         return host.exists(path) ? (await host.loadLibrary(path)) >>> 0 : 0;
     })());
 
-    /** The slots, one dword an export, made with the first stub. */
+    /** The slots, one pointer an export, made with the first stub. */
     let slots = 0;
+    const long = host.pointerSize === 8;
+    const width = long ? 8 : 4;
 
     /** @param {string} name @param {string} detail */
     const lost = (name, detail)=>host.divergence?.(name, detail, 'loss');
@@ -318,8 +376,15 @@ export function createMscoreeFunctions(host){
             lost(name, `${shimPath()} exports no ${name}: answered as with no runtime`);
             return 0;
         }
-        const word = new Uint8Array(4);
-        new DataView(word.buffer).setUint32(0, target, true);
+        const word = new Uint8Array(width);
+        if (long)
+        {
+            new DataView(word.buffer).setBigUint64(0, BigInt(target), true);
+        }
+        else
+        {
+            new DataView(word.buffer).setUint32(0, target, true);
+        }
         host.writeMemory(slot, word);
         return target;
     };
@@ -330,18 +395,21 @@ export function createMscoreeFunctions(host){
         const failed = { argBytes: argBytes ?? 0, handler: failedHandler(name, failure) };
         table[name] = {
             argBytes: argBytes ?? 0,
+            // Placed in a 64-bit process too, as x86-64.
+            ...long ? { guestLong: true } : {},
             /** @param {{ register: (label: string, trap: any) => number }} bind */
             guest: ({ register })=>{
                 const failTrap = register(`mscoree.dll!${name}`, failed);
                 if (slots === 0)
                 {
-                    slots = host.allocate(MSCOREE_FORWARDS.length * 4);
+                    slots = host.allocate(MSCOREE_FORWARDS.length * width);
                     if (slots !== 0)
                     {
-                        host.writeMemory(slots, new Uint8Array(MSCOREE_FORWARDS.length * 4));
+                        host.writeMemory(slots, new Uint8Array(MSCOREE_FORWARDS.length * width));
                     }
                 }
-                const at = slots === 0 ? 0 : host.allocateCode(STUB_LENGTH);
+                const at = slots === 0 ? 0
+                    : host.allocateCode(long ? STUB_LENGTH_64 : STUB_LENGTH);
                 if (at === 0)
                 {
                     // ponytail: with no room for the stub the export answers as
@@ -349,10 +417,11 @@ export function createMscoreeFunctions(host){
                     // if this is ever hit.
                     return failTrap;
                 }
-                const slot = slots + index * 4;
+                const slot = slots + index * width;
                 const resolveTrap = register(`mscoree.dll!${name}`,
                     { argBytes: 0, handler: ()=>resolve(name, slot) });
-                host.writeMemory(at, forwardingStub(at, slot, resolveTrap, failTrap));
+                host.writeMemory(at, (long ? forwardingStub64 : forwardingStub)(at, slot,
+                    resolveTrap, failTrap));
                 return at;
             },
         };

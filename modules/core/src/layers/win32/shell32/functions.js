@@ -231,7 +231,12 @@ const CSIDL_FOLDERS = Object.freeze({
     0x25: 'System',
     0x26: 'ProgramFiles',
     0x28: 'Profile',
+    // CSIDL_SYSTEMX86, CSIDL_PROGRAM_FILESX86, CSIDL_PROGRAM_FILES_COMMONX86:
+    // the 32-bit ones, SysWOW64 and Program Files (x86) on a 64-bit Windows.
+    0x29: 'SystemX86',
+    0x2a: 'ProgramFilesX86',
     0x2b: 'CommonFiles',
+    0x2c: 'CommonFilesX86',
     0x2e: 'Common Documents',
 });
 
