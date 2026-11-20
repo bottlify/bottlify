@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createUcrtbaseFunctions } from './ucrtbase.js';
 import { fusedMultiplyAdd } from './ucrt-math.js';
-import { moduleKeyOf } from '../../../app.js';
+import { moduleKeyOf } from '../../../process/libraries.js';
 
 const STANDARD_SNPRINTF_BEHAVIOR = 0x2;
 const LEGACY_VSPRINTF_NULL_TERMINATION = 0x1;

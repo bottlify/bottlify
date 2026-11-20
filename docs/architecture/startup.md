@@ -87,6 +87,7 @@ the layers to the program's first instruction run in the program's process threa
 
 Where to look in the code: `ui/src/engine/session.js` (what the launcher passes),
 [`core/src/host/create.js`](../../modules/core/src/host/create.js) and `remote.js` (the page side), `serve.js` (the engine side),
-[`core/src/app.js`](../../modules/core/src/app.js) (`createApp`, `buildApp`, the loader), the process's modules in
+[`core/src/app.js`](../../modules/core/src/app.js) (`createApp`, `buildApp`), the process's modules in
 [`core/src/process/`](../../modules/core/src/process/) (`module-table.js`: by name, path and base; `system-modules.js`: the engine's
-libraries made modules).
+libraries made modules; `library-loader.js`: imports resolved, libraries loaded and let go at run time;
+`libraries.js`: the names a load is tried under, the directories searched, where a library is placed).

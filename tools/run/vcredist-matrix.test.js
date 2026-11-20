@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { agrees, outcomeOf } from './vcredist-matrix.mjs';
 import { buildExe } from '../fixtures/make-pe.mjs';
-import { resourceOfImage } from '../../modules/core/src/app.js';
+import { resourceOfImage } from '../../modules/core/src/process/libraries.js';
 
 test('a run is the program running, the runtime\'s R6034 box, or a stop of another kind', ()=>{
     assert.equal(outcomeOf({ exitCode: 0 }), 'runs');
