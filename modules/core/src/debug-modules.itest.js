@@ -24,13 +24,15 @@ test('the images mapped are listed once each, the program by its own file name',
     });
     try
     {
-        /** @type {{ name: string, base: number, size: number }[]} */
+        /** @type {{ name: string, base: number, size: number, placed: boolean }[]} */
         const modules = app.debug.modules();
         const own = modules.filter(module=>module.base === 0x400000);
         assert.deepEqual(own.map(module=>module.name), ['SORT.EXE'],
             'the program once, by its file, not by a stand-in');
-        assert.ok(modules.some(module=>/^msvcrt\.dll$/i.test(module.name)),
+        assert.ok(modules.some(module=>/^msvcrt\.dll$/i.test(module.name) && module.placed),
             'and the libraries it imports, mapped before it runs');
+        assert.ok(modules.some(module=>/^d3d9\.dll$/i.test(module.name) && !module.placed),
+            'a library nothing asked for is laid out and not yet placed');
         assert.equal(new Set(modules.map(module=>module.base)).size, modules.length,
             'each image once');
     }

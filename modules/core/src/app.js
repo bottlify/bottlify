@@ -5178,7 +5178,9 @@ async function buildApp(options){
         let images = 0;
         for (const held of modules.all())
         {
-            images += held.loaded !== false && held.base < HEAP_BASE ? held.size ?? 0 : 0;
+            // A system module's bytes are there once placed, loaded or not.
+            const there = held.placed ?? held.loaded !== false;
+            images += there && held.base < HEAP_BASE ? held.size ?? 0 : 0;
         }
         return {
             images,
@@ -10281,6 +10283,8 @@ async function buildApp(options){
                     : module.name,
                 base: module.base,
                 size: module.size ?? 0,
+                // A system module laid out whose bytes nothing asked for yet.
+                placed: module.placed !== false,
             })),
             /**
              * Which image an address belongs to, or null: a stack of return

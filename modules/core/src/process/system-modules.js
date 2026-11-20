@@ -424,7 +424,7 @@ export function createSystemModules(host){
             {
                 return null;
             }
-            place();
+            record.place();
             return address;
         };
         const record = {
@@ -443,8 +443,14 @@ export function createSystemModules(host){
             // to whoever loads it, and runs on that caller's thread.
             attached: false,
             loaded: false,
+            // Whether its bytes are in guest memory yet: what is counted as
+            // the program's and what a report calls pending.
+            placed: false,
             /** Writes its bytes into guest memory, where its span is held; once. */
-            place,
+            place: ()=>{
+                record.placed = true;
+                place();
+            },
             /** @returns {number | Promise<number>} */
             release: ()=>host.release(record),
         };
