@@ -294,3 +294,24 @@ test('a program run under a host\'s bound (`charge`) a few modules high runs as 
         `${refused} refused, ${bounded.evictions} let go`);
     assert.equal(taken, bounded.heldBytes, 'what is held is what was taken, nothing given twice');
 });
+
+test('every module let go is told to the host by its bytes (`letGo`), none twice', async()=>{
+    const free = await ceilingRun(62, { cacheBytes: 0 });
+    const cacheBytes = Math.ceil(5 * free.heldBytes / free.heldModules);
+    /** @type {number[]} */
+    const told = [];
+    let taken = 0;
+    const charge = {
+        take: (/** @type {number} */ bytes)=>{
+            taken += bytes;
+            return true;
+        },
+        give: ()=>{},
+    };
+    const run = await ceilingRun(62, { cacheBytes, charge,
+        letGo: (/** @type {number} */ bytes)=>told.push(bytes) });
+    assert.ok(run.evictions > 10, `${run.evictions} modules let go`);
+    assert.ok(told.every(bytes=>bytes > 0));
+    assert.equal(taken - told.reduce((sum, bytes)=>sum + bytes, 0), run.heldBytes,
+        'every module held is still held or was told let go, once');
+});

@@ -11,6 +11,7 @@ import {
     FMT, decodeTexels, encodeTexels, halve, isCompressed, isCopyable, isSupported, keptAsIs,
     layoutOf, resample,
 } from './pixels.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DX's texture loaders: an image file made into a texture, a cube texture
@@ -168,7 +169,7 @@ export function createTextureLoader(host){
     const sources = {
         /** @param {number} data @param {number} size */
         memory: (data, size)=>((data >>> 0) === 0 || (size >>> 0) === 0 ? null
-            : host.readMemory(data >>> 0, size >>> 0).slice()),
+            : host.readMemory(wholeAddress(data), size >>> 0).slice()),
         /**
          * @param {string} api @param {number} at @param {boolean} wide
          * @returns {Promise<Uint8Array | null>}

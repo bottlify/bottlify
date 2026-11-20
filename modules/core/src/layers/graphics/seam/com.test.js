@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 
 import { createPublisher } from './com.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID_ONE = '{00000001-0000-0000-C000-000000000046}';
 const IID_TWO = '{00000002-0000-0000-C000-000000000046}';
@@ -271,8 +272,8 @@ function overTheBridge(){
     const handlers = new Map();
     let next = 0x2000;
     const vtables = createVtables({
-        memory: { writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
-            /** @type {number} */ length)=>new Uint8Array(length) },
+        memory: withPointers({ writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+            /** @type {number} */ length)=>new Uint8Array(length) }),
         register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
             handlers.set(name, fn);
             return 0x1000 + handlers.size * 0x10;
@@ -392,7 +393,7 @@ test('an interface counted in the host keeps AddRef and Release at their traps',
     let next = 0x4000;
     let code = 0x8000;
     const vtables = createVtables({
-        memory: {
+        memory: withPointers({
             writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
                 view.setUint32(at, value, true),
             readU32: (/** @type {number} */ at)=>view.getUint32(at, true),
@@ -400,7 +401,7 @@ test('an interface counted in the host keeps AddRef and Release at their traps',
                 bytes.set(data, at),
             readBytes: (/** @type {number} */ at, /** @type {number} */ length)=>
                 bytes.slice(at, at + length),
-        },
+        }),
         register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
             handlers.set(name, fn);
             traps.set(name, 0x1000 + handlers.size * 0x10);
@@ -446,8 +447,8 @@ test('what an object that went owes the program is made before its Release is an
         const handlers = new Map();
         let next = 0x2000;
         const vtables = createVtables({
-            memory: { writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
-                /** @type {number} */ length)=>new Uint8Array(length) },
+            memory: withPointers({ writeU32: ()=>{}, readBytes: (/** @type {number} */ at,
+                /** @type {number} */ length)=>new Uint8Array(length) }),
             register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
                 handlers.set(name, fn);
                 return 0x1000 + handlers.size * 0x10;

@@ -42,6 +42,7 @@ import {
 import { notifyWindow } from './notify.js';
 import { readText, writeText } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const REBAR_CLASS = 'ReBarWindow32';
@@ -266,11 +267,11 @@ export function createRebarProcedure(host, tk, images){
 
     /** @param {number} address */
     const u32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
-    const setU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const setU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     /** A pointer-wide field: a handle or an address, its low half what counts. */
     const setPointer = (/** @type {number} */ address, /** @type {number} */ value)=>{
@@ -281,7 +282,7 @@ export function createRebarProcedure(host, tk, images){
         }
     };
     /** @param {number} address @param {Rect} rect */
-    const setRect = (address, rect)=>host.writeMemory(address >>> 0, new Uint8Array(
+    const setRect = (address, rect)=>host.writeMemory(wholeAddress(address), new Uint8Array(
         new Int32Array([rect.left, rect.top, rect.right, rect.bottom]).buffer));
 
     /** @param {any} record */

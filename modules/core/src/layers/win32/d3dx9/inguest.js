@@ -24,6 +24,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
 
 /** 1.0f's bits. */
@@ -33,8 +34,8 @@ const ONE = 0x3f800000;
  * D3DXMATRIX *D3DXMatrixMultiply(D3DXMATRIX *out, const D3DXMATRIX *a, const D3DXMATRIX *b)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} a @param {u32} b
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} a @param {ptr} b
+ * @returns {ptr}
  */
 export function D3DXMatrixMultiply({ f32, setF32 }, out, a, b){
     const m00 = f32(a) * f32(b) + f32(a + 4) * f32(b + 16)
@@ -93,8 +94,8 @@ export function D3DXMatrixMultiply({ f32, setF32 }, out, a, b){
  * floats' bits moved as they are.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXMatrixTranspose({ u32, setU32 }, out, m){
     const t0 = u32(m);
@@ -141,8 +142,8 @@ export function D3DXMatrixTranspose({ u32, setU32 }, out, m){
  * determinant of 5 as it was.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} determinant @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} determinant @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXMatrixInverse({ f32, setF32 }, out, determinant, m){
     const e0 = f32(m);
@@ -227,8 +228,8 @@ export function D3DXMatrixInverse({ f32, setF32 }, out, determinant, m){
  * the identity with the three in its last row, their bits as they came.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} x @param {u32} y @param {u32} z
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {u32} x @param {u32} y @param {u32} z
+ * @returns {ptr}
  */
 export function D3DXMatrixTranslation({ setU32 }, out, x, y, z){
     setU32(out, ONE);
@@ -254,9 +255,9 @@ export function D3DXMatrixTranslation({ setU32 }, out, x, y, z){
  * D3DXMATRIX *D3DXMatrixOrthoLH(D3DXMATRIX *out, FLOAT w, FLOAT h, FLOAT zn, FLOAT zf)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {f32} w @param {f32} h @param {f32} zn
+ * @param {Guest} guest @param {ptr} out @param {f32} w @param {f32} h @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixOrthoLH({ setU32, setF32 }, out, w, h, zn, zf){
     setF32(out, 2 / w);
@@ -282,9 +283,9 @@ export function D3DXMatrixOrthoLH({ setU32, setF32 }, out, w, h, zn, zf){
  * D3DXMATRIX *D3DXMatrixPerspectiveLH(D3DXMATRIX *out, FLOAT w, FLOAT h, FLOAT zn, FLOAT zf)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {f32} w @param {f32} h @param {f32} zn
+ * @param {Guest} guest @param {ptr} out @param {f32} w @param {f32} h @param {f32} zn
  * @param {f32} zf
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXMatrixPerspectiveLH({ setU32, setF32 }, out, w, h, zn, zf){
     setF32(out, 2 * zn / w);
@@ -310,8 +311,8 @@ export function D3DXMatrixPerspectiveLH({ setU32, setF32 }, out, w, h, zn, zf){
  * D3DXVECTOR4 *D3DXVec4Transform(D3DXVECTOR4 *out, const D3DXVECTOR4 *v, const D3DXMATRIX *m)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec4Transform({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -338,8 +339,8 @@ export function D3DXVec4Transform({ f32, setF32 }, out, v, m){
  * -- the point with a w of 1: the matrix's last row added whole.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec3Transform({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -365,8 +366,8 @@ export function D3DXVec3Transform({ f32, setF32 }, out, v, m){
  *     const D3DXMATRIX *m) -- a direction: the last row, the translation, not taken.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec3TransformNormal({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -390,8 +391,8 @@ export function D3DXVec3TransformNormal({ f32, setF32 }, out, v, m){
  * by the w it comes to, each rounded to a float first; a w of 0 divides by 1.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec3TransformCoord({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -419,8 +420,8 @@ export function D3DXVec3TransformCoord({ f32, setF32 }, out, v, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec3TransformCoordArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -467,8 +468,8 @@ export function D3DXVec3TransformCoordArray({ f32, setF32 }, out, outStride, v, 
  * zero vector left zero rather than divided by its length.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v
+ * @returns {ptr}
  */
 export function D3DXVec3Normalize({ f32, setF32 }, out, v){
     const x = f32(v);

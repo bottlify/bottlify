@@ -19,6 +19,7 @@ import { createIcm } from './icm.js';
 import { BI_RGB, BI_BITFIELDS, HEADER_SIZE, ICM_DECOMPRESS, ICM_DECOMPRESS_BEGIN, ICM_COMPRESS,
     readHeader, strideOf, ICERR_OK } from './codecs.js';
 import { ICMODE_DECOMPRESS } from './icm.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export { ICINFO_SIZE } from './codecs.js';
 
@@ -204,7 +205,7 @@ export function createMsvfwFunctions(host){
          * LPVOID ICSeqCompressFrame(PCOMPVARS pc, UINT uiFlags, LPVOID lpBits, BOOL *pfKey, LONG
          *     *plSize)
          */
-        ICSeqCompressFrame: { argBytes: 20, handler: (/** @type {number[]} */ [pc, , bits, key,
+        ICSeqCompressFrame: { returns: 'pointer', argBytes: 20, handler: (/** @type {number[]} */ [pc, , bits, key,
             size])=>
             icm.seqFrame(pc, bits, key, size) },
 
@@ -266,8 +267,8 @@ export function createMsvfwFunctions(host){
             {
                 return 0;
             }
-            let format = info >>> 0;
-            let bits = data >>> 0;
+            let format = wholeAddress(info);
+            let bits = wholeAddress(data);
             if (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
             {
                 if (!await decompressFor(state, info, data, header))

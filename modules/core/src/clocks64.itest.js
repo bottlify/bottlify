@@ -57,3 +57,37 @@ test('a 64-bit process reads its performance counter in the guest, each read lat
             .find((/** @type {any} */ layer)=>layer.name === 'bridge'))?.metrics?.byFunction ?? []);
         assert.doesNotMatch(calls, /QueryPerformance/, 'neither went to the host');
     });
+
+test('a 64-bit process reads timeGetTime and GetTickCount in the guest, off one clock',
+    { timeout: 60000 }, async t=>{
+        const program = buildExe({
+            bits: 64, codeSize: 0x100,
+            imports: { 'WINMM.dll': ['timeGetTime'],
+                'KERNEL32.dll': ['GetTickCount', 'ExitProcess'] },
+            code: ({ iat, code })=>{
+                /** @type {number[]} */
+                const bytes = [];
+                /** @param {string} name  a call through its slot */
+                const call = name=>{
+                    bytes.push(0xff, 0x15, ...u32(iat(name) - (code(bytes.length) + 6)));
+                };
+                bytes.push(0x48, 0x83, 0xec, 0x28); // sub rsp, 40
+                call('timeGetTime');
+                bytes.push(0x89, 0xc3); // mov ebx, eax
+                call('GetTickCount');
+                bytes.push(0x29, 0xd8); // sub eax, ebx
+                bytes.push(0x31, 0xc9); // xor ecx, ecx
+                bytes.push(0x3d, ...u32(1000)); // cmp eax, 1000
+                bytes.push(0x73, 0x02, 0xff, 0xc1); // jae +2; inc ecx
+                call('ExitProcess');
+                return bytes;
+            },
+        });
+        const app = await createApp({ executable: program });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 50000 }), 1,
+            'the second no earlier, within a second');
+        const calls = JSON.stringify(/** @type {any} */ (app.diagnostics()
+            .find((/** @type {any} */ layer)=>layer.name === 'bridge'))?.metrics?.byFunction ?? []);
+        assert.doesNotMatch(calls, /timeGetTime|GetTickCount/, 'neither went to the host');
+    });

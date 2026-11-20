@@ -39,9 +39,10 @@ const letter = at=>String.fromCharCode(65 + at);
  * An arm: a build's cork host and translator, the settings the browser needs of
  * the translator (`withoutFaultingTailCalls`), which never change what the
  * guest computes, and what to do after each iteration (a JavaScriptCore
- * thread's nudge to collect).
+ * thread's nudge to collect). `window` is the GiB of a wide window its 64-bit
+ * workloads run over (cork's memory64 layout), none for the 4 GiB layout.
  * @typedef {{ createCorkHost: (options: any) => any, engine: any, label?: string,
- *     cork?: Record<string, any>, tick?: () => void }} Arm
+ *     cork?: Record<string, any>, tick?: () => void, window?: number }} Arm
  * @typedef {{ name: string, bits: 32 | 64, image: Uint8Array }} Workload
  * @typedef {{ retired: number, eax: string, regions: number,
  *     mechanisms: Record<string, number> }} Work
@@ -57,6 +58,7 @@ function hostOf(arm, workload, profile){
     const host = arm.createCorkHost({
         engine: arm.engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, ...workload.bits === 64 ? { bits: 64 } : {},
+        ...workload.bits === 64 && arm.window ? { window: arm.window * 2 ** 30 } : {},
         // The wasm interpreter from the first instruction: its start is the
         // process's, which a page or a second host would otherwise move.
         // Translation on this thread: the virtual clock means it, and a build
@@ -135,6 +137,9 @@ export function quantile(values, at){
     const lo = Math.floor(x);
     return sorted[lo] + (sorted[Math.min(lo + 1, sorted.length - 1)] - sorted[lo]) * (x - lo);
 }
+
+/** Whether the arm runs the workload in a layout of its own. @param {Arm} arm @param {Workload} workload */
+const layoutApart = (arm, workload)=>workload.bits === 64 && (arm.window ?? 0) > 0;
 
 /** @param {Work} a @param {Work} b */
 export const sameWork = (a, b)=>JSON.stringify(a) === JSON.stringify(b);
@@ -253,13 +258,17 @@ export async function runStand(arms, workloads, options){
             work.push(await workOf(arm, workload, warm, progress));
         }
         const reference = expected?.[workload.name]?.work;
+        const recorded = arms.findLastIndex(arm=>!layoutApart(arm, workload));
         const row = {
             name: workload.name, bits: workload.bits, work: counted ? work : null,
             // Every arm's work as the first's; and the last's as recorded (the
             // record is made from the newest checkout, the last arm).
-            same: counted ? work.every(one=>sameWork(one, work[0])) : null,
-            expected: !counted || reference === undefined ? null
-                : sameWork(work[work.length - 1], reference),
+            // An arm over a wide window is another layout: its ways between
+            // regions are its own, so it is in neither comparison.
+            same: counted ? work.every((one, at)=>layoutApart(arms[at], workload)
+                || sameWork(one, work[arms.findIndex(arm=>!layoutApart(arm, workload))])) : null,
+            expected: !counted || reference === undefined || recorded < 0 ? null
+                : sameWork(work[recorded], reference),
             ...timed ? await timeOf(arms, workload, { warm, warmMs, rounds, windowMs, now,
                 progress }) : {},
         };

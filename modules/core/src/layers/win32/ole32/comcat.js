@@ -19,6 +19,7 @@ import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
 import { canonicalGuid, formatGuid, parseGuid } from './guid.js';
 import { publishEnumerator } from './enumerator.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const CLSID_STD_COMPONENT_CATEGORIES_MGR = '{0002E005-0000-0000-C000-000000000046}';
 const IID_ICATREGISTER = '{0002E012-0000-0000-C000-000000000046}';
@@ -70,16 +71,16 @@ const MAX_COUNT = 1 << 16;
 /** @param {CategoryEnv} env */
 export function registerComponentCategories(env){
     /** @param {number} address */
-    const readU32 = address=>new DataView(env.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(env.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        env.writeMemory(address >>> 0, bytes);
+        env.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address */
-    const guidAt = address=>formatGuid(env.readMemory(address >>> 0, GUID_BYTES));
+    const guidAt = address=>formatGuid(env.readMemory(wholeAddress(address), GUID_BYTES));
     /** @param {string} text */
     const wide = text=>{
         const bytes = new Uint8Array((text.length + 1) * 2);
@@ -100,7 +101,7 @@ export function registerComponentCategories(env){
         let result = '';
         for (let index = 0; index < units; index++)
         {
-            const bytes = env.readMemory((address >>> 0) + index * 2, 2);
+            const bytes = env.readMemory(wholeAddress(address) + index * 2, 2);
             const unit = bytes[0] | (bytes[1] << 8);
             if (unit === 0)
             {

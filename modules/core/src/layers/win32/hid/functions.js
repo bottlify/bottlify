@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * hid.dll: the HID class driver's user-mode side, on a machine with no HID
  * device but the keyboard and mouse the system owns.
@@ -44,7 +46,7 @@ export function createHidFunctions(host){
             handler: ([guid])=>{
                 if ((guid >>> 0) !== 0)
                 {
-                    host.writeMemory(guid >>> 0, HID_GUID);
+                    host.writeMemory(wholeAddress(guid), HID_GUID);
                 }
                 return 0;
             },

@@ -7,6 +7,7 @@
 import { createComObject } from '../ole32/objects.js';
 import { DEVICE, STATEBLOCK_APPLY, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDeviceCalls }
     from './device.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * ID3DXLine: polylines drawn on the program's device as pre-transformed,
@@ -77,7 +78,8 @@ const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
 export function createLines(host){
     const { u32, putU32s, method } = createDeviceCalls(host);
     /** @param {number} at @param {number} count */
-    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(at >>> 0, count * 4)
+    const floats = (at, count)=>Array.from(new Float32Array(host.readMemory(wholeAddress(at),
+        count * 4)
         .slice().buffer));
 
     /**

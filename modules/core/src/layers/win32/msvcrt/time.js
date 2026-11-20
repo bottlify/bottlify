@@ -1258,7 +1258,7 @@ export function createTimeFunctions(host){
         },
 
         /** struct tm *localtime(const time_t *), and the 32- and 64-bit spellings */
-        localtime: intoStatic(readInt, localtimeOf),
+        localtime: { ...intoStatic(readInt, localtimeOf), returns: 'pointer' },
         _localtime32: intoStatic(readInt, localtimeOf),
         _localtime64: intoStatic(readTime64, localtimeOf),
         /** errno_t _localtime32_s(struct tm *, const __time32_t *), and the 64-bit one */
@@ -1266,7 +1266,7 @@ export function createTimeFunctions(host){
         _localtime64_s: intoCaller(readTime64, localtimeOf),
 
         /** struct tm *gmtime(const time_t *), and the 32- and 64-bit spellings */
-        gmtime: intoStatic(readInt, gmtime32),
+        gmtime: { ...intoStatic(readInt, gmtime32), returns: 'pointer' },
         _gmtime32: intoStatic(readInt, gmtime32),
         _gmtime64: intoStatic(readTime64, gmtime64),
         _gmtime32_s: intoCaller(readInt, gmtime32),
@@ -1306,11 +1306,11 @@ export function createTimeFunctions(host){
         },
 
         /** char *ctime(const time_t *), and the 32- and 64-bit spellings */
-        ctime: ctime(readInt),
+        ctime: { ...ctime(readInt), returns: 'pointer' },
         _ctime32: ctime(readInt),
         _ctime64: ctime(readTime64),
         /** wchar_t *_wctime(const time_t *), and the 32- and 64-bit spellings */
-        _wctime: ctime(readInt, true),
+        _wctime: { ...ctime(readInt, true), returns: 'pointer' },
         _wctime32: ctime(readInt, true),
         _wctime64: ctime(readTime64, true),
         /** errno_t _ctime32_s(char *, size_t, const __time32_t *), and the 64-bit one */
@@ -1319,6 +1319,7 @@ export function createTimeFunctions(host){
 
         /** char *asctime(const struct tm *): null and EINVAL for a struct it refuses */
         asctime: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1344,7 +1345,7 @@ export function createTimeFunctions(host){
          * cannot tell an overflow from an empty format, which is a defect in
          * the interface rather than here.
          */
-        strftime: strftimeEntry(false),
+        strftime: { ...strftimeEntry(false) },
 
         /**
          * size_t wcsftime(wchar_t *dest, size_t max, const wchar_t *format,
@@ -1353,7 +1354,7 @@ export function createTimeFunctions(host){
          * strftime's text in UTF-16, `max` in characters, and an empty string
          * when it does not fit.
          */
-        wcsftime: wcsftimeEntry(false),
+        wcsftime: { ...wcsftimeEntry(false) },
 
         /**
          * size_t _Strftime(char *dest, size_t max, const char *format,
@@ -1363,7 +1364,7 @@ export function createTimeFunctions(host){
          * made, say -- in place of the current locale's; null is the current
          * locale's.
          */
-        _Strftime: namedStrftimeEntry(false),
+        _Strftime: { ...namedStrftimeEntry(false) },
 
         // The universal runtime's, which knows C99's conversions too.
         [STANDARD_TIME_FORMATS]: {
@@ -1380,6 +1381,7 @@ export function createTimeFunctions(host){
          * colon -- ":Sun:Sunday:Mon:Monday..." -- null when there is no room.
          */
         _Getdays: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>publishText(C_TIME_NAMES.shortDays
@@ -1400,6 +1402,7 @@ export function createTimeFunctions(host){
          * makes releases it all.
          */
         _Gettnames: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -1430,6 +1433,7 @@ export function createTimeFunctions(host){
 
         /** char *_strdate(char *buffer) -- exactly nine bytes, "MM/DD/YY" */
         _strdate: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1441,6 +1445,7 @@ export function createTimeFunctions(host){
 
         /** char *_strtime(char *buffer) -- exactly nine bytes, "HH:MM:SS" */
         _strtime: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1452,6 +1457,7 @@ export function createTimeFunctions(host){
 
         /** wchar_t *_wstrdate(wchar_t *buffer) */
         _wstrdate: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1463,6 +1469,7 @@ export function createTimeFunctions(host){
 
         /** wchar_t *_wstrtime(wchar_t *buffer) */
         _wstrtime: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1509,7 +1516,7 @@ export function createTimeFunctions(host){
          * long *__p__dstbias(void), char **__p__tzname(void), and the
          * later spellings without the __p
          */
-        __p__timezone: accessor('_timezone'),
+        __p__timezone: { ...accessor('_timezone'), returns: 'pointer' },
         __p__daylight: accessor('_daylight'),
         __p__dstbias: accessor('_dstbias'),
         __p__tzname: accessor('_tzname'),

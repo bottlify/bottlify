@@ -446,7 +446,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
         strncat_s: inGuestWith('strncat_s', appendCounted(1)),
         wcsncat_s: inGuestWith('wcsncat_s', appendCounted(2)),
         /** size_t strnlen(const char *str, size_t max) and wcsnlen -- in the guest */
-        strnlen: guestEntry(inGuest.strnlen, COMPILED.strnlen, host),
+        strnlen: { ...guestEntry(inGuest.strnlen, COMPILED.strnlen, host) },
         wcsnlen: guestEntry(inGuest.wcsnlen, COMPILED.wcsnlen, host),
 
         /**

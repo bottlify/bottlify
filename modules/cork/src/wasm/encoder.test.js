@@ -379,7 +379,7 @@ test('a guest access in a wide window: the i32 address widened by the high local
     const type = m.type({ params: [ValType.i32, ValType.i64], results: [ValType.i32] });
     // ram[a + 4] = ram[a] + 1 (i32); ram[a + 16] as v128 = ram[a] as v128; answers ram[a]
     const b = new Body();
-    b.guest = { memory: 1, high: 1, scratch: t=>(t === ValType.i32 ? 2 : 3) };
+    b.guest = { memory: 1, whole: 1, scratch: t=>(t === ValType.i32 ? 2 : 3) };
     b.localGet(0).localGet(0).load('i32', { guest: true }).i32const(1).op(0x6a)
         .store('i32', { offset: 4, guest: true })
         .localGet(0).localGet(0).loadV128({ guest: true }).storeV128({ offset: 16, guest: true })

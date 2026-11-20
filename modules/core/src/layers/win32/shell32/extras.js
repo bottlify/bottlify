@@ -15,6 +15,7 @@
 import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { readGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -90,8 +91,6 @@ const SCALAR_TYPES = Object.freeze(new Set([0, 1, 2, 3, 4, 5, 11, 16, 17, 18, 19
     23, 64]));
 const VT_LPWSTR = 31;
 
-/** SHSTOCKICONINFO: cbSize, hIcon, iSysImageIndex, iIcon, then szPath[MAX_PATH]. */
-const SHSTOCKICONINFO_SIZE = 16 + MAX_PATH * 2;
 /** SIID_MAX_ICONS: the stock icons are numbered from 0 to one below it. */
 const SIID_MAX_ICONS = 181;
 const SHGSI_ICON = 0x100;
@@ -99,6 +98,7 @@ const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
 
 /**
  * @typedef {Object} ExtrasHost
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -142,6 +142,13 @@ const utf16z = text=>{
  * @param {ExtrasHost} host @param {ExtrasParts} parts
  */
 export function createShellExtras(host, parts){
+    /**
+     * SHSTOCKICONINFO: cbSize, hIcon (a handle wide, on its own boundary),
+     * iSysImageIndex, iIcon, then szPath[MAX_PATH].
+     */
+    const STOCK = host.pointerSize === 8 ? { icon: 8, image: 16, index: 20, path: 24 }
+        : { icon: 4, image: 8, index: 12, path: 16 };
+    const SHSTOCKICONINFO_SIZE = STOCK.path + MAX_PATH * 2;
     const { listFor, exists, parse } = parts;
     /** @param {string} name @param {number[]} args */
     const kernel32 = async(name, args)=>{
@@ -153,21 +160,21 @@ export function createShellExtras(host, parts){
         return /** @type {number} */ (await target.handler(args)) >>> 0;
     };
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, dword(value));
+            host.writeMemory(wholeAddress(address), dword(value));
         }
     };
     /** @param {number} address */
     const wide = address=>((address >>> 0) === 0 || !host.readWideString ? null
-        : host.readWideString(address >>> 0, 0x8000));
+        : host.readWideString(wholeAddress(address), 0x8000));
     /** @param {number} address */
     const narrow = address=>((address >>> 0) === 0 ? null
-        : host.readCString(address >>> 0, 0x8000));
+        : host.readCString(wholeAddress(address), 0x8000));
 
     /**
      * A block of guest memory for the length of `body`; `failed` when there
@@ -219,7 +226,7 @@ export function createShellExtras(host, parts){
                 {
                     return room & 0xffff;
                 }
-                host.writeMemory(buffer >>> 0, host.readMemory(at, needed * unit).slice());
+                host.writeMemory(wholeAddress(buffer), host.readMemory(at, needed * unit).slice());
                 return ((1 << 16) | (needed & 0xffff)) >>> 0;
             }, room & 0xffff);
         },
@@ -269,7 +276,7 @@ export function createShellExtras(host, parts){
             {
                 return fromWin32(ERROR_PATH_NOT_FOUND);
             }
-            host.writeMemory(path >>> 0, isWide ? utf16z(full)
+            host.writeMemory(wholeAddress(path), isWide ? utf16z(full)
                 : Uint8Array.from(`${full}\0`, c=>c.charCodeAt(0) & 0xff));
             return S_OK;
         },
@@ -382,7 +389,7 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(key >>> 0, found.key);
+                host.writeMemory(wholeAddress(key), found.key);
                 return S_OK;
             } },
         /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
@@ -404,7 +411,7 @@ export function createShellExtras(host, parts){
                 {
                     bytes.set(found.bytes);
                 }
-                host.writeMemory(value >>> 0, bytes);
+                host.writeMemory(wholeAddress(value), bytes);
                 return S_OK;
             } },
         /** HRESULT SetValue(REFPROPERTYKEY key, REFPROPVARIANT propvar) */
@@ -415,9 +422,9 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                const bytes = host.readMemory(value >>> 0, 16).slice();
+                const bytes = host.readMemory(wholeAddress(value), 16).slice();
                 const type = bytes[0] | bytes[1] << 8;
-                const stored = { key: host.readMemory(key >>> 0, 20).slice(), bytes };
+                const stored = { key: host.readMemory(wholeAddress(key), 20).slice(), bytes };
                 if (type === VT_LPWSTR)
                 {
                     object.state.values.set(keyOf(key),
@@ -479,7 +486,7 @@ export function createShellExtras(host, parts){
                 }
                 name = `${base} (${n})${extension}`;
             }
-            host.writeMemory(out >>> 0, isWide ? utf16z(name)
+            host.writeMemory(wholeAddress(out), isWide ? utf16z(name)
                 : Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0) & 0xff));
             return 1;
         },
@@ -502,6 +509,7 @@ export function createShellExtras(host, parts){
 
         /** PIDLIST_ABSOLUTE ILCreateFromPathA(PCSTR pszPath): NULL for a path not there. */
         ILCreateFromPathA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>listForPath(narrow(path)),
@@ -519,6 +527,7 @@ export function createShellExtras(host, parts){
          * one not there.
          */
         SHSimpleIDListFromPath: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>listForPath(wide(path)),
@@ -673,7 +682,7 @@ export function createShellExtras(host, parts){
                 // off, file names shown with their case.
                 view.setUint16(4, 0x0002 | 0x0004, true);
                 view.setUint32(8, 0, true);
-                host.writeMemory(state >>> 0, bytes);
+                host.writeMemory(wholeAddress(state), bytes);
                 return 0;
             },
         },
@@ -779,9 +788,13 @@ export function createShellExtras(host, parts){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(info + 4, 0);
-                writeU32(info + 8, -1);
-                writeU32(info + 12, -1);
+                writeU32(info + STOCK.icon, 0);
+                if (host.pointerSize === 8)
+                {
+                    writeU32(info + STOCK.icon + 4, 0);
+                }
+                writeU32(info + STOCK.image, -1);
+                writeU32(info + STOCK.index, -1);
                 if ((id | 0) < 0 || (id | 0) >= SIID_MAX_ICONS)
                 {
                     return E_INVALIDARG;
@@ -796,8 +809,8 @@ export function createShellExtras(host, parts){
                     return length > 0 && length < MAX_PATH ? wide(at) : null;
                 }, null);
                 const path = system === null ? 'shell32.dll' : `${system}\\shell32.dll`;
-                host.writeMemory(info + 16, utf16z(path.slice(0, MAX_PATH - 1)));
-                writeU32(info + 12, id | 0);
+                host.writeMemory(info + STOCK.path, utf16z(path.slice(0, MAX_PATH - 1)));
+                writeU32(info + STOCK.index, id | 0);
                 return S_OK;
             },
         },

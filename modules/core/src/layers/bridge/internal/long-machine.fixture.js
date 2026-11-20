@@ -23,8 +23,12 @@ export const LONG_RSP = 0x8000;
  * @param {Record<string, bigint>} [options.registers]
  * @param {Map<number, number[]>} [options.xmm]  Each register's four lanes.
  * @param {Map<number, number>} [options.words]  Guest memory, by dword address.
+ * @param {(answer: any, frame: any) => void} [options.suspend]  Told of a call whose handler
+ *     has not finished, as the bridge is.
  */
-export function longMachine({ registers = {}, xmm = new Map(), words = new Map() } = {}){
+export function longMachine({ registers = {}, xmm = new Map(), words = new Map(),
+    suspend = ()=>{} } = {})
+{
     /** @type {Map<string, bigint>} */
     const r = new Map(Object.entries({ rsp: BigInt(LONG_RSP), rax: 0n, ...registers }));
     if (!words.has(LONG_RSP))
@@ -50,7 +54,7 @@ export function longMachine({ registers = {}, xmm = new Map(), words = new Map()
     };
     const kernel = { currentThread: ()=>({ name: 'main' }), parkThread: ()=>{} };
     const dispatcher = createDispatcher({ cpu, memory, parking: createParking({ kernel }),
-        suspend: ()=>{} });
+        suspend });
     return { dispatcher, r };
 }
 

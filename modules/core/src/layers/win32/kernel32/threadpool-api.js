@@ -4,6 +4,9 @@
  * See LICENSE for details
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The thread pool API: pools, cleanup groups and the callback objects a
  * program makes in them -- work, simple callbacks, timers and waits -- and
@@ -163,7 +166,7 @@ export function createThreadpoolApi(core){
         {
             return { pool: processPool, group: null, cancel: 0, finalization: 0 };
         }
-        const at = environment >>> 0;
+        const at = wholeAddress(environment);
         const version = read32(at + ENVIRONMENT.VERSION);
         if ((version !== 1 && version !== 3)
             || (version === 3 && read32(at + ENVIRONMENT.PRIORITY) > TP_CALLBACK_PRIORITY_LOW))
@@ -384,9 +387,9 @@ export function createThreadpoolApi(core){
         {
             // IO_STATUS_BLOCK: the status, then the bytes; the callback's own,
             // given back once it has returned.
-            const block = host.allocate(8);
-            write32(block, packet.status ?? 0);
-            write32(block + 4, packet.transferred);
+            const layout = overlappedLayout(host.pointerSize);
+            const block = host.allocate(2 * layout.word);
+            overlappedResult(write32, layout, block, packet.status ?? 0, packet.transferred);
             core.dispatch({ entry: item.callback, instanced: true, owner: item,
                 args: [item.context, packet.overlapped, block, item.handle],
                 done: ()=>host.free?.(block) }, item.pool.lane);
@@ -501,8 +504,8 @@ export function createThreadpoolApi(core){
             {
                 return false;
             }
-            pool.lane.stack = { reserve: read32(information >>> 0),
-                commit: read32((information >>> 0) + 4) };
+            pool.lane.stack = { reserve: read32(wholeAddress(information)),
+                commit: read32(wholeAddress(information) + 4) };
             return true;
         },
 
@@ -518,8 +521,8 @@ export function createThreadpoolApi(core){
             {
                 return false;
             }
-            write32(information >>> 0, stack.reserve);
-            write32((information >>> 0) + 4, stack.commit);
+            write32(wholeAddress(information), stack.reserve);
+            write32(wholeAddress(information) + 4, stack.commit);
             return true;
         },
 
@@ -912,7 +915,8 @@ export function createThreadpoolApi(core){
     /** kernel32's calls: handles, BOOLs and last errors. */
     const table = {
         /** PTP_POOL CreateThreadpool(PVOID reserved) */
-        CreateThreadpool: fn(4, ()=>objects.allocPool() || fail(ERROR_NOT_ENOUGH_MEMORY)),
+        CreateThreadpool: { returns: 'pointer',
+            ...fn(4, ()=>objects.allocPool() || fail(ERROR_NOT_ENOUGH_MEMORY)) },
         /** VOID CloseThreadpool(PTP_POOL) */
         CloseThreadpool: fn(4, ([pool])=>{
             objects.releasePool(pool);
@@ -934,8 +938,8 @@ export function createThreadpoolApi(core){
             (objects.queryStack(pool, information) ? 1 : fail(ERROR_INVALID_PARAMETER))),
 
         /** PTP_CLEANUP_GROUP CreateThreadpoolCleanupGroup(void) */
-        CreateThreadpoolCleanupGroup: fn(0, ()=>
-            objects.allocGroup() || fail(ERROR_NOT_ENOUGH_MEMORY)),
+        CreateThreadpoolCleanupGroup: { returns: 'pointer', ...fn(0, ()=>
+            objects.allocGroup() || fail(ERROR_NOT_ENOUGH_MEMORY)) },
         /** VOID CloseThreadpoolCleanupGroup(PTP_CLEANUP_GROUP) */
         CloseThreadpoolCleanupGroup: fn(4, ([group])=>{
             objects.releaseGroup(group);
@@ -946,7 +950,7 @@ export function createThreadpoolApi(core){
             objects.releaseMembers(group, cancel, userdata)),
 
         /** PTP_WORK CreateThreadpoolWork(PTP_WORK_CALLBACK, PVOID, PTP_CALLBACK_ENVIRON) */
-        CreateThreadpoolWork: fn(12, args=>created('work', args)),
+        CreateThreadpoolWork: { returns: 'pointer', ...fn(12, args=>created('work', args)) },
         /** VOID SubmitThreadpoolWork(PTP_WORK) */
         SubmitThreadpoolWork: fn(4, ([work])=>{
             objects.post(work);
@@ -966,7 +970,7 @@ export function createThreadpoolApi(core){
         }),
 
         /** PTP_TIMER CreateThreadpoolTimer(PTP_TIMER_CALLBACK, PVOID, PTP_CALLBACK_ENVIRON) */
-        CreateThreadpoolTimer: fn(12, args=>created('timer', args)),
+        CreateThreadpoolTimer: { returns: 'pointer', ...fn(12, args=>created('timer', args)) },
         /** VOID SetThreadpoolTimer(PTP_TIMER, PFILETIME pftDueTime, DWORD msPeriod, DWORD msWindowLength) */
         SetThreadpoolTimer: fn(16, ([timer, due, period])=>{
             objects.setTimer(timer, due, period);
@@ -987,7 +991,7 @@ export function createThreadpoolApi(core){
         }),
 
         /** PTP_WAIT CreateThreadpoolWait(PTP_WAIT_CALLBACK, PVOID, PTP_CALLBACK_ENVIRON) */
-        CreateThreadpoolWait: fn(12, args=>created('wait', args)),
+        CreateThreadpoolWait: { returns: 'pointer', ...fn(12, args=>created('wait', args)) },
         /** VOID SetThreadpoolWait(PTP_WAIT, HANDLE, PFILETIME pftTimeout) */
         SetThreadpoolWait: fn(12, ([wait, object, timeout])=>{
             objects.setWait(wait, object, timeout);
@@ -1005,10 +1009,11 @@ export function createThreadpoolApi(core){
         }),
 
         /** PTP_IO CreateThreadpoolIo(HANDLE, PTP_WIN32_IO_CALLBACK, PVOID, PTP_CALLBACK_ENVIRON) */
-        CreateThreadpoolIo: fn(16, ([file, callback, context, environment])=>{
-            const made = objects.createIo(file, callback, context, environment, false);
-            return typeof made === 'number' ? made : fail(made.error);
-        }),
+        CreateThreadpoolIo: { returns: 'pointer',
+            ...fn(16, ([file, callback, context, environment])=>{
+                const made = objects.createIo(file, callback, context, environment, false);
+                return typeof made === 'number' ? made : fail(made.error);
+            }) },
         /** VOID StartThreadpoolIo(PTP_IO) */
         StartThreadpoolIo: fn(4, ([io])=>{
             objects.startIo(io);

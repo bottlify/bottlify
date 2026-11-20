@@ -39,6 +39,7 @@ import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 export { bezierPoints } from './paths.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { boundsOf, intersectArea, subtractFromArea } from './rects.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 import {
     ALTERNATE, RGN_AND, RGN_COPY, RGN_DIFF, WINDING, areaBox, areaContains, areaOf, areasEqual,
     combineAreas, offsetArea, orderedRect, polygonArea, roundedArea,
@@ -640,7 +641,7 @@ export function createDrawingFunctions(
         {
             return null;
         }
-        const sizes = readU32s(counts >>> 0, many);
+        const sizes = readU32s(wholeAddress(counts), many);
         if (sizes.some(size=>size < least || size > 0x100000))
         {
             return null;
@@ -1949,7 +1950,7 @@ export function createDrawingFunctions(
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
                 const corners = (mode >>> 0) === GRADIENT_FILL_TRIANGLE ? 3 : 2;
-                const indices = host.readMemory(mesh >>> 0, (entries >>> 0) * corners * 4);
+                const indices = host.readMemory(wholeAddress(mesh), (entries >>> 0) * corners * 4);
                 const view = new DataView(indices.buffer, indices.byteOffset, indices.byteLength);
                 const listed = Array.from({ length: entries >>> 0 }, (_, entry)=>
                     Array.from({ length: corners }, (__, corner)=>
@@ -2004,7 +2005,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dcOf(dest),
+                const image = readDib(wholeAddress(info), bits >>> 0, usage >>> 0, dcOf(dest),
                     undefined, true);
                 if (!image)
                 {
@@ -2044,7 +2045,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const dc = dcOf(dest);
-                const image = readDib(info >>> 0, bits >>> 0, usage >>> 0, dc, lines >>> 0);
+                const image = readDib(wholeAddress(info), bits >>> 0, usage >>> 0, dc, lines >>> 0);
                 if (!image)
                 {
                     return 0;
@@ -2413,7 +2414,8 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const types = total === 0 ? new Uint8Array(0) : host.readMemory(kinds >>> 0, total);
+                const types = total === 0 ? new Uint8Array(0)
+                    : host.readMemory(wholeAddress(kinds), total);
                 const through = pointsAt(points >>> 0, total);
                 const began = { ...dc.position };
                 const path = dc.path?.open ? dc.path : null;
@@ -2863,7 +2865,7 @@ export function createDrawingFunctions(
                     const logical = toLogical(dc, point);
                     return [logical.x, logical.y];
                 }));
-                host.writeMemory(kinds >>> 0, Uint8Array.from(path.types));
+                host.writeMemory(wholeAddress(kinds), Uint8Array.from(path.types));
                 return path.points.length;
             },
         },
@@ -2882,7 +2884,9 @@ export function createDrawingFunctions(
         LineDDA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([xStart, yStart, xEnd, yEnd, proc, data])=>{
+            handler: args=>{
+                const [xStart, yStart, xEnd, yEnd, proc] = args;
+                const data = /** @type {number} */ (forwarded(args, 5, true));
                 if ((xStart | 0) === (xEnd | 0) && (yStart | 0) === (yEnd | 0))
                 {
                     return 1;
@@ -2899,7 +2903,7 @@ export function createDrawingFunctions(
                 return (async()=>{
                     for (const point of points)
                     {
-                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data >>> 0], thread);
+                        await call(proc >>> 0, [point.x >>> 0, point.y >>> 0, data], thread);
                     }
                     return 1;
                 })();
@@ -3111,7 +3115,7 @@ export function createDrawingFunctions(
                 }
                 const previous = dc.characterExtra;
                 dc.characterExtra = extra | 0;
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 
@@ -3330,7 +3334,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                host.writeMemory(bits >>> 0, buffer);
+                host.writeMemory(wholeAddress(bits), buffer);
                 return written;
             },
         },
@@ -3559,7 +3563,7 @@ export function createDrawingFunctions(
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const header = readU32s(data >>> 0, 3);
+                const header = readU32s(wholeAddress(data), 3);
                 const count = header[2];
                 if (header[0] !== RGNDATAHEADER_SIZE || (size >>> 0) < RGNDATAHEADER_SIZE
                     || count > ((size >>> 0) - RGNDATAHEADER_SIZE) / RECT_SIZE)
@@ -3575,7 +3579,7 @@ export function createDrawingFunctions(
                 {
                     return regionHolding(rects);
                 }
-                const bytes = host.readMemory(xform >>> 0, 24);
+                const bytes = host.readMemory(wholeAddress(xform), 24);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, 24);
                 const [m11, m12, m21, m22, dx, dy] = Array.from({ length: 6 }, (_, index)=>
                     view.getFloat32(index * 4, true));
@@ -4313,7 +4317,7 @@ export function createDrawingFunctions(
                 }
                 if (total > 0)
                 {
-                    host.writeMemory(out >>> 0, bytes);
+                    host.writeMemory(wholeAddress(out), bytes);
                 }
                 return 0;
             },
@@ -4462,7 +4466,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const last = Math.min(held.length, (start >>> 0) + (count >>> 0));
-                const given = readU32s(entries >>> 0, last - (start >>> 0));
+                const given = readU32s(wholeAddress(entries), last - (start >>> 0));
                 for (let index = start >>> 0; index < last; index++)
                 {
                     if (((held[index] >>> 24) & PC_RESERVED) !== 0)
@@ -4577,7 +4581,9 @@ export function createDrawingFunctions(
         EnumObjects: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, type, proc, data])=>{
+            handler: args=>{
+                const [handle, type, proc] = args;
+                const data = /** @type {number} */ (forwarded(args, 3, true));
                 const call = host.call;
                 const scratch = host.surfaces;
                 if (!dcOf(handle) || (proc >>> 0) === 0 || !call || !scratch)
@@ -4608,7 +4614,7 @@ export function createDrawingFunctions(
                         for (const fields of offered)
                         {
                             writeU32s(host, buffer, fields);
-                            answer = (await call(proc >>> 0, [buffer, data >>> 0], thread)) | 0;
+                            answer = (await call(proc >>> 0, [buffer, data], thread)) | 0;
                             if (answer === 0)
                             {
                                 break;
@@ -4767,7 +4773,7 @@ export function createDrawingFunctions(
                         view.setUint16(at, entries ? entries[index] : index * 257, true);
                     }
                 }
-                host.writeMemory(ramp >>> 0, bytes);
+                host.writeMemory(wholeAddress(ramp), bytes);
                 return 1;
             },
         },
@@ -4787,7 +4793,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const read = readGammaRamp(host.readMemory(ramp >>> 0, GAMMA_RAMP_BYTES));
+                const read = readGammaRamp(host.readMemory(wholeAddress(ramp), GAMMA_RAMP_BYTES));
                 if (!read)
                 {
                     return 0;
@@ -4840,7 +4846,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 return services.pixelFormat.choose(
-                    host.readMemory(descriptor >>> 0, services.pixelFormat.size())) | 0;
+                    host.readMemory(wholeAddress(descriptor), services.pixelFormat.size())) | 0;
             },
         },
 
@@ -4873,7 +4879,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                host.writeMemory(out >>> 0, described);
+                host.writeMemory(wholeAddress(out), described);
                 return count;
             },
         },
@@ -4971,7 +4977,7 @@ export function createDrawingFunctions(
             host.setLastError?.(ERROR_NOACCESS);
             return 0;
         }
-        host.writeMemory(out >>> 0, shape);
+        host.writeMemory(wholeAddress(out), shape);
         return shape.length;
     };
 
@@ -4997,7 +5003,7 @@ export function createDrawingFunctions(
         const length = count >>> 0;
         const bytes = (string >>> 0) === 0 || length === 0
             ? new Uint8Array(0)
-            : host.readMemory(string >>> 0, wide ? length * 2 : length);
+            : host.readMemory(wholeAddress(string), wide ? length * 2 : length);
         let text = '';
         if (!wide)
         {
@@ -5015,7 +5021,7 @@ export function createDrawingFunctions(
         const advances = (dx >>> 0) === 0 || length === 0
             ? spacedAdvances(dcOf(handle), text) ?? undefined
             : [...Array(length).keys()].map(index=>{
-                const word = host.readMemory((dx >>> 0) + index * 4, 4);
+                const word = host.readMemory(wholeAddress(dx) + index * 4, 4);
                 return (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) | 0;
             });
         return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,

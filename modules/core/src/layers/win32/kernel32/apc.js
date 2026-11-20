@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { forwarded, wholeAddress } from '../common/pointers.js';
+
 /**
  * Asynchronous procedure calls: routines queued to a thread, run by that thread
  * the next time it waits alertably.
@@ -90,7 +92,7 @@ export function createApcs(host){
      * A queued routine; `taken` is told when it is delivered (a reserve
      * object it was queued with is free again).
      *
-     * @typedef {{ routine: number, args: number[], taken?: () => void }} Queued
+     * @typedef {{ routine: number, args: (number | bigint)[], taken?: () => void }} Queued
      */
     /**
      * What each thread has queued, oldest first.
@@ -130,7 +132,8 @@ export function createApcs(host){
             const { routine, args, taken } = /** @type {Queued} */ (queue.shift());
             delivered++;
             taken?.();
-            await host.callGuest({ entry: routine, args, thread });
+            // A bigint among them is a 64-bit caller's parameter, whole: the bridge widens it.
+            await host.callGuest({ entry: routine, args: /** @type {number[]} */ (args), thread });
         }
         return answer ? answer() : WAIT_IO_COMPLETION;
     };
@@ -156,7 +159,7 @@ export function createApcs(host){
      *
      * @param {any} thread
      * @param {number} routine
-     * @param {number[]} args
+     * @param {(number | bigint)[]} args
      * @param {() => void} [taken]  told when it is delivered
      */
     const queue = (thread, routine, args, taken)=>{
@@ -233,7 +236,8 @@ export function createApcs(host){
      *
      * @param {number[]} args
      */
-    const queueUser = ([routine, handle, data])=>{
+    const queueUser = args=>{
+        const [routine, handle] = args;
         const thread = threadOf(handle);
         if (!thread || (routine >>> 0) === 0)
         {
@@ -247,7 +251,8 @@ export function createApcs(host){
             host.setLastError(ERROR_GEN_FAILURE);
             return 0;
         }
-        queue(thread, routine, [data >>> 0]);
+        // The parameter is the program's alone: whole to its routine.
+        queue(thread, routine, [forwarded(args, 2)]);
         return 1;
     };
 
@@ -294,7 +299,7 @@ export function createApcs(host){
      * @returns {{ busy: boolean } | number}
      */
     const userApcReserve = handle=>{
-        const value = handle >>> 0;
+        const value = wholeAddress(handle);
         if (value === CURRENT_THREAD || value === CURRENT_PROCESS)
         {
             return STATUS_OBJECT_TYPE_MISMATCH;
@@ -401,7 +406,7 @@ export function createApcs(host){
                             {
                                 return STATUS_ACCESS_VIOLATION;
                             }
-                            host.writeU32(out >>> 0, kernel.handles.open('reserve',
+                            host.writeU32(wholeAddress(out), kernel.handles.open('reserve',
                                 { type: type >>> 0, busy: false }));
                             return STATUS_SUCCESS;
                         },
@@ -436,10 +441,11 @@ export function createApcs(host){
             QueueUserAPC2: {
                 argBytes: 16,
                 /** @param {number[]} args */
-                handler: ([routine, handle, data, flags])=>{
+                handler: args=>{
+                    const flags = args[3];
                     if ((flags >>> 0) === QUEUE_USER_APC_FLAGS_NONE)
                     {
-                        return queueUser([routine, handle, data]);
+                        return queueUser(args);
                     }
                     host.setLastError((flags >>> 0) === QUEUE_USER_APC_FLAGS_SPECIAL_USER_APC
                         ? ERROR_NOT_SUPPORTED : ERROR_INVALID_PARAMETER);

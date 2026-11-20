@@ -26,6 +26,7 @@ import { STARTF_USESTDHANDLES, STARTUPINFO, startupInfoBytes } from './startup-i
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
@@ -307,7 +308,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        host.writeMemory(buffer >>> 0, encodeAnsi(`${path}\0`));
+        host.writeMemory(wholeAddress(buffer), encodeAnsi(`${path}\0`));
         return path.length;
     };
 
@@ -422,7 +423,7 @@ export function createEnvironmentFunctions(host){
             bytes[at * 2] = code & 0xff;
             bytes[at * 2 + 1] = code >> 8;
         }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), bytes);
         return path.length;
     };
 
@@ -450,7 +451,7 @@ export function createEnvironmentFunctions(host){
                     // is not laid out at that width yet.
                     const bytes = new Uint8Array(STARTUPINFO_SIZE64);
                     new DataView(bytes.buffer).setUint32(0, STARTUPINFO_SIZE64, true);
-                    host.writeMemory(info >>> 0, bytes);
+                    host.writeMemory(wholeAddress(info), bytes);
                     return 0;
                 }
                 const record = host.startup?.() ?? null;
@@ -469,7 +470,8 @@ export function createEnvironmentFunctions(host){
                     // test_StdHandleInheritance, as Windows answers).
                     if (wide)
                     {
-                        host.writeMemory(info >>> 0, bytes.subarray(0, STARTUPINFO.STD_INPUT));
+                        host.writeMemory(wholeAddress(info), bytes.subarray(0,
+                            STARTUPINFO.STD_INPUT));
                         return 0;
                     }
                     for (const at of [STARTUPINFO.STD_INPUT, STARTUPINFO.STD_OUTPUT,
@@ -478,7 +480,7 @@ export function createEnvironmentFunctions(host){
                         view.setUint32(at, 0xffffffff, true);
                     }
                 }
-                host.writeMemory(info >>> 0, bytes);
+                host.writeMemory(wholeAddress(info), bytes);
                 return 0;
             },
         };
@@ -492,6 +494,7 @@ export function createEnvironmentFunctions(host){
 
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 commandLineAddress ??= writeAnsi(host.commandLine());
@@ -507,6 +510,7 @@ export function createEnvironmentFunctions(host){
          * two must each stay put once handed out.
          */
         GetCommandLineW: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 commandLineWideAddress ??= writeWideString(host.commandLine());
@@ -518,11 +522,13 @@ export function createEnvironmentFunctions(host){
          * LPCH GetEnvironmentStrings(VOID), exported under both of its
          * names, as kernel32 exports it.
          */
-        GetEnvironmentStrings: { argBytes: 0, handler: ()=>environmentBlock(false) },
+        GetEnvironmentStrings: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(false) },
         GetEnvironmentStringsA: { argBytes: 0, handler: ()=>environmentBlock(false) },
 
         /** LPWCH GetEnvironmentStringsW(VOID) */
-        GetEnvironmentStringsW: { argBytes: 0, handler: ()=>environmentBlock(true) },
+        GetEnvironmentStringsW: { returns: 'pointer', argBytes: 0,
+            handler: ()=>environmentBlock(true) },
 
         /**
          * BOOL FreeEnvironmentStringsA(LPCH penv)
@@ -553,7 +559,7 @@ export function createEnvironmentFunctions(host){
             handler: ([name, buffer, size])=>{
                 // A NULL name names no variable.
                 const value = (name >>> 0) === 0 ? undefined
-                    : variables.get(host.readCString(name >>> 0, 0x400));
+                    : variables.get(host.readCString(wholeAddress(name), 0x400));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -569,7 +575,7 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
                 const value = (name >>> 0) === 0 ? undefined
-                    : variables.get(host.readWideString(name >>> 0, 0x400 * 2));
+                    : variables.get(host.readWideString(wholeAddress(name), 0x400 * 2));
                 if (value === undefined)
                 {
                     host.setLastError(ERROR_ENVVAR_NOT_FOUND);
@@ -589,14 +595,14 @@ export function createEnvironmentFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const wanted = host.readCString(name >>> 0, 0x400);
+                const wanted = host.readCString(wholeAddress(name), 0x400);
                 if ((value >>> 0) === 0)
                 {
                     variables.delete(wanted);
                 }
                 else
                 {
-                    variables.set(wanted, host.readCString(value >>> 0, 0x2000));
+                    variables.set(wanted, host.readCString(wholeAddress(value), 0x2000));
                 }
                 // The cached blocks describe an environment that no longer
                 // exists. Dropping them means the next reader builds a fresh
@@ -623,17 +629,17 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
                 const expanded = encodeAnsi((source >>> 0) === 0 ? ''
-                    : expand(host.readCString(source >>> 0, 0x8000)));
+                    : expand(host.readCString(wholeAddress(source), 0x8000)));
                 if ((size >>> 0) >= expanded.length + 2 && (destination >>> 0) !== 0)
                 {
                     const bytes = new Uint8Array(expanded.length + 1);
                     bytes.set(expanded);
-                    host.writeMemory(destination >>> 0, bytes);
+                    host.writeMemory(wholeAddress(destination), bytes);
                     return expanded.length + 1;
                 }
                 if ((destination >>> 0) !== 0)
                 {
-                    host.writeMemory(destination >>> 0, Uint8Array.of(0));
+                    host.writeMemory(wholeAddress(destination), Uint8Array.of(0));
                 }
                 return expanded.length + 2;
             },
@@ -653,7 +659,7 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
                 const pieces = (source >>> 0) === 0 ? []
-                    : expandPieces(host.readWideString(source >>> 0, 0x8000));
+                    : expandPieces(host.readWideString(wholeAddress(source), 0x8000));
                 const length = pieces.reduce((sum, piece)=>sum + piece.text.length, 0);
                 if ((destination >>> 0) !== 0)
                 {
@@ -665,7 +671,7 @@ export function createEnvironmentFunctions(host){
                             bytes[index * 2] = units.charCodeAt(index) & 0xff;
                             bytes[index * 2 + 1] = units.charCodeAt(index) >> 8;
                         }
-                        host.writeMemory((destination >>> 0) + at * 2, bytes);
+                        host.writeMemory(wholeAddress(destination) + at * 2, bytes);
                     }
                 }
                 return length + 1;
@@ -696,14 +702,14 @@ export function createEnvironmentFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const wanted = host.readWideString(name >>> 0, 0x400 * 2);
+                const wanted = host.readWideString(wholeAddress(name), 0x400 * 2);
                 if ((value >>> 0) === 0)
                 {
                     variables.delete(wanted);
                 }
                 else
                 {
-                    variables.set(wanted, host.readWideString(value >>> 0, 0x2000));
+                    variables.set(wanted, host.readWideString(wholeAddress(value), 0x2000));
                 }
                 blocks.clear();
                 return 1;
@@ -790,7 +796,7 @@ export function createUserenvFunctions(host){
                 const block = host.block() >>> 0;
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, block, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return block === 0 ? 0 : 1;
             },
         },

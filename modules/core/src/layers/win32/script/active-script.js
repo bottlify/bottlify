@@ -35,6 +35,7 @@ import { createComObject } from '../ole32/objects.js';
 import { ScriptAbort, ScriptError } from './engine.js';
 import { DISP_E_UNKNOWNNAME, ExternalError, deferredExternal } from './external.js';
 import { IID_IDISPATCH } from './guest-dispatch.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {import('./values.js').Value} Value
@@ -209,7 +210,7 @@ export function activeScript(host, language){
     /** @param {number} address @returns {string} a terminated wide string, read whole */
     const readText = address=>{
         let text = '';
-        for (let at = address >>> 0; ; at += TEXT_PIECE * 2)
+        for (let at = wholeAddress(address); ; at += TEXT_PIECE * 2)
         {
             const piece = memory.readWideString(at, TEXT_PIECE);
             text += piece;
@@ -352,7 +353,7 @@ export function activeScript(host, language){
                     {
                         if ((out >>> 0) !== 0)
                         {
-                            memory.writeU32(out >>> 0, value);
+                            memory.writeU32(wholeAddress(out), value);
                         }
                     }
                     return S_OK;
@@ -364,7 +365,7 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(out >>> 0,
+                    memory.writeU32(wholeAddress(out),
                         await bridge.codec.allocateBstr(object.state.lineText));
                     return S_OK;
                 } },
@@ -477,7 +478,7 @@ export function activeScript(host, language){
      * @param {number} pointer @returns {string | null} the GUID a REFIID points at
      */
     const guidAt = pointer=>((pointer >>> 0) === 0
-        ? null : formatGuid(host.com.readMemory(pointer >>> 0, GUID_SIZE).slice()));
+        ? null : formatGuid(host.com.readMemory(wholeAddress(pointer), GUID_SIZE).slice()));
 
     /** @type {ComInterfaceDescriptor} */
     const activeScriptInterface = {
@@ -511,7 +512,7 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(out >>> 0, 0);
+                    memory.writeU32(wholeAddress(out), 0);
                     const iid = guidAt(riid);
                     if (site === 0)
                     {
@@ -522,7 +523,7 @@ export function activeScript(host, language){
                         return E_INVALIDARG;
                     }
                     const pointer = await bridge.queryInterface(site, iid);
-                    memory.writeU32(out >>> 0, pointer);
+                    memory.writeU32(wholeAddress(out), pointer);
                     return pointer === 0 ? E_NOINTERFACE : S_OK;
                 } },
             /** HRESULT SetScriptState(SCRIPTSTATE ss) */
@@ -569,7 +570,7 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(out >>> 0, state);
+                    memory.writeU32(wholeAddress(out), state);
                     return S_OK;
                 } },
             /** HRESULT Close(void) */
@@ -590,7 +591,7 @@ export function activeScript(host, language){
                     {
                         return E_UNEXPECTED;
                     }
-                    const name = memory.readWideString(pstrName >>> 0, MAX_NAME);
+                    const name = memory.readWideString(wholeAddress(pstrName), MAX_NAME);
                     items.set(keyOf(name), { name, flags: flags >>> 0, value: undefined });
                     if ((flags & SCRIPTITEM_GLOBALMEMBERS) !== 0)
                     {
@@ -614,17 +615,17 @@ export function activeScript(host, language){
                     }
                     if (!initialized || closed)
                     {
-                        memory.writeU32(out >>> 0, 0);
+                        memory.writeU32(wholeAddress(out), 0);
                         return E_UNEXPECTED;
                     }
                     if ((pstrItemName >>> 0) !== 0)
                     {
                         host.divergence?.('IActiveScript::GetScriptDispatch',
-                            `item "${memory.readWideString(pstrItemName >>> 0, MAX_NAME)}":`
+                            `item "${memory.readWideString(wholeAddress(pstrItemName), MAX_NAME)}":`
                             + ' answered with the global object');
                     }
                     const pointer = language.exportGlobal(engine, crossing);
-                    memory.writeU32(out >>> 0, pointer);
+                    memory.writeU32(wholeAddress(out), pointer);
                     return pointer === 0 ? E_OUTOFMEMORY : S_OK;
                 } },
             /** HRESULT GetCurrentScriptThreadID(SCRIPTTHREADID *pstidThread) */
@@ -634,7 +635,7 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(out >>> 0, host.threadId?.() ?? 0);
+                    memory.writeU32(wholeAddress(out), host.threadId?.() ?? 0);
                     return S_OK;
                 } },
             /** HRESULT GetScriptThreadID(DWORD dwWin32ThreadId, SCRIPTTHREADID *pstidThread) */
@@ -644,7 +645,7 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(out >>> 0, threadId >>> 0);
+                    memory.writeU32(wholeAddress(out), threadId >>> 0);
                     return S_OK;
                 } },
             /** HRESULT GetScriptThreadState(SCRIPTTHREADID, SCRIPTTHREADSTATE *) */
@@ -654,7 +655,7 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(out >>> 0, running > 0
+                    memory.writeU32(wholeAddress(out), running > 0
                         ? SCRIPTTHREADSTATE_RUNNING : SCRIPTTHREADSTATE_NOTINSCRIPT);
                     return S_OK;
                 } },
@@ -672,7 +673,7 @@ export function activeScript(host, language){
                 invoke: (_object, [out])=>{
                     if ((out >>> 0) !== 0)
                     {
-                        memory.writeU32(out >>> 0, 0);
+                        memory.writeU32(wholeAddress(out), 0);
                     }
                     return E_NOTIMPL;
                 } },
@@ -728,11 +729,11 @@ export function activeScript(host, language){
                     if ((item >>> 0) !== 0)
                     {
                         host.divergence?.('IActiveScriptParse::ParseScriptText',
-                            `code for item "${memory.readWideString(item >>> 0, MAX_NAME)}"`
+                            `code for item "${memory.readWideString(wholeAddress(item), MAX_NAME)}"`
                             + ' runs in the global context');
                     }
                     const expression = (flags & SCRIPTTEXT_ISEXPRESSION) !== 0;
-                    const text = (code >>> 0) === 0 ? '' : readText(code >>> 0);
+                    const text = (code >>> 0) === 0 ? '' : readText(wholeAddress(code));
                     let program;
                     try
                     {
@@ -774,8 +775,8 @@ export function activeScript(host, language){
                     {
                         return E_POINTER;
                     }
-                    memory.writeU32(supported >>> 0, INTERFACESAFE_SUPPORTED);
-                    memory.writeU32(enabled >>> 0, safetyEnabled);
+                    memory.writeU32(wholeAddress(supported), INTERFACESAFE_SUPPORTED);
+                    memory.writeU32(wholeAddress(enabled), safetyEnabled);
                     return S_OK;
                 } },
             /** HRESULT SetInterfaceSafetyOptions(REFIID, DWORD dwOptionSetMask, DWORD dwEnabledOptions) */

@@ -29,6 +29,7 @@
 
 import { guestByLength, openCharge, openMemoryBudget } from './memory-budget.js';
 import { exceptionName, hostFault } from './faults.js';
+import { releasedCode } from './gc-nudge.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
 import { createPorts } from './ports.js';
 
@@ -266,6 +267,27 @@ export function cacheShare(bytes, executors, executor){
 }
 
 /**
+ * A wide window's RAM, or the refusal said plainly: a browser without 64-bit
+ * WebAssembly memories (Safari, iOS) cannot run a program whose image lies
+ * past 4 GiB, and what the engine answers its attempt is no sentence for the
+ * person who started the program.
+ *
+ * @param {any} engine @param {number} window @param {boolean} shared
+ * @returns {WebAssembly.Memory}
+ */
+function wideMemory(engine, window, shared){
+    try
+    {
+        return engine.memory64(window, shared);
+    }
+    catch (e){
+        throw new Error(`cpu: this program is linked past 4 GiB and needs a 64-bit WebAssembly`
+            + ` memory (memory64) of ${window / 2 ** 30} GiB, which this browser does not provide`
+            + ` (${/** @type {Error} */ (e)?.message ?? e})`, { cause: e });
+    }
+}
+
+/**
  * Builds the cork host over a memory of its own.
  *
  * @param {CorkHostConfig} config
@@ -276,8 +298,10 @@ export function createCorkHost(config){
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
         memoryHolder, guestCharge } = config;
-    /** Whether the guest's memory counts by its length, not by what it was given. */
-    const byLength = guestByLength(guestCharge);
+    // Whether the guest's memory counts by its length, not by what it was given.
+    // A wide window is 8 GiB long whatever its program takes of it, more than
+    // any machine's memory here: counted by what was given wherever it runs.
+    const byLength = guestByLength(guestCharge) && wideWindow === undefined;
     /** The machine's memory this process's grows are taken from, where the run has one. */
     const machine = memoryBudget === undefined ? null
         : openMemoryBudget(memoryBudget, memoryHolder);
@@ -310,10 +334,9 @@ export function createCorkHost(config){
     // Long mode: the 64-bit block, the shared runtime's regions at its width and
     // the long-mode interpreter.
     const long = bits === 64;
-    if (long && (executors !== 1 || typeof engine?.interpret64 !== 'function'))
+    if (long && typeof engine?.interpret64 !== 'function')
     {
-        throw new Error('cpu: a 64-bit process runs on one executor of an engine with'
-            + ' a long-mode interpreter');
+        throw new Error('cpu: a 64-bit process runs on an engine with a long-mode interpreter');
     }
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
@@ -352,7 +375,12 @@ export function createCorkHost(config){
         ...(long ? { bits } : {}),
         ...(long && wideWindow !== undefined ? { window: wideWindow, codeBase } : {}),
         ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) };
-    let own = ownLayout(layoutOptions);
+    // Long mode's RAM may reach the whole 4 GiB only in a memory that grows,
+    // which keeps the window's last page from it (`longLayout`): the layout the
+    // tables are sized by is laid out short of it until that is known.
+    const wholeWindow = long && wideWindow === undefined && memorySize > 2 ** 32 - 4096;
+    let own = ownLayout(wholeWindow ? { ...layoutOptions, ramSize: 2 ** 32 - 4096 }
+        : layoutOptions);
     const blockSize = long ? engine.STATE_BLOCK_SIZE_64 : STATE_BLOCK_SIZE;
     // The guest's addresses the state page and the wasm interpreter's statics
     // past it hold: closed to the program for good. Its first page stays open,
@@ -369,9 +397,8 @@ export function createCorkHost(config){
     // and the interpreter tier in wasm its hot counts past that.
     const profileSize = import.meta.BOTTLIFY_DIAGNOSTICS !== false && corkConfig?.blockProfile
         ? Tables.BLOCK_PROFILE_SIZE : 0;
-    // Not over a wide window, whose RAM the interpreter tier in wasm does not address yet.
     const wasmWanted = typeof engine.createWasmInterpreter === 'function'
-        && corkConfig?.wasmInterpreter !== false && own.ramMemory === undefined;
+        && corkConfig?.wasmInterpreter !== false;
     const past = tables + profileSize + (wasmWanted ? engine.WASM_INTERPRETER_AREA : 0);
     // Every other executor's: its state page, its tables and what lies past them.
     const executorPages = Math.ceil((executorBytes(own) - tables + past) / 65536);
@@ -387,8 +414,9 @@ export function createCorkHost(config){
     // `memorySize`, and the memory holding only the RAM the guest has been given,
     // grown as it is given more (`growTo`) -- where a memory of the whole RAM was
     // committed by every process at its start. Only over shared memory, whose
-    // growth leaves every view taken as it was; a 32-bit process; a RAM a power
-    // of two; an engine that knows the layout (`WRAP_SLACK`).
+    // growth leaves every view taken as it was; a RAM a power
+    // of two; an engine that knows the layout (`WRAP_SLACK`). Long mode's 4 GiB
+    // layout too, not a wide window's, whose RAM is a memory of its own.
     const area = config.engineArea;
     // Where the other executors' pages lie apart from the first's (`others`), the
     // first's range holds its tables and the record they share; otherwise all
@@ -397,7 +425,7 @@ export function createCorkHost(config){
     const othersBytes = (executors - 1) * executorPages * 65536;
     const areaBytes = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
         + (apart ? 0 : othersBytes);
-    const growing = area !== undefined && shared && !long
+    const growing = area !== undefined && shared && wideWindow === undefined
         && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
         && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
         && area.at + areaBytes <= memorySize
@@ -414,19 +442,36 @@ export function createCorkHost(config){
     {
         own = ownLayout({ ...layoutOptions, tablesAt: area.at, ramFloor });
     }
+    else if (wholeWindow)
+    {
+        throw new Error('cpu: long mode\'s whole 4 GiB is RAM only in a memory that grows'
+            + ' (`engineArea`)');
+    }
     /** The engine's range inside the guest's space, empty where it has none. */
     const engineArea = growing ? { from: area.at, to: area.at + areaBytes } : { from: 0, to: 0 };
     /** The other executors' pages where they lie apart from the first's, empty otherwise. */
     const othersArea = growing && apart ? { from: apart.at, to: apart.at + othersBytes }
         : { from: 0, to: 0 };
+    // Long mode's last page of the 4 GiB window, which a growing layout counts
+    // as RAM (`longLayout`): kept from the guest, so a store window crossing
+    // 4 GiB still faults by its flag alone.
+    const windowEnd = long && wideWindow === undefined && memorySize === 2 ** 32
+        ? { from: 2 ** 32 - 4096, to: 2 ** 32 } : { from: 0, to: 0 };
     /** Every guest range the engine holds, in address order: closed to the program. */
-    const engineRanges = [enginePages, engineArea, othersArea]
+    const engineRanges = [enginePages, engineArea, othersArea, windowEnd]
         .filter(range=>range.to > range.from).sort((a, b)=>a.from - b.from);
     // Every field from the start of a state block, as the block's views read
     // it: the same on every executor, whose blocks a thread's context moves
     // between (`blockLayout`).
     const inBlock = blockFields(own);
     const firstPages = growing ? Math.ceil((own.tables + past) / 65536) : pagesFor(own, past);
+    // A wide window whose code block lies past 4 GiB: the block below it, where the system's
+    // libraries, the heap and a JIT's pages lie, is translated by a runtime of its own
+    // (`twoBlockRuntime`), its tables past everything of the first's (cork's `wideLayout`).
+    const lowLayout = long && wideWindow !== undefined && codeBase !== 0 && executors === 1
+        && corkConfig?.lowBlock !== false
+        ? ownLayout({ ...layoutOptions, codeBase: 0, tablesAt: firstPages * 65536 }) : null;
+    const lowPages = lowLayout === null ? 0 : Math.ceil(tables / 65536);
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
         : othersArea.to > othersArea.from ? othersArea.from + (index - 1) * executorPages * 65536
@@ -442,7 +487,7 @@ export function createCorkHost(config){
     // A growing memory starts with its floor and the slack past it, and may
     // grow to its whole RAM's (wasm's 4 GiB at most).
     const pages = growing ? (ramFloor + engine.WRAP_SLACK) / 65536
-        : firstPages + (executors - 1) * executorPages + sharedPages;
+        : firstPages + (executors - 1) * executorPages + sharedPages + lowPages;
     const maximumPages = growing
         ? Math.min(65536, (memorySize + engine.WRAP_SLACK) / 65536) : pages;
     if (given !== undefined && given.buffer.byteLength < pages * 65536)
@@ -475,7 +520,7 @@ export function createCorkHost(config){
         ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
     /** A wide window's RAM, a memory64 memory of the window's size made whole; none otherwise. */
     const ramMemory = own.ramMemory === undefined ? undefined
-        : config.ram ?? engine.memory64(/** @type {number} */ (own.window), shared);
+        : config.ram ?? wideMemory(engine, /** @type {number} */ (own.window), shared);
     /** The buffer the guest's RAM lies in. */
     const ramBuffer = ()=>(ramMemory ?? memory).buffer;
     // The memory past the guest's RAM, or a growing memory's engine range: the
@@ -815,10 +860,11 @@ export function createCorkHost(config){
      * @type {import('../engine.js').WasmInterpreter | null}
      */
     const wasmTier = wasmWanted
-        ? engine.createWasmInterpreter({ memory, layout, area: wasmArea,
+        ? engine.createWasmInterpreter({ memory, ram: ramMemory, layout, area: wasmArea,
             statics: stateBase + WASM_INTERPRETER_STATICS_AT,
             hotThreshold: corkConfig?.hotThreshold ?? 2, trapPort, parkBase,
-            precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true })
+            precise: corkConfig?.precise === true, atomic: corkConfig?.atomic === true,
+            ...lowLayout === null ? {} : { lowHash: lowLayout.tables + Tables.HASH } })
         : null;
     /** The last run starts the interpreter ran, a ring: the path a run took
      * into wherever it sits. The wasm tier's, when there is one. */
@@ -902,9 +948,15 @@ export function createCorkHost(config){
         return counted / VIRTUAL_INSTRUCTIONS_PER_MS;
     } : ()=>performance.now();
 
-    // RIP in long mode, whose code lies in the window below 4 GiB.
-    const eip = long ? ()=>Number(blockView.getBigUint64(inBlock.eip, true))
-        : ()=>blockView.getUint32(inBlock.eip, true) >>> 0;
+    // RIP in long mode, whole: a wide window's code lies past 4 GiB. There it is read as
+    // two dwords: the loop asks at every crossing between its code blocks, and the
+    // quadword's BigInt made a crossing a third dearer (jit64's strlen loop: 46 to 27
+    // machine instructions a guest one). In 4 GiB the quadword read is the cheaper
+    // (calls8 0.2 % fewer machine instructions an iteration).
+    const eip = !long ? ()=>blockView.getUint32(inBlock.eip, true) >>> 0
+        : wideWindow === undefined ? ()=>Number(blockView.getBigUint64(inBlock.eip, true))
+            : ()=>blockView.getUint32(inBlock.eip, true)
+                + blockView.getUint32(inBlock.eip + 4, true) * 2 ** 32;
     /** @param {number} value */
     const setEip = value=>{
         if (long)
@@ -1032,7 +1084,9 @@ export function createCorkHost(config){
     const clock = import.meta.BOTTLIFY_DIAGNOSTICS !== false && timings
         ? ()=>performance.now() : ()=>0;
 
-    const runtime = codeBlockRuntime(createEngine({
+    /** What every runtime of this host is made with: the image's code block's, and the
+     * one below 4 GiB of a wide window (`lowLayout`) with its own layout. */
+    const engineEnv = {
         memory,
         ...ramMemory === undefined ? {} : { ram: ramMemory },
         layout,
@@ -1065,6 +1119,8 @@ export function createCorkHost(config){
             // The tables are zero as the runtime starts: a memory just made, or
             // one zeroed where they lie (`reused`, `makeRoomFor`).
             tablesZeroed: true,
+            // Code it lets go brings this thread's full collection forward.
+            letGo: releasedCode,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(translationCharge === null ? {} : { charge: translationCharge }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
@@ -1080,7 +1136,12 @@ export function createCorkHost(config){
             trap: raiseTrap,
             rdtsc: readTsc,
         },
-    }), codeBase);
+    };
+    const imageRuntime = codeBlockRuntime(createEngine(engineEnv), codeBase);
+    const runtime = lowLayout === null ? imageRuntime
+        : twoBlockRuntime(imageRuntime, createEngine({ ...engineEnv, layout: lowLayout,
+            // The block profile lies past the first runtime's tables alone.
+            config: { ...engineEnv.config, blockProfile: false } }));
 
     // A translated read outside `precise` still wraps into RAM rather than
     // testing the range (`checkReads`): the interpreter and stores find it closed.
@@ -1505,7 +1566,15 @@ export function createCorkHost(config){
             tierInstalled = true;
             runtime.interpretWith?.(tier.entry(), tier.entered);
         }
-        blockView.setUint32(inBlock.eip, address >>> 0, true);
+        if (long)
+        {
+            // Whole: a wide window's code lies past 4 GiB.
+            blockView.setBigUint64(inBlock.eip, BigInt(address), true);
+        }
+        else
+        {
+            blockView.setUint32(inBlock.eip, address >>> 0, true);
+        }
         lastStart = address;
         if (jumpedIn)
         {
@@ -1691,6 +1760,7 @@ export function createCorkHost(config){
             rdtsc: readTsc,
             zeroReadsBelow,
             readThrough,
+            atomic: corkConfig?.atomic === true,
             ...(trapPort === undefined ? {} : { ports: { ...ports, trapPort } }),
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
                 invalidate(at, size, true);
@@ -2736,6 +2806,96 @@ export function createCorkHost(config){
         entered = true;
     };
     return host;
+}
+
+/**
+ * A wide window's two code blocks (cork's `wideLayout`), each translated by a
+ * runtime of its own: the image's, from past 4 GiB, and the one below 4 GiB,
+ * where the system's libraries, the heap and a JIT's pages lie. A RIP picks
+ * the runtime, an entry of the second is told apart by `LOW_ENTRY`, and the
+ * stores into code one's run met reach the other's code too. A jump from one
+ * block into the other leaves translated code, and the host's loop enters
+ * the other runtime there. Whatever else is asked of it is the image's.
+ * `interpretedAt` is told the ring of starts' dwords, which name the block below
+ * 4 GiB: a diagnostic, kept by the runtime that address names.
+ *
+ * @template {Record<string, any>} T
+ * @param {T} image @param {Record<string, any>} low
+ * @returns {T}
+ */
+function twoBlockRuntime(image, low){
+    const LOW_ENTRY = 2 ** 30;
+    /** @param {number} at */
+    const below = at=>at < 2 ** 32;
+    /** @param {string} name */
+    const byRip = name=>(/** @type {number} */ at, /** @type {any} */ a, /** @type {any} */ b)=>
+        (below(at) ? low : image)[name]?.(at, a, b);
+    // Asked for at every crossing: taken once, not through the image's proxy each time.
+    const { entryOf: imageEntryOf, run: imageRun } = image;
+    const lowEntryOf = low.entryOf.bind(low);
+    const lowRun = low.run.bind(low);
+    /** @type {Record<string, any>} */
+    const own = {
+        /** @param {number} at @param {number} top */
+        entryOf: (at, top)=>{
+            if (!below(at))
+            {
+                return imageEntryOf(at, top);
+            }
+            const entry = lowEntryOf(at, top);
+            return entry < 0 ? entry : entry + LOW_ENTRY;
+        },
+        /** @param {number} entry @param {number} budget */
+        run: (entry, budget)=>{
+            const fromLow = entry >= LOW_ENTRY;
+            const exit = fromLow ? lowRun(entry - LOW_ENTRY, budget) : imageRun(entry, budget);
+            if ((exit.staleSize ?? 0) > 0)
+            {
+                (fromLow ? image : low).stored(exit.staleAt, exit.staleSize, true);
+            }
+            return exit;
+        },
+        noteHot: byRip('noteHot'),
+        missAt: byRip('missAt'),
+        forcedStep: byRip('forcedStep'),
+        interpretedAt: byRip('interpretedAt'),
+        translatePending: ()=>Promise.all([image.translatePending(), low.translatePending()]),
+        /** @param {number} address @param {number} length @param {boolean} [guest] */
+        stored: (address, length, guest)=>{
+            image.stored(address, length, guest);
+            low.stored(address, length, guest);
+        },
+        /** @param {number} address @param {number} length */
+        codeWritten: (address, length)=>{
+            image.codeWritten(address, length);
+            low.codeWritten(address, length);
+        },
+        takeCodeWrites: ()=>image.takeCodeWrites() + low.takeCodeWrites(),
+        readsFaulted: ()=>{
+            image.readsFaulted?.();
+            low.readsFaulted?.();
+        },
+        /** @param {number} base @param {number} size */
+        noteStack: (base, size)=>{
+            image.noteStack(base, size);
+            low.noteStack(base, size);
+        },
+        /** @param {any} entry @param {() => number} entered */
+        interpretWith: (entry, entered)=>{
+            low.interpretWith?.(entry, entered);
+            return image.interpretWith?.(entry, entered);
+        },
+        diagnostics: ()=>({ ...image.diagnostics(), belowBlock: low.diagnostics() }),
+        counters: ()=>{
+            const first = image.counters();
+            const second = low.counters();
+            return Object.fromEntries(Object.entries(first).map(([key, value])=>[key,
+                typeof value === 'number' && typeof second[key] === 'number'
+                    ? value + second[key] : value]));
+        },
+    };
+    // Whatever else is asked is the image's, through the prototype.
+    return /** @type {T} */ (Object.setPrototypeOf(own, image));
 }
 
 /**

@@ -23,6 +23,7 @@
 
 import { STATUS } from './status.js';
 import { SKIP_THREAD_ATTACH, TEB } from '../kernel32/teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** RT_MESSAGETABLE's resource name: a module has one table, and it is number one. */
 const MESSAGE_TABLE_NAME = 1;
@@ -176,19 +177,19 @@ export function createProcessFunctions(host){
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address */
     const readU16 = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -775,6 +776,7 @@ export function createProcessFunctions(host){
          */
         NtCreateThreadEx: {
             argBytes: 44,
+            sizes: [7, 8, 9],
             /** @param {number[]} args */
             handler: ([out, , , process, start, argument, flags, , commit, reserve])=>{
                 if ((out >>> 0) === 0 || (start >>> 0) === 0)
@@ -830,6 +832,7 @@ export function createProcessFunctions(host){
          */
         RtlCreateUserThread: {
             argBytes: 40,
+            sizes: [4, 5],
             /** @param {number[]} args */
             handler: ([process, , suspended, , reserve, commit, start, argument, out,
                 client])=>{
@@ -1127,7 +1130,7 @@ export function createProcessFunctions(host){
                     view.setUint32(PROCESS_INFORMATION.ThreadHandle, child.thread, true);
                     view.setUint32(PROCESS_INFORMATION.UniqueProcess, child.processId, true);
                     view.setUint32(PROCESS_INFORMATION.UniqueThread, child.threadId, true);
-                    host.writeMemory(information >>> 0, answer);
+                    host.writeMemory(wholeAddress(information), answer);
                     return STATUS.SUCCESS;
                 };
                 return made instanceof Promise ? made.then(settle) : settle(made);

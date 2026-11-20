@@ -47,9 +47,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     one: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange'],
+        uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
             0x04, 0x24, 0xb8, 0x0c, 0x00, 0x00, 0x00, 0x89, 0x44, 0x24, 0x04, 0xe8,
@@ -83,9 +83,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     slots: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange'],
+        uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x8b, 0x7c, 0x24, 0x20, 0x8b, 0x6c, 0x24, 0x24,
             0x83, 0xff, 0x10, 0x77, 0x08, 0x85, 0xed, 0x75, 0x0e, 0x85, 0xff, 0x74,
@@ -129,7 +129,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 42,
         code: Uint8Array.of(
             0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x89, 0x04, 0x24, 0xb8, 0x07,
@@ -170,7 +170,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 42,
         code: Uint8Array.of(
             0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x89, 0x04, 0x24, 0xb8, 0x05,
@@ -211,7 +211,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 42,
         code: Uint8Array.of(
             0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x89, 0x04, 0x24, 0xb8, 0x11,
@@ -252,7 +252,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 50,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x10, 0x85, 0xc0, 0x75, 0x29, 0x83, 0xec, 0x0c, 0x8b,
@@ -294,7 +294,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 50,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x10, 0x85, 0xc0, 0x75, 0x29, 0x83, 0xec, 0x0c, 0x8b,
@@ -336,7 +336,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 50,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x10, 0x85, 0xc0, 0x75, 0x29, 0x83, 0xec, 0x0c, 0x8b,
@@ -378,7 +378,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 42,
         code: Uint8Array.of(
             0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x89, 0x04, 0x24, 0xb8, 0x0b,
@@ -419,7 +419,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 42,
         code: Uint8Array.of(
             0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x89, 0x04, 0x24, 0xb8, 0x12,
@@ -460,7 +460,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 42,
         code: Uint8Array.of(
             0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x89, 0x04, 0x24, 0xb8, 0x1d,
@@ -501,7 +501,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x03,
@@ -551,7 +551,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x0a,
@@ -601,7 +601,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x10,
@@ -651,7 +651,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x13,
@@ -701,7 +701,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x04,
@@ -751,7 +751,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x16,
@@ -801,7 +801,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x14,
@@ -851,7 +851,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x06,
@@ -901,7 +901,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 58,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x17,
@@ -949,9 +949,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     IASetVertexBuffers: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr', 'ptr', 'ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 313,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x08, 0x8b, 0x74, 0x24, 0x24, 0x8b,
@@ -1005,9 +1005,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     IASetIndexBuffer: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 103,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1043,9 +1043,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     OMSetRenderTargets: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 182,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x8b, 0x7c, 0x24, 0x18, 0x8b, 0x6c, 0x24, 0x1c,
@@ -1088,9 +1088,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     OMSetBlendState: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 174,
         code: Uint8Array.of(
             0x53, 0x56, 0x8b, 0x74, 0x24, 0x14, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24,
@@ -1132,9 +1132,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     OMSetDepthStencilState: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 96,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1172,7 +1172,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 59,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x1e,
@@ -1223,7 +1223,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 59,
         code: Uint8Array.of(
             0x83, 0xec, 0x14, 0x8b, 0x44, 0x24, 0x18, 0x89, 0x04, 0x24, 0xb8, 0x63,
@@ -1272,9 +1272,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     counted: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange'],
+        uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x04, 0x8b, 0x5c, 0x24, 0x20, 0x8b,
             0x6c, 0x24, 0x24, 0x83, 0xfb, 0x10, 0x77, 0x08, 0x85, 0xed, 0x75, 0x0e,
@@ -1317,9 +1317,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     RSSetScissorRects: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 178,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x8b, 0x74, 0x24, 0x18, 0x8b, 0x6c, 0x24, 0x1c,
@@ -1362,9 +1362,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     Draw: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 96,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1400,9 +1400,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     DrawIndexed: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 103,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1438,9 +1438,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     DrawInstanced: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 110,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1477,9 +1477,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     DrawIndexedInstanced: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 117,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1517,9 +1517,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     ClearRenderTargetView: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 147,
         code: Uint8Array.of(
             0x53, 0x56, 0x8b, 0x5c, 0x24, 0x14, 0x85, 0xdb, 0x0f, 0x84, 0x82, 0x00,
@@ -1559,9 +1559,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     ClearDepthStencilView: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 116,
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x40, 0x04, 0x89,
@@ -1598,9 +1598,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     BufferMap: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32'],
+        params: ['u32', 'u32', 'u32', 'ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 57,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x10, 0x85, 0xc0, 0x75, 0x04, 0x31, 0xc0, 0xeb, 0x17,
@@ -1636,9 +1636,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     ContextMap: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32', 'u32', 'u32', 'u32'],
+        params: ['ptr', 'ptr', 'u32', 'u32', 'u32', 'ptr'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 98,
         code: Uint8Array.of(
             0x53, 0x56, 0x8b, 0x74, 0x24, 0x20, 0x85, 0xf6, 0x74, 0x1b, 0x8b, 0x44,
@@ -1678,9 +1678,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     mapStorage: {
         convention: 'stdcall',
-        params: ['u32', 'u32'],
+        params: ['ptr', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange'],
+        uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x04, 0x8b, 0x5c, 0x24, 0x1c, 0x8b,
             0x44, 0x24, 0x18, 0x8b, 0x70, 0x04, 0x85, 0xf6, 0x74, 0x1a, 0x8b, 0x06,
@@ -1724,7 +1724,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 25,
         code: Uint8Array.of(
             0x83, 0xec, 0x04, 0x8b, 0x44, 0x24, 0x08, 0x89, 0x04, 0x24, 0xe8, 0x0e,
@@ -1766,9 +1766,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     ContextUnmap: {
         convention: 'stdcall',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange', 'host'],
+        uses: ['u32', 'setU32', 'compareExchange', 'host', 'pointerBytes'],
         host: 52,
         code: Uint8Array.of(
             0x8b, 0x44, 0x24, 0x08, 0x85, 0xc0, 0x74, 0x2b, 0x8b, 0x44, 0x24, 0x0c,
@@ -1814,7 +1814,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u32', 'setU32', 'compareExchange'],
+        uses: ['u32', 'setU32', 'compareExchange', 'pointerBytes'],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x8b, 0x44, 0x24, 0x10, 0x8b, 0x70, 0x04, 0x85, 0xf6,
             0x74, 0x10, 0x8b, 0x06, 0x83, 0xe0, 0x01, 0x85, 0xc0, 0x75, 0x07, 0x8b,

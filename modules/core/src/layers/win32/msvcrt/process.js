@@ -23,6 +23,7 @@
 import { createRefusals } from '../common/refusal.js';
 import { VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EINVAL, ENOENT } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The signals msvcrt.dll keeps a handler for; any other number is EINVAL. */
 const SIGNALS = new Set([
@@ -221,6 +222,7 @@ export function createProcessFunctions(host){
          * the exception a signal handler was called for: null until one is.
          */
         __pxcptinfoptrs: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>exceptionPointers(),
@@ -239,7 +241,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([signal, action])=>{
                 const number = signal | 0;
-                const given = action >>> 0;
+                const given = wholeAddress(action);
                 if (!SIGNALS.has(number) || given === SIG_SGE || given === SIG_ACK)
                 {
                     host.errno(EINVAL);
@@ -247,7 +249,7 @@ export function createProcessFunctions(host){
                 }
                 const previous = handlers.get(number) ?? 0;
                 handlers.set(number, given);
-                return previous >>> 0;
+                return wholeAddress(previous);
             },
         },
 
@@ -321,7 +323,7 @@ export function createProcessFunctions(host){
          * Null with ENOENT, as `system` answers: the command interpreter
          * that would run the command and be piped to is not there.
          */
-        _popen: noPipeTo('_popen'),
+        _popen: { ...noPipeTo('_popen'), returns: 'pointer' },
         _wpopen: noPipeTo('_wpopen'),
 
         /**
@@ -376,7 +378,7 @@ export function createProcessFunctions(host){
                 }
                 const { readU32 } = host;
                 const list = (argv >>> 0) === 0 || !readU32 ? []
-                    : untilNull(index=>readU32((argv >>> 0) + index * 4), MOST_ARGUMENTS);
+                    : untilNull(index=>readU32(wholeAddress(argv) + index * 4), MOST_ARGUMENTS);
                 return spawn(mode >>> 0, name, list);
             },
         },

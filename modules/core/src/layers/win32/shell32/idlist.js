@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The item id list functions: an ITEMIDLIST walked by its items' `cb`
  * words, whatever the items hold, as shlobj.h lays one out -- a WORD
@@ -45,7 +47,7 @@ export const IDLIST_ORDINALS = Object.freeze([
 export function createIdListFunctions(host){
     /** @param {number} at */
     const cbAt = at=>{
-        const bytes = host.readMemory(at >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(at), 2);
         return bytes[0] | bytes[1] << 8;
     };
 
@@ -58,7 +60,7 @@ export function createIdListFunctions(host){
     const walk = list=>{
         /** @type {number[]} */
         const items = [];
-        let at = list >>> 0;
+        let at = wholeAddress(list);
         for (let n = 0; at !== 0 && n < MOST_ITEMS; n++)
         {
             const cb = cbAt(at);
@@ -75,7 +77,7 @@ export function createIdListFunctions(host){
     /** @param {number} list  The bytes of a list, its terminator with them. */
     const bytesOf = list=>{
         const { end } = walk(list);
-        return host.readMemory(list >>> 0, end - (list >>> 0) + 2).slice();
+        return host.readMemory(wholeAddress(list), end - (list >>> 0) + 2).slice();
     };
 
     /** @param {Uint8Array} bytes @returns {number} a list holding them, 0 for no memory */
@@ -89,7 +91,7 @@ export function createIdListFunctions(host){
     };
 
     /** @param {number} at  One item's bytes, `cb` and all. */
-    const itemBytes = at=>host.readMemory(at >>> 0, cbAt(at)).slice();
+    const itemBytes = at=>host.readMemory(wholeAddress(at), cbAt(at)).slice();
 
     /** @param {...Uint8Array} parts @returns {Uint8Array} the items, then a terminator */
     const joined = (...parts)=>{
@@ -143,6 +145,7 @@ export function createIdListFunctions(host){
 
         /** PUIDLIST_RELATIVE ILGetNext(PCUIDLIST_RELATIVE pidl): NULL past the last item. */
         ILGetNext: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
@@ -161,6 +164,7 @@ export function createIdListFunctions(host){
          * The last item, or the list itself when it is empty.
          */
         ILFindLastID: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>((list >>> 0) === 0 ? 0 : walk(list).items.at(-1) ?? list >>> 0),
@@ -183,6 +187,7 @@ export function createIdListFunctions(host){
 
         /** PIDLIST_RELATIVE ILClone(PCUIDLIST_RELATIVE pidl) */
         ILClone: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>((list >>> 0) === 0 ? 0 : allocated(bytesOf(list))),
@@ -190,6 +195,7 @@ export function createIdListFunctions(host){
 
         /** PITEMID_CHILD ILCloneFirst(PCUIDLIST_RELATIVE pidl): the first item, ended. */
         ILCloneFirst: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
@@ -252,6 +258,7 @@ export function createIdListFunctions(host){
          * empty parent, its terminator for the same list.
          */
         ILFindChild: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([parent, child])=>{
@@ -271,6 +278,7 @@ export function createIdListFunctions(host){
          * a copy of the other, both missing NULL.
          */
         ILCombine: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
@@ -290,6 +298,7 @@ export function createIdListFunctions(host){
          * freed: what the caller holds afterwards is the answer.
          */
         ILAppendID: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([list, item, append])=>{
@@ -333,7 +342,9 @@ export function createIdListFunctions(host){
 
         /** LPVOID SHAlloc(SIZE_T cb): the task allocator's memory. */
         SHAlloc: {
+            returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([bytes])=>host.allocate?.(Math.max(bytes >>> 0, 1)) ?? 0,
         },

@@ -28,7 +28,7 @@
 
 import { TIER_SLOT, enterRegion } from '../emit/region.js';
 import { RANGE, SHAPE } from '../emit/x87.js';
-import { HELD, MADE, PRECISION } from '../emit/memory.js';
+import { FAR, HELD, MADE, PRECISION, RARE } from '../emit/memory.js';
 import { keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { resetBlockCounts } from './block-profile.js';
@@ -75,7 +75,7 @@ const KINDS = /** @type {ExitKind[]} */ (
  */
 export function createCorkRuntime(env){
     const rt = /** @type {import('./state.js').State} */ (baseState(env));
-    const { layout, settings, codeShared, pages, codePages, table, resumable, entries, view,
+    const { layout, settings, codeShared, pages, codeBase, table, resumable, entries, view,
         counterWord, profiling } = rt;
     // The instructions translated code retired, counted by the run loop below with nothing
     // between it and a region's return; the parts read it through the state.
@@ -93,7 +93,8 @@ export function createCorkRuntime(env){
     const { heldOnEntry, closedIn, copiesWanted } = join(rt, createRegions(rt));
     const { readsFaulted, precisionMissed, floatMissed, heldMissed, shapeMissed
     } = join(rt, createVariants(rt));
-    const { liftVolatile, invalidatePage, storedInto, translatable, stored, codeWritten,
+    const { liftVolatile, invalidatePage, storeIntoBlock, translatable, stored,
+        codeWritten,
         takeWrites, markWritten, takeCodeWrites, noteStack } = join(rt, createCodeWrites(rt));
     const { openTranslator, coveredOut, coveredIn, attachTranslator, detachTranslator,
         closeTranslators
@@ -119,9 +120,11 @@ export function createCorkRuntime(env){
     let missesInserted = 0;
     /** @type {Record<number, keyof typeof untranslatedBy>} */
     const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
-        [RANGE]: 'range', [MADE]: 'made' };
+        [RANGE]: 'range', [MADE]: 'made', [RARE]: 'rare' };
+    /** Whether the layout is a wide window's, whose blocks a run may leave between (`FAR`). */
+    const wide = layout.window !== undefined;
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
-    const exit = { retired: 0, kind: 'untranslated', vector: 0 };
+    const exit = { retired: 0, kind: 'untranslated', vector: 0, staleAt: 0, staleSize: 0 };
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
         && settings.blockProfileFrom > 0
         ? performance.now() + settings.blockProfileFrom * 1000 : null;
@@ -190,6 +193,20 @@ export function createCorkRuntime(env){
             corkRetired += tierEntered === null ? retired
                 : retired - ((tierEntered() - tierBefore) >>> 0);
             const left = KINDS[code & 0xff] ?? 'untranslated';
+            // An untranslated exit's vector past every other is a far exit's (`FAR`), kept
+            // where a store into code made it `stale`; a fault's vector is its own. Only a
+            // wide window has one.
+            const far = wide && code >>> 8 >= FAR && (left === 'untranslated' || left === 'stale');
+            if (far)
+            {
+                // Left for another code block of a wide window: the high half
+                // the region's RIP could not say is the vector's (`FAR`).
+                view().setUint32(layout.eip + 4, (code >>> 8) - FAR, true);
+                if (layout.previousIp >= 0)
+                {
+                    view().setUint32(layout.previousIp + 4, (code >>> 8) - FAR, true);
+                }
+            }
             // A call the spent budget kept from being made leaves as a call out of
             // translated code does, at its target (`callAndReturn`): the slice's
             // end, not a target with nothing translated. It was counted as that,
@@ -210,7 +227,7 @@ export function createCorkRuntime(env){
             }
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && kind === 'untranslated')
             {
-                untranslatedBy[VECTOR_NAMES[code >>> 8] ?? 'other']++;
+                untranslatedBy[far ? 'far' : VECTOR_NAMES[code >>> 8] ?? 'other']++;
             }
             if (kind === 'untranslated' && code >>> 8 === PRECISION)
             {
@@ -230,7 +247,7 @@ export function createCorkRuntime(env){
                     this.noteHot(record.entry, record.entryTop, 256);
                 }
             }
-            else if (kind === 'untranslated')
+            else if (kind === 'untranslated' && !far)
             {
                 if (code >>> 8 === HELD && retired === 0)
                 {
@@ -241,21 +258,32 @@ export function createCorkRuntime(env){
                     heldAt = view().getUint32(layout.eip, true);
                     heldStores = counts.codeStores;
                 }
+                // A rare case is no candidate either: the block it left has its entry.
                 this.missAt(view().getUint32(layout.eip, true), view().getUint8(layout.x87Top),
-                    code >>> 8 === HELD);
+                    code >>> 8 === HELD || code >>> 8 === RARE);
             }
             // Looked at whatever the run left by: a rep that stored into code and
             // ran out of budget on a later page in bulk leaves by the budget, and
             // the run that finishes it stores no code of its own.
+            if (wide)
+            {
+                exit.staleSize = 0;
+            }
             if (kind === 'stale' || pages.staleSize() !== 0)
             {
                 // Every page the run's stores into code reached, from the
-                // lowest of them to the highest.
-                const address = codePages.staleAddress();
+                // lowest of them to the highest, in the window: this block's
+                // code goes here, another block's runtime is told by the host.
+                const address = pages.staleAddress();
                 const size = pages.staleSize();
                 pages.clearStale();
-                storedInto(address, size);
-                codeShared?.publish(address, size);
+                storeIntoBlock(address, size);
+                codeShared?.publish(address - codeBase, size);
+                if (wide)
+                {
+                    exit.staleAt = address;
+                    exit.staleSize = size;
+                }
             }
             exit.retired = retired;
             exit.kind = kind;

@@ -232,7 +232,7 @@ From `emit-count.mjs --qemu <qemu 8.2.2 built with plugins> --root <1851609d> --
 
 ### What does translated code cost to run, to the instruction an iteration and for each of the guest's own instructions, workload by workload and arm against arm?
 
-[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]`
+[`translator/run-count.mjs`](translator/run-count.mjs): `node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--window 8|16] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]`
 
 ```
 instructions an iteration (100 warm, 20 counted), in square brackets a guest instruction's cost in them, arms: <657107ac>, <657107ac>
@@ -410,17 +410,21 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`checks/check-budget-writes.mjs`](checks/check-budget-writes.mjs) - The emitter writes a region's budget only as a count (`npm run check:boundaries`)
 - [`checks/check-emit-options.mjs`](checks/check-emit-options.mjs) - Every emit option reaches the cache key (`npm run check:boundaries`)
 - [`checks/check-guest-pointers.mjs`](checks/check-guest-pointers.mjs) - A handler faults on a bad guest pointer only as Windows does (`npm run check:boundaries`)
+- [`checks/check-wide-addresses.mjs`](checks/check-wide-addresses.mjs) - A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on (`node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]`)
 - [`checks/check-is-main.mjs`](checks/check-is-main.mjs) - No script decides it was started by comparing paths itself (`npm run check:boundaries`)
 - [`checks/check-link-slots.mjs`](checks/check-link-slots.mjs) - One machine a slot of a process's link (`npm run check:boundaries`)
 - [`checks/check-lock-release.mjs`](checks/check-lock-release.mjs) - A locked word is not released by a plain store (`npm run check:boundaries`)
 - [`checks/check-overlapped-layout.mjs`](checks/check-overlapped-layout.mjs) - OVERLAPPED's offsets are written in one file (`npm run check:boundaries`)
 - [`checks/check-package-files.mjs`](checks/check-package-files.mjs) - Core's package ships what its files import (`npm run check:boundaries`)
+- [`checks/check-routine-leaves.mjs`](checks/check-routine-leaves.mjs) - A 64-bit process's graphics routine, and each compiled function the build marks one, is a leaf to the unwinder (`npm run check:boundaries`)
 - [`checks/check-scan-windows.mjs`](checks/check-scan-windows.mjs) - A scan of guest memory stays in its region (`npm run check:boundaries`)
 - [`checks/check-store-protocol.mjs`](checks/check-store-protocol.mjs) - A store's protocol is spoken only in GameHub (`npm run check:boundaries`)
 - [`checks/check-volume-spread.mjs`](checks/check-volume-spread.mjs) - No volume is copied by object spread (`npm run check:boundaries`)
 - [`checks/check-wall-bounds.mjs`](checks/check-wall-bounds.mjs) - No test bounds a wall-clock time (`npm run check:boundaries`)
 - [`checks/check-wide-limits.mjs`](checks/check-wide-limits.mjs) - A UTF-16 read's limit is in bytes (`npm run check:boundaries`)
 - [`checks/check-wide-arguments.mjs`](checks/check-wide-arguments.mjs) - A host function or COM method taking a 64-bit, floating or wide structure argument by value says so to the bridge, for an x86-64 caller (`npm run check:boundaries`)
+- [`checks/check-pointer-arguments.mjs`](checks/check-pointer-arguments.mjs) - The table of each function's address arguments the win32 layer declares to the bridge is what the signature comments say (--write rewrites it) (`npm run check:boundaries`)
+- [`checks/check-pointer-writes.mjs`](checks/check-pointer-writes.mjs) - Every guest pointer is read and written whole by the memory layer's reader and writer (or win32's pointerIo), never as a dword and a zero made by hand (`npm run check:boundaries`)
 - [`checks/check-decision-numbers.mjs`](checks/check-decision-numbers.mjs) - Each decision number is one heading, and every citation of one is carried (`npm run check:boundaries`)
 - [`checks/emit-digest.mjs`](checks/emit-digest.mjs) - The 32-bit translation is unchanged (--check against emit-digest.json) (`npm run check:boundaries`)
 - [`checks/check-catalog.mjs`](checks/check-catalog.mjs) - Every file under tools/ is in this catalog, in its category, and every instrument has a real sample (`npm run check:boundaries`)

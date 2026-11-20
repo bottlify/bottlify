@@ -42,6 +42,7 @@ import {
 import { notifyWindow } from './notify.js';
 import { renderDate } from '../kernel32/datetime-format.js';
 import { DAYS, MONTHS } from '../kernel32/locale-data.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const MONTHCAL_CLASS = 'SysMonthCal32';
@@ -477,7 +478,7 @@ export function createMonthCalProcedure(host, tk, sources = {}){
 
     /** @param {number} address @returns {Time} */
     const readTime = address=>{
-        const view = new DataView(host.readMemory(address >>> 0, 16).buffer);
+        const view = new DataView(host.readMemory(wholeAddress(address), 16).buffer);
         const field = (/** @type {number} */ at)=>view.getUint16(at * 2, true);
         return { year: field(0), month: field(1), dow: field(2), day: field(3), hour: field(4),
             minute: field(5), second: field(6), ms: field(7) };
@@ -489,22 +490,22 @@ export function createMonthCalProcedure(host, tk, sources = {}){
         const view = new DataView(bytes.buffer);
         [time.year, time.month, time.dow, time.day, time.hour, time.minute, time.second, time.ms]
             .forEach((value, at)=>view.setUint16(at * 2, value & 0xffff, true));
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
      * @param {number} address
      * @param {{ left: number, top: number, right: number, bottom: number }} rect
      */
-    const writeRect = (address, rect)=>host.writeMemory(address >>> 0, new Uint8Array(
+    const writeRect = (address, rect)=>host.writeMemory(wholeAddress(address), new Uint8Array(
         new Int32Array([rect.left, rect.top, rect.right, rect.bottom]).buffer));
 
     /** @param {number} address */
-    const readI32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer)
+    const readI32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
         .getInt32(0, true);
 
     /** @param {number} address @param {number} value */
-    const writeI32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeI32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(new Int32Array([value]).buffer));
 
     /**

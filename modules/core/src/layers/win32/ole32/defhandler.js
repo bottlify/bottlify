@@ -29,6 +29,7 @@ import {
     IID_IDATAOBJECT, IID_IOLECACHE, IID_IOLECACHE2, IID_IOLECACHECONTROL, IID_IPERSISTSTORAGE,
     IID_IVIEWOBJECT, IID_IVIEWOBJECT2,
 } from './datacache.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -219,8 +220,8 @@ export function createDefaultHandlers(context){
             return S_OK;
         } },
         oleMethod('SetHostNames', 12, SLOT.SET_HOST_NAMES, ()=>S_OK, (state, [app, object])=>{
-            state.hostNames = { app: (app >>> 0) === 0 ? null : util.readWide(app >>> 0),
-                object: (object >>> 0) === 0 ? null : util.readWide(object >>> 0) };
+            state.hostNames = { app: (app >>> 0) === 0 ? null : util.readWide(wholeAddress(app)),
+                object: (object >>> 0) === 0 ? null : util.readWide(wholeAddress(object)) };
         }),
         { name: 'Close', argBytes: 8, invoke: async(object, [option])=>{
             const state = stateOf(object);
@@ -262,7 +263,7 @@ export function createDefaultHandlers(context){
             {
                 return call(state.server, 15, [out >>> 0], env.callerThread());
             }
-            env.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(state.clsid)));
+            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(state.clsid)));
             return S_OK;
         } },
         oleMethod('GetUserType', 12, 16, (state, [form, out])=>context.callExport(
@@ -501,7 +502,7 @@ export function createDefaultHandlers(context){
             {
                 return E_INVALIDARG;
             }
-            env.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
+            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
             return S_OK;
         } },
         { name: 'Run', argBytes: 8, invoke: object=>run(stateOf(object), env.callerThread()) },
@@ -594,7 +595,7 @@ export function createDefaultHandlers(context){
             {
                 return E_POINTER;
             }
-            env.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
+            env.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(stateOf(object).clsid)));
             return S_OK;
         } },
         { name: 'IsDirty', argBytes: 4, invoke: object=>persistBoth(stateOf(object), SLOT.IS_DIRTY,
@@ -679,7 +680,7 @@ export function createDefaultHandlers(context){
             {
                 return E_INVALIDARG;
             }
-            const asked = formatGuid(env.readMemory(riid >>> 0, 16));
+            const asked = formatGuid(env.readMemory(wholeAddress(riid), 16));
             if (object.interfaceFor(asked))
             {
                 const pointer = env.publish(object, asked) >>> 0;

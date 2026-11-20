@@ -35,6 +35,7 @@ import {
     raiseEvent,
 } from './winevents.js';
 import { notifyWindow } from './notify.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The class name a program creates the control by. */
 export const TAB_CLASS = 'SysTabControl32';
@@ -227,13 +228,13 @@ export function createTabProcedure(host, tk, images){
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
     /** @param {number} address @param {number} limit */
     const readWide = (address, limit)=>{
-        const bytes = host.readMemory(address >>> 0, limit * 2);
+        const bytes = host.readMemory(wholeAddress(address), limit * 2);
         let text = '';
         for (let at = 0; at + 1 < bytes.length; at += 2)
         {
@@ -261,7 +262,7 @@ export function createTabProcedure(host, tk, images){
         const clipped = text.slice(0, room - 1);
         if (!wide)
         {
-            host.writeMemory(address >>> 0, encodeAnsi(`${clipped}\0`));
+            host.writeMemory(wholeAddress(address), encodeAnsi(`${clipped}\0`));
             return;
         }
         const bytes = new Uint8Array((clipped.length + 1) * 2);
@@ -271,7 +272,7 @@ export function createTabProcedure(host, tk, images){
             bytes[index * 2] = unit & 0xff;
             bytes[index * 2 + 1] = unit >>> 8;
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -844,7 +845,7 @@ export function createTabProcedure(host, tk, images){
                     return 0;
                 }
                 [rect.left, rect.top, rect.right, rect.bottom].forEach((value, index)=>
-                    tk.writeU32((message.lParam >>> 0) + index * 4, value));
+                    tk.writeU32(wholeAddress(message.lParam) + index * 4, value));
                 return 1;
             }
             case TCM_HITTEST: {
@@ -905,7 +906,7 @@ export function createTabProcedure(host, tk, images){
                 const previous = held.minWidth;
                 held.minWidth = message.lParam | 0;
                 host.invalidate(record);
-                return previous >>> 0;
+                return wholeAddress(previous);
             }
             case TCM_GETROWCOUNT:
                 return 1;

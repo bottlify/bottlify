@@ -60,6 +60,7 @@ import { blockLayouts, INTERACTIVE_SESSION } from '../kernel32/teb.js';
 import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
 import { PROCESSOR_NAME } from '../kernel32/processor.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -326,11 +327,11 @@ function createUserInfoFunctions(kernel32, writeMemory){
                 }
                 if ((value >>> 0) !== 0 && info.value !== undefined)
                 {
-                    writeU32(value >>> 0, info.value);
+                    writeU32(wholeAddress(value), info.value);
                 }
                 if ((flags >>> 0) !== 0)
                 {
-                    writeU32(flags >>> 0, info.flags);
+                    writeU32(wholeAddress(flags), info.flags);
                 }
                 return 1;
             },
@@ -490,7 +491,9 @@ export function createNtdllFunctions(host){
              * laid over memory the caller gives is not made here: NULL.
              */
             RtlCreateHeap: {
+                returns: 'pointer',
                 argBytes: 24,
+                sizes: [2, 3],
                 /** @param {number[]} args */
                 handler: ([flags, base, reserve, commit])=>{
                     if ((base >>> 0) !== 0)
@@ -509,6 +512,7 @@ export function createNtdllFunctions(host){
              * NULL once the heap is gone; the heap itself when it could not be.
              */
             RtlDestroyHeap: {
+                returns: 'pointer',
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([heap])=>(kernel32.HeapDestroy.handler([heap]) !== 0 ? 0 : heap >>> 0),
@@ -838,7 +842,8 @@ export function createNtdllFunctions(host){
                     handler: ([user, out])=>{
                         const lcid = ((user & 0xff) !== 0 ? kernel32.GetUserDefaultLCID
                             : kernel32.GetSystemDefaultLCID).handler([]);
-                        host.writeMemory(out >>> 0, Uint8Array.of(lcid & 0xff, lcid >>> 8 & 0xff,
+                        host.writeMemory(wholeAddress(out), Uint8Array.of(lcid & 0xff,
+                            lcid >>> 8 & 0xff,
                             lcid >>> 16 & 0xff, lcid >>> 24 & 0xff));
                         return STATUS.SUCCESS;
                     },
@@ -877,7 +882,7 @@ export function createNtdllFunctions(host){
                     /** @param {number[]} args */
                     handler: ([attributes])=>{
                         const name = (attributes >>> 0) === 0 ? 0
-                            : readU32(host.readMemory((attributes >>> 0) + 8, 4));
+                            : readU32(host.readMemory(wholeAddress(attributes) + 8, 4));
                         if (name === 0)
                         {
                             return STATUS.INVALID_PARAMETER;
@@ -996,7 +1001,7 @@ export function createNtdllFunctions(host){
                 view.setUint16(0, text.length * 2, true);
                 view.setUint16(2, bytes.length, true);
                 view.setUint32(4, buffer, true);
-                host.writeMemory(out >>> 0, descriptor);
+                host.writeMemory(wholeAddress(out), descriptor);
                 return STATUS.SUCCESS;
             },
         },
@@ -1028,10 +1033,11 @@ export function createNtdllFunctions(host){
          * they carry the PE signature; NULL for anything else.
          */
         RtlImageNtHeader: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([base])=>{
-                const at = base >>> 0;
+                const at = wholeAddress(base);
                 if (at === 0)
                 {
                     return 0;
@@ -1051,6 +1057,7 @@ export function createNtdllFunctions(host){
 
         /** PPEB RtlGetCurrentPeb(void): where the running thread's block says it is. */
         RtlGetCurrentPeb: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>{
                 const teb = host.teb();
@@ -1088,6 +1095,7 @@ export function createNtdllFunctions(host){
          */
         RtlZeroMemory: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length])=>crt.memset.handler([destination, 0, length]),
         },
@@ -1095,6 +1103,7 @@ export function createNtdllFunctions(host){
         /** VOID RtlFillMemory(VOID UNALIGNED *Destination, SIZE_T Length, UCHAR Fill) */
         RtlFillMemory: {
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length, fill])=>
                 crt.memset.handler([destination, fill, length]),
@@ -1109,6 +1118,7 @@ export function createNtdllFunctions(host){
          */
         RtlMoveMemory: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, length])=>
                 crt.memmove.handler([destination, source, length]),
@@ -1124,11 +1134,12 @@ export function createNtdllFunctions(host){
          */
         RtlCompareMemory: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([left, right, length])=>{
                 const total = length >>> 0;
-                const a = host.readMemory(left >>> 0, total);
-                const b = host.readMemory(right >>> 0, total);
+                const a = host.readMemory(wholeAddress(left), total);
+                const b = host.readMemory(wholeAddress(right), total);
                 let matched = 0;
                 while (matched < total && a[matched] === b[matched])
                 {
@@ -1146,11 +1157,12 @@ export function createNtdllFunctions(host){
          */
         RtlCompareMemoryUlong: {
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([source, length, pattern])=>{
                 const words = (length >>> 0) >>> 2;
                 const bytes = words === 0 ? new Uint8Array(0)
-                    : host.readMemory(source >>> 0, words * 4);
+                    : host.readMemory(wholeAddress(source), words * 4);
                 const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
                 let matched = 0;
                 while (matched < words && view.getUint32(matched * 4, true) === pattern >>> 0)
@@ -1164,6 +1176,7 @@ export function createNtdllFunctions(host){
         /** VOID RtlFillMemoryUlong(PVOID Destination, SIZE_T Length, ULONG Pattern) */
         RtlFillMemoryUlong: {
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([destination, length, pattern])=>{
                 const words = (length >>> 0) >>> 2;
@@ -1175,7 +1188,7 @@ export function createNtdllFunctions(host){
                 }
                 if (words > 0)
                 {
-                    host.writeMemory(destination >>> 0, bytes);
+                    host.writeMemory(wholeAddress(destination), bytes);
                 }
                 return 0;
             },
@@ -1197,7 +1210,7 @@ export function createNtdllFunctions(host){
                 }
                 if (words > 0)
                 {
-                    host.writeMemory(destination >>> 0, bytes);
+                    host.writeMemory(wholeAddress(destination), bytes);
                 }
                 return 0;
             },
@@ -1226,7 +1239,7 @@ export function createNtdllFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const relation = readU32(host.readMemory(input >>> 0, 4));
+                const relation = readU32(host.readMemory(wholeAddress(input), 4));
                 const size = allocate(4);
                 try
                 {
@@ -1237,7 +1250,7 @@ export function createNtdllFunctions(host){
                     const needed = readU32(host.readMemory(size, 4));
                     if ((returnLength >>> 0) !== 0)
                     {
-                        host.writeMemory(returnLength >>> 0, host.readMemory(size, 4));
+                        host.writeMemory(wholeAddress(returnLength), host.readMemory(size, 4));
                     }
                     if (ok)
                     {

@@ -20,6 +20,7 @@ import { APPLY_OPTION, PATCH_ERROR, PATCH_OPTION, SIGNATURE_LENGTH, applyPatch, 
     readPatchHeader } from './pa19.js';
 import { createMd5 } from '../crypto/digest.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -84,7 +85,7 @@ export function createMspatchaFunctions(host){
     const { files } = host;
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
 
     /**
@@ -355,7 +356,7 @@ export function createMspatchaFunctions(host){
             return answer(thread, ERROR_INSUFFICIENT_BUFFER);
         }
         const text = `${signature}\0`;
-        host.writeMemory(buffer >>> 0, wide
+        host.writeMemory(wholeAddress(buffer), wide
             ? new Uint8Array(Uint16Array.from(text, c=>c.charCodeAt(0)).buffer)
             : encodeAnsi(text));
         return 1;
@@ -378,9 +379,9 @@ export function createMspatchaFunctions(host){
     };
 
     /** @param {number} address */
-    const ansi = address=>host.readCString(address >>> 0, MAX_NAME);
+    const ansi = address=>host.readCString(wholeAddress(address), MAX_NAME);
     /** @param {number} address */
-    const wide = address=>host.readWideString(address >>> 0, MAX_NAME * 2);
+    const wide = address=>host.readWideString(wholeAddress(address), MAX_NAME * 2);
 
     /**
      * ApplyPatchToFileByBuffers and its test: the patch and the old file in
@@ -400,10 +401,12 @@ export function createMspatchaFunctions(host){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const patch = host.readMemory(patchAt >>> 0, patchSize >>> 0).slice();
-        const old = oldAt === 0 ? null : host.readMemory(oldAt >>> 0, oldSize >>> 0).slice();
+        const patch = host.readMemory(wholeAddress(patchAt), patchSize >>> 0).slice();
+        const old = oldAt === 0 ? null : host.readMemory(wholeAddress(oldAt),
+            oldSize >>> 0).slice();
         const given = newBufferAt === 0 ? 0
-            : new DataView(host.readMemory(newBufferAt >>> 0, 4).slice().buffer).getUint32(0, true);
+            : new DataView(host.readMemory(wholeAddress(newBufferAt),
+                4).slice().buffer).getUint32(0, true);
         // The new size is told, and a buffer too small for it refused, as
         // soon as the header is read: before the old file is looked for.
         let header = null;
@@ -566,7 +569,7 @@ export function createMspatchaFunctions(host){
             argBytes: 40,
             /** @param {number[]} args */
             handler: ([address, size, ...rest])=>sign('GetFilePatchSignatureByBuffer',
-                host.readMemory(address >>> 0, size >>> 0).slice(), rest, false,
+                host.readMemory(wholeAddress(address), size >>> 0).slice(), rest, false,
                 host.callerThread()),
         },
         /**

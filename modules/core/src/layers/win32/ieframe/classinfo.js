@@ -14,6 +14,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001;
@@ -55,7 +56,7 @@ const METHODS = /** @type {[string, number][]} */ ([['GetTypeAttr', 8], ['GetTyp
  */
 export function createClassInfo(host){
     /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>host.writeMemory(at >>> 0,
+    const putU32 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
 
     /** @type {Record<string, (object: any, args: number[]) => number>} */

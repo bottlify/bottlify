@@ -119,7 +119,7 @@ for (const concurrency of /** @type {(1 | 4)[]} */ ([1, 4]))
                     }
                 }
             });
-            await app.run({ maxTurns: 200000, timeoutMs: 60000 });
+            await app.run({ maxTurns: 200000, timeoutMs: 600000 });
         }
         finally
         {

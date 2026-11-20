@@ -195,6 +195,15 @@ export function widenUnsigned(b){
 }
 
 /**
+ * @guestCode cdecl
+ * @param {f64} x
+ * @returns {i64}
+ */
+export function truncate(x){
+    return x * 2;
+}
+
+/**
  * @guestCode stdcall
  * @param {any} guest @param {u32} p @param {i32} k
  * @returns {i32}
@@ -593,6 +602,41 @@ export function deep(x, y){
 }
 
 /**
+ * Six doubles live at once, a negation's or a rounding's scratch above them:
+ * XMM6, then XMM7 too, taken at 64 bits, which the caller keeps.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function deeper(x, y){
+    const a = x * 3;
+    return x - (y * (a + (x / (y - -a))));
+}
+
+/**
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function deepest(x, y){
+    const a = x * 3;
+    return x - (y * (a + (x / (y - Math.floor(a)))));
+}
+
+/**
+ * Seven: more than x86-64 code keeps in registers.
+ *
+ * @guestCode cdecl
+ * @param {f64} x @param {f64} y
+ * @returns {f64}
+ */
+export function tooDeep(x, y){
+    const a = x * 3;
+    return x - (y * (a + (x / (y - (a * x)))));
+}
+
+/**
  * Integers each read once, left in the frame: the x87's integer operands.
  *
  * @guestCode cdecl
@@ -785,7 +829,7 @@ test('doubles: loads, stores, comparisons, the roundings, and NaN', async()=>{
 });
 
 test('x87 arguments popped, and an i64 from a double and from each integer', async()=>{
-    const { same } = await load(SAMPLE);
+    const { same, long } = await load(SAMPLE);
     const values = [0, -0.5, 3.75, -3.75, 2 ** 40 + 0.5, -(2 ** 62), 2 ** 63, -(2 ** 63), 1e20,
         NaN, Infinity, -Infinity];
     for (const v of values)
@@ -804,6 +848,12 @@ test('x87 arguments popped, and an i64 from a double and from each integer', asy
         same('widen', { stack: [a] });
         same('widenUnsigned', { stack: [a] });
     }
+    for (const v of values)
+    {
+        same('truncate', { stack: doubleWords(v) });
+    }
+    assert.deepEqual(['widen', 'widenUnsigned', 'truncate'].filter(name=>!long[name]), [],
+        'an i64 result built at 64 bits too, whole in RAX');
 });
 
 test('copies up and down, over themselves, a fill, and calls through a pointer', async()=>{
@@ -995,8 +1045,24 @@ test('a double\'s arithmetic as JavaScript computes it, and as the x87 rounds it
             same('remainders', { stack: [...doubleWords(x), ...doubleWords(y), k >>> 0,
                 i % 3 === 0 ? 0 : next() % 1000 - 500 >>> 0], control });
             same('deep', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+            same('deeper', { stack: [...doubleWords(x), ...doubleWords(y)], control });
+            same('deepest', { stack: [...doubleWords(x), ...doubleWords(y)], control });
         }
     }
+});
+
+test('at 64 bits, six doubles live at once and an operation\'s scratch take XMM6 and XMM7,'
+    + ' kept for the caller; seven are refused', async()=>{
+    const { long, refusedAt64 } = await load(FLOATS);
+    // movdqu [rsp+d], xmm6 / xmm7 at the entry, each put back at the exit.
+    const saves = (/** @type {Uint8Array} */ code, /** @type {number} */ reg)=>[...code.keys()]
+        .filter(i=>code[i] === 0xf3 && code[i + 1] === 0x0f && code[i + 2] === 0x7f
+            && (code[i + 3] >> 3 & 7) === reg).length;
+    assert.match(refusedAt64.deep, /more doubles at once/, 'eight deep, past what is kept');
+    assert.equal(saves(long.deeper.code, 6), 1);
+    assert.equal(saves(long.deeper.code, 7), 0);
+    assert.equal(saves(long.deepest.code, 7), 1);
+    assert.match(refusedAt64.tooDeep, /more doubles at once than x86-64 code keeps/);
 });
 
 test('integers in the frame as the x87\'s operands, and a negative zero\'s constant', async()=>{
@@ -1324,11 +1390,11 @@ test('everything outside the subset is refused where it is written', ()=>{
     refused(one(p, 'let s = a;\n    s = c;\n    return s;'), /s is i32, and this is u32/);
     refused(one('{ u9 }, a, c, x', 'return 0;'), /the guest's helpers are/);
     refused(one('a, c, x, y', 'return 0;'),
-        /@param \{i32 \| u32 \| f64 \| f32 \| x87\} y is wanted/);
+        /@param \{i32 \| u32 \| ptr \| f64 \| f32 \| f32bits \| x87 \| i64\} y is wanted/);
     refused(one(p, 'return 0;').replace('@guestCode cdecl', '@guestCode'),
         /names its convention/);
     refused(one(p, 'return a;', '@param {i32} a @param {u32} c @param {f64} x\n * @returns {f16}'),
-        /is not i32, u32, f64, f32, i64 or void/);
+        /is not i32, u32, ptr, f64, f32, i64 or void/);
     const q = '{ host }, a, c, x';
     refused(one(q, 'return host(a);'), /host\(\) takes no arguments/);
     refused(one(q, 'const v = host();\n    return v;'), /only returned: return host\(\)/);
@@ -1336,9 +1402,9 @@ test('everything outside the subset is refused where it is written', ()=>{
 });
 
 test('compareExchange: lock cmpxchg of a dword, answering what it held, the value stored only'
-    + ' where it held the expected one; a variable in EDX kept across it; refused at 64 bits',
+    + ' where it held the expected one; a variable in EDX kept across it; the same at 64 bits',
 async()=>{
-    const { same, compiled, refusedAt64 } = await load(`
+    const { same, compiled, long, refusedAt64 } = await load(`
 export const SLOT = Uint32Array.of(0);
 /**
  * @guestCode stdcall
@@ -1365,7 +1431,8 @@ export function exchange({ u32, compareExchange }, at, expected, value){
     assert.ok(stored > 50 && stored < 150, `${stored} of 200 stored: both outcomes taken`);
     assert.deepEqual(Object.keys(compiled.exchange.tables), ['SLOT'],
         'the table it reads, and where');
-    assert.match(refusedAt64.exchange, /compareExchange: .*refused at 64 bits/);
+    assert.equal(refusedAt64.exchange, undefined);
+    assert.ok(long.exchange, 'built at 64 bits, run beside the i386 by `same`');
 });
 
 test('pointerBytes: 4 in the i386 and 8 in the x86-64, a constant of each; an if on it keeps only'
@@ -1439,4 +1506,170 @@ export function sum({ doubleHigh }, x){
     return doubleHigh(x * 2);
 }
 `), /doubleHigh: at 32 bits a double variable/);
+});
+
+const ANSWERS = `
+/**
+ * @guestCode cdecl
+ * @param {u32} a
+ * @returns {u32}
+ */
+export function unsignedPast(a){
+    return (a + 0x80000000) >>> 0;
+}
+
+/**
+ * @guestCode cdecl
+ * @param {u32} a
+ * @returns {ptr}
+ */
+export function pointerPast(a){
+    return (a + 0x80000000) >>> 0;
+}
+
+/**
+ * @guestCode cdecl
+ * @param {i32} a
+ * @returns {i32}
+ */
+export function signedBelow(a){
+    return (a - 0x7fffffff) | 0;
+}
+`;
+
+test('a result in RAX at 64 bits: an i32 by its sign, a u32 and a pointer by zeros', async()=>{
+    const { same, sameAt64, compiled, long } = await load(ANSWERS);
+    for (const a of [0, 1, 0x10, 0x7fffffff, 0x80000000, 0xfffffffe])
+    {
+        for (const name of ['unsignedPast', 'pointerPast', 'signedBelow'])
+        {
+            same(name, { stack: [a] });
+            sameAt64(name, { stack: [a] });
+        }
+    }
+    assert.equal(compiled.pointerPast.returns, 'ptr', 'the record keeps the declared pointer');
+    assert.deepEqual(compiled.pointerPast.code, compiled.unsignedPast.code,
+        'a pointer result is a u32 in the i386');
+    assert.equal(long.pointerPast.returns, 'ptr');
+});
+
+const WIDE = `
+/**
+ * The sum of two 64-bit integers, its carry an unsigned compare.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {i64} a @param {i64} b
+ * @returns {i64}
+ */
+export function add64({ low64, high64, int64 }, a, b){
+    const low = (low64(a) + low64(b)) >>> 0;
+    const carry = low < low64(a) ? 1 : 0;
+    return int64(low, (high64(a) + high64(b) + carry) >>> 0);
+}
+
+/**
+ * The difference, its borrow an unsigned compare.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {i64} a @param {i64} b
+ * @returns {i64}
+ */
+export function sub64({ low64, high64, int64 }, a, b){
+    const borrow = low64(a) < low64(b) ? 1 : 0;
+    return int64((low64(a) - low64(b)) >>> 0, (high64(a) - high64(b) - borrow) >>> 0);
+}
+
+/**
+ * A 64-bit integer times a small factor and plus a digit: the low half's
+ * product in 16-bit parts, whose carries reach the high half.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} p1 @param {u32} p2 @param {u32} p3 @param {i64} value
+ * @param {u32} factor
+ * @returns {i64}
+ */
+export function scale64({ low64, high64, int64 }, p1, p2, p3, value, factor){
+    const low = low64(value);
+    const parts = (Math.imul(low & 0xffff, factor) + (p1 & 0xff)) >>> 0;
+    const upper = (Math.imul(low >>> 16, factor) + (parts >>> 16)) >>> 0;
+    const high = (Math.imul(high64(value), factor) + (upper >>> 16) + (p2 & p3 & 0)) >>> 0;
+    return int64(((upper << 16) | (parts & 0xffff)) >>> 0, high);
+}
+
+/**
+ * The high half of an i64 as an i32.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {i64} a
+ * @returns {i32}
+ */
+export function top({ high64 }, a){
+    return high64(a) | 0;
+}
+`;
+
+/** An i64's two stack words. @param {bigint} value */
+const i64Words = value=>[Number(BigInt.asUintN(32, value)),
+    Number(BigInt.asUintN(32, BigInt.asUintN(64, value) >> 32n))];
+
+test('i64 parameters read by their halves and an i64 result made of two, both widths', async()=>{
+    const { same, compiled, long } = await load(WIDE);
+    const values = [0n, 1n, -1n, 0xffffffffn, 0x100000000n, 0x7fffffffffffffffn,
+        -(2n ** 63n), 0x123456789abcdefn, -0x123456789abcdefn, 0xfffffffffn];
+    for (const a of values)
+    {
+        same('top', { stack: i64Words(a) });
+        for (const b of values)
+        {
+            same('add64', { stack: [...i64Words(a), ...i64Words(b)] });
+            same('sub64', { stack: [...i64Words(a), ...i64Words(b)] });
+        }
+        for (const factor of [0, 1, 10, 16, 36])
+        {
+            same('scale64', { stack: [7, 1, 2, ...i64Words(a), factor] });
+        }
+    }
+    assert.deepEqual(compiled.add64.params, ['i64', 'i64']);
+    assert.equal(compiled.sub64.code.at(-3), 0xc2, 'a stdcall i64 function pops its slots');
+    assert.equal(compiled.sub64.code.at(-2), 16, 'two slots for each i64');
+    assert.deepEqual(['add64', 'sub64', 'scale64', 'top'].filter(name=>!long[name]), [],
+        'every i64 function built at 64 bits, the fifth argument an i64 on the stack');
+});
+
+test('an i64 is read by its halves alone and int64 only returned', ()=>{
+    const head = '/**\n * @guestCode cdecl\n * @param {Guest} g @param {i64} a\n'
+        + ' * @returns {i64}\n */\nexport function f({ low64, int64 }, a){\n';
+    refused(`${head}    return a;\n}\n`, /a is an i64, read by low64\(\) and high64\(\)/);
+    refused(`${head}    const x = int64(1, 2);\n    return x;\n}\n`,
+        /int64\(low, high\) is an i64 function's result, returned/);
+    refused(`${head}    return int64(low64(a) + 1, 0);\n}\n`,
+        /a half of an i64 is brought back to 32 bits first/);
+});
+
+const MXCSR = `
+/**
+ * The exception flags as they stood, those named cleared.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} clear
+ * @returns {u32}
+ */
+export function flags({ mxcsr, setMxcsr }, clear){
+    const before = mxcsr();
+    setMxcsr(before & ~(clear & 0x3f));
+    return (before & 0xffff) >>> 0;
+}
+`;
+
+test('MXCSR read and loaded at both widths: the x86-64 has the word too', async()=>{
+    const { same, long, refusedAt64 } = await load(MXCSR);
+    assert.deepEqual(refusedAt64, {});
+    assert.equal(long.flags.leaf, false, 'the word goes through the stack: no leaf');
+    for (const mxcsr of [0x1f80, 0x1fbf, 0x1f81, 0x7fa4, 0x1f9d])
+    {
+        for (const clear of [0, 0x3f, 0x01, 0x24, 0xffffffff])
+        {
+            same('flags', { stack: [clear], mxcsr });
+        }
+    }
 });

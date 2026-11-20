@@ -25,6 +25,7 @@ import {
     PRIVILEGES, SDDL_ACE_FLAGS, SDDL_RIGHTS, SDDL_SIDS, USER_SID_TEXT, accountNamed, encodeText,
     isThisMachine, isTokenMember, parseSid, sidBytes, sidText, wideTextAt,
 } from './tokens.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_NOACCESS = 998;
@@ -256,12 +257,12 @@ export function createSecurityFunctions(host){
     };
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address */
     const readWord = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} value */
@@ -271,9 +272,9 @@ export function createSecurityFunctions(host){
         return bytes;
     };
     /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>host.writeMemory(address >>> 0, dwordBytes(value));
+    const writeDword = (address, value)=>host.writeMemory(wholeAddress(address), dwordBytes(value));
     /** @param {number} address @param {number} value */
-    const writeWord = (address, value)=>host.writeMemory(address >>> 0,
+    const writeWord = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array([value & 0xff, value >>> 8 & 0xff]));
 
     const { sidAt, aclAt, acesIn, partsOf, selfRelative, partsAskedFor } =
@@ -384,10 +385,10 @@ export function createSecurityFunctions(host){
             const bytes = encodeText(text, wide);
             const block = host.allocate(bytes.length);
             host.writeMemory(block, bytes);
-            writeDword(out >>> 0, block);
+            writeDword(wholeAddress(out), block);
             if ((length >>> 0) !== 0)
             {
-                writeDword(length >>> 0, text.length + 1);
+                writeDword(wholeAddress(length), text.length + 1);
             }
             host.setLastError(ERROR_SUCCESS);
             return 1;
@@ -421,7 +422,7 @@ export function createSecurityFunctions(host){
         view.setUint32(TRUSTEE.FORM, form, true);
         view.setUint32(TRUSTEE.TYPE, TRUSTEE_IS_UNKNOWN, true);
         view.setUint32(TRUSTEE.NAME, name >>> 0, true);
-        host.writeMemory(trustee >>> 0, bytes);
+        host.writeMemory(wholeAddress(trustee), bytes);
     };
 
     /**
@@ -439,18 +440,18 @@ export function createSecurityFunctions(host){
             let present = 0;
             if ((objectType >>> 0) !== 0)
             {
-                bytes.set(host.readMemory(objectType >>> 0, 16), 4);
+                bytes.set(host.readMemory(wholeAddress(objectType), 16), 4);
                 present |= ACE_OBJECT_TYPE_PRESENT;
             }
             if ((inheritedType >>> 0) !== 0)
             {
-                bytes.set(host.readMemory(inheritedType >>> 0, 16), 20);
+                bytes.set(host.readMemory(wholeAddress(inheritedType), 16), 20);
                 present |= ACE_INHERITED_OBJECT_TYPE_PRESENT;
             }
             const view = new DataView(bytes.buffer);
             view.setUint32(0, present, true);
             view.setUint32(36, sid >>> 0, true);
-            host.writeMemory(objects >>> 0, bytes);
+            host.writeMemory(wholeAddress(objects), bytes);
             writeTrustee(trustee, TRUSTEE_IS_OBJECTS_AND_SID, objects);
             return 0;
         },
@@ -471,7 +472,7 @@ export function createSecurityFunctions(host){
             inheritedName, name])=>{
             const present = ((typeName >>> 0) !== 0 ? ACE_OBJECT_TYPE_PRESENT : 0)
                 | ((inheritedName >>> 0) !== 0 ? ACE_INHERITED_OBJECT_TYPE_PRESENT : 0);
-            host.writeMemory(objects >>> 0, new Uint8Array([
+            host.writeMemory(wholeAddress(objects), new Uint8Array([
                 ...dwordBytes(present), ...dwordBytes(objectType), ...dwordBytes(typeName),
                 ...dwordBytes(inheritedName), ...dwordBytes(name),
             ]));
@@ -495,7 +496,7 @@ export function createSecurityFunctions(host){
         handler: (/** @type {number[]} */ [system, luid, name, size])=>{
             const machine = (system >>> 0) === 0 ? null
                 : wide ? wideTextAt(host.readMemory, system, 256)
-                    : host.readCString(system >>> 0, 256);
+                    : host.readCString(wholeAddress(system), 256);
             if (!isThisMachine(machine))
             {
                 return fail(RPC_S_SERVER_UNAVAILABLE);
@@ -505,7 +506,7 @@ export function createSecurityFunctions(host){
                 return fail(ERROR_INVALID_PARAMETER);
             }
             const low = readDword(luid);
-            const high = readDword((luid >>> 0) + 4);
+            const high = readDword(wholeAddress(luid) + 4);
             const found = high === 0
                 ? [...PRIVILEGES].find(([, value])=>value === low)?.[0] : undefined;
             if (found === undefined)
@@ -517,7 +518,7 @@ export function createSecurityFunctions(host){
                 writeDword(size, found.length + 1);
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory(name >>> 0, encodeText(found, wide));
+            host.writeMemory(wholeAddress(name), encodeText(found, wide));
             writeDword(size, found.length);
             host.setLastError(ERROR_SUCCESS);
             return 1;
@@ -591,11 +592,11 @@ export function createSecurityFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [descriptor, present, acl, defaulted])=>{
-            if ((descriptor >>> 0) === 0 || host.readMemory(descriptor >>> 0, 1)[0] !== 1)
+            if ((descriptor >>> 0) === 0 || host.readMemory(wholeAddress(descriptor), 1)[0] !== 1)
             {
                 return fail(ERROR_INVALID_SECURITY_DESCR);
             }
-            let control = readWord((descriptor >>> 0) + SD.CONTROL);
+            let control = readWord(wholeAddress(descriptor) + SD.CONTROL);
             if ((control & SE_SELF_RELATIVE) !== 0)
             {
                 return fail(ERROR_INVALID_SECURITY_DESCR);
@@ -604,9 +605,9 @@ export function createSecurityFunctions(host){
             if (present !== 0)
             {
                 control |= SE_SACL_PRESENT | (defaulted !== 0 ? SE_SACL_DEFAULTED : 0);
-                writeDword((descriptor >>> 0) + SD.SACL, acl);
+                writeDword(wholeAddress(descriptor) + SD.SACL, acl);
             }
-            writeWord((descriptor >>> 0) + SD.CONTROL, control);
+            writeWord(wholeAddress(descriptor) + SD.CONTROL, control);
             return 1;
         },
     };
@@ -724,8 +725,8 @@ export function createSecurityFunctions(host){
                 const head = new Uint8Array(8);
                 head[0] = 1;
                 head[1] = count & 0xff;
-                head.set(host.readMemory(authority >>> 0, 6), 2);
-                host.writeMemory(sid >>> 0, head);
+                head.set(host.readMemory(wholeAddress(authority), 6), 2);
+                host.writeMemory(wholeAddress(sid), head);
                 return 1;
             },
         },
@@ -819,7 +820,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(out >>> 0, domain);
+                host.writeMemory(wholeAddress(out), domain);
                 return 1;
             },
         },
@@ -856,7 +857,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                host.writeMemory(out >>> 0, sid);
+                host.writeMemory(wholeAddress(out), sid);
                 writeDword(size, sid.length);
                 return 1;
             },
@@ -912,7 +913,7 @@ export function createSecurityFunctions(host){
                     return fail(ERROR_NOACCESS);
                 }
                 writeDword(out, nextLuid++);
-                writeDword((out >>> 0) + 4, 0);
+                writeDword(wholeAddress(out) + 4, 0);
                 return 1;
             },
         },
@@ -933,7 +934,7 @@ export function createSecurityFunctions(host){
          * LPTSTR GetTrusteeName(PTRUSTEE), TRUSTEE_FORM GetTrusteeForm(PTRUSTEE),
          * TRUSTEE_TYPE GetTrusteeType(PTRUSTEE): the fields as they are.
          */
-        GetTrusteeNameA: trusteeField(TRUSTEE.NAME),
+        GetTrusteeNameA: { ...trusteeField(TRUSTEE.NAME), returns: 'pointer' },
         GetTrusteeNameW: trusteeField(TRUSTEE.NAME),
         GetTrusteeFormA: trusteeField(TRUSTEE.FORM),
         GetTrusteeFormW: trusteeField(TRUSTEE.FORM),
@@ -972,7 +973,7 @@ export function createSecurityFunctions(host){
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
                     const used = aces.reduce((sum, ace)=>sum + ace.bytes.length, ACL_HEADER);
-                    host.writeMemory(out >>> 0, new Uint8Array([...dwordBytes(aces.length),
+                    host.writeMemory(wholeAddress(out), new Uint8Array([...dwordBytes(aces.length),
                         ...dwordBytes(used), ...dwordBytes(bytes.length - used)]));
                     return 1;
                 }
@@ -1002,7 +1003,8 @@ export function createSecurityFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([descriptor, interest, set])=>{
-                if ((descriptor >>> 0) === 0 || host.readMemory(descriptor >>> 0, 1)[0] !== 1)
+                if ((descriptor >>> 0) === 0 || host.readMemory(wholeAddress(descriptor),
+                    1)[0] !== 1)
                 {
                     return fail(ERROR_INVALID_SECURITY_DESCR);
                 }
@@ -1010,8 +1012,8 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const control = readWord((descriptor >>> 0) + SD.CONTROL);
-                writeWord((descriptor >>> 0) + SD.CONTROL,
+                const control = readWord(wholeAddress(descriptor) + SD.CONTROL);
+                writeWord(wholeAddress(descriptor) + SD.CONTROL,
                     (control & ~interest | set & interest) & 0xffff);
                 return 1;
             },
@@ -1050,7 +1052,7 @@ export function createSecurityFunctions(host){
                     writeDword(size, bytes.length);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -1104,8 +1106,8 @@ export function createSecurityFunctions(host){
                     {
                         return 0;
                     }
-                    host.writeMemory(at >>> 0, part);
-                    return at >>> 0;
+                    host.writeMemory(wholeAddress(at), part);
+                    return wholeAddress(at);
                 };
                 const header = new Uint8Array(SD.SIZE);
                 const view = new DataView(header.buffer);
@@ -1115,7 +1117,7 @@ export function createSecurityFunctions(host){
                 view.setUint32(SD.GROUP, place(parts.group, group), true);
                 view.setUint32(SD.SACL, place(parts.sacl, sacl), true);
                 view.setUint32(SD.DACL, place(parts.dacl, dacl), true);
-                host.writeMemory(absolute >>> 0, header);
+                host.writeMemory(wholeAddress(absolute), header);
                 return 1;
             },
         },
@@ -1146,7 +1148,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },

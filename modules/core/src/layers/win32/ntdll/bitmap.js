@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The RTL_BITMAP routines: a bitmap is { ULONG SizeOfBitMap; PULONG Buffer; },
  * bit n the (n % 8)th of byte n / 8 of the buffer. A program's allocator of
@@ -32,11 +34,11 @@ const NOT_FOUND = 0xffffffff;
 export function createBitmapFunctions(host){
     /** @param {number} at */
     const u32 = at=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number[]} values */
-    const putU32s = (at, values)=>host.writeMemory(at >>> 0,
+    const putU32s = (at, values)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint32Array(values.map(v=>v >>> 0)).buffer));
 
     /**

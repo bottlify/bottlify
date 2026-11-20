@@ -16,6 +16,8 @@
  * Reading and writing them lives here too, so that the offsets and the code
  * that uses them cannot drift apart.
  */
+import { paramsOf, wideParams } from '../common/pointers.js';
+
 
 /** WNDCLASSA, the classic form RegisterClassA takes. */
 export const WNDCLASSA = Object.freeze({
@@ -142,13 +144,18 @@ const INPUT64 = Object.freeze({
 const NCCALCSIZE_PARAMS32 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 52 });
 const NCCALCSIZE_PARAMS64 = Object.freeze({ rgrc: 0, lppos: 48, SIZE: 56 });
 
-/** How each eight-byte field widens a 32-bit value: as a LONG, or as a UINT. */
+/**
+ * How each eight-byte field widens a 32-bit value: a handle and an LPARAM as a
+ * LONG (HWND_TOPMOST is -1 whole), an address and a WPARAM as a UINT. An address
+ * - a window procedure, a string, lpCreateParams, a module's base (HINSTANCE) -
+ * past 2 GiB in a program linked /LARGEADDRESSAWARE stays itself.
+ */
 const WIDE = Object.freeze({
-    hwnd: 'signed', hwndInsertAfter: 'signed', lpfnWndProc: 'signed', hInstance: 'signed',
-    hIcon: 'signed', hCursor: 'signed', hbrBackground: 'signed', lpszMenuName: 'signed',
-    lpszClassName: 'signed', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
-    hdc: 'signed', lpCreateParams: 'signed', hMenu: 'signed', hwndParent: 'signed',
-    lpszName: 'signed', lpszClass: 'signed', lpcs: 'signed', lppos: 'signed',
+    hwnd: 'signed', hwndInsertAfter: 'signed', lpfnWndProc: 'unsigned', hInstance: 'unsigned',
+    hIcon: 'signed', hCursor: 'signed', hbrBackground: 'signed', lpszMenuName: 'unsigned',
+    lpszClassName: 'unsigned', hIconSm: 'signed', wParam: 'unsigned', lParam: 'signed',
+    hdc: 'signed', lpCreateParams: 'unsigned', hMenu: 'signed', hwndParent: 'signed',
+    lpszName: 'unsigned', lpszClass: 'unsigned', lpcs: 'unsigned', lppos: 'unsigned',
     hWndActive: 'signed', dwExtraInfo: 'unsigned',
 });
 
@@ -217,7 +224,10 @@ export function putFields(view, base, layouts, layout, values){
         if (layouts.pointerSize === 8 && Object.hasOwn(WIDE, name))
         {
             const signed = WIDE[/** @type {keyof typeof WIDE} */ (name)] === 'signed';
-            view.setUint32(at + 4, signed && (value | 0) < 0 ? 0xffffffff : 0, true);
+            // An address past 4 GiB - an image a 64-bit program keeps at its
+            // own base there - is held whole and goes back whole.
+            view.setUint32(at + 4, value >= 2 ** 32 ? Math.floor(value / 2 ** 32) >>> 0
+                : signed && (value | 0) < 0 ? 0xffffffff : 0, true);
         }
     }
 }
@@ -292,6 +302,9 @@ export function writeU32s(memory, address, values){
  * @property {number} iconSm      Zero for the classic form, which has no such field.
  */
 
+/** @param {Record<string, number>} layout  whether it is a class structure at 64 bits */
+const wide64 = layout=>layout === WNDCLASSA64 || layout === WNDCLASSEXA64;
+
 /**
  * Reads either form of the class structure. The layout decides which fields
  * exist; everything past that is the same set of values, which is why the two
@@ -305,17 +318,25 @@ export function writeU32s(memory, address, values){
 export function readWindowClass(memory, address, layout){
     /** @param {number} offset */
     const field = offset=>readU32(memory, address + offset);
+    /**
+     * An address field, whole in a 64-bit structure: a procedure or a name in
+     * an image past 4 GiB is not its low dword.
+     *
+     * @param {number} offset
+     */
+    const address64 = offset=>(wide64(layout)
+        ? field(offset) + readU32(memory, address + offset + 4) * 2 ** 32 : field(offset));
     return {
         style: field(layout.style),
-        wndProc: field(layout.lpfnWndProc),
+        wndProc: address64(layout.lpfnWndProc),
         classExtra: field(layout.cbClsExtra) | 0,
         windowExtra: field(layout.cbWndExtra) | 0,
-        instance: field(layout.hInstance),
+        instance: address64(layout.hInstance),
         icon: field(layout.hIcon),
         cursor: field(layout.hCursor),
         background: field(layout.hbrBackground),
-        menuName: field(layout.lpszMenuName),
-        className: field(layout.lpszClassName),
+        menuName: address64(layout.lpszMenuName),
+        className: address64(layout.lpszClassName),
         iconSm: 'hIconSm' in layout ? field(layout.hIconSm) : 0,
     };
 }
@@ -360,6 +381,7 @@ export function writeWindowClass(memory, address, fields, layouts = userLayouts(
  * @property {number} time
  * @property {number} x
  * @property {number} y
+ * @property {import('../common/pointers.js').WideParams} [wide]
  */
 
 /**
@@ -380,6 +402,17 @@ export function writeMessage(memory, address, message, layouts = userLayouts(4))
         ptX: message.x,
         ptY: message.y,
     });
+    // What a 64-bit poster passed that the dwords do not say goes back whole.
+    const [w, l] = layouts.pointerSize === 8 ? paramsOf(message) : [0, 0];
+    const view = new DataView(bytes.buffer);
+    if (typeof w === 'bigint')
+    {
+        view.setBigUint64(layout.wParam, w, true);
+    }
+    if (typeof l === 'bigint')
+    {
+        view.setBigUint64(layout.lParam, l, true);
+    }
     // The 32-bit MSG ends at the point; a 64-bit one's lPrivate after it is
     // the system's, and left as the caller had it.
     memory.writeMemory(address, bytes.subarray(0, layout.ptY + 4));
@@ -391,25 +424,31 @@ export function writeMessage(memory, address, message, layouts = userLayouts(4))
  * what a TIMERPROC takes in their place. The cursor position is the queue's
  * own bookkeeping and nothing here decides anything by it.
  *
- * A field of a 64-bit MSG is read by its low half: a pointer, a handle and
- * every value the queue holds lie within it.
+ * A field of a 64-bit MSG is read by its low half; a WPARAM or an LPARAM whose
+ * high half says more than the dword does is carried beside it (`wide`).
  *
  * @param {StructMemory} memory
  * @param {number} address
  * @param {UserLayouts} [layouts]  The process's width; a 32-bit one's by default.
  * @returns {{ hwnd: number, message: number, wParam: number, lParam: number,
- *             time: number }}
+ *             time: number, wide?: import('../common/pointers.js').WideParams }}
  */
 export function readMessage(memory, address, layouts = userLayouts(4)){
     const layout = layouts.MSG;
+    const wParam = readU32(memory, address + layout.wParam);
+    const lParam = readU32(memory, address + layout.lParam);
+    const wide = layouts.pointerSize === 8 ? wideParams(wParam,
+        readU32(memory, address + layout.wParam + 4), lParam,
+        readU32(memory, address + layout.lParam + 4)) : undefined;
     return {
         hwnd: readU32(memory, address + layout.hwnd),
         message: readU32(memory, address + layout.message),
-        wParam: readU32(memory, address + layout.wParam),
-        lParam: readU32(memory, address + layout.lParam),
+        wParam,
+        lParam,
         // What a TIMERPROC is handed as its tick count when DispatchMessage
         // calls it.
         time: readU32(memory, address + layout.time),
+        ...wide ? { wide } : {},
     };
 }
 

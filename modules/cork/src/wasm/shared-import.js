@@ -13,6 +13,8 @@
 
 /** The most pages a 32-bit memory has: a shared import declaring it links against any. */
 export const SHARED_MAX_PAGES = 65536;
+/** The same for a `memory64` memory, a wide window's RAM: 16 GiB, the widest window's. */
+const SHARED_MAX_PAGES_64 = 262144;
 
 /** @param {Uint8Array} bytes @param {number} at @returns {[number, number]} value, next */
 const readLeb = (bytes, at)=>{
@@ -104,7 +106,9 @@ const sharedImports = (bytes, start, maxPages)=>{
         const flags = bytes[cursor];
         const [min, afterMin] = readLeb(bytes, cursor + 1);
         cursor = (flags & 1) ? readLeb(bytes, afterMin)[1] : afterMin;
-        section.push(3, ...leb(min), ...leb(maxPages));
+        // Bit 2: a `memory64` memory, which stays one.
+        section.push(3 | (flags & 4), ...leb(min),
+            ...leb((flags & 4) ? SHARED_MAX_PAGES_64 : maxPages));
     }
     return section;
 };

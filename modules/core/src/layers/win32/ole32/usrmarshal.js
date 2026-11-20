@@ -36,6 +36,7 @@ import { GUID_NULL, formatGuid, readGuid } from './guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
@@ -182,19 +183,20 @@ const after = (value, then)=>(value instanceof Promise ? value.then(then) : then
 
 /**
  * @param {UserMarshalHost} host
- * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any }>}
+ * @returns {Record<string, { argBytes: number, handler: (args: number[]) => any,
+ *     returns?: string }>}
  */
 export function createUserMarshalFunctions(host){
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address */
     const readU16 = address=>{
-        const bytes = host.readMemory(address >>> 0, 2);
+        const bytes = host.readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
     /** @param {number} address @param {number} value */
-    const writeU16 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU16 = (address, value)=>host.writeMemory(wholeAddress(address),
         Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
     /**
      * Consecutive words from `address`, written at once.
@@ -206,7 +208,7 @@ export function createUserMarshalFunctions(host){
         const bytes = new Uint8Array(words.length * 4);
         const view = new DataView(bytes.buffer);
         words.forEach((word, index)=>view.setUint32(index * 4, word >>> 0, true));
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
         return (address + bytes.length) >>> 0;
     };
     /** @param {number} address @param {number} value */
@@ -1206,16 +1208,18 @@ export function createUserMarshalFunctions(host){
          * unsigned char *WdtpInterfacePointer_UserMarshal(ULONG *pFlags,
          *     ULONG RealFlags, unsigned char *pBuffer, IUnknown *punk, REFIID riid)
          */
-        WdtpInterfacePointer_UserMarshal: entry(20, ([, , buffer, unknown, riid], thread)=>
-            (unknown === 0 ? buffer
+        WdtpInterfacePointer_UserMarshal: {
+            ...entry(20, ([, , buffer, unknown, riid], thread)=>(unknown === 0 ? buffer
                 : pointerMarshal(buffer, unknown, readGuid(host, riid), thread))),
+            returns: 'pointer',
+        },
 
         /**
          * unsigned char *WdtpInterfacePointer_UserUnmarshal(ULONG *pFlags,
          *     unsigned char *pBuffer, IUnknown **ppunk, REFIID riid)
          */
-        WdtpInterfacePointer_UserUnmarshal: entry(16, ([, buffer, slot, riid], thread)=>
-            pointerUnmarshal(buffer, slot, riid, thread)),
+        WdtpInterfacePointer_UserUnmarshal: { ...entry(16, ([, buffer, slot, riid], thread)=>
+            pointerUnmarshal(buffer, slot, riid, thread)), returns: 'pointer' },
 
         /** void WdtpInterfacePointer_UserFree(IUnknown *punk) */
         WdtpInterfacePointer_UserFree: entry(4, ([unknown], thread)=>

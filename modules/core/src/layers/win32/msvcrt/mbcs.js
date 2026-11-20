@@ -25,6 +25,7 @@
  */
 
 import { EILSEQ, EINVAL, ERANGE } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The `_mbctype` bits, at the values msvcrt's `<mbctype.h>` gives them. */
 export const MB_SYMBOL = 0x01;
@@ -264,10 +265,10 @@ export function createMultiBytePage(){
  */
 export function createMultiByteHandlers(host, page){
     /** @param {number} address */
-    const u8 = address=>host.readMemory(address >>> 0, 1)[0];
+    const u8 = address=>host.readMemory(wholeAddress(address), 1)[0];
 
     /** @param {number} address @param {number} value */
-    const setU8 = (address, value)=>host.writeMemory(address >>> 0, Uint8Array.of(value));
+    const setU8 = (address, value)=>host.writeMemory(wholeAddress(address), Uint8Array.of(value));
 
     /** How many bytes the character at `at` takes. @param {number} at */
     const width = at=>(page.isLead(u8(at)) && u8(at + 1) !== 0 ? 2 : 1);

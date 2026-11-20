@@ -32,6 +32,7 @@ import {
 import {
     CLSID_PICTURE_DIB, CLSID_PICTURE_ENHMETAFILE, CLSID_PICTURE_METAFILE,
 } from './datacache.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -353,9 +354,9 @@ export function createOle2Functions(env){
     const refuse = createRefusals({ divergence: env.divergence });
 
     /** @param {number} address */
-    const guidAt = address=>formatGuid(env.readMemory(address >>> 0, GUID_SIZE));
+    const guidAt = address=>formatGuid(env.readMemory(wholeAddress(address), GUID_SIZE));
     /** @param {number} address @param {string} guid */
-    const writeGuid = (address, guid)=>env.writeMemory(address >>> 0,
+    const writeGuid = (address, guid)=>env.writeMemory(wholeAddress(address),
         /** @type {Uint8Array} */ (parseGuid(guid)));
 
     /**
@@ -1220,7 +1221,7 @@ export function createOle2Functions(env){
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const render = renderopt >>> 0;
+                const render = wholeAddress(renderopt);
                 if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || (storage >>> 0) === 0
                     || (render === OLERENDER.FORMAT && (formatEtc >>> 0) === 0))
                 {
@@ -1479,6 +1480,7 @@ export function createOle2Functions(env){
          * label is neither drawn nor measured here, which is said once.
          */
         OleMetafilePictFromIconAndLabel: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([icon])=>{
@@ -1521,7 +1523,7 @@ export function createOle2Functions(env){
                 await system('KERNEL32.dll', 'GlobalUnlock', [block]);
                 util.sayOnce('OleMetafilePictFromIconAndLabel',
                     'the label is not drawn, and the extent is the icon\'s alone');
-                return block >>> 0;
+                return wholeAddress(block);
             },
         },
 
@@ -1553,7 +1555,7 @@ export function createOle2Functions(env){
                 {
                     return stat.hr;
                 }
-                env.writeMemory(out >>> 0, stat.clsid);
+                env.writeMemory(wholeAddress(out), stat.clsid);
                 const target = autoConvertOf(formatGuid(stat.clsid));
                 if (target.hr < 0)
                 {
@@ -1606,7 +1608,7 @@ export function createOle2Functions(env){
                 /** @type {CompObjFormat} */
                 const format = id === 0 ? null : name !== null ? { name } : { id };
                 return writeCompObj(storage >>> 0, format,
-                    (userType >>> 0) === 0 ? null : util.readWide(userType >>> 0), thread);
+                    (userType >>> 0) === 0 ? null : util.readWide(wholeAddress(userType)), thread);
             },
         },
 
@@ -1744,8 +1746,8 @@ export function createOle2Functions(env){
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const command = await acceleratorFor(readU32((info >>> 0) + FRAMEINFO_ACCEL),
-                    readU32((info >>> 0) + FRAMEINFO_ACCEL_COUNT), message >>> 0, thread);
+                const command = await acceleratorFor(readU32(wholeAddress(info) + FRAMEINFO_ACCEL),
+                    readU32(wholeAddress(info) + FRAMEINFO_ACCEL_COUNT), message >>> 0, thread);
                 if (command === null || (frame >>> 0) === 0)
                 {
                     return S_FALSE;
@@ -1774,7 +1776,7 @@ export function createOle2Functions(env){
                 new DataView(bytes.buffer).setUint32(0, menu >>> 0, true);
                 if ((widths >>> 0) !== 0)
                 {
-                    bytes.set(env.readMemory(widths >>> 0, MENU_WIDTHS_SIZE), 4);
+                    bytes.set(env.readMemory(wholeAddress(widths), MENU_WIDTHS_SIZE), 4);
                 }
                 return util.lend(bytes);
             },
@@ -1947,7 +1949,7 @@ export function createOle2Functions(env){
                         'only a picture of the format named is made');
                     return (formatEtc >>> 0) === 0 ? E_INVALIDARG : DV_E_FORMATETC;
                 }
-                const cf = util.readU16(formatEtc >>> 0);
+                const cf = util.readU16(wholeAddress(formatEtc));
                 const clsid = STATIC_CLASSES.get(cf);
                 if (!clsid || !env.defaultHandlers)
                 {
@@ -1965,6 +1967,7 @@ export function createOle2Functions(env){
          * block, a metafile picture with its metafile, an enhanced metafile.
          */
         OleDuplicateData: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, format])=>util.duplicate(handle >>> 0, format & 0xffff,

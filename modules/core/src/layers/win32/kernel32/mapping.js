@@ -13,6 +13,7 @@ import { copyOnWrite, sectionRights, viewProtection } from './view-rights.js';
 import { sectionProtection } from './image-protection.js';
 import { askChild } from './cross-process.js';
 import { PROCESS_VM_OPERATION } from './process-target.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -492,8 +493,8 @@ export function createMappingFunctions(host){
         {
             return null;
         }
-        return (wide ? host.readWideString(pointer >>> 0, WHOLE_NAME * 2)
-            : host.readCString(pointer >>> 0, WHOLE_NAME)) || null;
+        return (wide ? host.readWideString(wholeAddress(pointer), WHOLE_NAME * 2)
+            : host.readCString(wholeAddress(pointer), WHOLE_NAME)) || null;
     };
 
     /**
@@ -530,7 +531,7 @@ export function createMappingFunctions(host){
             return { status: STATUS.INVALID_PAGE_PROTECTION };
         }
         const writable = WRITABLE_PAGES.includes(page);
-        const asked = sizeLow >>> 0;
+        const asked = wholeAddress(sizeLow);
         if (!node)
         {
             // A mapping with no file must be told how big it is; there is
@@ -778,20 +779,20 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.INVALID_HANDLE;
                 }
-                if ((attributes >>> 0) !== 0 && readDword((attributes >>> 0) + 8) !== 0)
+                if ((attributes >>> 0) !== 0 && readDword(wholeAddress(attributes) + 8) !== 0)
                 {
                     host.divergence?.('NtCreateSection',
                         'a named section is made without its name');
                 }
                 const size = (maximum >>> 0) === 0 ? [0, 0]
-                    : [readDword((maximum >>> 0) + 4), readDword(maximum >>> 0)];
+                    : [readDword(wholeAddress(maximum) + 4), readDword(wholeAddress(maximum))];
                 return settle(makeSection(opened ? opened.node : null, page & PAGE_MASK,
                     flags || SEC_COMMIT, size[0], size[1]), made=>{
                     if ('status' in made)
                     {
                         return made.status;
                     }
-                    writeDword(out >>> 0, openSection(made));
+                    writeDword(wholeAddress(out), openSection(made));
                     return STATUS.SUCCESS;
                 });
             },
@@ -841,7 +842,7 @@ export function createMappingFunctions(host){
                     }
                     if (found)
                     {
-                        writeDword(out >>> 0, openNamed(found));
+                        writeDword(wholeAddress(out), openNamed(found));
                         return STATUS.SUCCESS;
                     }
                 }
@@ -858,6 +859,7 @@ export function createMappingFunctions(host){
          */
         NtQuerySection: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, buffer, length, returned])=>{
                 const section = sectionOf(handle);
@@ -894,7 +896,7 @@ export function createMappingFunctions(host){
                 {
                     info.set(sectionImageInformation(section.image));
                 }
-                host.writeMemory(buffer >>> 0, info);
+                host.writeMemory(wholeAddress(buffer), info);
                 writeDwordIf(returned >>> 0, size);
                 return STATUS.SUCCESS;
             },
@@ -911,6 +913,7 @@ export function createMappingFunctions(host){
          */
         NtMapViewOfSection: {
             argBytes: 40,
+            sizes: [4],
             /** @param {number[]} args */
             handler: ([handle, process, base, , , offsetAt, sizeAt, , , page])=>{
                 const section = sectionOf(handle);
@@ -933,13 +936,13 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                if (readDword(base >>> 0) !== 0)
+                if (readDword(wholeAddress(base)) !== 0)
                 {
                     host.divergence?.('NtMapViewOfSection',
                         'a view goes where there is room, not at the address asked for');
                 }
-                const offset = (offsetAt >>> 0) === 0 ? 0 : readDword(offsetAt >>> 0);
-                const length = readDword(sizeAt >>> 0) || section.size - offset;
+                const offset = (offsetAt >>> 0) === 0 ? 0 : readDword(wholeAddress(offsetAt));
+                const length = readDword(wholeAddress(sizeAt)) || section.size - offset;
                 if (length <= 0 || offset + length > section.size)
                 {
                     return STATUS.INVALID_VIEW_SIZE;
@@ -952,8 +955,8 @@ export function createMappingFunctions(host){
                     {
                         return STATUS.NO_MEMORY;
                     }
-                    writeDword(base >>> 0, address);
-                    writeDword(sizeAt >>> 0, pageRound(length));
+                    writeDword(wholeAddress(base), address);
+                    writeDword(wholeAddress(sizeAt), pageRound(length));
                     return section.image && address !== section.image.image.imageBase
                         ? STATUS.IMAGE_NOT_AT_BASE : STATUS.SUCCESS;
                 });
@@ -1015,14 +1018,16 @@ export function createMappingFunctions(host){
          * whatever is left of it.
          */
         MapViewOfFile: {
+            returns: 'pointer',
             argBytes: 20,
+            sizes: [4],
             /** @param {number[]} args */
             handler: ([handle, access, offsetHigh, offsetLow, length, base = 0])=>{
                 if (offsetHigh !== 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const placed = base >>> 0;
+                const placed = wholeAddress(base);
                 if (placed % ALLOCATION_GRANULARITY !== 0)
                 {
                     return fail(ERROR_MAPPED_ALIGNMENT);
@@ -1042,7 +1047,7 @@ export function createMappingFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                const offset = offsetLow >>> 0;
+                const offset = wholeAddress(offsetLow);
                 const wanted = (length >>> 0) || Math.max(mapping.size - offset, 0);
                 if (wanted === 0)
                 {
@@ -1201,7 +1206,9 @@ export function createMappingFunctions(host){
          * is anywhere.
          */
         MapViewOfFileEx: {
+            returns: 'pointer',
             argBytes: 24,
+            sizes: [4],
             /** @param {number[]} args */
             handler: args=>table.MapViewOfFile.handler(args),
         },
@@ -1226,7 +1233,7 @@ export function createMappingFunctions(host){
                 if (view.writable && view.mapping.node)
                 {
                     host.files.write(view.mapping.node, view.offset,
-                        host.readMemory(address >>> 0, view.length));
+                        host.readMemory(wholeAddress(address), view.length));
                 }
                 if (view.mapping.node)
                 {
@@ -1255,9 +1262,10 @@ export function createMappingFunctions(host){
          */
         FlushViewOfFile: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, count])=>{
-                const at = address >>> 0;
+                const at = wholeAddress(address);
                 for (const [base, view] of views)
                 {
                     if (at < base || at >= base + view.length)
@@ -1299,14 +1307,14 @@ export function createMappingFunctions(host){
                 const made = host.pipes?.anonymous?.(attributes >>> 0, (size >>> 0) || 4096);
                 if (made)
                 {
-                    writeDword(readHandle >>> 0, made.read);
-                    writeDword(writeHandle >>> 0, made.write);
+                    writeDword(wholeAddress(readHandle), made.read);
+                    writeDword(wholeAddress(writeHandle), made.write);
                     return 1;
                 }
                 /** @type {{ buffered: number[], writersOpen: boolean }} */
                 const pipe = { buffered: [], writersOpen: true };
-                writeDword(readHandle >>> 0, host.handles.open('pipe-read', pipe));
-                writeDword(writeHandle >>> 0, host.handles.open('pipe-write', pipe));
+                writeDword(wholeAddress(readHandle), host.handles.open('pipe-read', pipe));
+                writeDword(wholeAddress(writeHandle), host.handles.open('pipe-write', pipe));
                 return 1;
             },
         },
@@ -1338,7 +1346,7 @@ export function createMappingFunctions(host){
                 const copied = Math.min(total, size >>> 0);
                 if (buffer !== 0 && copied > 0)
                 {
-                    host.writeMemory(buffer >>> 0,
+                    host.writeMemory(wholeAddress(buffer),
                         new Uint8Array(pipe.buffered.slice(0, copied)));
                 }
                 writeDwordIf(read >>> 0, copied);

@@ -1920,6 +1920,87 @@ test('a 64-bit caller finds a quadword the handler answers in two halves whole i
         'and the high half one call gave is not the next call\'s');
 });
 
+test('a 64-bit caller finds an address zero-extended in RAX, any other dword sign-extended', ()=>{
+    // VirtualAlloc, HeapAlloc, malloc above 2 GiB: an address widened by its
+    // sign is 0xFFFFFFFF_9xxxxxxx, which faults on first use. A HANDLE of -1
+    // is INVALID_HANDLE_VALUE whole only sign-extended.
+    const { dispatcher, r } = longMachine();
+    dispatcher.register(1, { name: 'X!Alloc', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x90000000 });
+    dispatcher.register(2, { name: 'X!Open', ...STDCALL, argBytes: 0, handler: ()=>-1 });
+    dispatcher.register(3, { name: 'X!AllocSigned', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x90000000 | 0 });
+    dispatcher.register(4, { name: 'X!Small', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x1000 });
+    dispatcher.dispatch(1);
+    assert.equal(r.get('rax'), 0x90000000n);
+    dispatcher.dispatch(2);
+    assert.equal(r.get('rax'), 0xffffffffffffffffn);
+    dispatcher.dispatch(3);
+    assert.equal(r.get('rax'), 0x90000000n, 'an address the handler computed with | 0 too');
+    dispatcher.dispatch(4);
+    assert.equal(r.get('rax'), 0x1000n);
+    // strrchr into a string the program keeps past 4 GiB: the handler answers
+    // the address it was handed whole, and RAX holds all of it.
+    dispatcher.register(5, { name: 'X!Within', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>0x1_4000_3010 });
+    dispatcher.dispatch(5);
+    assert.equal(r.get('rax'), 0x1_4000_3010n);
+});
+
+test('a size past a dword reaches its handler as the largest dword, never as its low half', ()=>{
+    // malloc(4 GiB + 16) in a 64-bit program: sixteen bytes handed back would be
+    // written past at once. The handler refuses the largest dword as too large.
+    const { dispatcher } = longMachine({ rcx: 0x1_0000_0010n, r11: 0x40n, r8: 0x1_0000_0000n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Alloc', ...STDCALL, argBytes: 12, sizes: [0, 1],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.map(each=>each >>> 0)), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0xffffffff, 0x40, 0]],
+        'a declared size past a dword, one within it, and an undeclared argument as ever');
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Both', ...STDCALL, argBytes: 8,
+        addresses: [1], sizes: [1], handler: ()=>0 }), /sizes/, 'an address is no size');
+});
+
+test('a call that waits says whether its answer is an address, for the resume to widen it', ()=>{
+    // An allocation that waits (a file mapped once its blocks are fetched):
+    // the answer comes after the dispatcher has gone on, and RAX must take it
+    // as the call in place would - an address by zeros, a handle by its sign.
+    /** @type {boolean[]} */
+    const said = [];
+    const { dispatcher } = machine64({ suspend: (answer, frame)=>said.push(frame.zeroExtends) });
+    dispatcher.register(1, { name: 'X!MapLater', ...STDCALL, argBytes: 0, returns: 'pointer',
+        handler: ()=>Promise.resolve(0x90000000) });
+    dispatcher.register(2, { name: 'X!OpenLater', ...STDCALL, argBytes: 0,
+        handler: ()=>Promise.resolve(-1) });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    assert.deepEqual(said, [true, false]);
+});
+
+test('an argument declared an address is handed whole where its high half names one', ()=>{
+    // CreateThread's start routine and parameter in an image a 64-bit program
+    // keeps past 4 GiB: whole to a handler that declares them. Any other high
+    // half - none, a sign's ones, what a caller left above an int - leaves the
+    // dword every handler has always had, and so does an undeclared argument.
+    const { dispatcher } = longMachine({ rcx: 0x140001740n, r11: 0xffffffff_fffffffen,
+        r8: 0xdeadbeef_00000007n, r9: 0x140003010n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Start', ...STDCALL, argBytes: 16, addresses: [0, 1, 2],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0x140001740, -2, 7, 0x40003010]]);
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Wide', ...STDCALL, argBytes: 12,
+        quadwords: [1], addresses: [2], handler: ()=>0 }), /addresses/,
+    'half of a quadword is no address');
+    assert.throws(()=>dispatcher.register(3, { name: 'X!Past', ...STDCALL, argBytes: 8,
+        addresses: [2], handler: ()=>0 }), /addresses/, 'nor a dword past the arguments');
+});
+
 test('a quadword argument is one x64 slot, split into the two dwords the handler reads', ()=>{
     // _lseeki64(int fd, __int64 offset, int origin): four dwords to a 32-bit
     // handler, three arguments to an x86-64 caller -- RCX, RDX and R8.
@@ -2159,4 +2240,40 @@ test('a 64-bit call hands each argument\'s high dword beside it, for a pointer p
         } });
     dispatcher.dispatch(1);
     assert.deepEqual(seen, [[0x40001234, 5, 1, 0]]);
+});
+
+test('a function is checked when it is registered and its record made at its first call', ()=>{
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 4n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Add', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    assert.equal(/** @type {any} */ (dispatcher).functions[1], undefined,
+        'no record until it is called');
+    assert.equal(dispatcher.lookup(1)?.name, 'X!Add', 'its declaration is there to look up');
+    assert.throws(()=>dispatcher.register(1, { name: 'X!Again', ...STDCALL, argBytes: 0,
+        handler: ()=>0 }), /already implemented/, 'an id taken before its first call');
+    assert.throws(()=>dispatcher.register(2, { name: 'X!Bad', ...STDCALL, argBytes: 8,
+        quadwords: [1], handler: ()=>0 }), /quadwords/, 'a broken declaration refused at once');
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[3, 4]]);
+    const made = /** @type {{ calls: number } | undefined} */ (
+        /** @type {any} */ (dispatcher).functions.at(1));
+    assert.equal(made?.calls, 1, 'made, and counting');
+    assert.equal(dispatcher.diagnostics().implemented, 1);
+});
+
+test('an address in a span named by asking is named when a report asks, and only then', ()=>{
+    const { dispatcher } = longMachine({});
+    let asked = 0;
+    dispatcher.placedSpan(0x10000, 0x1000,
+        address=>(asked++, address === 0x10010 ? 'X!One' : null));
+    dispatcher.placed(0x20000, 'Y!Two');
+    assert.equal(asked, 0);
+    assert.equal(dispatcher.symbolize(0x10010), 'X!One');
+    assert.equal(dispatcher.symbolize(0x10020), null);
+    assert.equal(dispatcher.symbolize(0x20000), 'Y!Two');
+    assert.equal(dispatcher.symbolize(0x11000), null, 'past the span');
+    assert.equal(asked, 2);
 });

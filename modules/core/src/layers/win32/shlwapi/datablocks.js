@@ -21,6 +21,7 @@
  */
 
 import { dword } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Each is [ordinal, name]. @type {readonly (readonly [number, string])[]} */
 export const DATABLOCK_ORDINALS = Object.freeze([
@@ -118,7 +119,7 @@ export function blocksOf(bytes){
 export function createDataBlockFunctions(host){
     /** @param {number} address @param {number} length */
     const read = (address, length)=>(host.readMemory
-        ? host.readMemory(address >>> 0, length).slice() : new Uint8Array(length));
+        ? host.readMemory(wholeAddress(address), length).slice() : new Uint8Array(length));
     /** @param {number} address */
     const readU32 = address=>u32(read(address, 4));
     /**
@@ -133,7 +134,7 @@ export function createDataBlockFunctions(host){
 
     /** A list's bytes, read to its terminator. @param {number} list */
     const listBytes = list=>{
-        let at = list >>> 0;
+        let at = wholeAddress(list);
         for (let size = readU32(at); size >= HEADER; size = readU32(at))
         {
             at += size;
@@ -155,7 +156,7 @@ export function createDataBlockFunctions(host){
             {
                 kernel32('LocalFree', [old]);
             }
-            host.writeMemory(slot >>> 0, dword(0));
+            host.writeMemory(wholeAddress(slot), dword(0));
             return true;
         }
         const entries = blocks.map(stored);
@@ -176,7 +177,7 @@ export function createDataBlockFunctions(host){
         {
             kernel32('LocalFree', [old]);
         }
-        host.writeMemory(slot >>> 0, dword(made));
+        host.writeMemory(wholeAddress(slot), dword(made));
         return true;
     };
     /** @param {number} slot */
@@ -259,7 +260,7 @@ export function createDataBlockFunctions(host){
             Array.from(text).forEach((c, i)=>{
                 out[wide ? i * 2 : i] = c.charCodeAt(0);
             });
-            host.writeMemory(buffer >>> 0, out);
+            host.writeMemory(wholeAddress(buffer), out);
             return S_OK;
         },
     });
@@ -316,6 +317,7 @@ export function createDataBlockFunctions(host){
          * one -- or NULL.
          */
         SHFindDataBlock: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([list, signature])=>{
@@ -429,7 +431,7 @@ export function createDataBlockFunctions(host){
                         }
                         blocks.push(read(block, size));
                     }
-                    host.writeMemory(slot >>> 0, dword(0));
+                    host.writeMemory(wholeAddress(slot), dword(0));
                     return replaceList(slot, blocks) ? S_OK : E_OUTOFMEMORY;
                 });
             },
@@ -506,7 +508,7 @@ export function createDataBlockFunctions(host){
                 const status = yield* method(stream, STAT, at, STATFLAG_NONAME);
                 if (status >= 0 && (out >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, read(at + 8, 8));
+                    host.writeMemory(wholeAddress(out), read(at + 8, 8));
                 }
                 return status;
             }),

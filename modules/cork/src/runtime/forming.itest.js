@@ -186,6 +186,9 @@ function program(seed){
     return { code, turns };
 }
 
+/** Instructions a slice of `run`: some fifty to a program. */
+const SLICE = 20_000;
+
 /**
  * What a program observes, run on a machine of `config`.
  *
@@ -202,7 +205,19 @@ async function run(code, config, told){
         }
         m.setReg('esp', STACK);
         m.setReg('eip', MAIN);
-        const stop = await m.run({ maxInstructions: 5_000_000 });
+        // In slices, the runtime given its turn between them as a host gives it
+        // (`translatePending`): the machine's own run looks at the queue only after
+        // an exit to code not translated, and a call's samples are read at a look
+        // - with none past the program's first moments, the only calls sampled
+        // were the ones made while its callees were still being translated.
+        let stop = await m.run({ maxInstructions: SLICE });
+        let translated = stop.translated;
+        for (let ran = SLICE; stop.reason === 'limit' && ran < 5_000_000; ran += SLICE)
+        {
+            await m.runtime.translatePending();
+            stop = await m.run({ maxInstructions: SLICE });
+            translated += stop.translated;
+        }
         told?.(m.diagnostics());
         return {
             stop: stop.reason,
@@ -211,7 +226,7 @@ async function run(code, config, told){
             flags: m.reg('eflags') & 0x8d5,
             data: [...m.read(DATA, 64)],
             code: code.map(([at, bytes])=>[...m.read(at, bytes.length)]),
-            translated: stop.translated,
+            translated,
             reforms: m.diagnostics().reforms ?? 0,
         };
     }

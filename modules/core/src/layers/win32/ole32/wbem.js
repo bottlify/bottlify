@@ -27,6 +27,7 @@ import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { USER_NAME } from '../advapi32/tokens.js';
 import { CPUID, PROCESSOR, PROCESSOR_IDENTIFIER } from '../kernel32/processor.js';
 import { SOUND_ADAPTER_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const CLSID_WBEM_LOCATOR = '{4590F811-1D3A-11D0-891F-00AA004B2E24}';
 export const IID_IWBEM_LOCATOR = '{DC12A687-737F-11CF-884D-00AA004B2E24}';
@@ -572,7 +573,7 @@ export function registerWbemClasses(host){
     const publishInstance = (className, properties, out)=>publish(CLSID_WBEM_LOCATOR, {
         interfaces: [describe(IID_IWBEM_CLASS_OBJECT, 'IWbemClassObject', SLOTS.object, {
             Get: ([name, , value, type, flavor])=>{
-                const key = readString(name >>> 0);
+                const key = readString(wholeAddress(name));
                 const property = properties[key.toLowerCase()];
                 if (!property && !WBEM_SCHEMAS[className]?.has(key.toLowerCase()))
                 {
@@ -585,15 +586,15 @@ export function registerWbemClasses(host){
                     {
                         const variant = new Uint8Array(16);
                         new DataView(variant.buffer).setUint16(0, VT_NULL, true);
-                        host.writeMemory(value >>> 0, variant);
+                        host.writeMemory(wholeAddress(value), variant);
                     }
                     if ((type >>> 0) !== 0)
                     {
-                        writeU32(type >>> 0, CIM_STRING);
+                        writeU32(wholeAddress(type), CIM_STRING);
                     }
                     if ((flavor >>> 0) !== 0)
                     {
-                        writeU32(flavor >>> 0, 0);
+                        writeU32(wholeAddress(flavor), 0);
                     }
                     return S_OK;
                 }
@@ -633,15 +634,15 @@ export function registerWbemClasses(host){
                         view.setUint16(0, VT_I4, true);
                         view.setUint32(8, content >>> 0, true);
                     }
-                    host.writeMemory(value >>> 0, variant);
+                    host.writeMemory(wholeAddress(value), variant);
                 }
                 if ((type >>> 0) !== 0)
                 {
-                    writeU32(type >>> 0, cimType);
+                    writeU32(wholeAddress(type), cimType);
                 }
                 if ((flavor >>> 0) !== 0)
                 {
-                    writeU32(flavor >>> 0, 0);
+                    writeU32(wholeAddress(flavor), 0);
                 }
                 return S_OK;
             },
@@ -682,7 +683,7 @@ export function registerWbemClasses(host){
                             index++;
                             fetched++;
                         }
-                        writeU32(returned >>> 0, fetched);
+                        writeU32(wholeAddress(returned), fetched);
                         return fetched === (count >>> 0) ? S_OK : WBEM_S_FALSE;
                     },
                     Skip: ([, count])=>{
@@ -716,8 +717,8 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(out >>> 0, 0);
-            const name = readString(filter >>> 0);
+            writeU32(wholeAddress(out), 0);
+            const name = readString(wholeAddress(filter));
             return publishEnumerator(name.toLowerCase(),
                 instancesOf(name, 'IWbemServices::CreateInstanceEnum'), out >>> 0);
         },
@@ -726,12 +727,12 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(out >>> 0, 0);
-            if (readString(language >>> 0).toUpperCase() !== 'WQL')
+            writeU32(wholeAddress(out), 0);
+            if (readString(wholeAddress(language)).toUpperCase() !== 'WQL')
             {
                 return WBEM_E_INVALID_QUERY_TYPE;
             }
-            const text = readString(query >>> 0);
+            const text = readString(wholeAddress(query));
             const from = /\bfrom\s+(\w+)/i.exec(text);
             if (!from)
             {
@@ -753,8 +754,8 @@ export function registerWbemClasses(host){
             {
                 return WBEM_E_INVALID_PARAMETER;
             }
-            writeU32(out >>> 0, 0);
-            const namespace = readString(resource >>> 0);
+            writeU32(wholeAddress(out), 0);
+            const namespace = readString(wholeAddress(resource));
             // `\\.\root\cimv2`, `root\cimv2` or `//./root/cimv2`: the local
             // default namespace is the only one kept.
             if (!/(^|[\\/])root[\\/]cimv2$/i.test(namespace))

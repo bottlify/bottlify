@@ -50,6 +50,7 @@ import {
 import { formatIpv6Text, parseIpv4Text, parseIpv6Text } from './inet.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 export const HOSTNAME = 'bottlify';
@@ -256,14 +257,14 @@ export function createWinsockFunctions(host){
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
-        host.writeMemory(address >>> 0, new Uint8Array([
+        host.writeMemory(wholeAddress(address), new Uint8Array([
             value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
         ]));
     };
 
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 
@@ -289,7 +290,7 @@ export function createWinsockFunctions(host){
         else
         {
             const swapped = swap16(value & 0xffff);
-            host.writeMemory(out >>> 0, new Uint8Array([swapped & 0xff, swapped >>> 8]));
+            host.writeMemory(wholeAddress(out), new Uint8Array([swapped & 0xff, swapped >>> 8]));
         }
         return ok(0);
     };
@@ -349,7 +350,7 @@ export function createWinsockFunctions(host){
      * @param {number} pointer
      */
     const protoOf = pointer=>((pointer >>> 0) === 0
-        ? null : host.readCString(pointer >>> 0, 16).toLowerCase());
+        ? null : host.readCString(wholeAddress(pointer), 16).toLowerCase());
 
     /**
      * A service as struct servent, in the buffer both lookups share: named by
@@ -358,20 +359,25 @@ export function createWinsockFunctions(host){
      * @param {[string, number, string[]]} service @param {string | null} proto
      */
     const writeServent = ([name, port, protocols], proto)=>{
-        const block = staticBuffer('servent', SERVENT.SIZE + 48);
-        const nameAt = block + SERVENT.SIZE;
+        // At 64 bits the pointers are quadwords and the protocol comes before
+        // the port (winsock.h's _WIN64 order).
+        const layout = POINTER === 8
+            ? { s_name: 0, s_aliases: 8, s_proto: 16, s_port: 24, SIZE: 32 } : SERVENT;
+        const block = staticBuffer('servent', layout.SIZE + 48);
+        const nameAt = block + layout.SIZE;
         const aliasesAt = nameAt + 32;
-        const protoAt = aliasesAt + 4;
+        const protoAt = aliasesAt + POINTER;
         host.writeMemory(nameAt, sz(name));
-        writeDword(aliasesAt, 0);
+        putPointer(aliasesAt, 0);
         host.writeMemory(protoAt, sz(proto ?? protocols[0]));
-        const record = new DataView(new ArrayBuffer(SERVENT.SIZE));
-        record.setUint32(SERVENT.s_name, nameAt, true);
-        record.setUint32(SERVENT.s_aliases, aliasesAt, true);
-        record.setUint16(SERVENT.s_port, port, false);
-        record.setUint32(SERVENT.s_proto, protoAt, true);
+        // The record's upper halves and padding zero: the pointers lie below 4 GiB.
+        const record = new DataView(new ArrayBuffer(layout.SIZE));
+        record.setUint32(layout.s_name, nameAt, true);
+        record.setUint32(layout.s_aliases, aliasesAt, true);
+        record.setUint16(layout.s_port, port, false);
+        record.setUint32(layout.s_proto, protoAt, true);
         host.writeMemory(block, new Uint8Array(record.buffer));
-        return block >>> 0;
+        return wholeAddress(block);
     };
 
     /**
@@ -497,7 +503,7 @@ export function createWinsockFunctions(host){
             }
             if (outcome.value > 0)
             {
-                host.writeMemory(buffer >>> 0, outcome.bytes);
+                host.writeMemory(wholeAddress(buffer), outcome.bytes);
             }
             if (name !== 0 && outcome.from)
             {
@@ -634,7 +640,7 @@ export function createWinsockFunctions(host){
         view.setUint16(HOSTENT_HERE.h_length, 4, true);
         view.setUint32(HOSTENT_HERE.h_addr_list, listAt, true);
         host.writeMemory(block, record);
-        return block >>> 0;
+        return wholeAddress(block);
     };
 
     /**
@@ -656,7 +662,7 @@ export function createWinsockFunctions(host){
         const handles = [];
         for (let at = 0; at < total; at++)
         {
-            handles.push(readDword((pointer >>> 0) + POINTER + at * POINTER));
+            handles.push(readDword(wholeAddress(pointer) + POINTER + at * POINTER));
         }
         return handles;
     };
@@ -926,20 +932,23 @@ export function createWinsockFunctions(host){
      * @param {[string, number, string]} protocol
      */
     const writeProtoent = ([name, number, alias])=>{
-        const block = staticBuffer('protoent', PROTOENT.SIZE + 48);
-        const nameAt = block + PROTOENT.SIZE;
+        const layout = POINTER === 8 ? { p_name: 0, p_aliases: 8, p_proto: 16, SIZE: 24 }
+            : PROTOENT;
+        const block = staticBuffer('protoent', layout.SIZE + 48);
+        const nameAt = block + layout.SIZE;
         const aliasAt = nameAt + 16;
         const aliasesAt = aliasAt + 16;
         host.writeMemory(nameAt, sz(name));
         host.writeMemory(aliasAt, sz(alias));
-        writeDword(aliasesAt, aliasAt);
-        writeDword(aliasesAt + 4, 0);
-        const record = new DataView(new ArrayBuffer(PROTOENT.SIZE));
-        record.setUint32(PROTOENT.p_name, nameAt, true);
-        record.setUint32(PROTOENT.p_aliases, aliasesAt, true);
-        record.setInt16(PROTOENT.p_proto, number, true);
+        // The list: the alias, then the null that ends it, each a pointer wide.
+        putPointer(aliasesAt, aliasAt);
+        putPointer(aliasesAt + POINTER, 0);
+        const record = new DataView(new ArrayBuffer(layout.SIZE));
+        record.setUint32(layout.p_name, nameAt, true);
+        record.setUint32(layout.p_aliases, aliasesAt, true);
+        record.setInt16(layout.p_proto, number, true);
         host.writeMemory(block, new Uint8Array(record.buffer));
-        return block >>> 0;
+        return wholeAddress(block);
     };
 
     /** A kernel32 export's handler, read when it is called. @param {string} name */
@@ -1402,7 +1411,7 @@ export function createWinsockFunctions(host){
         if ((protocols >>> 0) !== 0)
         {
             wanted = [];
-            for (let at = protocols >>> 0; wanted.length < 64; at += 4)
+            for (let at = wholeAddress(protocols); wanted.length < 64; at += 4)
             {
                 const protocol = readDword(at);
                 if (protocol === 0)
@@ -1438,7 +1447,7 @@ export function createWinsockFunctions(host){
             view.setUint32(PROTOCOL_INFO.PROTOCOL, entry.protocol, true);
             view.setUint32(PROTOCOL_INFO.MESSAGE_SIZE, entry.messageSize, true);
             record.set(wideNames ? wide(entry.name) : sz(entry.name), PROTOCOL_INFO.NAME);
-            host.writeMemory((buffer >>> 0) + index * size, record);
+            host.writeMemory(wholeAddress(buffer) + index * size, record);
         });
         return chosen.length;
     };
@@ -1467,7 +1476,7 @@ export function createWinsockFunctions(host){
                     const legacy = (asked & 0xff) < 2;
                     view.setUint16(WSADATA.iMaxSockets, legacy ? 32767 : 0, true);
                     view.setUint16(WSADATA.iMaxUdpDg, legacy ? 65467 : 0, true);
-                    host.writeMemory(data >>> 0, block);
+                    host.writeMemory(wholeAddress(data), block);
                 }
                 return ok(0);
             },
@@ -1492,7 +1501,7 @@ export function createWinsockFunctions(host){
         // and the message loop run beside -- so there is no hook to run and
         // nothing to cancel, and each answers as Wine's tests see Windows do.
         /** FARPROC WSASetBlockingHook(FARPROC lpBlockFunc): the hook before it, none. */
-        WSASetBlockingHook: { argBytes: 4, handler: ()=>0 },
+        WSASetBlockingHook: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         /** int WSAUnhookBlockingHook(void) */
         WSAUnhookBlockingHook: { argBytes: 0, handler: ()=>0 },
         /** int WSACancelBlockingCall(void) */
@@ -1614,7 +1623,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK);
                 }
-                const bytes = host.readMemory(buffer >>> 0, length >>> 0);
+                const bytes = host.readMemory(wholeAddress(buffer), length >>> 0);
                 return sendNow(socket, bytes, null, settleSend);
             },
         },
@@ -1655,7 +1664,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
-                const bytes = host.readMemory(buffer >>> 0, length >>> 0);
+                const bytes = host.readMemory(wholeAddress(buffer), length >>> 0);
                 return sendNow(socket, bytes, target, settleSend);
             },
         },
@@ -1836,7 +1845,7 @@ export function createWinsockFunctions(host){
                     }
                     const name = EXTENSION_GUIDS[
                         /** @type {keyof typeof EXTENSION_GUIDS} */ (
-                            guidText(host.readMemory(input >>> 0, 16)))];
+                            guidText(host.readMemory(wholeAddress(input), 16)))];
                     if (!name)
                     {
                         return fail(WSAEINVAL);
@@ -1871,7 +1880,7 @@ export function createWinsockFunctions(host){
                         }
                         return fail(WSAEFAULT);
                     }
-                    host.writeMemory(output >>> 0, bytes);
+                    host.writeMemory(wholeAddress(output), bytes);
                     if ((returned >>> 0) !== 0)
                     {
                         writeDword(returned, bytes.length);
@@ -2012,7 +2021,7 @@ export function createWinsockFunctions(host){
                 if (timeout !== 0)
                 {
                     const seconds = readDword(timeout);
-                    const micro = readDword((timeout >>> 0) + 4);
+                    const micro = readDword(wholeAddress(timeout) + 4);
                     const milliseconds = seconds * 1000 + Math.floor(micro / 1000);
                     if (milliseconds === 0)
                     {
@@ -2139,7 +2148,7 @@ export function createWinsockFunctions(host){
                 for (let bit = 0; bit < FD_MAX_EVENTS; bit++)
                 {
                     const error = armed && (pending & (1 << bit)) ? armed.errors[bit] : 0;
-                    writeDword((eventsPointer >>> 0) + 4 + bit * 4, error);
+                    writeDword(wholeAddress(eventsPointer) + 4 + bit * 4, error);
                 }
                 if (armed)
                 {
@@ -2163,7 +2172,7 @@ export function createWinsockFunctions(host){
                 {
                     return INADDR_NONE;
                 }
-                const host32 = parseAddress(host.readCString(pointer >>> 0, 64));
+                const host32 = parseAddress(host.readCString(wholeAddress(pointer), 64));
                 // The answer is in network order, because it goes straight into
                 // a sockaddr without passing through htonl.
                 return host32 === INADDR_NONE ? INADDR_NONE : swap32(host32);
@@ -2176,7 +2185,7 @@ export function createWinsockFunctions(host){
             handler: ([value])=>{
                 const buffer = staticBuffer('inet_ntoa', 16);
                 host.writeMemory(buffer, sz(formatAddress(swap32(value))));
-                return buffer >>> 0;
+                return wholeAddress(buffer);
             },
         },
 
@@ -2188,7 +2197,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
-                host.writeMemory(buffer >>> 0, sz(HOSTNAME));
+                host.writeMemory(wholeAddress(buffer), sz(HOSTNAME));
                 return ok(0);
             },
         },
@@ -2208,7 +2217,8 @@ export function createWinsockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const name = pointer === 0 ? HOSTNAME : host.readCString(pointer >>> 0, 256);
+                const name = pointer === 0 ? HOSTNAME : host.readCString(wholeAddress(pointer),
+                    256);
                 const literal = parseAddress(name);
                 const known = name === HOSTNAME || name === 'localhost';
                 if (literal !== INADDR_NONE || known)
@@ -2235,6 +2245,7 @@ export function createWinsockFunctions(host){
          * machine's own name. Any other address is not found.
          */
         gethostbyaddr: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([pointer, length, type])=>{
@@ -2246,7 +2257,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEAFNOSUPPORT, 0);
                 }
-                const bytes = host.readMemory(pointer >>> 0, 4);
+                const bytes = host.readMemory(wholeAddress(pointer), 4);
                 const address = (bytes[0] << 24 | bytes[1] << 16 | bytes[2] << 8 | bytes[3]) >>> 0;
                 return address === INADDR_LOOPBACK
                     ? writeHostent(HOSTNAME, address) : fail(WSAHOST_NOT_FOUND, 0);
@@ -2261,6 +2272,7 @@ export function createWinsockFunctions(host){
          * it does not list, or a protocol it is not listed for, is not found.
          */
         getservbyname: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([namePointer, protoPointer])=>{
@@ -2268,7 +2280,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const name = host.readCString(namePointer >>> 0, 64).toLowerCase();
+                const name = host.readCString(wholeAddress(namePointer), 64).toLowerCase();
                 const proto = protoOf(protoPointer);
                 const found = SERVICES.find(([service, , protocols])=>service === name
                     && (proto === null || protocols.includes(proto)));
@@ -2284,6 +2296,7 @@ export function createWinsockFunctions(host){
          * buffer -- one call overwrites what the other returned.
          */
         getservbyport: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([port, protoPointer])=>{
@@ -2319,7 +2332,7 @@ export function createWinsockFunctions(host){
                 const task = nextAsyncTask++;
                 asyncTasks.set(task, { cancelled: false });
                 const name = namePointer === 0
-                    ? HOSTNAME : host.readCString(namePointer >>> 0, 256);
+                    ? HOSTNAME : host.readCString(wholeAddress(namePointer), 256);
 
                 const deliver = (/** @type {number} */ error)=>{
                     const record = asyncTasks.get(task);
@@ -2366,7 +2379,7 @@ export function createWinsockFunctions(host){
                         found.length === 0 ? WSAHOST_NOT_FOUND : 0, found[0]));
                 });
 
-                return task >>> 0;
+                return wholeAddress(task);
             },
         },
 
@@ -2487,7 +2500,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const at = overlapped >>> 0;
+                const at = wholeAddress(overlapped);
                 const report = ()=>{
                     const status = readDword(at + WSAOVERLAPPED.Internal);
                     writeDword(transferred, readDword(at + WSAOVERLAPPED.InternalHigh));
@@ -2640,7 +2653,7 @@ export function createWinsockFunctions(host){
                 }
                 const described = (/** @type {number} */ value, /** @type {number} */ offset)=>
                     ((value | 0) === FROM_PROTOCOL_INFO && (info >>> 0) !== 0
-                        ? readDword((info >>> 0) + offset) : value);
+                        ? readDword(wholeAddress(info) + offset) : value);
                 return createSocket(described(family, WSAPROTOCOL_INFO.iAddressFamily),
                     described(type, WSAPROTOCOL_INFO.iSocketType));
             },
@@ -2671,7 +2684,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
-                const at = message >>> 0;
+                const at = wholeAddress(message);
                 return sendCall({ handle, buffers: readDword(at + 8), count: readDword(at + 12),
                     sent, to: readDword(at), toLength: readDword(at + 4), overlapped, routine },
                 'WSASendMsg');
@@ -2696,13 +2709,13 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEAFNOSUPPORT);
                 }
-                const string = host.readCString(text >>> 0, 64);
+                const string = host.readCString(wholeAddress(text), 64);
                 const bytes = family === AF_INET ? parseIpv4Text(string) : parseIpv6Text(string);
                 if (!bytes)
                 {
                     return 0;
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -2716,7 +2729,9 @@ export function createWinsockFunctions(host){
          * and its terminator.
          */
         inet_ntop: {
+            returns: 'pointer',
             argBytes: 16,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([family, address, buffer, size])=>{
                 if (family !== AF_INET && family !== AF_INET6)
@@ -2727,14 +2742,14 @@ export function createWinsockFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0);
                 }
-                const bytes = host.readMemory(address >>> 0, family === AF_INET ? 4 : 16);
+                const bytes = host.readMemory(wholeAddress(address), family === AF_INET ? 4 : 16);
                 const text = family === AF_INET ? [...bytes].join('.') : formatIpv6Text(bytes);
                 if ((size >>> 0) < text.length + 1)
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0);
                 }
-                host.writeMemory(buffer >>> 0, sz(text));
-                return buffer >>> 0;
+                host.writeMemory(wholeAddress(buffer), sz(text));
+                return wholeAddress(buffer);
             },
         },
 
@@ -2825,7 +2840,7 @@ export function createWinsockFunctions(host){
                 {
                     return refuseWith(WSAEFAULT);
                 }
-                const id = host.readMemory(guid >>> 0, 16);
+                const id = host.readMemory(wholeAddress(guid), 16);
                 if (!id.every((byte, index)=>byte === MSAFD_TCPIP[index]))
                 {
                     return refuseWith(WSAEINVAL);
@@ -2835,7 +2850,7 @@ export function createWinsockFunctions(host){
                     writeDword(length, MSAFD_PATH.length + 1);
                     return refuseWith(WSAEFAULT);
                 }
-                host.writeMemory(path >>> 0, wide(MSAFD_PATH));
+                host.writeMemory(wholeAddress(path), wide(MSAFD_PATH));
                 writeDword(length, MSAFD_PATH.length + 1);
                 return 0;
             },
@@ -2939,7 +2954,7 @@ export function createWinsockFunctions(host){
                 if ((hintsPointer >>> 0) !== 0)
                 {
                     const hints = new DataView(
-                        host.readMemory(hintsPointer >>> 0, ADDRINFO.SIZE).slice().buffer);
+                        host.readMemory(wholeAddress(hintsPointer), ADDRINFO.SIZE).slice().buffer);
                     flags = hints.getInt32(ADDRINFO.ai_flags, true);
                     family = hints.getInt32(ADDRINFO.ai_family, true);
                     socktype = hints.getInt32(ADDRINFO.ai_socktype, true);
@@ -2969,7 +2984,7 @@ export function createWinsockFunctions(host){
                 let port = 0;
                 if ((servicePointer >>> 0) !== 0)
                 {
-                    const service = host.readCString(servicePointer >>> 0, 64);
+                    const service = host.readCString(wholeAddress(servicePointer), 64);
                     if (/^\d+$/.test(service))
                     {
                         port = Number(service);
@@ -3008,7 +3023,7 @@ export function createWinsockFunctions(host){
                 {
                     return reply([(flags & AI_PASSIVE) !== 0 ? INADDR_ANY : INADDR_LOOPBACK], null);
                 }
-                const name = host.readCString(nodePointer >>> 0, 256);
+                const name = host.readCString(wholeAddress(nodePointer), 256);
                 const numeric = parseAddress(name) !== INADDR_NONE
                     || name.trim() === '255.255.255.255';
                 if ((flags & AI_NUMERICHOST) !== 0 && !numeric)
@@ -3040,7 +3055,7 @@ export function createWinsockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                let node = list >>> 0;
+                let node = wholeAddress(list);
                 while (node !== 0 && addrinfoNodes.has(node))
                 {
                     const next = readDword(node + ADDRINFO.ai_next);
@@ -3119,11 +3134,11 @@ export function createWinsockFunctions(host){
                 }
                 if (hostText)
                 {
-                    host.writeMemory(hostOut >>> 0, hostText);
+                    host.writeMemory(wholeAddress(hostOut), hostText);
                 }
                 if (serviceText)
                 {
-                    host.writeMemory(servOut >>> 0, serviceText);
+                    host.writeMemory(wholeAddress(servOut), serviceText);
                 }
                 return 0;
             },
@@ -3138,6 +3153,7 @@ export function createWinsockFunctions(host){
          * it. One it does not list is WSANO_DATA and NULL.
          */
         getprotobyname: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
@@ -3145,7 +3161,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const name = host.readCString(pointer >>> 0, 64).toLowerCase();
+                const name = host.readCString(wholeAddress(pointer), 64).toLowerCase();
                 const found = PROTOCOLS.find(([own, , alias])=>own === name
                     || alias.toLowerCase() === name);
                 return found ? writeProtoent(found) : fail(WSANO_DATA, 0);
@@ -3153,6 +3169,7 @@ export function createWinsockFunctions(host){
         },
 
         getprotobynumber: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([number])=>{
@@ -3188,8 +3205,9 @@ export function createWinsockFunctions(host){
                 const taken = (at, bytes)=>(at === 0 || bytes === 0
                     ? new Uint8Array(0) : host.readMemory(at, bytes).slice());
                 const extra = (buffers >>> 0) === 0 ? null : {
-                    head: taken(readDword(buffers), readDword((buffers >>> 0) + 4)),
-                    tail: taken(readDword((buffers >>> 0) + 8), readDword((buffers >>> 0) + 12)),
+                    head: taken(readDword(buffers), readDword(wholeAddress(buffers) + 4)),
+                    tail: taken(readDword(wholeAddress(buffers) + 8),
+                        readDword(wholeAddress(buffers) + 12)),
                 };
                 const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
                 const wanted = total >>> 0;
@@ -3354,7 +3372,7 @@ export function createWinsockFunctions(host){
                     fold(outcome.value);
                     if ((received >>> 0) !== 0)
                     {
-                        writeDword(received >>> 0, 0);
+                        writeDword(wholeAddress(received), 0);
                     }
                     if ((overlapped >>> 0) !== 0)
                     {
@@ -3403,11 +3421,11 @@ export function createWinsockFunctions(host){
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        writeDword(out >>> 0, address);
+                        writeDword(wholeAddress(out), address);
                     }
                     if ((lengthOut >>> 0) !== 0)
                     {
-                        writeDword(lengthOut >>> 0, SOCKADDR_IN_SIZE);
+                        writeDword(wholeAddress(lengthOut), SOCKADDR_IN_SIZE);
                     }
                 }
                 return 0;
@@ -3444,7 +3462,7 @@ export function createWinsockFunctions(host){
                 }
                 const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
                 const payload = (data >>> 0) === 0 || (dataLength >>> 0) === 0 ? null
-                    : host.readMemory(data >>> 0, dataLength >>> 0).slice();
+                    : host.readMemory(wholeAddress(data), dataLength >>> 0).slice();
                 /** @param {any} delivery @returns {{ error: number, bytes: number }} */
                 const delivered = delivery=>({
                     error: delivery.error ?? 0, bytes: delivery.value ?? 0,
@@ -3473,7 +3491,7 @@ export function createWinsockFunctions(host){
                     }
                     if ((sent >>> 0) !== 0)
                     {
-                        writeDword(sent >>> 0, result.bytes);
+                        writeDword(wholeAddress(sent), result.bytes);
                     }
                     if ((overlapped >>> 0) !== 0)
                     {

@@ -40,6 +40,7 @@ import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
     rsaKeyFromBits, sameBytes, USAGE, TLS_USAGE } from '../crypto/x509.js';
 import { msiSubject, readSubject } from '../wintrust/subject.js';
 import { nameToString, NAME_STR } from './names.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('../crypto/x509.js').Certificate} Certificate */
 
@@ -1365,7 +1366,7 @@ export function createCertificateFunctions(host){
                 return text.length + 1;
             }
             const kept = text.slice(0, (count >>> 0) - 1);
-            host.writeMemory(out >>> 0, wide ? wideBytes(kept)
+            host.writeMemory(wholeAddress(out), wide ? wideBytes(kept)
                 : Uint8Array.from([...kept, '\0'], ch=>ch.charCodeAt(0) & 0xff));
             return kept.length + 1;
         },
@@ -1393,7 +1394,8 @@ export function createCertificateFunctions(host){
             argBytes: 20,
             handler: (/** @type {number[]} */ [provider, , , flags, parameter])=>{
                 const which = (provider >>> 0) < 0x10000 ? provider >>> 0
-                    : PROVIDER_NAMES.get(host.readCString(provider >>> 0, 64).toLowerCase()) ?? -1;
+                    : PROVIDER_NAMES.get(host.readCString(wholeAddress(provider),
+                        64).toLowerCase()) ?? -1;
                 return openStore(which, flags >>> 0, parameter >>> 0);
             },
         },
@@ -1458,6 +1460,7 @@ export function createCertificateFunctions(host){
          *     const BYTE *pbCertEncoded, DWORD cbCertEncoded)
          */
         CertCreateCertificateContext: {
+            returns: 'pointer',
             argBytes: 12,
             handler: (/** @type {number[]} */ [encodingType, pointer, length])=>{
                 if ((pointer >>> 0) === 0)
@@ -1476,6 +1479,7 @@ export function createCertificateFunctions(host){
 
         /** PCCERT_CONTEXT CertDuplicateCertificateContext(PCCERT_CONTEXT pCertContext) */
         CertDuplicateCertificateContext: {
+            returns: 'pointer',
             argBytes: 4,
             handler: (/** @type {number[]} */ [address])=>duplicate(address >>> 0),
         },
@@ -1538,6 +1542,7 @@ export function createCertificateFunctions(host){
          * free, or to pass back.
          */
         CertEnumCertificatesInStore: {
+            returns: 'pointer',
             argBytes: 8,
             handler: (/** @type {number[]} */ [handle, previous])=>{
                 if (!storeOf(handle))
@@ -1616,6 +1621,7 @@ export function createCertificateFunctions(host){
 
         /** PCCERT_CHAIN_CONTEXT CertDuplicateCertificateChain(PCCERT_CHAIN_CONTEXT) */
         CertDuplicateCertificateChain: {
+            returns: 'pointer',
             argBytes: 4,
             handler: (/** @type {number[]} */ [address])=>{
                 const chain = chains.get(address >>> 0);
@@ -1624,7 +1630,7 @@ export function createCertificateFunctions(host){
                     return 0;
                 }
                 chain.refs++;
-                return address >>> 0;
+                return wholeAddress(address);
             },
         },
 
@@ -1654,7 +1660,7 @@ export function createCertificateFunctions(host){
                 {
                     return fail(E_INVALIDARG);
                 }
-                const which = policy >>> 0;
+                const which = wholeAddress(policy);
                 if (!/** @type {number[]} */ (Object.values(POLICY)).includes(which))
                 {
                     host.divergence?.('CertVerifyCertificateChainPolicy',
@@ -1744,6 +1750,7 @@ export function createCertificateFunctions(host){
          * The search goes on after the previous context, which is freed.
          */
         CertFindCertificateInStore: {
+            returns: 'pointer',
             argBytes: 24,
             handler: (/** @type {number[]} */ [handle, , flags, type, para, previous])=>{
                 if (!storeOf(handle))
@@ -1834,7 +1841,7 @@ export function createCertificateFunctions(host){
                 }
                 if ((id >>> 0) === PROP.KEY_PROV_INFO)
                 {
-                    const at = data >>> 0;
+                    const at = wholeAddress(data);
                     const text = (/** @type {number} */ pointer)=>(pointer === 0 ? null
                         : host.readWideString(pointer, 1024 * 2));
                     properties.set(PROP.KEY_PROV_INFO, { container: text(dword(at)),
@@ -1945,12 +1952,12 @@ export function createCertificateFunctions(host){
                     }
                     const written = new Uint8Array(length >>> 0);
                     written.set(bits.subarray(0, written.length));
-                    host.writeMemory(out >>> 0, written);
+                    host.writeMemory(wholeAddress(out), written);
                     return 1;
                 }
                 if ((length >>> 0) > 0)
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(length >>> 0));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(length >>> 0));
                 }
                 host.setLastError(0);
                 return 0;
@@ -1962,13 +1969,14 @@ export function createCertificateFunctions(host){
          *     CERT_EXTENSION rgExtensions[])
          */
         CertFindExtension: {
+            returns: 'pointer',
             argBytes: 12,
             handler: (/** @type {number[]} */ [oid, count, list])=>{
                 if ((oid >>> 0) === 0)
                 {
                     return fail(E_INVALIDARG);
                 }
-                const wanted = host.readCString(oid >>> 0, 128);
+                const wanted = host.readCString(wholeAddress(oid), 128);
                 for (let i = 0; i < Math.min(count >>> 0, 256); i++)
                 {
                     const at = (list >>> 0) + i * shape.extension.size;
@@ -2014,7 +2022,7 @@ export function createCertificateFunctions(host){
                 {
                     return fail(E_INVALIDARG);
                 }
-                const at = config >>> 0;
+                const at = wholeAddress(config);
                 const size = dword(at);
                 const count = dword(at + 16);
                 const list = dword(at + 20);
@@ -2062,6 +2070,7 @@ export function createCertificateFunctions(host){
          * certificate here has one.
          */
         CertFindChainInStore: {
+            returns: 'pointer',
             argBytes: 24,
             handler: (/** @type {number[]} */ [, , , , , previous])=>{
                 if ((previous >>> 0) !== 0)
@@ -2092,6 +2101,7 @@ export function createCertificateFunctions(host){
          * Making one needs a key pair this machine cannot generate.
          */
         CertCreateSelfSignCertificate: {
+            returns: 'pointer',
             argBytes: 32,
             handler: ()=>{
                 host.divergence?.('CertCreateSelfSignCertificate',
@@ -2139,7 +2149,8 @@ export function createCertificateFunctions(host){
                 }
                 else if ((objectType >>> 0) === QUERY_OBJECT.FILE)
                 {
-                    bytes = host.readFile?.(host.readWideString(object >>> 0, 1024 * 2)) ?? null;
+                    bytes = host.readFile?.(host.readWideString(wholeAddress(object),
+                        1024 * 2)) ?? null;
                     if (!bytes)
                     {
                         return fail(ERROR_FILE_NOT_FOUND);

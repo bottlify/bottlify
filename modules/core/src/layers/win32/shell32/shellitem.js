@@ -17,6 +17,7 @@ import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { parseGuid, readGuid } from '../ole32/guid.js';
 import { itemsOf, listBytes, parentOf } from './namespace.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -97,13 +98,13 @@ const MAX_LIST = 0x10000;
  */
 export function createShellItems(host, namespace){
     /** @param {number} at */
-    const readU32 = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+    const readU32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} at @param {number} value */
     const writeU32 = (at, value)=>{
         if ((at >>> 0) !== 0)
         {
-            host.writeMemory(at >>> 0, dword(value));
+            host.writeMemory(wholeAddress(at), dword(value));
         }
     };
     const memory = { readMemory: host.readMemory, writeMemory: host.writeMemory };
@@ -125,7 +126,7 @@ export function createShellItems(host, namespace){
                 return null;
             }
         }
-        return host.readMemory(at >>> 0, length + 2).slice();
+        return host.readMemory(wholeAddress(at), length + 2).slice();
     };
 
     /** @param {Uint8Array} first @param {Uint8Array} second  Two lists as one. */
@@ -391,7 +392,7 @@ export function createShellItems(host, namespace){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(CLSID_SHELLITEM)));
+                host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(CLSID_SHELLITEM)));
                 return S_OK;
             } },
         /** HRESULT SetIDList(PCIDLIST_ABSOLUTE pidl): the item becomes the list's. */

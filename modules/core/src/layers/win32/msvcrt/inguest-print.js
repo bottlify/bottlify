@@ -36,6 +36,7 @@
 
 /** @typedef {import('./guest-code.js').Guest} Guest */
 /** @typedef {import('./guest-code.js').u32} u32 */
+/** @typedef {import('./guest-code.js').ptr} ptr */
 /** @typedef {import('./guest-code.js').i32} i32 */
 
 /** The host's window of argument slots a `va_list` is read as (`functions.js`). */
@@ -218,7 +219,7 @@ export function formatInGuest({ u8, pointerBytes }, format){
  *
  * @guestCode cdecl
  * @param {Pick<Guest, 'u8' | 'u32' | 'setU8' | 'setU32' | 'pointerBytes'>} guest
- * @param {u32} buffer @param {u32} limit @param {u32} format @param {u32} list
+ * @param {ptr} buffer @param {u32} limit @param {u32} format @param {ptr} list
  * @param {u32} counts
  * @returns {u32}
  */
@@ -659,7 +660,7 @@ export function printInto({ u8, u32, setU8, setU32, pointerBytes }, buffer, limi
  * its terminator, however long; its length.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} format @param {u32} list
+ * @param {Guest} guest @param {ptr} buffer @param {u32} format @param {u32} list
  * @returns {i32}
  */
 export function vsprintf({ u8, u32, setU8, setU32, host, pointerBytes }, buffer, format, list){
@@ -679,7 +680,7 @@ export function vsprintf({ u8, u32, setU8, setU32, host, pointerBytes }, buffer,
  * when it did not fit. No buffer is the host's (a length asked for, or EINVAL).
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} count @param {u32} format
+ * @param {Guest} guest @param {ptr} buffer @param {u32} count @param {u32} format
  * @param {u32} list
  * @returns {i32}
  */
@@ -728,7 +729,7 @@ export function _vscprintf({ u8, u32, setU8, setU32, host, pointerBytes }, forma
  * the host's, found before a byte is written.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} size @param {u32} count
+ * @param {Guest} guest @param {ptr} buffer @param {u32} size @param {u32} count
  * @param {u32} format @param {u32} list
  * @returns {i32}
  */
@@ -771,7 +772,7 @@ export function _vsnprintf_s({ u8, u32, setU8, setU32, host, pointerBytes }, buf
  * host's, found before a byte is written.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} size @param {u32} format
+ * @param {Guest} guest @param {ptr} buffer @param {u32} size @param {u32} format
  * @param {u32} list
  * @returns {i32}
  */
@@ -1041,7 +1042,7 @@ export function formatInGuestWide({ u16, pointerBytes }, format){
  *
  * @guestCode cdecl
  * @param {Pick<Guest, 'u16' | 'u32' | 'setU16' | 'setU32' | 'pointerBytes'>} guest
- * @param {u32} buffer @param {u32} limit @param {u32} format @param {u32} list
+ * @param {ptr} buffer @param {u32} limit @param {u32} format @param {ptr} list
  * @param {u32} counts
  * @returns {u32}
  */
@@ -1485,7 +1486,7 @@ export function printIntoWide({ u16, u32, setU16, setU32, pointerBytes }, buffer
  * count, is EINVAL, the host's.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} count @param {u32} format
+ * @param {Guest} guest @param {ptr} buffer @param {u32} count @param {u32} format
  * @param {u32} list
  * @returns {i32}
  */
@@ -1519,7 +1520,7 @@ export function _vsnwprintf({ u16, u32, setU16, setU32, host, pointerBytes }, bu
  * msvcrt's own with no count: the text and its terminator, however long.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} format @param {u32} list
+ * @param {Guest} guest @param {ptr} buffer @param {u32} format @param {u32} list
  * @returns {i32}
  */
 export function vswprintf({ u16, u32, setU16, setU32, host, pointerBytes }, buffer, format, list){
@@ -1556,7 +1557,7 @@ export function _vscwprintf({ u16, u32, setU16, setU32, host, pointerBytes }, fo
  * (EINVAL) the host's, found before a unit is written.
  *
  * @guestCode cdecl
- * @param {Guest} guest @param {u32} buffer @param {u32} size @param {u32} format
+ * @param {Guest} guest @param {ptr} buffer @param {u32} size @param {u32} format
  * @param {u32} list
  * @returns {i32}
  */

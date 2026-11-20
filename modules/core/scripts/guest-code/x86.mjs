@@ -84,6 +84,8 @@ export function frame(reg, disp){
  * @property {number} [index]  Not esp.
  * @property {1 | 2 | 4 | 8} [scale]
  * @property {number} [disp]
+ * @property {boolean} [whole]  x86-64: the registers hold quadwords that are the
+ *                              address as they are, a pointer's among them.
  */
 
 /**

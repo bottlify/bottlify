@@ -919,3 +919,63 @@ test('a flush of write buffers waits until each executor running guest code has 
             'no executor in guest code: done at once');
         assert.equal(flushWrites({}), true, 'one executor: nothing to wait for');
     });
+
+test('a 64-bit thread parked or held keeps a return past 4 GiB whole, and the park loop\'s',
+    async()=>{
+        // A 64-bit program's image at its own base past 4 GiB: the return address
+        // its stub would pop is that whole quadword, and the park loop written over
+        // it leaves no high dword of the caller's beside it.
+        const memory = fakeMemory();
+        const kernel = await kernelModule.create(
+            { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+            /** @type {any} */ ({
+                /** @param {string} name */
+                requireApi: name=>(name === 'cpu'
+                    ? { ...fakeCpu(0x2ffed0), bits: ()=>64 } : memory),
+                provide: ()=>{},
+            }),
+        );
+        /** @type {any} */
+        const thread = { name: 'main' };
+        memory.words.set(0x2ffed0, 0x40001202);
+        memory.words.set(0x2ffed4, 1);
+        kernel.parkThread(thread, 0x2ffed8);
+        assert.equal(thread.parkedReturn, 0x140001202);
+        assert.equal(memory.words.get(0x2ffed0), PARK);
+        assert.equal(memory.words.get(0x2ffed4), 0, 'the park loop whole');
+        memory.words.set(0x2ffed0, 0x40001202);
+        memory.words.set(0x2ffed4, 1);
+        assert.equal(kernel.holdThread(), 0x140001202);
+        assert.equal(memory.words.get(0x2ffed4), 0);
+    });
+
+test('a 64-bit thread starts with a parameter and a routine past 4 GiB whole', async()=>{
+    // RCX and RDX of the new thread: the dword view of its context carries
+    // their low halves, so the whole values are set through the context's own
+    // quadwords - and only where there is a high half to set.
+    const memory = { ...fakeMemory(), writeBytes: ()=>{} };
+    /** @type {{ gpr: bigint[] }[]} */
+    const set = [];
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? {
+                ...fakeCpu(), bits: ()=>64,
+                /** @param {any} state */
+                newContext: state=>({ ...state, reg32: new Array(8).fill(0) }),
+                /** @param {any} context @param {{ gpr: bigint[] }} long */
+                setContextLong: (context, long)=>set.push(long),
+            } : memory),
+            provide: ()=>{},
+        }),
+    );
+    const high = kernel.createThread({ entry: 0x402000, start: 0x140001740,
+        parameter: 0x140003010 });
+    assert.deepEqual([high.context.reg32[1], high.context.reg32[2]], [0x40003010, 0x40001740]);
+    assert.equal(set.length, 1);
+    assert.deepEqual([set[0].gpr[1], set[0].gpr[2]], [0x140003010n, 0x140001740n]);
+    assert.equal(0 in set[0].gpr, false, 'no other register is touched');
+    kernel.createThread({ entry: 0x402000, start: 0x401000, parameter: 0x90000000 });
+    assert.equal(set.length, 1, 'a thread below 4 GiB starts as it always did');
+});

@@ -22,6 +22,7 @@
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
 import { dword, u32 } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_ISTREAM = '{0000000C-0000-0000-C000-000000000046}';
 export const IID_ISEQUENTIAL_STREAM = '{0C733A30-2A1C-11CE-ADE5-00AA0044773D}';
@@ -143,14 +144,14 @@ export function createStreams(host){
     const writeU32 = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, dword(value));
+            host.writeMemory(wholeAddress(address), dword(value));
         }
     };
     /** @param {number} address @param {number} value */
     const writeQuad = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, quadBytes(value));
+            host.writeMemory(wholeAddress(address), quadBytes(value));
         }
     };
     /**
@@ -315,7 +316,7 @@ export function createStreams(host){
             const bytes = await state.backing.read(state.position, wanted >>> 0);
             if (bytes.length > 0)
             {
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(wholeAddress(buffer), bytes);
             }
             state.position += bytes.length;
             writeU32(countOut, bytes.length);
@@ -494,7 +495,7 @@ export function createStreams(host){
             view.setUint32(4, STGTY_STREAM, true);
             record.set(quadBytes(await state.backing.size()), 8);
             view.setUint32(40, state.mode >>> 0, true);
-            host.writeMemory(out >>> 0, record);
+            host.writeMemory(wholeAddress(out), record);
             return S_OK;
         } },
         /** HRESULT Clone(IStream **ppstm): not made, the out pointer untouched. */
@@ -558,7 +559,7 @@ export function createStreams(host){
         }
         // Read to its terminator: the caller's buffer may end at the top of its stack.
         const name = (width === 'W' ? host.readWideString?.(path >>> 0, 0x8000)
-            : host.readCString(path >>> 0, 0x8000)) ?? '';
+            : host.readCString(wholeAddress(path), 0x8000)) ?? '';
         const stream = publishStream(fileBacking(handle, name), mode);
         if (!stream)
         {
@@ -618,6 +619,7 @@ export function createStreams(host){
          * A stream over a copy of the bytes, open to read and write.
          */
         SHCreateMemStream: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([initial, size])=>publishStream(memoryBacking((initial >>> 0) === 0

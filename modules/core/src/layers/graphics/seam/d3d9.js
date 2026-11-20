@@ -321,13 +321,7 @@ export function createDirect3D9Seam(
      *
      * @param {number} address @param {number} value
      */
-    const writePointer = (address, value)=>{
-        fields.writeU32(address, value);
-        if (long)
-        {
-            fields.writeU32((address >>> 0) + 4, 0);
-        }
-    };
+    const writePointer = (address, value)=>fields.writePointer(address, value, long ? 8 : 4);
     const PRESENT_PARAMETERS = long ? D3DPRESENT_PARAMETERS9_64 : D3DPRESENT_PARAMETERS9;
     const CREATION_PARAMETERS = long ? D3DDEVICE_CREATION_PARAMETERS64
         : D3DDEVICE_CREATION_PARAMETERS;
@@ -830,9 +824,9 @@ export function createDirect3D9Seam(
             [unlock]: builtWide((/** @type {{ trap: number }} */ { trap })=>
                 placeCode(at=>unlockLevelCode(at, trap, { find }, routineWidth))),
             ...(find === 'texture'
-                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
-                    { trap })=>placeCode(at=>commandCode(at, trap,
-                    { ...COMMANDS[dirty], slot: commandSlot(dirty) })) }
+                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: builtWide(
+                    (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
+                        { ...COMMANDS[dirty], slot: commandSlot(dirty) }, routineWidth))) }
                 : {}),
         };
     };

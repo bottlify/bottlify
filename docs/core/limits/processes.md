@@ -6,6 +6,10 @@
   order itself (x86 does). On a host that does not (an ARM machine), a program passing a message
   through plain stores alone (a flag after its payload, a spinlock released with `mov`) may see
   the flag before the payload.
+- With several executors, a locked instruction whose operand lies across two aligned quadwords (a
+  split lock) and `lock cmpxchg16b` are indivisible against each other, not against an aligned
+  locked access of another width on part of the same bytes at the same instant
+  (`roadmap/decisions.md`, A279).
 - With several executors, a store into bytes another executor is translating at that instant can
   be missed: when the store's page check came before the other set the page's code flag, and the
   store landed after it read the bytes back. The window is a few instructions, longer (at most a

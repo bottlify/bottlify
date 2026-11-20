@@ -30,6 +30,7 @@ import {
     IID_IOLE_COMMAND_TARGET, IID_IOLE_CONTROL_SITE, IID_IOLE_IN_PLACE_SITE, IID_IOLE_WINDOW,
     IID_IPROPERTY_NOTIFY_SINK, INTERFACES, IN_PLACE_FRAME, IN_PLACE_SITE,
 } from './layout.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -141,12 +142,13 @@ export const BROWSER_CLASSES = Object.freeze(['Shell Embedding', 'Shell DocObjec
  */
 export function createBrowsers(host){
     /** @param {number} at */
-    const u32 = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer).getUint32(0, true);
+    const u32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer).getUint32(0,
+        true);
     /** @param {number} at @param {number[]} values */
-    const putU32s = (at, values)=>host.writeMemory(at >>> 0,
+    const putU32s = (at, values)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint32Array(values.map(value=>value >>> 0)).buffer));
     /** @param {number} at @param {number} value */
-    const putU16 = (at, value)=>host.writeMemory(at >>> 0,
+    const putU16 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint16Array([value & 0xffff]).buffer));
     /** @param {number} bytes */
     const allocate = bytes=>{
@@ -164,7 +166,7 @@ export function createBrowsers(host){
             return '';
         }
         let text = '';
-        for (let p = at >>> 0; text.length < 0x10000; p += 2)
+        for (let p = wholeAddress(at); text.length < 0x10000; p += 2)
         {
             const unit = new DataView(host.readMemory(p, 2).slice().buffer).getUint16(0, true);
             if (unit === 0)
@@ -1184,7 +1186,7 @@ export function createBrowsers(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(object.state.v1
+                host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(object.state.v1
                     ? CLSID_WEB_BROWSER_V1 : CLSID_WEB_BROWSER)));
                 return S_OK;
             },
@@ -1322,10 +1324,10 @@ export function createBrowsers(host){
                 }
                 if ((kind >>> 0) !== GUIDKIND_DEFAULT_SOURCE_DISP_IID)
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(16));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(16));
                     return E_FAIL;
                 }
-                host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(object.state.v1
+                host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(object.state.v1
                     ? DIID_DWEB_BROWSER_EVENTS : DIID_DWEB_BROWSER_EVENTS2)));
                 return S_OK;
             },
@@ -1367,7 +1369,7 @@ export function createBrowsers(host){
 
     /** A GUID in guest memory as text. @param {number} at */
     const formatAt = at=>{
-        const raw = host.readMemory(at >>> 0, 16);
+        const raw = host.readMemory(wholeAddress(at), 16);
         const view = new DataView(raw.buffer, raw.byteOffset, 16);
         const hex = (/** @type {number} */ v, /** @type {number} */ n)=>v.toString(16)
             .padStart(n, '0');
@@ -1420,7 +1422,7 @@ export function createBrowsers(host){
                     {
                         return E_POINTER;
                     }
-                    host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(iid)));
+                    host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(iid)));
                     return S_OK;
                 },
                 GetConnectionPointContainer: (_, [out])=>{

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * IAudioEndpointVolume, as IMMDevice::Activate hands it out: the endpoint's
  * master volume and mute, and each channel's, which every stream to the
@@ -69,10 +71,10 @@ export function createEndpointVolume(host){
     let toldOfListeners = false;
 
     /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>host.writeMemory(at >>> 0,
+    const writeU32 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** @param {number} at @param {number} value */
-    const writeFloat = (at, value)=>host.writeMemory(at >>> 0,
+    const writeFloat = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Float32Array.of(value).buffer));
     /** A float passed by value, as its bits arrive. @param {number} bits */
     const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];

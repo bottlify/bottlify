@@ -30,6 +30,7 @@
 import { formatGuid } from '../ole32/guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** CInterfaceStubVtbl: its header, then the IRpcStubBuffer vtable. */
 export const STUB_VTBL = Object.freeze({
@@ -74,12 +75,12 @@ const REG_SZ = 1;
 export function readProxyFiles(memory, list){
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = memory.readMemory(at >>> 0, 4);
+        const bytes = memory.readMemory(wholeAddress(at), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} at */
     const u16 = at=>{
-        const bytes = memory.readMemory(at >>> 0, 2);
+        const bytes = memory.readMemory(wholeAddress(at), 2);
         return bytes[0] | (bytes[1] << 8);
     };
     /** @param {number} at */

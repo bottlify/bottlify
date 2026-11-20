@@ -49,7 +49,9 @@ import { compileShader } from './hlsl-compile.js';
 import { PARAMETER, PC, PT, buildEffect, isSampler, isShader, isTexture } from './effect-model.js';
 import { FX_2_0, readCompiledEffect } from './effect-binary.js';
 import { COMPILED as SETTERS_IN_GUEST } from './effect-setters.x86.js';
+import { COMPILED as SETTERS_LONG } from './effect-setters.x64.js';
 import { COMPILED as COMMIT_IN_GUEST } from './effect-commit.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('./effect-model.js').EffectModel} EffectModel */
 /** @typedef {import('./effect-model.js').ParamModel} ParamModel */
@@ -274,6 +276,7 @@ const COLOR_SCALE = 255;
  * @typedef {Object} EffectHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, which places the setters' x86-64.
  * @property {(address: number) => number} [readU32]  A word read in place.
  * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -438,6 +441,10 @@ const COLOR_SCALE = 255;
  */
 export function createEffects(host, helpers, options = {}){
     const version = options.version ?? 43;
+    /** A 64-bit process, whose setters are their x86-64 (`effect-setters.js`). */
+    const long = host.pointerSize === 8;
+    /** @type {Record<string, any>} */
+    const setters = long ? SETTERS_LONG : SETTERS_IN_GUEST;
     /** Every handle any effect of this process handed out, to what it names. @type {Map<number, any>} */
     const handles = new Map();
     const { u32, putU32s, method, string } = createDeviceCalls(host);
@@ -931,7 +938,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} count */
     const words = (at, count)=>{
-        const bytes = host.readMemory(at >>> 0, count * 4);
+        const bytes = host.readMemory(wholeAddress(at), count * 4);
         // One copy of the words in place of a call a word: every value an
         // effect is set comes through here, bone palettes of hundreds of words
         // among them, many times a frame. The guest's words are little-endian
@@ -1233,7 +1240,7 @@ export function createEffects(host, helpers, options = {}){
                     putU32s(out, unpackColor(wordsOf(p)[0]).map(floatBits));
                     return D3D_OK;
                 }
-                host.writeMemory(out >>> 0, vectorBytes(p, 0));
+                host.writeMemory(wholeAddress(out), vectorBytes(p, 0));
                 return D3D_OK;
             } },
             /** HRESULT SetVectorArray(D3DXHANDLE, CONST D3DXVECTOR4 *, UINT Count) */
@@ -1415,7 +1422,7 @@ export function createEffects(host, helpers, options = {}){
                 if (p && (out >>> 0) !== 0 && !p.model.elements && transpose
                     && (p.model.cls === PC.SCALAR || p.model.cls === PC.VECTOR))
                 {
-                    host.writeMemory(out >>> 0, matrixBytes(p, 0, false));
+                    host.writeMemory(wholeAddress(out), matrixBytes(p, 0, false));
                     return D3D_OK;
                 }
                 return p && (out >>> 0) !== 0 && !p.model.elements && isMatrix(p)
@@ -2545,7 +2552,15 @@ export function createEffects(host, helpers, options = {}){
         if (walkAt < 0)
         {
             const code = /** @type {Uint8Array} */ (/** @type {any} */ (COMMIT_IN_GUEST).Walk.code);
-            walkAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
+            // A 64-bit process commits on the host: no Walk to call. The
+            // methods' x86-64 is built and held to their JavaScript
+            // (effect-commit.x64.js, effect-commit.test.js); it is bound once
+            // the gate against the host's commit runs over a 64-bit layout
+            // too, with a table refused there for SetNPatchMode (its FLOAT
+            // travels in XMM1, which Walk's integer call does not fill) and
+            // for a state manager, the one address in a table the program
+            // chose, which may lie past 4 GiB.
+            walkAt = host.heap && !long ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (walkAt !== 0)
             {
                 host.writeMemory(walkAt, code);
@@ -2558,8 +2573,7 @@ export function createEffects(host, helpers, options = {}){
     const placeResolve = ()=>{
         if (resolveAt < 0)
         {
-            const code = /** @type {Uint8Array} */ (/** @type {any} */ (SETTERS_IN_GUEST)
-                .Resolve.code);
+            const code = /** @type {Uint8Array} */ (/** @type {any} */ (setters).Resolve.code);
             resolveAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
             if (resolveAt !== 0)
             {
@@ -3577,14 +3591,16 @@ export function createEffects(host, helpers, options = {}){
      * The setters with code in the guest given it: each slot holds the
      * compiled setter, whose cases it does not take jump to the method's own
      * trap, the host's setter. Placed once per slot. A setter left to the
-     * host says why, once each (`whyHost`).
+     * host says why, once each (`whyHost`). A 64-bit process places the
+     * setters' x86-64 (`wide`); CommitChanges and the passes have none and are
+     * traps there, as is a setter the build refused for 64 bits.
      *
      * @param {ComMethod[]} methods @returns {ComMethod[]}
      */
     function inGuest(methods){
         return methods.map(given=>{
-            const compiled = /** @type {Record<string, any>} */ ({ ...SETTERS_IN_GUEST,
-                ...COMMIT_IN_GUEST })[given.name];
+            const compiled = /** @type {Record<string, any>} */ (long ? setters
+                : { ...SETTERS_IN_GUEST, ...COMMIT_IN_GUEST })[given.name];
             if (!compiled || !host.heap)
             {
                 return given;
@@ -3605,7 +3621,7 @@ export function createEffects(host, helpers, options = {}){
             /** @type {Map<number, number>} */
             const placed = new Map();
             return /** @type {ComMethod} */ (/** @type {unknown} */ ({ ...m,
-                guest: (/** @type {{ trap: number }} */ { trap })=>{
+                guest: Object.assign((/** @type {{ trap: number }} */ { trap })=>{
                     const known = placed.get(trap);
                     if (known !== undefined)
                     {
@@ -3626,7 +3642,7 @@ export function createEffects(host, helpers, options = {}){
                     host.writeMemory(at, bytes);
                     placed.set(trap, at);
                     return at;
-                } }));
+                }, { wide: true }) }));
         });
     }
 
@@ -4461,7 +4477,7 @@ export function createEffects(host, helpers, options = {}){
 
     /** @param {number} at @param {number} size */
     const bytesAt = (at, size)=>((at >>> 0) === 0 ? null
-        : host.readMemory(at >>> 0, size >>> 0).slice());
+        : host.readMemory(wholeAddress(at), size >>> 0).slice());
 
     const exports = {
         /**

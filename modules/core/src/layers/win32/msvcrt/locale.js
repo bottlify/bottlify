@@ -21,7 +21,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -188,6 +188,7 @@ export function createLocaleFunctions(host){
          * empty, every number CHAR_MAX -- the same structure each call.
          */
         localeconv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>localeConventions(),
@@ -273,7 +274,7 @@ export function createLocaleFunctions(host){
                 {
                     return 0;
                 }
-                host.writeMemory(destination >>> 0, bytes);
+                host.writeMemory(wholeAddress(destination), bytes);
                 return bytes.length;
             },
         },

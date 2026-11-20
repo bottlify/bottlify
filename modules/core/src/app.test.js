@@ -762,7 +762,7 @@ async function mapBeside(files, executable, space){
         events: { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             emitted.push([name, payload]) },
         isSystem: kernel32, isKnownDll: kernel32,
-        byName: new Map(), byBase: new Map(),
+        modules: { add: ()=>{} },
         floor,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>[...held, ...placed].find(one=>
@@ -2251,7 +2251,7 @@ test('the engine keeps a range under the stacks, short of 0x10000000, cut out of
     const space = { moduleBase: 0x02000000, stackPoolStart: 0x08000000, heapStart: 0x0c000000 };
     const image = { imageBase: 0x400000, sizeOfImage: MIB };
     /** @param {number} executors @param {object} [more] */
-    const area = (executors, more = {})=>engineAreaFor({ long: false, memorySize: 2 ** 31,
+    const area = (executors, more = {})=>engineAreaFor({ wide: false, memorySize: 2 ** 31,
         ...space, executors, image, ...more });
     assert.deepEqual(area(1), { at: 0x08000000 - 28 * MIB, span: 28 * MIB, inHeap: false },
         'twenty MiB an executor and eight shared, at the top of the libraries\' space');
@@ -2274,7 +2274,8 @@ test('the engine keeps a range under the stacks, short of 0x10000000, cut out of
     assert.deepEqual(area(1, { moduleBase: 0x06000000, stackPoolStart: 0x07800000 }),
         { at: 0x0c000000, span: 28 * MIB, inHeap: true },
         'too little of the libraries\' space left: the heap\'s start');
-    assert.equal(area(1, { long: true }), undefined, 'long mode keeps its whole memory');
+    assert.equal(area(1, { wide: true }), undefined,
+        'a wide window keeps its RAM in a memory of its own, which does not grow');
     assert.equal(area(1, { memorySize: 3 * 2 ** 30 }), undefined, 'a RAM not a power of two');
     assert.deepEqual(area(1, { image: { imageBase: 0x07000000, sizeOfImage: 0x10000 } }),
         { at: 0x0c000000, span: 28 * MIB, inHeap: true }, 'the program\'s image at the top');

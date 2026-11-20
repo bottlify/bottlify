@@ -28,6 +28,7 @@ import { BASE_SIZE, createCefObjects } from './objects.js';
 import { createCefStrings } from './strings.js';
 import { commandLineMethods, emptyCommandLine, parseCommandLine, splitCommandLine }
     from './command-line.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** cef_app_t's methods after its base. */
 const APP = Object.freeze({ getBrowserProcessHandler: BASE_SIZE + 12 });
@@ -106,7 +107,7 @@ const EXPORTS = Object.freeze([
  */
 export function createLibcefFunctions(host){
     /** @param {number} address */
-    const dword = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const dword = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     const objects = createCefObjects(host);
@@ -216,10 +217,11 @@ export function createLibcefFunctions(host){
         },
     });
 
-    /** @type {Record<string, { convention: 'cdecl', argBytes: number, handler: Function }>} */
+    /** @type {Record<string, { convention: 'cdecl', argBytes: number, handler: Function,
+        returns?: string }>} */
     const answered = {
         /** const char* cef_api_hash(int entry) */
-        cef_api_hash: { convention: 'cdecl', argBytes: 4,
+        cef_api_hash: { returns: 'pointer', convention: 'cdecl', argBytes: 4,
             handler: (/** @type {number[]} */ [entry])=>hashAt(entry | 0) },
 
         /**
@@ -247,11 +249,11 @@ export function createLibcefFunctions(host){
             } },
 
         /** cef_command_line_t* cef_command_line_create(void) */
-        cef_command_line_create: { convention: 'cdecl', argBytes: 0,
+        cef_command_line_create: { returns: 'pointer', convention: 'cdecl', argBytes: 0,
             handler: ()=>newLine(emptyCommandLine()) },
 
         /** cef_command_line_t* cef_command_line_get_global(void): the process's own. */
-        cef_command_line_get_global: { convention: 'cdecl', argBytes: 0,
+        cef_command_line_get_global: { returns: 'pointer', convention: 'cdecl', argBytes: 0,
             handler: ()=>{
                 if (globalLine === 0)
                 {

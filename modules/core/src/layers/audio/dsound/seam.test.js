@@ -21,6 +21,7 @@ import {
     IDIRECTSOUNDBUFFER8_SLOTS,
 } from './seam.js';
 import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buffers.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const DSERR_INVALIDPARAM = 0x80070057 | 0;
 const DSERR_CONTROLUNAVAIL = 0x8878001e | 0;
@@ -169,7 +170,7 @@ function fixture({ pointerSize = 4, memory = guestMemory(), callGuest, createIns
         mta.users--;
     } };
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const address = nextAddress;
             nextAddress += (bytes + 0xfff) & ~0xfff;
@@ -1218,7 +1219,7 @@ test('DirectSoundCreate refuses to write through a null', ()=>{
 test('with no bridge behind it the seam refuses instead of publishing nowhere', ()=>{
     const memory = guestMemory();
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: ()=>0x50000,
         now: ()=>0,
         publishInterface: ()=>0,
@@ -1267,7 +1268,7 @@ function guestMachine({ answers = [], pointerSize = 4 } = {}){
     let nextTrap = 1;
     let heapNext = 0x8000;
     const vtables = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} at @param {number} length */
             readBytes: (at, length)=>memory.bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
@@ -1276,7 +1277,7 @@ function guestMachine({ answers = [], pointerSize = 4 } = {}){
             readU32: at=>memory.u32(at),
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>memory.setU32(at, value),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             const trap = nextTrap++;
@@ -1295,7 +1296,7 @@ function guestMachine({ answers = [], pointerSize = 4 } = {}){
 
     let storage = 0x60000;
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const at = storage;
             storage += bytes + 0xfff & ~0xfff;
@@ -1603,7 +1604,7 @@ function withGuest(answers){
     /** @type {{ entry: number, args: number[] }[]} */
     const calls = [];
     const dsound = createDirectSound({
-        memory,
+        memory: withPointers(memory),
         allocate: (/** @type {number} */ bytes)=>{
             const address = nextAddress;
             nextAddress += (bytes + 0xfff) & ~0xfff;

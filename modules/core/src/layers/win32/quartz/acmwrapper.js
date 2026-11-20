@@ -22,6 +22,7 @@ import { FORMAT_WAVE_FORMAT_EX, MEDIATYPE_AUDIO } from './filter.js';
 import { audioType } from './splitters.js';
 import { describe } from './describe.js';
 import { parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const E_POINTER = 0x80004003 | 0;
@@ -222,7 +223,7 @@ export function createAcmWrapper(base, host, acm, passThru){
             {
                 return E_POINTER;
             }
-            host.writeMemory(out >>> 0, /** @type {Uint8Array} */ (parseGuid(CLSID_ACM_WRAPPER)));
+            host.writeMemory(wholeAddress(out), /** @type {Uint8Array} */ (parseGuid(CLSID_ACM_WRAPPER)));
             return S_OK;
         },
         InitNew: ()=>S_OK,

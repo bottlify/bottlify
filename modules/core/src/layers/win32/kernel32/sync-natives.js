@@ -24,6 +24,7 @@ import { KEYEDEVENT_WAIT, KEYEDEVENT_WAKE, MODIFY_STATE, QUERY_STATE, allows,
     grantedAccess } from './access.js';
 import { dueInMs, readLargeInteger, FILETIME_EPOCH_MS } from './due-time.js';
 import { STATUS } from '../ntdll/status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** EVENT_TYPE: a manual-reset event, an auto-reset one. */
 const NOTIFICATION_EVENT = 0;
@@ -72,7 +73,7 @@ export function createSyncNatives(host){
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
@@ -85,7 +86,7 @@ export function createSyncNatives(host){
     const writeByteIf = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, new Uint8Array([value & 0xff]));
+            host.writeMemory(wholeAddress(address), new Uint8Array([value & 0xff]));
         }
     };
 
@@ -228,7 +229,7 @@ export function createSyncNatives(host){
         {
             return STATUS.ACCESS_VIOLATION;
         }
-        host.writeMemory(buffer >>> 0, record());
+        host.writeMemory(wholeAddress(buffer), record());
         writeDwordIf(returned, size);
         return STATUS.SUCCESS;
     };

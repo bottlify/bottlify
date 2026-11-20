@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { COMPILED as compiled } from './d3d10-inguest.x86.js';
+import { COMPILED as LONG } from './d3d10-inguest.x64.js';
 
 /** @type {Record<string, any>} */
 const COMPILED = compiled;
@@ -28,6 +29,15 @@ import { BUFFER10 } from './d3d10-ring.js';
 import { D3D10_COMMANDS } from '../d3d10/commands.js';
 
 const { same } = equivalence(COMPILED, sources);
+const { sameAt64 } = equivalence(COMPILED, sources, undefined, /** @type {any} */ (LONG));
+/**
+ * Each width a process has, with how one input is judged there: the i386 in a
+ * 32-bit process; the x86-64 in a 64-bit one, where an interface's block is
+ * the word eight bytes past it and an array of interfaces steps by eight.
+ *
+ * @type {[4 | 8, (name: string, input: any, double: any) => any][]}
+ */
+const WIDTHS = [[4, same], [8, (name, input, double)=>sameAt64(name, input, double)]];
 const HANDED = { host: ()=>0x0badf00d };
 
 const SELF = DATA;
@@ -113,76 +123,92 @@ function array(next){
     return next() % 10 === 0 ? 0 : ARRAYS;
 }
 
-test('every ring routine in the guest answers and writes as its JavaScript', ()=>{
-    const next = random(10);
-    for (const [name, argsOf] of Object.entries(SHAPES))
-    {
-        assert.ok(COMPILED[name], `${name} is compiled`);
-        for (let round = 0; round < 150; round++)
+for (const [pointer, judged] of WIDTHS)
+{
+    test(`every ring routine in the guest answers and writes as its JavaScript (${
+        pointer * 8} bits)`, ()=>{
+        const next = random(10);
+        for (const [name, argsOf] of Object.entries(SHAPES))
         {
-            const bytes = new Uint8Array(ARRAYS + 0x200 - DATA);
-            const view = new DataView(bytes.buffer);
-            view.setUint32(SELF - DATA + 4, next() % 12 === 0 ? 0 : BLOCK, true);
-            const at = BLOCK - DATA;
-            view.setUint32(at, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
-            view.setUint32(at + SHADOW.COMMANDS, next() % 12 === 0 ? 0 : RING, true);
-            view.setUint32(at + SHADOW.COMMAND_BYTES, RING_BYTES, true);
-            view.setUint32(at + SHADOW.COMMAND_HEAD,
-                [0, 4, 64, RING_BYTES - 64, RING_BYTES - 12, RING_BYTES][next() % 6], true);
-            view.setUint32(at + SHADOW.HELD, next() % 10 === 0 ? 2 : 0, true);
-            for (let word = 0; word < 0x200 / 4; word++)
+            if (pointer === 8 && name === 'ClearDepthStencilView')
             {
-                view.setUint32(ARRAYS - DATA + word * 4, next(), true);
+            // A FLOAT by value in XMM3: a trap in a 64-bit process (d3d10.js NARROW).
+                continue;
             }
-            same(name, { stack: [SELF, ...argsOf(next)], memory: [[DATA, bytes]] }, HANDED);
+            assert.ok(/** @type {Record<string, any>} */ (pointer === 8 ? LONG : COMPILED)[name],
+                `${name} is compiled`);
+            for (let round = 0; round < 150; round++)
+            {
+                const bytes = new Uint8Array(ARRAYS + 0x200 - DATA);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(SELF - DATA + pointer, next() % 12 === 0 ? 0 : BLOCK, true);
+                const at = BLOCK - DATA;
+                view.setUint32(at, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
+                view.setUint32(at + SHADOW.COMMANDS, next() % 12 === 0 ? 0 : RING, true);
+                view.setUint32(at + SHADOW.COMMAND_BYTES, RING_BYTES, true);
+                view.setUint32(at + SHADOW.COMMAND_HEAD,
+                    [0, 4, 64, RING_BYTES - 64, RING_BYTES - 12, RING_BYTES][next() % 6], true);
+                view.setUint32(at + SHADOW.HELD, next() % 10 === 0 ? 2 : 0, true);
+                for (let word = 0; word < 0x200 / 4; word++)
+                {
+                    view.setUint32(ARRAYS - DATA + word * 4, next(), true);
+                }
+                judged(name, { stack: [SELF, ...argsOf(next)], memory: [[DATA, bytes]] }, HANDED);
+            }
         }
-    }
-});
+    });
+}
 
-test('a dynamic buffer\'s map and unmap in the guest answer and write as their JavaScript', ()=>{
-    const next = random(12);
-    // A buffer's block past the arrays, its device's block the one above.
-    const BUFFER = ARRAYS + 0x200;
-    for (let round = 0; round < 2000; round++)
-    {
-        const bytes = new Uint8Array(BUFFER + BUFFER10.SIZE + 0x40 - DATA);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(SELF - DATA + 4, next() % 12 === 0 ? 0 : BUFFER, true);
-        const device = BLOCK - DATA;
-        view.setUint32(device, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
-        view.setUint32(device + SHADOW.COMMANDS, next() % 12 === 0 ? 0 : RING, true);
-        view.setUint32(device + SHADOW.COMMAND_BYTES, RING_BYTES, true);
-        view.setUint32(device + SHADOW.COMMAND_HEAD, [0, 64, RING_BYTES - 12][next() % 3], true);
-        view.setUint32(device + SHADOW.HELD, next() % 10 === 0 ? 2 : 0, true);
-        const at = BUFFER - DATA;
-        view.setUint32(at + BUFFER10.FLAGS, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
-        view.setUint32(at + BUFFER10.DEVICE, next() % 12 === 0 ? 0 : BLOCK, true);
-        view.setUint32(at + BUFFER10.CURRENT, 0x20000 + (next() % 4) * 0x1000, true);
-        view.setUint32(at + BUFFER10.LENGTH, 0x800, true);
-        view.setUint32(at + BUFFER10.MAPPED, [0, 0, 0, 4, 5][next() % 5], true);
-        const storages = 1 + next() % 4;
-        view.setUint32(at + BUFFER10.COUNT, storages, true);
-        view.setUint32(at + BUFFER10.FREE, next() & ((1 << storages) - 1), true);
-        for (let index = 0; index < storages; index++)
+for (const [pointer, judged] of WIDTHS)
+{
+    test(`a dynamic buffer's map and unmap in the guest answer and write as their JavaScript (${
+        pointer * 8} bits)`, ()=>{
+        const next = random(12);
+        // A buffer's block past the arrays, its device's block the one above.
+        const BUFFER = ARRAYS + 0x200;
+        for (let round = 0; round < 2000; round++)
         {
-            view.setUint32(at + BUFFER10.STORAGES + index * 4, 0x20000 + index * 0x1000, true);
+            const bytes = new Uint8Array(BUFFER + BUFFER10.SIZE + 0x40 - DATA);
+            const view = new DataView(bytes.buffer);
+            view.setUint32(SELF - DATA + pointer, next() % 12 === 0 ? 0 : BUFFER, true);
+            const device = BLOCK - DATA;
+            view.setUint32(device, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
+            view.setUint32(device + SHADOW.COMMANDS, next() % 12 === 0 ? 0 : RING, true);
+            view.setUint32(device + SHADOW.COMMAND_BYTES, RING_BYTES, true);
+            view.setUint32(device + SHADOW.COMMAND_HEAD, [0, 64, RING_BYTES - 12][next() % 3],
+                true);
+            view.setUint32(device + SHADOW.HELD, next() % 10 === 0 ? 2 : 0, true);
+            const at = BUFFER - DATA;
+            view.setUint32(at + BUFFER10.FLAGS, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
+            view.setUint32(at + BUFFER10.DEVICE, next() % 12 === 0 ? 0 : BLOCK, true);
+            view.setUint32(at + BUFFER10.CURRENT, 0x20000 + (next() % 4) * 0x1000, true);
+            view.setUint32(at + BUFFER10.LENGTH, 0x800, true);
+            view.setUint32(at + BUFFER10.MAPPED, [0, 0, 0, 4, 5][next() % 5], true);
+            const storages = 1 + next() % 4;
+            view.setUint32(at + BUFFER10.COUNT, storages, true);
+            view.setUint32(at + BUFFER10.FREE, next() & ((1 << storages) - 1), true);
+            for (let index = 0; index < storages; index++)
+            {
+                view.setUint32(at + BUFFER10.STORAGES + index * 4, 0x20000 + index * 0x1000, true);
+            }
+            const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, bytes]]);
+            const type = [4, 4, 5, 5, 1, 2, 3, next()][next() % 8];
+            const out = next() % 10 === 0 ? 0 : ARRAYS;
+            judged('BufferMap', { stack: [SELF, type, next() % 3 === 0 ? 0x100000 : 0, out],
+                memory },
+            HANDED);
+            judged('BufferUnmap', { stack: [SELF], memory }, HANDED);
+            // Direct3D 11's context: an immediate one's word is its device's block,
+            // a deferred one's zero, which leaves its maps to the host.
+            const CONTEXT = ARRAYS + 0x100;
+            view.setUint32(CONTEXT - DATA + pointer, next() % 3 === 0 ? 0 : BLOCK, true);
+            judged('ContextMap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0, type,
+                next() % 3 === 0 ? 0x100000 : 0, out], memory }, HANDED);
+            judged('ContextUnmap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0], memory },
+                HANDED);
         }
-        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, bytes]]);
-        const type = [4, 4, 5, 5, 1, 2, 3, next()][next() % 8];
-        const out = next() % 10 === 0 ? 0 : ARRAYS;
-        same('BufferMap', { stack: [SELF, type, next() % 3 === 0 ? 0x100000 : 0, out], memory },
-            HANDED);
-        same('BufferUnmap', { stack: [SELF], memory }, HANDED);
-        // Direct3D 11's context: an immediate one's word is its device's block,
-        // a deferred one's zero, which leaves its maps to the host.
-        const CONTEXT = ARRAYS + 0x100;
-        view.setUint32(CONTEXT - DATA + 4, next() % 3 === 0 ? 0 : BLOCK, true);
-        same('ContextMap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0, type,
-            next() % 3 === 0 ? 0x100000 : 0, out], memory }, HANDED);
-        same('ContextUnmap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0], memory },
-            HANDED);
-    }
-});
+    });
+}
 
 test('a deferred context\'s map and unmap are the host\'s (test_deferred_context_map)', ()=>{
     const memory = new Uint8Array(0x100);

@@ -28,8 +28,10 @@
  * four values together must not overflow.
  */
 
+import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { encodeAnsi } from './locale.js';
 import { msToFileTime } from './filetime.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -267,6 +269,8 @@ export const COMPUTER_NAME = 'BOTTLIFY';
  * @property {() => string} [currentDirectory]  The process's, as a full path.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {(path: string) => { exists?: boolean, isDirectory?: boolean } | null} [stat]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose IO_STATUS_BLOCK
+ *     holds Information eight bytes in; absent, 4.
  * @property {{ resolve: (handle: number, type?: string) => any }} [handles]
  *     The handle table, for the volume an open file is on.
  */
@@ -401,7 +405,7 @@ export function createDriveFunctions(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: ([path, sectorsPerCluster, bytesPerSector, freeClusters, totalClusters])=>{
-            const root = rootOf(path === 0 ? null : readPath(path >>> 0));
+            const root = rootOf(path === 0 ? null : readPath(wholeAddress(path)));
             if (root === null || !known(root))
             {
                 host.setLastError(ERROR_PATH_NOT_FOUND);
@@ -433,7 +437,7 @@ export function createDriveFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([path, available, total, free])=>{
-            const root = rootOf(path === 0 ? null : readPath(path >>> 0));
+            const root = rootOf(path === 0 ? null : readPath(wholeAddress(path)));
             if (root === null || !known(root))
             {
                 host.setLastError(ERROR_PATH_NOT_FOUND);
@@ -568,7 +572,7 @@ export function createDriveFunctions(host){
         {
             return false;
         }
-        host.writeMemory(buffer >>> 0, encode(`${text}\0`));
+        host.writeMemory(wholeAddress(buffer), encode(`${text}\0`));
         return true;
     };
 
@@ -596,9 +600,9 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const device = read(name >>> 0);
+                const device = read(wholeAddress(name));
                 const key = device.toLowerCase();
-                const given = (target >>> 0) === 0 ? null : read(target >>> 0);
+                const given = (target >>> 0) === 0 ? null : read(wholeAddress(target));
                 const path = given === null || (flags & DDD_RAW_TARGET_PATH) !== 0
                     ? given : `\\??\\${given.replace(/\//g, '\\')}`;
                 if ((flags & DDD_REMOVE_DEFINITION) !== 0)
@@ -701,7 +705,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_FILENAME_EXCED_RANGE);
                     return 0;
                 }
-                const text = (point >>> 0) === 0 ? '' : read(point >>> 0).replace(/\//g, '\\');
+                const text = (point >>> 0) === 0 ? '' : read(wholeAddress(point)).replace(/\//g, '\\');
                 if (!text.endsWith('\\'))
                 {
                     host.setLastError(ERROR_INVALID_NAME);
@@ -746,7 +750,7 @@ export function createDriveFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, room])=>{
-                const text = (name >>> 0) === 0 ? '' : read(name >>> 0);
+                const text = (name >>> 0) === 0 ? '' : read(wholeAddress(name));
                 if (text === '' || (buffer >>> 0) === 0 || (room >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -766,7 +770,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_FILENAME_EXCED_RANGE);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, encode(`${answer}\0`));
+                host.writeMemory(wholeAddress(buffer), encode(`${answer}\0`));
                 return 1;
             },
         },
@@ -782,7 +786,7 @@ export function createDriveFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, buffer, room, needed])=>{
-                const text = (name >>> 0) === 0 ? '' : read(name >>> 0);
+                const text = (name >>> 0) === 0 ? '' : read(wholeAddress(name));
                 if (!/^\\\\\?\\Volume\{[0-9a-f-]{36}\}\\$/i.test(text))
                 {
                     host.setLastError(ERROR_INVALID_NAME);
@@ -801,7 +805,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_MORE_DATA);
                     return 0;
                 }
-                host.writeMemory(buffer >>> 0, encode(list));
+                host.writeMemory(wholeAddress(buffer), encode(list));
                 return 1;
             },
         },
@@ -819,7 +823,7 @@ export function createDriveFunctions(host){
         handler: args=>{
             const [path, labelBuffer, volumeSize, serial,
                 componentLength, flags, systemName, systemSize] = args;
-            const named = path === 0 ? '' : readPath(path >>> 0);
+            const named = path === 0 ? '' : readPath(wholeAddress(path));
             const root = path === 0 ? '' : rootNamed(named);
             if (root === null)
             {
@@ -840,7 +844,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(labelBuffer >>> 0, encode(label + '\0'));
+                host.writeMemory(wholeAddress(labelBuffer), encode(label + '\0'));
             }
             if (systemName !== 0)
             {
@@ -849,7 +853,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(systemName >>> 0, encode(system + '\0'));
+                host.writeMemory(wholeAddress(systemName), encode(system + '\0'));
             }
             writeDwordIf(serial >>> 0, number);
             writeDwordIf(componentLength >>> 0, component);
@@ -1007,8 +1011,11 @@ export function createDriveFunctions(host){
         handler: ([handle, block, out, length, kind])=>{
             /** @param {number} status @param {number} information */
             const report = (status, information)=>{
-                writeDwordIf(block >>> 0, status);
-                writeDwordIf(block === 0 ? 0 : (block >>> 0) + 4, information);
+                if ((block >>> 0) !== 0)
+                {
+                    overlappedResult(writeDwordIf, overlappedLayout(host.pointerSize),
+                        block >>> 0, status, information);
+                }
                 return status;
             };
             const root = rootOfHandle(handle);
@@ -1033,7 +1040,7 @@ export function createDriveFunctions(host){
                 return STATUS_INFO_LENGTH_MISMATCH;
             }
             const stored = found.bytes.subarray(0, Math.min(found.bytes.length, length >>> 0));
-            host.writeMemory(out >>> 0, stored);
+            host.writeMemory(wholeAddress(out), stored);
             return report(stored.length < found.bytes.length ? STATUS_BUFFER_OVERFLOW : 0,
                 stored.length);
         },
@@ -1054,15 +1061,15 @@ export function createDriveFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const room = readDword(size >>> 0);
+            const room = readDword(wholeAddress(size));
             if (buffer === 0 || COMPUTER_NAME.length + 1 > room)
             {
-                writeDword(size >>> 0, COMPUTER_NAME.length + 1);
+                writeDword(wholeAddress(size), COMPUTER_NAME.length + 1);
                 host.setLastError(ERROR_BUFFER_OVERFLOW);
                 return 0;
             }
-            host.writeMemory(buffer >>> 0, encode(COMPUTER_NAME + '\0'));
-            writeDword(size >>> 0, COMPUTER_NAME.length);
+            host.writeMemory(wholeAddress(buffer), encode(COMPUTER_NAME + '\0'));
+            writeDword(wholeAddress(size), COMPUTER_NAME.length);
             return 1;
         },
     });
@@ -1087,15 +1094,15 @@ export function createDriveFunctions(host){
                 return 0;
             }
             const name = (format & 3) === 2 ? '' : COMPUTER_NAME;
-            const room = readDword(size >>> 0);
+            const room = readDword(wholeAddress(size));
             if ((buffer >>> 0) === 0 || name.length + 1 > room)
             {
-                writeDword(size >>> 0, name.length + 1);
+                writeDword(wholeAddress(size), name.length + 1);
                 host.setLastError(ERROR_MORE_DATA);
                 return 0;
             }
-            host.writeMemory(buffer >>> 0, encode(`${name}\0`));
-            writeDword(size >>> 0, name.length);
+            host.writeMemory(wholeAddress(buffer), encode(`${name}\0`));
+            writeDword(wholeAddress(size), name.length);
             return 1;
         },
     });
@@ -1120,7 +1127,7 @@ export function createDriveFunctions(host){
         handler: ([name, target, max])=>{
             let list;
             const defined = name === 0 ? undefined
-                : devices.get(readName(name >>> 0).toLowerCase());
+                : devices.get(readName(wholeAddress(name)).toLowerCase());
             if (name === 0)
             {
                 list = [...letters().map(letter=>`${letter}:`),
@@ -1135,7 +1142,7 @@ export function createDriveFunctions(host){
             }
             else
             {
-                const found = /^([A-Za-z]):$/.exec(readName(name >>> 0));
+                const found = /^([A-Za-z]):$/.exec(readName(wholeAddress(name)));
                 const letter = found ? found[1].toUpperCase() : null;
                 if (letter === null || !letters().includes(letter))
                 {
@@ -1150,7 +1157,7 @@ export function createDriveFunctions(host){
                 host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                 return 0;
             }
-            host.writeMemory(target >>> 0, encode(list));
+            host.writeMemory(wholeAddress(target), encode(list));
             return list.length;
         },
     });
@@ -1175,7 +1182,7 @@ export function createDriveFunctions(host){
             {
                 return needed;
             }
-            host.writeMemory(buffer >>> 0, encode(block + '\0'));
+            host.writeMemory(wholeAddress(buffer), encode(block + '\0'));
             return block.length;
         },
     });
@@ -1281,7 +1288,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? null : host.readCString(path >>> 0, WHOLE_NAME)),
+                path === 0 ? null : host.readCString(wholeAddress(path), WHOLE_NAME)),
         },
 
         /** UINT GetDriveTypeW(LPCWSTR lpRootPathName) */
@@ -1289,7 +1296,7 @@ export function createDriveFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>driveType(
-                path === 0 ? null : host.readWideString(path >>> 0, WHOLE_NAME * 2)),
+                path === 0 ? null : host.readWideString(wholeAddress(path), WHOLE_NAME * 2)),
         },
 
         /**
@@ -1368,7 +1375,7 @@ export function createDriveFunctions(host){
                         host.setLastError(ERROR_BAD_LENGTH);
                         return 0;
                     }
-                    host.writeMemory(buffer >>> 0, encodeWide(text + '\0'));
+                    host.writeMemory(wholeAddress(buffer), encodeWide(text + '\0'));
                 }
                 writeDwordIf(serial >>> 0, facts.serial);
                 writeDwordIf(componentLength >>> 0, facts.component);
@@ -1388,7 +1395,7 @@ export function createDriveFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([path, name])=>{
-                const root = path === 0 ? '' : host.readCString(path >>> 0, WHOLE_NAME);
+                const root = path === 0 ? '' : host.readCString(wholeAddress(path), WHOLE_NAME);
                 const letter = letterOf(root);
                 if (letter === null || !known(root))
                 {
@@ -1400,7 +1407,8 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_WRITE_PROTECT);
                     return 0;
                 }
-                labels.set(letter, name === 0 ? '' : host.readCString(name >>> 0, WHOLE_NAME));
+                labels.set(letter, name === 0 ? '' : host.readCString(wholeAddress(name),
+                    WHOLE_NAME));
                 return 1;
             },
         },

@@ -330,6 +330,31 @@ test('calls and returns run as interpreted, every call a wasm call or the leaves
     }
 }));
 
+test('a block that begins with an instruction whose rare case is the interpreter\'s has its'
+    + ' entry: an import thunk, a quadword made a double', ifRoom(()=>{
+    const slot = Buffer.alloc(8);
+    slot.writeBigUInt64LE(BigInt(CORPUS.codeAt + 0x10));
+    const programs = {
+        // jmp m; t: jmp [rip+0]; dq f; f: add rax, rcx; ret;
+        // m: mov ecx, 20000; l: call t; dec ecx; jnz l
+        'a call through an import thunk': `eb12ff2500000000${slot.toString('hex')}4801c8c3`
+            + 'b9204e0000e8e4ffffffffc975f7',
+        // mov ecx, 20000; l: cvtsi2sd xmm0, rcx; addsd xmm1, xmm0; dec ecx; jnz l
+        'a loop that begins with cvtsi2sd of a quadword': 'b9204e0000f2480f2ac1f20f58c8ffc975f3',
+    };
+    for (const [text, code] of Object.entries(programs))
+    {
+        // Callees apart, so the thunk is a region of its own, entered at its jump;
+        // a budget that ends runs inside the loop, so its head is entered too.
+        const { failures, exits, stats } = compare([{ ...CORPUS.cases[0], text, code }],
+            { budget: 1000, config: { leafCalls: false } });
+        assert.deepEqual(failures, [], text);
+        assert.equal(exits, 1, text);
+        assert.ok(stats.interpreted < 1000 && stats.translated > 60000,
+            `${text}: ${JSON.stringify(stats)}`);
+    }
+}));
+
 /**
  * Programs whose flags cross a call, a `ret` or a jump between regions, each
  * side reading what the other left: the flag record crosses in the state

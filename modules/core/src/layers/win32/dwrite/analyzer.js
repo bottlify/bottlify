@@ -25,6 +25,7 @@ import { outlinesOf, rasterize } from './outline.js';
 import {
     JUSTIFY, SCRIPT, bidiLevels, codePoints, itemize, justification, lineBreakpoints, mirrored,
 } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -337,10 +338,10 @@ export function createAnalysis(a){
             properties[i * 2] = (classes[i] ?? JUSTIFY.NONE) | 0x10
                 | (isZeroWidth(code) ? 0x40 : 0);
         });
-        host.writeMemory(clusterMap >>> 0, clusters);
-        host.writeMemory(textProperties >>> 0, new Uint8Array(n * 2));
-        host.writeMemory(glyphsOut >>> 0, glyphs);
-        host.writeMemory(glyphProperties >>> 0, properties);
+        host.writeMemory(wholeAddress(clusterMap), clusters);
+        host.writeMemory(wholeAddress(textProperties), new Uint8Array(n * 2));
+        host.writeMemory(wholeAddress(glyphsOut), glyphs);
+        host.writeMemory(wholeAddress(glyphProperties), properties);
         return S_OK;
     };
 
@@ -379,8 +380,8 @@ export function createAnalysis(a){
             }
             view.setUint32(i * 4, bitsOf(advance), true);
         });
-        host.writeMemory(advancesOut >>> 0, advances);
-        host.writeMemory(offsetsOut >>> 0, new Uint8Array(n * 8));
+        host.writeMemory(wholeAddress(advancesOut), advances);
+        host.writeMemory(wholeAddress(offsetsOut), new Uint8Array(n * 8));
         return S_OK;
     };
 
@@ -399,7 +400,7 @@ export function createAnalysis(a){
         {
             return E_INVALIDARG;
         }
-        const run = host.readMemory(runAt >>> 0, 32);
+        const run = host.readMemory(wholeAddress(runAt), 32);
         const view = new DataView(run.buffer, run.byteOffset, 32);
         const facePointer = view.getUint32(0, true);
         const faceObject = facePointer === 0 ? null : host.objectAt(facePointer);
@@ -415,7 +416,7 @@ export function createAnalysis(a){
         const offsetsAt = view.getUint32(20, true);
         const rtl = (view.getUint32(28, true) & 1) === 1;
         const matrix = (transformAt >>> 0) === 0 ? [1, 0, 0, 1, 0, 0]
-            : Array.from({ length: 6 }, (_, i)=>f32(u32((transformAt >>> 0) + i * 4)));
+            : Array.from({ length: 6 }, (_, i)=>f32(u32(wholeAddress(transformAt) + i * 4)));
         const units = face.metrics.designUnitsPerEm;
         const scale = emSize * ppd / units;
         // Each glyph's pen position along the baseline, in pixels before the transform.
@@ -626,7 +627,7 @@ export function createAnalysis(a){
 
     /** RECT. @param {number} at */
     const readRect = at=>{
-        const raw = host.readMemory(at >>> 0, 16);
+        const raw = host.readMemory(wholeAddress(at), 16);
         const view = new DataView(raw.buffer, raw.byteOffset, 16);
         return { left: view.getInt32(0, true), top: view.getInt32(4, true),
             right: view.getInt32(8, true), bottom: view.getInt32(12, true) };
@@ -688,7 +689,7 @@ export function createAnalysis(a){
                     }
                 }
             }
-            host.writeMemory(buffer >>> 0, out);
+            host.writeMemory(wholeAddress(buffer), out);
             return S_OK;
         } },
         /**

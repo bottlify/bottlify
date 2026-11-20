@@ -33,6 +33,7 @@ import { formatGuid, parseGuid } from '../ole32/guid.js';
 import {
     compareVersions, encodeIdentity, identityMatches, parseManifest,
 } from './manifest.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Codes and statuses these calls answer with. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -581,12 +582,13 @@ export function createActivationContexts(host){
 
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
-        host.writeMemory(address >>> 0, new Uint8Array(new Uint32Array([value >>> 0]).buffer));
+        host.writeMemory(wholeAddress(address),
+            new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     };
     /** @param {number} address @param {number} value */
     const writeDwordIf = (address, value)=>{
@@ -1616,7 +1618,7 @@ export function createActivationContexts(host){
             writeDwordIf(written, result.bytes.length);
             return STATUS_BUFFER_TOO_SMALL;
         }
-        host.writeMemory(buffer >>> 0, result.bytes);
+        host.writeMemory(wholeAddress(buffer), result.bytes);
         writeDwordIf(written, result.written ?? result.bytes.length);
         if ((kind >>> 0) === BASIC_INFORMATION && (flags & QUERY_ACTCTX_FLAG_NO_ADDREF) === 0)
         {
@@ -1931,7 +1933,7 @@ export function createActivationContexts(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([flags, guid, id, key, data])=>findString(flags >>> 0, guid >>> 0, id >>> 0,
-                readUnicodeString(key >>> 0), data >>> 0),
+                readUnicodeString(wholeAddress(key)), data >>> 0),
         },
         /**
          * NTSTATUS RtlFindActivationContextSectionGuid(ULONG flags, const GUID *,
@@ -1946,6 +1948,7 @@ export function createActivationContexts(host){
         /** NTSTATUS RtlQueryInformationActiveActivationContext(ULONG, PVOID, SIZE_T, SIZE_T *) */
         RtlQueryInformationActiveActivationContext: {
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([kind, buffer, size, written])=>query([QUERY_ACTCTX_FLAG_USE_ACTIVE_ACTCTX, 0,
                 0, kind, buffer, size, written]),
@@ -1953,6 +1956,7 @@ export function createActivationContexts(host){
         /** NTSTATUS RtlQueryInformationActivationContext(ULONG, HANDLE, PVOID, ULONG, PVOID, SIZE_T, SIZE_T *) */
         RtlQueryInformationActivationContext: {
             argBytes: 28,
+            sizes: [5],
             /** @param {number[]} args */
             handler: args=>query(args),
         },
@@ -2130,6 +2134,7 @@ export function createActivationContexts(host){
          */
         QueryActCtxW: {
             argBytes: 28,
+            sizes: [5],
             /** @param {number[]} args */
             handler: args=>{
                 const status = query(args);

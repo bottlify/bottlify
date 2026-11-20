@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * imm32 — the input method, which this build does not have and does not need.
  *
@@ -129,9 +131,9 @@ export function createImmFunctions(host){
          * No input context is ever handed out (ImmGetContext), so none can be
          * locked: NULL, and FALSE for the unlock, as an invalid handle answers.
          */
-        ImmLockIMC: { argBytes: 4, handler: ()=>0 },
+        ImmLockIMC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         ImmUnlockIMC: { argBytes: 4, handler: ()=>0 },
-        ImmLockIMCC: { argBytes: 4, handler: ()=>0 },
+        ImmLockIMCC: { returns: 'pointer', argBytes: 4, handler: ()=>0 },
         ImmUnlockIMCC: { argBytes: 4, handler: ()=>0 },
 
         /**
@@ -176,7 +178,7 @@ export function createImmFunctions(host){
                 {
                     if ((out >>> 0) !== 0)
                     {
-                        host.writeMemory(out >>> 0, new Uint8Array(4));
+                        host.writeMemory(wholeAddress(out), new Uint8Array(4));
                     }
                 }
                 return 1;
@@ -227,7 +229,7 @@ export function createImmFunctions(host){
             handler: ([, count])=>{
                 if ((count >>> 0) !== 0)
                 {
-                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
                 return 0;
             },
@@ -326,7 +328,7 @@ export function createImmFunctions(host){
             handler: ([, count])=>{
                 if ((count >>> 0) !== 0)
                 {
-                    host.writeMemory(count >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
                 return 0;
             },

@@ -18,6 +18,7 @@
  */
 
 import { canonicalGuid, formatGuid, readGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;
@@ -96,13 +97,13 @@ export function registerFileDialogClasses(registry, host){
     let told = false;
     /** @param {number} at */
     const read32 = at=>{
-        const b = host.readMemory(at >>> 0, 4);
+        const b = host.readMemory(wholeAddress(at), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number} value */
     const write32 = (at, value)=>{
         const v = value >>> 0;
-        host.writeMemory(at >>> 0,
+        host.writeMemory(wholeAddress(at),
             Uint8Array.of(v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24));
     };
     /** @param {number} at */
@@ -524,7 +525,7 @@ export function registerFileDialogClasses(registry, host){
     ];
     /** @param {number} at @returns {string | null} */
     const guidAt = at=>(at >>> 0 === 0 ? null
-        : canonicalGuid(formatGuid(host.readMemory(at >>> 0, 16))));
+        : canonicalGuid(formatGuid(host.readMemory(wholeAddress(at), 16))));
     /**
      * IExplorerBrowserEvents: the dialog hears its browser's navigation; with
      * no browser shown, nothing is to be done about it.
@@ -558,7 +559,7 @@ export function registerFileDialogClasses(registry, host){
         {
             if (buffer >>> 0 !== 0 && (length | 0) > 0)
             {
-                host.writeMemory(buffer >>> 0, new Uint8Array(2));
+                host.writeMemory(wholeAddress(buffer), new Uint8Array(2));
             }
             return S_OK;
         } },

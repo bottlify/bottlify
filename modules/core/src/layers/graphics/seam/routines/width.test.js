@@ -15,8 +15,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CODE_64, KEPT_64, STACK_64, argumentOf, callLong, longMachine }
+import { CODE_64, HIGH_64, KEPT_64, STACK_64, argumentOf, callLong, longMachine }
     from '../../../../../scripts/guest-code/long.mjs';
+import { ifRoom } from '../../../../../../cork/src/testing/memory64.js';
 import { I386, X64 } from './assemble.js';
 import { getRenderStateCode } from './getters.js';
 import { FLAG_SLOW_PATH, SHADOW } from '../block.js';
@@ -28,8 +29,8 @@ const BLOCK = 0x210000;
 const OUT = 0x230000;
 
 /** A machine with an interface whose block holds render state 7 as valid, value 0x1234. */
-const world = ()=>{
-    const m = longMachine();
+const world = (/** @type {Parameters<typeof longMachine>[0]} */ options = {})=>{
+    const m = longMachine(options);
     m.write(TRAP, [0xf4]);
     m.write(RETURN, [0xf4]);
     m.write(CODE_64, getRenderStateCode(CODE_64, TRAP, X64));
@@ -60,7 +61,6 @@ for (const [why, change] of /** @type {[string, (m: any, a: bigint[]) => void][]
     ['the host wants the slow path', m=>m.write(BLOCK, [FLAG_SLOW_PATH])],
     ['a state the device refuses', (m, a)=>{ a[1] = argumentOf(8, 1); }],
     ['a null pointer', (m, a)=>{ a[2] = 0n; }],
-    ['a pointer above 4 GiB', (m, a)=>{ a[2] = BigInt(OUT) | 1n << 32n; }],
     ['no block', m=>m.setQuad(THIS + 8, 0n)],
 ]))
 {
@@ -82,3 +82,12 @@ test('the i386 width keeps a 32-bit routine as it was', ()=>{
     assert.deepEqual(getRenderStateCode(CODE_64, TRAP), getRenderStateCode(CODE_64, TRAP, I386));
     assert.deepEqual([...I386.entry(), ...I386.reload()], []);
 });
+
+test('GetRenderState at 64 bits writes through a pointer past 4 GiB, not its low half', ifRoom(()=>{
+    // On the interpreter: the translator's wide window has its own gate.
+    const m = world({ window: 2 ** 33, config: { translate: false } });
+    run(m, [BigInt(THIS), argumentOf(7, 1), BigInt(HIGH_64 + OUT)]);
+    assert.equal(m.rip(), RETURN + 1);
+    assert.deepEqual([...m.read(HIGH_64 + OUT, 4)], [0x34, 0x12, 0, 0]);
+    assert.deepEqual([...m.read(OUT, 4)], [0, 0, 0, 0]);
+}));

@@ -794,6 +794,16 @@ export function createFields(memory){
     return {
         readU32,
         writeU32,
+        /**
+         * A pointer of `bytes` (4 or 8), whole, through the memory service's
+         * reader and writer (the memory layer's): never a dword and a zero
+         * made here.
+         *
+         * @param {number} address @param {4 | 8} bytes
+         */
+        readPointer: (address, bytes)=>memory.readPointer(address, bytes),
+        /** @param {number} address @param {number} value @param {4 | 8} bytes */
+        writePointer: (address, value, bytes)=>memory.writePointer(address, value, bytes),
         staged,
         writeStaged,
 

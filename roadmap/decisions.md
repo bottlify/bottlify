@@ -2563,3 +2563,59 @@ out: a program that looked would otherwise ask for what is not there (Wine's ntd
 by this). Nothing here has a date of its own, so the volume was made on 1 January 1980, the date the
 files found on the drive carry, no younger than anything on it (`kernel32/drives.js`). Revisit when
 the volume keeps object ids. *2026-11-19.*
+
+**A277. A program's plain loads and stores keep no x86 order between executors on a host that
+reorders them (arm64).** x86 is TSO: one thread's stores are seen by another in the order made, and
+programs hand data over with plain movs - a spinlock let go with `mov [lock], 0`, a `volatile` flag
+after the data it guards. Wasm's plain accesses to shared memory have no such order, and an arm64
+host reorders them; a translated program on several executors there may see a flag before the data.
+The engine's own routines and every `lock`-prefixed or `xchg` access of the program are atomics and
+keep their order (`check-lock-release`). Turning every integer access into an atomic (the removed
+`ordered` variant) cost 13 % of machine code on arm64, and no program was found to need it: the
+flicker it was made for in Call of Duty 4 was a thread's missing static TLS. So nothing is done
+until a program shows the bug: what it looks like is rare corruption - a worker reading garbage
+through a pointer it was handed, a stray triangle, a click - only on an arm64 host with several
+executors, never with one executor or on x86. kernel32/sleep-zero.itest.js hands a token with plain
+movs and runs on one executor only on such a host.
+*2026-11-18, the owner's ruling.*
+
+**A278. A 64-bit handler's `size_t` / `SIZE_T` result is sign-extended into RAX.** Handlers answer
+in dwords, and the C runtime's sizes carry their errors as `(size_t)-1` and `(size_t)-2` (mbrtowc's
+INCOMPLETE, wcstombs' failure): only a sign-extension makes those the quadword a 64-bit caller
+compares against. So a size is no address to the bridge (`check-wide-arguments.mjs` refuses
+`returns: 'pointer'` over one). The cost: a host size of 2 GiB or more comes back wrong unless its
+handler answers a quadword. Pointer-sized integers (`ULONG_PTR`, `UINT_PTR`, `DWORD_PTR`,
+`uintptr_t`, `WPARAM`) are decided by meaning: GetClassLongPtr's value may be an address and is
+declared one. A function that has guest code is the exception, because its code answers too: its
+handler leaves RAX as its x86-64 does for the type its source declares (`@returns {u32}` by zeros,
+`{i32}` by its sign, `{ptr}` whole; `guestExport` hands the bridge that type), so that a caller
+cannot tell which of the two answered. A size whose errors are `(size_t)-1` is declared `i32` there.
+*2026-11-18; the guest-code exception 2026-11-19.*
+
+**A279. A locked access across two aligned quadwords (a split lock), and `lock cmpxchg16b`, are
+made holding one lock word of the process, not as one atomic access.** A `lock`-prefixed
+read-modify-write or an `xchg` with memory is one wasm atomic on an address aligned to its width,
+and a compare-and-swap of the aligned quadword holding it where it lies across its own alignment
+inside one. Across two quadwords, and for the sixteen bytes of `cmpxchg16b`, no wasm atomic covers
+the access: with several executors it is a plain read, compare and write made while holding a word
+every executor spins for (`layout.lockWord`; `lockHeld` in `emit/locked.js`, `BlockMemory.held` in the
+interpreters). So such accesses are indivisible against each other - the only writers a program has
+at an address it locks that way, a lock-free list's counted head among them - and a plain reader
+sees what it would on hardware, either half old or new. Not excluded: an aligned locked access of
+another width on part of the same bytes at the same instant, which hardware's bus lock would keep
+out; no program was found to mix the two on one address. The wasm interpreter tier leaves every
+locked instruction of a process on several executors to the JavaScript one.
+*2026-11-19.*
+
+**A280. A system module's bytes are written when it is first loaded, at a span fixed at the start.**
+Windows maps a DLL when something loads it; every one of ours was written into every process at
+the start (12.9 MiB of 157 modules, for a program that imports kernel32 alone), and a setup that
+runs dozens of processes paid that each time. Now each module's span, its export addresses and
+its trap stubs are laid out at the start, in the same order in every process, and its bytes are
+written when it is first marked loaded or first hands out an address (`addressOf`): an address
+taken early is the one that works later (the reason everything was written at once), and code
+translated in one process calls the same addresses in the next. Laid out on demand instead, the
+bases would follow each program's load order: a warm translation store measured on wine-d3d9's
+device test kept 286 of its regions with every module moved 64 KiB, against 357 in place, its
+misses 97 against 8. Until written a module's span is a reserved region nothing else is given.
+*2026-11-19.*

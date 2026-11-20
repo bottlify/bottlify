@@ -21,6 +21,7 @@
 import {
     MS_COEFFICIENTS, decodeImaBlock, decodeMsBlock, imaSamplesPerBlock, msSamplesPerBlock,
 } from './codecs.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const MMSYSERR_NOERROR = 0;
 const MMSYSERR_INVALHANDLE = 5;
@@ -293,11 +294,11 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
 
     /** @param {number} address */
     const u32 = address=>{
-        const b = readMemory(address >>> 0, 4);
+        const b = readMemory(wholeAddress(address), 4);
         return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
-    const put32 = (address, value)=>writeMemory(address >>> 0, new Uint8Array(
+    const put32 = (address, value)=>writeMemory(wholeAddress(address), new Uint8Array(
         [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff]));
 
     /**
@@ -309,7 +310,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         {
             return null;
         }
-        const head = readMemory(address >>> 0, WAVEFORMATEX.SIZE);
+        const head = readMemory(wholeAddress(address), WAVEFORMATEX.SIZE);
         const view = new DataView(head.buffer, head.byteOffset, head.byteLength);
         const tag = view.getUint16(WAVEFORMATEX.wFormatTag, true);
         const channels = view.getUint16(WAVEFORMATEX.nChannels, true);
@@ -505,7 +506,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         view.setUint32(WAVEFORMATEX.nAvgBytesPerSec, pcm.rate * blockAlign, true);
         view.setUint16(WAVEFORMATEX.nBlockAlign, blockAlign, true);
         view.setUint16(WAVEFORMATEX.wBitsPerSample, pcm.bits, true);
-        writeMemory(address >>> 0, bytes.subarray(0, Math.min(room, WAVEFORMATEX.SIZE)));
+        writeMemory(wholeAddress(address), bytes.subarray(0, Math.min(room, WAVEFORMATEX.SIZE)));
     };
 
     /**
@@ -553,7 +554,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             }
             at += DETAIL_STRINGS[index] * units;
         });
-        writeMemory(details >>> 0, bytes.subarray(0, Math.min(room, size)));
+        writeMemory(wholeAddress(details), bytes.subarray(0, Math.min(room, size)));
         return MMSYSERR_NOERROR;
     };
 
@@ -567,7 +568,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         {
             bytes[index * units] = text.charCodeAt(index) & 0xff;
         }
-        writeMemory(address >>> 0, bytes);
+        writeMemory(wholeAddress(address), bytes);
     };
 
     /**

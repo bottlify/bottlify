@@ -70,6 +70,7 @@ import {
 } from '../d3d7/constants.js';
 import { D3DPT } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
@@ -94,7 +95,7 @@ function machine(){
     const bytes = new Uint8Array(4 << 20);
     const view = new DataView(bytes.buffer);
     let next = 0x100;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -103,7 +104,7 @@ function machine(){
         readU32: at=>view.getUint32(at, true),
         /** @param {number} at @param {number} value */
         writeU32: (at, value)=>view.setUint32(at, value >>> 0, true),
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;

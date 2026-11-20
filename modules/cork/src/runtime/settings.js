@@ -109,6 +109,13 @@ export const SETTINGS = {
             + ' one it has no room for lets those gone longest without running go until there'
             + ' is, and where none is left one module is held past it (`unchargedBytes` in the'
             + ' diagnostics).' },
+    // The engine keeps a module's compiled code until a full collection finds
+    // it unreachable, which a thread with a small heap may not run for minutes.
+    letGo: { kind: 'host', value: /** @type {((bytes: number) => void) | null} */ (null),
+        shown: 'none',
+        doc: 'Told the wasm bytes of each module the runtime lets go (no running region in'
+            + ' it any more: replaced, evicted or written over), so a host can ask its engine'
+            + ' to collect the compiled code it no longer reaches.' },
     sharedModuleBytes: { kind: 'host', value: 256 << 20,
         doc: 'The wasm bytes of compiled batch modules kept for every runtime handed the same'
             + ' `store` (`shared-modules.js`): a process the run starts again instantiates what'
@@ -372,6 +379,10 @@ export const SETTINGS = {
     yieldChunk: { kind: 'test', value: undefined, shown: '2^24',
         doc: '`createMachine` alone (cork\'s machine for its tests): the instructions translated'
             + ' code runs at a time.' },
+    lowBlock: { kind: 'test', value: undefined, shown: '`true`',
+        doc: 'The core\'s host: over a wide window whose code block is past 4 GiB, the block'
+            + ' below it translated by a runtime of its own (`twoBlockRuntime`); false leaves'
+            + ' its code to the interpreter tier.' },
     sliceMs: { kind: 'test', value: undefined, shown: '8',
         doc: 'How long an interpreting slice may take.' },
     wasmInterpreterAfter: { kind: 'test', value: undefined, shown: '8192',

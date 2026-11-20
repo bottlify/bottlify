@@ -98,6 +98,11 @@ const LONG_WORD = 8;
  *           VARIANT -- by their first dword counting the interface pointer and
  *           their size in dwords: a 64-bit caller passes a pointer to a copy
  *           (the bridge's `structs`).
+ * @property {string} [returns]  The answer is an address: zero-extended into a
+ *           64-bit caller's RAX (`HostFunction.returns`).
+ * @property {number[]} [addresses]  The dwords, counting the interface pointer,
+ *           that carry an address the method takes whole from a 64-bit caller
+ *           (`HostFunction.addresses`).
  */
 
 /**
@@ -186,16 +191,10 @@ const COUNT_CODE_64 = {
  *        interface has a slot for and no implementation of, which answers E_NOTIMPL
  */
 export function createVtables({ memory, register, heap, long = ()=>false, unimplemented }){
-    /** A pointer's width now, and a pointer written at it. */
+    /** A pointer's width now, and a pointer written at it, whole (the memory layer's). */
     const wordSize = ()=>(long() ? LONG_WORD : WORD);
     /** @param {number} at @param {number} value */
-    const writeWord = (at, value)=>{
-        memory.writeU32(at, value >>> 0);
-        if (long())
-        {
-            memory.writeU32(at + 4, 0);
-        }
-    };
+    const writeWord = (at, value)=>memory.writePointer(at, value, wordSize());
     /** One entry per object; inside it, one interface pointer per interface. */
     const published = new WeakMap();
     /**
@@ -244,7 +243,9 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         : `${interfaceId}|${table.map(method=>`${method.argBytes}:${method.builtin ?? ''}:${
             method.floats ? JSON.stringify(method.floats) : ''}:${
             method.quadwords ? method.quadwords.join('.') : ''}:${
-            method.structs ? JSON.stringify(method.structs) : ''}`).join(',')}`);
+            method.structs ? JSON.stringify(method.structs) : ''}:${
+            method.returns ?? ''}:${
+            method.addresses ? method.addresses.join('.') : ''}`).join(',')}`);
     /**
      * Which object an interface pointer belongs to, and that object's own
      * methods for it. A shared stub is called through many pointers, and the
@@ -341,6 +342,8 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
                     ...method.quadwords ? { quadwords: method.quadwords } : {},
 
                     ...method.structs ? { structs: method.structs } : {},
+                    ...method.returns ? { returns: method.returns } : {},
+                    ...method.addresses ? { addresses: method.addresses } : {},
                     /** @param {number[]} args */
                     handler: args=>{
                         // The first argument is the interface pointer the guest

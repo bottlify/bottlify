@@ -11,6 +11,7 @@ import {
     MEDIATYPE_Audio, STANDARD_EFFECTS, registerStandardEffects,
 } from './effects.js';
 import { parseGuid } from '../../win32/ole32/guid.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -26,11 +27,15 @@ function machine(){
     const classes = new Map();
     /** @type {string[]} */
     const said = [];
-    registerStandardEffects({ registerClass: (clsid, factory)=>classes.set(clsid, factory) }, {
-        readMemory: (at, length)=>bytes.slice(at, at + length),
-        writeMemory: (at, data)=>bytes.set(data, at),
-        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
-    });
+    registerStandardEffects({ registerClass: (clsid, factory)=>classes.set(clsid, factory) },
+        withPointers({
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                bytes.slice(at, at + length),
+            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
+                bytes.set(data, at),
+            divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+                said.push(`${api}: ${detail}`),
+        }));
     /**
      * One effect's methods by interface and name.
      *

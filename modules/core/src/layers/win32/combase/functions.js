@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * combase: the Windows Runtime's start, its strings and its activation, as
  * much of it as a desktop program asks before falling back to the Win32 way.
@@ -45,14 +47,14 @@ const MAX_TEXT = 0x7fffffff;
 export function createCombaseFunctions(host){
     /** @param {number} address */
     const dword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     };
     /** @param {number} address @param {number} value */
     const setDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** The runtime's apartment, once started: 'single' or 'multi'. @type {string | null} */
     let apartment = null;
@@ -170,7 +172,7 @@ export function createCombaseFunctions(host){
                 const view = new DataView(bytes.buffer);
                 view.setUint32(4, count, true);
                 view.setUint32(16, block + HEADER_SIZE, true);
-                bytes.set(host.readMemory(source >>> 0, count * 2), HEADER_SIZE);
+                bytes.set(host.readMemory(wholeAddress(source), count * 2), HEADER_SIZE);
                 host.writeMemory(block, bytes);
                 made.add(block);
                 setDword(out, block);
@@ -202,7 +204,7 @@ export function createCombaseFunctions(host){
                 {
                     return E_POINTER;
                 }
-                const terminator = host.readMemory((source >>> 0) + count * 2, 2);
+                const terminator = host.readMemory(wholeAddress(source) + count * 2, 2);
                 if (terminator[0] !== 0 || terminator[1] !== 0)
                 {
                     return E_INVALIDARG;
@@ -212,7 +214,7 @@ export function createCombaseFunctions(host){
                 view.setUint32(0, REFERENCE, true);
                 view.setUint32(4, count, true);
                 view.setUint32(16, source >>> 0, true);
-                host.writeMemory(header >>> 0, bytes);
+                host.writeMemory(wholeAddress(header), bytes);
                 setDword(out, header >>> 0);
                 return S_OK;
             },
@@ -234,6 +236,7 @@ export function createCombaseFunctions(host){
 
         /** PCWSTR WindowsGetStringRawBuffer(HSTRING string, UINT32 *length) */
         WindowsGetStringRawBuffer: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, length])=>{

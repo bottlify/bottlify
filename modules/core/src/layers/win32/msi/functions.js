@@ -56,6 +56,7 @@ import {
     ERROR_BAD_PATHNAME, exportTable, importTable, mergeDatabases, streamFolder,
 } from './archive.js';
 import { parseGuid } from '../ole32/guid.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 /** MsiEnableLog: the bit that lists the properties at the end, and appending to the file. */
@@ -236,18 +237,18 @@ export function createMsiFunctions(host){
     const registration = createRegistration(host.hive);
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>writeU32(address, value | 0);
 
     /** @param {boolean} wide @returns {(address: number) => string | null} */
     const reader = wide=>address=>((address >>> 0) === 0 ? null : wide
-        ? host.readWideString(address >>> 0, MAX_TEXT * 2)
-        : host.readCString(address >>> 0, MAX_TEXT));
+        ? host.readWideString(wholeAddress(address), MAX_TEXT * 2)
+        : host.readCString(wholeAddress(address), MAX_TEXT));
 
     /** @param {string} text */
     const utf16 = text=>{
@@ -283,7 +284,7 @@ export function createMsiFunctions(host){
             const fits = Math.min(length, room - 1);
             const out = new Uint8Array((fits + 1) * width);
             out.set(units.subarray(0, fits * width));
-            host.writeMemory(buffer >>> 0, out);
+            host.writeMemory(wholeAddress(buffer), out);
         }
         writeU32(size, length);
         return (buffer >>> 0) !== 0 && length >= room ? ERROR_MORE_DATA : ERROR_SUCCESS;
@@ -1510,7 +1511,7 @@ export function createMsiFunctions(host){
      * @param {boolean} wide @param {string} text @param {number} buffer
      */
     const putFixed = (wide, text, buffer)=>{
-        host.writeMemory(buffer >>> 0, wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`));
+        host.writeMemory(wholeAddress(buffer), wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`));
     };
 
     return {
@@ -1690,7 +1691,7 @@ export function createMsiFunctions(host){
                 const want = Math.min(readU32(size), value.stream.size - value.position);
                 const bytes = want > 0 ? await value.stream.read(value.position, want)
                     : new Uint8Array(0);
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(wholeAddress(buffer), bytes);
                 value.position += bytes.length;
                 writeU32(size, bytes.length);
                 return ERROR_SUCCESS;
@@ -1988,7 +1989,7 @@ export function createMsiFunctions(host){
                 {
                     if ((filetime >>> 0) !== 0)
                     {
-                        host.writeMemory(filetime >>> 0, new Uint8Array(
+                        host.writeMemory(wholeAddress(filetime), new Uint8Array(
                             BigUint64Array.of(BigInt(entry.value)).buffer));
                     }
                     return ERROR_SUCCESS;
@@ -2022,7 +2023,7 @@ export function createMsiFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const value = wanted === VT.LPSTR ? reader(wide)(text) ?? ''
-                : wanted === VT.FILETIME ? new DataView(host.readMemory(filetime >>> 0, 8)
+                : wanted === VT.FILETIME ? new DataView(host.readMemory(wholeAddress(filetime), 8)
                     .slice().buffer).getBigUint64(0, true) : integer | 0;
             summary.set(property >>> 0, { type: wanted, value });
             const owner = summaries.get(summary);
@@ -2637,7 +2638,7 @@ export function createMsiFunctions(host){
                 return ERROR_NO_MORE_ITEMS;
             }
             const text = `${products[index >>> 0]}\0`;
-            host.writeMemory(buffer >>> 0, wide ? utf16(text) : encodeAnsi(text));
+            host.writeMemory(wholeAddress(buffer), wide ? utf16(text) : encodeAnsi(text));
             return ERROR_SUCCESS;
         }),
         ...both('MsiGetComponentPath', 16, wide=>([product, component, buffer, size])=>{

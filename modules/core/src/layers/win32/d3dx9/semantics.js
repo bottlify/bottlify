@@ -25,6 +25,7 @@
  */
 
 import { COMMENT_OPCODE, END_TOKEN, MOST_TOKENS, tokensAfter } from '../common/shader-tokens.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const OP_DCL = 31;
 const OP_DEFB = 47;
@@ -157,7 +158,7 @@ export function createShaderSemantics(host){
     const D3DXERR_INVALIDDATA = 0x88760b59;
     /** @param {number} at */
     const readU32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /**
@@ -171,7 +172,7 @@ export function createShaderSemantics(host){
             {
                 return D3DERR_INVALIDCALL;
             }
-            const found = shaderSemantics(index=>readU32((code >>> 0) + index * 4), output);
+            const found = shaderSemantics(index=>readU32(wholeAddress(code) + index * 4), output);
             if (found === null)
             {
                 return D3DXERR_INVALIDDATA;
@@ -184,11 +185,11 @@ export function createShaderSemantics(host){
                     view.setUint32(i * 8, usage, true);
                     view.setUint32(i * 8 + 4, index, true);
                 });
-                host.writeMemory(semantics >>> 0, bytes);
+                host.writeMemory(wholeAddress(semantics), bytes);
             }
             if ((count >>> 0) !== 0)
             {
-                host.writeMemory(count >>> 0, Uint8Array.of(found.length, 0, 0, 0));
+                host.writeMemory(wholeAddress(count), Uint8Array.of(found.length, 0, 0, 0));
             }
             return D3D_OK;
         },
@@ -213,7 +214,7 @@ export function createShaderSemantics(host){
         D3DXGetShaderVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([code])=>((code >>> 0) === 0 ? 0 : readU32(code >>> 0)),
+            handler: ([code])=>((code >>> 0) === 0 ? 0 : readU32(wholeAddress(code))),
         },
     };
 }

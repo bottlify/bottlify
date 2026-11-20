@@ -110,6 +110,9 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [apic]  Cork's own, beside `interrupt`: an i32 holding the processor this
  *     executor is to the code it runs, where `cpuid`'s leaf 1 answers it (EBX[31:24]); a
  *     translation made for every executor reads it there.
+ * @property {number} [lockWord]  Cork's own, where the process has several executors: an i32
+ *     in the first executor's page, the same address for every executor, held around a locked
+ *     access no host atomic spans (across two aligned quadwords, `cmpxchg16b`).
  * @property {boolean} [shared]  Cork's own: the process's shared layout (`sharedLayout`), whose
  *     state fields and tables are offsets from bases each instance is given.
  * @property {string} id           A hash of every field above.
@@ -336,6 +339,9 @@ export function engineContractProblem(engineModule, url){
  * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [charge]
  *     Where the host bounds what its runtimes hold together (the tab's memory): each
  *     module held is taken by its wasm bytes and given back as it is let go.
+ * @property {((bytes: number) => void) | null} [letGo]  Told the wasm bytes of each module
+ *     the runtime lets go, so the host can bring forward the collection that frees its
+ *     compiled code (`gc-nudge.js` `releasedCode`).
  * @property {number} [sharedModuleBytes]  Wasm bytes of compiled batch modules kept for every
  *     runtime handed the same `store`: a process the run starts again instantiates the modules
  *     an earlier one compiled, without compiling them (0: none kept). Default 256 MiB.
@@ -351,6 +357,9 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [yieldChunk]  `createMachine` alone (cork's machine for its tests): the
  *     instructions translated code runs at a time. Default 2^24.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
+ * @property {boolean} [lowBlock]  The core's host over a wide window whose code block lies
+ *     past 4 GiB: the block below it translated by a runtime of its own; false leaves its code
+ *     to the interpreter tier. Default true.
  * @property {'host' | 'virtual'} [clock]  The clock the cork host and its translator take
  *     their decisions by: `host`, the machine's (the default); `virtual`, the instructions the
  *     guest retired, a million a millisecond (`VIRTUAL_INSTRUCTIONS_PER_MS`) -- a slice's
@@ -460,6 +469,9 @@ export function engineContractProblem(engineModule, url){
  * @property {ExitKind} kind
  * @property {number} vector   For `fault`: 0 (#DE), 6 (#UD), 3 (int 3), 13 (page flag);
  *                             `int n` reports n.
+ * @property {number} [staleAt]   The span of code the run's stores reached, in the window,
+ * @property {number} [staleSize] its size 0 for none: a wide window's other code block's
+ *                             runtime is told of it (cork-host's `twoBlockRuntime`).
  */
 
 /**

@@ -9,7 +9,8 @@
  * input by input, on cork's test machine: handles past the table, with no
  * word, an event's or a mutex's word, MIRROR's states; counts at zero, one,
  * the maximum and past it, HOST set, a release of zero, a negative count,
- * one past the room, a null previous count. What the JavaScript answers
+ * one past the room, a null previous count - each through its i386 and its
+ * x86-64. What the JavaScript answers
  * against the host's own WaitForSingleObject and ReleaseSemaphore is
  * `semaphore-guest.itest.js`'s gate.
  */
@@ -18,6 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { COMPILED } from './semaphore-guest.x86.js';
+import { COMPILED as LONG } from './semaphore-guest.x64.js';
 import * as sources from './semaphore-guest.js';
 import { EVENT_SLOTS } from './wait-one.js';
 import { DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
@@ -34,13 +36,16 @@ const HANDLES = 32;
  * Each function's code as the binding places it: HANDLE_WORDS the table the
  * case lays out, as the JavaScript reads it.
  */
-const placed = Object.fromEntries(Object.entries(COMPILED).map(([name, record])=>{
-    const code = record.code.slice();
-    new DataView(code.buffer).setUint32(record.tables.HANDLE_WORDS, TABLE, true);
-    return [name, { ...record, code }];
-}));
+const placedOf = (/** @type {Record<string, any>} */ records)=>Object.fromEntries(
+    Object.entries(records).map(([name, record])=>{
+        const code = record.code.slice();
+        new DataView(code.buffer).setUint32(record.tables.HANDLE_WORDS, TABLE, true);
+        return [name, { ...record, code }];
+    }));
 sources.HANDLE_WORDS[0] = TABLE;
-const { same } = equivalence(/** @type {any} */ (placed), sources);
+// Each case through the x86-64 a 64-bit process places as well.
+const { same } = equivalence(/** @type {any} */ (placedOf(COMPILED)), sources, undefined,
+    /** @type {any} */ (placedOf(LONG)));
 /** The host's stand-in: what the trap answers is the gate's, here only that it was reached. */
 const HANDED = { host: ()=>0x0badf00d };
 

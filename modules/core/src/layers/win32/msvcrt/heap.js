@@ -254,13 +254,16 @@ export function createHeapFunctions(host){
         const heap = /** @type {() => number} */ (host.heapHandle)();
         const allocateCode = /** @type {(bytes: number) => number} */ (host.allocateCode);
         /**
-         * @param {string} label @param {{ argBytes: number, handler: Function }} entry
+         * @param {string} label
+         * @param {{ argBytes: number, handler: Function, returns?: string,
+         *     sizes?: number[] }} entry
          * @param {(p: import('../kernel32/guest-heap.js').Placement, at: number, trap: number)
          *     => Uint8Array} code
          */
         const place = (label, entry, code)=>{
             const trap = builder.register(label, {
                 convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
+                returns: entry.returns, ...entry.sizes ? { sizes: entry.sizes } : {},
             });
             if (placement === null || !guest.isHeap(heap))
             {
@@ -289,7 +292,7 @@ export function createHeapFunctions(host){
      * over the tables' placement and the heap.
      *
      * @type {Record<'malloc' | 'new' | 'free' | 'calloc' | 'realloc' | 'msize',
-     *     [() => { argBytes: number, handler: Function },
+     *     [() => { argBytes: number, handler: Function, returns?: string, sizes?: number[] },
      *     (p: import('../kernel32/guest-heap.js').Placement, heap: number)
      *         => import('../kernel32/guest-heap-long.js').LongRoutine]>}
      */
@@ -316,14 +319,17 @@ export function createHeapFunctions(host){
                 return bindLong(builder, placement === null || !guest.isHeap(heap) ? null
                     : make(placement, heap), {
                     convention: 'cdecl', argBytes: entry.argBytes, handler: entry.handler,
+                    returns: entry.returns, ...entry.sizes ? { sizes: entry.sizes } : {},
                 });
             },
         }
         : {});
 
     const allocator = {
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        sizes: [0],
         handler: mallocHandler,
         ...routine('malloc'),
     };
@@ -334,8 +340,10 @@ export function createHeapFunctions(host){
      * fast path the same as malloc's.
      */
     const newAllocator = {
+        returns: 'pointer',
         convention: 'cdecl',
         argBytes: 4,
+        sizes: [0],
         handler: newHandlerCall,
         ...routine('new'),
     };
@@ -368,8 +376,10 @@ export function createHeapFunctions(host){
 
         /** void *calloc(size_t count, size_t size) */
         calloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [0, 1],
             ...routine('calloc'),
             /** @param {number[]} args */
             handler: ([count, size])=>{
@@ -389,8 +399,10 @@ export function createHeapFunctions(host){
 
         /** void *realloc(void *block, size_t size) */
         realloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [1],
             ...routine('realloc'),
             /** @param {number[]} args */
             handler: ([address, size])=>{
@@ -455,8 +467,10 @@ export function createHeapFunctions(host){
          * -- the whole point of it is that the pointer stays valid.
          */
         _expand: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>host.resize(address, size >>> 0) ? address : 0,
         },
@@ -475,14 +489,18 @@ export function createHeapFunctions(host){
          * test_aligned, and the documentation).
          */
         _aligned_malloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [0, 1],
             /** @param {number[]} args */
             handler: ([size, alignment])=>alignedAllocate(size >>> 0, alignment >>> 0, 0),
         },
         _aligned_offset_malloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [0, 1, 2],
             /** @param {number[]} args */
             handler: ([size, alignment, offset])=>
                 alignedAllocate(size >>> 0, alignment >>> 0, offset >>> 0),
@@ -500,15 +518,19 @@ export function createHeapFunctions(host){
          * may differ from the ones it was made with.
          */
         _aligned_realloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [1, 2],
             /** @param {number[]} args */
             handler: ([block, size, alignment])=>
                 alignedResize(block >>> 0, size >>> 0, alignment >>> 0, 0),
         },
         _aligned_offset_realloc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [1, 2, 3],
             /** @param {number[]} args */
             handler: ([block, size, alignment, offset])=>
                 alignedResize(block >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
@@ -526,15 +548,19 @@ export function createHeapFunctions(host){
              * before zeroed.
              */
             _aligned_recalloc: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 16,
+                sizes: [1, 2, 3],
                 /** @param {number[]} args */
                 handler: ([block, count, size, alignment])=>
                     alignedRecalloc(block >>> 0, count >>> 0, size >>> 0, alignment >>> 0, 0),
             },
             _aligned_offset_recalloc: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 20,
+                sizes: [1, 2, 3, 4],
                 /** @param {number[]} args */
                 handler: ([block, count, size, alignment, offset])=>alignedRecalloc(block >>> 0,
                     count >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
@@ -567,8 +593,10 @@ export function createHeapFunctions(host){
              * zeroed; a product past the address space is NULL and ENOMEM.
              */
             _recalloc: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 12,
+                sizes: [1, 2],
                 /** @param {number[]} args */
                 handler: ([block, count, size])=>{
                     const bytes = (count >>> 0) * (size >>> 0);
@@ -613,6 +641,7 @@ export function createHeapFunctions(host){
         _set_sbh_threshold: {
             convention: 'cdecl',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>{
                 if ((size >>> 0) > SBH_MAX)
@@ -628,6 +657,7 @@ export function createHeapFunctions(host){
         ...host.heapHandle ? {
             /** intptr_t _get_heap_handle(void) -- the runtime's own heap, not the process's. */
             _get_heap_handle: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>/** @type {() => number} */ (host.heapHandle)(),
@@ -694,6 +724,7 @@ export function createHeapFunctions(host){
         _callnewh: {
             convention: 'cdecl',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>(newHandler === 0 || !host.callGuest
                 ? 0

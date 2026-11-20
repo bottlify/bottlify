@@ -22,6 +22,7 @@
 
 import { STATUS } from './status.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem, upcaseUnit } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @param {string} text */
 export const upcaseText = text=>Array.from(text,
@@ -159,7 +160,7 @@ export function createCountedStringFunctions(host){
      * @param {number} string
      */
     const freeString = string=>{
-        const at = string >>> 0;
+        const at = wholeAddress(string);
         const { buffer } = readDescriptor(at);
         if (buffer !== 0)
         {
@@ -176,7 +177,7 @@ export function createCountedStringFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([destination, source])=>{
-            const at = source >>> 0;
+            const at = wholeAddress(source);
             const text = at === 0 ? '' : host.readCString(at, MAX_ANSI_BYTES);
             writeDescriptor(destination >>> 0, {
                 length: text.length,
@@ -204,7 +205,7 @@ export function createCountedStringFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([destination, source, allocateDestination])=>{
-            const from = readDescriptor(source >>> 0);
+            const from = readDescriptor(wholeAddress(source));
             const text = from.buffer === 0 || from.length === 0 ? ''
                 : decode(host.readMemory(from.buffer, from.length));
             const total = text.length * 2 + 2;
@@ -214,7 +215,7 @@ export function createCountedStringFunctions(host){
                 return STATUS.INVALID_PARAMETER_2;
             }
 
-            const to = readDescriptor(destination >>> 0);
+            const to = readDescriptor(wholeAddress(destination));
             let buffer = to.buffer;
             let maximumLength = to.maximumLength;
             if (asked(allocateDestination))
@@ -253,7 +254,7 @@ export function createCountedStringFunctions(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([destination, source, allocateDestination])=>{
-            const from = readDescriptor(source >>> 0);
+            const from = readDescriptor(wholeAddress(source));
             const read = wideAt(from.buffer, from.length);
             const text = upcase ? upcaseText(read) : read;
             const terminator = counted ? 0 : 1;
@@ -263,7 +264,7 @@ export function createCountedStringFunctions(host){
                 return STATUS.INVALID_PARAMETER_2;
             }
 
-            const to = readDescriptor(destination >>> 0);
+            const to = readDescriptor(wholeAddress(destination));
             let buffer = to.buffer;
             let maximumLength = to.maximumLength;
             let kept = text;
@@ -309,7 +310,7 @@ export function createCountedStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>{
-                const at = source >>> 0;
+                const at = wholeAddress(source);
                 const text = at === 0 ? '' : host.readWideString(at, MAX_WIDE_BYTES);
                 writeDescriptor(destination >>> 0, {
                     length: text.length * 2,
@@ -365,7 +366,7 @@ export function createCountedStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>{
-                const text = host.readCString(source >>> 0, MAX_ANSI_BYTES);
+                const text = host.readCString(wholeAddress(source), MAX_ANSI_BYTES);
                 const total = text.length * 2 + 2;
                 if (total > MAX_MAXIMUM)
                 {
@@ -394,7 +395,7 @@ export function createCountedStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>{
-                const text = host.readWideString(source >>> 0, MAX_WIDE_BYTES);
+                const text = host.readWideString(wholeAddress(source), MAX_WIDE_BYTES);
                 const total = text.length * 2 + 2;
                 if (total > MAX_MAXIMUM)
                 {

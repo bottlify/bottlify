@@ -22,12 +22,15 @@ import * as sources from './inguest-float.js';
 import { doubleWords, equivalence, random } from
     '../../../../scripts/guest-code/equivalence.mjs';
 import { loadModel } from '../../../../scripts/guest-code/model.mjs';
+import { CODE_64, KEPT_64, callLong, longMachine } from
+    '../../../../scripts/guest-code/long.mjs';
+import { guestEntry, halvesEntry } from './guest-code.js';
 
 const SOURCE = new URL('./inguest-float.js', import.meta.url);
 const model = await loadModel(await readFile(SOURCE, 'utf8'), {
     file: 'inguest-float.js', url: SOURCE.href, values: sources,
 });
-const { same } = equivalence(COMPILED, sources, model);
+const { same, sameAt64 } = equivalence(COMPILED, sources, model);
 
 /** Double, single, extended, and each with another rounding. */
 const CONTROLS = [0x27f, 0x07f, 0x37f, 0xe7f, 0x47f, 0x87f];
@@ -195,6 +198,79 @@ test('_statusfp and _clearfp fold in MXCSR\'s flags, and _clearfp clears both un
     assert.equal(same('_statusfp', { mxcsr: 0x1f81 }).eax >>> 0, 0x10, '_SW_INVALID');
 });
 
+/** MXCSR's bits and the runtime's for each, bit by bit. @param {number} word */
+function abstractSse(word){
+    let bits = 0;
+    for (const [x87, runtime] of EXCEPTION_BITS)
+    {
+        bits |= (word & x87 << 7) !== 0 ? runtime : 0;
+    }
+    bits |= [0, 0x100, 0x200, 0x300][word >>> 13 & 3];
+    bits |= (word & 0x8000) !== 0 ? (word & 0x40) !== 0 ? 0x01000000 : 0x03000000
+        : (word & 0x40) !== 0 ? 0x02000000 : 0;
+    return bits >>> 0;
+}
+
+test('a 64-bit process\'s control and status calls are MXCSR\'s: masks, rounding and the '
+    + 'denormal bits, the flags kept, no precision', ()=>{
+    const next = random(53);
+    const registers = [0x1f80, 0x0000, 0x7f80, 0x3f80, 0x5f80, 0x9fc0, 0x1fc0, 0x9f80, 0x1fbf,
+        0xffff, 0x0a15];
+    /** @type {[number, number][]} newControl, mask */
+    const asked = [[0, 0], [0x300, 0x300], [0x100, 0x300], [0, 0x8001f], [0x8001f, 0x8001f],
+        [0x01000000, 0x03000000], [0x02000000, 0x03000000], [0x03000000, 0x03000000],
+        [0, 0x03000000], [0x20000, 0x30000], [0x40000, 0x40000], [0xffffffff, 0xffffffff],
+        [0, 0x80000]];
+    for (let i = 0; i < 40; i++)
+    {
+        asked.push([next(), next()]);
+    }
+    const OUT = 0x20100;
+    for (const mxcsr of registers)
+    {
+        for (const [wanted, mask] of asked)
+        {
+            for (const name of /** @type {const} */ (['_control87', '_controlfp']))
+            {
+                const ran = sameAt64(name, { stack: [wanted, mask], mxcsr });
+                const changed = mask & 0x0308031f & (name === '_controlfp' ? ~0x80000 : ~0);
+                const expected = (abstractSse(mxcsr) & ~changed | wanted & changed) >>> 0;
+                const what = `${name}(0x${wanted.toString(16)}, 0x${mask.toString(16)}) under `
+                    + `MXCSR 0x${mxcsr.toString(16)}`;
+                assert.equal(ran.eax >>> 0, expected, what);
+                assert.equal(abstractSse(/** @type {number} */ (ran.mxcsr)), expected,
+                    `${what}: loaded`);
+                assert.equal(/** @type {number} */ (ran.mxcsr) & 0x3f, mxcsr & 0x3f,
+                    `${what}: the flags kept`);
+            }
+            const written = sameAt64('_controlfp_s', { stack: [OUT, wanted, mask], mxcsr });
+            assert.equal(written.eax, 0);
+            assert.equal(new DataView(written.data.buffer, written.data.byteOffset)
+                .getUint32(OUT - 0x10000, true), abstractSse(/** @type {number} */ (written.mxcsr)),
+            '_controlfp_s writes what it loaded');
+            sameAt64('_controlfp_s', { stack: [0, wanted, mask], mxcsr });
+        }
+        const flags = abstractFlags(mxcsr);
+        assert.equal(sameAt64('_statusfp', { mxcsr, status: 0x3f }).eax >>> 0, flags,
+            '_statusfp reads MXCSR alone');
+        const cleared = sameAt64('_clearfp', { mxcsr, status: 0x3f });
+        assert.equal(cleared.eax >>> 0, flags);
+        assert.equal(cleared.mxcsr, mxcsr & ~0x3f, '_clearfp clears the flags and nothing else');
+    }
+    assert.equal(sameAt64('_controlfp', { stack: [0, 0] }).eax >>> 0, 0x8001f,
+        'the reset word: every exception masked, to nearest');
+});
+
+/** MXCSR's flags as the runtime numbers them. @param {number} word */
+function abstractFlags(word){
+    let bits = 0;
+    for (const [x87, runtime] of EXCEPTION_BITS)
+    {
+        bits |= (word & x87) !== 0 ? runtime : 0;
+    }
+    return bits >>> 0;
+}
+
 test('_isnan, _finite and _fpclass read the bits of every kind of double', ()=>{
     const next = random(42);
     /** @type {Record<number, (low: number, high: number) => boolean>} */
@@ -221,6 +297,35 @@ test('_isnan, _finite and _fpclass read the bits of every kind of double', ()=>{
                     : negative ? 0x8 : 0x100;
         assert.equal(kind, expected, `_fpclass of 0x${high.toString(16)}:${low.toString(16)}`);
     }
+});
+
+test('_fpclass for a 64-bit caller reads the double out of XMM0: every kind, a signalling NaN'
+    + ' as its bits say', ()=>{
+    const RETURN = 0x0f00;
+    const m = longMachine();
+    m.write(RETURN, [0xf4]);
+    const entry = halvesEntry(guestEntry(sources._fpclass, COMPILED._fpclass, {}));
+    m.write(CODE_64, /** @type {NonNullable<typeof entry.long>} */ (entry.long)());
+    const next = random(47);
+    const seen = new Set();
+    for (let i = 0; i < 600; i++)
+    {
+        const [low, high] = doubleBits(next);
+        const bits = BigInt(high >>> 0) << 32n | BigInt(low >>> 0);
+        // The integer registers hold a pattern: the double is in XMM0 alone.
+        const call = callLong(m, CODE_64, { args: [bits], floats: [true], returnTo: RETURN });
+        const what = `_fpclass of 0x${bits.toString(16)}`;
+        assert.equal(m.rip(), RETURN + 1, `${what} returns`);
+        assert.equal(m.reg('rsp'), call.entry.rsp + 8n, `${what}: RSP past the return address`);
+        for (const name of KEPT_64)
+        {
+            assert.equal(m.reg(name), call.entry[name], `${what}: ${name} kept`);
+        }
+        const expected = sources._fpclass(low, high | 0);
+        assert.equal(m.reg('rax'), BigInt(expected), what);
+        seen.add(expected);
+    }
+    assert.equal(seen.size, 10, 'every class met');
 });
 
 test('_copysign, _chgsign, _logb and _nextafter', ()=>{

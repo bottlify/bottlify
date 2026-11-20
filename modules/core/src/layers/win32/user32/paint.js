@@ -36,6 +36,7 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { boundsOf, intersectArea, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** DrawText's flags. */
 const DT_CENTER = 0x0001;
@@ -917,7 +918,7 @@ export function createPaintFunctions(options){
         entry.revision = options.layoutRevision?.() ?? 0;
         if ((flags & (DCX_INTERSECTRGN | DCX_EXCLUDERGN)) !== 0)
         {
-            const given = region >>> 0;
+            const given = wholeAddress(region);
             if (entry.region && entry.region.handle !== given)
             {
                 host.deleteRegion?.(entry.region.handle);
@@ -1248,8 +1249,8 @@ export function createPaintFunctions(options){
      */
     const readCounted = (address, count, wide)=>(wide
         ? String.fromCharCode(...new Uint16Array(
-            host.readMemory(address >>> 0, count * 2).slice().buffer))
-        : decodeAnsi(host.readMemory(address >>> 0, count)));
+            host.readMemory(wholeAddress(address), count * 2).slice().buffer))
+        : decodeAnsi(host.readMemory(wholeAddress(address), count)));
 
     /**
      * DrawState of either kind of text: text, an icon or a bitmap at a
@@ -1272,7 +1273,7 @@ export function createPaintFunctions(options){
         const DSS_UNION = 0x10;
         const DSS_DISABLED = 0x20;
         const draw = host.draw;
-        const h = hdc >>> 0;
+        const h = wholeAddress(hdc);
         const kind = flags & 0xf;
         if (!draw || h === 0)
         {
@@ -1438,7 +1439,7 @@ export function createPaintFunctions(options){
         const cell = cellOf(hdc);
         const widthOf = cell.width ?? ((/** @type {string} */ piece)=>piece.length * cell.cellWidth);
         const given = (stops >>> 0) === 0 ? 0 : Math.min(Math.max(positions | 0, 0), MAX_TAB_STOPS);
-        const bytes = host.readMemory(stops >>> 0, given * 4);
+        const bytes = host.readMemory(wholeAddress(stops), given * 4);
         const list = Array.from({ length: given }, (_, index)=>
             bytes[index * 4] | bytes[index * 4 + 1] << 8 | bytes[index * 4 + 2] << 16
             | bytes[index * 4 + 3] << 24);
@@ -1813,7 +1814,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const handle = brush >>> 0;
+                const handle = wholeAddress(brush);
                 const area = readRect(host, rect);
                 if (handle >= 1 && handle <= SYS_COLOR_BRUSH_LIMIT)
                 {
@@ -1986,7 +1987,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const h = hdc >>> 0;
+                const h = wholeAddress(hdc);
                 const area = readRect(host, rect);
                 const pushed = (state & DFCS_PUSHED) !== 0;
                 const flat = (state & DFCS_FLAT) !== 0;
@@ -2150,7 +2151,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 const area = readRect(host, rect);
-                const h = hdc >>> 0;
+                const h = wholeAddress(hdc);
                 return draw.invert(h, { ...area, bottom: area.top + 1 }, true)
                     && draw.invert(h, { ...area, top: area.bottom - 1 }, true)
                     && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
@@ -2193,7 +2194,7 @@ export function createPaintFunctions(options){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const window = hwnd >>> 0;
+                const window = wholeAddress(hwnd);
                 if (window === 0)
                 {
                     lockedWindow = 0;

@@ -22,6 +22,7 @@
 
 /** @typedef {import('../msvcrt/guest-code.js').Guest} Guest */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').f32} f32 */
 /** @typedef {import('../msvcrt/guest-code.js').f64} f64 */
 
@@ -55,8 +56,8 @@ const catmullRom = (p0, p1, p2, p3, s)=>0.5 * (2 * p1 + (p2 - p0) * s
  * D3DXVECTOR2 *D3DXVec2Normalize(D3DXVECTOR2 *out, const D3DXVECTOR2 *v)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v
+ * @returns {ptr}
  */
 export function D3DXVec2Normalize({ f32, setF32 }, out, v){
     const x = f32(v);
@@ -71,8 +72,8 @@ export function D3DXVec2Normalize({ f32, setF32 }, out, v){
  * D3DXVECTOR4 *D3DXVec4Normalize(D3DXVECTOR4 *out, const D3DXVECTOR4 *v)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v
+ * @returns {ptr}
  */
 export function D3DXVec4Normalize({ f32, setF32 }, out, v){
     const x = f32(v);
@@ -93,9 +94,9 @@ export function D3DXVec4Normalize({ f32, setF32 }, out, v){
  * with the tangents t1 and t2.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} t1 @param {u32} v2
- * @param {u32} t2 @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} t1 @param {ptr} v2
+ * @param {ptr} t2 @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXVec2Hermite({ f32, setF32 }, out, v1, t1, v2, t2, s){
     const h1 = hermite1(s);
@@ -116,9 +117,9 @@ export function D3DXVec2Hermite({ f32, setF32 }, out, v1, t1, v2, t2, s){
  *     const D3DXVECTOR2 *v2, const D3DXVECTOR2 *v3, FLOAT s)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v0 @param {u32} v1 @param {u32} v2
- * @param {u32} v3 @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v0 @param {ptr} v1 @param {ptr} v2
+ * @param {ptr} v3 @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXVec2CatmullRom({ f32, setF32 }, out, v0, v1, v2, v3, s){
     const x = catmullRom(f32(v0), f32(v1), f32(v2),
@@ -135,9 +136,9 @@ export function D3DXVec2CatmullRom({ f32, setF32 }, out, v0, v1, v2, v3, s){
  *     const D3DXVECTOR2 *v3, FLOAT f, FLOAT g) -- v1 + f (v2 - v1) + g (v3 - v1).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} v2 @param {u32} v3
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} v2 @param {ptr} v3
  * @param {f32} f @param {f32} g
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec2BaryCentric({ f32, setF32 }, out, v1, v2, v3, f, g){
     const x1 = f32(v1);
@@ -157,9 +158,9 @@ export function D3DXVec2BaryCentric({ f32, setF32 }, out, v1, v2, v3, f, g){
  * with the tangents t1 and t2.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} t1 @param {u32} v2
- * @param {u32} t2 @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} t1 @param {ptr} v2
+ * @param {ptr} t2 @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXVec3Hermite({ f32, setF32 }, out, v1, t1, v2, t2, s){
     const h1 = hermite1(s);
@@ -183,9 +184,9 @@ export function D3DXVec3Hermite({ f32, setF32 }, out, v1, t1, v2, t2, s){
  *     const D3DXVECTOR3 *v2, const D3DXVECTOR3 *v3, FLOAT s)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v0 @param {u32} v1 @param {u32} v2
- * @param {u32} v3 @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v0 @param {ptr} v1 @param {ptr} v2
+ * @param {ptr} v3 @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXVec3CatmullRom({ f32, setF32 }, out, v0, v1, v2, v3, s){
     const x = catmullRom(f32(v0), f32(v1), f32(v2),
@@ -205,9 +206,9 @@ export function D3DXVec3CatmullRom({ f32, setF32 }, out, v0, v1, v2, v3, s){
  *     const D3DXVECTOR3 *v3, FLOAT f, FLOAT g) -- v1 + f (v2 - v1) + g (v3 - v1).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} v2 @param {u32} v3
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} v2 @param {ptr} v3
  * @param {f32} f @param {f32} g
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec3BaryCentric({ f32, setF32 }, out, v1, v2, v3, f, g){
     const x1 = f32(v1);
@@ -231,9 +232,9 @@ export function D3DXVec3BaryCentric({ f32, setF32 }, out, v1, v2, v3, f, g){
  * with the tangents t1 and t2.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} t1 @param {u32} v2
- * @param {u32} t2 @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} t1 @param {ptr} v2
+ * @param {ptr} t2 @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXVec4Hermite({ f32, setF32 }, out, v1, t1, v2, t2, s){
     const h1 = hermite1(s);
@@ -260,9 +261,9 @@ export function D3DXVec4Hermite({ f32, setF32 }, out, v1, t1, v2, t2, s){
  *     const D3DXVECTOR4 *v2, const D3DXVECTOR4 *v3, FLOAT s)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v0 @param {u32} v1 @param {u32} v2
- * @param {u32} v3 @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v0 @param {ptr} v1 @param {ptr} v2
+ * @param {ptr} v3 @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXVec4CatmullRom({ f32, setF32 }, out, v0, v1, v2, v3, s){
     const x = catmullRom(f32(v0), f32(v1), f32(v2),
@@ -285,9 +286,9 @@ export function D3DXVec4CatmullRom({ f32, setF32 }, out, v0, v1, v2, v3, s){
  *     const D3DXVECTOR4 *v3, FLOAT f, FLOAT g) -- v1 + f (v2 - v1) + g (v3 - v1).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} v2 @param {u32} v3
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} v2 @param {ptr} v3
  * @param {f32} f @param {f32} g
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXVec4BaryCentric({ f32, setF32 }, out, v1, v2, v3, f, g){
     const x1 = f32(v1);
@@ -314,8 +315,8 @@ export function D3DXVec4BaryCentric({ f32, setF32 }, out, v1, v2, v3, f, g){
  * -- the point (x, y, 0, 1).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec2Transform({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -337,8 +338,8 @@ export function D3DXVec2Transform({ f32, setF32 }, out, v, m){
  * to, each rounded to a float first, as D3DXVec3TransformCoord's.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec2TransformCoord({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -356,8 +357,8 @@ export function D3DXVec2TransformCoord({ f32, setF32 }, out, v, m){
  *     const D3DXMATRIX *m) -- the direction (x, y, 0, 0).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXVec2TransformNormal({ f32, setF32 }, out, v, m){
     const vx = f32(v);
@@ -377,8 +378,8 @@ export function D3DXVec2TransformNormal({ f32, setF32 }, out, v, m){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec2TransformArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -423,8 +424,8 @@ export function D3DXVec2TransformArray({ f32, setF32 }, out, outStride, v, vStri
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec2TransformCoordArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -463,8 +464,8 @@ export function D3DXVec2TransformCoordArray({ f32, setF32 }, out, outStride, v, 
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec2TransformNormalArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -497,8 +498,8 @@ export function D3DXVec2TransformNormalArray({ f32, setF32 }, out, outStride, v,
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec3TransformArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -548,8 +549,8 @@ export function D3DXVec3TransformArray({ f32, setF32 }, out, outStride, v, vStri
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec3TransformNormalArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -590,8 +591,8 @@ export function D3DXVec3TransformNormalArray({ f32, setF32 }, out, outStride, v,
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec4TransformArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -642,8 +643,8 @@ export function D3DXVec4TransformArray({ f32, setF32 }, out, outStride, v, vStri
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} m @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} m @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXPlaneTransformArray({ f32, setF32 }, out, outStride, v, vStride, m, n){
     const e0 = f32(m);
@@ -697,9 +698,9 @@ export function D3DXPlaneTransformArray({ f32, setF32 }, out, outStride, v, vStr
  * viewport the transformed point itself.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} viewport
- * @param {u32} projection @param {u32} view @param {u32} world
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} viewport
+ * @param {ptr} projection @param {ptr} view @param {ptr} world
+ * @returns {ptr}
  */
 export function D3DXVec3Project({ f32, u32, setF32 }, out, v, viewport, projection, view, world){
     /** @type {f64} */
@@ -949,9 +950,9 @@ export function D3DXVec3Project({ f32, u32, setF32 }, out, v, viewport, projecti
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} viewport @param {u32} projection @param {u32} view
- * @param {u32} world @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} viewport @param {ptr} projection @param {ptr} view
+ * @param {ptr} world @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec3ProjectArray({ f32, u32, setF32 }, out, outStride, v, vStride, viewport,
     projection, view, world, n)
@@ -1236,9 +1237,9 @@ export function D3DXVec3ProjectArray({ f32, u32, setF32 }, out, outStride, v, vS
  * answers NULL and writes nothing.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v @param {u32} viewport
- * @param {u32} projection @param {u32} view @param {u32} world
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v @param {ptr} viewport
+ * @param {ptr} projection @param {ptr} view @param {ptr} world
+ * @returns {ptr}
  */
 export function D3DXVec3Unproject({ f32, u32, setF32 }, out, v, viewport, projection, view, world){
     /** @type {f64} */
@@ -1545,9 +1546,9 @@ export function D3DXVec3Unproject({ f32, u32, setF32 }, out, v, viewport, projec
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} outStride @param {u32} v
- * @param {u32} vStride @param {u32} viewport @param {u32} projection @param {u32} view
- * @param {u32} world @param {u32} n
- * @returns {u32}
+ * @param {u32} vStride @param {ptr} viewport @param {ptr} projection @param {ptr} view
+ * @param {ptr} world @param {u32} n
+ * @returns {ptr}
  */
 export function D3DXVec3UnprojectArray({ f32, u32, setF32 }, out, outStride, v, vStride, viewport,
     projection, view, world, n)
@@ -1882,8 +1883,8 @@ export function D3DXVec3UnprojectArray({ f32, u32, setF32 }, out, outStride, v, 
  * the 2x2 minors of v and w, weighed by u's elements.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} u @param {u32} v @param {u32} w
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} u @param {ptr} v @param {ptr} w
+ * @returns {ptr}
  */
 export function D3DXVec4Cross({ f32, setF32 }, out, u, v, w){
     const ux = f32(u);
@@ -1920,8 +1921,8 @@ export function D3DXVec4Cross({ f32, setF32 }, out, u, v, w){
  * the normal (17, 31, 24) in Wine's conformance test).
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} point @param {u32} normal
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} point @param {ptr} normal
+ * @returns {ptr}
  */
 export function D3DXPlaneFromPointNormal({ f32, u32, setU32, setF32 }, out, point, normal){
     setU32(out, u32(normal));
@@ -1938,8 +1939,8 @@ export function D3DXPlaneFromPointNormal({ f32, u32, setU32, setF32 }, out, poin
  * normalised cross product of v2 - v1 and v3 - v1, through v1.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} v1 @param {u32} v2 @param {u32} v3
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} v1 @param {ptr} v2 @param {ptr} v3
+ * @returns {ptr}
  */
 export function D3DXPlaneFromPoints({ f32, setF32 }, out, v1, v2, v3){
     const x1 = f32(v1);
@@ -1972,8 +1973,8 @@ export function D3DXPlaneFromPoints({ f32, setF32 }, out, v1, v2, v3){
  * parallel to it.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} plane @param {u32} v1 @param {u32} v2
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} plane @param {ptr} v1 @param {ptr} v2
+ * @returns {ptr}
  */
 export function D3DXPlaneIntersectLine({ f32, setF32 }, out, plane, v1, v2){
     const a = f32(plane);
@@ -2002,8 +2003,8 @@ export function D3DXPlaneIntersectLine({ f32, setF32 }, out, plane, v1, v2){
  * the four divided by the normal's length.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} plane
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} plane
+ * @returns {ptr}
  */
 export function D3DXPlaneNormalize({ f32, setF32 }, out, plane){
     const a = f32(plane);
@@ -2024,8 +2025,8 @@ export function D3DXPlaneNormalize({ f32, setF32 }, out, plane){
  * to pass is the inverse transpose of the one that moves the points.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} plane @param {u32} m
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} plane @param {ptr} m
+ * @returns {ptr}
  */
 export function D3DXPlaneTransform({ f32, setF32 }, out, plane, m){
     const a = f32(plane);
@@ -2048,8 +2049,8 @@ export function D3DXPlaneTransform({ f32, setF32 }, out, plane, m){
  *     FLOAT s) -- each of r, g, b moved from 0.5 by s; alpha as it came.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} color @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} color @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXColorAdjustContrast({ f32, u32, setU32, setF32 }, out, color, s){
     const r = 0.5 + s * (f32(color) - 0.5);
@@ -2069,8 +2070,8 @@ export function D3DXColorAdjustContrast({ f32, u32, setU32, setF32 }, out, color
  * 0.7154 g + 0.0721 b) by s; alpha as it came.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} color @param {f32} s
- * @returns {u32}
+ * @param {Guest} guest @param {ptr} out @param {ptr} color @param {f32} s
+ * @returns {ptr}
  */
 export function D3DXColorAdjustSaturation({ f32, u32, setU32, setF32 }, out, color, s){
     const r = f32(color);
@@ -2115,7 +2116,7 @@ export function D3DXFresnelTerm(costheta, refractionindex){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} values @param {u32} n
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXFloat32To16Array({ u32, setU16 }, out, values, n){
     for (/** @type {u32} */ let i = 0; i < n; i++)
@@ -2160,7 +2161,7 @@ export function D3DXFloat32To16Array({ u32, setU16 }, out, values, n){
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} out @param {u32} values @param {u32} n
- * @returns {u32}
+ * @returns {ptr}
  */
 export function D3DXFloat16To32Array({ u16, setU32 }, out, values, n){
     for (/** @type {u32} */ let i = 0; i < n; i++)

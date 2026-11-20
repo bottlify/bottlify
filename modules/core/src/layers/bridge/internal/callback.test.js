@@ -507,7 +507,10 @@ test('a 64-bit routine is handed a negative argument sign-extended, any other ze
         made.placeLongCall(()=>0x9000);
         made.call({ thread: thread('main'), entry: 0x402000,
             args: [0x40, 0x0400, 0x80000001, -1], stackAtRest: 0x2ff000 });
-        const frameBase = resumed[0].esp;
+        // The thread starts a quadword below the frame, on the routine it pops.
+        const frameBase = resumed[0].esp + 8;
+        assert.deepEqual([written.get(frameBase - 8), written.get(frameBase - 4)], [0x402000, 0],
+            'the routine, whole, below the frame');
         /** @param {number} at */
         const quad = at=>[written.get(frameBase + at), written.get(frameBase + at + 4)];
         assert.deepEqual(quad(16), [0x80000001, 0], 'R8, a WPARAM');
@@ -515,3 +518,40 @@ test('a 64-bit routine is handed a negative argument sign-extended, any other ze
         assert.deepEqual(quad(0), [0x40, 0]);
         assert.deepEqual(quad(32), [SENTINEL, 0], 'the return into the sentinel');
     });
+
+test('a 64-bit routine is handed a quadword whole: an argument that came into the host whole', ()=>{
+    // A pointer the program passed above 2 GiB - an LPARAM, a thread's
+    // parameter - reaches the host as a dword and its high half (`args.high`);
+    // handed back as a bigint it is the program's value again, not one
+    // widened by the sign of its low dword.
+    /** @type {Map<number, number>} */
+    const written = new Map();
+    /** @type {any[]} */
+    const resumed = [];
+    const made = createCallbacks({
+        cpu: { readReg32: ()=>0, bits: ()=>64 },
+        kernel: {
+            threads: ()=>[],
+            /** @param {any} who @param {any} where */
+            scheduleResume: (who, where)=>resumed.push(where),
+        },
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>written.set(address >>> 0, value >>> 0),
+        },
+        reserveTrap: ()=>({ id: 1, address: SENTINEL }),
+    });
+    made.reserve();
+    made.placeLongCall(()=>0x9000);
+    made.call({ thread: thread('main'), entry: 0x402000,
+        args: [0x40, 0x9000_0000 | 0, 0x9000_0000n, 0x1_2345_6780n, 0x8000_0000n | 1n],
+        stackAtRest: 0x2ff000 });
+    const frameBase = resumed[0].esp + 8;
+    /** @param {number} at */
+    const quad = at=>[written.get(frameBase + at), written.get(frameBase + at + 4)];
+    assert.deepEqual(quad(8), [0x90000000, 0xffffffff], 'RDX: a negative number, by its sign');
+    assert.deepEqual(quad(16), [0x90000000, 0], 'R8: the same address as a bigint, whole');
+    assert.deepEqual(quad(24), [0x23456780, 1], 'R9: past 4 GiB');
+    assert.deepEqual(quad(72), [0x80000001, 0], 'the fifth, on the stack past the home slots');
+    assert.deepEqual(quad(40 + 16), [0x90000000, 0], 'and its home slot');
+});

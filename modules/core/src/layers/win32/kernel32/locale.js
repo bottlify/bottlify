@@ -13,6 +13,7 @@ import { unitsFromUtf8, utf8FromUnits } from './utf8.js';
 import { bestFit, codePage } from './codepages.js';
 import { ALTERNATE_SORTS, LOCALES, lcidOfName, localeByLcid, localeByName } from './locales.js';
 import { renderDate, renderTime } from './datetime-format.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 import { compareText, isSymbol, sortKey } from './collation.js';
 import { stringType } from './string-types.js';
 import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, validMapFlags }
@@ -456,7 +457,7 @@ const isDefault = lcid=>lcid === 0 || lcid === LOCALE_USER_DEFAULT
  * @returns {import('./locales.js').Locale | null}
  */
 function localeOf(lcid){
-    const asked = lcid >>> 0;
+    const asked = wholeAddress(lcid);
     if (asked === LOCALE_INVARIANT)
     {
         return INVARIANT_LOCALE;
@@ -479,7 +480,7 @@ function localeOf(lcid){
  * @param {number} locale @param {boolean} neutral
  */
 function localeTagOf(locale, neutral){
-    const asked = locale >>> 0;
+    const asked = wholeAddress(locale);
     if (asked === LOCALE_INVARIANT)
     {
         return '';
@@ -585,7 +586,7 @@ const DEFAULT_CHAR = 0x3f;
 
 /** @param {number} page */
 const resolvePage = page=>{
-    const wanted = page >>> 0;
+    const wanted = wholeAddress(page);
     // CP_THREAD_ACP where no thread's locale is at hand: the machine's.
     if (wanted === CP_ACP || wanted === CP_THREAD_ACP)
     {
@@ -1723,7 +1724,7 @@ export function createLocaleFunctions(host){
             {
                 return refuse(ERROR_INVALID_FLAGS);
             }
-            const wanted = calendar >>> 0;
+            const wanted = wholeAddress(calendar);
             return wanted !== ENUM_ALL_CALENDARS && wanted !== CAL_GREGORIAN ? 1
                 : enumerateFormats(proc, [text], wide, ex ? [CAL_GREGORIAN] : []);
         },
@@ -1733,7 +1734,8 @@ export function createLocaleFunctions(host){
     const enumUILanguages = wide=>({
         argBytes: 12,
         /** @param {number[]} args */
-        handler: (/** @type {number[]} */ [proc, flags, parameter])=>{
+        handler: args=>{
+            const [proc, flags] = args;
             if ((proc >>> 0) === 0)
             {
                 return refuse(ERROR_INVALID_PARAMETER);
@@ -1746,7 +1748,8 @@ export function createLocaleFunctions(host){
             const text = asked === MUI_LANGUAGE_NAME
                 ? /** @type {string} */ (LANGUAGE_NAMES.get(UI_LANGUAGE))
                 : UI_LANGUAGE.toString(16).toUpperCase().padStart(4, '0');
-            const ran = enumerateFormats(proc, [text], wide, [parameter >>> 0]);
+            const parameter = /** @type {number} */ (forwarded(args, 2, true));
+            const ran = enumerateFormats(proc, [text], wide, [parameter]);
             // A number back means the callback was never run -- no bridge to
             // run it, or no memory for its text -- and the call says so.
             return ran instanceof Promise ? ran.then(()=>1) : refuse(ERROR_CALL_NOT_IMPLEMENTED);
@@ -1788,7 +1791,7 @@ export function createLocaleFunctions(host){
             }
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, Number(text), true);
-            host.writeMemory(value >>> 0, bytes);
+            host.writeMemory(wholeAddress(value), bytes);
             return wide ? 2 : 4;
         },
     });
@@ -1847,11 +1850,11 @@ export function createLocaleFunctions(host){
             {
                 if (wide)
                 {
-                    writeWide(buffer >>> 0, written);
+                    writeWide(wholeAddress(buffer), written);
                 }
                 else
                 {
-                    host.writeMemory(buffer >>> 0,
+                    host.writeMemory(wholeAddress(buffer),
                         encodeSingleByte(written, ANSI_CODE_PAGE).bytes);
                 }
             }
@@ -1893,8 +1896,9 @@ export function createLocaleFunctions(host){
                 return refuse(ERROR_INVALID_PARAMETER);
             }
             const span = sourceSpan(source >>> 0, sourceChars, wide ? 2 : 1);
-            const folded = fold(wide ? readWide(source >>> 0, span.length)
-                : decodeSingleByte(host.readMemory(source >>> 0, span.length), ANSI_CODE_PAGE),
+            const folded = fold(wide ? readWide(wholeAddress(source), span.length)
+                : decodeSingleByte(host.readMemory(wholeAddress(source), span.length),
+                    ANSI_CODE_PAGE),
             asked);
             // Back to the ANSI page as WideCharToMultiByte with no flags writes
             // it: with best fit, so a decomposed accent is its spacing form.
@@ -1911,11 +1915,11 @@ export function createLocaleFunctions(host){
             }
             if (bytes)
             {
-                host.writeMemory(destination >>> 0, bytes);
+                host.writeMemory(wholeAddress(destination), bytes);
             }
             else
             {
-                writeWide(destination >>> 0, folded);
+                writeWide(wholeAddress(destination), folded);
             }
             return length;
         },
@@ -2151,7 +2155,7 @@ export function createLocaleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([locale])=>{
-                const asked = locale >>> 0;
+                const asked = wholeAddress(locale);
                 if (localeOf(asked) === null)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -2173,7 +2177,7 @@ export function createLocaleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([locale])=>{
-                const asked = locale >>> 0;
+                const asked = wholeAddress(locale);
                 if (isDefault(asked))
                 {
                     return LCID_EN_US;
@@ -2211,7 +2215,7 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeWide(buffer >>> 0, `${name}\0`);
+                writeWide(wholeAddress(buffer), `${name}\0`);
                 return name.length + 1;
             },
         },
@@ -2230,7 +2234,7 @@ export function createLocaleFunctions(host){
                 {
                     return LCID_EN_US;
                 }
-                const asked = readWide(name >>> 0, host.stringLength(name >>> 0, 2));
+                const asked = readWide(wholeAddress(name), host.stringLength(name >>> 0, 2));
                 if (asked === '')
                 {
                     return LOCALE_INVARIANT;
@@ -2262,7 +2266,7 @@ export function createLocaleFunctions(host){
                 {
                     return 0;
                 }
-                const asked = readWide(name >>> 0, host.stringLength(name >>> 0, 2));
+                const asked = readWide(wholeAddress(name), host.stringLength(name >>> 0, 2));
                 return asked === '' || lcidOfName(asked, true) !== 0 ? 1 : 0;
             },
         },
@@ -2756,7 +2760,7 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
-                const raw = host.readMemory(source >>> 0, span.length);
+                const raw = host.readMemory(wholeAddress(source), span.length);
                 let text;
                 let invalid = false;
                 if (resolved === CP_UTF8)
@@ -2798,11 +2802,11 @@ export function createLocaleFunctions(host){
                 // and nothing written leaves it holding an empty string.
                 if (text.length > (destinationChars | 0))
                 {
-                    writeWide(destination >>> 0, text.slice(0, destinationChars | 0));
+                    writeWide(wholeAddress(destination), text.slice(0, destinationChars | 0));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeWide(destination >>> 0, text);
+                writeWide(wholeAddress(destination), text);
                 return invalid ? noTranslation() : text.length;
             },
         },
@@ -2837,7 +2841,7 @@ export function createLocaleFunctions(host){
                     host.setLastError(ERROR_INVALID_FLAGS);
                     return 0;
                 }
-                const text = readWide(source >>> 0, span.length);
+                const text = readWide(wholeAddress(source), span.length);
                 // Half a surrogate pair is no character: WC_ERR_INVALID_CHARS
                 // fails on it, the text written all the same with U+FFFD.
                 const invalid = resolved === CP_UTF8 && (flags & WC_ERR_INVALID_CHARS) !== 0
@@ -2863,11 +2867,11 @@ export function createLocaleFunctions(host){
                 // gives -- but never with half a character.
                 if (short)
                 {
-                    host.writeMemory(destination >>> 0, encoded.bytes.subarray(0, written));
+                    host.writeMemory(wholeAddress(destination), encoded.bytes.subarray(0, written));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                host.writeMemory(destination >>> 0, encoded.bytes);
+                host.writeMemory(wholeAddress(destination), encoded.bytes);
                 return invalid ? noTranslation() : encoded.bytes.length;
             },
         },
@@ -2888,7 +2892,7 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const span = sourceSpan(source >>> 0, count, 1);
-                const raw = host.readMemory(source >>> 0, span.length);
+                const raw = host.readMemory(wholeAddress(source), span.length);
                 const text = decodeSingleByte(raw, ANSI_CODE_PAGE);
                 const out = new Uint8Array(text.length * 2);
                 const view = new DataView(out.buffer);
@@ -2897,7 +2901,7 @@ export function createLocaleFunctions(host){
                     view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
                         text.charCodeAt(at))), true);
                 }
-                host.writeMemory(types >>> 0, out);
+                host.writeMemory(wholeAddress(types), out);
                 return 1;
             },
         },
@@ -2920,7 +2924,7 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const span = sourceSpan(source >>> 0, count, 2);
-                const text = readWide(source >>> 0, span.length);
+                const text = readWide(wholeAddress(source), span.length);
                 const out = new Uint8Array(text.length * 2);
                 const view = new DataView(out.buffer);
                 for (let at = 0; at < text.length; at++)
@@ -2928,7 +2932,7 @@ export function createLocaleFunctions(host){
                     view.setUint16(at * 2, /** @type {number} */ (stringType(infoType >>> 0,
                         text.charCodeAt(at))), true);
                 }
-                host.writeMemory(types >>> 0, out);
+                host.writeMemory(wholeAddress(types), out);
                 return 1;
             },
         },
@@ -3049,9 +3053,10 @@ export function createLocaleFunctions(host){
         EnumDateFormatsExEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([proc, name, flags, parameter])=>(localeOfName(name >>> 0) === null
+            handler: args=>(localeOfName(args[1] >>> 0) === null
                 ? refuse(ERROR_INVALID_PARAMETER)
-                : enumerateDateFormats(proc, flags >>> 0, true, [CAL_GREGORIAN, parameter >>> 0])),
+                : enumerateDateFormats(args[0], args[2] >>> 0, true,
+                    [CAL_GREGORIAN, /** @type {number} */ (forwarded(args, 3, true))])),
         },
     };
 
@@ -3118,7 +3123,7 @@ export function createLocaleFunctions(host){
                 writeWide(block, `${locale.name}\0`);
                 const kind = LOCALE_WINDOWS
                     | (locale.neutral ? LOCALE_NEUTRALDATA : LOCALE_SPECIFICDATA);
-                if (((await call(proc >>> 0, [block, kind, parameter >>> 0], thread)) | 0) === 0)
+                if (((await call(proc >>> 0, [block, kind, parameter], thread)) | 0) === 0)
                 {
                     break;
                 }
@@ -3233,11 +3238,11 @@ export function createLocaleFunctions(host){
                 {
                     if ((room | 0) > 0)
                     {
-                        writeWide(buffer >>> 0, `${resolved.slice(0, (room | 0) - 1)}\0`);
+                        writeWide(wholeAddress(buffer), `${resolved.slice(0, (room | 0) - 1)}\0`);
                     }
                     return refuse(ERROR_INSUFFICIENT_BUFFER);
                 }
-                writeWide(buffer >>> 0, `${resolved}\0`);
+                writeWide(wholeAddress(buffer), `${resolved}\0`);
                 return resolved.length + 1;
             },
         },
@@ -3255,8 +3260,8 @@ export function createLocaleFunctions(host){
         EnumSystemLocalesEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([proc, flags, parameter])=>
-                enumerateLocaleNames(proc, flags >>> 0, parameter),
+            handler: args=>enumerateLocaleNames(args[0], args[1] >>> 0,
+                /** @type {number} */ (forwarded(args, 2, true))),
         },
         GetStringTypeExA: table.GetStringTypeA,
 

@@ -27,6 +27,7 @@
  */
 
 import { createRefusals } from '../common/refusal.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
@@ -233,6 +234,7 @@ export function createWin9xFunctions(host){
                 ? pointer >>> 0 : mapSL.handler()),
         },
         MapSLFix: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>(((pointer >>> 0) & SELECTOR_MASK) === 0
@@ -297,7 +299,7 @@ export function createWin9xFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                return handle >>> 0;
+                return wholeAddress(handle);
             },
         },
 

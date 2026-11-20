@@ -22,7 +22,7 @@ const LONG_OPS = new Set([
     'shl', 'sal', 'shr', 'sar', 'rol', 'ror', 'rcl', 'rcr', 'imul', 'mul', 'div', 'idiv',
     'xchg', 'popcnt', 'cwde', 'cdq', 'leave', 'bsf', 'bsr', 'bswap', 'prefetch', 'prefetchw',
     'prefetchnta', 'prefetcht0', 'prefetcht1', 'prefetcht2', 'lfence', 'mfence', 'sfence', 'pause',
-    'clflush',
+    'clflush', 'rdtsc',
     'emms', 'ldmxcsr', 'stmxcsr', 'bt', 'bts', 'btr', 'btc',
     'clc', 'stc', 'cmc', 'cld', 'std', 'lahf', 'sahf', 'pushf', 'popf', 'xadd', 'cmpxchg',
     'cmpxchg8b', 'cmpxchg16b', 'movnti', 'shld', 'shrd', 'loop', 'loope', 'loopne', 'jecxz',
@@ -41,8 +41,8 @@ const X87_LEFT = new Set(['fxsave', 'fxrstor', 'fbld', 'fbstp', 'fnstenv', 'fste
 const STRING_OPS = new Set(['movs', 'stos', 'lods', 'cmps', 'scas']);
 
 /**
- * What a `lock` prefix may stand on. A process in long mode runs on one
- * executor, so a locked instruction is its plain form.
+ * What a `lock` prefix may stand on: its plain form on one executor, one
+ * indivisible access under the atomic variant (`emitLockedLong`).
  */
 const LOCKABLE = new Set(['add', 'adc', 'and', 'btc', 'btr', 'bts', 'cmpxchg', 'cmpxchg8b',
     'cmpxchg16b',

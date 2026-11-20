@@ -25,6 +25,7 @@
  */
 
 import { ZONE_KEYS, zoneForYear } from './timezones.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Codes this surface reports. */
 const ERROR_ACCESS_DENIED = 5;
@@ -651,7 +652,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(to >>> 0, readFileTime(from >>> 0));
+                writeFileTime(to >>> 0, readFileTime(wholeAddress(from)));
                 return 1;
             },
         },
@@ -687,7 +688,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const units = readFileTime(from >>> 0);
+                const units = readFileTime(wholeAddress(from));
                 const packed = units < FILETIME_EPOCH
                     ? null
                     : msToDosDateTime(Number(units - FILETIME_EPOCH) / Number(FILETIME_PER_MS));
@@ -697,8 +698,8 @@ export function createFileTimeFunctions(host){
                 }
                 const word = (/** @type {number} */ value)=>
                     new Uint8Array([value & 0xff, value >>> 8]);
-                host.writeMemory(outDate >>> 0, word(packed.date));
-                host.writeMemory(outTime >>> 0, word(packed.time));
+                host.writeMemory(wholeAddress(outDate), word(packed.date));
+                host.writeMemory(wholeAddress(outTime), word(packed.time));
                 return 1;
             },
         },
@@ -712,7 +713,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(to >>> 0, readFileTime(from >>> 0));
+                writeFileTime(to >>> 0, readFileTime(wholeAddress(from)));
                 return 1;
             },
         },
@@ -777,7 +778,7 @@ export function createFileTimeFunctions(host){
                 }
                 if ((written >>> 0) !== 0)
                 {
-                    const ms = fileTimeToMs(readFileTime(written >>> 0));
+                    const ms = fileTimeToMs(readFileTime(wholeAddress(written)));
                     if (ms !== null)
                     {
                         host.setModified?.(file.path, ms);
@@ -831,7 +832,7 @@ export function createFileTimeFunctions(host){
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeLow, size >>> 0, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nNumberOfLinks, entry?.links ?? 1, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileIndexLow, index, true);
-                host.writeMemory(information >>> 0, data);
+                host.writeMemory(wholeAddress(information), data);
                 return 1;
             },
         },
@@ -875,7 +876,7 @@ export function createFileTimeFunctions(host){
                 }
                 const entry = host.stat(file.path);
                 const room = size >>> 0;
-                const at = buffer >>> 0;
+                const at = wholeAddress(buffer);
                 if ((kind >>> 0) === FILE_NAME_INFO)
                 {
                     const name = String(file.path).replace(/^[A-Za-z]:/, '');
@@ -962,7 +963,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
                 }
-                host.writeMemory(information >>> 0, currentZone());
+                host.writeMemory(wholeAddress(information), currentZone());
                 return TIME_ZONE_ID_UNKNOWN;
             },
         },
@@ -1007,7 +1008,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_FILE_NOT_FOUND);
                 }
-                host.writeMemory(information >>> 0, zone);
+                host.writeMemory(wholeAddress(information), zone);
                 return 1;
             },
         },
@@ -1053,7 +1054,8 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const utc = systemTimeToMs(host.readMemory(universal >>> 0, SYSTEMTIME_SIZE));
+                const utc = systemTimeToMs(host.readMemory(wholeAddress(universal),
+                    SYSTEMTIME_SIZE));
                 if (utc === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1074,7 +1076,7 @@ export function createFileTimeFunctions(host){
                     - (moment.getUTCMonth() === 0 && moment.getUTCDate() === 1 ? 1 : 0);
                 const first = localBy(year);
                 const wall = new Date(first).getUTCFullYear() === year ? first : localBy(year + 1);
-                host.writeMemory(local >>> 0, msToSystemTime(wall));
+                host.writeMemory(wholeAddress(local), msToSystemTime(wall));
                 return 1;
             },
         },
@@ -1091,7 +1093,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const wall = systemTimeToMs(host.readMemory(local >>> 0, SYSTEMTIME_SIZE));
+                const wall = systemTimeToMs(host.readMemory(wholeAddress(local), SYSTEMTIME_SIZE));
                 if (wall === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1099,7 +1101,7 @@ export function createFileTimeFunctions(host){
                 const data = zone === 0 ? currentZone()
                     : dynamicRules(zone >>> 0, new Date(wall).getUTCFullYear());
                 const bias = biasOnLocalClock(new DataView(data.buffer, data.byteOffset), wall);
-                host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
+                host.writeMemory(wholeAddress(universal), msToSystemTime(wall + bias * 60_000));
                 return 1;
             },
         },
@@ -1122,16 +1124,17 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const utc = systemTimeToMs(host.readMemory(universal >>> 0, SYSTEMTIME_SIZE));
+                const utc = systemTimeToMs(host.readMemory(wholeAddress(universal),
+                    SYSTEMTIME_SIZE));
                 if (utc === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const data = zone === 0
                     ? currentZone()
-                    : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
+                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE).slice();
                 const bias = biasAt(new DataView(data.buffer), utc);
-                host.writeMemory(local >>> 0, msToSystemTime(utc - bias * 60_000));
+                host.writeMemory(wholeAddress(local), msToSystemTime(utc - bias * 60_000));
                 return 1;
             },
         },
@@ -1156,16 +1159,16 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const wall = systemTimeToMs(host.readMemory(local >>> 0, SYSTEMTIME_SIZE));
+                const wall = systemTimeToMs(host.readMemory(wholeAddress(local), SYSTEMTIME_SIZE));
                 if (wall === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const data = zone === 0
                     ? currentZone()
-                    : host.readMemory(zone >>> 0, TIME_ZONE_INFORMATION.SIZE).slice();
+                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE).slice();
                 const bias = biasOnLocalClock(new DataView(data.buffer), wall);
-                host.writeMemory(universal >>> 0, msToSystemTime(wall + bias * 60_000));
+                host.writeMemory(wholeAddress(universal), msToSystemTime(wall + bias * 60_000));
                 return 1;
             },
         },

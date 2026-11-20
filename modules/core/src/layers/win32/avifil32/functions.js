@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * avifil32 — the AVIFile library: reading and writing AVI files through the
  * file and stream handlers COM registers for them.
@@ -34,7 +36,7 @@ export function createAvifilFunctions(host){
     /** @param {number} at */
     const clear = at=>{
         if ((at >>> 0) !== 0)
-            host.writeMemory(at >>> 0, new Uint8Array(4));
+            host.writeMemory(wholeAddress(at), new Uint8Array(4));
     };
     /** HRESULT AVIFileOpen(PAVIFILE *ppfile, LPCSTR szFile, UINT uMode, LPCLSID lpHandler) */
     const open = { argBytes: 16, handler: (/** @type {number[]} */ [out])=>{
@@ -116,8 +118,8 @@ export function createAvifilFunctions(host){
          *
          * No decompressor to open one with: NULL, and NULL is not a frame object.
          */
-        AVIStreamGetFrameOpen: { argBytes: 8, handler: ()=>0 },
-        AVIStreamGetFrame: { argBytes: 8, handler: ()=>0 },
+        AVIStreamGetFrameOpen: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
+        AVIStreamGetFrame: { returns: 'pointer', argBytes: 8, handler: ()=>0 },
         AVIStreamGetFrameClose: { argBytes: 4, handler: ()=>AVIERR_BADHANDLE },
 
         /**

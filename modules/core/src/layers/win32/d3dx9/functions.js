@@ -44,7 +44,7 @@ import { createEffects } from './effect.js';
 import { createTextureLoader } from './texture.js';
 import { createTextureTools } from './texture-tools.js';
 import { createTextureSaver } from './save-texture.js';
-import { guestEntry } from '../msvcrt/guest-code.js';
+import { guestEntry, withLongCode } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
@@ -65,6 +65,11 @@ import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATRIX } from './inguest-matrix.x86.js';
 import { COMPILED as VECTOR } from './inguest-vector.x86.js';
 import { COMPILED as QUATERNION } from './inguest-quaternion.x86.js';
+import { COMPILED as LONG } from './inguest.x64.js';
+import { COMPILED as MATRIX_LONG } from './inguest-matrix.x64.js';
+import { COMPILED as VECTOR_LONG } from './inguest-vector.x64.js';
+import { COMPILED as QUATERNION_LONG } from './inguest-quaternion.x64.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -135,6 +140,11 @@ export function d3dxVersionFunctions(version){
  */
 const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
     [quaternion, QUATERNION]];
+// Their x86-64, from the same sources: what a 64-bit process places.
+withLongCode(COMPILED, LONG);
+withLongCode(MATRIX, MATRIX_LONG);
+withLongCode(VECTOR, VECTOR_LONG);
+withLongCode(QUATERNION, QUATERNION_LONG);
 
 /**
  * @typedef {Object} D3dxHost
@@ -196,7 +206,8 @@ export function createD3dxFunctions(host, options = {}){
         id: IID_ID3DXBUFFER,
         methods: [
             /** LPVOID GetBufferPointer() */
-            { name: 'GetBufferPointer', argBytes: 4, invoke: object=>object.state.data },
+            { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
+                invoke: object=>object.state.data },
             /** DWORD GetBufferSize() */
             { name: 'GetBufferSize', argBytes: 4, invoke: object=>object.state.size },
         ],
@@ -215,7 +226,7 @@ export function createD3dxFunctions(host, options = {}){
     const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
     /** @param {number} address */
     const u32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /**
@@ -226,7 +237,7 @@ export function createD3dxFunctions(host, options = {}){
      */
     const cString = address=>readToTerminator(host, address, 1, 4096).bytes;
     /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
+    const putU32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(value & 0xff,
         value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
 
     /** A pointer's bytes in the calling process. */
@@ -304,7 +315,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             return D3DERR_INVALIDCALL;
         }
-        const bytes = host.readMemory(desc >>> 0, 24);
+        const bytes = host.readMemory(wholeAddress(desc), 24);
         const view = new DataView(bytes.slice().buffer);
         return createFont([device, view.getInt32(0, true), view.getUint32(4, true),
             view.getUint32(8, true), view.getUint32(12, true), view.getUint32(16, true),
@@ -333,7 +344,7 @@ export function createD3dxFunctions(host, options = {}){
     const macrosAt = at=>{
         /** @type {[string, string][]} */
         const macros = [];
-        for (let entry = at >>> 0; entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
+        for (let entry = wholeAddress(at); entry !== 0 && u32(entry) !== 0 && macros.length < 1024;
             entry += 2 * POINTER)
         {
             const value = u32(entry + POINTER);
@@ -488,7 +499,7 @@ export function createD3dxFunctions(host, options = {}){
     const shaderSources = {
         /** @param {number} data @param {number} size @param {number} include */
         memory: (data, size, include)=>/** @type {ShaderSource} */ ({
-            text: untilNul(host.readMemory(data >>> 0, size >>> 0)),
+            text: untilNul(host.readMemory(wholeAddress(data), size >>> 0)),
             include: (include >>> 0) === 0 ? undefined : includer(include >>> 0) }),
         /**
          * @param {string} api @param {number} file @param {boolean} wide @param {number} include
@@ -561,7 +572,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
             }
         }
     };
@@ -888,7 +899,7 @@ export function createD3dxFunctions(host, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(4));
+                host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 if (!host.heap || !host.vtables)
                 {
                     return E_NOTIMPL;
@@ -941,7 +952,7 @@ export function createD3dxFunctions(host, options = {}){
             handler: ([shader, , comments, out])=>{
                 if ((out >>> 0) !== 0)
                 {
-                    host.writeMemory(out >>> 0, new Uint8Array(4));
+                    host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 }
                 if ((shader >>> 0) === 0 || (out >>> 0) === 0 || !host.heap || !host.vtables)
                 {
@@ -954,7 +965,7 @@ export function createD3dxFunctions(host, options = {}){
                 const length = functionLength(at=>{
                     while (words.length <= at)
                     {
-                        words.push(u32((shader >>> 0) + words.length * 4));
+                        words.push(u32(wholeAddress(shader) + words.length * 4));
                     }
                     return words[at];
                 });

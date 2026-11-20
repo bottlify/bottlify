@@ -23,6 +23,7 @@ import { Status, fn } from './kit.js';
 import { invert } from './matrix.js';
 import { CombineMode, combine, rectNode, transformNode } from './region.js';
 import { Unit, pixelsPer } from './graphics.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** StringFormatFlags. */
 const NoWrap = 0x1000;
@@ -93,7 +94,7 @@ export function createTextFunctions(kit, { host, fonts, graphics, brushes, forma
     const stringAt = (at, length)=>{
         if ((length | 0) < 0)
         {
-            return host.readWideString ? host.readWideString(at >>> 0) : '';
+            return host.readWideString ? host.readWideString(wholeAddress(at)) : '';
         }
         const bytes = kit.read(at, (length | 0) * 2);
         return String.fromCharCode(...new Uint16Array(bytes.buffer, 0, length | 0));

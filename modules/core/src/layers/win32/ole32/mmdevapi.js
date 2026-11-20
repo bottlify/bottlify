@@ -35,6 +35,7 @@ import { SOUND_DEVICE_GUID } from '../devices.js';
 import { IID_IUNKNOWN } from './objects.js';
 import { parseGuid } from './guid.js';
 import { IID_IAUDIO_ENDPOINT_VOLUME, createEndpointVolume } from './endpoint-volume.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -210,14 +211,10 @@ export function registerMmDevApiClasses(host){
     }
     const pointerSize = host.pointerSize ?? 4;
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** An interface or a block written to an out pointer, whole. @param {number} at @param {number} value */
-    const writePointer = (at, value)=>{
-        const bytes = new Uint8Array(pointerSize);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
-    };
+    const writePointer = pointerIo(host, pointerSize).write;
     /** A string in task memory, its terminator after it; 0 when none is left. @param {string} text */
     const taskString = text=>{
         const at = host.heap.allocate(text.length * 2 + 2);
@@ -273,7 +270,7 @@ export function registerMmDevApiClasses(host){
 
     /** A PROPERTYKEY at an address, as `{fmtid} pid`. @param {number} at */
     const readKey = at=>{
-        const bytes = host.readMemory(at >>> 0, 20).slice();
+        const bytes = host.readMemory(wholeAddress(at), 20).slice();
         const view = new DataView(bytes.buffer);
         const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
             value.toString(16).toUpperCase().padStart(width, '0');
@@ -330,7 +327,7 @@ export function registerMmDevApiClasses(host){
             // A property the endpoint does not have: VT_EMPTY, and S_OK, as Windows.
             view.setUint16(0, VT_EMPTY, true);
         }
-        host.writeMemory(out >>> 0, variant);
+        host.writeMemory(wholeAddress(out), variant);
         return S_OK;
     };
 
@@ -362,7 +359,7 @@ export function registerMmDevApiClasses(host){
                 const bytes = new Uint8Array(20);
                 bytes.set(/** @type {Uint8Array} */ (parseGuid(fmtid)), 0);
                 new DataView(bytes.buffer).setUint32(16, Number(pid), true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return S_OK;
             } },
             /** HRESULT GetValue(REFPROPERTYKEY key, PROPVARIANT *pv) */
@@ -491,7 +488,7 @@ export function registerMmDevApiClasses(host){
         {
             return hr;
         }
-        const object = new DataView(host.readMemory(out >>> 0, 4).slice().buffer)
+        const object = new DataView(host.readMemory(wholeAddress(out), 4).slice().buffer)
             .getUint32(0, true);
         const guid = host.heap.allocate(16);
         if (guid === 0)
@@ -599,7 +596,7 @@ export function registerMmDevApiClasses(host){
                         writePointer(out, 0);
                         // An id not of an endpoint's form is an invalid argument;
                         // one of the form that names no endpoint here is not found.
-                        const asked = host.readWideString(id >>> 0, 128 * 2);
+                        const asked = host.readWideString(wholeAddress(id), 128 * 2);
                         if (asked === SPEAKERS.id)
                         {
                             return handOutDevice(out);

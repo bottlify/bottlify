@@ -13,7 +13,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['controlWord', 'setControlWord'],
+        uses: ['controlWord', 'setControlWord', 'mxcsr', 'setMxcsr', 'pointerBytes'],
         tables: {
             EXCEPTIONS: 268,
             ROUNDING_PRECISION: 524,
@@ -82,7 +82,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['controlWord', 'setControlWord'],
+        uses: ['controlWord', 'setControlWord', 'mxcsr', 'setMxcsr', 'pointerBytes'],
         tables: {
             EXCEPTIONS: 272,
             ROUNDING_PRECISION: 528,
@@ -150,9 +150,9 @@ export const COMPILED = /** @type {const} */ ({
     },
     _controlfp_s: {
         convention: 'cdecl',
-        params: ['u32', 'u32', 'u32'],
+        params: ['ptr', 'u32', 'u32'],
         returns: 'u32',
-        uses: ['controlWord', 'setControlWord', 'setU32'],
+        uses: ['controlWord', 'setControlWord', 'setU32', 'mxcsr', 'setMxcsr', 'pointerBytes'],
         tables: {
             EXCEPTIONS: 292,
             ROUNDING_PRECISION: 548,
@@ -223,7 +223,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: [],
         returns: 'u32',
-        uses: ['statusWord', 'mxcsr'],
+        uses: ['statusWord', 'mxcsr', 'pointerBytes'],
         tables: { EXCEPTIONS: 48 },
         code: Uint8Array.of(
             0x53, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0xdf, 0xe0, 0x25, 0xff, 0xc7,
@@ -258,7 +258,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: [],
         returns: 'u32',
-        uses: ['statusWord', 'clearExceptions', 'mxcsr', 'setMxcsr'],
+        uses: ['statusWord', 'clearExceptions', 'mxcsr', 'setMxcsr', 'pointerBytes'],
         tables: { EXCEPTIONS: 68 },
         code: Uint8Array.of(
             0x53, 0x83, 0xec, 0x04, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x83, 0xec,
@@ -375,7 +375,7 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['f64', 'f64'],
         returns: 'f64',
-        uses: ['controlWord', 'setControlWord', 'host'],
+        uses: ['controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 508,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x83, 0xec, 0x18, 0xe8, 0xf7, 0x01, 0x00, 0x00, 0xdd,
@@ -428,7 +428,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     strtod: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['u32', 'ptr'],
         returns: 'f64',
         uses: ['u8', 'setU32', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 872,
@@ -618,7 +618,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _dtest: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i32',
         uses: ['u32'],
         code: Uint8Array.of(
@@ -635,7 +635,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     _fdtest: {
         convention: 'cdecl',
-        params: ['u32'],
+        params: ['ptr'],
         returns: 'i32',
         uses: ['u32'],
         code: Uint8Array.of(
@@ -671,7 +671,7 @@ export const COMPILED = /** @type {const} */ ({
     },
     wcstod: {
         convention: 'cdecl',
-        params: ['u32', 'u32'],
+        params: ['u32', 'ptr'],
         returns: 'f64',
         uses: ['u16', 'setU32', 'controlWord', 'setControlWord', 'host', 'pointerBytes'],
         host: 877,

@@ -18,13 +18,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createTestMachine } from '../../../../../../cork/src/testing/machine.js';
-import { CODE_64, STACK_64, argumentOf, callLong, longMachine }
+import { CODE_64, HIGH_64, STACK_64, argumentOf, callLong, longMachine }
     from '../../../../../scripts/guest-code/long.mjs';
+import { ifRoom } from '../../../../../../cork/src/testing/memory64.js';
 import { X64 } from './assemble.js';
 import { commandCode } from './command.js';
 import { COMMANDS, commandSlot } from '../../d3d9/commands.js';
 import { DRAW, FLAG_SLOW_PATH, HELD_HOST, SHADOW } from '../block.js';
-import { DRAWABLE_MIRRORS, RENDER_STATE_MIRROR } from './command.js';
+import {
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR,
+} from './command.js';
 
 const TRAP = 0x180000;
 const RETURN = 0x180010;
@@ -43,6 +46,8 @@ const MIRRORS = {
     SetRenderState: RENDER_STATE_MIRROR,
     SetStreamSource: DRAWABLE_MIRRORS.SetStreamSource9,
     SetIndices: DRAWABLE_MIRRORS.SetIndices,
+    SetTransform: TRANSFORM_MIRROR,
+    SetViewport: [...VIEWPORT_GUARD_9, ...VIEWPORT_MIRROR],
 };
 
 /** @param {string} name @param {import('./assemble.js').Width} [width] */
@@ -78,10 +83,11 @@ const lay = (write, { flags = 0, held = 0, ringBytes = RING_BYTES,
  * A call made on both machines; what each left.
  *
  * @param {string} name @param {number[]} args  without `this`, each a dword
- * @param {{ state?: Parameters<typeof lay>[1], high?: number }} [given]
- *     high: an argument the 64-bit call passes with its upper half set
+ * @param {{ state?: Parameters<typeof lay>[1], high?: number, far?: number }} [given]
+ *     high: an argument the 64-bit call passes with its upper half set; far: a pointer
+ *     argument (1-based) the 64-bit call passes past 4 GiB, what it points at moved with it
  */
-const both = (name, args, { state, high = -1 } = {})=>{
+const both = (name, args, { state, high = -1, far = -1 } = {})=>{
     const m32 = createTestMachine({ ramSize: 1 << 22 });
     m32.write(CODE_64, Array.from(codeOf(name)));
     m32.write(TRAP, [0xf4]);
@@ -99,20 +105,28 @@ const both = (name, args, { state, high = -1 } = {})=>{
     m32.setEflags(2);
     m32.runProgram(CODE_64);
 
-    const m64 = longMachine();
+    // `far`: a pointer argument moved past 4 GiB, what it points at with it, on a
+    // machine whose window reaches there - on the interpreter: the translator's
+    // wide window has its own gate.
+    const m64 = longMachine(far >= 0 ? { window: 2 ** 33, config: { translate: false } } : {});
     m64.write(CODE_64, codeOf(name, X64));
     m64.write(TRAP, [0xf4]);
     m64.write(RETURN, [0xf4]);
     m64.setQuad(THIS, 0x7000n);
     m64.setQuad(THIS + 8, BigInt(BLOCK));
     lay((at, bytes)=>m64.write(at, bytes), state);
+    if (far >= 0)
+    {
+        m64.write(HIGH_64 + args[far - 1], m64.read(args[far - 1], 256));
+    }
     // A pointer comes whole, its upper half zero; any other argument's upper
     // half is the convention's to leave undefined, a pattern here.
     const shape = COMMANDS[name];
     const pointers = new Set([...shape.objects ?? [], shape.pointer ?? -1]);
     const call = callLong(m64, CODE_64, { returnTo: RETURN, args: [BigInt(THIS), ...args.map(
         (word, i)=>(i + 1 === high ? BigInt(word >>> 0) | 1n << 32n
-            : pointers.has(i) ? BigInt(word >>> 0) : argumentOf(word, i + 1)))] });
+            : i + 1 === far ? BigInt(HIGH_64 + word)
+                : pointers.has(i) ? BigInt(word >>> 0) : argumentOf(word, i + 1)))] });
     return {
         m32, m64, call,
         returned32: m32.eip() === RETURN + 1, returned64: m64.rip() === RETURN + 1,
@@ -163,6 +177,8 @@ const TAKEN = [
     ['SetSamplerState', [2, 5, 1]],
     ['DrawIndexedPrimitive', [4, -2, 0, 300, 0, 100]],
     ['SetVertexShader', [OBJECT]],
+    ['SetTransform', [2, DATA]],
+    ['SetViewport', [DATA]],
 ];
 
 for (const [name, args] of TAKEN)
@@ -203,20 +219,32 @@ for (const [why, name, args, given] of LEFT)
     });
 }
 
-for (const [name, args, pointer] of /** @type {[string, number[], number][]} */ ([
-    ['SetVertexShaderConstantF', [0, DATA, 1], 2],
+for (const [name, args, object] of /** @type {[string, number[], number][]} */ ([
     ['SetTexture', [3, OBJECT], 2],
     ['SetStreamSource', [0, OBJECT, 0, 32], 2],
 ]))
 {
-    test(`${name} at 64 bits leaves a pointer above 4 GiB to the trap`, ()=>{
-        const run = both(name, args, { high: pointer });
-        assert.ok(run.trapped64, 'left for the trap');
-        for (const reg of ['rcx', 'rdx', 'r8', 'r9', 'rsp'])
-        {
-            assert.equal(run.m64.reg(reg), run.call.entry[reg], reg);
-        }
-        assert.deepEqual([...run.m64.read(RING, RING_BYTES)], new Array(RING_BYTES).fill(0xee));
-        assert.equal(run.m64.read(BLOCK + SHADOW.HELD, 4)[0], 0, 'the lock let go');
-    });
+    test(`${name} at 64 bits leaves an interface above 4 GiB, none of the engine's, to the trap`,
+        ()=>{
+            const run = both(name, args, { high: object });
+            assert.ok(run.trapped64, 'left for the trap');
+            for (const reg of ['rcx', 'rdx', 'r8', 'r9', 'rsp'])
+            {
+                assert.equal(run.m64.reg(reg), run.call.entry[reg], reg);
+            }
+            assert.deepEqual([...run.m64.read(RING, RING_BYTES)], new Array(RING_BYTES).fill(0xee));
+            assert.equal(run.m64.read(BLOCK + SHADOW.HELD, 4)[0], 0, 'the lock let go');
+        });
+}
+
+for (const [name, args, pointer] of /** @type {[string, number[], number][]} */ ([
+    ['SetVertexShaderConstantF', [4, DATA, 3], 2],
+    ['SetPixelShaderConstantF', [0, DATA + 16, 1], 2],
+    ['SetTransform', [2, DATA], 2],
+    ['SetViewport', [DATA], 1],
+]))
+{
+    test(`${name} at 64 bits copies what a pointer past 4 GiB points at`, ifRoom(()=>{
+        tookCall(both(name, args, { far: pointer }), COMMANDS[name].args);
+    }));
 }

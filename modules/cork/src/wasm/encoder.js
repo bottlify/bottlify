@@ -244,10 +244,11 @@ export class Body {
         this.mustDepth = -1;
         /**
          * A wide window's guest accesses (cork's `wideLayout`), when given: an
-         * access marked `guest` goes to `memory`, a `memory64` one, at the i32
-         * address it was given widened and or-ed with the i64 local `high`, the
-         * value a store writes kept meanwhile in `scratch(type)`.
-         * @type {{ memory: number, high: number, scratch: (type: number) => number } | null}
+         * access marked `guest` goes to `memory`, a `memory64` one, at the i64
+         * address the local `whole` holds with the i32 it was given for its low
+         * half (`widenGuest`), the value a store writes kept meanwhile in
+         * `scratch(type)`.
+         * @type {{ memory: number, whole: number, scratch: (type: number) => number } | null}
          */
         this.guest = null;
     }
@@ -549,12 +550,24 @@ export class Body {
     }
 
     /**
-     * The i32 guest address on the stack as a wide window's i64 one, its high
-     * half put in (`guest`); as it is in 4 GiB. What a helper given a guest
-     * address takes in a wide window.
+     * The i32 guest address on the stack as a wide window's i64 one: `whole`
+     * (`guest`) with the i32 for its low half; as it is in 4 GiB. What a helper
+     * given a guest address takes in a wide window.
+     *
+     * Written as `whole ^ zext(wrap(whole) ^ address)`, not as the high half
+     * or-ed in: where the i32 is `whole`'s own low half - an address computed
+     * once and used as it is, the usual access - the engine sees one value
+     * xor-ed with itself and the access takes `whole` as it stands, where the
+     * halves cut apart and put together again cost it three instructions an
+     * access.
      */
     widenGuest(){
-        return this.guest === null ? this : this.op(0xad).localGet(this.guest.high).op(0x84);
+        if (this.guest === null)
+        {
+            return this;
+        }
+        const { whole } = this.guest;
+        return this.localGet(whole).op(0xa7).op(0x73).op(0xad).localGet(whole).op(0x85);
     }
 
     unreachable(){

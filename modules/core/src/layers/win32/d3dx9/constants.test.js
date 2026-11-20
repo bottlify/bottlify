@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createConstantTables, registerValues } from './constants.js';
+import { COMPILED as SETTERS_LONG } from './constants-setters.x64.js';
+import { COMPILED as SETTERS_32 } from './constants-setters.x86.js';
 
 /**
  * A vertex shader's bytecode as a compiler writes it: the version token, then
@@ -338,6 +340,7 @@ test('the gate: the table\'s methods in the guest answer and call the device as 
                         return 0;
                     },
                     host,
+                    pointerBytes: 4,
                 }, 0x300, ...args) : host();
                 let said = (await answer) >>> 0;
                 if (step.method === 'GetConstantElement' && said !== 0)
@@ -399,4 +402,24 @@ test('a 64-bit process gets its table, the table\'s description and a constant\'
     assert.equal(await call('SetMatrixPointerArray', m.DEVICE, m.put('WorldViewProj'), 0x2100,
         1), 0);
     assert.equal(m.calls[0].slot, 94, 'SetVertexShaderConstantF, read from the quadword slot');
+});
+
+test('a 64-bit process takes the setters\' x86-64 through their guest slot, every one the'
+    + ' i386 has', ()=>{
+    const m = machine(shader(), { pointerSize: 8 });
+    assert.equal(m.tables.D3DXGetShaderConstantTable.handler([0x1000, 0x50]), 0);
+    const [table] = m.published;
+    const methods = /** @type {any[]} */ (table.interfaceFor(
+        '{AB3C758F-093E-4356-B762-4DB18F1B3A01}').methods);
+    const named = (/** @type {string} */ name)=>methods.find(method=>method.name === name);
+    assert.deepEqual(Object.keys(SETTERS_LONG).sort(), Object.keys(SETTERS_32).sort());
+    for (const name of Object.keys(SETTERS_LONG))
+    {
+        const { guest } = named(name);
+        assert.equal(guest?.wide, true, `${name}: built for the process's width`);
+        const at = guest({ trap: 0x7000 });
+        const { code, host } = /** @type {Record<string, any>} */ (SETTERS_LONG)[name];
+        assert.deepEqual([...m.memory.subarray(at, at + host - 1)], [...code.subarray(0, host - 1)],
+            `${name}: its x86-64`);
+    }
 });

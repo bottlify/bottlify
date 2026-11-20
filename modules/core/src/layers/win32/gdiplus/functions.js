@@ -20,7 +20,7 @@
  * a string's outlines - answers NotImplemented, said once as a divergence.
  */
 
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { createFontFunctions } from './fonts.js';
 import { createKit } from './kit.js';
 import { createMatrixFunctions } from './matrix.js';
@@ -125,7 +125,8 @@ export function createGdiplusFunctions(host){
                 }
                 // GdiplusStartupInput: the version, the debug callback, then
                 // SuppressBackgroundThread.
-                const fields = new DataView(host.readMemory(input >>> 0, pointer.size * 2 + 4)
+                const fields = new DataView(host.readMemory(wholeAddress(input),
+                    pointer.size * 2 + 4)
                     .slice().buffer);
                 const version = fields.getUint32(0, true);
                 if (version < 1 || version > 2)
@@ -179,7 +180,9 @@ export function createGdiplusFunctions(host){
 
         /** void *GdipAlloc(size_t size): memory GdipFree gives back, zero when none is left. */
         GdipAlloc: {
+            returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(Math.max(1, size >>> 0)),
         },

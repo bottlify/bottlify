@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Walking a PE image's headers in guest memory, as the Rtl image helpers do.
  *
@@ -159,10 +161,12 @@ export function createImageFunctions(host){
          * holds, where the walk stops.
          */
         LdrProcessRelocationBlock: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([page, count, entries, delta])=>{
-                const list = new DataView(host.readMemory(entries >>> 0, (count >>> 0) * 2).buffer);
+                const list = new DataView(host.readMemory(wholeAddress(entries),
+                    (count >>> 0) * 2).buffer);
                 for (let i = 0; i < (count >>> 0); i++)
                 {
                     const entry = list.getUint16(i * 2, true);
@@ -171,7 +175,7 @@ export function createImageFunctions(host){
                         return 0;
                     }
                 }
-                return (entries + (count >>> 0) * 2) >>> 0;
+                return wholeAddress(entries + (count >>> 0) * 2);
             },
         },
 
@@ -186,10 +190,11 @@ export function createImageFunctions(host){
          * as the real walk is guarded.
          */
         RtlImageDirectoryEntryToData: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([base, mappedAsImage, entry, size])=>{
-                const address = base >>> 0;
+                const address = wholeAddress(base);
                 const asData = (address & 1) !== 0;
                 try
                 {

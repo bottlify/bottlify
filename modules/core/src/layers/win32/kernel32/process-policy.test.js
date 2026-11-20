@@ -28,11 +28,11 @@ const CURRENT_THREAD = 0xfffffffe;
  *     divergence?: (api: string, detail: string) => void,
  *     flushProcessWrites?: () => true | Promise<true>,
  *     processors?: { count: () => number, systemMask: () => number },
- *     namedObjects?: any }} [given]
+ *     namedObjects?: any, pointerSize?: number }} [given]
  */
 function machine(given = {}){
     const { registers = {}, setRegisters, divergence, flushProcessWrites, processors,
-        namedObjects } = given;
+        namedObjects, pointerSize } = given;
     const bytes = new Uint8Array(0x10000);
     const view = new DataView(bytes.buffer);
     /** @type {number[]} */
@@ -82,6 +82,7 @@ function machine(given = {}){
                 }
             },
             processId: 0x100,
+            pointerSize,
             namedObjects,
             // Each process ended, in order: a child takes the code as its exit.
             terminateProcess: (process, code)=>{
@@ -106,6 +107,24 @@ function machine(given = {}){
     return { bytes, view, errors, handles, call, fns, childHandle, threadHandle, thread, child,
         ended, posted, jobEvents: ()=>jobEvents };
 }
+
+test('NtCancelSynchronousIoFile writes its status block as the process lays it out', ()=>{
+    // IO_STATUS_BLOCK: the status and Information, each a pointer wide. At 64
+    // bits Information lies eight bytes in and was left as the program had it.
+    for (const pointerSize of [4, 8])
+    {
+        const { bytes, view, fns, threadHandle } = machine({ pointerSize });
+        bytes.fill(0xaa, 0x2000, 0x2020);
+        const cancel = /** @type {any} */ (fns.CreateJobObjectW).natives.NtCancelSynchronousIoFile;
+        assert.equal(cancel.handler([threadHandle, 0, 0x2000]) >>> 0, 0xc0000225,
+            'STATUS_NOT_FOUND: the thread waits in nothing');
+        assert.equal(view.getUint32(0x2000, true), 0xc0000225);
+        const end = 2 * pointerSize;
+        assert.deepEqual([...bytes.subarray(0x2004, 0x2000 + end)], new Array(end - 4).fill(0),
+            'Information zero, and at 64 bits the status\'s upper half');
+        assert.equal(view.getUint32(0x2000 + end, true), 0xaaaaaaaa, 'nothing past the block');
+    }
+});
 
 test('RtlCaptureContext is the caller\'s registers as it will be on return', ()=>{
     const { view, call } = machine({ registers: { esp: 0x8f00, ebp: 0x8f40 } });

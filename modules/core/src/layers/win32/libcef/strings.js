@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The framework's strings, lists and maps.
  *
@@ -37,14 +39,14 @@ const STRING_SIZE = 12;
  */
 export function createCefStrings(host, { utf8 = false } = {}){
     /** @param {number} address */
-    const dword = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const dword = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number[]} values */
     const words = (address, values)=>{
         const bytes = new Uint8Array(values.length * 4);
         const view = new DataView(bytes.buffer);
         values.forEach((value, i)=>view.setUint32(i * 4, value >>> 0, true));
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** The destructor every string this library fills carries: it frees the buffer. */
@@ -151,10 +153,10 @@ export function createCefStrings(host, { utf8 = false } = {}){
         }
         if (count >= 0)
         {
-            return host.readMemory(address >>> 0, count).slice();
+            return host.readMemory(wholeAddress(address), count).slice();
         }
         const out = [];
-        for (let at = address >>> 0; ; at++)
+        for (let at = wholeAddress(address); ; at++)
         {
             const byte = host.readMemory(at, 1)[0];
             if (byte === 0)
@@ -228,7 +230,7 @@ export function createCefStrings(host, { utf8 = false } = {}){
             return Math.sign(left.length - right.length);
         }),
         cef_string_wide_to_utf8: cdecl(12, ([src, length, output])=>{
-            const raw = host.readMemory(src >>> 0, (length >>> 0) * 2).slice();
+            const raw = host.readMemory(wholeAddress(src), (length >>> 0) * 2).slice();
             const text = String.fromCharCode(...new Uint16Array(raw.buffer, 0, length >>> 0));
             const bytes = new TextEncoder().encode(text);
             fill(output, bytes, bytes.length);

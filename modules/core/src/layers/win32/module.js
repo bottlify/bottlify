@@ -28,9 +28,10 @@ import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, decodeAnsi, encodeAnsi } from './kernel32/locale.js';
-import { guestEntry } from './msvcrt/guest-code.js';
+import { guestEntry, withLongCode } from './msvcrt/guest-code.js';
 import * as kernel32InGuest from './kernel32/inguest.js';
 import { COMPILED as KERNEL32_COMPILED } from './kernel32/inguest.x86.js';
+import { COMPILED as KERNEL32_LONG } from './kernel32/inguest.x64.js';
 import {
     ENVIRONMENT_NOW, EXPAND_ENVIRONMENT, createEnvironmentFunctions, createUserenvFunctions,
     defaultEnvironment, machineArchitecture, sessionEnvironment,
@@ -73,6 +74,7 @@ import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
+import { createMsvcp60Functions } from './msvcrt/msvcp60.js';
 import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
 import { addSecondNames, MSVCRT_SECOND_NAMES } from './msvcrt/second-names.js';
 import { UNIVERSAL_CXX } from './msvcrt/classes.js';
@@ -132,6 +134,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { OLEDLG_ORDINALS, createOledlgFunctions } from './oledlg/functions.js';
 import { createFaultrepFunctions } from './faultrep/functions.js';
 import { MSCOREE_ORDINALS, createMscoreeFunctions } from './mscoree/functions.js';
 import { createHttpapiFunctions } from './httpapi/functions.js';
@@ -229,6 +232,12 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
     from './mfreadwrite/functions.js';
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
+import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
+import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
+
+// MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
+// 64-bit process places (`withLongCode`), the conversions here and the flush in heap.js.
+withLongCode(KERNEL32_COMPILED, KERNEL32_LONG);
 
 /**
  * The locale functions with MultiByteToWideChar and WideCharToMultiByte
@@ -286,7 +295,8 @@ const CDECL_LIBRARIES =
  * of the universal runtime loads ucrtbase and never msvcrt, and its standard
  * streams were records at address zero.
  */
-const CRT_IMAGES = ['msvcrt.dll', 'ucrtbase.dll', 'MSVCR80.dll', 'MSVCR71.dll', 'CRTDLL.dll'];
+const CRT_IMAGES = ['msvcrt.dll', 'ucrtbase.dll', 'MSVCR80.dll', 'MSVCR90.dll', 'MSVCR71.dll',
+    'CRTDLL.dll'];
 
 /**
  * The runtimes that export each 64-bit language handler the dispatcher reads
@@ -304,6 +314,7 @@ const C_HANDLERS = [
 const CXX_HANDLERS3 = [
     ['msvcrt.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
     ['MSVCR80.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
+    ['MSVCR90.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
     ['VCRUNTIME140.dll', ['__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3']],
 ];
 /** @type {[string, string[]][]} */
@@ -317,7 +328,8 @@ const CXX_HANDLERS4 = [['VCRUNTIME140_1.dll', ['__CxxFrameHandler4']]];
 const VCRUNTIME_EXPORTS = [
     '_CxxThrowException', '__CxxFrameHandler', '__CxxFrameHandler2', '__CxxFrameHandler3',
     '__C_specific_handler', '_except_handler3', '_except_handler4_common',
-    '__uncaught_exception', '_purecall', '_setjmp3', 'longjmp', 'memchr', 'memcmp', 'memcpy',
+    '__uncaught_exception', '_purecall', '_setjmp3', '__intrinsic_setjmp', '__intrinsic_setjmpex',
+    'longjmp', 'memchr', 'memcmp', 'memcpy',
     'memmove', 'memset', 'strchr', 'strrchr', 'strstr', 'wcschr', 'wcsrchr', 'wcsstr',
 ];
 
@@ -998,7 +1010,7 @@ export function createWin32Module(){
              */
             const nvapi = name=>({
                 /** void *nvapi_QueryInterface(unsigned int id) */
-                nvapi_QueryInterface: { argBytes: 4, convention: 'cdecl',
+                nvapi_QueryInterface: { returns: 'pointer', argBytes: 4, convention: 'cdecl',
                     /** @param {number[]} args */
                     handler: ([id])=>{
                         const found = NVAPI_INTERFACES.get(id >>> 0);
@@ -1683,6 +1695,7 @@ export function createWin32Module(){
             // CreateFile hand their handles and names on to them.
             const mailslots = createMailslots({
                 kernel,
+                pointerSize,
                 handles,
                 readMemory,
                 writeMemory,
@@ -2595,6 +2608,8 @@ export function createWin32Module(){
                     continueAt: where=>bridge.continueAt({ eip: where.rip, esp: where.rsp,
                         long: where.long }, { below: where.rsp }),
                     currentThread: ()=>kernel.currentThread(),
+                    controlWord: config?.fpu?.controlWord,
+                    setControlWord: config?.fpu?.setControlWord,
                     // The stub addresses of this engine's own C language
                     // handler, so a frame naming it has its scope table read
                     // rather than the handler run; resolved once the synthetic
@@ -3172,6 +3187,7 @@ export function createWin32Module(){
             // are its, answered as statuses (`native`).
             const threadPool = createThreadPool({
                 kernel,
+                pointerSize,
                 // A timer's due time and a wait's time-out are read
                 // from the caller's FILETIME, against the wall clock.
                 readMemory,
@@ -3440,16 +3456,9 @@ export function createWin32Module(){
             // fiber or a thread ends (`kernel32/fls.js`).
             const fiberStorage = createFiberLocalStorage({
                 pointerSize,
-                readPointer: address=>(pointerSize === 8
-                    ? memory.readU32(address) + memory.readU32(address + 4) * 2 ** 32
-                    : memory.readU32(address)),
-                writePointer: (address, value)=>{
-                    memory.writeU32(address, value % 2 ** 32 >>> 0);
-                    if (pointerSize === 8)
-                    {
-                        memory.writeU32(address + 4, Math.floor(value / 2 ** 32));
-                    }
-                },
+                readPointer: address=>memory.readPointer(address, pointerSize === 8 ? 8 : 4),
+                writePointer: (address, value)=>memory.writePointer(address, value,
+                    pointerSize === 8 ? 8 : 4),
                 teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
                 allocate: bytes=>{
                     const at = heap.allocate(bytes);
@@ -3601,7 +3610,7 @@ export function createWin32Module(){
             // The common controls, one implementation and the two libraries it is:
             // system32's 5.82 and Common Controls 6 (`commonControlsFaces`).
             const commonControls = commonControlsFaces({
-                readMemory, writeMemory, divergence: config?.divergence, imageLists,
+                readMemory, writeMemory, pointerSize, divergence: config?.divergence, imageLists,
                 // What _TrackMouseEvent is documented to call where the
                 // system has it; looked up when called, as user32 is built
                 // beside it.
@@ -4019,6 +4028,7 @@ export function createWin32Module(){
                         registry: hive,
                     }),
                     ...createDriveFunctions({
+                        pointerSize,
                         readCString, readWideString, readMemory, writeMemory,
                         setLastError: setError,
                         drives: ()=>filesystem.drives(),
@@ -4447,6 +4457,9 @@ export function createWin32Module(){
                         unwind: seh.unwind,
                         divergence: config?.divergence,
                     }).table,
+                    // A 64-bit process's marks are its own: the registers whole,
+                    // the frame an unwind reaches (`kernel32/seh64.js`).
+                    ...seh64 ? seh64.crt : {},
                     ...createMsvcrtFunctions({
                         pointerSize,
                         readMemory,
@@ -4604,6 +4617,7 @@ export function createWin32Module(){
 
                 // The adapters behind the sockets: one, on the network they reach.
                 'IPHLPAPI.dll': createIphlpapiFunctions({
+                    pointerSize,
                     readMemory, writeMemory, localAddress: ()=>sockets.localAddress(),
                     // MIB tables the caller frees with FreeMibTable.
                     allocate: bytes=>libraries['KERNEL32.dll'].LocalAlloc
@@ -5036,6 +5050,9 @@ export function createWin32Module(){
                 'msasn1.dll': {},
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+                // The OLE dialogs MFC's library imports by number, embedding or not.
+                'OLEDLG.dll': createOledlgFunctions({ readMemory, writeMemory, pointerSize,
+                    user32: ()=>libraries['USER32.dll'], lent, divergence: config?.divergence }),
                 'faultrep.dll': createFaultrepFunctions({ reported: ()=>{
                     faultReported = true;
                 } }),
@@ -5668,7 +5685,7 @@ export function createWin32Module(){
                                     setError(ERROR_INVALID_PARAMETER);
                                     return 0;
                                 }
-                                writeMemory(index >>> 0, Uint8Array.of(1, 0, 0, 0));
+                                writeMemory(wholeAddress(index), Uint8Array.of(1, 0, 0, 0));
                                 return AVRT_TASK_HANDLE;
                             } }]),
                     ['AvRevertMmThreadCharacteristics', { argBytes: 4,
@@ -5855,11 +5872,30 @@ export function createWin32Module(){
                         // The four arguments a window procedure declares, in
                         // order: at 64 bits a WPARAM widens as the UINT it is
                         // kept as, an LPARAM as the LONG (`callback.js`).
+                        // A value a 64-bit caller passed that a dword does not
+                        // say - a pointer past 2 GiB in an LPARAM, any past
+                        // 4 GiB - goes whole (`paramsOf`).
+                        /** @type {(number | bigint)[]} */
                         const args = [message.hwnd >>> 0, message.message >>> 0,
-                            message.wParam >>> 0, message.lParam | 0];
-                        return guarded
-                            ? callGuarded({ entry: wndProc, args, thread, failed: 0 })
-                            : bridge.callGuest({ entry: wndProc, args, thread });
+                            ...paramsOf(message)];
+                        if (guarded)
+                        {
+                            return callGuarded({ entry: wndProc,
+                                args: /** @type {any} */ (args), thread, failed: 0 });
+                        }
+                        const answer = bridge.callGuest({ entry: wndProc, args, thread });
+                        const { wide } = message;
+                        // An LRESULT a dword does not say, for the sender that
+                        // asked to be told (`wholeAnswer`).
+                        return wide === undefined ? answer : answer.then((
+                            /** @type {number} */ value)=>{
+                            const { high } = /** @type {{ high?: number }} */ (answer);
+                            if (high !== undefined && high !== ((value | 0) < 0 ? 0xffffffff : 0))
+                            {
+                                wide.r = BigInt(high) << 32n | BigInt(value >>> 0);
+                            }
+                            return value;
+                        });
                     },
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                     callerThread: ()=>bridge.callerThread(),
@@ -5904,7 +5940,7 @@ export function createWin32Module(){
                         // What came before was looked at by the caller just now.
                         kernel.resetEvent(held.event);
                         const words = new Uint8Array(count * 4 + 4);
-                        words.set(readMemory(array >>> 0, count * 4));
+                        words.set(readMemory(wholeAddress(array), count * 4));
                         new DataView(words.buffer).setUint32(count * 4, held.handle, true);
                         writeMemory(held.array, words);
                         return libraries['KERNEL32.dll'].WaitForMultipleObjects.handler(
@@ -6180,6 +6216,7 @@ export function createWin32Module(){
                         allocate: bytes=>heap.allocate(bytes),
                     }),
                     ...createEventLogFunctions({
+                        pointerSize,
                         readCString,
                         readWideString,
                         setLastError: setError,
@@ -6324,6 +6361,7 @@ export function createWin32Module(){
                     readMemory,
                     writeMemory,
                     pointerSize,
+                    now: ()=>kernel.clock.wallClock(),
                     // Another library's export, as it is when called -- the
                     // clipboard, accelerators and the GDI deletions a medium's
                     // release makes are user32's, gdi32's and kernel32's. The
@@ -6749,6 +6787,8 @@ export function createWin32Module(){
             {
                 libraries['WINMM.dll'].timeGetTime = {
                     ...libraries['WINMM.dll'].timeGetTime, guest: ticks.guest,
+                    // And at 64 bits where GetTickCount's routine is.
+                    ...ticks.guestLong ? { guestLong: true } : {},
                 };
             }
 
@@ -6839,10 +6879,29 @@ export function createWin32Module(){
                     __CxxFrameHandler4: cxx64.table.__CxxFrameHandler4,
                 };
             }
+            // Visual C++ 2008's: the 2005 runtime's table under its own name,
+            // with its own invalid-parameter handler, and the C++ library over
+            // it, whose string is laid out as 2005's. A program whose setup put
+            // no copy in the bottle finds them here, as on a Windows the
+            // redistributable was installed on.
+            libraries['MSVCR90.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
+                { readMemory, writeMemory, pointerSize, library: 'MSVCR90.dll',
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread() });
+            libraries['MSVCP90.dll'] = createMsvcp80Functions(libraries['MSVCR90.dll'],
+                { readMemory, writeMemory, fillMemory, pointerSize,
+                    ...floatResults ? { fpu: floatResults } : {} });
             libraries['MSVCR71.dll'] = { ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
             libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],
                 { readMemory, writeMemory, fillMemory });
+            // Visual C++ 6's C++ library, which Windows itself carries: its
+            // strings are shared by count, as that compiler's headers inline.
+            libraries['MSVCP60.dll'] = createMsvcp60Functions(libraries['msvcrt.dll'], {
+                readMemory, writeMemory,
+                addressOf: name=>modules.find('MSVCP60.dll')?.addressOf?.(name) ?? 0,
+                divergence: config?.divergence,
+            });
 
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already
@@ -6954,6 +7013,10 @@ export function createWin32Module(){
                 libraries['ntdll.dll'].NtPowerInformation =
                     libraries['POWRPROF.dll'].CallNtPowerInformation;
             }
+
+            // Each function's address arguments, as its signature names them:
+            // a 64-bit caller's past 4 GiB reaches the handler whole.
+            declareAddresses(libraries, POINTER_ARGUMENTS);
 
             /** Every function, whichever library exports it. */
             const flat = ()=>Object.assign({}, ...Object.values(libraries));
@@ -7170,6 +7233,7 @@ export function createWin32Module(){
                     'COMCTL32.dll': COMCTL32_ORDINALS,
                     'WINMM.dll': WINMM_ORDINALS,
                     'SFC.dll': SFC_ORDINALS,
+                    'OLEDLG.dll': OLEDLG_ORDINALS,
                     'ODBC32.dll': ODBC32_ORDINALS,
                     'MSI.dll': MSI_ORDINALS,
                     'CABINET.dll': CABINET_ORDINALS,

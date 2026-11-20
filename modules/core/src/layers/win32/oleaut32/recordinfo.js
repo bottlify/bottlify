@@ -22,6 +22,7 @@ import { readGuid, writeGuid } from '../ole32/guid.js';
 import {
     isImport, resolveReference, TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD,
 } from './typelib.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IRECORDINFO = '{0000002F-0000-0000-C000-000000000046}';
 
@@ -256,7 +257,8 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                host.writeMemory(record >>> 0, new Uint8Array(state.description.instanceSize));
+                host.writeMemory(wholeAddress(record),
+                    new Uint8Array(state.description.instanceSize));
                 return S_OK;
             } },
         { name: 'RecordClear', argBytes: 8,
@@ -296,7 +298,7 @@ export function createRecordInfoObjects(host){
                     return E_INVALIDARG;
                 }
                 const bstr = host.allocateBstr(state.description.name);
-                writeU32(out >>> 0, bstr);
+                writeU32(wholeAddress(out), bstr);
                 return bstr === 0 ? E_OUTOFMEMORY : S_OK;
             } },
         { name: 'GetSize', argBytes: 8,
@@ -306,7 +308,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, state.description.instanceSize);
+                writeU32(wholeAddress(out), state.description.instanceSize);
                 return S_OK;
             } },
         { name: 'GetTypeInfo', argBytes: 8,
@@ -316,7 +318,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, state.typeInfo);
+                writeU32(wholeAddress(out), state.typeInfo);
                 return callMethod(state.typeInfo, 1, [], host.thread()).then(()=>S_OK);
             } },
         { name: 'GetField', argBytes: 16,
@@ -326,7 +328,7 @@ export function createRecordInfoObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                const field = fieldNamed(state, readWide(name >>> 0));
+                const field = fieldNamed(state, readWide(wholeAddress(name)));
                 if (!field)
                 {
                     return TYPE_E_FIELDNOTFOUND;
@@ -342,8 +344,8 @@ export function createRecordInfoObjects(host){
                 {
                     const bytes = new Uint8Array(16);
                     bytes[0] = VT_BSTR;
-                    host.writeMemory(out >>> 0, bytes);
-                    writeU32((out >>> 0) + 8, host.copyBstr(readU32(at)));
+                    host.writeMemory(wholeAddress(out), bytes);
+                    writeU32(wholeAddress(out) + 8, host.copyBstr(readU32(at)));
                     return S_OK;
                 }
                 if (size === undefined)
@@ -353,7 +355,7 @@ export function createRecordInfoObjects(host){
                 const bytes = new Uint8Array(16);
                 bytes[0] = vt;
                 bytes.set(host.readMemory(at, size), 8);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return S_OK;
             } },
         ...['GetFieldNoCopy', 'PutField', 'PutFieldNoCopy'].map(name=>({
@@ -374,15 +376,16 @@ export function createRecordInfoObjects(host){
                 const all = state.description.variables;
                 if ((names >>> 0) === 0)
                 {
-                    writeU32(count >>> 0, all.length);
+                    writeU32(wholeAddress(count), all.length);
                     return S_OK;
                 }
-                const room = Math.min(readU32(count >>> 0), all.length);
+                const room = Math.min(readU32(wholeAddress(count)), all.length);
                 for (let index = 0; index < room; index++)
                 {
-                    writeU32((names >>> 0) + index * 4, host.allocateBstr(all[index].name ?? ''));
+                    writeU32(wholeAddress(names) + index * 4,
+                        host.allocateBstr(all[index].name ?? ''));
                 }
-                writeU32(count >>> 0, room);
+                writeU32(wholeAddress(count), room);
                 return S_OK;
             } },
         { name: 'IsMatchingType', argBytes: 8,
@@ -431,7 +434,7 @@ export function createRecordInfoObjects(host){
                     return E_OUTOFMEMORY;
                 }
                 host.writeMemory(record, new Uint8Array(state.description.instanceSize));
-                writeU32(out >>> 0, record);
+                writeU32(wholeAddress(out), record);
                 return inOrder(copySteps(state.library, state.description, from >>> 0, record,
                     host.thread()));
             } },

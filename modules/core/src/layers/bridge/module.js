@@ -6,7 +6,7 @@
 
 import { Convention, calleeCleanup } from './internal/conventions.js';
 import { createParking } from './internal/parking.js';
-import { createDispatcher } from './internal/dispatch.js';
+import { createDispatcher, unsignedAddress } from './internal/dispatch.js';
 import { createCallbacks } from './internal/callback.js';
 import { driven, isDriven, stepsThroughPromises } from './internal/drive.js';
 import { createVtables } from './internal/vtable.js';
@@ -207,6 +207,18 @@ export function createBridgeModule(){
             state.callbacks = createCallbacks({ cpu, kernel, memory, reserveTrap });
 
             /**
+             * An answer that comes after its call returned to the dispatcher, as
+             * the thread's resume takes it: a quadword whole, an address of a
+             * 64-bit caller's zero-extended (`zeroExtends`, a bigint the resume
+             * writes into RAX whole), any other dword by its sign.
+             *
+             * @param {number | bigint} value @param {boolean} zeroExtends
+             * @returns {number | bigint}
+             */
+            const lateAnswer = (value, zeroExtends)=>(typeof value === 'bigint' ? value
+                : zeroExtends ? BigInt(unsignedAddress(value)) : value | 0);
+
+            /**
              * A handler that has not finished: the thread is stopped, and told where
              * to pick up its own code once the answer arrives.
              *
@@ -222,7 +234,7 @@ export function createBridgeModule(){
                 const thread = kernel.currentThread();
                 // Everything wanted of the frame is taken now: it describes this
                 // call only until the dispatcher's next one.
-                const { name, restingStack, hostReturn } = frame;
+                const { name, restingStack, hostReturn, zeroExtends } = frame;
                 record({ t: 'park', name, thread: thread?.name });
                 // Where it returns to was read before the handler ran: a handler
                 // that called the guest back has since written over that part of
@@ -242,7 +254,9 @@ export function createBridgeModule(){
                             state.callbacks.finish(thread, value.value | 0, value.registers);
                             return;
                         }
-                        state.callbacks.finish(thread, value | 0);
+                        // A quadword answered whole (an LRESULT handed on) goes
+                        // back whole; a dword as the function's type has it.
+                        state.callbacks.finish(thread, lateAnswer(value, zeroExtends));
                     },
                     // Nothing above is waiting on this promise, so a handler that
                     // throws would otherwise vanish and leave the guest parked
@@ -265,7 +279,7 @@ export function createBridgeModule(){
              */
             const driveNow = (token, frame)=>{
                 const thread = kernel.currentThread();
-                const { name, restingStack, hostReturn, freeStack } = frame;
+                const { name, restingStack, hostReturn, freeStack, zeroExtends } = frame;
                 record({ t: 'drive', name, thread: thread?.name });
                 state.drive.call = name;
                 // From the call's first guest routine to its answer: the steps'
@@ -342,7 +356,7 @@ export function createBridgeModule(){
                         }
                         return;
                     }
-                    state.callbacks.finishNow(thread, value | 0);
+                    state.callbacks.finishNow(thread, lateAnswer(value, zeroExtends));
                 }
                 // The first call from where the call in flight left the stack;
                 // the rest from where it rests, as `callGuest` builds them.
@@ -527,6 +541,13 @@ export function createBridgeModule(){
                  *     The structures wider than eight bytes passed by value, by
                  *     their first dword and their size in dwords, which an
                  *     x86-64 caller passes by a pointer to a copy.
+                 * @param {string} [fn.returns]  The answer is an address, zero-extended
+                 *     into a 64-bit caller's RAX (`HostFunction.returns`).
+                 * @param {number[]} [fn.addresses]  The dwords that carry an address the
+                 *     handler takes whole from a 64-bit caller (`HostFunction.addresses`).
+                 * @param {number[]} [fn.sizes]  The dwords that carry a size, which a
+                 *     64-bit caller's past a dword makes the largest dword
+                 *     (`HostFunction.sizes`).
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -536,6 +557,7 @@ export function createBridgeModule(){
                     {
                         convention = Convention.STDCALL, argBytes, handler,
                         preserveResult = false, lastError = true, quadwords, floats, structs,
+                        returns, addresses, sizes,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -556,7 +578,8 @@ export function createBridgeModule(){
                         name, calleeCleanup(convention, argBytes), { preserveResult });
                     state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
                         ...quadwords ? { quadwords } : {}, ...floats ? { floats } : {},
-                        ...structs ? { structs } : {} });
+                        ...structs ? { structs } : {}, ...returns ? { returns } : {},
+                        ...addresses ? { addresses } : {}, ...sizes ? { sizes } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
                 },
@@ -781,7 +804,12 @@ export function createBridgeModule(){
                  *
                  * @param {Object} call
                  * @param {number} call.entry
-                 * @param {number[]} [call.args]
+                 * @param {(number | bigint)[]} [call.args]
+                 *   Each a dword, which a 64-bit process takes widened by its sign
+                 *   as JavaScript holds it -- an address given unsigned (`>>> 0`)
+                 *   zero-extended, an LPARAM or a handle of -1 sign-extended -- or a
+                 *   bigint, a quadword whole (an argument that came in whole, its
+                 *   high half from `args.high`); a 32-bit process takes its low dword.
                  * @param {any} [call.thread]
                  *   Whose stack to build the frame on. Defaults to the thread on
                  *   the processor, which is right only while the host call that is
@@ -1189,6 +1217,20 @@ export function createBridgeModule(){
                     if (live())
                     {
                         state.dispatcher.placed(address, name);
+                    }
+                },
+
+                /**
+                 * Names a span's addresses as a report asks for them, rather than
+                 * one by one ahead of time: a module's thousands of exports.
+                 *
+                 * @param {number} base @param {number} size
+                 * @param {(address: number) => string | null} nameAt
+                 */
+                labelSpan: (base, size, nameAt)=>{
+                    if (live())
+                    {
+                        state.dispatcher.placedSpan(base, size, nameAt);
                     }
                 },
 

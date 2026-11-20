@@ -19,6 +19,7 @@ import { readGuid } from '../ole32/guid.js';
 import { CodecError, WINCODEC, cropRows } from './frames.js';
 import { convertRow, converts, formatOf, rowBytes } from './formats.js';
 import { GUID } from './layout.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const E_INVALIDARG = 0x80070057 | 0;
 
@@ -55,7 +56,8 @@ const E_INVALIDARG = 0x80070057 | 0;
  */
 
 /** @param {GuestAccess} access @param {number} at */
-const u32 = (access, at)=>new DataView(access.readMemory(at >>> 0, 4).buffer).getUint32(0, true);
+const u32 = (access, at)=>new DataView(access.readMemory(wholeAddress(at), 4).buffer).getUint32(0,
+    true);
 
 /**
  * Runs `use` with a zeroed heap block of `bytes`, freed after.

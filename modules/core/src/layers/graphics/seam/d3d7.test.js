@@ -50,6 +50,7 @@ import {
 } from '../d3d7/constants.js';
 import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
@@ -74,7 +75,7 @@ const slot = (slots, name)=>{
 function machine(){
     const bytes = new Uint8Array(4 << 20);
     let next = 0x100;
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -89,7 +90,7 @@ function machine(){
             bytes[at + 2] = value >>> 16 & 0xff;
             bytes[at + 3] = value >>> 24 & 0xff;
         },
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;

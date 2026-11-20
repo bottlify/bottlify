@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { createParking } from './parking.js';
 import { createDispatcher } from './dispatch.js';
 import { createVtables } from './vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const ESP = 0x3000;
 const CALLS = 1_000_000;
@@ -37,7 +38,7 @@ function machine(){
             registers[name] = value;
         },
     };
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address */
         readU32: address=>words[address >>> 2],
         /** @param {number} address @param {number} value */
@@ -58,7 +59,7 @@ function machine(){
                 into[at + word] = words[(address >>> 2) + word] | 0;
             }
         },
-    };
+    });
     const thread = { name: 'main' };
     const parking = createParking({
         kernel: { currentThread: ()=>thread, parkThread: ()=>{} },

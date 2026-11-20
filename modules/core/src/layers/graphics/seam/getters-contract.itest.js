@@ -49,6 +49,7 @@ import {
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { loopbackDirect3D } from '../remote/loopback.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const ENTRY = 0x7000;
 const PROGRAM = 0x8000;
@@ -165,7 +166,7 @@ function machine(version, options){
     host.writePhysical(ENTRY, new Uint8Array(u32(PROGRAM)));
     /** @param {number} at @param {number} value */
     const writeU32 = (at, value)=>host.writePhysical(at, new Uint8Array(u32(value >>> 0)));
-    const services = {
+    const services = withPointers({
         /** @param {number} at @param {number} length */
         readMemory: (at, length)=>host.readPhysical(at, length).slice(),
         /** @param {number} at @param {number} length */
@@ -175,7 +176,7 @@ function machine(version, options){
         /** @param {number} at */
         readU32: at=>host.readU32(at) >>> 0,
         writeU32,
-    };
+    });
     let heap = HEAP;
     let code = CODE;
     /** @param {number} bytes */
@@ -210,8 +211,8 @@ function machine(version, options){
     /** @type {Map<string, number>} */
     const fellBack = new Map();
     const vtables = createVtables({
-        memory: { readBytes: services.readMemory, writeBytes: services.writeMemory,
-            readU32: services.readU32, writeU32 },
+        memory: withPointers({ readBytes: services.readMemory, writeBytes: services.writeMemory,
+            readU32: services.readU32, writeU32 }),
         register: (/** @type {string} */ name, /** @type {any} */ fn)=>{
             const at = TRAPS + traps.size * 4;
             host.writePhysical(at, new Uint8Array([0xf4]));

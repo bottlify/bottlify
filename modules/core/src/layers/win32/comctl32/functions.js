@@ -18,11 +18,13 @@ import { createImageListFunctions } from './imagelist-stream.js';
 import { createPropertySheetFunctions } from './propsheet.js';
 import { createSubclassFunctions } from './subclass.js';
 import { UDM_SETBUDDY, UDM_SETPOS, UDM_SETRANGE, UPDOWN_CLASS } from './updown.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} ComctlHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the arrays (DPA, DSA) take its layout.
  * @property {(bitmap: number) => { width: number, height: number } | null} [bitmapSize]
  *           How large a bitmap handle is, for counting the images in a strip.
  *           Absent in a build without gdi32 behind it, and then a strip counts
@@ -177,7 +179,7 @@ export function createComctlFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([controls])=>{
-                const size = u32(host.readMemory(controls >>> 0, 4), 0);
+                const size = u32(host.readMemory(wholeAddress(controls), 4), 0);
                 return size === 8 ? 1 : 0;
             },
         },
@@ -200,7 +202,7 @@ export function createComctlFunctions(host){
                 {
                     return host.trackMouseEvent(track >>> 0);
                 }
-                const size = u32(host.readMemory(track >>> 0, 4), 0);
+                const size = u32(host.readMemory(wholeAddress(track), 4), 0);
                 return size === 16 ? 1 : 0;
             },
         },
@@ -283,7 +285,7 @@ function dllGetVersion(host, version){
             {
                 return E_INVALIDARG;
             }
-            const size = u32(host.readMemory(info >>> 0, 4), 0);
+            const size = u32(host.readMemory(wholeAddress(info), 4), 0);
             if (size !== DLLVERSIONINFO_SIZE && size !== DLLVERSIONINFO2_SIZE)
             {
                 return E_INVALIDARG;
@@ -300,7 +302,7 @@ function dllGetVersion(host, version){
                 fields.setUint32(20, (version.build << 16 | version.qfe) >>> 0, true);
                 fields.setUint32(24, (version.major << 16 | version.minor) >>> 0, true);
             }
-            host.writeMemory((info >>> 0) + 4, new Uint8Array(fields.buffer));
+            host.writeMemory(wholeAddress(info) + 4, new Uint8Array(fields.buffer));
             return S_OK;
         },
     };
@@ -329,7 +331,7 @@ function registerClassName(host, classes){
                 return 0;
             }
             const units = [];
-            for (let at = name >>> 0; units.length < 256; at += 2)
+            for (let at = wholeAddress(name); units.length < 256; at += 2)
             {
                 const unit = host.readMemory(at, 2);
                 const code = unit[0] | unit[1] << 8;

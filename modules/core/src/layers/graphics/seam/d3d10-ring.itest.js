@@ -55,6 +55,7 @@ import {
     assemble, cb, colouredPixelShader, colouredVertexShader, dclConstantBuffer, dclOutput, mov, o,
     ret,
 } from '../d3d10/shader-fixtures.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 /** D3D11_SDK_VERSION. */
 const D3D11_SDK_VERSION = 7;
@@ -137,8 +138,9 @@ function machine(guestCode, worker, eleven = false){
     };
     /** @param {number} at @param {number} value */
     const writeU32 = (at, value)=>writeBytes(at, new Uint8Array(u32(value >>> 0)));
-    const memory = { readBytes, writeBytes, readMemory: readBytes, writeMemory: writeBytes,
-        readU32, writeU32 };
+    const memory = withPointers({ readBytes, writeBytes, readMemory: readBytes,
+        writeMemory: writeBytes,
+        readU32, writeU32 });
     let heap = HEAP;
     let code = CODE;
     /** @param {number} bytes */

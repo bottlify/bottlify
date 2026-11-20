@@ -169,6 +169,40 @@ test('a 64-bit field widens a dword as its type does: a handle and an LPARAM by 
     assert.equal(view.getUint32(0x100 + 32, true), 4);
 });
 
+test('a 64-bit pointer field widens a dword by zero: an address past 2 GiB stays itself', ()=>{
+    // A program linked /LARGEADDRESSAWARE is handed addresses past 2 GiB; the window procedure,
+    // the class name, CREATESTRUCT's lpCreateParams and the hook structures' pointers are
+    // addresses there, which sign extension would turn into 0xFFFFFFFF_8...: another address.
+    const memory = fakeMemory(0x400);
+    const L = userLayouts(8);
+    memory.bytes.fill(0xaa);
+    const view = new DataView(memory.bytes.buffer);
+    const high = 0x9000_1000;
+    writeWindowClass(memory, 0x40, { style: 0, wndProc: high, classExtra: 0, windowExtra: 0,
+        instance: high + 0x1000, icon: 0, cursor: 0, background: 0, menuName: high + 0x2000,
+        className: high + 0x3000, iconSm: 0 }, L, L.WNDCLASSEXA);
+    for (const [name, value] of /** @type {[string, number][]} */ ([['lpfnWndProc', high],
+        ['hInstance', high + 0x1000], ['lpszMenuName', high + 0x2000],
+        ['lpszClassName', high + 0x3000]]))
+    {
+        assert.equal(view.getBigUint64(0x40 + L.WNDCLASSEXA[name], true), BigInt(value), name);
+    }
+    writeFields(memory, 0x100, L, L.CREATESTRUCTA, { lpCreateParams: high, hInstance: high,
+        hwndParent: -1, lpszName: high + 4, lpszClass: high + 8 });
+    for (const [name, value] of /** @type {[string, number][]} */ ([['lpCreateParams', high],
+        ['hInstance', high], ['lpszName', high + 4], ['lpszClass', high + 8]]))
+    {
+        assert.equal(view.getBigUint64(0x100 + L.CREATESTRUCTA[name], true), BigInt(value), name);
+    }
+    assert.equal(view.getBigInt64(0x100 + L.CREATESTRUCTA.hwndParent, true), -1n,
+        'a handle keeps its sign');
+    writeFields(memory, 0x200, L, L.CBT_CREATEWNDA, { lpcs: high, hwndInsertAfter: -2 });
+    assert.equal(view.getBigUint64(0x200 + L.CBT_CREATEWNDA.lpcs, true), BigInt(high));
+    assert.equal(view.getBigInt64(0x200 + L.CBT_CREATEWNDA.hwndInsertAfter, true), -2n);
+    writeFields(memory, 0x300, L, L.NCCALCSIZE_PARAMS, { lppos: high });
+    assert.equal(view.getBigUint64(0x300 + L.NCCALCSIZE_PARAMS.lppos, true), BigInt(high));
+});
+
 test('a class written back at 64 bits reads the same way it was read', ()=>{
     const memory = fakeMemory();
     const L = userLayouts(8);
@@ -178,4 +212,43 @@ test('a class written back at 64 bits reads the same way it was read', ()=>{
     };
     writeWindowClass(memory, 0x40, fields, L, L.WNDCLASSEXA);
     assert.deepEqual(readWindowClass(memory, 0x40, L.WNDCLASSEXA), fields);
+});
+
+test('a 64-bit class keeps a procedure and a name past 4 GiB whole, both ways', ()=>{
+    // A 64-bit program's image at its own base past 4 GiB (a wide window):
+    // its window procedure is that address, not the low dword's alias.
+    const memory = fakeMemory();
+    const layouts = userLayouts(8);
+    const L = layouts.WNDCLASSEXA;
+    const view = new DataView(memory.bytes.buffer);
+    view.setBigUint64(0x10 + L.lpfnWndProc, 0x140001740n, true);
+    view.setBigUint64(0x10 + L.lpszClassName, 0x1400023ben, true);
+    const fields = readWindowClass(memory, 0x10, L);
+    assert.equal(fields.wndProc, 0x140001740);
+    assert.equal(fields.className, 0x1400023be);
+    writeWindowClass(memory, 0x100, fields, layouts, L);
+    assert.equal(view.getBigUint64(0x100 + L.lpfnWndProc, true), 0x140001740n);
+    assert.equal(view.getBigUint64(0x100 + L.lpszClassName, true), 0x1400023ben);
+});
+
+test('a 64-bit MSG carries a WPARAM and an LPARAM a dword does not say, both ways', ()=>{
+    const memory = fakeMemory();
+    const layouts = userLayouts(8);
+    const L = layouts.MSG;
+    const view = new DataView(memory.bytes.buffer);
+    writeMessage(memory, 0x20, { hwnd: 0x1004, message: 0x401, wParam: 0x23456789,
+        lParam: 0x90000000, time: 5, x: 1, y: 2,
+        wide: { w: 0x123456789n, l: 0x90000000n } }, layouts);
+    assert.equal(view.getBigUint64(0x20 + L.wParam, true), 0x123456789n);
+    assert.equal(view.getBigUint64(0x20 + L.lParam, true), 0x90000000n,
+        'a pointer past 2 GiB, not its sign\'s ones');
+    const back = readMessage(memory, 0x20, layouts);
+    assert.deepEqual(back.wide, { w: 0x123456789n, l: 0x90000000n });
+    assert.equal(back.lParam, 0x90000000);
+    // Where the dwords say it all, nothing rides beside them.
+    writeMessage(memory, 0x80, { hwnd: 0x1004, message: 0x401, wParam: 7, lParam: 0xffffffff,
+        time: 5, x: 1, y: 2 }, layouts);
+    assert.equal(view.getBigUint64(0x80 + L.lParam, true), 0xffffffffffffffffn);
+    assert.equal(readMessage(memory, 0x80, layouts).wide, undefined);
+    assert.equal(readMessage(memory, 0x80).wide, undefined, 'nor in a 32-bit MSG');
 });

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * D3DX's data loaders, ID3DX10DataLoader and ID3DX11DataLoader: what an
  * asynchronous load reads its bytes through -- memory the program holds, a
@@ -77,7 +79,7 @@ export function publishBare(host, id, methods, end){
 export function createDataLoaders(host, how){
     const { prefix, fileNotFound, string } = how;
     /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>host.writeMemory(at >>> 0,
+    const writeU32 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
 
     /**

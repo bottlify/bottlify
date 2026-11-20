@@ -23,6 +23,7 @@
 
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The last errors DeleteFile and RemoveDirectory leave. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -458,7 +459,7 @@ export function createPathFunctions(host){
      */
     const readWide = pointer=>{
         let text = '';
-        for (let at = pointer >>> 0; text.length < MAX_STRING; at += 2)
+        for (let at = wholeAddress(pointer); text.length < MAX_STRING; at += 2)
         {
             const unit = host.readMemory?.(at, 2) ?? new Uint8Array(2);
             const code = unit[0] | unit[1] << 8;
@@ -514,7 +515,7 @@ export function createPathFunctions(host){
         {
             bytes.set(encodeAnsi(name), layout.NAME);
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -719,6 +720,7 @@ export function createPathFunctions(host){
         _makepath_s: {
             convention: 'cdecl',
             argBytes: 24,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([path, size, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
@@ -775,6 +777,7 @@ export function createPathFunctions(host){
              * UTF-16, `size` counted in characters.
              */
             _wgetcwd: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 8,
                 /** @param {number[]} args */
@@ -814,8 +817,10 @@ export function createPathFunctions(host){
              * destination is one allocated for the caller to free.
              */
             _wfullpath: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 12,
+                sizes: [2],
                 /** @param {number[]} args */
                 handler: ([destination, relative, max])=>{
                     const text = fullPath(readWide(relative), host.files.currentDirectory());
@@ -853,6 +858,7 @@ export function createPathFunctions(host){
             _wmakepath_s: {
                 convention: 'cdecl',
                 argBytes: 24,
+                sizes: [1],
                 /** @param {number[]} args */
                 handler: ([path, size, drive, directory, name, extension])=>{
                     const read = (/** @type {number} */ pointer)=>(
@@ -900,8 +906,10 @@ export function createPathFunctions(host){
          * A null destination means "allocate one", and the caller frees it.
          */
         _fullpath: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, relative, max])=>{
                 const text = fullPath(readString(relative), host.files.currentDirectory());
@@ -928,6 +936,7 @@ export function createPathFunctions(host){
          * name to the directory and does so in place.
          */
         _getcwd: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -957,6 +966,7 @@ export function createPathFunctions(host){
          * prefix and a number, on the heap for the caller to free.
          */
         _tempnam: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -979,6 +989,7 @@ export function createPathFunctions(host){
          * then left as it was.
          */
         _mktemp: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1000,6 +1011,7 @@ export function createPathFunctions(host){
 
         /** wchar_t *_wmktemp(wchar_t *template): `_mktemp` over a wide template. */
         _wmktemp: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1028,6 +1040,7 @@ export function createPathFunctions(host){
          * the next call writes over.
          */
         tmpnam: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -1041,7 +1054,7 @@ export function createPathFunctions(host){
                     name = next();
                 }
                 tmpnamCount++;
-                let at = buffer >>> 0;
+                let at = wholeAddress(buffer);
                 if (at === 0)
                 {
                     tmpnamBuffer ||= host.allocate(TMPNAM_BUFFER);
@@ -1058,6 +1071,7 @@ export function createPathFunctions(host){
         ...host.readMemory ? {
             /** wchar_t *_wtempnam(const wchar_t *dir, const wchar_t *prefix) */
             _wtempnam: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 8,
                 /** @param {number[]} args */

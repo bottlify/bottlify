@@ -215,7 +215,8 @@ function scanArgs(name, data, int, length, dst, src){
  * @param {{ window?: number, high: number }} where
  */
 function runCase(c, helpers, { window, high }){
-    const m = machine({ window, high, config: { helpers } });
+    // Tiered, as a program runs: what leaves a region for no entry is the wasm tier's.
+    const m = machine({ window, high, tiered: true, config: { helpers } });
     const pages = (window ?? 2 ** 32) / 4096;
     const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), pages);
     const ranges = new Uint8Array(m.memory.buffer, codeRangesAt(m.layout), pages * 2);
@@ -329,7 +330,7 @@ const CHKSTK = [0x41, 0x52, 0x41, 0x53, 0x4c, 0x8d, 0x54, 0x24, 0x18, 0x49, 0x29
  * @param {number} limit @param {false | object[]} helpers
  */
 function runChkstk(where, size, limit, helpers){
-    const m = machine({ ...where, config: { helpers } });
+    const m = machine({ ...where, tiered: true, config: { helpers } });
     const { high } = where;
     const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout),
         (where.window ?? 2 ** 32) / 4096);
@@ -401,7 +402,7 @@ for (const where of [{ high: 0 }, { window: 2 ** 33, high: 2 ** 32 }])
  * @param {bigint} cookieValue @param {bigint} argument @param {false | object[]} helpers
  */
 function runCookie(where, cookieValue, argument, helpers){
-    const m = machine({ ...where, config: { helpers } });
+    const m = machine({ ...where, tiered: true, config: { helpers } });
     const { high } = where;
     const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout),
         (where.window ?? 2 ** 32) / 4096);

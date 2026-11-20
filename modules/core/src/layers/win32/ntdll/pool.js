@@ -21,6 +21,7 @@
  */
 
 import { STATUS } from './status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** The kernel32 calls these are made of. */
 export const POOL_ENTRIES = ['QueueUserWorkItem', 'RegisterWaitForSingleObject',
@@ -55,7 +56,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
     const write32 = (at, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        writeMemory(at >>> 0, bytes);
+        writeMemory(wholeAddress(at), bytes);
     };
     /** A Win32 error the API refused with, as its status. @param {number} error */
     const statusOf = error=>(error === 0 ? STATUS.SUCCESS
@@ -275,7 +276,7 @@ export function createPoolFunctions({ kernel32, deletions, writeMemory }){
                 }
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, queue, true);
-                writeMemory(out >>> 0, bytes);
+                writeMemory(wholeAddress(out), bytes);
                 return STATUS.SUCCESS;
             },
         },

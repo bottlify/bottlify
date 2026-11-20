@@ -17,6 +17,7 @@
  */
 
 import { STATUS } from './status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_VARIABLE_NOT_FOUND = 0xc0000100;
 /** The most a block may hold, in UTF-16 units; a walk stops there. */
@@ -33,7 +34,7 @@ const BLOCK_LIMIT = 0x100000;
 
 /**
  * @param {EnvironmentHost} host
- * @returns {Record<string, { argBytes: number, handler: Function }>}
+ * @returns {Record<string, { argBytes: number, sizes?: number[], handler: Function }>}
  */
 export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, allocate, free }){
     /** @param {number} address */
@@ -239,11 +240,11 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 {
                     return STATUS_VARIABLE_NOT_FOUND;
                 }
-                const head = readMemory(value >>> 0, 4);
+                const head = readMemory(wholeAddress(value), 4);
                 const room = head[2] | head[3] << 8;
-                writeMemory(value >>> 0, Uint8Array.of(found.length * 2 & 0xff,
+                writeMemory(wholeAddress(value), Uint8Array.of(found.length * 2 & 0xff,
                     found.length * 2 >>> 8 & 0xff));
-                return put(found, u32((value >>> 0) + 4), room);
+                return put(found, u32(wholeAddress(value) + 4), room);
             },
         },
 
@@ -255,6 +256,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
          */
         RtlQueryEnvironmentVariable: {
             argBytes: 24,
+            sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, name, nameLength, value, valueLength, returned])=>{
                 const found = lookup(block >>> 0, readUnits(name >>> 0, nameLength >>> 0));
@@ -267,10 +269,10 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 // terminator needs too.
                 if (found.length + 1 > (valueLength >>> 0))
                 {
-                    setU32(returned >>> 0, found.length + 1);
+                    setU32(wholeAddress(returned), found.length + 1);
                     return STATUS.BUFFER_TOO_SMALL;
                 }
-                setU32(returned >>> 0, found.length);
+                setU32(wholeAddress(returned), found.length);
                 return put(found, value >>> 0, (valueLength >>> 0) * 2);
             },
         },
@@ -287,18 +289,18 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             /** @param {number[]} args */
             handler: ([block, source, destination, returned])=>{
                 const pieces = expand(block >>> 0, counted(source >>> 0));
-                const head = readMemory(destination >>> 0, 4);
+                const head = readMemory(wholeAddress(destination), 4);
                 const room = (head[2] | head[3] << 8) >>> 1;
-                const total = writeExpanded(pieces, u32((destination >>> 0) + 4), room);
+                const total = writeExpanded(pieces, u32(wholeAddress(destination) + 4), room);
                 if ((returned >>> 0) !== 0)
                 {
-                    setU32(returned >>> 0, total * 2);
+                    setU32(wholeAddress(returned), total * 2);
                 }
                 if (total > room)
                 {
                     return STATUS.BUFFER_TOO_SMALL;
                 }
-                writeMemory(destination >>> 0, Uint8Array.of(total * 2 - 2 & 0xff,
+                writeMemory(wholeAddress(destination), Uint8Array.of(total * 2 - 2 & 0xff,
                     total * 2 - 2 >>> 8 & 0xff));
                 return STATUS.SUCCESS;
             },
@@ -314,13 +316,14 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
          */
         RtlExpandEnvironmentStrings: {
             argBytes: 24,
+            sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, source, sourceLength, destination, destinationLength, returned])=>{
                 const pieces = expand(block >>> 0, readUnits(source >>> 0, sourceLength >>> 0));
                 const total = writeExpanded(pieces, destination >>> 0, destinationLength >>> 0);
                 if ((returned >>> 0) !== 0)
                 {
-                    setU32(returned >>> 0, total);
+                    setU32(wholeAddress(returned), total);
                 }
                 return total > (destinationLength >>> 0) ? STATUS.BUFFER_TOO_SMALL
                     : STATUS.SUCCESS;
@@ -351,7 +354,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                     set(key, text);
                     return STATUS.SUCCESS;
                 }
-                const old = u32(where >>> 0);
+                const old = u32(wholeAddress(where));
                 const list = (old === 0 ? [] : entries(old))
                     .filter(([entry])=>entry.toUpperCase() !== key.toUpperCase());
                 if (text !== null)
@@ -363,7 +366,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 {
                     return STATUS.NO_MEMORY;
                 }
-                setU32(where >>> 0, fresh);
+                setU32(wholeAddress(where), fresh);
                 if (old !== 0)
                 {
                     free(old);
@@ -386,7 +389,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 {
                     return STATUS.NO_MEMORY;
                 }
-                setU32(out >>> 0, fresh);
+                setU32(wholeAddress(out), fresh);
                 return STATUS.SUCCESS;
             },
         },
@@ -415,7 +418,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                 const before = processEntries();
                 if ((old >>> 0) !== 0)
                 {
-                    setU32(old >>> 0, blockOf(before));
+                    setU32(wholeAddress(old), blockOf(before));
                 }
                 // No block is no variables at all.
                 const after = (block >>> 0) === 0 ? [] : entries(block >>> 0);

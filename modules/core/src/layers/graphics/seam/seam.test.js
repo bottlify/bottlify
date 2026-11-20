@@ -26,6 +26,7 @@ import { D3DPRESENT_PARAMETERS8, D3DPRESENT_PARAMETERS9, createFields } from './
 import { createDirect3D8 } from '../d3d8/device.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpengl } from '../opengl/exports.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
@@ -34,7 +35,7 @@ function machine(){
     const bytes = new Uint8Array(0x10000);
     let next = 0x100;
 
-    const memory = {
+    const memory = withPointers({
         /** @param {number} at @param {number} length */
         readBytes: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
@@ -49,7 +50,7 @@ function machine(){
             bytes[at + 2] = value >>> 16 & 0xff;
             bytes[at + 3] = value >>> 24 & 0xff;
         },
-    };
+    });
 
     /** Trap ids, so a published slot can be called the way a guest would. */
     /** @type {Map<number, any>} */
@@ -79,12 +80,12 @@ function machine(){
         memory,
         registered,
         /** The graphics services shape: readMemory/writeMemory. */
-        services: {
+        services: withPointers({
             /** @param {number} at @param {number} length */
             readMemory: (at, length)=>bytes.slice(at, at + length),
             /** @param {number} at @param {Uint8Array} value */
             writeMemory: (at, value)=>bytes.set(value, at),
-        },
+        }),
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
 

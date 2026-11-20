@@ -21,6 +21,7 @@
  */
 
 import { undecorateName, undecorateType } from './undname.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 /**
  * A class's fields by the pointer's width. An exception: its vtable, where it
@@ -205,13 +206,7 @@ export function createClassFunctions(host){
         host.writeMemory(address, bytes);
     };
     /** A pointer written whole. @param {number} address @param {number} value */
-    const writePointer = (address, value)=>{
-        writeU32(address, value);
-        if (pointer === 8)
-        {
-            writeU32(address + 4, 0);
-        }
-    };
+    const writePointer = pointerIo(host, pointer).write;
 
     /** A copy of a C string on the runtime's heap, or 0. @param {string} text */
     const copyString = text=>{
@@ -484,6 +479,7 @@ export function createClassFunctions(host){
          * the type, so a program asking about one sees type_info's answer.
          */
         __unDName: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 24,
             /** @param {number[]} args */
@@ -507,8 +503,8 @@ export function createClassFunctions(host){
                     }
                     const kept = bytes.slice(0, room);
                     kept[kept.length - 1] = 0;
-                    host.writeMemory(buffer >>> 0, kept);
-                    return buffer >>> 0;
+                    host.writeMemory(wholeAddress(buffer), kept);
+                    return wholeAddress(buffer);
                 }
                 if ((allocate >>> 0) === 0)
                 {
@@ -547,11 +543,11 @@ export function createClassFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([from, to])=>{
-                const message = readU32(from >>> 0);
-                const owned = (host.readMemory((from >>> 0) + pointer, 1)[0] & 0xff) !== 0;
+                const message = readU32(wholeAddress(from));
+                const owned = (host.readMemory(wholeAddress(from) + pointer, 1)[0] & 0xff) !== 0;
                 const copy = owned && message !== 0 ? copyString(readString(message)) : 0;
-                writeU32(to >>> 0, owned && message !== 0 ? copy : message);
-                host.writeMemory((to >>> 0) + pointer, Uint8Array.of(copy !== 0 ? 1 : 0));
+                writeU32(wholeAddress(to), owned && message !== 0 ? copy : message);
+                host.writeMemory(wholeAddress(to) + pointer, Uint8Array.of(copy !== 0 ? 1 : 0));
                 return 0;
             },
         },
@@ -566,13 +562,14 @@ export function createClassFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([data])=>{
-                const message = readU32(data >>> 0);
-                if ((host.readMemory((data >>> 0) + pointer, 1)[0] & 0xff) !== 0 && message !== 0)
+                const message = readU32(wholeAddress(data));
+                if ((host.readMemory(wholeAddress(data) + pointer,
+                    1)[0] & 0xff) !== 0 && message !== 0)
                 {
                     host.free(message);
                 }
-                writeU32(data >>> 0, 0);
-                host.writeMemory((data >>> 0) + pointer, Uint8Array.of(0));
+                writeU32(wholeAddress(data), 0);
+                host.writeMemory(wholeAddress(data) + pointer, Uint8Array.of(0));
                 return 0;
             },
         },
@@ -593,8 +590,8 @@ export function createClassFunctions(host){
                 {
                     return 0;
                 }
-                const a = readString((left >>> 0) + pointer + 1);
-                const b = readString((right >>> 0) + pointer + 1);
+                const a = readString(wholeAddress(left) + pointer + 1);
+                const b = readString(wholeAddress(right) + pointer + 1);
                 return a === b ? 0 : a < b ? -1 : 1;
             },
         },
@@ -610,7 +607,7 @@ export function createClassFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([data])=>{
-                const name = readString((data >>> 0) + pointer + 1);
+                const name = readString(wholeAddress(data) + pointer + 1);
                 if (pointer === 8)
                 {
                     /** @type {bigint} */
@@ -641,16 +638,17 @@ export function createClassFunctions(host){
          * `__std_type_info_destroy_list` frees what it holds.
          */
         __std_type_info_name: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([data, root])=>{
-                const kept = readU32(data >>> 0);
+                const kept = readU32(wholeAddress(data));
                 if (kept !== 0)
                 {
                     return kept;
                 }
-                const decorated = readString((data >>> 0) + pointer);
+                const decorated = readString(wholeAddress(data) + pointer);
                 const text = undecorateType(decorated.slice(1)) ?? decorated;
                 const bytes = new Uint8Array(text.length + 1);
                 bytes.set([...text].map(character=>character.charCodeAt(0) & 0xff));
@@ -669,7 +667,7 @@ export function createClassFunctions(host){
                 const count = host.readMemory(depth, 2);
                 host.writeMemory(depth, Uint8Array.of((count[0] + 1) & 0xff,
                     (count[1] + ((count[0] + 1) >> 8)) & 0xff));
-                writeU32(data >>> 0, name);
+                writeU32(wholeAddress(data), name);
                 return name;
             },
         },
@@ -689,7 +687,7 @@ export function createClassFunctions(host){
                     host.free(entry);
                     entry = next;
                 }
-                host.writeMemory(root >>> 0, new Uint8Array(pointer * 2));
+                host.writeMemory(wholeAddress(root), new Uint8Array(pointer * 2));
                 return 0;
             },
         },

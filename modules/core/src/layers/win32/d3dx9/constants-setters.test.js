@@ -14,11 +14,14 @@
  */
 
 import { test } from 'node:test';
+import assert from 'node:assert/strict';
 import { COMPILED } from './constants-setters.x86.js';
+import { COMPILED as LONG } from './constants-setters.x64.js';
 import * as sources from './constants-setters.js';
 import { CALLBACK, DATA, equivalence, random } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const { same } = equivalence(COMPILED, sources);
+const { sameAt64 } = equivalence(COMPILED, sources, undefined, /** @type {any} */ (LONG));
 
 const SELF = DATA;
 const BLOCK = DATA + 0x10;
@@ -44,13 +47,29 @@ const HANDED = { host: ()=>0x8876086c,
     call: (/** @type {Uint8Array} */ _, /** @type {number} */ fn, /** @type {number[]} */ args)=>
         (fn === CALLBACK ? args[1] ^ args[3] : ~(args[1] ^ args[3])) >>> 0 };
 
-/** @param {() => number} next @returns {Uint8Array} */
-function layout(next){
+/**
+ * The same two setters in x86-64, called as the x64 convention calls: the
+ * stack aligned at the entry (else ud2), the register in RDX and the count in
+ * R9, the answer theirs as above.
+ */
+const ALIGNED = [0x49, 0x89, 0xe2, 0x41, 0x83, 0xe2, 0x0f, 0x41, 0x83, 0xfa, 0x08, 0x74, 0x02,
+    0x0f, 0x0b];
+const VS_64 = [...ALIGNED, 0x89, 0xd0, 0x44, 0x31, 0xc8, 0xc3];
+const PS_64 = [...ALIGNED, 0x89, 0xd0, 0x44, 0x31, 0xc8, 0xf7, 0xd0, 0xc3];
+const HANDED_64 = { ...HANDED,
+    callback64: [...VS_64, ...new Array(32 - VS_64.length).fill(0xcc), ...PS_64] };
+
+/**
+ * @param {() => number} next @param {4 | 8} [pointer]  the process's pointer: the block
+ *     the word that far past the interface, the device's methods that far apart
+ * @returns {Uint8Array}
+ */
+function layout(next, pointer = 4){
     const bytes = new Uint8Array(0x3b00);
     const view = new DataView(bytes.buffer);
     const put = (/** @type {number} */ at, /** @type {number} */ value)=>
         view.setUint32(at - DATA, value >>> 0, true);
-    put(SELF + 4, next() % 10 === 0 ? 0 : BLOCK);
+    put(SELF + pointer, next() % 10 === 0 ? 0 : BLOCK);
     put(BLOCK, next() % 2);
     put(DEVICE, VTABLE);
     // SetDefaults' list: the two setters, twins among them, entries with no values.
@@ -65,7 +84,8 @@ function layout(next){
     }
     for (let slot = 0; slot < 120; slot++)
     {
-        put(VTABLE + slot * 4, slot === 94 ? CALLBACK : slot === 109 ? CALLBACK + 16 : 0);
+        put(VTABLE + slot * pointer, slot === 94 ? CALLBACK
+            : slot === 109 ? CALLBACK + 4 * pointer : 0);
     }
     for (let i = 0; i < COUNT; i++)
     {
@@ -120,3 +140,31 @@ test('the table\'s methods in the guest answer, write and call the device as the
             same('SetDefaults', { stack: [SELF, device], memory }, HANDED);
         }
     });
+
+test('the table\'s methods in a 64-bit process answer, write and call the device as their'
+    + ' JavaScript', ()=>{
+    const next = random(64);
+    /** The calls the x86-64 answered itself. */
+    const taken = { SetFloat: 0, GetConstantDesc: 0 };
+    for (let round = 0; round < 500; round++)
+    {
+        const memory = /** @type {[number, Uint8Array][]} */ ([[DATA, layout(next, 8)]]);
+        const h = handleOf(next);
+        const device = next() % 10 === 0 ? 0 : DEVICE;
+        const pointer = next() % 10 === 0 ? 0 : INPUT;
+        sameAt64('SetMatrix', { stack: [SELF, device, h, pointer], memory }, HANDED_64);
+        sameAt64('SetMatrixTranspose', { stack: [SELF, device, h, pointer], memory }, HANDED_64);
+        sameAt64('SetVector', { stack: [SELF, device, h, pointer], memory }, HANDED_64);
+        const set = sameAt64('SetFloat', { stack: [SELF, device, h, next()], memory },
+            HANDED_64);
+        const described = sameAt64('GetConstantDesc', { stack: [SELF, h,
+            next() % 5 === 0 ? 0 : OUT, next() % 3 === 0 ? 0 : OUT + 0x40], memory }, HANDED_64);
+        taken.SetFloat += set.handedOver ? 0 : 1;
+        taken.GetConstantDesc += described.handedOver ? 0 : 1;
+        sameAt64('GetConstantElement', { stack: [SELF, h, next() % 8], memory }, HANDED_64);
+        sameAt64('SetDefaults', { stack: [SELF, device], memory }, HANDED_64);
+    }
+    assert.ok(taken.SetFloat > 20 && taken.SetFloat < 500, `SetFloat took ${taken.SetFloat}`);
+    assert.ok(taken.GetConstantDesc > 100 && taken.GetConstantDesc < 500,
+        `GetConstantDesc took ${taken.GetConstantDesc}`);
+});

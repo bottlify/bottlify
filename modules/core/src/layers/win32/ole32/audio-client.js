@@ -32,6 +32,7 @@
  */
 
 import { createComObject } from './objects.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IAUDIO_CLIENT = '{1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}';
 const IID_IAUDIO_RENDER_CLIENT = '{F294ACFC-3146-4483-A7BF-ADDCA7C260E2}';
@@ -143,7 +144,7 @@ const SUBTYPE_TAIL = [0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38
  * @returns {StreamFormat}
  */
 export function readStreamFormat(read, at){
-    const head = read(at >>> 0, 18).slice();
+    const head = read(wholeAddress(at), 18).slice();
     const view = new DataView(head.buffer);
     const tag = view.getUint16(0, true);
     const format = {
@@ -162,7 +163,7 @@ export function readStreamFormat(read, at){
         format.extensible = true;
         if (format.cbSize >= 22)
         {
-            const tail = read((at >>> 0) + 18, 22).slice();
+            const tail = read(wholeAddress(at) + 18, 22).slice();
             const ext = new DataView(tail.buffer);
             format.validBits = ext.getUint16(0, true);
             const sub = ext.getUint32(6, true);
@@ -258,21 +259,21 @@ export function createAudioClients(host, endpoint){
     /** Every stream handed out, for diagnostics. @type {Set<any>} */
     const streams = new Set();
     /** @param {number} at @param {number} value */
-    const writeU32 = (at, value)=>host.writeMemory(at >>> 0,
+    const writeU32 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** @param {number} at @param {number} value */
     const writeU64 = (at, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigUint64(0, BigInt(Math.max(0, Math.floor(value))), true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at @param {number} value */
-    const writeFloat = (at, value)=>host.writeMemory(at >>> 0,
+    const writeFloat = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(Float32Array.of(value).buffer));
     /** A float passed by value, as its bits arrive. @param {number} bits */
     const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
     /** @param {number} at */
-    const readFloat = at=>new Float32Array(host.readMemory(at >>> 0, 4).slice().buffer)[0];
+    const readFloat = at=>new Float32Array(host.readMemory(wholeAddress(at), 4).slice().buffer)[0];
     /** A copy of the mix format in task memory; 0 when none is left. */
     const taskMixFormat = ()=>{
         const bytes = endpoint.mixFormat();
@@ -803,7 +804,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            session.name = host.readWideString(text >>> 0, NAME_BYTES);
+            session.name = host.readWideString(wholeAddress(text), NAME_BYTES);
             return S_OK;
         } },
         /** HRESULT GetIconPath(LPWSTR *pRetVal) */
@@ -816,7 +817,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            session.icon = host.readWideString(text >>> 0, NAME_BYTES);
+            session.icon = host.readWideString(wholeAddress(text), NAME_BYTES);
             return S_OK;
         } },
         /** HRESULT GetGroupingParam(GUID *pRetVal) */
@@ -825,7 +826,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            host.writeMemory(out >>> 0, session.grouping);
+            host.writeMemory(wholeAddress(out), session.grouping);
             return S_OK;
         } },
         /** HRESULT SetGroupingParam(LPCGUID Override, LPCGUID EventContext) */
@@ -834,7 +835,7 @@ export function createAudioClients(host, endpoint){
             {
                 return E_NULL_REFERENCE;
             }
-            session.grouping = host.readMemory(guid >>> 0, 16).slice();
+            session.grouping = host.readMemory(wholeAddress(guid), 16).slice();
             return S_OK;
         } },
         /**
@@ -1456,7 +1457,7 @@ export function createAudioClients(host, endpoint){
  * @param {number} at
  */
 export function guidAt(read, at){
-    const bytes = read(at >>> 0, 16).slice();
+    const bytes = read(wholeAddress(at), 16).slice();
     const view = new DataView(bytes.buffer);
     const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
         value.toString(16).toUpperCase().padStart(width, '0');

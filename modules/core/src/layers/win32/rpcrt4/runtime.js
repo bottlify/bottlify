@@ -40,6 +40,7 @@ import {
 import {
     STUB_VTBL, factoryClass, readProxyFiles, registerProxyFiles, unregisterProxyFiles,
 } from './proxyfile.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -130,14 +131,14 @@ export function createRuntime(host){
 
     /** @param {number} at */
     const u32 = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
     /** @param {number} at @param {number} value */
-    const w32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(
+    const w32 = (at, value)=>host.writeMemory(wholeAddress(at), Uint8Array.of(
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff));
     /** @param {number} at */
-    const guidAt = at=>formatGuid(host.readMemory(at >>> 0, 16));
+    const guidAt = at=>formatGuid(host.readMemory(wholeAddress(at), 16));
 
     /**
      * A method of a guest object, whoever implements it.
@@ -667,7 +668,7 @@ export function createRuntime(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([proxy, rpc, message, descriptor, procedure])=>{
-                host.writeMemory(rpc >>> 0, new Uint8Array(RPC_MESSAGE.SIZE));
+                host.writeMemory(wholeAddress(rpc), new Uint8Array(RPC_MESSAGE.SIZE));
                 w32(rpc + RPC_MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
                 w32(rpc + RPC_MESSAGE.PROC_NUM, procedure);
                 w32(rpc + RPC_MESSAGE.INTERFACE_INFORMATION,
@@ -824,6 +825,7 @@ export function createRuntime(host){
          *     IRpcChannelBuffer *pRpcChannelBuffer)
          */
         NdrStubInitialize: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor, channel])=>{
@@ -869,7 +871,9 @@ export function createRuntime(host){
 
         /** void *NdrOleAllocate(size_t Size) and void NdrOleFree(void *NodeToFree): task memory. */
         NdrOleAllocate: {
+            returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size])=>host.allocate(size >>> 0),
         },
@@ -1123,6 +1127,7 @@ export function createRuntime(host){
         },
         /** IRpcStubBuffer *CStdStubBuffer_IsIIDSupported(IRpcStubBuffer *This, REFIID riid) */
         CStdStubBuffer_IsIIDSupported: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([stub, riid])=>{

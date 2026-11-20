@@ -25,7 +25,7 @@ start); cork's tables and the other executors' pages then lie in a range of the 
 space the process keeps from it (at the top of the libraries' space under the thread stacks, or at
 the heap's start). With four executors or more the first executor's tables stay there and the
 other executors' pages are cut out of the heap at 0x14000000, which the memory reaches only when
-one of them opens: a process whose threads open none holds what it would on one executor. A 64-bit process, a run without shared memory and one
+one of them opens: a process whose threads open none holds what it would on one executor. A run without shared memory and one
 with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. Nothing in a
 memory just made is cleared: its pages are zero until touched. A process that takes the memory of
 one gone before it zeroes the first executor's tables at once and another executor's pages as that
@@ -237,8 +237,9 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 
 An x86-64 program (a PE32+ image) runs on the same translator and runtime at a 64-bit width: the
 sixteen 64-bit registers live in the state block, and its memory is a 4 GiB window, every page
-below 4 GiB and an image whose base is above it relocated down. A 64-bit process runs on one
-executor. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
+below 4 GiB and an image whose base is above it relocated down; over shared memory it grows as
+the program is given more, as a 32-bit process's does, up to the whole 4 GiB with `memorySize`
+4 GiB (the window's last page kept from it). A 64-bit process runs on as many executors as a 32-bit one (its locked instructions one indivisible access each, as at 32 bits); one whose pages lie past 4 GiB (the wide window) runs on one, and the cpu layer says so (`executorsRefused`). Over the wide window the image's 4 GiB block and the one below it, where the system's libraries, the heap and a JIT's pages lie, are each translated by a runtime of its own; a call, jump or return from one into the other leaves translated code with the whole address (a far exit), and the host goes on in the other's runtime. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
 Windows (`machine: 'amd64'`, [API](../core/api.md#what-runs)), where a 32-bit child runs under
 WOW64. What the Windows layer has at 64 bits is in
 [the limits](../core/limits/README.md#programs).

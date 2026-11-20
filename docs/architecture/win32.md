@@ -5,10 +5,13 @@ how many bytes of arguments to take off the stack, and its calling convention (s
 stated). For example, `AddAtomA: { argBytes: 4, handler: ([p]) => add(p) }` in
 [`core/src/layers/win32/kernel32/atoms.js`](../../modules/core/src/layers/win32/kernel32/atoms.js).
 
-When a process starts, the loader builds real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
-from these tables (PE32+, AMD64, in a 64-bit process) and places them in the program's memory. To the program they are ordinary DLLs,
-with headers, an export table and code. So the address `GetProcAddress` returns is the one the import
-was bound to.
+When a process starts, the loader lays out real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
+from these tables (PE32+, AMD64, in a 64-bit process): each module's span and every export's address
+are fixed then, in the same order in every process, and its bytes are written into the program's
+memory when something first loads it or is first handed one of its addresses
+([`process/system-modules.js`](../../modules/core/src/process/system-modules.js), decision A280).
+To the program they are ordinary DLLs, with headers, an export table and code. So the address
+`GetProcAddress` returns is the one the import was bound to.
 
 One table can be two libraries. comctl32 is system32's 5.82 to a program without Common Controls 6
 in its manifest and version 6 to one with it, as on Windows: the same controls, two modules
@@ -61,7 +64,7 @@ CC ...           int3 up to 16 bytes
 ntdll's system calls (`Nt*`, `Zw*`) are not slots: each export is its stub's own bytes. On Windows
 a system call is a few position-independent instructions, and a program may copy one elsewhere and
 call the copy; a slot's relative JMP, copied, lands nowhere, while a stub carries its id and runs
-wherever it is (`trapExport` in `app.js`, `stubAt` in `cpu/internal/thunks.js`).
+wherever it is (`trapExport` in [`process/system-modules.js`](../../modules/core/src/process/system-modules.js), `stubAt` in `cpu/internal/thunks.js`).
 
 How many bytes `ret N` takes off, the bridge decides from the calling convention: stdcall takes all
 of `argBytes`, cdecl none, and thiscall and fastcall leave out the arguments passed in registers.
@@ -75,6 +78,17 @@ a VARIANT (a pointer to the caller's copy there). `IStream::Seek` is
 `{ name: 'Seek', argBytes: 20, quadwords: [1] }`, counting `this` as 0. `npm run check:boundaries`
 runs `tools/checks/check-wide-arguments.mjs`, which holds each entry to the signature comment
 above it.
+
+A dword argument reaches the handler as its slot's low half; an address reaches it whole. The
+dwords that carry one are the function's `addresses` (`CreateThread` is `{ argBytes: 24,
+addresses: [2, 3] }`), which the bridge joins to their high half when a 64-bit program keeps the
+address past 4 GiB. A spec that does not declare them gets them from its signature comment:
+`common/pointer-arguments.js`, written by `tools/checks/check-pointer-arguments.mjs` from every
+comment the layers carry, is declared on each function when the layer is built
+(`declareAddresses`), a C++ member's `this` among them. So a handler keeps an address with
+`wholeAddress`, never `>>> 0`, and memory takes it whole. An answer typed an address is written
+into RAX whole as well, past 4 GiB too. The same check holds each declared dword to an address
+of the signature.
 
 ## One call, from the program to JS and back
 
@@ -155,7 +169,10 @@ sequenceDiagram
   keeps. Others are written once in JavaScript, marked `@guestCode`, and compiled to i386 by the
   build ([`core/scripts/guest-code/`](../../modules/core/scripts/guest-code/)): the compiled bytes sit beside the source as `*.x86.js`. The
   JavaScript stays the host's handler and the reference a test holds the x86 to, and
-  `return host()` hands a rare case to that handler. D3DX's vector, matrix and quaternion math and
+  `return host()` hands a rare case to that handler. For a 64-bit process the same source is
+  compiled to x86-64 too (`*.x64.js`): a parameter declared a pointer (`ptr`) is carried whole
+  there, past 4 GiB as well, and the handler answers a 64-bit caller's RAX as the code does, by
+  the type the source declares. D3DX's vector, matrix and quaternion math and
   its effect setters, msvcrt's string, float and math functions and GLU are written so.
 - **When a function is missing.** Each name has a stub of its own. If it is known how many bytes of
   arguments to take off (an `@N` decoration, a C++ name, a cdecl library, or a library the program
@@ -180,6 +197,18 @@ flowchart TD
   runtimes the engine stands in for whoever's copy it is (`DSETUP.dll`, `MSVCR80.dll`,
   `Mp3dec.asi` for sound and `ijl15.dll` for media), and the C runtime's API sets
   (`api-ms-win-crt-*`), which are `ucrtbase.dll` under the names they are imported by.
+- **Ours when the bottle has no copy:** the other runtimes the engine has a table for - Visual
+  C++ 2008's `MSVCR90.dll` and `MSVCP90.dll`, 2003's `MSVCR71.dll` and `MSVCP71.dll` - and the
+  libraries Windows ships that a setup never installs, among them `OLEDLG.dll`, which every MFC
+  program imports: its dialogs are not shown and answer Cancel, each said as a loss; and Visual
+  C++ 6's `MSVCP60.dll`, whose `std::string` and `std::wstring` keep that compiler's layout and
+  share their text by count, as its headers inline; a position past the end or a string too long
+  throws out_of_range or length_error into the program, as the library does. Its iostreams
+  (stringstreams, fstreams over the C runtime's FILE, `cin`/`cout`/`cerr`/`clog` laid out
+  whole as static objects) are in that compiler's layout too, a stream reaching its virtual
+  `basic_ios` through its vbtable; a locale says the decimal point Windows' locale data gives.
+  A stream buffer or manipulator of the program's own class, whose virtual functions are its
+  code, is not run from the library: the call reads as end of stream, said once as a loss.
 - **The C runtimes share msvcrt's functions** and differ where Windows' do: an argument a function
   of `MSVCR80.dll` or `ucrtbase.dll` refuses calls that runtime's invalid-parameter handler, or
   with none set ends the process with 0xC0000417 and an error naming the call; msvcrt.dll answers

@@ -16,6 +16,7 @@ import { createComObject } from '../ole32/objects.js';
 import { readGuid, writeGuid } from '../ole32/guid.js';
 import { CodecError } from './frames.js';
 import { INTERFACES } from './layout.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const S_OK = 0;
 export const S_FALSE = 1;
@@ -155,20 +156,21 @@ export function createKit(host){
     };
 
     /** @param {number} at */
-    const u32 = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer).getUint32(0, true);
+    const u32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer).getUint32(0,
+        true);
     /** @param {number} at */
     const i32 = at=>u32(at) | 0;
     /** @param {number} at @param {number} value */
     const putU32 = (at, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at @param {number} value */
     const putF64 = (at, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setFloat64(0, value, true);
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /** A double passed by value: its two halves among the arguments. @param {number} lo @param {number} hi */
     const f64 = (lo, hi)=>{
@@ -213,7 +215,7 @@ export function createKit(host){
             bytes[i * 2] = text.charCodeAt(i) & 0xff;
             bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
         }
-        host.writeMemory(buffer >>> 0, bytes);
+        host.writeMemory(wholeAddress(buffer), bytes);
         return S_OK;
     };
 

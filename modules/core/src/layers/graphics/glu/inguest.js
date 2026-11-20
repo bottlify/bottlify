@@ -29,6 +29,7 @@
  * @typedef {import('../../win32/msvcrt/guest-code.js').GuestMemory} Guest
  */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../../win32/msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').i32} i32 */
 /** @typedef {import('../../win32/msvcrt/guest-code.js').f64} f64 */
 
@@ -44,7 +45,7 @@ const DEGREES = 0.017453292519943295;
  * no cotangent -- and the call then leaves the matrix as it was.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {f64} fovy @param {f64} aspect
+ * @param {Guest} guest @param {ptr} out @param {f64} fovy @param {f64} aspect
  * @param {f64} zNear @param {f64} zFar
  * @returns {u32}
  */
@@ -86,7 +87,7 @@ export function gluPerspectiveMatrix({ setF64 }, out, fovy, aspect, zNear, zFar)
  * rows are orthonormal whatever up the program passed.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out
+ * @param {Guest} guest @param {ptr} out
  * @param {f64} eyeX @param {f64} eyeY @param {f64} eyeZ
  * @param {f64} centerX @param {f64} centerY @param {f64} centerZ
  * @param {f64} upX @param {f64} upY @param {f64} upZ
@@ -146,8 +147,8 @@ export function gluLookAtMatrix({ setF64 }, out, eyeX, eyeY, eyeZ, centerX, cent
  * the call then leaves the matrix alone for.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {f64} x @param {f64} y
- * @param {f64} width @param {f64} height @param {u32} viewport
+ * @param {Guest} guest @param {ptr} out @param {f64} x @param {f64} y
+ * @param {f64} width @param {f64} height @param {ptr} viewport
  * @returns {u32}
  */
 export function gluPickMatrixArgs({ i32, setF64 }, out, x, y, width, height, viewport){
@@ -179,8 +180,8 @@ export function gluPickMatrixArgs({ i32, setF64 }, out, x, y, width, height, vie
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {f64} objX @param {f64} objY @param {f64} objZ
- * @param {u32} model @param {u32} proj @param {u32} viewport
- * @param {u32} winX @param {u32} winY @param {u32} winZ
+ * @param {ptr} model @param {ptr} proj @param {ptr} viewport
+ * @param {ptr} winX @param {ptr} winY @param {ptr} winZ
  * @returns {i32}
  */
 export function gluProject({ f64, i32, setF64 }, objX, objY, objZ, model, proj, viewport,
@@ -223,8 +224,8 @@ export function gluProject({ f64, i32, setF64 }, objX, objY, objZ, model, proj, 
  * What gluUnProject (near 0, far 1, w 1) and gluUnProject4 share.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} out @param {u32} model @param {u32} proj
- * @param {u32} viewport @param {f64} winX @param {f64} winY @param {f64} winZ
+ * @param {Guest} guest @param {ptr} out @param {ptr} model @param {ptr} proj
+ * @param {ptr} viewport @param {f64} winX @param {f64} winY @param {f64} winZ
  * @param {f64} clipW @param {f64} near @param {f64} far
  * @returns {u32}
  */
@@ -336,8 +337,8 @@ export function gluUnProjectPoint({ f64, i32, setF64 }, out, model, proj, viewpo
  * zero, which names no point.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} point @param {u32} objX @param {u32} objY
- * @param {u32} objZ
+ * @param {Guest} guest @param {ptr} point @param {ptr} objX @param {ptr} objY
+ * @param {ptr} objZ
  * @returns {i32}
  */
 export function gluUnProjectDivide({ f64, setF64 }, point, objX, objY, objZ){
@@ -360,8 +361,8 @@ export function gluUnProjectDivide({ f64, setF64 }, point, objX, objY, objZ){
  * into the four outputs -- its bits moved, not loaded and stored.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} point @param {u32} objX @param {u32} objY
- * @param {u32} objZ @param {u32} objW
+ * @param {Guest} guest @param {ptr} point @param {ptr} objX @param {ptr} objY
+ * @param {ptr} objZ @param {ptr} objW
  * @returns {i32}
  */
 export function gluUnProjectStore({ u32, setU32 }, point, objX, objY, objZ, objW){
@@ -392,7 +393,7 @@ export function gluUnProjectStore({ u32, setU32 }, point, objX, objY, objZ, objW
  * a null pointer for either, are not found.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} name @param {u32} string
+ * @param {Guest} guest @param {ptr} name @param {ptr} string
  * @returns {u32}
  */
 export function gluCheckExtension({ u8 }, name, string){

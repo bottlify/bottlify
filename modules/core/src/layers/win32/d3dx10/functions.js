@@ -24,6 +24,7 @@ import { DIMENSION } from './dds10.js';
 import { createComObject } from '../ole32/objects.js';
 import { createDataLoaders, publishBare } from './loaders.js';
 import { createThreadPumps } from './pump.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005;
@@ -141,7 +142,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
         id: IID_ID3D10BLOB,
         methods: [
             /** LPVOID GetBufferPointer() */
-            { name: 'GetBufferPointer', argBytes: 4,
+            { name: 'GetBufferPointer', returns: 'pointer', argBytes: 4,
                 invoke: (/** @type {any} */ object)=>object.state.data },
             /** SIZE_T GetBufferSize() */
             { name: 'GetBufferSize', argBytes: 4,
@@ -438,7 +439,7 @@ export function createD3dx10Functions(host, version, profile = D3DX10_PROFILE){
             /** HRESULT Process(void *pData, SIZE_T cBytes) */
             { name: 'Process', argBytes: 12, invoke: (_self, [data, size])=>
                 ((data >>> 0) === 0 || (size >>> 0) === 0 ? E_FAIL
-                    : process(host.readMemory(data >>> 0, size >>> 0).slice())) },
+                    : process(host.readMemory(wholeAddress(data), size >>> 0).slice())) },
             /** HRESULT CreateDeviceObject(void **ppDataObject) */
             { name: 'CreateDeviceObject', argBytes: 8, invoke: (_self, [object])=>
                 makeObject(object >>> 0, host.currentThread?.()) },

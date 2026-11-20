@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * ntdll's random numbers over a seed the caller keeps.
  *
@@ -37,11 +39,11 @@ export const uniformStep = seed=>Number((BigInt(seed >>> 0) * MULTIPLIER + INCRE
 export function createRandomFunctions(host){
     /** @param {number} at */
     const readSeed = at=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number} value */
-    const writeSeed = (at, value)=>host.writeMemory(at >>> 0,
+    const writeSeed = (at, value)=>host.writeMemory(wholeAddress(at),
         Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
 
     // The shuffle's table, filled from a fixed start the first time it is

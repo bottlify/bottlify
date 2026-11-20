@@ -45,10 +45,22 @@ export const LONG = new Map([
     ['layers/win32/msvcrt/inguest-math.js', {}],
     ['layers/win32/msvcrt/inguest-print.js', {}],
     ['layers/graphics/seam/inguest.js', {}],
-    ['layers/win32/msvcrt/inguest-float.js', {
-        _fpclass: 'a double passed as two dwords, which x86-64 passes in XMM0: as a double '
-            + 'its handler would hold a signalling NaN quieted',
-    }],
+    ['layers/graphics/seam/d3d10-inguest.js', {}],
+    ['layers/graphics/glu/inguest.js', {}],
+    ['layers/win32/msvcrt/inguest-string.js', {}],
+    ['layers/win32/msvcrt/inguest-rtti.js', {}],
+    ['layers/win32/msvcrt/inguest-int64.js', {}],
+    ['layers/win32/msvcrt/inguest-scan.js', {}],
+    ['layers/win32/kernel32/inguest.js', {}],
+    ['layers/win32/kernel32/semaphore-guest.js', {}],
+    ['layers/win32/d3dx9/constants-setters.js', {}],
+    ['layers/win32/d3dx9/effect-setters.js', {}],
+    ['layers/win32/d3dx9/effect-commit.js', {}],
+    ['layers/win32/d3dx9/inguest.js', {}],
+    ['layers/win32/d3dx9/inguest-matrix.js', {}],
+    ['layers/win32/d3dx9/inguest-vector.js', {}],
+    ['layers/win32/d3dx9/inguest-quaternion.js', {}],
+    ['layers/win32/msvcrt/inguest-float.js', {}],
 ]);
 
 /** @param {string} dir @param {string[]} [found] @returns {Promise<string[]>} */

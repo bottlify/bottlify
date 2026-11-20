@@ -181,6 +181,11 @@ export function createAudioModule(){
                     readMemory: (address, length)=>memory.readBytes(address, length),
                     /** @param {number} address @param {Uint8Array} bytes */
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    /** @param {number} address @param {number} value @param {4 | 8} bytes */
+                    writePointer: (address, value, bytes)=>memory.writePointer(address, value,
+                        bytes),
+                    /** @param {number} address @param {4 | 8} bytes */
+                    readPointer: (address, bytes)=>memory.readPointer(address, bytes),
                 },
                 allocate,
                 now: config?.now ?? (()=>Date.now()),
@@ -213,6 +218,8 @@ export function createAudioModule(){
                     readMemory: (address, length)=>memory.readBytes(address, length),
                     /** @param {number} address @param {Uint8Array} bytes */
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                    /** @param {number} address @param {4 | 8} bytes */
+                    readPointer: (address, bytes)=>memory.readPointer(address, bytes),
                     divergence: config?.divergence,
                 }, config?.pointerSize === 8 ? 8 : 4);
             }

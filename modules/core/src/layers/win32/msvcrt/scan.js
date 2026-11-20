@@ -24,6 +24,7 @@
 import { scanInteger, scanFloat, scanStandardDecimal } from './convert.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * How many stack slots a variadic function reads past its fixed arguments.
@@ -650,6 +651,32 @@ export const STANDARD_SCAN = Symbol('standard scans');
  * reading without the floating-point fields.
  */
 export const KERNEL_SCAN = Symbol('kernel scan');
+
+/**
+ * sscanf's handler over a `va_list`: what the code in the guest
+ * (`inguest-scan.js`) hands over, the places read from the list's slots as
+ * the conversions come to them and no more of them than sscanf's own handler
+ * reads.
+ *
+ * @param {ScanHost & { readMemory: (address: number, length: number) => Uint8Array }} host
+ * @returns {(args: number[]) => number}
+ */
+export function listScanHandler(host){
+    const store = createScanStore(host);
+    const slotBytes = host.pointerSize ?? 4;
+    return ([input, format, list])=>{
+        let taken = 0;
+        return runScan(host.readCString(input, MAX_STRING), host.readCString(format, MAX_STRING),
+            ()=>{
+                if (taken >= VARIADIC_SLOTS)
+                {
+                    return 0;
+                }
+                const slot = host.readMemory(wholeAddress(list) + slotBytes * taken++, 4);
+                return new DataView(slot.buffer, slot.byteOffset, 4).getUint32(0, true);
+            }, store, { pointerBytes: slotBytes });
+    };
+}
 
 /**
  * @param {ScanHost} host

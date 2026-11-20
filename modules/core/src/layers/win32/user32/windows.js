@@ -67,6 +67,7 @@ import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directo
 import { createClassRegistry } from './classes.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
+import { forwarded, paramsOf, wholeAddress, wideOf } from '../common/pointers.js';
 import { afterWait } from './after-wait.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
@@ -333,6 +334,29 @@ const lowLevelMessage = (kind, message)=>{
     const DOUBLE_CLICKS = new Map([[0x0203, 0x0201], [0x0206, 0x0204], [0x0209, 0x0207],
         [0x020d, 0x020b]]);
     return kind === 'mouse' ? DOUBLE_CLICKS.get(message) ?? message : message;
+};
+
+/**
+ * A low-level hook's structure as its process lays it out. The structures are
+ * put together as a 32-bit process's, dwords one after another with
+ * dwExtraInfo last; in a 64-bit process dwExtraInfo is a ULONG_PTR on an
+ * eight-byte boundary - 24 bytes into an MSLLHOOKSTRUCT of 32, 16 into a
+ * KBDLLHOOKSTRUCT of 24 - its upper half zero.
+ *
+ * @param {number} type  WH_MOUSE_LL or WH_KEYBOARD_LL
+ * @param {Uint8Array} bytes @param {boolean} wide
+ */
+export const lowLevelLayout = (type, bytes, wide)=>{
+    if (!wide)
+    {
+        return bytes;
+    }
+    const extraFrom = bytes.length - 4;
+    const extraAt = type === WH_MOUSE_LL ? 24 : 16;
+    const laid = new Uint8Array(extraAt + 8);
+    laid.set(bytes.subarray(0, extraFrom));
+    laid.set(bytes.subarray(extraFrom), extraAt);
+    return laid;
 };
 
 /**
@@ -681,6 +705,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  * @property {number} wParam
  * @property {number} lParam
  * @property {boolean} [unicode]  whether its text is wide (`unicode.js`)
+ * @property {import('../common/pointers.js').WideParams} [wide]  its WPARAM and LPARAM as a 64-bit
+ *     caller passed them, where the dwords do not say them
  */
 
 /**
@@ -1108,7 +1134,7 @@ export function createWindowFunctions(host){
      * @returns {any | null}
      */
     const classOf = (pointer, unicode = false, instance = 0, asking = 'create')=>{
-        const value = pointer >>> 0;
+        const value = wholeAddress(pointer);
         if (value === 0)
         {
             return null;
@@ -1319,7 +1345,8 @@ export function createWindowFunctions(host){
      *
      * @param {number} value
      */
-    const procBehind = value=>(((value >>> 0) & 0xffff0000) >>> 0 === WINPROC_HANDLE
+    const procBehind = value=>(value < 2 ** 32
+        && ((value >>> 0) & 0xffff0000) >>> 0 === WINPROC_HANDLE
         ? winprocs[value & 0xffff] ?? null : null);
     /**
      * A procedure as a call of one encoding reads it: its address when it
@@ -1329,7 +1356,7 @@ export function createWindowFunctions(host){
      * @param {boolean} reader  whether the call reading it is the wide one
      */
     const procAs = (address, unicode, reader)=>{
-        const ansi = ansiEntries.get(address >>> 0) ?? address >>> 0;
+        const ansi = ansiEntries.get(wholeAddress(address)) ?? wholeAddress(address);
         const wide = wideEntries.get(ansi);
         if (wide !== undefined)
         {
@@ -1401,7 +1428,7 @@ export function createWindowFunctions(host){
      */
     const callProcedure = (address, message, thread, unicode = undefined)=>{
         host.trace?.(message);
-        const procedure = procedures.get(address >>> 0);
+        const procedure = procedures.get(wholeAddress(address));
         const record = windows.get(message.hwnd >>> 0);
         if (procedure)
         {
@@ -1421,10 +1448,10 @@ export function createWindowFunctions(host){
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
         // handed the message as it came.
-        const reads = unicode ?? (record && (address >>> 0) === record.wndProc
+        const reads = unicode ?? (record && (wholeAddress(address)) === record.wndProc
             ? procReads(record) : message.unicode === true);
         return translated(host, message, reads,
-            text=>watchDispatch(host, text, host.dispatch(address >>> 0, text, thread)),
+            text=>watchDispatch(host, text, host.dispatch(wholeAddress(address), text, thread)),
             record?.style);
     };
 
@@ -1461,9 +1488,11 @@ export function createWindowFunctions(host){
      * @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam
      * @param {unknown} [thread]
      * @param {boolean} [unicode]  whether the text the message carries is wide
+     * @param {import('../common/pointers.js').WideParams} [wide]  the WPARAM and LPARAM a
+     *     64-bit caller passed, where the dwords do not say them
      * @returns {number | Promise<number>}
      */
-    const send = (hwnd, message, wParam, lParam, thread, unicode = false)=>{
+    const send = (hwnd, message, wParam, lParam, thread, unicode = false, wide = undefined)=>{
         const record = live(hwnd);
         if (!record || record.wndProc === 0)
         {
@@ -1482,7 +1511,7 @@ export function createWindowFunctions(host){
         }
         return callProcedure(record.wndProc, {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
-            ...unicode ? { unicode } : {},
+            ...unicode ? { unicode } : {}, ...wide ? { wide } : {},
         }, thread);
     };
 
@@ -1494,7 +1523,8 @@ export function createWindowFunctions(host){
      * @typedef {{ hwnd: number, message: number, wParam: number, lParam: number,
      *     unicode: boolean, kind: number, replied: boolean, result: number,
      *     from: number | null, callback: number, data: number,
-     *     elsewhere?: number }} SentMessage
+     *     elsewhere?: number,
+     *     wide?: import('../common/pointers.js').WideParams }} SentMessage
      *     `elsewhere`: the number another process asks for its answer by.
      */
 
@@ -1623,7 +1653,7 @@ export function createWindowFunctions(host){
         const inside = listOf(handling, id);
         inside.push(sent);
         return andThen(send(sent.hwnd, sent.message, sent.wParam, sent.lParam, thread,
-            sent.unicode), result=>{
+            sent.unicode, sent.wide), result=>{
             inside.splice(inside.lastIndexOf(sent), 1);
             reply(sent, result);
             return receiveSent(thread);
@@ -1640,8 +1670,10 @@ export function createWindowFunctions(host){
      * @param {number} hwnd @param {number} message @param {number} wParam
      * @param {number} lParam @param {unknown} thread
      * @param {boolean} [unicode]
-     * @param {{ kind?: number, timeout?: number, callback?: number, data?: number }} [how]
-     *     `timeout` in milliseconds, for SendMessageTimeout.
+     * @param {{ kind?: number, timeout?: number, callback?: number, data?: number,
+     *     wide?: import('../common/pointers.js').WideParams }} [how]
+     *     `timeout` in milliseconds, for SendMessageTimeout; `wide` the WPARAM
+     *     and LPARAM a 64-bit caller passed where the dwords do not say them.
      * @returns {number | null | Promise<number | null>} the answer; null when
      *     the timeout passed first
      */
@@ -1659,13 +1691,14 @@ export function createWindowFunctions(host){
         const self = threadIdOf(thread);
         if (!record || owner === null || self === null || owner === self)
         {
-            return send(hwnd, message, wParam, lParam, thread, unicode);
+            return send(hwnd, message, wParam, lParam, thread, unicode, how.wide);
         }
         /** @type {SentMessage} */
         const sent = {
             hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0,
             lParam: lParam >>> 0, unicode, kind: how.kind ?? ISMEX_SEND, replied: false,
             result: 0, from: self, callback: how.callback ?? 0, data: how.data ?? 0,
+            ...how.wide ? { wide: how.wide } : {},
         };
         listOf(inbox, owner).push(sent);
         host.queue.sent?.(owner);
@@ -1858,7 +1891,7 @@ export function createWindowFunctions(host){
                 {
                     if (answer.bytes)
                     {
-                        host.writeMemory(lParam >>> 0, answer.bytes);
+                        host.writeMemory(wholeAddress(lParam), answer.bytes);
                     }
                     return answer.result ?? 0;
                 }
@@ -3001,7 +3034,7 @@ export function createWindowFunctions(host){
      */
     const setFocus = (hwnd, thread)=>{
         const before = focusWindow();
-        const target = hwnd >>> 0;
+        const target = wholeAddress(hwnd);
         const on = thread ?? host.callerThread?.();
         const WS_POPUP_CHILD = WS_CHILD | 0x80000000;
         if (target === 0)
@@ -3218,7 +3251,7 @@ export function createWindowFunctions(host){
      * @param {boolean} wide @param {boolean} extended
      */
     const classInfo = (instance, className, out, wide, extended)=>{
-        const cls = classOf(className, wide, instance >>> 0, 'info');
+        const cls = classOf(className, wide, wholeAddress(instance), 'info');
         if (!cls)
         {
             host.setLastError?.(ERROR_CLASS_DOES_NOT_EXIST);
@@ -3230,7 +3263,8 @@ export function createWindowFunctions(host){
         }
         // lpszClassName is what the caller asked by, a name or an atom.
         const reported = { ...procRead(cls, wide),
-            instance: classes.reportedInstance(cls, instance >>> 0), className: className >>> 0 };
+            instance: classes.reportedInstance(cls, instance),
+            className: wholeAddress(className) };
         writeWindowClass(host, out >>> 0, reported, L, extended ? L.WNDCLASSEXA : undefined);
         return cls.atom || 1;
     };
@@ -3510,8 +3544,13 @@ export function createWindowFunctions(host){
 
     /**
      * A pointer-sized long of a 64-bit process's window: eight of its extra
-     * bytes whole, or a field GWLP_ names -- a pointer, a handle, a style --
-     * sign-extended from the dword the record keeps, as RAX is.
+     * bytes whole, or a field GWLP_ names. The procedure and the module are
+     * addresses, zero-extended: one past 2 GiB in a program linked
+     * /LARGEADDRESSAWARE is itself, not 0xFFFFFFFF_8... (a procedure's handle,
+     * 0xFFFFxxxx, is ULONG_PTR-wide as Wine's WINPROC_HANDLE is). USERDATA
+     * and ID are LONG_PTRs: whole where SetWindowLongPtr set them
+     * (`longHigh`), a LONG set through SetWindowLong sign-extended; a handle
+     * and a style sign-extended, as RAX is.
      *
      * @param {any} record @param {number} index
      * @param {boolean} [unicode]  Read through GetWindowLongPtrW: a procedure is
@@ -3524,7 +3563,16 @@ export function createWindowFunctions(host){
         {
             return at + 8 <= record.extra.byteLength ? record.extra.getBigUint64(at, true) : 0n;
         }
-        return BigInt.asUintN(64, BigInt(readLong(record, index, unicode) | 0));
+        const value = readLong(record, index, unicode);
+        if (at === GWL_WNDPROC || at === GWL_HINSTANCE)
+        {
+            // Whole: an image a 64-bit program keeps at its own base past 4 GiB.
+            return BigInt(wholeAddress(value));
+        }
+        const low = value >>> 0;
+        const high = record.longHigh?.get(at);
+        return high !== undefined ? BigInt(high) << 32n | BigInt(low)
+            : BigInt.asUintN(64, BigInt(low | 0));
     };
 
     /**
@@ -3545,8 +3593,22 @@ export function createWindowFunctions(host){
         const at = index | 0;
         if (at < 0)
         {
-            return andThen(setLong(record, index, low, unicode),
-                done=>(done === false ? 0n : previous));
+            // A procedure or an instance of an image past 4 GiB: whole, as
+            // the bridge joins a declared address (a high half that names one).
+            const high32 = high >>> 0;
+            const value = (at === GWL_WNDPROC || at === GWL_HINSTANCE) && high32 !== 0
+                && high32 < 2 ** 21 ? high32 * 2 ** 32 + (low >>> 0) : low;
+            return andThen(setLong(record, index, value, unicode), done=>{
+                if (done === false)
+                {
+                    return 0n;
+                }
+                if (at === GWL_USERDATA || at === GWL_ID)
+                {
+                    (record.longHigh ??= new Map()).set(at, high >>> 0);
+                }
+                return previous;
+            });
         }
         if (at + 8 <= record.extra.byteLength)
         {
@@ -3600,14 +3662,14 @@ export function createWindowFunctions(host){
                 // reads; NULL keeps the procedure and only switches the
                 // encoding (win.c test_set_window_long).
                 const behind = procBehind(value);
-                if ((value >>> 0) === 0)
+                if (wholeAddress(value) === 0)
                 {
                     record.procUnicode = procReads(record);
                     record.unicode = unicode;
                     return;
                 }
                 delete record.procUnicode;
-                record.wndProc = behind ? behind.address : value >>> 0;
+                record.wndProc = behind ? behind.address : wholeAddress(value);
                 record.unicode = behind ? behind.unicode : unicode;
                 return;
             }
@@ -3643,6 +3705,7 @@ export function createWindowFunctions(host){
             }
             case GWL_ID:
                 record.id = value >>> 0;
+                record.longHigh?.delete(GWL_ID);
                 return;
             case GWL_STYLE:
                 // A top-level window clips its siblings whatever it is given,
@@ -3667,9 +3730,10 @@ export function createWindowFunctions(host){
                 return;
             case GWL_USERDATA:
                 record.userData = value >>> 0;
+                record.longHigh?.delete(GWL_USERDATA);
                 return;
             case GWL_HINSTANCE:
-                record.instance = value >>> 0;
+                record.instance = wholeAddress(value);
                 return;
             default:
                 break;
@@ -3707,7 +3771,7 @@ export function createWindowFunctions(host){
      * @returns {number | null}
      */
     const windowFilter = hwnd=>{
-        const value = hwnd >>> 0;
+        const value = wholeAddress(hwnd);
         if (value === 0)
         {
             return ANY_WINDOW;
@@ -3732,8 +3796,9 @@ export function createWindowFunctions(host){
             // Only a procedure a live timer registered: anyone can post a
             // WM_TIMER, and its lParam is otherwise an address to call that
             // the poster chose. Windows drops such a message undispatched.
-            if (host.queue.isTimerProc
-                && !host.queue.isTimerProc(message.hwnd, message.wParam, message.lParam))
+            const [id, whole] = paramsOf(message);
+            const proc = typeof whole === 'bigint' ? Number(whole) : message.lParam >>> 0;
+            if (host.queue.isTimerProc && !host.queue.isTimerProc(message.hwnd, id, proc))
             {
                 return 0;
             }
@@ -3741,11 +3806,12 @@ export function createWindowFunctions(host){
             // around the call: an exception the procedure does not take ends
             // the call answering zero (UOI_TIMERPROC_EXCEPTION_SUPPRESSION,
             // on by default).
-            return host.dispatch(message.lParam >>> 0, {
+            return host.dispatch(proc, {
                 ...message,
                 // A TIMERPROC takes the tick count where a window procedure
                 // takes the lParam.
                 lParam: message.time ?? 0,
+                wide: typeof id === 'bigint' ? { w: id } : undefined,
             }, thread, true);
         }
         // Not `live`: a WM_DESTROY still has to reach the procedure of the
@@ -3962,7 +4028,7 @@ export function createWindowFunctions(host){
         }
         const call = host.call;
         const allocate = host.allocate;
-        const bytes = structure();
+        const bytes = lowLevelLayout(type, structure(), host.pointerSize === 8);
         /** @param {unknown} who */
         const run = who=>{
             const at = allocate(bytes.length);
@@ -4165,7 +4231,7 @@ export function createWindowFunctions(host){
         }
         try
         {
-            host.writeMemory(out >>> 0, new Uint8Array(width));
+            host.writeMemory(wholeAddress(out), new Uint8Array(width));
             return true;
         }
         catch {
@@ -4328,7 +4394,7 @@ export function createWindowFunctions(host){
     const makeWindowFor = (args, unicode = false, caller = undefined)=>{
         const [exStyle, className, windowName, style, x, y, width, height, parent, menu, instance]
             = args;
-        const cls = classOf(className, unicode, instance >>> 0, 'create');
+        const cls = classOf(className, unicode, wholeAddress(instance), 'create');
         if (!cls)
         {
             host.setLastError?.(ERROR_CANNOT_FIND_WND_CLASS);
@@ -4371,7 +4437,7 @@ export function createWindowFunctions(host){
             // A window made on the desktop is a top-level window, which is
             // what a parent of zero already says.
             parent: desktop !== null && (parent >>> 0) === desktop.hwnd ? 0 : parent >>> 0,
-            instance: instance >>> 0,
+            instance: wholeAddress(instance),
             // For a child window hMenu is its control id; for any other --
             // an owned popup included, and WS_CHILD | WS_POPUP, which is a
             // popup -- it is a menu handle, which the menu bookkeeping hangs
@@ -4458,7 +4524,7 @@ export function createWindowFunctions(host){
         const thread = caller ?? host.callerThread?.();
         // Kept for a procedure on this side that reads it (the MDI client's
         // CLIENTCREATESTRUCT), which is handed no CREATESTRUCT.
-        record.createParams = (params ?? 0) >>> 0;
+        record.createParams = wholeAddress(params ?? 0);
         // The CBT hook sees the styles asked for, the window edge already
         // following the frame; the procedure, from WM_NCCREATE on, sees the
         // window as the window manager has settled it.
@@ -5924,7 +5990,7 @@ export function createWindowFunctions(host){
      * @param {number} request
      */
     const trackMouseEvent = request=>{
-        const at = request >>> 0;
+        const at = wholeAddress(request);
         if (at === 0 || readU32(host, at) !== TRACKMOUSEEVENT_SIZE)
         {
             host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -6087,7 +6153,7 @@ export function createWindowFunctions(host){
         const hit = (entry.message >>> 0) >= WM_MOUSEMOVE ? HTCLIENT : entry.wParam & 0xffff;
         return andThen(send(record.hwnd, WM_MOUSEACTIVATE, top.hwnd,
             ((entry.message & 0xffff) << 16 | hit) >>> 0, thread), answer=>{
-            const how = answer >>> 0;
+            const how = wholeAddress(answer);
             const eaten = how === MA_ACTIVATEANDEAT || how === MA_NOACTIVATEANDEAT;
             if (how === MA_NOACTIVATE || how === MA_NOACTIVATEANDEAT)
             {
@@ -6387,7 +6453,7 @@ export function createWindowFunctions(host){
                 // screen, or in the parent's client area for a child -- if it
                 // moved, and its size if that or the window's state changed.
                 const word = (message.lParam >>> 0) === 0 ? null
-                    : host.readMemory((message.lParam >>> 0) + L.WINDOWPOS.flags, 4);
+                    : host.readMemory(wholeAddress(message.lParam) + L.WINDOWPOS.flags, 4);
                 const flags = word ? (word[0] | word[1] << 8 | word[2] << 16 | word[3] << 24) : 0;
                 const client = geometry.clientRect(record);
                 const parent = isChild(record) ? live(record.parent) : null;
@@ -6920,7 +6986,7 @@ export function createWindowFunctions(host){
             return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
                 rect.height, parent, id, 0, 0], false, thread), hwnd=>{
                 host.release?.(name);
-                return hwnd >>> 0;
+                return wholeAddress(hwnd);
             });
         },
         show: (hwnd, command)=>/** @type {any} */ (table).ShowWindow.handler([hwnd, command]),
@@ -7844,11 +7910,12 @@ export function createWindowFunctions(host){
         let asked = 0;
         if ((recipients >>> 0) !== 0)
         {
-            const bytes = host.readMemory(recipients >>> 0, 4);
+            const bytes = host.readMemory(wholeAddress(recipients), 4);
             asked = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
             const reached = asked === 0 ? BSM_APPLICATIONS
                 : asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS);
-            host.writeMemory(recipients >>> 0, Uint8Array.of(reached & 0xff, reached >>> 8 & 0xff,
+            host.writeMemory(wholeAddress(recipients), Uint8Array.of(reached & 0xff,
+                reached >>> 8 & 0xff,
                 reached >>> 16 & 0xff, reached >>> 24 & 0xff));
         }
         if (asked !== 0 && (asked & (BSM_APPLICATIONS | BSM_ALLDESKTOPS)) === 0)
@@ -7917,8 +7984,11 @@ export function createWindowFunctions(host){
      * @param {number[]} args  hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const postTo = ([hwnd, message, wParam, lParam], unicode)=>{
-        const target = hwnd >>> 0;
+    const postTo = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam] = args;
+        // What a 64-bit poster passed that the dwords do not say (`wideOf`).
+        const wide = wideOf(args, 2, 3);
+        const target = wholeAddress(hwnd);
         if (target === HWND_BROADCAST)
         {
             for (const each of broadcastTargets())
@@ -7947,6 +8017,7 @@ export function createWindowFunctions(host){
         // No window is a message for the poster's own thread, as
         // PostThreadMessage to itself would post it.
         host.queue.post({ hwnd: target, message, wParam, lParam, ...unicode ? { unicode } : {},
+            ...wide ? { wide } : {},
             ...target === 0 ? { thread: threadIdOf(host.callerThread?.()) } : {} });
         return 1;
     };
@@ -8052,7 +8123,9 @@ export function createWindowFunctions(host){
      * @param {number[]} args  hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const notify = ([hwnd, message, wParam, lParam], unicode)=>{
+    const notify = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam] = args;
+        const wide = wideOf(args, 2, 3);
         if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd)
             && !directory.describe(hwnd, processId))
         {
@@ -8060,7 +8133,7 @@ export function createWindowFunctions(host){
             return 0;
         }
         return andThen(sendAcross(hwnd, message, wParam, lParam, host.callerThread?.(), unicode,
-            { kind: ISMEX_NOTIFY }), ()=>1);
+            { kind: ISMEX_NOTIFY, ...wide ? { wide } : {} }), ()=>1);
     };
 
     /**
@@ -8069,7 +8142,9 @@ export function createWindowFunctions(host){
      * @param {number[]} args  hWnd, Msg, wParam, lParam, lpResultCallBack, dwData.
      * @param {boolean} unicode
      */
-    const sendWithCallback = ([hwnd, message, wParam, lParam, callback, data], unicode)=>{
+    const sendWithCallback = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam, callback, data] = args;
+        const wide = wideOf(args, 2, 3);
         const record = live(hwnd);
         if (!record)
         {
@@ -8082,9 +8157,10 @@ export function createWindowFunctions(host){
         if (owner !== null && self !== null && owner !== self)
         {
             return sendAcross(hwnd, message, wParam, lParam, thread, unicode,
-                { kind: ISMEX_CALLBACK, callback: callback >>> 0, data: data >>> 0 });
+                { kind: ISMEX_CALLBACK, callback: callback >>> 0, data: data >>> 0,
+                    ...wide ? { wide } : {} });
         }
-        return andThen(send(hwnd, message, wParam, lParam, thread, unicode), result=>
+        return andThen(send(hwnd, message, wParam, lParam, thread, unicode, wide), result=>
             andThen((callback >>> 0) !== 0 && host.call
                 ? host.call(callback >>> 0, [record.hwnd, message >>> 0, data >>> 0, result],
                     thread)
@@ -8103,8 +8179,10 @@ export function createWindowFunctions(host){
      * @param {number[]} args  idThread, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const postToThread = ([thread, message, wParam, lParam], unicode)=>{
-        const id = thread >>> 0;
+    const postToThread = (args, unicode)=>{
+        const [thread, message, wParam, lParam] = args;
+        const wide = wideOf(args, 2, 3);
+        const id = wholeAddress(thread);
         const known = host.threadExists ? host.threadExists(id) : id !== 0;
         if (!known)
         {
@@ -8112,7 +8190,7 @@ export function createWindowFunctions(host){
             return 0;
         }
         host.queue.post({ hwnd: 0, message, wParam, lParam, thread: id,
-            ...unicode ? { unicode } : {} });
+            ...unicode ? { unicode } : {}, ...wide ? { wide } : {} });
         return 1;
     };
 
@@ -8540,15 +8618,19 @@ export function createWindowFunctions(host){
         /** BOOL UnregisterClassA(LPCSTR lpClassName, HINSTANCE hInstance) */
         UnregisterClassA: {
             argBytes: 8,
+            addresses: [1],
             /** @param {number[]} args */
-            handler: ([className, instance])=>unregister(className, false, instance >>> 0),
+            handler: ([className, instance])=>unregister(className, false,
+                wholeAddress(instance)),
         },
 
         /** BOOL UnregisterClassW(LPCWSTR lpClassName, HINSTANCE hInstance) */
         UnregisterClassW: {
             argBytes: 8,
+            addresses: [1],
             /** @param {number[]} args */
-            handler: ([className, instance])=>unregister(className, true, instance >>> 0),
+            handler: ([className, instance])=>unregister(className, true,
+                wholeAddress(instance)),
         },
 
         /**
@@ -8558,6 +8640,7 @@ export function createWindowFunctions(host){
          */
         GetClassInfoA: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, false,
                 false),
@@ -8572,6 +8655,7 @@ export function createWindowFunctions(host){
          */
         GetClassInfoW: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, true,
                 false),
@@ -8580,6 +8664,7 @@ export function createWindowFunctions(host){
         /** BOOL GetClassInfoExW(HINSTANCE, LPCWSTR lpClassName, LPWNDCLASSEXW) */
         GetClassInfoExW: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, true,
                 true),
@@ -8594,6 +8679,7 @@ export function createWindowFunctions(host){
          */
         GetClassInfoExA: {
             argBytes: 12,
+            addresses: [0, 1],
             /** @param {number[]} args */
             handler: ([instance, className, out])=>classInfo(instance, className, out, false,
                 true),
@@ -8660,12 +8746,17 @@ export function createWindowFunctions(host){
          */
         CreateWindowExA: {
             argBytes: 48,
+            addresses: [1, 2, 10, 11],
             /** @param {number[]} args */
             handler: args=>createWindow(args),
         },
 
         /**
-         * HWND CreateWindowA(...) -- the same call without the extended style.
+         * HWND CreateWindowA(LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
+         *   int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
+         *   HINSTANCE hInstance, LPVOID lpParam)
+         *
+         * The same call without the extended style.
          *
          * The SDK makes this a macro over CreateWindowExA rather than an export,
          * so an import table will not name it; it costs one line to answer if
@@ -8673,17 +8764,22 @@ export function createWindowFunctions(host){
          */
         CreateWindowA: {
             argBytes: 44,
+            addresses: [0, 1, 9, 10],
             /** @param {number[]} args */
             handler: args=>createWindow([0, ...args]),
         },
 
         /**
          * HWND CreateWindowExW(DWORD dwExStyle, LPCWSTR lpClassName,
-         *   LPCWSTR lpWindowName, ...) -- the same call with wide names, whose
-         *   WM_NCCREATE and WM_CREATE carry a CREATESTRUCTW.
+         *   LPCWSTR lpWindowName, DWORD dwStyle, int X, int Y, int nWidth, int nHeight,
+         *   HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
+         *
+         * The same call with wide names, whose WM_NCCREATE and WM_CREATE carry
+         * a CREATESTRUCTW.
          */
         CreateWindowExW: {
             argBytes: 48,
+            addresses: [1, 2, 10, 11],
             /** @param {number[]} args */
             handler: args=>createWindow(args, true),
         },
@@ -8698,6 +8794,7 @@ export function createWindowFunctions(host){
          */
         CreateMDIWindowA: {
             argBytes: 40,
+            addresses: [0, 1, 8, 9],
             /** @param {number[]} args */
             handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
                 createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
@@ -8706,15 +8803,23 @@ export function createWindowFunctions(host){
 
         CreateMDIWindowW: {
             argBytes: 40,
+            addresses: [0, 1, 8, 9],
             /** @param {number[]} args */
             handler: ([className, title, style, x, y, width, height, parent, instance, lParam])=>
                 createWindow([WS_EX_MDICHILD, className, title, style, x, y, width, height,
                     parent, 0, instance, lParam], true),
         },
 
-        /** HWND CreateWindowW(...), without the extended style. */
+        /**
+         * HWND CreateWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName, DWORD dwStyle,
+         *   int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
+         *   HINSTANCE hInstance, LPVOID lpParam)
+         *
+         * Without the extended style.
+         */
         CreateWindowW: {
             argBytes: 44,
+            addresses: [0, 1, 9, 10],
             /** @param {number[]} args */
             handler: args=>createWindow([0, ...args], true),
         },
@@ -8843,7 +8948,7 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([info])=>{
                 const view = (info >>> 0) === 0 ? null
-                    : new DataView(host.readMemory(info >>> 0, 20).slice().buffer);
+                    : new DataView(host.readMemory(wholeAddress(info), 20).slice().buffer);
                 if (!view || view.getUint32(0, true) !== 20)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -9260,7 +9365,7 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     new Uint8Array(Uint32Array.of(record.displayAffinity ?? 0).buffer));
                 return 1;
             },
@@ -9306,17 +9411,18 @@ export function createWindowFunctions(host){
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, layered?.key ?? 0, true);
-                    host.writeMemory(key >>> 0, bytes);
+                    host.writeMemory(wholeAddress(key), bytes);
                 }
                 if ((alpha >>> 0) !== 0)
                 {
-                    host.writeMemory(alpha >>> 0, new Uint8Array([(layered?.alpha ?? 0) & 0xff]));
+                    host.writeMemory(wholeAddress(alpha),
+                        new Uint8Array([(layered?.alpha ?? 0) & 0xff]));
                 }
                 if ((flags >>> 0) !== 0)
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, layered?.flags ?? 0, true);
-                    host.writeMemory(flags >>> 0, bytes);
+                    host.writeMemory(wholeAddress(flags), bytes);
                 }
                 return 1;
             },
@@ -9425,9 +9531,15 @@ export function createWindowFunctions(host){
             },
         },
 
-        /** HHOOK SetWindowsHookExW(...), as the ANSI form. */
+        /**
+         * HHOOK SetWindowsHookExW(int idHook, HOOKPROC lpfn, HINSTANCE hmod,
+         *                         DWORD dwThreadId)
+         *
+         * As the ANSI form.
+         */
         SetWindowsHookExW: {
             argBytes: 16,
+            addresses: [1],
             /** @param {number[]} args */
             handler: args=>table.SetWindowsHookExA.handler(args),
         },
@@ -9451,6 +9563,7 @@ export function createWindowFunctions(host){
          */
         SetWindowsHookExA: {
             argBytes: 16,
+            addresses: [1],
             /** @param {number[]} args */
             handler: ([type, proc, module, thread])=>{
                 const kind = type | 0;
@@ -9475,7 +9588,8 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_GLOBAL_ONLY_HOOK);
                     return 0;
                 }
-                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0,
+                const hook = { handle: 0, type: type | 0, proc: wholeAddress(proc),
+                    thread: thread >>> 0,
                     owner: threadIdOf(host.callerThread?.()) };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
@@ -9552,16 +9666,19 @@ export function createWindowFunctions(host){
         CallNextHookEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, code, wParam, lParam])=>{
+            handler: args=>{
+                const [handle, code] = args;
                 const hook = hooks.find(each=>each.handle === (handle >>> 0));
                 if (!hook)
                 {
                     return 0;
                 }
-                // At 64 bits the next hook is handed the LPARAM as a message's
-                // is (decision A63): what this handler reads is its low half.
-                return callHook(hook.type, hook.handle, [code, wParam >>> 0, lParam | 0],
-                    host.callerThread?.());
+                // The next hook is handed what this one passed on, whole: at
+                // 64 bits an LPARAM that names a structure past 2 GiB is not
+                // its dword widened by sign (decision A63 is the dword's case).
+                const passed = /** @type {number[]} */ (
+                    [code, forwarded(args, 2), forwarded(args, 3, true)]);
+                return callHook(hook.type, hook.handle, passed, host.callerThread?.());
             },
         },
 
@@ -9912,8 +10029,8 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([count, handles, waitAll, timeout, wakeMask, inputAvailable, alertable])=>{
                 const total = count >>> 0;
-                const wait = timeout >>> 0;
-                const mask = wakeMask >>> 0;
+                const wait = wholeAddress(timeout);
+                const mask = wholeAddress(wakeMask);
                 const waiter = threadIdOf(host.callerThread?.());
                 hasQueue(host.callerThread?.());
                 const input = ()=>((inputAvailable
@@ -10056,7 +10173,11 @@ export function createWindowFunctions(host){
         EnumChildWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([parent, callback, lParam])=>{
+            handler: args=>{
+                const [parent, callback] = args;
+                // The context is the program's alone: whole to its routine.
+                // (a bigint among a callback's arguments is the bridge's to widen)
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const call = host.call;
                 if (!call || (callback >>> 0) === 0)
                 {
@@ -10071,7 +10192,7 @@ export function createWindowFunctions(host){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             break;
                         }
@@ -10092,7 +10213,11 @@ export function createWindowFunctions(host){
         EnumWindows: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([callback, lParam])=>{
+            handler: args=>{
+                const [callback] = args;
+                // The context is the program's alone: whole to its routine.
+                // (a bigint among a callback's arguments is the bridge's to widen)
+                const lParam = /** @type {number} */ (forwarded(args, 1, true));
                 const call = host.call;
                 if (!call || (callback >>> 0) === 0)
                 {
@@ -10109,7 +10234,7 @@ export function createWindowFunctions(host){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }
@@ -10255,7 +10380,11 @@ export function createWindowFunctions(host){
         EnumThreadWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([threadId, callback, lParam])=>{
+            handler: args=>{
+                const [threadId, callback] = args;
+                // The context is the program's alone: whole to its routine.
+                // (a bigint among a callback's arguments is the bridge's to widen)
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const call = host.call;
                 if (!call || (callback >>> 0) === 0)
                 {
@@ -10272,7 +10401,7 @@ export function createWindowFunctions(host){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }

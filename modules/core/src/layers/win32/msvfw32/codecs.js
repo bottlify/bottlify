@@ -20,6 +20,7 @@
 import { decodeRle, encodeRle8 } from './rle.js';
 import { decodeVideo1 } from './video1.js';
 import { decodeCinepak, newCinepakState } from './cinepak.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const ICERR_OK = 0;
 export const ICERR_UNSUPPORTED = -1;
@@ -100,7 +101,7 @@ export function readHeader(memory, at){
     {
         return null;
     }
-    const view = new DataView(memory.readMemory(at >>> 0, HEADER_SIZE).slice().buffer);
+    const view = new DataView(memory.readMemory(wholeAddress(at), HEADER_SIZE).slice().buffer);
     return {
         at: at >>> 0,
         size: view.getUint32(0, true),
@@ -151,10 +152,10 @@ function writeHeader(memory, at, like, change, palette){
     view.setUint32(16, change.compression ?? BI_RGB, true);
     view.setUint32(20, change.sizeImage ?? strideOf(width, bitCount) * Math.abs(height), true);
     view.setUint32(32, palette ? palette.length / 4 : 0, true);
-    memory.writeMemory(at >>> 0, bytes);
+    memory.writeMemory(wholeAddress(at), bytes);
     if (palette)
     {
-        memory.writeMemory((at >>> 0) + HEADER_SIZE, palette);
+        memory.writeMemory(wholeAddress(at) + HEADER_SIZE, palette);
     }
 }
 
@@ -205,7 +206,7 @@ function writePixels(memory, out, bits, width, height, colour, index, left = 0, 
             row[x * bytes + 1] = rgb >> 8 & 255;
             row[x * bytes + 2] = rgb >> 16 & 255;
         }
-        memory.writeMemory((bits >>> 0) + at, row);
+        memory.writeMemory(wholeAddress(bits) + at, row);
     }
 }
 
@@ -262,7 +263,7 @@ export function infoOf(codec){
 
 /** ICDECOMPRESS: dwFlags, lpbiInput, lpInput, lpbiOutput, lpOutput, ckid. */
 const readDecompress = (/** @type {CodecMemory} */ memory, /** @type {number} */ at)=>{
-    const view = new DataView(memory.readMemory(at >>> 0, 20).slice().buffer);
+    const view = new DataView(memory.readMemory(wholeAddress(at), 20).slice().buffer);
     return { flags: view.getUint32(0, true), inHeader: view.getUint32(4, true),
         input: view.getUint32(8, true), outHeader: view.getUint32(12, true),
         output: view.getUint32(16, true) };
@@ -273,7 +274,7 @@ const readDecompress = (/** @type {CodecMemory} */ memory, /** @type {number} */
  * rectangle and the source's, each x, y, dx, dy.
  */
 const readDecompressEx = (/** @type {CodecMemory} */ memory, /** @type {number} */ at)=>{
-    const view = new DataView(memory.readMemory(at >>> 0, 52).slice().buffer);
+    const view = new DataView(memory.readMemory(wholeAddress(at), 52).slice().buffer);
     const int = (/** @type {number} */ i)=>view.getInt32(i, true);
     return { flags: view.getUint32(0, true), inHeader: view.getUint32(4, true),
         input: view.getUint32(8, true), outHeader: view.getUint32(12, true),
@@ -345,7 +346,7 @@ function decompressor(memory, codec, rest = ()=>ICERR_UNSUPPORTED){
                 {
                     return HEADER_SIZE + palette.length;
                 }
-                memory.writeMemory((second >>> 0) + HEADER_SIZE, palette);
+                memory.writeMemory(wholeAddress(second) + HEADER_SIZE, palette);
                 return ICERR_OK;
             }
             case ICM_DECOMPRESS:
@@ -359,7 +360,7 @@ function decompressor(memory, codec, rest = ()=>ICERR_UNSUPPORTED){
                 }
                 const length = from.sizeImage || strideOf(from.width,
                     from.bitCount) * Math.abs(from.height);
-                codec.decode(from, memory.readMemory(call.input >>> 0, length).slice(),
+                codec.decode(from, memory.readMemory(wholeAddress(call.input), length).slice(),
                     paletteOf(memory, from), to, call.output, 0, 0);
                 return ICERR_OK;
             }
@@ -400,7 +401,7 @@ function decompressor(memory, codec, rest = ()=>ICERR_UNSUPPORTED){
                     const length = from.sizeImage || strideOf(from.width,
                         from.bitCount) * Math.abs(from.height);
                     // The rectangle's top-left corner, in rows from the picture's bottom.
-                    codec.decode(from, memory.readMemory(call.input >>> 0, length).slice(),
+                    codec.decode(from, memory.readMemory(wholeAddress(call.input), length).slice(),
                         paletteOf(memory, from), to, call.output, call.xDst,
                         Math.abs(to.height) - call.yDst - call.dyDst);
                 }
@@ -479,7 +480,7 @@ const msrle = /** @type {Codec} */ ({
                         const at = Math.floor(i / width) * stride + ((i % width) >> 1);
                         image[at] |= (i % width) % 2 === 0 ? index << 4 : index;
                     });
-                    memory.writeMemory(bits >>> 0, image);
+                    memory.writeMemory(wholeAddress(bits), image);
                     return;
                 }
                 writePixels(memory, output, bits, width, height,
@@ -530,7 +531,8 @@ const msrle = /** @type {Codec} */ ({
                     return ICERR_OK;
                 case ICM_COMPRESS:
                 {
-                    const view = new DataView(memory.readMemory(first >>> 0, 48).slice().buffer);
+                    const view = new DataView(memory.readMemory(wholeAddress(first),
+                        48).slice().buffer);
                     const flags = view.getUint32(0, true);
                     const outHeader = view.getUint32(4, true);
                     const output = view.getUint32(8, true);
@@ -550,7 +552,7 @@ const msrle = /** @type {Codec} */ ({
                     memory.writeMemory(output, encoded);
                     const size = new Uint8Array(4);
                     new DataView(size.buffer).setUint32(0, encoded.length, true);
-                    memory.writeMemory((outHeader >>> 0) + 20, size);
+                    memory.writeMemory(wholeAddress(outHeader) + 20, size);
                     if (flagsOut !== 0)
                     {
                         new DataView(size.buffer).setUint32(0, key ? AVIIF_KEYFRAME : 0, true);

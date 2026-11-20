@@ -20,6 +20,7 @@
  */
 
 import { EINVAL } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The key qsort sorted as msvcrt.dll's own sort orders is carried under in
@@ -51,14 +52,14 @@ export function createSortFunctions(host){
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** Two elements exchanged in place. @param {number} a @param {number} b @param {number} width */
@@ -269,7 +270,7 @@ export function createSortFunctions(host){
          * A linear search, the key the comparator's first element: null with
          * EINVAL for no key, array, count, width or comparator.
          */
-        _lfind_s: cdecl(24, ([key, base, num, width, compare, context])=>{
+        _lfind_s: { ...cdecl(24, ([key, base, num, width, compare, context])=>{
             if ((key >>> 0) === 0 || (base >>> 0) === 0 || (num >>> 0) === 0
                 || (width >>> 0) === 0 || (compare >>> 0) === 0)
             {
@@ -279,13 +280,13 @@ export function createSortFunctions(host){
             const thread = host.currentThread?.();
             return find(key, base >>> 0, readU32(num), width >>> 0,
                 element=>ask(compare, [context, key >>> 0, element], thread));
-        }),
+        }), returns: 'pointer' },
 
         /**
          * void *_lfind(const void *key, const void *base, unsigned int *num,
          *              unsigned int width, int (*compare)(const void *, const void *))
          */
-        _lfind: cdecl(20, ([key, base, num, width, compare])=>{
+        _lfind: { ...cdecl(20, ([key, base, num, width, compare])=>{
             if ((num >>> 0) === 0 || (compare >>> 0) === 0)
             {
                 host.errno?.(EINVAL);
@@ -294,7 +295,7 @@ export function createSortFunctions(host){
             const thread = host.currentThread?.();
             return find(key, base >>> 0, readU32(num), width >>> 0,
                 element=>ask(compare, [key >>> 0, element], thread));
-        }),
+        }), returns: 'pointer' },
 
         /**
          * void *_lsearch(const void *key, void *base, unsigned int *num,
@@ -302,7 +303,7 @@ export function createSortFunctions(host){
          *
          * _lfind, and a key not found appended to the array, the count raised.
          */
-        _lsearch: cdecl(20, ([key, base, num, width, compare])=>{
+        _lsearch: { ...cdecl(20, ([key, base, num, width, compare])=>{
             if ((num >>> 0) === 0 || (compare >>> 0) === 0)
             {
                 host.errno?.(EINVAL);
@@ -317,10 +318,10 @@ export function createSortFunctions(host){
                     return found;
                 }
                 const end = (base + count * width) >>> 0;
-                host.writeMemory(end, host.readMemory(key >>> 0, width >>> 0).slice());
+                host.writeMemory(end, host.readMemory(wholeAddress(key), width >>> 0).slice());
                 writeU32(num, count + 1);
                 return end;
             });
-        }),
+        }), returns: 'pointer' },
     };
 }

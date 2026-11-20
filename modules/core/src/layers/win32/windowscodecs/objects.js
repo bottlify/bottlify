@@ -28,6 +28,7 @@ import { bgraOf, checkedRect, clippedSource, conversionOf, convertedSource, flip
     guestSource, heldSource, scaledSource, withBlock } from './sources.js';
 import { E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, S_OK, createKit } from './kit.js';
 import { createInfos } from './info.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** @typedef {import('./sources.js').Source} Source */
 /** @typedef {import('../ole32/objects.js').ComObject} ComObject */
@@ -170,7 +171,8 @@ export function createCodecs(host){
                 {
                     return E_INVALIDARG;
                 }
-                const bytes = count ? host.readMemory(colours >>> 0, count * 4).slice() : null;
+                const bytes = count ? host.readMemory(wholeAddress(colours),
+                    count * 4).slice() : null;
                 const view = bytes ? new DataView(bytes.buffer) : null;
                 state.type = PALETTE_TYPE.CUSTOM;
                 state.colours = Array.from({ length: count }, (_, i)=>
@@ -222,7 +224,7 @@ export function createCodecs(host){
                 const given = state.colours.slice(0, count);
                 const bytes = new Uint8Array(given.length * 4);
                 given.forEach((c, i)=>new DataView(bytes.buffer).setUint32(i * 4, c >>> 0, true));
-                host.writeMemory(colours >>> 0, bytes);
+                host.writeMemory(wholeAddress(colours), bytes);
                 putU32(actual, given.length);
                 return S_OK;
             },
@@ -397,7 +399,7 @@ export function createCodecs(host){
                 const rows = await source.copy(caller, r);
                 if (stride === row)
                 {
-                    host.writeMemory(buffer >>> 0, rows.subarray(0, row * r.height));
+                    host.writeMemory(wholeAddress(buffer), rows.subarray(0, row * r.height));
                 }
                 else
                 {
@@ -940,7 +942,7 @@ export function createCodecs(host){
                 }
                 const bytes = count === 0 ? new Uint8Array(0)
                     : await live().read(thread(), state.position, count);
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(wholeAddress(buffer), bytes);
                 state.position += bytes.length;
                 if (done !== 0)
                 {
@@ -964,7 +966,7 @@ export function createCodecs(host){
                     return STG_E_MEDIUMFULL;
                 }
                 const written = count === 0 ? 0 : await body.write(caller, state.position,
-                    host.readMemory(buffer >>> 0, count).slice());
+                    host.readMemory(wholeAddress(buffer), count).slice());
                 state.position += written;
                 if (done !== 0)
                 {
@@ -1014,7 +1016,7 @@ export function createCodecs(host){
                 view.setUint32(4, 2, true);
                 view.setUint32(8, size >>> 0, true);
                 view.setUint32(12, Math.floor(size / 0x100000000), true);
-                host.writeMemory(out >>> 0, statstg);
+                host.writeMemory(wholeAddress(out), statstg);
                 return S_OK;
             }),
             Clone: own('Clone', 13, refused),
@@ -1041,7 +1043,7 @@ export function createCodecs(host){
                     diverge('IWICStream::InitializeFromFilename', 'a file opened for writing');
                     return E_NOTIMPL;
                 }
-                const data = await host.readFile(host.readWideString(name >>> 0, 260 * 2));
+                const data = await host.readFile(host.readWideString(wholeAddress(name), 260 * 2));
                 if (!data)
                 {
                     return ERROR_FILE_NOT_FOUND;
@@ -1331,7 +1333,7 @@ export function createCodecs(host){
                 {
                     return E_INVALIDARG;
                 }
-                const data = await host.readFile(host.readWideString(name >>> 0, 260 * 2));
+                const data = await host.readFile(host.readWideString(wholeAddress(name), 260 * 2));
                 if (!data)
                 {
                     return ERROR_FILE_NOT_FOUND;
@@ -1346,7 +1348,7 @@ export function createCodecs(host){
                     return E_INVALIDARG;
                 }
                 state.type = 1;
-                state.profile = host.readMemory(buffer >>> 0, size).slice();
+                state.profile = host.readMemory(wholeAddress(buffer), size).slice();
                 return S_OK;
             },
             InitializeFromExifColorSpace: (object, [space])=>{
@@ -1379,7 +1381,7 @@ export function createCodecs(host){
                 putU32(actual, state.profile.length);
                 if (buffer !== 0 && size >= state.profile.length)
                 {
-                    host.writeMemory(buffer >>> 0, state.profile);
+                    host.writeMemory(wholeAddress(buffer), state.profile);
                 }
                 return buffer !== 0 && size < state.profile.length
                     ? WINCODEC.INSUFFICIENTBUFFER : S_OK;
@@ -1427,7 +1429,7 @@ export function createCodecs(host){
                 return E_INVALIDARG;
             }
             putU32(out, 0);
-            const data = await host.readFile(host.readWideString(name >>> 0, 260 * 2));
+            const data = await host.readFile(host.readWideString(wholeAddress(name), 260 * 2));
             if (!data)
             {
                 return ERROR_FILE_NOT_FOUND;

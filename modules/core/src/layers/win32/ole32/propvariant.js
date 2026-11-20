@@ -25,6 +25,7 @@
  */
 
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -642,7 +643,7 @@ export function createPropVariantFunctions(host){
                     made.strings.forEach(string=>host.bstr?.free(string));
                     return after(waited(owed), ()=>after(destroyAll(made.arrays), ()=>copy));
                 }
-                host.writeMemory(dest >>> 0, copy);
+                host.writeMemory(wholeAddress(dest), copy);
                 return settle(owed, thread, 'PropVariantCopy');
             },
         },
@@ -665,7 +666,7 @@ export function createPropVariantFunctions(host){
                 /** @type {Owed} */
                 const owed = { addRef: [], release: [] };
                 const known = release(pvar >>> 0, owed);
-                host.writeMemory(pvar >>> 0, new Uint8Array(PROPVARIANT_SIZE));
+                host.writeMemory(wholeAddress(pvar), new Uint8Array(PROPVARIANT_SIZE));
                 if (!known)
                 {
                     return STG_E_INVALIDPARAMETER;

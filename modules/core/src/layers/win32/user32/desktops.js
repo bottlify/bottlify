@@ -21,6 +21,7 @@
  */
 
 import { threadIdOf } from './messages.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 import { readText, textBytes } from './unicode.js';
 
 const ERROR_INVALID_HANDLE = 6;
@@ -145,7 +146,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
     const createStation = ([name, , , attributes], wide)=>{
         const text = (name >>> 0) === 0 ? null
             : wide ? readText(host, name >>> 0, true, MAX_NAME)
-                : host.readCString(name >>> 0, MAX_NAME);
+                : host.readCString(wholeAddress(name), MAX_NAME);
         let made = text === null ? null : stationNamed(text);
         if (!made)
         {
@@ -154,7 +155,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             stations.push(made);
         }
         const inherit = (attributes >>> 0) !== 0
-            && new DataView(host.readMemory((attributes >>> 0) + 8, 4).slice().buffer)
+            && new DataView(host.readMemory(wholeAddress(attributes) + 8, 4).slice().buffer)
                 .getUint32(0, true) !== 0;
         return open(made, inherit);
     };
@@ -294,7 +295,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         }
         if ((needed >>> 0) !== 0)
         {
-            host.writeMemory(needed >>> 0, new Uint8Array(new Uint32Array([bytes.length]).buffer));
+            host.writeMemory(wholeAddress(needed),
+                new Uint8Array(new Uint32Array([bytes.length]).buffer));
         }
         if ((length >>> 0) < bytes.length || ((into >>> 0) === 0 && bytes.length > 0))
         {
@@ -302,7 +304,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         }
         if (bytes.length > 0)
         {
-            host.writeMemory(into >>> 0, bytes);
+            host.writeMemory(wholeAddress(into), bytes);
         }
         return 1;
     };
@@ -333,7 +335,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
                 host.writeMemory(at, bytes);
-                answer = await call(callback >>> 0, [at, lParam >>> 0], thread) >>> 0;
+                answer = await call(callback >>> 0, [at, lParam], thread) >>> 0;
                 host.release?.(at);
                 if (answer === 0)
                 {
@@ -350,7 +352,9 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
      * @param {number[]} args  hwinsta, lpEnumFunc, lParam.
      * @param {boolean} unicode
      */
-    const enumDesktops = ([handle, callback, lParam], unicode)=>{
+    const enumDesktops = (args, unicode)=>{
+        const [handle, callback] = args;
+        const lParam = /** @type {number} */ (forwarded(args, 2, true));
         if ((handle >>> 0) !== 0 && !named(handle, 'station'))
         {
             return fail(ERROR_INVALID_HANDLE);
@@ -375,7 +379,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         {
             return fail(ERROR_INVALID_PARAMETER);
         }
-        const view = new DataView(host.readMemory(from >>> 0, USEROBJECTFLAGS_SIZE).slice().buffer);
+        const view = new DataView(host.readMemory(wholeAddress(from),
+            USEROBJECTFLAGS_SIZE).slice().buffer);
         entry.inherit = view.getUint32(0, true) !== 0;
         entry.object.flags = view.getUint32(8, true);
         return 1;
@@ -458,7 +463,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                const at = info >>> 0;
+                const at = wholeAddress(info);
                 if ((action >>> 0) > MSGFLT_DISALLOW
                     || (at !== 0 && readU32(at) !== CHANGEFILTERSTRUCT_SIZE))
                 {
@@ -655,7 +660,9 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         EnumDesktopWindows: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, callback, lParam])=>{
+            handler: args=>{
+                const [handle, callback] = args;
+                const lParam = /** @type {number} */ (forwarded(args, 2, true));
                 const entry = (handle >>> 0) === 0 ? { object: input } : named(handle, 'desktop');
                 const call = host.call;
                 if (!entry)
@@ -671,7 +678,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 return (async()=>{
                     for (const hwnd of listed)
                     {
-                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        if ((await call(callback >>> 0, [hwnd, lParam], thread) | 0) === 0)
                         {
                             return 0;
                         }
@@ -703,13 +710,15 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
         EnumWindowStationsA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([callback, lParam])=>enumNames(stations, callback, lParam, false),
+            handler: args=>enumNames(stations, args[0],
+                /** @type {number} */ (forwarded(args, 1, true)), false),
         },
         /** BOOL EnumWindowStationsW(WINSTAENUMPROCW lpEnumFunc, LPARAM lParam) */
         EnumWindowStationsW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([callback, lParam])=>enumNames(stations, callback, lParam, true),
+            handler: args=>enumNames(stations, args[0],
+                /** @type {number} */ (forwarded(args, 1, true)), true),
         },
 
         /**
@@ -746,14 +755,14 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 {
                     return fail(ERROR_NOACCESS);
                 }
-                const bytes = userObjectSecurity(readU32(requested >>> 0));
-                host.writeMemory(needed >>> 0,
+                const bytes = userObjectSecurity(readU32(wholeAddress(requested)));
+                host.writeMemory(wholeAddress(needed),
                     new Uint8Array(new Uint32Array([bytes.length]).buffer));
                 if ((length >>> 0) < bytes.length || (into >>> 0) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory(into >>> 0, bytes);
+                host.writeMemory(wholeAddress(into), bytes);
                 return 1;
             },
         },
@@ -802,7 +811,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             /** @param {number[]} args */
             handler: ([name, inherit])=>{
                 const found = (name >>> 0) === 0 ? null
-                    : stationNamed(host.readCString(name >>> 0, MAX_NAME));
+                    : stationNamed(host.readCString(wholeAddress(name), MAX_NAME));
                 return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
             },
         },

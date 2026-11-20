@@ -695,6 +695,16 @@ export function createGraphicsModule(){
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**
+                 * A pointer of the process's width (4 or 8 bytes), read and
+                 * written whole by the memory layer: the one place a pointer's
+                 * upper half is made.
+                 *
+                 * @param {number} address @param {4 | 8} bytes
+                 */
+                readPointer: (address, bytes)=>memory.readPointer(address, bytes),
+                /** @param {number} address @param {number} value @param {4 | 8} bytes */
+                writePointer: (address, value, bytes)=>memory.writePointer(address, value, bytes),
+                /**
                  * A dword, written in place: an out-parameter without an array
                  * made to carry its four bytes. Absent where the memory given
                  * writes only bytes, and then the bytes carry it.

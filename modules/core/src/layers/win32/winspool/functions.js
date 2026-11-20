@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * winspool — the print spooler, of which this machine has none.
  *
@@ -105,7 +107,7 @@ export function createSpoolerFunctions(host){
         }
         const units = [];
         const width = wide ? 2 : 1;
-        for (let at = pointer >>> 0; units.length < 1024; at += width)
+        for (let at = wholeAddress(pointer); units.length < 1024; at += width)
         {
             const bytes = host.readMemory(at, width);
             const unit = wide ? bytes[0] | bytes[1] << 8 : bytes[0];

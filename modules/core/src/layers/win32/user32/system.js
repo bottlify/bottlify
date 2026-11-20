@@ -62,6 +62,7 @@ import { DISPLAY_DEVICE_NAME, VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
 import { afterWait } from './after-wait.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { forwarded, wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -1057,7 +1058,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         {
             return 0;
         }
-        const state = (keyState >>> 0) === 0 ? null : host.readMemory(keyState >>> 0, 256);
+        const state = (keyState >>> 0) === 0 ? null : host.readMemory(wholeAddress(keyState), 256);
         const character = characterOf(vk & 0xff, modifiersIn(state));
         if (character === null)
         {
@@ -1065,7 +1066,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         }
         // A WORD either way: ToAscii's buffer is one, and its high byte is
         // left clear rather than holding a stale half.
-        host.writeMemory(buffer >>> 0, new Uint8Array([character & 0xff,
+        host.writeMemory(wholeAddress(buffer), new Uint8Array([character & 0xff,
             unit === 2 ? character >>> 8 : 0]));
         return 1;
     };
@@ -1239,7 +1240,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             return 0;
         }
         const name = `0000${LANGID_EN_US.toString(16).padStart(4, '0')}`;
-        host.writeMemory(into >>> 0, textBytes(name, wide));
+        host.writeMemory(wholeAddress(into), textBytes(name, wide));
         return 1;
     };
 
@@ -1251,14 +1252,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      * @param {number} lParam
      * @param {boolean} [unicode]  Whether the text the message carries is wide.
      * @param {number} [timeout]  How long to wait for another thread, in milliseconds.
+     * @param {import('../common/pointers.js').WideParams} [wide]  The WPARAM and LPARAM a
+     *     64-bit caller passed, where the dwords do not say them.
      * @returns {number | Promise<number | null>} null when the timeout passed first
      */
-    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined)=>
+    const sendMessage = (hwnd, message, wParam, lParam, unicode = false, timeout = undefined,
+        wide = undefined)=>
         (host.sendAcross
             ? host.sendAcross(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
-                host.callerThread?.(), unicode, timeout === undefined ? {} : { timeout })
+                host.callerThread?.(), unicode,
+                { ...timeout === undefined ? {} : { timeout }, ...wide ? { wide } : {} })
             : host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0,
-                host.callerThread?.(), unicode));
+                host.callerThread?.(), unicode, wide));
 
     /** @param {number} codePage @param {number} start @param {number} current */
     const previousCharacter = (codePage, start, current)=>
@@ -1320,11 +1325,15 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      * @param {number[]} args  lpPrevWndFunc, hWnd, Msg, wParam, lParam.
      * @param {boolean} unicode
      */
-    const callWindowProc = ([previous, hwnd, message, wParam, lParam], unicode)=>{
+    const callWindowProc = (args, unicode)=>{
+        const [previous, hwnd, message, wParam, lParam] = args;
         if ((previous >>> 0) === 0)
         {
             return 0;
         }
+        // What a 64-bit caller passed that the dwords do not say, and a holder
+        // for a quadword the procedure answers (`wideOf`).
+        const wide = wideOf(args, 3, 4, true);
         // A system class's procedure lives on this side, and a program
         // that subclassed one calls it through here with its address. An
         // address is called as a procedure of the call's own encoding; a
@@ -1334,13 +1343,14 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         const behind = host.procBehind?.(previous) ?? null;
         /** @type {boolean} */
         const reads = behind ? behind.unicode : host.entryReads?.(previous) ?? unicode;
-        return host.callProcedure(behind ? behind.address : previous >>> 0, {
+        return andThen(host.callProcedure(behind ? behind.address : wholeAddress(previous), {
             hwnd: hwnd >>> 0,
             message: message >>> 0,
             wParam: wParam >>> 0,
             lParam: lParam >>> 0,
             ...(behind ? unicode : reads) ? { unicode: true } : {},
-        }, host.callerThread?.(), reads);
+            ...wide ? { wide } : {},
+        }, host.callerThread?.(), reads), result=>wholeAnswer(result, wide));
     };
 
     /**
@@ -1353,7 +1363,9 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      * @param {number[]} args  hWnd, Msg, wParam, lParam, fuFlags, uTimeout, lpdwResult.
      * @param {boolean} unicode
      */
-    const sendMessageTimeout = ([hwnd, message, wParam, lParam, , timeout, result], unicode)=>{
+    const sendMessageTimeout = (args, unicode)=>{
+        const [hwnd, message, wParam, lParam, , timeout, result] = args;
+        const wide = wideOf(args, 2, 3, true);
         if ((hwnd >>> 0) !== HWND_BROADCAST && !live(hwnd) && !elsewhere(hwnd))
         {
             host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
@@ -1368,11 +1380,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             }
             if ((result >>> 0) !== 0)
             {
-                writeU32s(host, result >>> 0, [answer >>> 0]);
+                // A DWORD_PTR: the LRESULT whole at 64 bits, a dword widened
+                // by its sign where the procedure answered no more.
+                const whole = wholeAnswer(answer, wide);
+                writeU32s(host, result >>> 0, host.pointerSize === 8
+                    ? typeof whole === 'bigint'
+                        ? [Number(whole & 0xffffffffn), Number(whole >> 32n & 0xffffffffn)]
+                        : [answer >>> 0, (answer | 0) < 0 ? 0xffffffff : 0]
+                    : [answer >>> 0]);
             }
             return 1;
         };
-        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0);
+        const answer = sendMessage(hwnd, message, wParam, lParam, unicode, timeout >>> 0, wide);
         return typeof (/** @type {any} */ (answer))?.then === 'function'
             ? /** @type {Promise<number | null>} */ (answer).then(report)
             : report(/** @type {number} */ (answer));
@@ -1706,7 +1725,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([text])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             if (at === 0)
             {
                 return 0;
@@ -1725,7 +1744,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([text, count])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             const length = count >>> 0;
             if (at === 0 || length === 0)
             {
@@ -1748,7 +1767,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         argBytes: 4,
         /** @param {number[]} args */
         handler: ([text])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             if (at === 0)
             {
                 return 0;
@@ -1776,7 +1795,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([text, count])=>{
-            const at = text >>> 0;
+            const at = wholeAddress(text);
             const length = count >>> 0;
             if (at === 0 || length === 0)
             {
@@ -1875,7 +1894,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
 
     /**
      * A pointer-sized class long of a 64-bit process: eight of the class's
-     * extra bytes whole, or a field sign-extended from its dword.
+     * extra bytes whole, or a field: an address whole, any other
+     * sign-extended from its dword.
      *
      * @param {any} cls @param {number} index
      * @param {boolean} [unicode]  Read through the wide call, as `readClassLong`.
@@ -1888,7 +1908,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
             return at + 8 <= cls.extra.byteLength ? cls.extra.getBigUint64(at, true) : 0n;
         }
-        return BigInt.asUintN(64, BigInt(readClassLong(cls, index, unicode) | 0));
+        const value = readClassLong(cls, index, unicode);
+        // A procedure, a module and a menu's name are addresses, whole and
+        // zero-extended; a handle or a count widens by its sign, as RAX does.
+        return at === GCL_WNDPROC || at === GCL_HMODULE || at === GCL_MENUNAME
+            ? BigInt(wholeAddress(value)) : BigInt.asUintN(64, BigInt(value | 0));
     };
 
     /**
@@ -1998,7 +2022,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
     };
 
     /** A wsprintf %S of a null pointer prints as a %s of one. @param {number} address */
-    const wideOrNull = address=>((address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0));
+    const wideOrNull = address=>((address >>> 0) === 0 ? '(null)'
+        : readWideString(wholeAddress(address)));
 
     /** A narrow character's byte, as the ANSI page has it. @param {number} byte */
     const byteChar = byte=>decodeAnsi(Uint8Array.of(byte));
@@ -2305,8 +2330,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
      */
     const loadBitmap = (instance, name, wide)=>{
         const RT_BITMAP = 2;
-        const module = instance >>> 0;
-        const raw = name >>> 0;
+        const module = wholeAddress(instance);
+        const raw = wholeAddress(name);
         if (module === 0)
         {
             return 0;
@@ -3250,7 +3275,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         const MINIMIZEDMETRICS_SIZE = 20;
         const SPI_GETNONCLIENTMETRICS = 0x0029;
         const SPI_GETWORKAREA = 0x0030;
-        const asked = action >>> 0;
+        const asked = wholeAddress(action);
         const number = numberSettings.get(asked);
         if (number)
         {
@@ -3313,10 +3338,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 writeU32s(host, value >>> 0, mouseThresholds);
                 return 1;
             case SPI_SETMOUSE:
-                mouseThresholds = [0, 4, 8].map(at=>readU32((value >>> 0) + at));
+                mouseThresholds = [0, 4, 8].map(at=>readU32(wholeAddress(value) + at));
                 return settled(asked, ini);
             case SPI_GETICONTITLELOGFONT:
-                host.writeMemory(value >>> 0, logFontBytes(iconFont, wide));
+                host.writeMemory(wholeAddress(value), logFontBytes(iconFont, wide));
                 return 1;
             case SPI_SETICONTITLELOGFONT:
                 iconFont = readFont(value >>> 0, wide);
@@ -3324,7 +3349,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             case SPI_GETICONMETRICS:
             case SPI_SETICONMETRICS: {
                 const size = 16 + (wide ? LOGFONTW_SIZE : LOGFONTA.SIZE);
-                if (readU32(value >>> 0) !== size)
+                if (readU32(wholeAddress(value)) !== size)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -3333,7 +3358,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     numberSettings.get(SPI_SETICONTITLEWRAP));
                 if (asked === SPI_SETICONMETRICS)
                 {
-                    const [across, down, titleWrap] = [4, 8, 12].map(at=>readU32((value >>> 0) + at)
+                    const [across, down, titleWrap] = [4, 8,
+                        12].map(at=>readU32(wholeAddress(value) + at)
                         | 0);
                     iconSpacing.across = Math.max(across, LEAST_ICON_SPACING);
                     iconSpacing.down = Math.max(down, LEAST_ICON_SPACING);
@@ -3343,11 +3369,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 }
                 writeU32s(host, (value >>> 0) + 4, [iconSpacing.across, iconSpacing.down,
                     wrap.value]);
-                host.writeMemory((value >>> 0) + 16, logFontBytes(iconFont, wide));
+                host.writeMemory(wholeAddress(value) + 16, logFontBytes(iconFont, wide));
                 return 1;
             }
             case SPI_GETHIGHCONTRAST: {
-                if (readU32(value >>> 0) !== HIGHCONTRAST_SIZE)
+                if (readU32(wholeAddress(value)) !== HIGHCONTRAST_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -3356,16 +3382,16 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 return 1;
             }
             case SPI_SETHIGHCONTRAST:
-                if (readU32(value >>> 0) !== HIGHCONTRAST_SIZE)
+                if (readU32(wholeAddress(value)) !== HIGHCONTRAST_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                highContrast = readU32((value >>> 0) + 4);
+                highContrast = readU32(wholeAddress(value) + 4);
                 return settled(asked, ini);
             case SPI_GETDESKWALLPAPER: {
                 const bytes = textBytes(wallpaper, wide);
-                host.writeMemory(value >>> 0, bytes.subarray(0, Math.min(bytes.length,
+                host.writeMemory(wholeAddress(value), bytes.subarray(0, Math.min(bytes.length,
                     Math.max(param >>> 0, wide ? 2 : 1))));
                 return 1;
             }
@@ -3396,7 +3422,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             // is its four bits.
             case SPI_GETMINIMIZEDMETRICS:
             case SPI_SETMINIMIZEDMETRICS: {
-                const fields = new DataView(host.readMemory(value >>> 0,
+                const fields = new DataView(host.readMemory(wholeAddress(value),
                     MINIMIZEDMETRICS_SIZE).slice().buffer);
                 if (fields.getUint32(0, true) !== MINIMIZEDMETRICS_SIZE)
                 {
@@ -3508,7 +3534,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             return null;
         }
         const given = (count >>> 0) > 0 && (list >>> 0) !== 0
-            ? Array.from({ length: count >>> 0 }, (_, at)=>live(readU32((list >>> 0) + at * 4)))
+            ? Array.from({ length: count >>> 0 }, (_,
+                at)=>live(readU32(wholeAddress(list) + at * 4)))
             : ordered();
         const size = host.geometry.clientSize(record);
         return {
@@ -3557,11 +3584,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         {
             return 0;
         }
-        const header = host.readMemory(bits >>> 0, 6);
+        const header = host.readMemory(wholeAddress(bits), 6);
         const count = header[4] | header[5] << 8;
         const cursor = (icon >>> 0) === 0;
         const size = width > 0 ? width : metric(cursor ? SM_CXCURSOR : SM_CXICON);
-        return groupImageId(host.readMemory(bits >>> 0, 6 + count * 14).slice(), cursor, size)
+        return groupImageId(host.readMemory(wholeAddress(bits), 6 + count * 14).slice(), cursor,
+            size)
             ?? 0;
     };
 
@@ -3719,8 +3747,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         {
             return 0;
         }
-        const original = wide ? readWideString(name >>> 0).slice(0, MAX_NAME)
-            : host.readCString(name >>> 0, MAX_NAME);
+        const original = wide ? readWideString(wholeAddress(name)).slice(0, MAX_NAME)
+            : host.readCString(wholeAddress(name), MAX_NAME);
         const key = original.toLowerCase();
         if (key.length === 0)
         {
@@ -3822,8 +3850,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 }
                 if (many > 0)
                 {
-                    const indices = new DataView(host.readMemory(elements >>> 0, many * 4).buffer);
-                    const colours = new DataView(host.readMemory(values >>> 0, many * 4).buffer);
+                    const indices = new DataView(host.readMemory(wholeAddress(elements),
+                        many * 4).buffer);
+                    const colours = new DataView(host.readMemory(wholeAddress(values),
+                        many * 4).buffer);
                     for (let at = 0; at < many; at++)
                     {
                         host.colors?.set(indices.getInt32(at * 4, true),
@@ -4064,7 +4094,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([device, index, out])=>enumDisplayDevices(
-                (device >>> 0) === 0 ? null : host.readCString(device >>> 0, 32),
+                (device >>> 0) === 0 ? null : host.readCString(wholeAddress(device), 32),
                 index >>> 0, out >>> 0, false),
         },
 
@@ -4080,7 +4110,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([device, index, out])=>enumDisplayDevices(
-                (device >>> 0) === 0 ? null : readWideString(device >>> 0),
+                (device >>> 0) === 0 ? null : readWideString(wholeAddress(device)),
                 index >>> 0, out >>> 0, true),
         },
 
@@ -4856,10 +4886,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * it on to copy from address zero.
          */
         CharNextA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const at = text >>> 0;
+                const at = wholeAddress(text);
                 if (at === 0)
                 {
                     return 0;
@@ -4870,10 +4901,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
 
         /** LPWSTR CharNextW(LPCWSTR lpsz): CharNextA, a character being two bytes */
         CharNextW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const at = text >>> 0;
+                const at = wholeAddress(text);
                 if (at === 0)
                 {
                     return 0;
@@ -4900,8 +4932,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, count >>> 0), OEM_PAGE, ANSI_PAGE));
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), count >>> 0), OEM_PAGE, ANSI_PAGE));
                 return 1;
             },
         },
@@ -4916,8 +4948,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, count >>> 0), ANSI_PAGE, OEM_PAGE));
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), count >>> 0), ANSI_PAGE, OEM_PAGE));
                 return 1;
             },
         },
@@ -4937,12 +4969,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 let length = 0;
-                while (host.readMemory((source >>> 0) + length, 1)[0] !== 0)
+                while (host.readMemory(wholeAddress(source) + length, 1)[0] !== 0)
                 {
                     length++;
                 }
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, length + 1), OEM_PAGE, ANSI_PAGE));
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), length + 1), OEM_PAGE, ANSI_PAGE));
                 return 1;
             },
         },
@@ -4956,9 +4988,9 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                const text = host.readCString(source >>> 0, 0x10000);
-                host.writeMemory(target >>> 0, transcodeSingleByte(
-                    host.readMemory(source >>> 0, text.length + 1), ANSI_PAGE, OEM_PAGE));
+                const text = host.readCString(wholeAddress(source), 0x10000);
+                host.writeMemory(wholeAddress(target), transcodeSingleByte(
+                    host.readMemory(wholeAddress(source), text.length + 1), ANSI_PAGE, OEM_PAGE));
                 return 1;
             },
         },
@@ -4977,8 +5009,9 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                const text = decodeOem(host.readMemory(source >>> 0, count >>> 0));
-                host.writeMemory(target >>> 0, textBytes(text, true).subarray(0, text.length * 2));
+                const text = decodeOem(host.readMemory(wholeAddress(source), count >>> 0));
+                host.writeMemory(wholeAddress(target), textBytes(text, true).subarray(0,
+                    text.length * 2));
                 return 1;
             },
         },
@@ -4992,9 +5025,9 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                const length = host.readCString(source >>> 0, 0x10000).length;
-                const text = decodeOem(host.readMemory(source >>> 0, length));
-                host.writeMemory(target >>> 0, textBytes(text, true));
+                const length = host.readCString(wholeAddress(source), 0x10000).length;
+                const text = decodeOem(host.readMemory(wholeAddress(source), length));
+                host.writeMemory(wholeAddress(target), textBytes(text, true));
                 return 1;
             },
         },
@@ -5013,13 +5046,13 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                const units = host.readMemory(source >>> 0, (count >>> 0) * 2);
+                const units = host.readMemory(wholeAddress(source), (count >>> 0) * 2);
                 let text = '';
                 for (let at = 0; at + 1 < units.length; at += 2)
                 {
                     text += String.fromCharCode(units[at] | units[at + 1] << 8);
                 }
-                host.writeMemory(target >>> 0, charToOem(text));
+                host.writeMemory(wholeAddress(target), charToOem(text));
                 return 1;
             },
         },
@@ -5033,10 +5066,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                const text = readWideString(source >>> 0);
+                const text = readWideString(wholeAddress(source));
                 const bytes = new Uint8Array(text.length + 1);
                 bytes.set(charToOem(text));
-                host.writeMemory(target >>> 0, bytes);
+                host.writeMemory(wholeAddress(target), bytes);
                 return 1;
             },
         },
@@ -5049,7 +5082,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * converted and handed back as a value; anything else is a pointer to
          * a string converted in place, and the pointer is the answer.
          */
-        CharLowerA: caseOfString(false),
+        CharLowerA: { ...caseOfString(false), returns: 'pointer' },
         CharUpperA: caseOfString(true),
 
         /**
@@ -5070,7 +5103,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          *
          * The same, a character being a UTF-16 unit.
          */
-        CharLowerW: caseOfWideString(false),
+        CharLowerW: { ...caseOfWideString(false), returns: 'pointer' },
         CharUpperW: caseOfWideString(true),
         CharLowerBuffW: caseOfWideBuffer(false),
         CharUpperBuffW: caseOfWideBuffer(true),
@@ -5099,6 +5132,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * which is how a caller walking backwards knows to stop.
          */
         CharPrevA: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, current])=>previousCharacter(0, start >>> 0, current >>> 0),
@@ -5113,6 +5147,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * look like a lead one.
          */
         CharPrevExA: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([codePage, start, current])=>
@@ -5126,6 +5161,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * past the start -- not the start, as the ANSI call answers.
          */
         CharPrevW: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, current])=>(
@@ -5141,10 +5177,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * stepped over.
          */
         CharNextExA: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([codePage, text])=>{
-                const at = text >>> 0;
+                const at = wholeAddress(text);
                 if (at === 0)
                 {
                     return 0;
@@ -5470,7 +5507,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 0;
                 }
-                return writeString(name >>> 0, text, count | 0);
+                return writeString(wholeAddress(name), text, count | 0);
             },
         },
         GetClipboardFormatNameW: {
@@ -5722,7 +5759,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([first, second])=>{
                 const a = first >>> 0;
-                const b = second >>> 0;
+                const b = wholeAddress(second);
                 return a === b ? 0 : (a < b ? -1 >>> 0 : 1);
             },
         },
@@ -5875,7 +5912,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             handler: ([info])=>{
                 const CURSORINFO_SIZE = 20;
                 const CURSOR_SHOWING = 0x1;
-                if ((info >>> 0) === 0 || readU32(info >>> 0) !== CURSORINFO_SIZE)
+                if ((info >>> 0) === 0 || readU32(wholeAddress(info)) !== CURSORINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -5972,7 +6009,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 const events = count >>> 0;
-                const at = inputs >>> 0;
+                const at = wholeAddress(inputs);
                 // One after the other: a low-level hook may run guest code
                 // between two of them.
                 /** @param {number} index @param {number} inserted @returns {any} */
@@ -6129,7 +6166,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([info])=>{
                 if ((info >>> 0) === 0
-                    || new DataView(host.readMemory(info >>> 0, 4).slice().buffer)
+                    || new DataView(host.readMemory(wholeAddress(info), 4).slice().buffer)
                         .getUint32(0, true) !== 8)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
@@ -6277,7 +6314,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(state >>> 0, host.queue?.syncedKeyboard?.()
+                host.writeMemory(wholeAddress(state), host.queue?.syncedKeyboard?.()
                     ?? host.keyboardState?.() ?? new Uint8Array(256));
                 return 1;
             },
@@ -6299,7 +6336,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const bytes = host.readMemory(state >>> 0, 256);
+                const bytes = host.readMemory(wholeAddress(state), 256);
                 host.queue?.setSyncedKeyboard?.(bytes);
                 host.setKeyboardState?.(bytes);
                 return 1;
@@ -6534,7 +6571,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             handler: ([layout])=>{
                 const HKL_PREV = 0;
                 const HKL_NEXT = 1;
-                const wanted = layout >>> 0;
+                const wanted = wholeAddress(layout);
                 if (wanted === HKL_PREV || wanted === HKL_NEXT || wanted === HKL_EN_US)
                 {
                     return HKL_EN_US;
@@ -6798,16 +6835,20 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          * message and never gets past the window it was for.
          */
         SetTimer: {
+            returns: 'pointer',
             argBytes: 16,
+            addresses: [3],
             /** @param {number[]} args */
-            handler: ([hwnd, id, elapse, proc])=>{
-                const window = hwnd >>> 0;
+            handler: args=>{
+                const [hwnd, , elapse, proc] = args;
+                const window = wholeAddress(hwnd);
+                // The id is the program's own name for the timer, a pointer of
+                // its own often enough: whole.
+                const id = forwarded(args, 1);
                 // A thread timer named again by the id SetTimer gave it is
                 // retuned, as a window's is; any other id is a new timer.
-                const timerId = window === 0 && !host.queue.hasTimer?.(0, id >>> 0)
-                    ? nextTimerId++
-                    : id >>> 0;
-                host.queue.setTimer(window, timerId, elapse >>> 0, proc >>> 0);
+                const timerId = window === 0 && !host.queue.hasTimer?.(0, id) ? nextTimerId++ : id;
+                host.queue.setTimer(window, timerId, elapse >>> 0, proc);
                 return timerId === 0 ? 1 : timerId;
             },
         },
@@ -6816,7 +6857,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         KillTimer: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hwnd, id])=>(host.queue.killTimer(hwnd >>> 0, id >>> 0) ? 1 : 0),
+            handler: args=>(host.queue.killTimer(args[0] >>> 0, forwarded(args, 1)) ? 1 : 0),
         },
 
         /**
@@ -6832,7 +6873,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         SendMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>sendMessage(hwnd, message, wParam, lParam),
+            handler: args=>{
+                const wide = wideOf(args, 2, 3, true);
+                return andThen(sendMessage(args[0], args[1], args[2], args[3], false, undefined,
+                    wide), result=>wholeAnswer(result, wide));
+            },
         },
 
         /**
@@ -6844,8 +6889,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         SendMessageW: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>
-                sendMessage(hwnd, message, wParam, lParam, true),
+            handler: args=>{
+                const wide = wideOf(args, 2, 3, true);
+                return andThen(sendMessage(args[0], args[1], args[2], args[3], true, undefined,
+                    wide), result=>wholeAnswer(result, wide));
+            },
         },
 
         /**
@@ -6907,7 +6955,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             handler: ([, out])=>{
                 const pointer = host.pointerSize ?? 4;
                 const size = 8 + 6 * pointer + 16;
-                if ((out >>> 0) === 0 || readU32(out >>> 0) !== size)
+                if ((out >>> 0) === 0 || readU32(wholeAddress(out)) !== size)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -6918,7 +6966,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 const held = [host.active?.() ?? 0, host.focus?.() ?? 0, host.capture()];
                 held.forEach((hwnd, index)=>
                     view.setUint32(8 + index * pointer, hwnd >>> 0, true));
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return 1;
             },
         },
@@ -6971,6 +7019,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         ...host.pointerSize === 8 ? {
             /** ULONG_PTR GetClassLongPtrA(HWND hWnd, int nIndex) */
             GetClassLongPtrA: {
+                returns: 'pointer',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
@@ -6980,6 +7029,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
             /** ULONG_PTR GetClassLongPtrW(HWND hWnd, int nIndex) */
             GetClassLongPtrW: {
+                returns: 'pointer',
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([hwnd, index])=>{
@@ -6989,6 +7039,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
             /** ULONG_PTR SetClassLongPtrA(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
             SetClassLongPtrA: {
+                returns: 'pointer',
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
@@ -6997,6 +7048,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
             /** ULONG_PTR SetClassLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong) */
             SetClassLongPtrW: {
+                returns: 'pointer',
                 argBytes: 16,
                 quadwords: [2],
                 /** @param {number[]} args */
@@ -7246,7 +7298,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([processId])=>{
-                const id = processId >>> 0;
+                const id = wholeAddress(processId);
                 if (id !== ASFW_ANY && id !== (host.processId ?? 0)
                     && host.processExists?.(id) === false)
                 {
@@ -7396,10 +7448,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             handler: ([parent, after, className, windowName])=>{
                 const wanted = (className >>> 0) === 0
                     ? null
-                    : host.readCString(className >>> 0, MAX_NAME);
+                    : host.readCString(wholeAddress(className), MAX_NAME);
                 const title = (windowName >>> 0) === 0
                     ? null
-                    : host.readCString(windowName >>> 0, MAX_NAME);
+                    : host.readCString(wholeAddress(windowName), MAX_NAME);
                 const siblings = ordered().filter(record=>record.parent === (parent >>> 0));
                 const start = (after >>> 0) === 0
                     ? 0
@@ -7803,6 +7855,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         CallWindowProcA: {
             argBytes: 20,
+            addresses: [0],
             /** @param {number[]} args */
             handler: args=>callWindowProc(args, false),
         },
@@ -7816,6 +7869,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
          */
         CallWindowProcW: {
             argBytes: 20,
+            addresses: [0],
             /** @param {number[]} args */
             handler: args=>callWindowProc(args, true),
         },

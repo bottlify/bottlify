@@ -39,6 +39,7 @@ import * as inGuestFloat from './inguest-float.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * div_t div(int numerator, int denominator), and ldiv, its long twin: the
@@ -361,7 +362,7 @@ export function createMathFunctions(host){
     const read = host.readMemory;
     handlers._cabs = host.pointerSize === 8 && read
         ? returningDouble(fpu, 4, ([at])=>{
-            const parts = new DataView(read(at >>> 0, 16).slice().buffer);
+            const parts = new DataView(read(wholeAddress(at), 16).slice().buffer);
             const real = parts.getFloat64(0, true);
             const imaginary = parts.getFloat64(8, true);
             return answer([real, imaginary], Math.hypot(real, imaginary));
@@ -501,7 +502,7 @@ export function createMathFunctions(host){
                 }
                 const quotient = Math.trunc(n / d);
                 setRegisters({ edx: (n - quotient * d) >>> 0 });
-                return quotient >>> 0;
+                return wholeAddress(quotient);
             },
         } : {},
     };

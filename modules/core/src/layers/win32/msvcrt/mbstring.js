@@ -27,7 +27,7 @@ import {
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import {
     SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
     toHalfWidth, jisLevel,
@@ -176,15 +176,17 @@ export function createWideFunctions(host){
 
     const wide = {
         /** size_t wcslen(const wchar_t *) -- in the guest */
-        wcslen: guestEntry(inGuest.wcslen, COMPILED.wcslen, host),
+        wcslen: { ...guestEntry(inGuest.wcslen, COMPILED.wcslen, host) },
 
         /** wchar_t *wcscpy(wchar_t *dest, const wchar_t *src) -- in the guest */
-        wcscpy: guestEntry(inGuest.wcscpy, COMPILED.wcscpy, host),
+        wcscpy: { ...guestEntry(inGuest.wcscpy, COMPILED.wcscpy, host), returns: 'pointer' },
 
         /** wchar_t *wcsncpy(wchar_t *dest, const wchar_t *src, size_t count) */
         wcsncpy: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const length = count >>> 0;
@@ -207,6 +209,7 @@ export function createWideFunctions(host){
         wcsxfrm: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const room = count >>> 0;
@@ -232,6 +235,7 @@ export function createWideFunctions(host){
              * null, errno untouched.
              */
             _wcsdup: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 4,
                 /** @param {number[]} args */
@@ -253,10 +257,10 @@ export function createWideFunctions(host){
         } : {},
 
         /** wchar_t *wcscat(wchar_t *dest, const wchar_t *src) -- in the guest */
-        wcscat: guestEntry(inGuest.wcscat, COMPILED.wcscat, host),
+        wcscat: { ...guestEntry(inGuest.wcscat, COMPILED.wcscat, host), returns: 'pointer' },
 
         /** wchar_t *wcsncat(wchar_t *dest, const wchar_t *src, size_t count) -- in the guest */
-        wcsncat: guestEntry(inGuest.wcsncat, COMPILED.wcsncat, host),
+        wcsncat: { ...guestEntry(inGuest.wcsncat, COMPILED.wcsncat, host), returns: 'pointer' },
 
         /** int wcscmp(const wchar_t *, const wchar_t *) -- in the guest */
         wcscmp: guestEntry(inGuest.wcscmp, COMPILED.wcscmp, host),
@@ -268,22 +272,23 @@ export function createWideFunctions(host){
         _wcsicmp: guestEntry(inGuest._wcsicmp, COMPILED._wcsicmp, host),
 
         /** wchar_t *wcschr(const wchar_t *, wchar_t) -- in the guest */
-        wcschr: guestEntry(inGuest.wcschr, COMPILED.wcschr, host),
+        wcschr: { ...guestEntry(inGuest.wcschr, COMPILED.wcschr, host), returns: 'pointer' },
 
         /** wchar_t *wcsrchr(const wchar_t *, wchar_t) -- in the guest */
-        wcsrchr: guestEntry(inGuest.wcsrchr, COMPILED.wcsrchr, host),
+        wcsrchr: { ...guestEntry(inGuest.wcsrchr, COMPILED.wcsrchr, host), returns: 'pointer' },
 
         /** int _wcsnicmp(const wchar_t *left, const wchar_t *right, size_t count) -- in the guest, ASCII folded */
         _wcsnicmp: guestEntry(inGuest._wcsnicmp, COMPILED._wcsnicmp, host),
 
         /** wchar_t *_wcslwr(wchar_t *text) -- ASCII lowered in place, as the C locale has it */
-        _wcslwr: foldInPlace(LOWER),
+        _wcslwr: { ...foldInPlace(LOWER), returns: 'pointer' },
 
         /** wchar_t *_wcsupr(wchar_t *text) -- ASCII raised in place */
-        _wcsupr: foldInPlace(UPPER),
+        _wcsupr: { ...foldInPlace(UPPER), returns: 'pointer' },
 
         /** wchar_t *_wcsrev(wchar_t *text) -- the units reversed in place, as `_strrev` reverses bytes */
         _wcsrev: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -300,6 +305,7 @@ export function createWideFunctions(host){
          * ends each token, and null for the text carries on from there.
          */
         wcstok: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -344,16 +350,16 @@ export function createWideFunctions(host){
         },
 
         /** size_t wcsspn(const wchar_t *text, const wchar_t *accept) -- in the guest */
-        wcsspn: guestEntry(inGuest.wcsspn, COMPILED.wcsspn, host),
+        wcsspn: { ...guestEntry(inGuest.wcsspn, COMPILED.wcsspn, host) },
 
         /** size_t wcscspn(const wchar_t *text, const wchar_t *reject) -- in the guest */
-        wcscspn: guestEntry(inGuest.wcscspn, COMPILED.wcscspn, host),
+        wcscspn: { ...guestEntry(inGuest.wcscspn, COMPILED.wcscspn, host) },
 
         /** wchar_t *wcspbrk(const wchar_t *text, const wchar_t *accept) -- in the guest */
-        wcspbrk: guestEntry(inGuest.wcspbrk, COMPILED.wcspbrk, host),
+        wcspbrk: { ...guestEntry(inGuest.wcspbrk, COMPILED.wcspbrk, host), returns: 'pointer' },
 
         /** wchar_t *wcsstr(const wchar_t *, const wchar_t *) -- in the guest */
-        wcsstr: guestEntry(inGuest.wcsstr, COMPILED.wcsstr, host),
+        wcsstr: { ...guestEntry(inGuest.wcsstr, COMPILED.wcsstr, host), returns: 'pointer' },
 
         /**
          * size_t mbstowcs(wchar_t *dest, const char *src, size_t count)
@@ -365,6 +371,7 @@ export function createWideFunctions(host){
         mbstowcs: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 if ((source >>> 0) === 0)
@@ -397,6 +404,7 @@ export function createWideFunctions(host){
         wcstombs: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const text = readWide(source);
@@ -454,6 +462,7 @@ export function createWideFunctions(host){
         mbrtowc: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 if ((source >>> 0) === 0)
@@ -477,6 +486,7 @@ export function createWideFunctions(host){
         mbrlen: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([source, count])=>{
                 if ((source >>> 0) === 0)
@@ -528,9 +538,11 @@ export function createWideFunctions(host){
         mbsrtowcs: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
-                const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
+                const source = width.get(new DataView(host.readMemory(wholeAddress(from),
+                    width.size)
                     .slice().buffer), 0);
                 const text = readNarrowUnits(source);
                 if ((destination >>> 0) === 0)
@@ -541,7 +553,8 @@ export function createWideFunctions(host){
                 const converted = text.slice(0, room);
                 const ended = converted.length < room;
                 writeWide(destination, converted, ended);
-                host.writeMemory(from >>> 0, width.bytes(ended ? 0 : source + converted.length));
+                host.writeMemory(wholeAddress(from),
+                    width.bytes(ended ? 0 : source + converted.length));
                 return converted.length;
             },
         },
@@ -556,9 +569,11 @@ export function createWideFunctions(host){
         wcsrtombs: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
-                const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
+                const source = width.get(new DataView(host.readMemory(wholeAddress(from),
+                    width.size)
                     .slice().buffer), 0);
                 const text = readWide(source);
                 const room = (destination >>> 0) === 0 ? text.length + 1 : count >>> 0;
@@ -569,7 +584,7 @@ export function createWideFunctions(host){
                     if ((destination >>> 0) !== 0)
                     {
                         writeNarrow(destination, converted.slice(0, refused), false);
-                        host.writeMemory(from >>> 0, width.bytes(source + refused * 2));
+                        host.writeMemory(wholeAddress(from), width.bytes(source + refused * 2));
                     }
                     host.errno?.(EILSEQ);
                     return -1;
@@ -580,7 +595,7 @@ export function createWideFunctions(host){
                 }
                 const ended = converted.length < room;
                 writeNarrow(destination, converted, ended);
-                host.writeMemory(from >>> 0,
+                host.writeMemory(wholeAddress(from),
                     width.bytes(ended ? 0 : source + converted.length * 2));
                 return converted.length;
             },
@@ -590,6 +605,7 @@ export function createWideFunctions(host){
         mbtowc: {
             convention: 'cdecl',
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 if ((source >>> 0) === 0 || (count >>> 0) === 0)
@@ -841,6 +857,7 @@ export function createMultiByteFunctions(narrow, host){
         mblen: {
             convention: 'cdecl',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([text, count])=>{
                 if ((text >>> 0) === 0)
@@ -851,7 +868,7 @@ export function createMultiByteFunctions(narrow, host){
                 {
                     return -1;
                 }
-                return host.readMemory(text >>> 0, 1)[0] === 0 ? 0 : 1;
+                return host.readMemory(wholeAddress(text), 1)[0] === 0 ? 0 : 1;
             },
         },
         ...narrow.strlen ? { _mbstrlen: narrow.strlen } : {},

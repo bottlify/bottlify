@@ -27,6 +27,7 @@ import { formatGuid } from '../ole32/guid.js';
 import { REG_EXPAND_SZ, REG_SZ } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { BASE85 } from './system.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -572,7 +573,7 @@ export function createProductFunctions(context){
             }
             if ((date >>> 0) !== 0)
             {
-                context.writeMemory(date >>> 0, new Uint8Array(2));
+                context.writeMemory(wholeAddress(date), new Uint8Array(2));
             }
             return ERROR_SUCCESS;
         }),
@@ -785,7 +786,7 @@ export function createProductFunctions(context){
             }
             const md5 = createMd5();
             md5.update(bytes);
-            context.writeMemory((hash >>> 0) + 4, md5.digest());
+            context.writeMemory(wholeAddress(hash) + 4, md5.digest());
             return ERROR_SUCCESS;
         }),
         ...both('MsiGetFileSignatureInformation', 20, wide=>([path, flags, certificate])=>{
@@ -1606,7 +1607,7 @@ export function createProductFunctions(context){
             // msi.dll's own string table: none of its strings is carried here.
             if ((buffer >>> 0) !== 0 && (room | 0) > 0)
             {
-                context.writeMemory(buffer >>> 0, new Uint8Array(2));
+                context.writeMemory(wholeAddress(buffer), new Uint8Array(2));
             }
             return 0;
         }),

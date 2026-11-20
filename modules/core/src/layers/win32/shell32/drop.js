@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * A drop's HDROP: the global block WM_DROPFILES hands a window, a DROPFILES
  * header then the dropped paths, each ended by a NUL and the list by one
@@ -141,11 +143,11 @@ export function createDropFunctions(host, decode, encode){
                     bytes[i * 2] = cut.charCodeAt(i) & 0xff;
                     bytes[i * 2 + 1] = cut.charCodeAt(i) >>> 8;
                 }
-                host.writeMemory(buffer >>> 0, bytes);
+                host.writeMemory(wholeAddress(buffer), bytes);
                 return cut.length;
             }
             const bytes = encode(cut);
-            host.writeMemory(buffer >>> 0, Uint8Array.of(...bytes, 0));
+            host.writeMemory(wholeAddress(buffer), Uint8Array.of(...bytes, 0));
             return bytes.length;
         },
     });
@@ -175,7 +177,7 @@ export function createDropFunctions(host, decode, encode){
                     const view = new DataView(bytes.buffer);
                     view.setInt32(0, read.x, true);
                     view.setInt32(4, read.y, true);
-                    host.writeMemory(point >>> 0, bytes);
+                    host.writeMemory(wholeAddress(point), bytes);
                 }
                 return read.client ? 1 : 0;
             },

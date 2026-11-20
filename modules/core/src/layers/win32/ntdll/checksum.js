@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The checksums ntdll computes over a caller's bytes.
  *
@@ -53,7 +55,8 @@ export function createChecksumFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([initial, data, length])=>crc32(initial >>> 0,
-                (length | 0) <= 0 ? new Uint8Array(0) : host.readMemory(data >>> 0, length | 0)),
+                (length | 0) <= 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(data),
+                    length | 0)),
         },
     };
 }

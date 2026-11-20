@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Disk space lists: what a set of copies and deletes would take on each
  * drive, before any of them is done.
@@ -105,7 +107,7 @@ export function createDiskSpaceFunctions(host){
     const writeI64 = (address, value)=>{
         const bytes = new Uint8Array(8);
         new DataView(bytes.buffer).setBigInt64(0, BigInt(value), true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {boolean} wide */
@@ -249,7 +251,7 @@ export function createDiskSpaceFunctions(host){
                 }
                 if ((buffer >>> 0) !== 0)
                 {
-                    host.writeMemory((buffer >>> 0) + used * (wide ? 2 : 1),
+                    host.writeMemory(wholeAddress(buffer) + used * (wide ? 2 : 1),
                         host.encode(letter, wide));
                 }
                 used = needed;
@@ -259,7 +261,7 @@ export function createDiskSpaceFunctions(host){
             {
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, total, true);
-                host.writeMemory(requiredOut >>> 0, bytes);
+                host.writeMemory(wholeAddress(requiredOut), bytes);
             }
             if ((buffer >>> 0) === 0)
             {
@@ -269,7 +271,7 @@ export function createDiskSpaceFunctions(host){
             {
                 return fail(ERROR_INSUFFICIENT_BUFFER);
             }
-            host.writeMemory((buffer >>> 0) + used * (wide ? 2 : 1), host.encode('', wide));
+            host.writeMemory(wholeAddress(buffer) + used * (wide ? 2 : 1), host.encode('', wide));
             return fail(0, 1);
         },
     });

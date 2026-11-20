@@ -12,16 +12,13 @@
  */
 
 import {
-    EAX, EBX, ECX, EDX, I386, assemble, dword, letHeldGo, prologue, routine, takeHeld,
+    EAX, EBX, ECX, EDI, EDX, ESI, I386, assemble, dword, laidParts, letHeldGo, prologue, routine,
+    takeHeld,
 } from './assemble.js';
 import {
     BUFFER, COMMAND, D3DLOCK_DISCARD, D3DLOCK_NOOVERWRITE, D3DLOCK_READONLY, FLAG_SLOW_PATH, LEVEL,
     LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE,
 } from '../block.js';
-
-/** ModR/M register numbers the assembler's own list leaves out. */
-const ESI = 6;
-const EDI = 7;
 
 /**
  * HRESULT Lock(this, UINT offset, UINT size, BYTE** out, DWORD flags), as
@@ -236,11 +233,8 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
         { jcc: 0x72, to: 'held' },                               // jc held
         [0x3b, 0x41, BUFFER.LENGTH],                             // cmp eax, [ecx+8]
         { jcc: 0x77, to: 'held' },                               // ja held
-        [...width.argOp([0x83], 7, 3), 0x00],                    // cmp dword [esp+16], 0
+        [...width.pointerOp([0x83], 7, 3), 0x00],                // cmp dword [esp+16], 0
         { jcc: 0x74, to: 'held' },                               // je held
-        // A 64-bit out-pointer the routine cannot write is the host's, before
-        // the move: past it no way leads to the trap.
-        ...width.highZero(3, 'held'),
         [0x83, 0x79, BUFFER.SPARE_FREE, 0x00],                   // cmp dword [ecx+48], 0
         { jcc: 0x75, to: 'first' },                              // jne first
         [0x83, 0x79, BUFFER.SPARE_FREE + 4, 0x00],               // cmp dword [ecx+52], 0
@@ -250,7 +244,7 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
         { label: 'first' },
         [0x31, 0xc0],                                            // xor eax, eax
         { label: 'move' },
-        [0x53, 0x56],                                            // push ebx; push esi
+        width.save([EBX, ESI]),                                  // push ebx; push esi
         [0x89, 0xc3],                                            // mov ebx, eax
         [0x83, 0xba, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [edx+disp], 0
         { jcc: 0x74, to: 'full' },                               // je full
@@ -276,10 +270,10 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
         [0xbe, ...dword(COMMAND.ARGS + 8)],                      // mov esi, 16
         [0x87, 0x70, COMMAND.BYTES],                             // xchg [eax+4], esi
         [...width.argOp([0xc7], 0, 4, 2), ...dword(D3DLOCK_NOOVERWRITE)], // [esp+28] = imm
-        [0x5e, 0x5b],                                            // pop esi; pop ebx
+        width.restore([ESI, EBX]),                               // pop esi; pop ebx
         { jcc: 0xeb, to: 'free' },                               // jmp free
         { label: 'full' },
-        [0x5e, 0x5b],                                            // pop esi; pop ebx
+        width.restore([ESI, EBX]),                               // pop esi; pop ebx
         { jcc: 0xeb, to: 'held' },                               // jmp held
     ];
     const parts = [
@@ -318,16 +312,15 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
         { jcc: 0x72, to: 'held' },                               // jc held
         [0x3b, 0x51, BUFFER.LENGTH],                             // cmp edx, [ecx+8]
         { jcc: 0x77, to: 'held' },                               // ja held
-        [...width.argOp([0x83], 7, 3), 0x00],                    // cmp dword [esp+16], 0
+        [...width.pointerOp([0x83], 7, 3), 0x00],                // cmp dword [esp+16], 0
         { jcc: 0x74, to: 'held' },                               // je held
-        ...width.highZero(3, 'held'),
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'held' },
         [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
         letHeldGo(0),                                            // mov dword [eax+HELD], 0
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'take' },
-        [0x53],                                                  // push ebx
+        width.save([EBX]),                                       // push ebx
         [0x8b, 0x59, BUFFER.TO],                                 // mov ebx, [ecx+20]
         [0x3b, 0x59, BUFFER.FROM],                               // cmp ebx, [ecx+16]
         { jcc: 0x75, to: 'merge' },                              // jne merge
@@ -360,9 +353,9 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
         [0x89, 0x8c, 0x93, ...dword(SHADOW.LOCK_RING)],          // mov [ebx+edx*4+disp], ecx
         [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
         letHeldGo(EBX),                                          // mov dword [ebx+HELD], 0
-        width.arg(EBX, 3, 1),                                    // mov ebx, [esp+20]
+        width.pointer(EBX, 3, 1),                                // mov ebx, [esp+20]
         width.storePointer(EBX, EAX, 0),                         // mov [ebx], eax
-        [0x5b],                                                  // pop ebx
+        width.restore([EBX]),                                    // pop ebx
         ...(renameSlot === undefined ? [] : [
             width.arg(EDX, 0),                                   // mov edx, [esp+4]
             [0x3b, 0x51, BUFFER.SPARES],                         // cmp edx, [ecx+40]
@@ -433,8 +426,8 @@ export function lockCode(at, trap, renameSlot, copyAt, width = I386){
  * @returns {Uint8Array}
  */
 export function moveCopyCode(width = I386){
-    return assemble([
-        [0x56, 0x57, 0x53],                                      // push esi; push edi; push ebx
+    return assemble(laidParts([
+        width.save([ESI, EDI, EBX]),                             // push esi; push edi; push ebx
         [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
         width.arg(EBX, 2, 3),                                    // mov ebx, [esp+24]
         [0x85, 0xdb],                                            // test ebx, ebx
@@ -459,10 +452,10 @@ export function moveCopyCode(width = I386){
         [0x89, 0xd1],                                            // mov ecx, edx
         width.argOp([0x2b], ECX, 1, 3),                          // sub ecx, [esp+20]
         [0xf3, 0xa4],                                            // rep movsb
-        [0x5b, 0x5f, 0x5e],                                      // pop ebx; pop edi; pop esi
+        width.restore([EBX, EDI, ESI]),                          // pop ebx; pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(5),                                            // ret 20
-    ]);
+    ], width));
 }
 
 /**
@@ -803,15 +796,13 @@ export function lockLevelCode(at, trap, { find, box = false }, width = I386){
         [0x81, 0xba, ...dword(SHADOW.RING_HEAD), ...dword(SHADOW.RING_CAPACITY)], // cmp [edx+d], 64
         { jcc: 0x73, to: 'held', near: true },                   // jae held
         { label: 'room' },
-        [...width.argOp([0x83], 7, out), 0x00],                  // cmp dword [esp+out], 0
+        [...width.pointerOp([0x83], 7, out), 0x00],              // cmp dword [esp+out], 0
         { jcc: 0x74, to: 'held', near: true },                   // je held
-        ...width.highZero(out, 'held'),
-        ...width.highZero(rect, 'held'),
-        [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
-        width.arg(ESI, rect, 3),                                 // mov esi, [esp+rect+12]
+        width.save([EBX, ESI, EDI]),                             // push ebx; push esi; push edi
+        width.pointer(ESI, rect, 3),                             // mov esi, [esp+rect+12]
         [0x31, 0xdb],                                            // xor ebx, ebx
         [0x89, 0x59, LEVEL.BOXED],                               // mov [ecx+60], ebx
-        [0x85, 0xf6],                                            // test esi, esi
+        width.testPointer(ESI),                                  // test esi, esi
         { jcc: 0x74, to: 'take', near: true },                   // jz take
         [0x8b, 0x46, 0x08],                                      // mov eax, [esi+8]: right
         [0x3b, 0x41, LEVEL.WIDTH],                               // cmp eax, [ecx+40]
@@ -868,7 +859,7 @@ export function lockLevelCode(at, trap, { find, box = false }, width = I386){
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
         [0x89, 0xd8],                                            // mov eax, ebx
         [0x03, 0x41, LEVEL.BASE],                                // add eax, [ecx+4]
-        width.arg(EDI, out, 3),                                  // mov edi, [esp+out+12]
+        width.pointer(EDI, out, 3),                              // mov edi, [esp+out+12]
         [0x8b, 0x51, LEVEL.ROW_PITCH],                           // mov edx, [ecx+20]
         [0x89, 0x17],                                            // mov [edi], edx
         // pBits after the pitch, or after the two of a box: a pointer, at 4 in a
@@ -880,11 +871,11 @@ export function lockLevelCode(at, trap, { find, box = false }, width = I386){
                 width.storePointer(EDI, EAX, 8),                 // mov [edi+8], eax
             ]
             : [width.storePointer(EDI, EAX, width.word)]),       // mov [edi+4], eax
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        width.restore([EDI, ESI, EBX]),                          // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         width.ret(flags + 1),                                    // ret: this and the arguments
         { label: 'refused' },
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        width.restore([EDI, ESI, EBX]),                          // pop edi; pop esi; pop ebx
         { label: 'held' },
         [0x8b, 0x41, LEVEL.DEVICE],                              // mov eax, [ecx+28]
         letHeldGo(0),                                            // mov dword [eax+HELD], 0

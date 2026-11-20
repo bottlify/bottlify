@@ -17,6 +17,7 @@
 
 import { publishEnumerator } from './enumerator.js';
 import { FORMATETC_SIZE, STGMEDIUM_SIZE, SLOT, createOleUtil } from './oleutil.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -218,7 +219,8 @@ export function createAdviseFunctions(env){
                                     {
                                         return E_INVALIDARG;
                                     }
-                                    const copy = env.readMemory(format >>> 0, FORMATETC_SIZE)
+                                    const copy = env.readMemory(wholeAddress(format),
+                                        FORMATETC_SIZE)
                                         .slice();
                                     // The target device is the caller's; the copy keeps none.
                                     copy.fill(0, 4, 8);

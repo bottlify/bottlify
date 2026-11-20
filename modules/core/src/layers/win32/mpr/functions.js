@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * mpr -- the network provider router, behind which this machine has no network.
  *
@@ -134,7 +136,7 @@ export function createNetworkFunctions(host){
             enumerations.add(handle);
             const bytes = new Uint8Array(4);
             new DataView(bytes.buffer).setUint32(0, handle, true);
-            host.writeMemory(out >>> 0, bytes);
+            host.writeMemory(wholeAddress(out), bytes);
             return NO_ERROR;
         },
     };

@@ -31,9 +31,21 @@ import { compiledAt } from './block.js';
 import { createDeviceRing } from './d3d10-ring.js';
 import { createDirect3D11Seam } from './d3d11.js';
 import { COMPILED } from './d3d10-inguest.x86.js';
+import { COMPILED as COMPILED_LONG } from './d3d10-inguest.x64.js';
 
-/** The routines by name. @type {Record<string, any>} */
-const IN_GUEST = COMPILED;
+/**
+ * The routines by name, for each width: one source (`d3d10-inguest.js`), a
+ * 64-bit process placing its x86-64.
+ *
+ * @type {Record<4 | 8, Record<string, any>>}
+ */
+const IN_GUEST = { 4: COMPILED, 8: COMPILED_LONG };
+/**
+ * The routines a 64-bit process leaves to the trap: ClearDepthStencilView's
+ * depth is a FLOAT by value, the fourth argument, which the x64 convention
+ * passes in XMM3 where the routine reads R9.
+ */
+const NARROW = new Set(['ClearDepthStencilView']);
 import { ID3D10DEVICE_SLOTS } from '../d3d10/slots.js';
 import { createEffectSeam } from './d3d10-effect.js';
 import { readGuid } from './ddraw.js';
@@ -792,13 +804,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
      *
      * @param {number} address @param {number} value
      */
-    const writePointer = (address, value)=>{
-        fields.writeU32(address, value);
-        if (long)
-        {
-            fields.writeU32((address >>> 0) + 4, 0);
-        }
-    };
+    const writePointer = (address, value)=>fields.writePointer(address, value, long ? 8 : 4);
     const SUBRESOURCE_DATA = long ? D3D10_SUBRESOURCE_DATA_64 : D3D10_SUBRESOURCE_DATA;
     const INPUT_ELEMENT_DESC = long ? D3D10_INPUT_ELEMENT_DESC_64 : D3D10_INPUT_ELEMENT_DESC;
     const ADAPTER_DESC = long ? DXGI_ADAPTER_DESC_64 : DXGI_ADAPTER_DESC;
@@ -899,25 +905,33 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             unattachedMaps[usage] = (unattachedMaps[usage] ?? 0) + 1;
         }
     };
+    /**
+     * A routine's guest slot: its code of the process's width placed, or the
+     * trap where there was no room. Built for either width, so a 64-bit
+     * process takes it as a 32-bit one does (`wide`, `createVtables`).
+     *
+     * @param {string} routine
+     */
+    const guestOf = routine=>Object.assign((/** @type {{ trap: number }} */ { trap })=>
+        placeCode(at=>compiledAt(IN_GUEST[long ? 8 : 4][routine], at, trap)) || trap,
+    { wide: /** @type {true} */ (true) });
     /** A dynamic buffer's map and unmap, in the guest, where devices have rings. */
     const bufferGuests = ringAllocate
         ? Object.fromEntries([['Map', 'BufferMap'], ['Unmap', 'BufferUnmap']]
             .filter(([name])=>!traps.has(`Buffer.${name}`)).map(([name, routine])=>[name,
-                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
-                    IN_GUEST[routine], at, trap)) || trap]))
+                guestOf(routine)]))
         : {};
     /** The device's methods that run in the guest, where a device has a ring. */
     const ringGuests = ringAllocate
-        ? Object.fromEntries(RING_METHODS.filter(name=>!traps.has(name)).map(name=>[name,
-            (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(IN_GUEST[name], at,
-                trap)) || trap]))
+        ? Object.fromEntries(RING_METHODS.filter(name=>!traps.has(name)
+            && !(long && NARROW.has(name))).map(name=>[name, guestOf(name)]))
         : {};
     /** Direct3D 11's immediate context's, into its device's ring. */
     const contextGuests = ringAllocate
         ? Object.fromEntries(Object.entries(CONTEXT_RING)
-            .filter(([name])=>!traps.has(`Context.${name}`)).map(([name, routine])=>[name,
-                (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
-                    IN_GUEST[routine], at, trap)) || trap]))
+            .filter(([name, routine])=>!traps.has(`Context.${name}`)
+                && !(long && NARROW.has(routine))).map(([name, routine])=>[name,
+                guestOf(routine)]))
         : {};
     /**
      * A device's command ring, made before the device is published: publishing
@@ -1431,26 +1445,26 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             return hr === S_OK ? E_INVALIDARG : hr;
         }
         writeWide(out + ADAPTER_DESC.Description, held.desc.Description, 128);
-        if (long)
-        {
-            // The memories' high halves: a gigabyte is a low half alone.
-            for (const field of /** @type {const} */ (['DedicatedVideoMemory',
-                'DedicatedSystemMemory', 'SharedSystemMemory']))
-            {
-                fields.writeU32(out + ADAPTER_DESC[field] + 4, 0);
-            }
-        }
+        const memories = {
+            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+            DedicatedSystemMemory: 0,
+            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+        };
         fields.writeStruct(out, ADAPTER_DESC, {
             VendorId: held.desc.VendorId,
             DeviceId: held.desc.DeviceId,
             SubSysId: held.desc.SubSysId,
             Revision: held.desc.Revision,
-            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
-            DedicatedSystemMemory: 0,
-            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
+            ...memories,
             AdapterLuidLow: held.desc.AdapterLuid?.low ?? 1,
             AdapterLuidHigh: held.desc.AdapterLuid?.high ?? 0,
         });
+        // The memories are SIZE_Ts, pointer-sized: written whole, their upper
+        // halves too in a 64-bit process.
+        for (const [field, bytes] of Object.entries(memories))
+        {
+            writePointer(out + ADAPTER_DESC[/** @type {keyof typeof memories} */ (field)], bytes);
+        }
         return S_OK;
     };
 
@@ -5053,11 +5067,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         /** HRESULT D3D10StateBlockMaskUnion(mask*, mask*, mask*) */
         D3D10StateBlockMaskUnion: combineEntry(stateBlockMask.Union),
         /** const char* D3D10GetVertexShaderProfile(ID3D10Device*) */
-        D3D10GetVertexShaderProfile: profileEntry(SHADER_PROFILE.VERTEX),
+        D3D10GetVertexShaderProfile: { ...profileEntry(SHADER_PROFILE.VERTEX), returns: 'pointer' },
         /** const char* D3D10GetPixelShaderProfile(ID3D10Device*) */
-        D3D10GetPixelShaderProfile: profileEntry(SHADER_PROFILE.PIXEL),
+        D3D10GetPixelShaderProfile: { ...profileEntry(SHADER_PROFILE.PIXEL), returns: 'pointer' },
         /** const char* D3D10GetGeometryShaderProfile(ID3D10Device*) */
-        D3D10GetGeometryShaderProfile: profileEntry(SHADER_PROFILE.GEOMETRY),
+        D3D10GetGeometryShaderProfile: {
+            ...profileEntry(SHADER_PROFILE.GEOMETRY), returns: 'pointer',
+        },
         /**
          * HRESULT D3D10CompileShader(const char*, SIZE_T, const char*,
          *     const D3D10_SHADER_MACRO*, ID3D10Include*, const char*, const char*,

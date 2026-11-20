@@ -41,6 +41,7 @@ import {
     IID_IMEDIA_SAMPLE, IID_IMEM_ALLOCATOR, IID_IMEM_INPUT_PIN, IID_IPERSIST, IID_IPIN,
     IMEDIA_FILTER_SLOTS, IMEDIA_SAMPLE_SLOTS, IMEM_ALLOCATOR_SLOTS, IPIN_SLOTS, VTABLE,
 } from './interfaces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -180,12 +181,12 @@ export function createStreaming(host){
         {
             return E_POINTER;
         }
-        host.writeMemory(address >>> 0, words(value));
+        host.writeMemory(wholeAddress(address), words(value));
         return S_OK;
     };
 
     /** @param {number} self @param {number} slot */
-    const entryOf = (self, slot)=>host.readU32((host.readU32(self >>> 0) + slot * 4) >>> 0);
+    const entryOf = (self, slot)=>host.readU32((host.readU32(wholeAddress(self)) + slot * 4) >>> 0);
 
     /**
      * A method of one of the program's objects, called on the thread the

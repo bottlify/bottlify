@@ -25,6 +25,7 @@ import { PROCESSOR } from './processor.js';
 import { TAKEN } from './named-objects.js';
 import { OBJ_OPENIF, nameToWalk, readObjectAttributes } from './object-attributes.js';
 import { STATUS } from '../ntdll/status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -775,11 +776,17 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeDword(block >>> 0, 0);
+                writeDword(wholeAddress(block), 0);
                 const status = (host.cancelSynchronous?.(thread, request >>> 0) ?? 0) > 0
                     ? STATUS.SUCCESS : STATUS.NOT_FOUND;
-                writeDword(block >>> 0, status);
-                writeDword((block >>> 0) + 4, 0);
+                // Status and Information, each a pointer wide.
+                writeDword(wholeAddress(block), status);
+                writeDword(wholeAddress(block) + 4, 0);
+                if (wide)
+                {
+                    writeDword(wholeAddress(block) + 8, 0);
+                    writeDword(wholeAddress(block) + 12, 0);
+                }
                 return status;
             },
         },
@@ -824,7 +831,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.OBJECT_TYPE_MISMATCH;
                 }
-                writeDword(out >>> 0, made.handle);
+                writeDword(wholeAddress(out), made.handle);
                 return made.reused ? STATUS.OBJECT_NAME_EXISTS : STATUS.SUCCESS;
             },
         },
@@ -859,7 +866,7 @@ export function createProcessPolicyFunctions(host){
                     return STATUS.OBJECT_NAME_NOT_FOUND;
                 }
                 host.namedObjects?.reference(found);
-                writeDword(out >>> 0, kernel.handles.open('job', found));
+                writeDword(wholeAddress(out), kernel.handles.open('job', found));
                 return STATUS.SUCCESS;
             },
         },
@@ -912,7 +919,7 @@ export function createProcessPolicyFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([context])=>{
-            const at = context >>> 0;
+            const at = wholeAddress(context);
             if (at === 0 || !host.setRegisters)
             {
                 return STATUS_ACCESS_VIOLATION;
@@ -987,12 +994,12 @@ export function createProcessPolicyFunctions(host){
                     const frames = backTrace(skip >>> 0, Math.min(wanted >>> 0, 0xffff));
                     let sum = 0;
                     frames.forEach((address, index)=>{
-                        writeDword((out >>> 0) + index * 4, address);
+                        writeDword(wholeAddress(out) + index * 4, address);
                         sum = (sum + address) >>> 0;
                     });
                     if ((hash >>> 0) !== 0)
                     {
-                        writeDword(hash >>> 0, sum);
+                        writeDword(wholeAddress(hash), sum);
                     }
                     return frames.length;
                 },
@@ -1080,7 +1087,7 @@ export function createProcessPolicyFunctions(host){
                     }
                     inJob = job.processes.has(process);
                 }
-                writeDword(out >>> 0, inJob ? 1 : 0);
+                writeDword(wholeAddress(out), inJob ? 1 : 0);
                 return 1;
             },
         },
@@ -1114,9 +1121,9 @@ export function createProcessPolicyFunctions(host){
                 }
                 if ((type >>> 0) === JOB.ASSOCIATE_COMPLETION_PORT)
                 {
-                    return associatePort(job, host.readMemory(from >>> 0, record.length));
+                    return associatePort(job, host.readMemory(wholeAddress(from), record.length));
                 }
-                record.set(host.readMemory(from >>> 0, record.length));
+                record.set(host.readMemory(wholeAddress(from), record.length));
                 return 1;
             },
         },
@@ -1182,10 +1189,10 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_BAD_LENGTH);
                 }
-                host.writeMemory(to >>> 0, answer);
+                host.writeMemory(wholeAddress(to), answer);
                 if ((returned >>> 0) !== 0)
                 {
-                    writeDword(returned >>> 0, answer.length);
+                    writeDword(wholeAddress(returned), answer.length);
                 }
                 return more ? fail(ERROR_MORE_DATA) : 1;
             },
@@ -1233,13 +1240,14 @@ export function createProcessPolicyFunctions(host){
          */
         GetProcessMitigationPolicy: {
             argBytes: 16,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([process, policy, to, length])=>{
                 if (!processOf(process))
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const which = policy >>> 0;
+                const which = wholeAddress(policy);
                 const size = which === DEP_POLICY ? 8 : 4;
                 if (which >= MITIGATION_POLICIES || (length >>> 0) !== size || (to >>> 0) === 0)
                 {
@@ -1247,11 +1255,11 @@ export function createProcessPolicyFunctions(host){
                 }
                 if (which === DEP_POLICY)
                 {
-                    writeDword(to >>> 0, depFlags);
-                    writeDword((to >>> 0) + 4, depPermanent ? 1 : 0);
+                    writeDword(wholeAddress(to), depFlags);
+                    writeDword(wholeAddress(to) + 4, depPermanent ? 1 : 0);
                     return 1;
                 }
-                writeDword(to >>> 0, mitigations.get(which) ?? 0);
+                writeDword(wholeAddress(to), mitigations.get(which) ?? 0);
                 return 1;
             },
         },
@@ -1265,20 +1273,21 @@ export function createProcessPolicyFunctions(host){
          */
         SetProcessMitigationPolicy: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([policy, from, length])=>{
-                const which = policy >>> 0;
+                const which = wholeAddress(policy);
                 const size = which === DEP_POLICY ? 8 : 4;
                 if (which >= MITIGATION_POLICIES || which === ASLR_POLICY
                     || (length >>> 0) !== size || (from >>> 0) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const flags = readDword(from >>> 0);
+                const flags = readDword(wholeAddress(from));
                 if (which === DEP_POLICY)
                 {
                     depFlags |= flags;
-                    depPermanent ||= readDword((from >>> 0) + 4) !== 0;
+                    depPermanent ||= readDword(wholeAddress(from) + 4) !== 0;
                     return 1;
                 }
                 mitigations.set(which, (mitigations.get(which) ?? 0) | flags);
@@ -1335,11 +1344,11 @@ export function createProcessPolicyFunctions(host){
                 }
                 if ((flags >>> 0) !== 0)
                 {
-                    writeDword(flags >>> 0, depFlags);
+                    writeDword(wholeAddress(flags), depFlags);
                 }
                 if ((permanent >>> 0) !== 0)
                 {
-                    writeDword(permanent >>> 0, depPermanent ? 1 : 0);
+                    writeDword(wholeAddress(permanent), depPermanent ? 1 : 0);
                 }
                 return 1;
             },
@@ -1366,7 +1375,8 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                processInformation.set(type >>> 0, host.readMemory(from >>> 0, size).slice());
+                processInformation.set(type >>> 0, host.readMemory(wholeAddress(from),
+                    size).slice());
                 return 1;
             },
         },
@@ -1406,7 +1416,7 @@ export function createProcessPolicyFunctions(host){
                         bytes[0] = 1;
                     }
                 }
-                host.writeMemory(into >>> 0, bytes);
+                host.writeMemory(wholeAddress(into), bytes);
                 return 1;
             },
         },
@@ -1480,7 +1490,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, handleCount());
+                writeDword(wholeAddress(out), handleCount());
                 return 1;
             },
         },
@@ -1531,7 +1541,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDword(out >>> 0, (process === SELF ? host.debugged?.() === true
+                writeDword(wholeAddress(out), (process === SELF ? host.debugged?.() === true
                     : Boolean(process.debugged)) ? 1 : 0);
                 return 1;
             },
@@ -1624,7 +1634,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, event.signalled ? 1 : 0);
+                writeDword(wholeAddress(out), event.signalled ? 1 : 0);
                 return 1;
             },
         },
@@ -1661,7 +1671,7 @@ export function createProcessPolicyFunctions(host){
                 }
                 const record = new Uint8Array(wide ? 16 : 12);
                 new DataView(record.buffer).setUint32(0, nodeMask(), true);
-                host.writeMemory(out >>> 0, record);
+                host.writeMemory(wholeAddress(out), record);
                 return 1;
             },
         },
@@ -1680,7 +1690,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const known = (processor & 0xff) < processorCount();
-                host.writeMemory(out >>> 0, new Uint8Array([known ? 0 : 0xff]));
+                host.writeMemory(wholeAddress(out), new Uint8Array([known ? 0 : 0xff]));
                 return known ? 1 : fail(ERROR_INVALID_PARAMETER);
             },
         },
@@ -1698,10 +1708,10 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const named = host.readMemory(processor >>> 0, 4);
+                const named = host.readMemory(wholeAddress(processor), 4);
                 const group = named[0] | named[1] << 8;
                 const known = group === 0 && named[2] < processorCount();
-                host.writeMemory(out >>> 0, known ? new Uint8Array([0, 0])
+                host.writeMemory(wholeAddress(out), known ? new Uint8Array([0, 0])
                     : new Uint8Array([0xff, 0xff]));
                 return known ? 1 : fail(ERROR_INVALID_PARAMETER);
             },
@@ -1719,7 +1729,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, 0);
+                writeDword(wholeAddress(out), 0);
                 return 1;
             },
         },
@@ -1733,7 +1743,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(out >>> 0, FIRMWARE_TYPE_UEFI);
+                writeDword(wholeAddress(out), FIRMWARE_TYPE_UEFI);
                 return 1;
             },
         },
@@ -1806,7 +1816,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeDword(out >>> 0, werFlags);
+                writeDword(wholeAddress(out), werFlags);
                 return 0;
             },
         },

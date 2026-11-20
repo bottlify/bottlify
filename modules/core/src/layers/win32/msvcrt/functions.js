@@ -25,7 +25,7 @@ import { createSecureFunctions } from './secure.js';
 import { INVALID_PARAMETERS, createInvalidParameterWatch } from './invalid-parameter.js';
 import { createErrorFunctions, messageOf } from './errors.js';
 import { createConversionFunctions } from './convert.js';
-import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
+import { createScanFunctions, listScanHandler, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
 import { createPathFunctions, splitSearch } from './paths.js';
@@ -34,13 +34,17 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createClassFunctions } from './classes.js';
-import { guestEntry, guestExport, variadicEntry } from './guest-code.js';
+import { guestEntry, guestExport, halvesEntry, variadicEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import * as inGuest64 from './inguest-int64.js';
+import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
+import * as inGuestScan from './inguest-scan.js';
+import { COMPILED as SCAN_CODE } from './inguest-scan.x86.js';
 import * as inGuestRtti from './inguest-rtti.js';
 import { COMPILED as RTTI_CODE } from './inguest-rtti.x86.js';
 import { createMathFunctions } from './math.js';
@@ -59,6 +63,7 @@ import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
 import { O_UNICODE, bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** A double the code reads as its two halves, which a 64-bit caller passes in XMM0. */
 const DOUBLE_HALVES = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
@@ -568,6 +573,13 @@ export function createMsvcrtFunctions(host){
      */
     let currentLocale = 0;
 
+    const scans = createScanFunctions(host);
+    /** sscanf's arguments as a list: the form its code in the guest is compiled as. */
+    const scanList = guestEntry(inGuestScan.scanList, SCAN_CODE.scanList, host, {
+        argBytes: 12,
+        handler: listScanHandler(host),
+    });
+
     /**
      * int vsprintf(char *buffer, const char *format, va_list args) -- in the
      * guest (`inguest-print.js`), a format with a double, a 64-bit integer or
@@ -687,6 +699,7 @@ export function createMsvcrtFunctions(host){
          * A category past LC_TIME is no category, and null.
          */
         setlocale: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
@@ -714,7 +727,7 @@ export function createMsvcrtFunctions(host){
         },
 
         /** size_t strlen(const char *str) -- in the guest */
-        strlen: guestEntry(inGuest.strlen, COMPILED.strlen, host),
+        strlen: { ...guestEntry(inGuest.strlen, COMPILED.strlen, host) },
 
         /** int strcmp(const char *left, const char *right) -- in the guest */
         strcmp: guestEntry(inGuest.strcmp, COMPILED.strcmp, host),
@@ -726,23 +739,23 @@ export function createMsvcrtFunctions(host){
         _stricmp: guestEntry(inGuest._stricmp, COMPILED._stricmp, host),
 
         /** char *strcpy(char *dest, const char *src) -- in the guest */
-        strcpy: guestEntry(inGuest.strcpy, COMPILED.strcpy, host),
+        strcpy: { ...guestEntry(inGuest.strcpy, COMPILED.strcpy, host), returns: 'pointer' },
 
         /**
          * char *strncpy(char *dest, const char *src, size_t count) -- in the
          * guest: padded to the full count when the source is short, and no
          * terminator at all when it truncates
          */
-        strncpy: guestEntry(inGuest.strncpy, COMPILED.strncpy, host),
+        strncpy: { ...guestEntry(inGuest.strncpy, COMPILED.strncpy, host), returns: 'pointer' },
 
         /** char *strcat(char *dest, const char *src) -- in the guest */
-        strcat: guestEntry(inGuest.strcat, COMPILED.strcat, host),
+        strcat: { ...guestEntry(inGuest.strcat, COMPILED.strcat, host), returns: 'pointer' },
 
         /** char *strchr(const char *str, int ch) -- in the guest */
-        strchr: guestEntry(inGuest.strchr, COMPILED.strchr, host),
+        strchr: { ...guestEntry(inGuest.strchr, COMPILED.strchr, host), returns: 'pointer' },
 
         /** char *strstr(const char *haystack, const char *needle) -- in the guest */
-        strstr: guestEntry(inGuest.strstr, COMPILED.strstr, host),
+        strstr: { ...guestEntry(inGuest.strstr, COMPILED.strstr, host), returns: 'pointer' },
 
         /** int toupper(int ch) -- in the guest */
         toupper: guestEntry(inGuest.toupper, COMPILED.toupper, host),
@@ -757,11 +770,11 @@ export function createMsvcrtFunctions(host){
          * void *memcpy(void *dest, const void *src, size_t count) and memmove,
          * one function: in the guest
          */
-        memcpy: guestEntry(inGuest.memmove, COMPILED.memmove, host),
+        memcpy: { ...guestEntry(inGuest.memmove, COMPILED.memmove, host), returns: 'pointer' },
         memmove: guestEntry(inGuest.memmove, COMPILED.memmove, host),
 
         /** void *memset(void *dest, int value, size_t count) -- in the guest */
-        memset: guestEntry(inGuest.memset, COMPILED.memset, host),
+        memset: { ...guestEntry(inGuest.memset, COMPILED.memset, host), returns: 'pointer' },
 
         /** int memcmp(const void *left, const void *right, size_t count) -- in the guest */
         memcmp: guestEntry(inGuest.memcmp, COMPILED.memcmp, host),
@@ -773,7 +786,7 @@ export function createMsvcrtFunctions(host){
 
         itoa,
         /** char *_itoa(int value, char *buffer, int radix) -- in the guest, ten and the powers of two */
-        _itoa: guestEntry(inGuest._itoa, COMPILED._itoa, host, itoa),
+        _itoa: { ...guestEntry(inGuest._itoa, COMPILED._itoa, host, itoa), returns: 'pointer' },
 
         /**
          * int _isnan(double x), int _finite(double x), int _fpclass(double x)
@@ -782,14 +795,15 @@ export function createMsvcrtFunctions(host){
          * guest (`inguest-float.js`) that reads them as integers: no FPU, so
          * they are here rather than with the maths. A 64-bit caller passes the
          * double in XMM0: _isnan and _finite read it there too; _fpclass, whose
-         * code takes the double as its two halves, is the handler's at 64 bits.
+         * code takes the double as its two halves, after the instructions that
+         * make XMM0 the two (`halvesEntry`).
          */
         _isnan: { ...guestEntry(inGuestFloat._isnan, FLOAT_CODE._isnan, {}),
             floats: DOUBLE_HALVES },
         _finite: { ...guestEntry(inGuestFloat._finite, FLOAT_CODE._finite, {}),
             floats: DOUBLE_HALVES },
-        _fpclass: { ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
-            floats: DOUBLE_HALVES },
+        _fpclass: halvesEntry({ ...guestEntry(inGuestFloat._fpclass, FLOAT_CODE._fpclass, {}),
+            floats: DOUBLE_HALVES }),
 
         /**
          * unsigned int _control87(unsigned int newControl, unsigned int mask),
@@ -963,6 +977,7 @@ export function createMsvcrtFunctions(host){
         _vswprintf_c: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>
                 cutWide(buffer, size, wideText(format, varargsAt(list))),
@@ -1008,6 +1023,7 @@ export function createMsvcrtFunctions(host){
         _vsnwprintf_s: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1, 2],
             /** @param {number[]} args */
             handler: ([buffer, size, count, format, list])=>{
                 const room = size >>> 0;
@@ -1039,6 +1055,7 @@ export function createMsvcrtFunctions(host){
         _vsprintf_p: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>{
                 if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || (size >>> 0) === 0)
@@ -1074,7 +1091,7 @@ export function createMsvcrtFunctions(host){
          * Code in the guest's own msvcrt, as qsort is: the comparator is the
          * program's, called with a `call`.
          */
-        bsearch: guestExport(COMPILED.bsearch),
+        bsearch: { ...guestExport(COMPILED.bsearch), returns: 'pointer' },
     };
 
     const allocate = host.allocate ?? (()=>0);
@@ -1288,6 +1305,7 @@ export function createMsvcrtFunctions(host){
          * multibyte character of the locale (`___mb_cur_max_func`, locale.js).
          */
         __p___mb_cur_max: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>(host.addressOf?.('__mb_cur_max') ?? 0)
@@ -1431,7 +1449,14 @@ export function createMsvcrtFunctions(host){
             errno,
             ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
         }),
-        ...createScanFunctions(host),
+        ...scans,
+
+        /**
+         * int sscanf(const char *buffer, const char *format, ...) - in the
+         * guest (`inguest-scan.js`): the plain conversions of an ASCII text
+         * stored there, the rest handed to the scanner here whole.
+         */
+        sscanf: variadicEntry(2, scanList, scans.sscanf),
         ...createSortFunctions({
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
@@ -1445,7 +1470,7 @@ export function createMsvcrtFunctions(host){
         ...createProcessFunctions({
             errno,
             readCString: readString,
-            readU32: at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+            readU32: at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
                 .getUint32(0, true),
             allocate,
             writeMemory: host.writeMemory,
@@ -1592,7 +1617,8 @@ export function createMsvcrtFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([message])=>{
-                const lead = (message >>> 0) === 0 ? '' : host.readCString(message >>> 0, 4096);
+                const lead = (message >>> 0) === 0 ? '' : host.readCString(wholeAddress(message),
+                    4096);
                 const line = `${lead ? `${lead}: ` : ''}${messageOf(globals.get(errnoName()))}\n`;
                 const stderr = descriptors?.get(2);
                 if (stderr)
@@ -1631,7 +1657,8 @@ export function createMsvcrtFunctions(host){
                 const console = descriptors?.get(1);
                 if (console)
                 {
-                    descriptors?.put(console, encodeAnsi(host.readCString(text >>> 0, 1 << 20)));
+                    descriptors?.put(console, encodeAnsi(host.readCString(wholeAddress(text),
+                        1 << 20)));
                 }
                 return 0;
             },
@@ -1655,15 +1682,15 @@ export function createMsvcrtFunctions(host){
                  * __int64 _atoi64(const char *text)
                  *
                  * Whitespace, a sign and decimal digits; a value past 64 bits
-                 * is clamped as `_strtoi64` clamps it.
+                 * is clamped as `_strtoi64` clamps it. In the guest
+                 * (`inguest-int64.js`), which hands this handler the clamp.
                  */
-                _atoi64: {
-                    convention: 'cdecl',
+                _atoi64: guestEntry(inGuest64._atoi64, INT64_CODE._atoi64, host, {
                     argBytes: 4,
                     /** @param {number[]} args */
                     handler: ([text])=>{
                         const match = /^[ \t\n\v\f\r]*([+-]?)(\d*)/
-                            .exec(host.readCString(text >>> 0, 4096));
+                            .exec(host.readCString(wholeAddress(text), 4096));
                         const digits = match?.[2] ?? '';
                         let value = digits ? BigInt(digits) : 0n;
                         if (match?.[1] === '-')
@@ -1676,7 +1703,7 @@ export function createMsvcrtFunctions(host){
                         host.setRegisters?.({ edx: Number(bits >> 32n) });
                         return Number(bits & 0xffffffffn);
                     },
-                },
+                }),
             }
             : {}),
         ...(host.threads ? createThreadFunctions({

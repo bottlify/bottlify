@@ -19,6 +19,7 @@
 
 import { FACES, FF_MODERN, FF_ROMAN, designCell, faceNamed, fontFamilies }
     from '../gdi32/faces.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** GpStatus (gdiplustypes.h). */
 const Ok = 0;
@@ -127,13 +128,13 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
     const fonts = new Map();
 
     /** @param {number} address @param {number} value */
-    const putFloat = (address, value)=>host.writeMemory(address >>> 0,
+    const putFloat = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Float32Array.of(value).buffer));
     /** @param {number} address @param {number} value */
-    const putU32 = (address, value)=>host.writeMemory(address >>> 0,
+    const putU32 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint32Array.of(value >>> 0).buffer));
     /** @param {number} address @param {number} value */
-    const putU16 = (address, value)=>host.writeMemory(address >>> 0,
+    const putU16 = (address, value)=>host.writeMemory(wholeAddress(address),
         new Uint8Array(Uint16Array.of(value).buffer));
     /** A REAL argument, as its bits arrive. @param {number} bits */
     const real = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
@@ -185,7 +186,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
 
     /** @param {number} address @param {boolean} wide */
     const readLogfont = (address, wide)=>{
-        const bytes = host.readMemory(address >>> 0, LF_FACE + LF_FACESIZE * (wide ? 2 : 1))
+        const bytes = host.readMemory(wholeAddress(address), LF_FACE + LF_FACESIZE * (wide ? 2 : 1))
             .slice();
         const names = bytes.subarray(LF_FACE);
         const text = wide ? String.fromCharCode(...new Uint16Array(names.buffer, names.byteOffset,
@@ -225,7 +226,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 bytes[LF_FACE + i] = name.charCodeAt(i) & 0xff;
             }
         }
-        host.writeMemory(out >>> 0, bytes);
+        host.writeMemory(wholeAddress(out), bytes);
         return Ok;
     };
 
@@ -287,7 +288,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 {
                     return InvalidParameter;
                 }
-                const wanted = host.readWideString(name >>> 0);
+                const wanted = host.readWideString(wholeAddress(name));
                 const own = collections.get(collection >>> 0);
                 const added = own && !own.installed ? own.names.find(n=>n.toLowerCase()
                     === wanted.toLowerCase()) : undefined;
@@ -343,7 +344,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 {
                     name[i] = face.charCodeAt(i);
                 }
-                host.writeMemory(out >>> 0, new Uint8Array(name.buffer));
+                host.writeMemory(wholeAddress(out), new Uint8Array(name.buffer));
                 return Ok;
             },
         },
@@ -640,7 +641,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 {
                     return InvalidParameter;
                 }
-                const collection = new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+                const collection = new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
                     .getUint32(0, true);
                 const held = collections.get(collection);
                 if (!held || held.installed)
@@ -710,7 +711,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 {
                     return InvalidParameter;
                 }
-                const bytes = await host.readFile(host.readWideString(name >>> 0));
+                const bytes = await host.readFile(host.readWideString(wholeAddress(name)));
                 const added = bytes ? fontFamilies(bytes) : [];
                 if (added.length === 0)
                 {
@@ -740,7 +741,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 {
                     return InvalidParameter;
                 }
-                const added = fontFamilies(host.readMemory(memory >>> 0, length | 0).slice());
+                const added = fontFamilies(host.readMemory(wholeAddress(memory),
+                    length | 0).slice());
                 if (added.length === 0)
                 {
                     return 1;

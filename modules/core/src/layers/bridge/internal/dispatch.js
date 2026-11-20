@@ -41,6 +41,31 @@ import { isDriven } from './drive.js';
  *     one among its first four in the XMM register of its position, and
  *     `readLongCall` reads it from there into the dwords the 32-bit signature
  *     has it in -- a double's two, low first.
+ * @property {number[]} [addresses]  The dwords that carry an address a
+ *     64-bit caller may keep past 4 GiB and the handler takes whole - an
+ *     image's instance, a parameter handed on to a callback: `readLongCall`
+ *     gives such an argument as low + high * 2^32 where its high half names
+ *     an address (not zero, below 2^21), and as its dword otherwise, so a
+ *     process in 4 GiB sees what it always saw. A handler that declares one
+ *     must not cut it with `>>> 0` or `| 0`. The win32 layer declares each
+ *     function's from its signature comment where its spec does not
+ *     (`declareAddresses`).
+ * @property {number[]} [sizes]  The dwords that carry a `size_t` / `SIZE_T`: a
+ *     64-bit caller's is eight bytes, and one past a dword is handed as the
+ *     largest dword (0xFFFFFFFF) - a request no handler can meet, which it
+ *     refuses as it refuses any too large - never as its low half, which
+ *     would answer a request of 4 GiB + 16 bytes with sixteen.
+ * @property {string} [returns]  'pointer': the answer is an address or an
+ *     unsigned size (a pointer, an HMODULE, a SIZE_T), and a 64-bit caller
+ *     finds it in RAX zero-extended. 'u32': the function has guest code that
+ *     answers an unsigned dword (`@returns {u32}`), which leaves RAX
+ *     zero-extended, and its handler answers the same quadword. Every other
+ *     dword answer is sign-extended there, as a HANDLE of -1 is
+ *     INVALID_HANDLE_VALUE whole; the callers of a function that answers a
+ *     dword read EAX alone, and its high half is no one's.
+ *     `tools/checks/check-wide-arguments.mjs` holds each spec to the return
+ *     type its signature comment writes; a function with guest code takes
+ *     its `returns` from the type its source declares (`guestExport`).
  * @property {Record<number, number>} [structs]  The structures wider than eight
  *     bytes passed by value -- a GUID, a VARIANT -- by their first dword's index,
  *     and how many dwords each is: the 32-bit signature has them inline, an
@@ -119,6 +144,9 @@ import { isDriven } from './drive.js';
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
  * @property {number} sampledCalls  How many of them were timed.
  * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
+ * @property {number[] | null} addresses  Of `fn`, checked; null for none.
+ * @property {number[] | null} sizes  Of `fn`, checked; null for none.
+ * @property {boolean} zeroExtends  `zeroExtendsOf(fn)`: RAX takes the answer zero-extended.
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
  *     null when every slot is one dword.
@@ -135,6 +163,8 @@ import { isDriven } from './drive.js';
  *     is here and the stack arguments above it.
  * @property {number} restingStack Where the stack will be once the stub returns.
  * @property {number} hostReturn
+ * @property {boolean} zeroExtends  A 64-bit caller of a function that answers an address:
+ *     an answer that comes after a wait goes into RAX zero-extended, as one in place does.
  * @property {any} thread           Whose call this is: parking stamps it as the call begins.
  */
 
@@ -322,6 +352,52 @@ const chainCounts = chains=>[...chains].flatMap(([first, below])=>[...below].map
     ([second, count])=>/** @type {[string, number]} */ ([first === 0 ? ''
         : `0x${first.toString(16)}${second === 0 ? '' : `<0x${second.toString(16)}`}`, count])));
 
+/** The high halves an address can have: user space ends below 2^53 (and Windows' below 2^47). */
+const ADDRESS_HIGH = 2 ** 21;
+
+/**
+ * Makes each declared address argument whole where its high half names an
+ * address past 4 GiB (`Entry.addresses`): any other - zero, a sign's ones, an
+ * integer's leftover - leaves the dword as every handler has always had it.
+ *
+ * @param {number[] | null} addresses @param {any[]} args @param {number[]} high
+ */
+export const wholeAddresses = (addresses, args, high)=>{
+    if (addresses === null)
+    {
+        return;
+    }
+    for (let i = 0; i < addresses.length; i++)
+    {
+        const at = addresses[i];
+        const upper = high[at];
+        if (upper !== 0 && upper < ADDRESS_HIGH)
+        {
+            args[at] = upper * 2 ** 32 + (args[at] >>> 0);
+        }
+    }
+};
+
+/**
+ * Makes each declared size argument the largest dword where a 64-bit caller's
+ * is past one (`HostFunction.sizes`).
+ *
+ * @param {number[] | null} sizes @param {any[]} args @param {number[]} high
+ */
+const largestSizes = (sizes, args, high)=>{
+    if (sizes === null)
+    {
+        return;
+    }
+    for (let i = 0; i < sizes.length; i++)
+    {
+        if (high[sizes[i]] !== 0)
+        {
+            args[sizes[i]] = -1;
+        }
+    }
+};
+
 /**
  * A call's argument array, made to hold each word as a value from the start.
  *
@@ -403,6 +479,49 @@ function makeRecord(){
 
 /** The last error of a dispatcher that was handed no reader. */
 const NO_ERROR = ()=>0;
+
+/**
+ * Whether RAX takes a function's answer zero-extended in a 64-bit process
+ * (`longAnswer`): an address (`returns: 'pointer'`), or the unsigned dword
+ * of a function whose guest code leaves RAX so (`returns: 'u32'`) - the
+ * handler and the code are one function, and a caller that reads RAX whole
+ * must not be able to tell which answered.
+ *
+ * @param {{ returns?: string }} fn
+ */
+export const zeroExtendsOf = fn=>fn.returns === 'pointer' || fn.returns === 'u32';
+
+/**
+ * RAX as a 64-bit call's answer leaves it, as the function's type has it: a
+ * bigint whole; a quadword answered the 32-bit way, its high half for EDX
+ * (`high`), the two halves whole; an address zero-extended, or whole where
+ * the handler answered one past 4 GiB; any other dword sign-extended - a
+ * handle of -1 is INVALID_HANDLE_VALUE whole.
+ *
+ * @param {number | bigint} result @param {number | null} high @param {boolean} zeroExtends
+ * @returns {bigint}
+ */
+export function longAnswer(result, high, zeroExtends){
+    if (typeof result === 'bigint')
+    {
+        return BigInt.asUintN(64, result);
+    }
+    if (high !== null)
+    {
+        return BigInt(high) << 32n | BigInt(result >>> 0);
+    }
+    return zeroExtends ? BigInt(unsignedAddress(result)) : BigInt.asUintN(64, BigInt(result | 0));
+}
+
+/**
+ * An answer typed an address or an unsigned dword, as a number RAX takes
+ * zero-extended: a dword by its low 32 bits, whatever sign it was computed
+ * with, and an address past 4 GiB a handler answered whole as it is.
+ *
+ * @param {number} result
+ */
+export const unsignedAddress = result=>(result >= 2 ** 32 && result < 2 ** 53 ? result
+    : result >>> 0);
 
 /**
  * @param {Object} deps
@@ -625,6 +744,15 @@ class Dispatcher {
         // Indexed by trap id: the cpu hands them out in sequence from zero.
         /** @type {(Entry | undefined)[]} */
         this.functions = [];
+        /** Spans named by asking (`placedSpan`). @type {{ base: number, size: number, nameAt: (address: number) => string | null }[]} */
+        this.spans = [];
+        /**
+         * Functions registered and not yet called, by id: their records are
+         * made at their first call (`entry`).
+         *
+         * @type {any[]}
+         */
+        this.pending = [];
         this.implemented = 0;
         /**
          * Frames by depth of nesting, reused: a guest callback can trap into
@@ -1036,6 +1164,15 @@ class Dispatcher {
     }
 
     /**
+     * The quadword return address at RSP, whole.
+     *
+     * @param {number} rsp
+     */
+    longReturn(rsp){
+        return (this.memory.readU32(rsp) >>> 0) + (this.memory.readU32(rsp + 4) >>> 0) * 2 ** 32;
+    }
+
+    /**
      * An x86-64 call's arguments, as the x64 convention passes them: the first
      * four in RCX, RDX, R8 and R9 -- RDX as the stub kept it, in R11, before
      * the trap spent DX -- and the rest on the stack past the return address
@@ -1047,7 +1184,8 @@ class Dispatcher {
      * `floats`) is read whole into the dwords the 32-bit signature has it in.
      *
      * @param {Entry} entry @param {number} rsp
-     * @returns {number} the return address at RSP
+     * @returns {number} the return address at RSP, whole: a caller in an image
+     *     past 4 GiB is not its low dword
      */
     readLongCall(entry, rsp){
         const args = entry.args;
@@ -1072,7 +1210,9 @@ class Dispatcher {
                     high[i] = this.memory.readU32(at + 4) >>> 0;
                 }
             }
-            return this.memory.readU32(rsp);
+            wholeAddresses(entry.addresses, args, high);
+            largestSizes(entry.sizes, args, high);
+            return this.longReturn(rsp);
         }
         // An argument the signature counts as two dwords is one slot here,
         // both its halves: the slots after it come one earlier. A float or a
@@ -1124,7 +1264,9 @@ class Dispatcher {
                 }
             }
         }
-        return this.memory.readU32(rsp);
+        wholeAddresses(entry.addresses, args, high);
+        largestSizes(entry.sizes, args, high);
+        return this.longReturn(rsp);
     }
 
     /**
@@ -1331,7 +1473,7 @@ class Dispatcher {
      * @param {number} id
      */
     cross(id){
-        const entry = this.functions[id];
+        const entry = this.entry(id);
         if (entry === undefined)
         {
             throw new Error(`bridge: trap ${id} has no implementation`);
@@ -1374,7 +1516,7 @@ class Dispatcher {
         const depth = this.depth;
         const frame = this.frames[depth] ??= {
             name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
-            thread: null,
+            zeroExtends: false, thread: null,
         };
         frame.name = entry.name;
         frame.freeStack = pushed;
@@ -1383,6 +1525,7 @@ class Dispatcher {
         // cleans up whatever the convention.
         frame.restingStack = long ? esp + 8 : esp + 4 + entry.cleanup;
         frame.hostReturn = hostReturn;
+        frame.zeroExtends = long && entry.zeroExtends;
 
         // Which instruction made this call. Read from the frame that was
         // captured above rather than the stack, because a handler that
@@ -1677,15 +1820,12 @@ class Dispatcher {
         }
         if (long)
         {
-            // Sign-extended, as a dword the host computes is meant: a handle
-            // of -1 is INVALID_HANDLE_VALUE whole, and every address below
-            // 2 GiB reads the same either way. A quadword answered the 32-bit
-            // way, its high half for EDX, is the two halves whole.
-            const high = this.wideHigh;
-            this.cpu.writeReg64('rax', typeof result === 'bigint' ? BigInt.asUintN(64, result)
-                : high !== null
-                    ? BigInt(high) << 32n | BigInt(/** @type {number} */ (result) >>> 0)
-                    : BigInt.asUintN(64, BigInt(/** @type {number} */ (result) | 0)));
+            // As the function's type has it (`returns`): an address
+            // zero-extended, any other dword sign-extended - a handle of -1 is
+            // INVALID_HANDLE_VALUE whole. A quadword answered the 32-bit way,
+            // its high half for EDX, is the two halves whole.
+            this.cpu.writeReg64('rax', longAnswer(/** @type {number | bigint} */ (result),
+                this.wideHigh, entry.zeroExtends));
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
@@ -1706,10 +1846,91 @@ class Dispatcher {
      * @param {HostFunction} fn
      */
     register(id, fn){
-        if (this.functions[id] !== undefined)
+        if (this.functions[id] !== undefined || this.pending[id] !== undefined)
         {
             throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
         }
+        // Checked now, made when first called (`entry`): a process registers
+        // every export of every system library, and calls a few hundred.
+        const { hook } = this.shape(fn);
+        this.pending[id] = fn;
+        this.implemented++;
+        if (hook)
+        {
+            this.hooksByName.set(fn.name, id);
+            this.entry(id);
+        }
+    }
+
+    /**
+     * A function's record, made from its declaration the first time it is
+     * asked for, and undefined for an id nothing registered.
+     *
+     * @param {number} id
+     */
+    entry(id){
+        /** @type {Entry | undefined} */
+        const ready = this.functions[id];
+        if (ready !== undefined)
+        {
+            return ready;
+        }
+        const fn = this.pending[id];
+        if (fn === undefined)
+        {
+            return undefined;
+        }
+        this.pending[id] = undefined;
+        const { site, registerArgs, cleanup, stackWords, hook, quadwords, floats, structs,
+            addresses, sizes, words } = this.shape(fn);
+        /** @type {Entry} */
+        const made = this.functions[id] = {
+            fn,
+            name: fn.name,
+            handler: fn.handler,
+            registerArgs,
+            stackWords,
+            cleanup,
+            saved: fn.saved ?? 0,
+            forwards: fn.forwards === true,
+            hook,
+            target: fn.target ?? 0,
+            site,
+            trampoline: fn.trampoline ?? 0,
+            resume: fn.resume ?? 0,
+            stackAdjust: fn.stackAdjust ?? 0,
+            registers: site
+                ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
+                : null,
+            hookStats: hook
+                ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
+            readsError: this.errorReader && fn.lastError !== false,
+            quadwords,
+            addresses,
+            sizes,
+            zeroExtends: zeroExtendsOf(fn),
+            longSlots: quadwords || floats || structs
+                ? longSlotsOf(words, quadwords, floats, structs) : null,
+            args: argumentArray(site ? 8 : stackWords + registerArgs),
+            kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
+            chainCount: 0,
+            writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
+            sinkRevision: -1,
+            sinkOn: true,
+            calls: 0,
+            sampledMs: 0,
+            sampledCalls: 0,
+        };
+        return made;
+    }
+
+    /**
+     * What a function's declaration says of its call, checked: thrown where it
+     * does not hold together, at registration, not at its first call.
+     *
+     * @param {any} fn
+     */
+    shape(fn){
         const site = fn.site === true;
         // A site hook marshals nothing through a convention: its eight
         // registers come straight off the pushad block, not off a
@@ -1761,50 +1982,29 @@ class Dispatcher {
                     + ' is not among its arguments');
             }
         }
-        this.functions[id] = {
-            fn,
-            name: fn.name,
-            handler: fn.handler,
-            registerArgs,
-            stackWords,
-            cleanup,
-            saved: fn.saved ?? 0,
-            forwards: fn.forwards === true,
-            hook,
-            target: fn.target ?? 0,
-            site,
-            trampoline: fn.trampoline ?? 0,
-            resume: fn.resume ?? 0,
-            stackAdjust: fn.stackAdjust ?? 0,
-            registers: site
-                ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
-                : null,
-            hookStats: hook
-                ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
-            readsError: this.errorReader && fn.lastError !== false,
-            quadwords,
-            longSlots: quadwords || floats || structs
-                ? longSlotsOf(words, quadwords, floats, structs) : null,
-            args: argumentArray(site ? 8 : stackWords + registerArgs),
-            kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
-            chainCount: 0,
-            writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
-            sinkRevision: -1,
-            sinkOn: true,
-            calls: 0,
-            sampledMs: 0,
-            sampledCalls: 0,
-        };
-        if (hook)
+        const addresses = fn.addresses !== undefined && fn.addresses.length > 0
+            ? [...fn.addresses] : null;
+        if (addresses?.some(at=>!Number.isInteger(at) || at < 0 || at >= words
+            || quadwords?.includes(at) || quadwords?.includes(at - 1) || floats?.[at]))
         {
-            this.hooksByName.set(fn.name, id);
+            throw new Error(`bridge: ${fn.name}'s addresses ${addresses.join(', ')} are not dwords`
+                + ' of its arguments that hold one value each');
         }
-        this.implemented++;
+        const sizes = fn.sizes !== undefined && fn.sizes.length > 0 ? [...fn.sizes] : null;
+        if (sizes?.some(at=>!Number.isInteger(at) || at < 0 || at >= words
+            || quadwords?.includes(at) || quadwords?.includes(at - 1) || floats?.[at]
+            || addresses?.includes(at)))
+        {
+            throw new Error(`bridge: ${fn.name}'s sizes ${sizes.join(', ')} are not dwords`
+                + ' of its arguments that hold one value each');
+        }
+        return { site, registerArgs, cleanup, stackWords, hook, quadwords, floats, structs,
+            addresses, sizes, words };
     }
 
     /** @param {number} id */
     lookup(id){
-        return this.functions[id]?.fn ?? null;
+        return this.functions[id]?.fn ?? this.pending[id] ?? null;
     }
 
     /**
@@ -1814,7 +2014,31 @@ class Dispatcher {
      * @returns {string | null}
      */
     symbolize(address){
-        return this.byAddress.get(address >>> 0) ?? null;
+        const at = address >>> 0;
+        const named = this.byAddress.get(at);
+        if (named !== undefined)
+        {
+            return named;
+        }
+        for (const span of this.spans)
+        {
+            if (at >= span.base && at < span.base + span.size)
+            {
+                return span.nameAt(at);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Names the addresses of a span by asking it, as they are asked for: a
+     * module's exports, named only if a report ever stands on one.
+     *
+     * @param {number} base @param {number} size
+     * @param {(address: number) => string | null} nameAt
+     */
+    placedSpan(base, size, nameAt){
+        this.spans.push({ base: base >>> 0, size, nameAt });
     }
 
     /**
@@ -2039,14 +2263,17 @@ class Dispatcher {
         this.ringSkip.clear();
         /** @type {string[]} */
         const skipped = [];
-        this.functions.forEach((entry, id)=>{
-            const bare = entry?.name.slice(entry.name.indexOf('!') + 1) ?? '';
-            if (entry && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
+        const length = Math.max(this.functions.length, this.pending.length);
+        for (let id = 0; id < length; id++)
+        {
+            const name = this.functions[id]?.name ?? this.pending[id]?.name;
+            const bare = name?.slice(name.indexOf('!') + 1) ?? '';
+            if (name && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
             {
                 this.ringSkip.add(id);
-                skipped.push(entry.name);
+                skipped.push(name);
             }
-        });
+        }
         return skipped;
     }
 

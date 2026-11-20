@@ -56,7 +56,7 @@ import { emitInstruction, profileCall } from './integer.js';
 import { copyLoopOf, emitCopyAtOnce, emitIndexedCopyAtOnce, indexedCopyOf } from './copy-loop.js';
 import {
     addUndoHelper, copyPlan, emitGroupChecks, emitStaleExit, emitStreamWindow, planBlock,
-    planLoop, planRegion, ramAlways, readsWrapped, registersChanged, HOST_OPS, MADE,
+    planLoop, planRegion, ramAlways, readsWrapped, registersChanged, HOST_OPS, MADE, RARE, FAR,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
@@ -74,6 +74,7 @@ const I64_LT_U = 0x54;
 const I64_EQ = 0x51;
 const I64_NE = 0x52;
 const I64_SHR_U = 0x88;
+const I64_WRAP = 0xa7;
 const I32_REINTERPRET_F32 = 0xbc;
 const I64_REINTERPRET_F64 = 0xbd;
 import { SITE, callsOut, guestOf, inlineReturns, sited } from '../region.js';
@@ -580,15 +581,16 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.precise = true;
     }
-    // A loose stack's access takes rsp's low half for its address, which a wide
-    // window's stack past 4 GiB is not.
-    else if (looseStacks && undoLog !== true && layout.window === undefined)
+    // A loose stack's access takes rsp's low half for its address and, over a wide
+    // window, rsp's high half with it (`stackLow`).
+    else if (looseStacks && undoLog !== true)
     {
         context.looseStacks = true;
     }
-    // A wide window tests every read: a read wrapped into RAM, or folded off a
-    // wrapped sum, reckons with RAM the size of its 32-bit address.
-    if (checkReads || layout.window !== undefined)
+    // A wide window's reads go untested as 4 GiB's do: each takes its whole address,
+    // the registers' quadword sum wrapped into the window (`windowed`), not the
+    // 32-bit one a read wrapped into RAM takes in 4 GiB.
+    if (checkReads)
     {
         context.checkReads = true;
     }
@@ -596,7 +598,7 @@ export function prepareModule(m, layout, features, memory = {},
     {
         context.zeroPage = true;
     }
-    if (atomic && width.bits === 32)
+    if (atomic)
     {
         context.atomic = true;
     }
@@ -874,7 +876,7 @@ function storeIp(context, b, pushEip){
         {
             // A code block's offset into RIP (`codeBase`).
             b.op(I64_EXTEND_U);
-            if (layout.codeBase !== undefined)
+            if (layout.codeBase)
             {
                 b.i64const(BigInt(layout.codeBase)).op(0x84);
             }
@@ -998,6 +1000,13 @@ function addResume(m, layout, bases, materialise, transfer, width = WIDTH_32){
     b.localGet(budget).localGet(code).i32const(8).op(I32.shrU).op(I32.sub).localSet(left);
     b.localGet(code).i32const(0xff).op(I32.and).i32const(TIER_ENTRY).op(I32.eq)
         .localGet(left).i32const(0).op(I32.gtS).op(I32.and);
+    if (layout.window !== undefined)
+    {
+        // A wide window's tier runs both code blocks (`wideLayout`): an entry
+        // in the other block is its runtime's, which the host goes to.
+        atState(bases, b).load('i64', { offset: layout.eip }).i64const(32n).op(I64_SHR_U)
+            .i64const(BigInt(layout.codeBase ?? 0) >> 32n).op(I64_EQ).op(I32.and);
+    }
     b.if(EMPTY);
     // The run goes on from what is left, counted from here.
     atState(bases, b).localGet(left)
@@ -1176,8 +1185,8 @@ export class RegionEmitter {
         const emitter = this;
         this.guest = this.layout.ramMemory === undefined ? null : {
             memory: this.layout.ramMemory,
-            get high(){
-                return emitter.wideLocal(ValType.i64, 'high');
+            get whole(){
+                return emitter.wideLocal(ValType.i64, 'whole');
             },
             /** @param {number} type */
             scratch: type=>emitter.wideLocal(type, 'scratch'),
@@ -1656,11 +1665,11 @@ export class RegionEmitter {
     }
 
     /**
-     * A wide window's local of `type` for `use` (`guest`): the i64 high half of
+     * A wide window's local of `type` for `use` (`guest`): the i64 whole of
      * the access's address, or the value a store holds while its address is
      * widened. Made at its first use, as the region's other lazy locals.
      *
-     * @param {number} type @param {'high' | 'scratch'} use
+     * @param {number} type @param {'whole' | 'scratch'} use
      */
     wideLocal(type, use){
         const key = `${use}${type}`;
@@ -5535,7 +5544,7 @@ export class RegionEmitter {
      * @param {number} eip @param {number} kind @param {number} [vector]
      */
     exitBefore(eip, kind, vector = 0){
-        if (kind === Exit.UNTRANSLATED && vector !== MADE
+        if (kind === Exit.UNTRANSLATED && vector !== MADE && vector !== RARE
             && this.blockRetired - this.blockCarried === 1)
         {
             // The block's first instruction is the other executor's: the
@@ -5545,8 +5554,9 @@ export class RegionEmitter {
             // `out`, the block would leave through the hash for its own
             // start and tail-call itself forever. A fault's exit is not
             // counted here: a block that may fault first still runs when it
-            // does not. Nor a call left to be made as it was (`MADE`), which goes
-            // to the host and not through the hash: the host runs the call.
+            // does not. Nor a call left to be made as it was (`MADE`) or an
+            // instruction's rare case (`RARE`), which go to the host and not
+            // through the hash: the host runs the instruction.
             this.leaving.add(this.blockIndex);
         }
         this.blockRetired--;
@@ -5564,10 +5574,29 @@ export class RegionEmitter {
     }
 
     /**
+     * Leaves, the instruction done, for the target in the i64 local `local`,
+     * which lies in another 4 GiB block of a wide window: its low half in the
+     * `eip` local, its high half in the exit's vector (`FAR`).
+     *
+     * @param {number} local
+     */
+    exitFar(local){
+        const { b } = this;
+        b.localGet(local).op(I64_WRAP).localSet(Local.eip);
+        this.charge();
+        this.exitWithKind(Exit.UNTRANSLATED, 0, ARITH_FLAGS, ()=>{
+            b.localGet(local).i64const(32n).op(I64_SHR_U).op(I64_WRAP).i32const(FAR).op(I32.add)
+                .i32const(8).op(I32.shl).i32const(Exit.UNTRANSLATED).op(I32.or);
+        });
+    }
+
+    /**
      * @param {number} kind @param {number} vector
      * @param {number} [live]  the flags the code it leaves for reads before it writes them
+     * @param {() => void} [pushCode]  pushes the exit's code, where it is known only as the
+     *     code runs (`exitFar`), in place of `kind` and `vector`
      */
-    exitWithKind(kind, vector, live = ARITH_FLAGS){
+    exitWithKind(kind, vector, live = ARITH_FLAGS, pushCode = undefined){
         if (this.x87.active)
         {
             x87Normalise(this);
@@ -5602,8 +5631,24 @@ export class RegionEmitter {
             // The instruction stored and leaves in the same breath (a call):
             // a store into a code page turns the exit into `stale`, the EIP
             // being the one the exit set.
-            this.b.i32const(Exit.STALE).i32const(kind | vector << 8).localGet(Local.stale)
-                .op(0x1b).localSet(Local.t0);
+            // Its vector kept: a far exit's says where the RIP lies.
+            if (pushCode)
+            {
+                pushCode();
+                this.b.localTee(Local.t0).i32const(~0xff).op(I32.and)
+                    .i32const(Exit.STALE).op(I32.or).localGet(Local.t0).localGet(Local.stale)
+                    .op(0x1b).localSet(Local.t0);
+            }
+            else
+            {
+                this.b.i32const(Exit.STALE).i32const(kind | vector << 8).localGet(Local.stale)
+                    .op(0x1b).localSet(Local.t0);
+            }
+        }
+        else if (pushCode)
+        {
+            pushCode();
+            this.b.localSet(Local.t0);
         }
         else
         {

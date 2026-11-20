@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Interlocked singly linked lists: a LIFO of entries the program owns, each
  * an SLIST_ENTRY whose first word is the next one's address, under an
@@ -185,7 +187,7 @@ export function createSListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([header])=>{
-                host.writeMemory(header >>> 0, new Uint8Array(HEADER.SIZE));
+                host.writeMemory(wholeAddress(header), new Uint8Array(HEADER.SIZE));
                 return 0;
             },
         },
@@ -199,6 +201,7 @@ export function createSListFunctions(host){
 
         /** PSLIST_ENTRY InterlockedPushEntrySList(PSLIST_HEADER, PSLIST_ENTRY) */
         InterlockedPushEntrySList: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([header, entry])=>pushList(header >>> 0, entry >>> 0, entry >>> 0, 1),
@@ -211,6 +214,7 @@ export function createSListFunctions(host){
                  * The same push, as an ordinary stdcall.
                  */
                 RtlInterlockedPushListSListEx: {
+                    returns: 'pointer',
                     argBytes: 16,
                     /** @param {number[]} args */
                     handler: ([header, first, last, count])=>
@@ -221,6 +225,7 @@ export function createSListFunctions(host){
 
         /** PSLIST_ENTRY InterlockedPopEntrySList(PSLIST_HEADER) */
         InterlockedPopEntrySList: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
@@ -235,6 +240,7 @@ export function createSListFunctions(host){
          * answer kernel32's sync tests accept from Windows before 8.
          */
         InterlockedFlushSList: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {

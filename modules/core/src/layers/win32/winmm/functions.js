@@ -39,6 +39,7 @@ import { MAX_PERIOD } from './timers.js';
 import { SOUND_ADAPTER_NAME, SOUND_DEVICE_INTERFACE } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
@@ -705,7 +706,7 @@ export function createWinmmFunctions(host){
      * @param {number} hwo
      */
     const volumeTarget = hwo=>{
-        const value = hwo >>> 0;
+        const value = wholeAddress(hwo);
         if (devices.has(value) || value === 0 || value === 0xffffffff)
         {
             return MMSYSERR_NOERROR;
@@ -756,7 +757,7 @@ export function createWinmmFunctions(host){
                 bytes[at] = kept.charCodeAt(at) & 0xff;
             }
         }
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /**
@@ -842,7 +843,7 @@ export function createWinmmFunctions(host){
                 return MCIERR_NULL_PARAMETER_BLOCK;
             }
             /** @param {number} offset */
-            const field = offset=>u32(host.readMemory((parameters >>> 0) + offset, 4), 0);
+            const field = offset=>u32(host.readMemory(wholeAddress(parameters) + offset, 4), 0);
             /** @param {number} address @param {number} limit */
             const text = (address, limit)=>(wide ? wideAt(address, limit) : ansiAt(address, limit));
             if ((flags & MCI_OPEN_TYPE) !== 0)
@@ -1210,8 +1211,8 @@ export function createWinmmFunctions(host){
         }
         // The RIFF header carries the image's own length, so the whole of it
         // can be read without the caller saying how much there is.
-        const head = host.readMemory(sound >>> 0, 8);
-        const wave = parseWave(host.readMemory(sound >>> 0, 8 + u32(head, 4)));
+        const head = host.readMemory(wholeAddress(sound), 8);
+        const wave = parseWave(host.readMemory(wholeAddress(sound), 8 + u32(head, 4)));
         if (!wave)
         {
             return 0;
@@ -1290,8 +1291,8 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                host.writeMemory(time >>> 0, dword(TIME_MS));
-                host.writeMemory((time >>> 0) + 4, dword(host.now() >>> 0));
+                host.writeMemory(wholeAddress(time), dword(TIME_MS));
+                host.writeMemory(wholeAddress(time) + 4, dword(host.now() >>> 0));
                 return MMSYSERR_NOERROR;
             },
         },
@@ -1310,8 +1311,8 @@ export function createWinmmFunctions(host){
                 {
                     return TIMERR_NOCANDO;
                 }
-                host.writeMemory(caps >>> 0, dword(1));
-                host.writeMemory((caps >>> 0) + 4, dword(MAX_PERIOD));
+                host.writeMemory(wholeAddress(caps), dword(1));
+                host.writeMemory(wholeAddress(caps) + 4, dword(MAX_PERIOD));
                 return MMSYSERR_NOERROR;
             },
         },
@@ -1341,7 +1342,7 @@ export function createWinmmFunctions(host){
                     return MMSYSERR_INVALPARAM;
                 }
                 const level = volume & 0xffff;
-                host.writeMemory(out >>> 0, dword(level | level << 16));
+                host.writeMemory(wholeAddress(out), dword(level | level << 16));
                 return MMSYSERR_NOERROR;
             },
         },
@@ -1417,7 +1418,7 @@ export function createWinmmFunctions(host){
                 // Truncated to what the caller offered: an older header is
                 // shorter, and writing the whole of ours past it would land in
                 // whatever follows.
-                host.writeMemory(caps >>> 0,
+                host.writeMemory(wholeAddress(caps),
                     bytes.subarray(0, Math.min(size >>> 0, WAVEOUTCAPS.size)));
                 return MMSYSERR_NOERROR;
             },
@@ -1441,7 +1442,7 @@ export function createWinmmFunctions(host){
                 bytes.set(dword(WAVE_FORMATS), WAVEOUTCAPSW.dwFormats);
                 bytes[WAVEOUTCAPSW.wChannels] = 2;
                 bytes.set(dword(WAVE_SUPPORT), WAVEOUTCAPSW.dwSupport);
-                host.writeMemory(caps >>> 0,
+                host.writeMemory(wholeAddress(caps),
                     bytes.subarray(0, Math.min(size >>> 0, WAVEOUTCAPSW.size)));
                 return MMSYSERR_NOERROR;
             },
@@ -1470,7 +1471,7 @@ export function createWinmmFunctions(host){
         waveOutGetID: onDevice(8, (device, [, out])=>{
             // The id the device was opened by: WAVE_MAPPER's -1 for one the
             // mapper chose, as winmm's wave tests read it back.
-            host.writeMemory(out >>> 0, dword(device.openedAs));
+            host.writeMemory(wholeAddress(out), dword(device.openedAs));
             return MMSYSERR_NOERROR;
         }),
 
@@ -1494,12 +1495,12 @@ export function createWinmmFunctions(host){
             {
                 return MMSYSERR_ERROR;
             }
-            const wanted = u32(host.readMemory(time >>> 0, 4), 0);
+            const wanted = u32(host.readMemory(wholeAddress(time), 4), 0);
             const head = device.queue[0]?.length ?? 0;
             const bytes = device.position + Math.floor(Math.min(device.playedBytes, head));
             const unit = wanted === TIME_SAMPLES ? TIME_SAMPLES : TIME_BYTES;
-            host.writeMemory(time >>> 0, dword(unit));
-            host.writeMemory((time >>> 0) + 4, dword(unit === TIME_SAMPLES
+            host.writeMemory(wholeAddress(time), dword(unit));
+            host.writeMemory(wholeAddress(time) + 4, dword(unit === TIME_SAMPLES
                 ? Math.floor(bytes / device.blockAlign)
                 : bytes));
             return MMSYSERR_NOERROR;
@@ -1526,17 +1527,17 @@ export function createWinmmFunctions(host){
                     return MMSYSERR_INVALPARAM;
                 }
 
-                const head = host.readMemory(format >>> 0, WAVEFORMATEX.size);
+                const head = host.readMemory(wholeAddress(format), WAVEFORMATEX.size);
                 // The extension too, where the tag says there is one.
                 const header = u16(head, WAVEFORMATEX.wFormatTag) === WAVE_FORMAT_EXTENSIBLE
-                    ? host.readMemory(format >>> 0, 40) : head;
+                    ? host.readMemory(wholeAddress(format), 40) : head;
                 const judged = judgeWaveFormat(header, ((flags >>> 0) & WAVE_FORMAT_DIRECT) !== 0);
                 if (judged.result !== MMSYSERR_NOERROR)
                 {
                     // An open that fails leaves no handle; a query touches nothing.
                     if (((flags >>> 0) & WAVE_FORMAT_QUERY) === 0 && (out >>> 0) !== 0)
                     {
-                        host.writeMemory(out >>> 0, dword(0));
+                        host.writeMemory(wholeAddress(out), dword(0));
                     }
                     return judged.result;
                 }
@@ -1604,7 +1605,7 @@ export function createWinmmFunctions(host){
                 // callback is handed that same handle and a program may use it
                 // straight away, so the variable it is going to read had better
                 // already hold it.
-                host.writeMemory(out >>> 0, dword(handle));
+                host.writeMemory(wholeAddress(out), dword(handle));
                 notice(opened, MM_WOM_OPEN, 0);
                 return flush(opened, MMSYSERR_NOERROR);
             },
@@ -1627,7 +1628,7 @@ export function createWinmmFunctions(host){
                 return MMSYSERR_INVALPARAM;
             }
 
-            const at = header >>> 0;
+            const at = wholeAddress(header);
             const flags = flagsOf(at);
             if ((flags & WHDR_PREPARED) === 0)
             {

@@ -17,6 +17,7 @@
 
 import { TEB, TEB64 } from './teb.js';
 import { THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION, allows } from './access.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** THREADINFOCLASS values answered here. */
 export const THREAD_INFO = Object.freeze({
@@ -140,7 +141,7 @@ export function createThreadInfoFunctions(host){
         }
         try
         {
-            return host.readMemory(address >>> 0, length).slice();
+            return host.readMemory(wholeAddress(address), length).slice();
         }
         catch (e){
             void e;
@@ -156,7 +157,7 @@ export function createThreadInfoFunctions(host){
         }
         try
         {
-            host.writeMemory(address >>> 0, bytes);
+            host.writeMemory(wholeAddress(address), bytes);
             return true;
         }
         catch (e){
@@ -469,10 +470,10 @@ export function createThreadInfoFunctions(host){
                 const thread = host.currentThread();
                 const fields = host.pointerSize === 8 ? TEB64 : TEB;
                 const teb = thread?.tebAddress ?? 0;
-                const bytes = host.readMemory(pointer >>> 0, 4);
+                const bytes = host.readMemory(wholeAddress(pointer), 4);
                 const asked = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
                 const had = teb === 0 ? 0 : tebDword(thread, fields.GUARANTEED_STACK_BYTES);
-                host.writeMemory(pointer >>> 0, dword(had));
+                host.writeMemory(wholeAddress(pointer), dword(had));
                 const pointerBytes = host.pointerSize === 8 ? 8 : 4;
                 const reserved = teb === 0 ? 0 : tebDword(thread, fields.STACK_BASE)
                     - tebDword(thread, fields.DEALLOCATION_STACK);
@@ -571,7 +572,7 @@ export function createThreadInfoFunctions(host){
                     return hresultFromNt(STATUS_INVALID_HANDLE);
                 }
                 let name = '';
-                for (let at = text >>> 0; at !== 0; at += 2)
+                for (let at = wholeAddress(text); at !== 0; at += 2)
                 {
                     const unit = read(at, 2);
                     if (!unit)

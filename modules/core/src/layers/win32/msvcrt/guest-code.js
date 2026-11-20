@@ -35,7 +35,16 @@ import { COMPILED as PRINT } from './inguest-print.x86.js';
 import { COMPILED as PRINT_LONG } from './inguest-print.x64.js';
 import { COMPILED as FLOAT } from './inguest-float.x86.js';
 import { COMPILED as FLOAT_LONG } from './inguest-float.x64.js';
+import { COMPILED as STRING } from './inguest-string.x86.js';
+import { COMPILED as STRING_LONG } from './inguest-string.x64.js';
+import { COMPILED as RTTI } from './inguest-rtti.x86.js';
+import { COMPILED as RTTI_LONG } from './inguest-rtti.x64.js';
+import { COMPILED as INT64 } from './inguest-int64.x86.js';
+import { COMPILED as INT64_LONG } from './inguest-int64.x64.js';
+import { COMPILED as SCAN } from './inguest-scan.x86.js';
+import { COMPILED as SCAN_LONG } from './inguest-scan.x64.js';
 import { setSingle } from './float.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Each function's x86-64 code by its i386, the two compiled from one source:
@@ -46,13 +55,26 @@ import { setSingle } from './float.js';
 const LONG_CODE = new Map();
 /** @type {[Record<string, CompiledGuestCode>, Record<string, CompiledGuestCode>][]} */
 const PAIRS = [[RUNTIME, RUNTIME_LONG], [MATH, MATH_LONG], [PRINT, PRINT_LONG],
-    [FLOAT, FLOAT_LONG]];
-for (const [i386, long] of PAIRS)
-{
+    [FLOAT, FLOAT_LONG], [STRING, STRING_LONG], [RTTI, RTTI_LONG], [INT64, INT64_LONG],
+    [SCAN, SCAN_LONG]];
+/**
+ * Pairs each function of a module's x86-64 with its i386 record, so that an
+ * export bound with the i386 (`guestEntry`, `guestExport`) carries the x86-64
+ * a 64-bit process places: called once for each module the build compiles at
+ * 64 bits (`LONG` in scripts/build-guest-code.mjs), by the library it serves.
+ *
+ * @param {Readonly<Record<string, CompiledGuestCode>>} i386
+ * @param {Readonly<Record<string, CompiledGuestCode>>} long
+ */
+export function withLongCode(i386, long){
     for (const [name, compiled] of Object.entries(long))
     {
         LONG_CODE.set(i386[name], compiled);
     }
+}
+for (const [i386, long] of PAIRS)
+{
+    withLongCode(i386, long);
 }
 
 /**
@@ -65,7 +87,8 @@ for (const [i386, long] of PAIRS)
 export const longCodeOf = compiled=>LONG_CODE.get(compiled);
 
 /** The helpers that take a float apart, which read no guest memory. */
-const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
+const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh', 'low64', 'high64',
+    'int64'];
 const bitsView = new DataView(new ArrayBuffer(8));
 const FLOAT_BIT_HELPERS = {
     /** @param {number} value */
@@ -88,22 +111,37 @@ const FLOAT_BIT_HELPERS = {
         bitsView.setFloat64(0, value, true);
         return bitsView.getUint32(4, true);
     },
+    /** An i64 parameter's low dword (a bigint, as the handler reads it). @param {i64} value */
+    low64: value=>Number(BigInt.asUintN(32, BigInt(value))),
+    /** Its high dword. @param {i64} value */
+    high64: value=>Number(BigInt.asUintN(32, BigInt(value) >> 32n)),
+    /** An i64 result of two dwords. @param {number} low @param {number} high */
+    int64: (low, high)=>BigInt.asIntN(64, BigInt(high >>> 0) << 32n | BigInt(low >>> 0)),
 };
 
 /** @typedef {number} i32  A signed 32-bit stack slot, or EAX. */
-/** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX. */
+/** @typedef {number} u32  An unsigned 32-bit stack slot, or EAX (zero-extended into RAX at 64 bits). */
+/** @typedef {number} ptr  A pointer: a u32 in the i386, the whole of RAX at 64 bits. */
 /** @typedef {number} f64  A double: two stack slots, or ST0 as a result. */
 /** @typedef {number} f32  A float: one stack slot, or ST0 as a result. */
+/**
+ * @typedef {number} f32bits  A float taken as its dword: a stack slot in the
+ *     i386, the XMM register of its place read bit for bit at 64 bits.
+ */
 /** @typedef {number} x87  A double the caller left on the x87 stack, which the callee pops. */
-/** @typedef {number} i64  A result in EDX:EAX. */
+/**
+ * @typedef {bigint | number} i64  A 64-bit integer: two stack slots or one
+ *     register at 64 bits as a parameter (a bigint here), EDX:EAX or RAX as a
+ *     result (a bigint, or a number truncated as `fisttp` truncates).
+ */
 
 /**
  * What the build made of a `@guestCode` function.
  *
  * @typedef {Object} CompiledGuestCode
  * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
- * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87')[]} params
- * @property {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} returns
+ * @property {readonly ('i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'f32bits' | 'x87' | 'i64')[]} params
+ * @property {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
  * @property {Uint8Array} code
  * @property {number} [host]  Where the jump to the trap into the host's handler
@@ -119,7 +157,8 @@ const FLOAT_BIT_HELPERS = {
  *
  * @typedef {Object} CodeBuilder
  * @property {(trap: { convention: string, argBytes: number, handler: Function,
- *     lastError?: boolean, floats?: Record<number, 'f32' | 'f64'> }) => number} register
+ *     lastError?: boolean, floats?: Record<number, 'f32' | 'f64'>, quadwords?: number[] })
+ *     => number} register
  *     Answers the trap's address.
  * @property {(at: number, target: number) => void} jump
  *     The four bytes at `at` in the code are a jump's displacement to `target`.
@@ -152,6 +191,9 @@ const FLOAT_BIT_HELPERS = {
  * @property {(bits: number) => number} floatOfBits  the float a dword is
  * @property {(value: number) => number} doubleLow  a double's low dword
  * @property {(value: number) => number} doubleHigh  a double's high dword
+ * @property {(value: i64) => number} low64  an i64 parameter's low dword
+ * @property {(value: i64) => number} high64  its high dword
+ * @property {(low: number, high: number) => bigint} int64  an i64 result of two dwords
  * @property {(address: number, value: number) => void} setU8
  * @property {(address: number, value: number) => void} setU16
  * @property {(address: number, value: number) => void} setU32
@@ -164,6 +206,10 @@ const FLOAT_BIT_HELPERS = {
  * @property {(destination: number, source: number, count: number) => void} copyDown
  *     Byte by byte from the last, as `std; rep movsb` copies.
  * @property {(destination: number, value: number, count: number) => void} fill
+ * @property {(address: number) => number} ptr  The pointer at an address: a dword in a
+ *     32-bit process, a quadword in a 64-bit one.
+ * @property {(address: number, value: number) => void} setPtr  A pointer stored, by the
+ *     process's width.
  * @property {(address: number, expected: number, value: number) => number} compareExchange
  *     The dword at the address replaced by the value where it held `expected`,
  *     answering what it held, as `lock cmpxchg` does: the 32-bit kernel's
@@ -225,6 +271,7 @@ function x87Words(fpu){
  *     A guest function run to its return, synchronously: a test's stand-in.
  *     The engine has none -- running the guest from the host is a wait --
  *     so a function that calls one has no handler, only its x86.
+ * @property {number} [pointerSize]  8 in a 64-bit process: what `ptr` and `setPtr` move.
  */
 
 /**
@@ -242,9 +289,13 @@ function x87Words(fpu){
  * @returns {GuestMemory}
  */
 export function guestMemory(host){
+    const wide = host.pointerSize === 8;
+    // An address as the code computed it: a dword wraps in a 32-bit process,
+    // as the i386 does; a 64-bit one's past 4 GiB is whole (`ptr`).
+    const at = wide ? wholeAddress : (/** @type {number} */ address)=>address >>> 0;
     /** @param {number} address @param {number} length */
     const view = (address, length)=>{
-        const bytes = host.readMemory(address >>> 0, length);
+        const bytes = host.readMemory(at(address), length);
         return new DataView(bytes.buffer, bytes.byteOffset, length);
     };
     // A scalar written goes through one buffer, its bytes copied out by the
@@ -260,14 +311,14 @@ export function guestMemory(host){
     /** @param {number} address @param {1 | 2 | 4 | 8} length @param {(v: DataView) => void} fill */
     const write = (address, length, fill)=>{
         fill(scratchView);
-        host.writeMemory(address >>> 0, pieces[length]);
+        host.writeMemory(at(address), pieces[length]);
     };
     /** @param {number} address */
-    const u8 = address=>host.readMemory(address >>> 0, 1)[0];
+    const u8 = address=>host.readMemory(at(address), 1)[0];
     /** @param {number} address @param {number} value */
     const setU8 = (address, value)=>{
         scratch[0] = value;
-        host.writeMemory(address >>> 0, pieces[1]);
+        host.writeMemory(at(address), pieces[1]);
     };
     return {
         u8,
@@ -284,13 +335,22 @@ export function guestMemory(host){
         setU32: (address, value)=>write(address, 4, v=>v.setUint32(0, value, true)),
         setF32: (address, value)=>write(address, 4, v=>v.setFloat32(0, value, true)),
         setF64: (address, value)=>write(address, 8, v=>v.setFloat64(0, value, true)),
+        ptr: address=>{
+            const held = view(address, wide ? 8 : 4);
+            return held.getUint32(0, true) + (wide ? held.getUint32(4, true) * 2 ** 32 : 0);
+        },
+        setPtr: (address, value)=>write(address, wide ? 8 : 4, v=>{
+            const high = Math.floor(value / 2 ** 32);
+            v.setUint32(0, value - high * 2 ** 32, true);
+            v.setUint32(4, high, true);
+        }),
         copyUp: (destination, source, count)=>{
             const length = count >>> 0;
             // Apart, or the destination below: a copy of the whole reads the
             // same bytes the ascending one does.
             if ((destination - source >>> 0) >= length)
             {
-                host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
+                host.writeMemory(at(destination), host.readMemory(at(source), length).slice());
                 return;
             }
             for (let i = 0; i < length; i++)
@@ -302,7 +362,7 @@ export function guestMemory(host){
             const length = count >>> 0;
             if ((source - destination >>> 0) >= length)
             {
-                host.writeMemory(destination >>> 0, host.readMemory(source >>> 0, length).slice());
+                host.writeMemory(at(destination), host.readMemory(at(source), length).slice());
                 return;
             }
             for (let i = length - 1; i >= 0; i--)
@@ -313,10 +373,10 @@ export function guestMemory(host){
         fill: (destination, value, count)=>{
             if (host.fillMemory)
             {
-                host.fillMemory(destination >>> 0, value & 0xff, count >>> 0);
+                host.fillMemory(at(destination), value & 0xff, count >>> 0);
                 return;
             }
-            host.writeMemory(destination >>> 0, new Uint8Array(count >>> 0).fill(value & 0xff));
+            host.writeMemory(at(destination), new Uint8Array(count >>> 0).fill(value & 0xff));
         },
         // One thread's reference: the host answers it with nothing else running.
         compareExchange: (address, expected, value)=>{
@@ -381,14 +441,14 @@ export function guestMemory(host){
  * @param {CompiledGuestCode} compiled
  * @param {HostFallback} [fallback]
  * @returns {{ convention: string, argBytes: number,
- *     floats?: Record<number, 'f32' | 'f64'>,
+ *     floats?: Record<number, 'f32' | 'f64'>, addresses?: number[], returns?: string,
  *     code: (builder?: CodeBuilder) => Uint8Array,
  *     long?: (builder?: CodeBuilder) => Uint8Array }}
  */
 export function guestExport(compiled, fallback){
     const { convention } = compiled;
     const argBytes = compiled.params.reduce((sum, type)=>
-        sum + (type === 'f64' ? 8 : type === 'x87' ? 0 : 4), 0);
+        sum + (type === 'f64' || type === 'i64' ? 8 : type === 'x87' ? 0 : 4), 0);
     if (compiled.host !== undefined && !fallback)
     {
         throw new Error('guest code: a function that hands calls to the host wants its handler');
@@ -398,6 +458,10 @@ export function guestExport(compiled, fallback){
     // code hands a call over to.
     /** @type {Record<number, 'f32' | 'f64'>} */
     const floats = {};
+    /** @type {number[]} An i64's first slot: one argument whole to a 64-bit caller. */
+    const quadwords = [];
+    /** @type {number[]} A pointer's slot: the address whole to a handler of a 64-bit caller. */
+    const addresses = [];
     let word = 0;
     for (const type of compiled.params)
     {
@@ -405,9 +469,29 @@ export function guestExport(compiled, fallback){
         {
             floats[word] = type;
         }
-        word += type === 'f64' ? 2 : type === 'x87' ? 0 : 1;
+        if (type === 'f32bits')
+        {
+            // A float the handler takes as its dword, out of the same register.
+            floats[word] = 'f32';
+        }
+        if (type === 'i64')
+        {
+            quadwords.push(word);
+        }
+        if (type === 'ptr')
+        {
+            addresses.push(word);
+        }
+        word += type === 'f64' || type === 'i64' ? 2 : type === 'x87' ? 0 : 1;
     }
-    const declared = Object.keys(floats).length > 0 ? { floats } : {};
+    // RAX as the x86-64 code leaves it for the declared type, which the trap
+    // has to answer the same: a pointer and an unsigned dword by zeros, a
+    // signed one (no `returns`) by its sign. One source, the function's own.
+    const returns = compiled.returns === 'ptr' ? 'pointer'
+        : compiled.returns === 'u32' ? 'u32' : undefined;
+    const declared = { ...Object.keys(floats).length > 0 ? { floats } : {},
+        ...quadwords.length > 0 ? { quadwords } : {},
+        ...addresses.length > 0 ? { addresses } : {}, ...returns ? { returns } : {} };
     /**
      * The code with its jump to the trap filled in, where it has one.
      *
@@ -460,7 +544,7 @@ export function guestExport(compiled, fallback){
  * @param {HostFallback} [fallback]  What `return host()` answers with, in the
  *     handler and through the trap the code jumps to.
  * @returns {{ convention: string, argBytes: number,
- *     floats?: Record<number, 'f32' | 'f64'>,
+ *     floats?: Record<number, 'f32' | 'f64'>, addresses?: number[], returns?: string,
  *     code: (builder?: CodeBuilder) => Uint8Array,
  *     long?: (builder?: CodeBuilder) => Uint8Array, handler: (args: number[]) => number }}
  */
@@ -486,7 +570,8 @@ export function guestEntry(source, compiled, host, fallback){
     /** @type {Guest | null} */
     const guest = uses.length === 0 ? null : readMemory && writeMemory
         ? /** @type {Guest} */ ({ ...guestMemory({ readMemory, writeMemory,
-            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {} }), ...words, ...bits })
+            ...fillMemory ? { fillMemory } : {}, ...call ? { call } : {},
+            ...host.pointerSize === 8 ? { pointerSize: 8 } : {} }), ...words, ...bits })
         : /** @type {Guest} */ (/** @type {unknown} */ ({ ...words, ...bits,
             host: ()=>{
                 throw new Error('guest code: host() is answered only in a handler with a '
@@ -496,7 +581,7 @@ export function guestEntry(source, compiled, host, fallback){
     const onStack = params.filter(type=>type === 'x87').length;
     /** @param {number[]} args */
     const handler = args=>{
-        /** @type {number[]} */
+        /** @type {(number | bigint)[]} */
         const values = [];
         let slot = 0;
         let x87 = onStack;
@@ -517,6 +602,18 @@ export function guestEntry(source, compiled, host, fallback){
             {
                 SCRATCH.setUint32(0, args[slot] >>> 0, true);
                 values.push(SCRATCH.getFloat32(0, true));
+                slot++;
+            }
+            else if (type === 'i64')
+            {
+                values.push(BigInt.asIntN(64, BigInt(args[slot + 1] >>> 0) << 32n
+                    | BigInt(args[slot] >>> 0)));
+                slot += 2;
+            }
+            else if (type === 'ptr')
+            {
+                // Whole from a 64-bit caller (the spec's `addresses`).
+                values.push(args[slot] >= 2 ** 32 ? args[slot] : args[slot] >>> 0);
                 slot++;
             }
             else
@@ -560,6 +657,11 @@ export function guestEntry(source, compiled, host, fallback){
             }
             case 'void':
                 return 0;
+            case 'ptr':
+                // Past a dword only in a 64-bit process, whose RAX takes a bigint
+                // whole (the bridge's `longAnswer`); a number to every other reader.
+                return result >= 2 ** 32
+                    ? /** @type {number} */ (/** @type {unknown} */ (BigInt(result))) : result;
             default:
                 return result;
         }
@@ -703,6 +805,49 @@ export function xmmEntry(form, own){
         } };
 }
 
+/**
+ * A function of one double whose code reads it as its two halves, integers
+ * (`_fpclass`: a signalling NaN is a NaN its bits say, which a double held on
+ * the way would quiet), for a 64-bit caller, who passes the double in XMM0:
+ * the halves put where the x86-64 code reads its two arguments, by three
+ * instructions before it.
+ *
+ *     movq rcx, xmm0         ; the low half, read as ECX
+ *     mov rdx, rcx
+ *     shr rdx, 32            ; the high half
+ *   form:                    ; the code of (low, high)
+ *
+ * Nothing of the stack moves and no register a caller keeps changes: a leaf
+ * still, where its form is one.
+ *
+ * @template {{ long?: (builder?: CodeBuilder) => Uint8Array }} T
+ * @param {T} form  The export as `guestEntry` made it, its `long` the code of (low, high).
+ * @returns {T}
+ */
+export function halvesEntry(form){
+    const { long } = form;
+    if (long === undefined)
+    {
+        throw new Error('guest code: a function of a double\'s halves has no x86-64 code');
+    }
+    const head = [
+        0x66, 0x48, 0x0f, 0x7e, 0xc1,       // movq rcx, xmm0
+        0x48, 0x89, 0xca,                   // mov rdx, rcx
+        0x48, 0xc1, 0xea, 0x20,             // shr rdx, 32
+    ];
+    return { ...form,
+        long: (/** @type {CodeBuilder | undefined} */ builder)=>{
+            const shifted = builder && { register: builder.register,
+                jump: (/** @type {number} */ at, /** @type {number} */ target)=>
+                    builder.jump(at + head.length, target) };
+            const body = long(shifted);
+            const bytes = new Uint8Array(head.length + body.length);
+            bytes.set(head);
+            bytes.set(body, head.length);
+            return bytes;
+        } };
+}
+
 /** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */
 const MOV_EAX = 0xb8;
 
@@ -714,9 +859,13 @@ const SCRATCH = new DataView(new ArrayBuffer(8));
  * toward zero, and NaN or a double out of range the integer indefinite, which
  * `fisttp` stores.
  *
- * @param {number} value
+ * @param {number | bigint} value  a bigint (`int64`) as it is
  */
 export function toInt64(value){
+    if (typeof value === 'bigint')
+    {
+        return BigInt.asIntN(64, value);
+    }
     const truncated = Math.trunc(value);
     if (!Number.isFinite(truncated) || truncated >= 2 ** 63 || truncated < -(2 ** 63))
     {

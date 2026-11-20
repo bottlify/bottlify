@@ -316,56 +316,98 @@ export function createLoaderModule(){
                  *        second library of the same name is synthesised beside it.
                  * @param {Uint8Array} [options.headers]  The real library's own headers
                  *        (`installedHeaders`), laid over the synthesised ones.
+                 * @param {boolean} [options.later]  Its span held and its bytes
+                 *        written only at `place()`: the same bytes, made again.
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
-                 *   ordinalOf: (name: string) => number | null }}
+                 *   ordinalOf: (name: string) => number | null,
+                 *   addressOfOrdinal: (ordinal: number) => number | null,
+                 *   entries: () => [string, number][],
+                 *   placed: () => boolean, place: () => void }}
                  */
-                synthesise({ name, base, exports, entryPoint, long, headers, region = name }){
-                    const module = synthesiseModule({ name, base, exports, entryPoint, long });
-                    const codeSize = module.dataRva || module.size;
-                    // The real library's own headers, where its file is
-                    // installed (`installedHeaders`): within the headers' page.
-                    if (headers)
-                    {
-                        module.bytes.set(headers, 0);
-                    }
-
-                    memory.register({
-                        name: region,
-                        base,
-                        size: codeSize,
-                        kind: memory.RegionKind.IMAGE,
-                        // Written once, at assembly, and executable from then on:
-                        // the exports are jumps and the guest runs them.
-                        access: memory.Access.READ_WRITE_EXECUTE,
-                    });
-                    memory.writeBytes(base, module.bytes.subarray(0, codeSize));
-                    memory.protect(region, memory.Access.READ_EXECUTE);
-                    if (module.dataRva !== 0)
-                    {
-                        // The variables are written by the program and by the
-                        // library's own functions alike, as a real `.data` is.
+                synthesise(options){
+                    const { name, base, exports, entryPoint, long, headers } = options;
+                    const later = options.later ?? false;
+                    const region = options.region ?? name;
+                    const built = ()=>{
+                        const module = synthesiseModule({ name, base, exports, entryPoint, long });
+                        // The real library's own headers, where its file is
+                        // installed (`installedHeaders`): within the headers' page.
+                        if (headers)
+                        {
+                            module.bytes.set(headers, 0);
+                        }
+                        return module;
+                    };
+                    /** @param {ReturnType<typeof synthesiseModule>} module */
+                    const write = module=>{
+                        const codeSize = module.dataRva || module.size;
                         memory.register({
-                            name: `${region} .data`,
-                            base: base + module.dataRva,
-                            size: module.size - module.dataRva,
+                            name: region,
+                            base,
+                            size: codeSize,
                             kind: memory.RegionKind.IMAGE,
-                            access: memory.Access.READ_WRITE,
+                            // Written once, at assembly, and executable from then on:
+                            // the exports are jumps and the guest runs them.
+                            access: memory.Access.READ_WRITE_EXECUTE,
                         });
-                        memory.writeBytes(base + module.dataRva,
-                            module.bytes.subarray(module.dataRva));
+                        memory.writeBytes(base, module.bytes.subarray(0, codeSize));
+                        memory.protect(region, memory.Access.READ_EXECUTE);
+                        if (module.dataRva !== 0)
+                        {
+                            // The variables are written by the program and by the
+                            // library's own functions alike, as a real `.data` is.
+                            memory.register({
+                                name: `${region} .data`,
+                                base: base + module.dataRva,
+                                size: module.size - module.dataRva,
+                                kind: memory.RegionKind.IMAGE,
+                                access: memory.Access.READ_WRITE,
+                            });
+                            memory.writeBytes(base + module.dataRva,
+                                module.bytes.subarray(module.dataRva));
+                        }
+                    };
+                    const module = built();
+                    // Placed later (`later`): its span held now, so nothing else
+                    // is given those addresses, its bytes not kept - they are
+                    // made again from the same exports when it is placed.
+                    const pending = later ? `${region} (not placed)` : null;
+                    if (pending)
+                    {
+                        memory.register({ name: pending, base, size: module.size,
+                            kind: memory.RegionKind.RESERVED, access: memory.Access.NONE });
+                    }
+                    else
+                    {
+                        write(module);
                     }
 
                     const entryAddress = module.entryPointRva === 0
                         ? 0 : base + module.entryPointRva;
                     const record = { base, entryPoint: entryAddress, unresolved: [], name };
                     loaded.push(record);
+                    let placed = !later;
                     return {
                         base,
                         size: module.size,
                         entryPoint: entryAddress,
                         addressOf: module.addressOf,
                         ordinalOf: module.ordinalOf,
+                        addressOfOrdinal: module.addressOfOrdinal,
+                        entries: module.entries,
+                        /** Whether its bytes are in guest memory. */
+                        placed: ()=>placed,
+                        /** Writes its bytes where its span was held; nothing once it has. */
+                        place: ()=>{
+                            if (placed)
+                            {
+                                return;
+                            }
+                            placed = true;
+                            memory.unregister(/** @type {string} */ (pending));
+                            write(built());
+                        },
                     };
                 },
 

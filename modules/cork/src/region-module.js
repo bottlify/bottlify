@@ -30,7 +30,7 @@ import { MODE_64 } from './decode/decoder.js';
  *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
  *     checked?: boolean, processors?: number, markBlocks?: boolean, ramBase?: number,
  *     hostFeatures?: Partial<import('./wasm/features.js').Features>,
- *     form?: Parameters<typeof formRegion>[2], bits?: 32 | 64 }} what
+ *     form?: Parameters<typeof formRegion>[2], bits?: 32 | 64, window?: number }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
  *     default); `precise`, `atomic`, `hash`, `callReturn`, `looseStacks`:
  *     as the translator's configuration has them; `expansion` told each
@@ -45,12 +45,14 @@ import { MODE_64 } from './decode/decoder.js';
  *     an arm64 one's default NaN is positive, and its float arithmetic carries the fix-ups
  *     an x86 host emits no code for; `form` how the region is formed (`formRegion`'s
  *     options: `formDepth`, the leaves' limits); `bits` 64 the code long mode's, formed and
- *     emitted as the long-mode runtime has it
+ *     emitted as the long-mode runtime has it; `window` a wide window's bytes (8 or 16
+ *     GiB, long mode's), the RAM a `memory64` memory of its own
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
     ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
     expansion = null, wide = false, checked = true, processors = 1,
-    markBlocks = false, ramBase = PAGE, hostFeatures = {}, form = {}, bits = 32 })
+    markBlocks = false, ramBase = PAGE, hostFeatures = {}, form = {}, bits = 32,
+    window })
 {
     const bytes = Uint8Array.from(code);
     // Bytes past the code read as `hlt`, so a region never runs off into them.
@@ -60,7 +62,8 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
     };
     const region = formRegion(read, entry, bits === 64 ? { mode: MODE_64, ...form } : form);
     const m = new ModuleBuilder();
-    const layout = ownLayout({ ramSize, processors, ramBase, ...bits === 64 ? { bits: 64 } : {} });
+    const layout = window !== undefined ? ownLayout({ ramSize, bits: 64, window, ramBase: 0 })
+        : ownLayout({ ramSize, processors, ramBase, ...bits === 64 ? { bits: 64 } : {} });
     const context = prepareModule(m, layout, { ...features(), ...hostFeatures }, {},
         { precise, atomic, hash, callReturn: hash && callReturn, looseStacks,
             expansion, wide, markBlocks });

@@ -19,6 +19,7 @@ import { CONTAINERS, WINCODEC } from './frames.js';
 import { FORMATS, formatOf } from './formats.js';
 import { GUID, INTERFACES } from './layout.js';
 import { E_INVALIDARG, S_OK } from './kit.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** WICComponentType. */
 const TYPE = Object.freeze({ DECODER: 1, ENCODER: 2, CONVERTER: 4, PIXEL_FORMAT: 0x20 });
@@ -193,7 +194,7 @@ export function createInfos(kit, host, makers){
                     {
                         return E_INVALIDARG;
                     }
-                    const asked = host.readWideString(mime >>> 0, 256 * 2).toLowerCase();
+                    const asked = host.readWideString(wholeAddress(mime), 256 * 2).toLowerCase();
                     putU32(out, container.mime.split(',').includes(asked) ? 1 : 0);
                     return S_OK;
                 },
@@ -315,7 +316,7 @@ export function createInfos(kit, host, makers){
                         {
                             return E_INVALIDARG;
                         }
-                        host.writeMemory(buffer >>> 0, mask);
+                        host.writeMemory(wholeAddress(buffer), mask);
                     }
                     return S_OK;
                 },

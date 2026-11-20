@@ -42,5 +42,12 @@ test('a 64-bit program dispatches exceptions through its unwind tables',
         assert.match(text, /^ok {3}a frame whose handler hands on to the runtime's reaches/m,
             text);
         assert.match(text, /^ok {3}and its __finally runs on the way, once$/m, text);
+        assert.match(text, /^ok {3}a longjmp returns to its mark with its value and the registers/m,
+            text);
+        assert.match(text, /^ok {3}through the __finally between$/m, text);
+        assert.match(text, /^ok {3}a longjmp of zero arrives as one$/m, text);
+        const calls = JSON.stringify(/** @type {any} */ (app.diagnostics()
+            .find((/** @type {any} */ layer)=>layer.name === 'bridge'))?.metrics?.byFunction ?? []);
+        assert.doesNotMatch(calls, /_setjmp/, 'a mark is set in the guest');
         assert.equal(code, 0, text);
     });

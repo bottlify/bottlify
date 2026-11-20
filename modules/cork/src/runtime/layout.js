@@ -200,6 +200,9 @@ export const transferTargetAt = (layout, slot)=>mechanismAt(layout, Tables.MECHA
  */
 export const CALL_STRIDE = 64;
 
+/** What a call's count is multiplied by: one whose product's top bits are zero is kept. */
+export const CALL_HASH = 0x9e3779b1;
+
 /**
  * The block profile's slot for a block start: the top twenty bits of the
  * address times the golden ratio.
@@ -254,7 +257,7 @@ export const WRAP_SLACK = 2 * PAGE;
  *     a field only past one, so one processor's layout, and its translations, are
  *     what they were;
  *     `ramBase`: `PAGE` (the default) or 0;
- *     `bits`: 64 for long mode's state block (`longLayout`), one executor's;
+ *     `bits`: 64 for long mode's state block (`longLayout`);
  *     `tablesAt`: where the tables lie, a multiple of `PAGE`, when not past RAM -- inside
  *     the guest's space, in a range the host keeps from it, so the memory need not reach
  *     past RAM's end to hold them;
@@ -264,7 +267,7 @@ export const WRAP_SLACK = 2 * PAGE;
  *     the RAM the memory holds now, less one, as it grows;
  *     `window`: long mode's address space, 4 GiB (the default), 8 or 16 GiB
  *     (`wideLayout`); `codeBase`: a wide window's 4 GiB block its code lies in
- *     (`wideLayout`), 0 by default
+ *     (`wideLayout`), 0 by default; `tablesAt` there places a second block's tables
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
@@ -283,7 +286,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
     {
         throw new Error(`cork: tables at ${tablesAt}, not a page boundary`);
     }
-    if (ramFloor !== undefined && (bits !== 32 || ramBase !== 0
+    if (ramFloor !== undefined && ((bits !== 32 && window !== WINDOW) || ramBase !== 0
         || (ramSize & ramSize - 1) !== 0 || (ramFloor & ramFloor - 1) !== 0
         || ramFloor > ramSize || ramFloor < 2 * PAGE))
     {
@@ -302,12 +305,13 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
     const state = ramBase === 0 ? LOW_STATE : 0;
     if (bits === 64)
     {
-        if (processors > 1)
+        if (processors > 1 && window !== WINDOW)
         {
-            throw new Error('cork: long mode runs on one executor so far');
+            throw new Error('cork: a wide window runs on one executor so far');
         }
-        return window === WINDOW ? longLayout(state, ramBase, ramSize, hashSlots)
-            : wideLayout(window, ramSize, hashSlots, codeBase);
+        return window === WINDOW
+            ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors)
+            : wideLayout(window, ramSize, hashSlots, codeBase, tablesAt);
     }
     const fields = {
         bits: /** @type {32} */ (32),
@@ -355,8 +359,12 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // runs, where leaf 1 of `cpuid` has it (its initial APIC id, EBX[31:24]).
         // A translation made for every executor (`sharedLayout`) reads it there;
         // whoever gives an executor its state page writes it (`apicWord`).
+        // And the process's one lock word, in its first executor's page for every
+        // executor (no state field: `executorLayout` leaves it where it is): taken
+        // around a locked access no host atomic spans (`emit/locked.js` `lockHeld`).
         ...processors > 1
-            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052 } : {},
+            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052,
+                lockWord: state + 2056 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -368,14 +376,20 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
  * XMM registers and FS's and GS's bases as quadwords; the counter, the call
  * profile and `origin` past them, `nanFirst` past the block.
  *
+ * A growing one (`tablesAt`, `ramFloor`) is laid out as the 32-bit one is:
+ * the tables inside the guest's space, the RAM held up to a power of two read
+ * from the wrap word; its ceiling may be the whole window, 4 GiB, where the
+ * host keeps the window's last page from the guest (an engine range) rather
+ * than the layout leaving it out of RAM.
+ *
  * @param {number} state @param {number} ramBase @param {number} ramSize
- * @param {number} hashSlots
+ * @param {number} hashSlots @param {number} [tablesAt] @param {number} [ramFloor]
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function longLayout(state, ramBase, ramSize, hashSlots){
+function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors = 1){
     // The last page of the 4 GiB window is never RAM: translated code finds a
     // store window that crosses 4 GiB by that page's INACCESSIBLE flag alone.
-    if (ramSize > 2 ** 32 - 4096)
+    if (ramSize > (ramFloor === undefined ? 2 ** 32 - 4096 : 2 ** 32))
     {
         throw new RangeError('cork: long mode\'s RAM leaves the last page of 4 GiB');
     }
@@ -404,8 +418,15 @@ function longLayout(state, ramBase, ramSize, hashSlots){
         // and carry in as dwords, result and operands as quadwords.
         flagRecord: state + 768,
         nanFirst: state + STATE_BLOCK_SIZE_64,
-        tables: ramBase + ramSize,
+        tables: tablesAt ?? ramBase + ramSize,
+        ...ramFloor === undefined ? {} : { ramFloor, wrap: state + WRAP_WORD },
         hashShift: 32 - Math.log2(hashSlots),
+        // As the 32-bit layout's: the word another executor asks through, the
+        // processor this one is and the process's lock word, only where others run
+        // beside it.
+        ...processors > 1
+            ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052,
+                lockWord: state + 2056 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -434,11 +455,17 @@ export const WIDE_WINDOWS = Object.freeze([2 ** 33, 2 ** 34]);
  * address leaves the translated code -- RIP written back, a return address,
  * a RIP-relative operand -- and comes out of a target that enters it.
  *
+ * A process translates two such blocks, each with a runtime of its own:
+ * the image's, and the one below 4 GiB, where the system's libraries, the
+ * heap and a JIT's pages lie (`codeBase` 0). Each keeps its own tables, the
+ * second's past the first's (`tablesAt`); the page flags, code granules and
+ * stale span are the window's, one for both.
+ *
  * @param {number} window @param {number} ramSize @param {number} hashSlots
- * @param {number} codeBase
+ * @param {number} codeBase @param {number} [tablesAt]
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function wideLayout(window, ramSize, hashSlots, codeBase){
+function wideLayout(window, ramSize, hashSlots, codeBase, tablesAt){
     if (!(ramSize > 0 && ramSize <= window - 4096 && ramSize % 4096 === 0))
     {
         throw new RangeError(`cork: ${ramSize} bytes of RAM in a window of ${window}`);
@@ -446,8 +473,8 @@ function wideLayout(window, ramSize, hashSlots, codeBase){
     /** @type {Record<string, any>} */
     const fields = { ...longLayout(LOW_STATE, 0, 4096, hashSlots), ramSize, window,
         ramMemory: 1, pageFlags: PAGE, codeRanges: PAGE + window / 4096,
-        staleSpan: PAGE + window / 4096 * 3, tables: PAGE * 2 + window / 4096 * 3,
-        ...codeBase === 0 ? {} : { codeBase } };
+        staleSpan: PAGE + window / 4096 * 3,
+        tables: tablesAt ?? PAGE * 2 + window / 4096 * 3, codeBase };
     delete fields.id;
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }

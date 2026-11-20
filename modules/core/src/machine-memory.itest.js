@@ -182,9 +182,10 @@ for (const { guestCharge, cores, concurrency } of CASES)
  * its whole 512 MiB, and none has room to start; by what it is given, one
  * child of four has room for its block and the rest are refused theirs. At
  * 640 MiB four children by what they were given all but fitted, and whether
- * one was refused hung on when the round before let its memory go.
+ * one was refused hung on when the round before let its memory go; at 384 MiB
+ * they fitted once a process wrote only the system modules it loads (A280).
  */
-const MACHINE = { length: 640 * MiB, given: 384 * MiB };
+const MACHINE = { length: 640 * MiB, given: 320 * MiB };
 for (const guestCharge of CHARGES)
 {
     test(`a run made with machineMemory reports it, and a block past it is refused, not a fault`

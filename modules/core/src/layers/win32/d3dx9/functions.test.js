@@ -91,6 +91,14 @@ test('every mathematical export is there, stdcall, and pops its arguments', ()=>
     }
     assert.equal(fns.D3DXCreateEffectPool.argBytes, 4);
     assert.equal(fns.D3DXCreateEffectFromResourceA.argBytes, 36);
+    // Each is guest code in a 64-bit process too: its x86-64 from the same source.
+    for (const compiled of [COMPILED, MATRIX, VECTOR, QUATERNION])
+    {
+        for (const name of Object.keys(compiled))
+        {
+            assert.equal(typeof fns[name].long, 'function', `${name}: x86-64 code`);
+        }
+    }
 });
 
 test('a transpose swaps rows and columns and answers the output pointer', ()=>{

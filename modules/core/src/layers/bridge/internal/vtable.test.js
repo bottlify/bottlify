@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createVtables } from './vtable.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const IID = '{00000001-0000-0000-C000-000000000046}';
 
@@ -44,12 +45,12 @@ function vtables({ stubs = Infinity, heap = true }){
     let left = stubs;
     let next = 0x2000;
     return createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>memory.set(address, String(value)),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name */
         register: name=>{
             if (left-- <= 0)
@@ -109,12 +110,12 @@ test('a method table is laid where the heap keeps tables, apart from objects and
     const words = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>words.set(address, value),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         register: ()=>(next += 0x10),
         heap: {
             /** @param {number} size */
@@ -136,12 +137,12 @@ test('a method that runs in the guest takes its slot, and keeps its trap to fall
     const memory = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>memory.set(address, String(value)),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name */
         register: name=>{
             registered.push(name);
@@ -193,12 +194,12 @@ test('objects of one interface share its stubs, and a call still finds its own o
     const memory = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>memory.set(address, String(value)),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -263,11 +264,11 @@ test('objects whose lists are made afresh share the stubs of their shape, each i
         const handlers = new Map();
         let next = 0x2000;
         const table = createVtables({
-            memory: {
+            memory: withPointers({
                 writeU32: ()=>{},
                 /** @param {number} address @param {number} length */
                 readBytes: (address, length)=>new Uint8Array(length),
-            },
+            }),
             /** @param {string} name @param {any} fn */
             register: (name, fn)=>{
                 handlers.set(`${name}#${handlers.size}`, fn);
@@ -329,11 +330,11 @@ test('a method hands its implementation one argument array, until a call answers
     const handlers = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             writeU32: ()=>{},
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -385,11 +386,11 @@ test('an object still reachable at a count of zero keeps its pointer until it is
     const handlers = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             writeU32: ()=>{},
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -464,12 +465,12 @@ function interfaces(){
     const freed = [];
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>words.set(address, value),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>guids.get(address) ?? new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -754,7 +755,7 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
     const registered = new Map();
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>words.set(address, value >>> 0),
             /** @param {number} address @param {number} length */
@@ -762,7 +763,7 @@ test('a 64-bit process\'s interfaces have eight-byte slots, traps for the i386 c
                 : new Uint8Array(length)),
             /** @param {number} address @param {Uint8Array} bytes */
             writeBytes: (address, bytes)=>void [address, bytes],
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             registered.set(name, fn);
@@ -824,12 +825,12 @@ test('a method with a slot and no implementation answers E_NOTIMPL, and is said'
     const said = [];
     let next = 0x2000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>void [address, value],
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         /** @param {string} name @param {any} fn */
         register: (name, fn)=>{
             handlers.set(name, fn);
@@ -857,12 +858,12 @@ test('an object whose layout goes on past the vtable pointer is given its bytes,
     const words = new Map();
     let next = 0x8000;
     const table = createVtables({
-        memory: {
+        memory: withPointers({
             /** @param {number} address @param {number} value */
             writeU32: (address, value)=>words.set(address, value),
             /** @param {number} address @param {number} length */
             readBytes: (address, length)=>new Uint8Array(length),
-        },
+        }),
         register: ()=>{
             next += 0x10;
             return next;

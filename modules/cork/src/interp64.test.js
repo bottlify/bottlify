@@ -12,7 +12,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { STATE_BLOCK_SIZE_64, ownLayout, pagesFor, tablesSize } from './runtime/layout.js';
+import { PAGE, STATE_BLOCK_SIZE_64, WRAP_SLACK, ownLayout, pagesFor, tablesSize }
+    from './runtime/layout.js';
 import { allowMemory64, ifRoom } from './testing/memory64.js';
 import { Fault } from './ir.js';
 import { memory64 } from './wasm/features.js';
@@ -199,4 +200,38 @@ test('crc32 over a quadword and a byte is CRC-32C: "123456789" checks to 0xE3069
     interpret64(state, 10);
     state.syncOut();
     assert.equal(view.getBigUint64(layout.regs, true), 0xe3069283n);
+});
+
+test('a memory that grew between two runs is read where it grew', ()=>{
+    // A 64-bit process's memory grows as its program takes more: what the
+    // interpreter reads next lies past where the memory ended at its last run.
+    // Shared, as a process's is: the buffer of before stays whole and short.
+    const MIB = 1 << 20;
+    const layout = ownLayout({ ramSize: 64 * MIB, ramBase: 0, bits: 64, tablesAt: 4 * MIB,
+        ramFloor: 8 * MIB });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)),
+        maximum: (64 * MIB + WRAP_SLACK) / PAGE, shared: true });
+    const view = ()=>new DataView(memory.buffer);
+    view().setUint32(/** @type {number} */ (layout.wrap), 8 * MIB - 1, true);
+    view().setUint32(layout.eflags, 0x202, true);
+    view().setUint32(layout.mxcsr, 0x1f80, true);
+    const state = blockState64({ memory, layout, ports: { trapPort: TRAP_PORT,
+        read: ()=>0, write: ()=>{} } });
+    /** mov eax, [rbx]; hlt - run with RBX at `address`. @param {number} address */
+    const read = address=>{
+        new Uint8Array(memory.buffer).set([0x8b, 0x03, 0xf4], CODE);
+        view().setBigUint64(layout.regs + 3 * 8, BigInt(address), true);
+        view().setBigUint64(layout.eip, BigInt(CODE), true);
+        state.syncIn();
+        state.halted = false;
+        interpret64(state, 4);
+        state.syncOut();
+        return Number(view().getBigUint64(layout.regs, true));
+    };
+    view().setUint32(0x500000, 0x11111111, true);
+    assert.equal(read(0x500000), 0x11111111);
+    memory.grow((64 * MIB + WRAP_SLACK - memory.buffer.byteLength) / PAGE);
+    view().setUint32(/** @type {number} */ (layout.wrap), 64 * MIB - 1, true);
+    view().setUint32(0x2180000, 0x33333333, true);
+    assert.equal(read(0x2180000), 0x33333333);
 });

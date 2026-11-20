@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * dxva2 - here, the monitor configuration API it carries: the physical
  * monitors behind a display monitor, and their settings over DDC/CI.
@@ -76,10 +78,10 @@ export function createDxva2Functions(host){
         return 0;
     };
     /** @param {number} at @param {number} value */
-    const putU32 = (at, value)=>host.writeMemory(at >>> 0,
+    const putU32 = (at, value)=>host.writeMemory(wholeAddress(at),
         new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     /** @param {number} at */
-    const readU32 = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+    const readU32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
         .getUint32(0, true);
 
     /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */
@@ -126,7 +128,7 @@ export function createDxva2Functions(host){
                 view.setUint32(0, next, true);
                 [...DESCRIPTION].forEach((char, at)=>view.setUint16(4 + at * 2,
                     char.charCodeAt(0), true));
-                host.writeMemory(array >>> 0, entry);
+                host.writeMemory(wholeAddress(array), entry);
                 return 1;
             },
         },
@@ -148,7 +150,7 @@ export function createDxva2Functions(host){
                 let all = true;
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    all = open.delete(readU32((array >>> 0) + index * PHYSICAL_MONITOR_SIZE))
+                    all = open.delete(readU32(wholeAddress(array) + index * PHYSICAL_MONITOR_SIZE))
                         && all;
                 }
                 return all ? 1 : fail(ERROR_INVALID_HANDLE);

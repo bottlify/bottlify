@@ -50,6 +50,7 @@ import { createDirect3D8 } from '../d3d8/device.js';
 import {
     D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTS, D3DTSS, floatToDword,
 } from '../d3d8/constants.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -102,7 +103,7 @@ function machine(){
         where.bytes.set(value, where.at);
     };
 
-    const memory = {
+    const memory = withPointers({
         readBytes,
         writeBytes,
         /** @param {number} address */
@@ -114,7 +115,7 @@ function machine(){
         writeU32: (address, value)=>writeBytes(address, new Uint8Array([
             value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
         ])),
-    };
+    });
 
     /** @type {Map<number, any>} */
     const registered = new Map();

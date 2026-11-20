@@ -17,6 +17,7 @@
  */
 
 import { dword, u32 } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -70,7 +71,7 @@ export function createUsKeyFunctions(host){
     /** @param {'A' | 'W'} width @param {number} address */
     const readName = (width, address)=>((address >>> 0) === 0 ? ''
         : width === 'W' ? host.readWideString?.(address >>> 0, 0x10000) ?? ''
-            : host.readCString(address >>> 0, 0x10000));
+            : host.readCString(wholeAddress(address), 0x10000));
 
     /**
      * A wide string in a block of its own, for the calls made with the
@@ -162,7 +163,7 @@ export function createUsKeyFunctions(host){
         }
         keys.set(handle, { user, machine,
             path: parent ? `${parent.path}\\${sub}` : sub, access: access >>> 0 });
-        host.writeMemory(out >>> 0, dword(handle));
+        host.writeMemory(wholeAddress(out), dword(handle));
         return ERROR_SUCCESS;
     };
 
@@ -304,7 +305,7 @@ export function createUsKeyFunctions(host){
                 return ERROR_INVALID_PARAMETER;
             }
             const read = /** @type {(a: number, l: number) => Uint8Array} */ (host.readMemory);
-            const room = (sizeOut >>> 0) !== 0 ? u32(read(sizeOut >>> 0, 4)) : 0;
+            const room = (sizeOut >>> 0) !== 0 ? u32(read(wholeAddress(sizeOut), 4)) : 0;
             let status = ERROR_FILE_NOT_FOUND;
             for (const open of [(ignoreUser | 0) !== 0 ? 0 : key.user, key.machine])
             {
@@ -314,7 +315,7 @@ export function createUsKeyFunctions(host){
                 }
                 if ((sizeOut >>> 0) !== 0)
                 {
-                    host.writeMemory(sizeOut >>> 0, dword(room));
+                    host.writeMemory(wholeAddress(sizeOut), dword(room));
                 }
                 status = registry(`RegQueryValueEx${width}`, [open, value, 0, typeOut, data,
                     sizeOut]);
@@ -327,8 +328,8 @@ export function createUsKeyFunctions(host){
                 && (sizeOut >>> 0) !== 0)
             {
                 const length = Math.min(fallbackSize >>> 0, room);
-                host.writeMemory(data >>> 0, read(fallback >>> 0, length).slice());
-                host.writeMemory(sizeOut >>> 0, dword(length));
+                host.writeMemory(wholeAddress(data), read(wholeAddress(fallback), length).slice());
+                host.writeMemory(wholeAddress(sizeOut), dword(length));
                 return ERROR_SUCCESS;
             }
             return status;

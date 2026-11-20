@@ -8,8 +8,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ownLayout, pagesFor, pageFlagsAt, codeRangesAt, sharedLayout, windowBits, PAGE, LOW_STATE,
-    tablesSize } from './layout.js';
+import { ownLayout, pagesFor, pageFlagsAt, codeRangesAt,
+    sharedLayout, windowBits, PAGE, LOW_STATE, tablesSize } from './layout.js';
 
 const GiB = 2 ** 30;
 

@@ -28,6 +28,7 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_LOCAL_MACHINE } from './registry.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -111,6 +112,8 @@ const MAX_NAME = 0x8000;
  * @property {Reader} readCString
  * @property {Reader} readWideString
  * @property {(code: number) => void} setLastError
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose TRACE_GUID_REGISTRATION
+ *           is two quadwords.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
@@ -356,11 +359,12 @@ export function createEventLogFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            if (!isLocal((serverName >>> 0) === 0 ? null : read(serverName >>> 0, MAX_NAME)))
+            if (!isLocal((serverName >>> 0) === 0 ? null : read(wholeAddress(serverName),
+                MAX_NAME)))
             {
                 return fail(RPC_S_SERVER_UNAVAILABLE);
             }
-            const source = read(sourceName >>> 0, MAX_NAME);
+            const source = read(wholeAddress(sourceName), MAX_NAME);
             const log = logFor(source);
             return host.handles.open('eventlog', { kind: 'log', log, source, cursor: null,
                 register });
@@ -382,11 +386,12 @@ export function createEventLogFunctions(host){
             const texts = [];
             for (let at = 0; at < (count & 0xffff); at++)
             {
-                const pointer = readDword((strings >>> 0) + at * 4);
+                const pointer = readDword(wholeAddress(strings) + at * 4);
                 texts.push(pointer === 0 ? '' : read(pointer, MAX_NAME));
             }
             const sidBytes = (sid >>> 0) === 0 || !host.readMemory ? null
-                : host.readMemory(sid >>> 0, 8 + 4 * host.readMemory(sid >>> 0, 2)[1]).slice();
+                : host.readMemory(wholeAddress(sid), 8 + 4 * host.readMemory(wholeAddress(sid),
+                    2)[1]).slice();
             if ((type & 0xffff) === EVENTLOG_ERROR_TYPE)
             {
                 host.reportError?.(object.source, id >>> 0, texts);
@@ -395,7 +400,8 @@ export function createEventLogFunctions(host){
                 id: id >>> 0, type: type & 0xffff, category: category & 0xffff,
                 source: object.source, sid: sidBytes, strings: texts,
                 data: (data >>> 0) === 0 || (dataSize >>> 0) === 0 || !host.readMemory
-                    ? new Uint8Array(0) : host.readMemory(data >>> 0, dataSize >>> 0).slice(),
+                    ? new Uint8Array(0) : host.readMemory(wholeAddress(data),
+                        dataSize >>> 0).slice(),
             });
             return 1;
         },
@@ -474,7 +480,7 @@ export function createEventLogFunctions(host){
                 used += bytes.length;
                 object.cursor = records[at].number;
             }
-            let at = buffer >>> 0;
+            let at = wholeAddress(buffer);
             for (const bytes of out)
             {
                 host.writeMemory?.(at, bytes);
@@ -600,11 +606,12 @@ export function createEventLogFunctions(host){
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
-            if (!isLocal((serverName >>> 0) === 0 ? null : read(serverName >>> 0, MAX_NAME)))
+            if (!isLocal((serverName >>> 0) === 0 ? null : read(wholeAddress(serverName),
+                MAX_NAME)))
             {
                 return fail(RPC_S_SERVER_UNAVAILABLE);
             }
-            const path = read(fileName >>> 0, MAX_NAME);
+            const path = read(wholeAddress(fileName), MAX_NAME);
             const found = host.files?.stat(path);
             if (!host.files || !found?.exists || found.isDirectory)
             {
@@ -718,7 +725,7 @@ export function createEventLogFunctions(host){
             const handle = nextSession++;
             sessions.set(name.toUpperCase(), handle);
             writeDword(out, handle);
-            writeDword((out >>> 0) + 4, 0);
+            writeDword(wholeAddress(out) + 4, 0);
             return ERROR_SUCCESS;
         },
     });
@@ -831,13 +838,20 @@ export function createEventLogFunctions(host){
             }
             const handle = nextRegistration++;
             traceRegistrations.add(handle);
-            // TRACE_GUID_REGISTRATION: the GUID, then the handle Windows fills in.
+            // TRACE_GUID_REGISTRATION: the GUID's pointer, then the handle Windows
+            // fills in, each a pointer wide.
+            const word = host.pointerSize === 8 ? 8 : 4;
             for (let at = 0; at < (count >>> 0); at++)
             {
-                writeDword((guids >>> 0) + at * 8 + 4, handle);
+                const slot = (guids >>> 0) + at * 2 * word + word;
+                writeDword(slot, handle);
+                if (word === 8)
+                {
+                    writeDword(slot + 4, 0);
+                }
             }
             writeDword(out, handle);
-            writeDword((out >>> 0) + 4, 0);
+            writeDword(wholeAddress(out) + 4, 0);
             return ERROR_SUCCESS;
         },
     };
@@ -1208,7 +1222,7 @@ export function createEventLogFunctions(host){
                 const handle = nextProvider++;
                 providers.add(handle);
                 writeDword(out, handle);
-                writeDword((out >>> 0) + 4, 0);
+                writeDword(wholeAddress(out) + 4, 0);
                 return ERROR_SUCCESS;
             },
         },

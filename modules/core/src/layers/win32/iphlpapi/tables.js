@@ -19,6 +19,7 @@
  */
 
 import { readToTerminator } from '../common/scan-windows.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const NO_ERROR = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -272,12 +273,12 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        if ((table >>> 0) === 0 || readU32(size >>> 0) < bytes.length)
+        if ((table >>> 0) === 0 || readU32(wholeAddress(size)) < bytes.length)
         {
-            writeU32(size >>> 0, bytes.length);
+            writeU32(wholeAddress(size), bytes.length);
             return ERROR_INSUFFICIENT_BUFFER;
         }
-        host.writeMemory(table >>> 0, bytes);
+        host.writeMemory(wholeAddress(table), bytes);
         return NO_ERROR;
     };
 
@@ -292,8 +293,8 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        host.writeMemory(at >>> 0, bytes);
-        writeU32(out >>> 0, at);
+        host.writeMemory(wholeAddress(at), bytes);
+        writeU32(wholeAddress(out), at);
         return NO_ERROR;
     };
 
@@ -543,7 +544,7 @@ export function createIphlpapiTables(host, model){
                 }
                 const opened = host.handles?.open('mib-change', { api }) ?? 0;
                 notifications.add(opened);
-                writeU32(handle >>> 0, opened);
+                writeU32(wholeAddress(handle), opened);
                 if ((initial & 0xff) !== 0 && !initialRefused)
                 {
                     initialRefused = true;
@@ -593,7 +594,7 @@ export function createIphlpapiTables(host, model){
             const view = new DataView(timedOut.buffer);
             view.setUint32(0, destination, false);
             view.setUint32(4, IP_REQ_TIMED_OUT, true);
-            host.writeMemory(reply >>> 0, timedOut);
+            host.writeMemory(wholeAddress(reply), timedOut);
             return { replies: 0, error: IP_REQ_TIMED_OUT };
         }
         const bytes = new Uint8Array(ECHO_REPLY);
@@ -603,10 +604,11 @@ export function createIphlpapiTables(host, model){
         view.setUint16(12, size, true);
         view.setUint32(16, (reply >>> 0) + ECHO_REPLY, true);
         view.setUint8(20, 128);
-        host.writeMemory(reply >>> 0, bytes);
+        host.writeMemory(wholeAddress(reply), bytes);
         if (size > 0 && (data >>> 0) !== 0)
         {
-            host.writeMemory((reply >>> 0) + ECHO_REPLY, host.readMemory(data >>> 0, size).slice());
+            host.writeMemory(wholeAddress(reply) + ECHO_REPLY, host.readMemory(wholeAddress(data),
+                size).slice());
         }
         return { replies: 1, error: 0 };
     };
@@ -674,7 +676,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([out, size, order, family, tableClass])=>{
-                const kind = tableClass >>> 0;
+                const kind = wholeAddress(tableClass);
                 if ((size >>> 0) === 0 || kind > 8
                     || ((family >>> 0) !== AF_INET && (family >>> 0) !== AF_INET6))
                 {
@@ -711,7 +713,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([out, size, order, family, tableClass])=>{
-                const kind = tableClass >>> 0;
+                const kind = wholeAddress(tableClass);
                 if ((size >>> 0) === 0 || kind > 2
                     || ((family >>> 0) !== AF_INET && (family >>> 0) !== AF_INET6))
                 {
@@ -810,7 +812,7 @@ export function createIphlpapiTables(host, model){
                 }
                 for (let i = 0; i < n; i++)
                 {
-                    const wanted = host.readMemory((destinations >>> 0) + i * SOCKADDR_IN6,
+                    const wanted = host.readMemory(wholeAddress(destinations) + i * SOCKADDR_IN6,
                         SOCKADDR_IN6).slice();
                     const sourceAt = pairs + i * 2 * SOCKADDR_IN6;
                     const destinationAt = sourceAt + SOCKADDR_IN6;
@@ -830,9 +832,9 @@ export function createIphlpapiTables(host, model){
                     view.setUint32(i * 8, at + sourceAt, true);
                     view.setUint32(i * 8 + 4, at + destinationAt, true);
                 }
-                host.writeMemory(at >>> 0, bytes);
-                writeU32(out >>> 0, at);
-                writeU32(outCount >>> 0, n);
+                host.writeMemory(wholeAddress(at), bytes);
+                writeU32(wholeAddress(out), at);
+                writeU32(wholeAddress(outCount), n);
                 return NO_ERROR;
             },
         },
@@ -972,7 +974,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([row])=>{
-                if ((row >>> 0) === 0 || readU32(row >>> 0) !== TCP_DELETE_TCB)
+                if ((row >>> 0) === 0 || readU32(wholeAddress(row)) !== TCP_DELETE_TCB)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -985,7 +987,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>((out >>> 0) === 0 ? ERROR_INVALID_PARAMETER
-                : (host.writeMemory(out >>> 0, ipStats()), NO_ERROR)),
+                : (host.writeMemory(wholeAddress(out), ipStats()), NO_ERROR)),
         },
         GetIpStatisticsEx: {
             argBytes: 8,
@@ -996,7 +998,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>((out >>> 0) === 0 ? ERROR_INVALID_PARAMETER
-                : (host.writeMemory(out >>> 0, tcpStats()), NO_ERROR)),
+                : (host.writeMemory(wholeAddress(out), tcpStats()), NO_ERROR)),
         },
         GetTcpStatisticsEx: {
             argBytes: 8,
@@ -1007,7 +1009,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>((out >>> 0) === 0 ? ERROR_INVALID_PARAMETER
-                : (host.writeMemory(out >>> 0, udpStats()), NO_ERROR)),
+                : (host.writeMemory(wholeAddress(out), udpStats()), NO_ERROR)),
         },
         GetUdpStatisticsEx: {
             argBytes: 8,
@@ -1019,7 +1021,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>((out >>> 0) === 0 ? ERROR_INVALID_PARAMETER
-                : (host.writeMemory(out >>> 0, new Uint8Array(2 * 13 * 4)), NO_ERROR)),
+                : (host.writeMemory(wholeAddress(out), new Uint8Array(2 * 13 * 4)), NO_ERROR)),
         },
         /** MIB_ICMP_EX: messages, errors and 256 type counts, in then out. */
         GetIcmpStatisticsEx: {
@@ -1048,13 +1050,13 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((out >>> 0) === 0 || readU32(size >>> 0) < bytes.length)
+                if ((out >>> 0) === 0 || readU32(wholeAddress(size)) < bytes.length)
                 {
-                    writeU32(size >>> 0, bytes.length);
+                    writeU32(wholeAddress(size), bytes.length);
                     return 111;
                 }
                 view.setUint32(264, (out >>> 0) + 268, true);
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return NO_ERROR;
             },
         },
@@ -1080,12 +1082,12 @@ export function createIphlpapiTables(host, model){
                 const bytes = new Uint8Array(52);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, one.type === MIB_IF_TYPE_LOOPBACK ? 0 : 1, true);
-                if ((out >>> 0) === 0 || readU32(size >>> 0) < bytes.length)
+                if ((out >>> 0) === 0 || readU32(wholeAddress(size)) < bytes.length)
                 {
-                    writeU32(size >>> 0, bytes.length);
+                    writeU32(wholeAddress(size), bytes.length);
                     return 111;
                 }
-                host.writeMemory(out >>> 0, bytes);
+                host.writeMemory(wholeAddress(out), bytes);
                 return NO_ERROR;
             },
         },
@@ -1099,13 +1101,13 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const wanted = readWide(name >>> 0).toUpperCase();
+                const wanted = readWide(wholeAddress(name)).toUpperCase();
                 const one = interfaces().find(each=>`\\DEVICE\\TCPIP_${each.guid}` === wanted);
                 if (!one)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                writeU32(out >>> 0, one.index);
+                writeU32(wholeAddress(out), one.index);
                 return NO_ERROR;
             },
         },
@@ -1124,7 +1126,7 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_NETWORK_UNREACHABLE;
                 }
-                host.writeMemory(out >>> 0, forwardRow(route));
+                host.writeMemory(wholeAddress(out), forwardRow(route));
                 return NO_ERROR;
             },
         },
@@ -1138,7 +1140,8 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const sockaddr = new DataView(host.readMemory(address >>> 0, 8).slice().buffer);
+                const sockaddr = new DataView(host.readMemory(wholeAddress(address),
+                    8).slice().buffer);
                 if (sockaddr.getUint16(0, true) !== AF_INET)
                 {
                     return sockaddr.getUint16(0, true) === AF_INET6
@@ -1149,7 +1152,7 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_NETWORK_UNREACHABLE;
                 }
-                writeU32(out >>> 0, route.index);
+                writeU32(wholeAddress(out), route.index);
                 return NO_ERROR;
             },
         },
@@ -1168,7 +1171,8 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const sockaddr = new DataView(host.readMemory(destination >>> 0, 8).slice().buffer);
+                const sockaddr = new DataView(host.readMemory(wholeAddress(destination),
+                    8).slice().buffer);
                 if (sockaddr.getUint16(0, true) !== AF_INET)
                 {
                     return ERROR_NETWORK_UNREACHABLE;
@@ -1180,11 +1184,11 @@ export function createIphlpapiTables(host, model){
                 }
                 const row = new Uint8Array(FORWARD_ROW2.SIZE);
                 forwardRow2(new DataView(row.buffer), 0, route);
-                host.writeMemory(out >>> 0, row);
+                host.writeMemory(wholeAddress(out), row);
                 const best = new Uint8Array(SOCKADDR_INET);
                 sockaddrInet(new DataView(best.buffer), 0,
                     /** @type {InterfaceModel} */ (byIndex(route.index)).address ?? 0);
-                host.writeMemory(source >>> 0, best);
+                host.writeMemory(wholeAddress(source), best);
                 return NO_ERROR;
             },
         },
@@ -1198,7 +1202,7 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const family = readU32((row >>> 0) + IP_INTERFACE_ROW.FAMILY) & 0xffff;
+                const family = readU32(wholeAddress(row) + IP_INTERFACE_ROW.FAMILY) & 0xffff;
                 if (family !== AF_INET && family !== AF_INET6)
                 {
                     return ERROR_INVALID_PARAMETER;
@@ -1208,7 +1212,7 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_NOT_FOUND;
                 }
-                host.writeMemory(row >>> 0, ipInterfaceRow(one));
+                host.writeMemory(wholeAddress(row), ipInterfaceRow(one));
                 return NO_ERROR;
             },
         },
@@ -1222,7 +1226,7 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const sockaddr = new DataView(host.readMemory(row >>> 0, 8).slice().buffer);
+                const sockaddr = new DataView(host.readMemory(wholeAddress(row), 8).slice().buffer);
                 const family = sockaddr.getUint16(0, true);
                 if (family !== AF_INET && family !== AF_INET6)
                 {
@@ -1239,7 +1243,7 @@ export function createIphlpapiTables(host, model){
                 }
                 const bytes = new Uint8Array(UNICAST_ROW.SIZE);
                 unicastRow(new DataView(bytes.buffer), 0, one);
-                host.writeMemory(row >>> 0, bytes);
+                host.writeMemory(wholeAddress(row), bytes);
                 return NO_ERROR;
             },
         },
@@ -1282,8 +1286,8 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const one = byLuid(readLuid(luid >>> 0));
-                writeU32(index >>> 0, one ? one.index : 0);
+                const one = byLuid(readLuid(wholeAddress(luid)));
+                writeU32(wholeAddress(index), one ? one.index : 0);
                 return one ? NO_ERROR : ERROR_FILE_NOT_FOUND;
             },
         },
@@ -1297,8 +1301,9 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const one = byLuid(readLuid(luid >>> 0));
-                host.writeMemory(guid >>> 0, one ? guidBytes(one.guid) : new Uint8Array(16));
+                const one = byLuid(readLuid(wholeAddress(luid)));
+                host.writeMemory(wholeAddress(guid),
+                    one ? guidBytes(one.guid) : new Uint8Array(16));
                 return one ? NO_ERROR : ERROR_FILE_NOT_FOUND;
             },
         },
@@ -1344,13 +1349,14 @@ export function createIphlpapiTables(host, model){
                 {
                     return 0;
                 }
-                const wanted = readAnsi(name >>> 0, 256);
+                const wanted = readAnsi(wholeAddress(name), 256);
                 return interfaces().find(one=>nameOf(one) === wanted)?.index ?? 0;
             },
         },
 
         /** PCHAR if_indextoname(NET_IFINDEX InterfaceIndex, PCHAR InterfaceName) */
         if_indextoname: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([index, name])=>{
@@ -1359,8 +1365,8 @@ export function createIphlpapiTables(host, model){
                 {
                     return 0;
                 }
-                host.writeMemory(name >>> 0, ansiBytes(nameOf(one)));
-                return name >>> 0;
+                host.writeMemory(wholeAddress(name), ansiBytes(nameOf(one)));
+                return wholeAddress(name);
             },
         },
 
@@ -1373,13 +1379,13 @@ export function createIphlpapiTables(host, model){
                 {
                     if ((mask >>> 0) !== 0)
                     {
-                        writeU32(mask >>> 0, INADDR_NONE);
+                        writeU32(wholeAddress(mask), INADDR_NONE);
                     }
                     return ERROR_INVALID_PARAMETER;
                 }
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, maskOf(length >>> 0), false);
-                host.writeMemory(mask >>> 0, bytes);
+                host.writeMemory(wholeAddress(mask), bytes);
                 return NO_ERROR;
             },
         },
@@ -1400,13 +1406,13 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([text, guid])=>{
-                const value = (text >>> 0) === 0 ? '' : readWide(text >>> 0, 64);
+                const value = (text >>> 0) === 0 ? '' : readWide(wholeAddress(text), 64);
                 if (!/^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$/i
                     .test(value))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                host.writeMemory(guid >>> 0, guidBytes(value));
+                host.writeMemory(wholeAddress(guid), guidBytes(value));
                 return NO_ERROR;
             },
         },
@@ -1505,8 +1511,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([reply])=>{
-                const count = (reply >>> 0) !== 0 && readU32((reply >>> 0) + 4) === IP_SUCCESS
-                    && readU32(reply >>> 0) !== 0 ? 1 : 0;
+                const count = (reply >>> 0) !== 0 && readU32(wholeAddress(reply) + 4) === IP_SUCCESS
+                    && readU32(wholeAddress(reply)) !== 0 ? 1 : 0;
                 host.setLastError?.(count === 0 ? IP_REQ_TIMED_OUT : 0);
                 return count;
             },
@@ -1552,7 +1558,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_NOT_SUPPORTED;
         }
-        host.writeMemory(out >>> 0, make());
+        host.writeMemory(wholeAddress(out), make());
         return NO_ERROR;
     }
 
@@ -1569,7 +1575,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const one = byLuid(readLuid(luid >>> 0));
+        const one = byLuid(readLuid(wholeAddress(luid)));
         if (!one)
         {
             return ERROR_FILE_NOT_FOUND;
@@ -1579,7 +1585,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        host.writeMemory(out >>> 0, wide ? wideBytes(text) : ansiBytes(text));
+        host.writeMemory(wholeAddress(out), wide ? wideBytes(text) : ansiBytes(text));
         return NO_ERROR;
     }
 
@@ -1594,7 +1600,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const wanted = wide ? readWide(text >>> 0, 257) : readAnsi(text >>> 0, 257);
+        const wanted = wide ? readWide(wholeAddress(text), 257) : readAnsi(wholeAddress(text), 257);
         const one = interfaces().find(each=>textOf(each).toLowerCase() === wanted.toLowerCase());
         writeLuid(luid >>> 0, one ? luidOf(one) : 0n);
         return one ? NO_ERROR : ERROR_INVALID_PARAMETER;
@@ -1611,12 +1617,12 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const text = guidText(host.readMemory(guid >>> 0, 16).slice());
+        const text = guidText(host.readMemory(wholeAddress(guid), 16).slice());
         if ((length >>> 0) < text.length + 1)
         {
             return ERROR_INSUFFICIENT_BUFFER;
         }
-        host.writeMemory(out >>> 0, wide ? wideBytes(text) : ansiBytes(text));
+        host.writeMemory(wholeAddress(out), wide ? wideBytes(text) : ansiBytes(text));
         return NO_ERROR;
     }
 }

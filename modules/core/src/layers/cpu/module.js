@@ -6,7 +6,7 @@
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { openMemoryBudget } from './internal/memory-budget.js';
-import { gcNudgeOf, startGcNudge } from './internal/gc-nudge.js';
+import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
@@ -307,6 +307,7 @@ export function createCpuModule(){
              * read them, and only them, never a different instance's.
              *
              * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
+             *          memorySize: number,
              *          worstInterpreted: number, worstInterpretedAt: number,
              *          interpretedBefore: number, lastFault: any, disposed: boolean,
              *          samples: ReturnType<typeof createSampleTable>,
@@ -326,12 +327,15 @@ export function createCpuModule(){
              *          awaited: (() => boolean) | null,
              *          trapTimed: ((ms: number) => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
+             *          executorsLost: string[], lostRemotes: any[],
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null,
              *          nudge: ReturnType<typeof startGcNudge> | null, store: any }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false, nudge: null,
+                // The guest RAM's ceiling, set with the settings below.
+                memorySize: 0,
                 // The translations' store the run gave, for its figures.
                 store: null,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
@@ -356,6 +360,11 @@ export function createCpuModule(){
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
                 executorsRefused: null,
+                // The executors whose worker went while the process ran, and why,
+                // and the executors themselves, whose blocks still hold the
+                // thread each ran last.
+                executorsLost: [],
+                lostRemotes: [],
                 // The store the executors this bundle's threads opened are kept in,
                 // and the most it holds, once read: none in a run that opens them all.
                 learned: null,
@@ -469,6 +478,8 @@ export function createCpuModule(){
                 guestCharge: config?.guestCharge,
                 // The translator's module, imported at boot for `cork`.
                 engineUrl: config?.engineUrl ?? null,
+                // The executors' worker script: the file beside this one by default.
+                executorWorker: config?.executorWorker ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
                 cork: config?.cork ?? {},
                 // Addresses below this are no-access; zero closes none.
@@ -504,18 +515,24 @@ export function createCpuModule(){
                 // for each (`processorsFor`).
                 executors: Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)),
                 // 64 for an x86-64 process (`roadmap/x64.md`): cork's long-mode
-                // state block and interpreter, on one executor.
+                // state block and interpreter.
                 bits: config?.bits === 64 ? /** @type {64} */ (64) : /** @type {32} */ (32),
                 // An image past 4 GiB: the wide window it runs over and the block its code lies in.
                 ...(config?.bits === 64 && config?.window ? { window: config.window,
                     codeBase: config.codeBase ?? 0,
                     ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
             };
-            if (settings.bits === 64)
-            {
-                settings.executors = 1;
-            }
+            state.memorySize = settings.memorySize;
             state.store = settings.cork?.store ?? null;
+            // A wide window's RAM is a memory64 memory of its own, which the
+            // executors' shared layout does not span yet: said, as below.
+            if (settings.executors > 1 && settings.bits === 64 && settings.window)
+            {
+                state.executorsRefused = `${settings.executors} asked, 1 run: `
+                    + 'a program past 4 GiB (the wide window) runs on one executor';
+                settings.executors = 1;
+                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+            }
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
             // cross-origin isolated has none: the program then runs on one, as
@@ -584,6 +601,28 @@ export function createCpuModule(){
                     }
                     state.remotes = [...state.remotes, remote]
                         .sort((a, b)=>a.index - b.index);
+                    // Its worker gone without the process ending it (the tab's
+                    // memory, a crash): no thread is placed on it again, the one
+                    // out on it comes back with its slice's end (`lost`), and
+                    // it is not opened again for this process.
+                    remote.onGone?.((/** @type {string} */ reason)=>{
+                        state.remotes = state.remotes
+                            .filter((/** @type {any} */ one)=>one !== remote);
+                        // Its block stays the process's to read the thread off.
+                        state.lostRemotes.push(remote);
+                        state.unopened.add(index);
+                        state.executorsLost.push(`executor ${index}: ${reason}`);
+                        const detail = `executor ${index}'s worker went (${reason}): its threads`
+                            + ' run on the others, the one it ran from its last state';
+                        if (config?.divergence)
+                        {
+                            config.divergence('cpu', detail, 'loss');
+                        }
+                        else
+                        {
+                            log?.error?.('cpu', detail);
+                        }
+                    });
                     const learned = state.learned;
                     if (learned !== null && state.remotes.length > learned.opened)
                     {
@@ -812,6 +851,8 @@ export function createCpuModule(){
                         const host = state.host;
                         const openOne = (/** @type {number} */ index)=>createRemoteExecutor({ host, index,
                             engineUrl: settings.engineUrl, bell,
+                            ...(settings.executorWorker
+                                ? { workerUrl: new URL(settings.executorWorker) } : {}),
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
                             config: { ...hostConfig, cork } }).then(remote=>{
@@ -1384,7 +1425,9 @@ export function createCpuModule(){
                  * @param {number} index @param {() => void} work
                  */
                 onExecutor(index, work){
-                    const remote = state.remotes.find((/** @type {any} */ one)=>one.index === index);
+                    // A lost one too: the thread it ran last is read off its block.
+                    const remote = state.remotes.find((/** @type {any} */ one)=>one.index === index)
+                        ?? state.lostRemotes.find((/** @type {any} */ one)=>one.index === index);
                     if (!remote)
                     {
                         throw new Error(`cpu: no executor ${index}`);
@@ -1540,23 +1583,28 @@ export function createCpuModule(){
                  * @param {any} context
                  * @param {Object} options
                  * @param {number} options.eip
-                 * @param {number} options.returnValue
+                 * @param {number | bigint} options.returnValue
                  * @param {number | null} [options.esp]
                  * @param {Record<string, number> | null} [options.registers]
                  */
                 resumeContextAt(context, { eip, returnValue, esp = null, registers = null }){
                     context.eip = eip;
-                    context.reg32[0] = returnValue | 0; // EAX
-                    // A 64-bit thread's RAX whole, sign-extended as a dword
-                    // the host answers is meant -- what a call answered at
-                    // once gets (the bridge): a restore writes the low dword
-                    // alone, and the high one left was whatever RAX held at
-                    // the call.
+                    // A quadword the host answers whole (a bigint), or a dword.
+                    const low = typeof returnValue === 'bigint'
+                        ? Number(BigInt.asIntN(32, returnValue)) : returnValue | 0;
+                    context.reg32[0] = low; // EAX
+                    // A 64-bit thread's RAX whole: the quadword's high half, or
+                    // a dword sign-extended as a dword the host answers is
+                    // meant -- what a call answered at once gets (the bridge):
+                    // a restore writes the low dword alone, and the high one
+                    // left was whatever RAX held at the call.
                     if (context.layout?.bits === 64 && context.block instanceof Uint8Array)
                     {
                         new DataView(context.block.buffer, context.block.byteOffset,
                             context.block.byteLength).setUint32(context.layout.regs + 4,
-                            (returnValue | 0) < 0 ? 0xffffffff : 0, true);
+                            typeof returnValue === 'bigint'
+                                ? Number(BigInt.asUintN(32, returnValue >> 32n))
+                                : low < 0 ? 0xffffffff : 0, true);
                     }
                     if (registers !== null)
                     {
@@ -1640,6 +1688,16 @@ export function createCpuModule(){
                     context.inHlt = 0;
                     return context;
                 },
+
+                /**
+                 * Registers of a saved 64-bit context set whole: a thread's
+                 * parameter or start routine past 4 GiB, which the dword view
+                 * (`reg32`) cannot carry.
+                 *
+                 * @param {any} context
+                 * @param {import('./internal/context.js').LongRegisters} long
+                 */
+                setContextLong: (context, long)=>setContextLong(context, long),
 
                 /**
                  * A thread's stack: the translator stores through esp untested while
@@ -1802,6 +1860,7 @@ export function createCpuModule(){
                     sharedMemory: typeof SharedArrayBuffer === 'function'
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     executorsRefused: instance.executorsRefused,
+                    executorsLost: instance.executorsLost,
                     // The executors asked for and not open yet, by index: a worker
                     // takes some tens of milliseconds to open, and more on a busy
                     // machine, so one asked for at a run's start may still be
@@ -1812,10 +1871,18 @@ export function createCpuModule(){
                     gcNudges: instance.nudge?.made() ?? null,
                     // Those the browser would not make, near its limit.
                     gcNudgesRefused: instance.nudge?.refused() ?? null,
+                    // Collections brought forward on this thread for translated
+                    // code let go (`releasedCode`), every process's on it together.
+                    codeNudges: codeNudgesMade(),
                     // The machine's memory every process takes its memory from, as
                     // the run holds it now, and the grows refused this process; null
                     // where the run has none (`machineMemory`).
                     machineMemory: instance.host?.machineMemory?.() ?? null,
+                    // The guest's memory: the RAM it may reach, what the memory holds of
+                    // it now, and whether it grows as the guest is given more.
+                    guestMemory: instance.host?.ramHeld ? { ceiling: instance.memorySize,
+                        held: instance.host.ramHeld(), growing: instance.host.growing?.() === true }
+                        : null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     traps: instance.thunks ? instance.thunks.size : 0,
@@ -1916,6 +1983,9 @@ export function createCpuModule(){
                 {
                     await current.cork.flush();
                 }
+                // The process's code goes with it: this thread's full collection
+                // is brought forward as for code its translator let go.
+                releasedCode(current.cork?.counters?.()?.heldBytes ?? 0);
                 if (current.host)
                 {
                     current.host.stop();

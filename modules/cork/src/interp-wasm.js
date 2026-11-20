@@ -26,11 +26,15 @@
  * Over a 64-bit layout it is the same source built with LONG defined
  * (`interp-wasm64.bytes.js`): long mode's tier, whose reference is `ir64.js`
  * and which leaves what it does not run to `interp64.js` the same way, RIP at
- * the instruction.
+ * the instruction. Over a wide window (`ramMemory`) it is that build with the
+ * guest's RAM as its second memory (`interp-wasm-wide.bytes.js`): an address
+ * is a quadword whole, and code is known to the hash, the counts and the ring
+ * by its offset in the code block, as the translator knows it.
  */
 
 import { MODULE_BASE64 } from './interp-wasm.bytes.js';
 import { MODULE_BASE64 as MODULE_BASE64_LONG } from './interp-wasm64.bytes.js';
+import { MODULE_BASE64 as MODULE_BASE64_WIDE } from './interp-wasm-wide.bytes.js';
 import { eflagsOf } from './emit/flags.js';
 import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
 import { withSharedMemoryImport } from './wasm/shared-import.js';
@@ -82,9 +86,12 @@ export const HOST_MATH = Object.freeze({
  * start is paid once a process, so the stretch that waits for it to pay is the process's too. */
 const stretch = { work: 0 };
 
+/** The builds, by name. */
+const BUILDS = { 32: MODULE_BASE64, 64: MODULE_BASE64_LONG, wide: MODULE_BASE64_WIDE };
+
 /**
  * The modules compiled so far, each once a process: by build (32-bit code's,
- * long mode's) and by whether its memory import is declared shared.
+ * long mode's, a wide window's) and by whether its memory imports are declared shared.
  *
  * @type {Map<string, WebAssembly.Module>}
  */
@@ -94,14 +101,14 @@ const compiled = new Map();
  * The module, compiled once a process: its memory import declared shared for
  * a shared memory, which an import declared otherwise does not link to.
  *
- * @param {boolean} shared @param {boolean} long  long mode's build
+ * @param {boolean} shared @param {keyof typeof BUILDS} build
  */
-function wasmModule(shared, long){
-    const key = `${long ? 64 : 32}${shared ? 's' : ''}`;
+function wasmModule(shared, build){
+    const key = `${build}${shared ? 's' : ''}`;
     let module = compiled.get(key);
     if (module === undefined)
     {
-        const text = atob(long ? MODULE_BASE64_LONG : MODULE_BASE64);
+        const text = atob(BUILDS[build]);
         const bytes = new Uint8Array(text.length);
         for (let i = 0; i < text.length; i++)
         {
@@ -119,23 +126,34 @@ function wasmModule(shared, long){
 /**
  * The tier over one memory, or null for a layout it cannot run over: one
  * without an `fs` base, or a memory without room for its areas. A 64-bit
- * layout (`bits` 64) gets long mode's build.
+ * layout (`bits` 64) gets long mode's build, one over a wide window the build
+ * whose second memory is `ram`.
  *
- * @param {{ memory: WebAssembly.Memory,
+ * @param {{ memory: WebAssembly.Memory, ram?: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     area: number, statics: number, hotThreshold: number, trapPort?: number,
- *     parkBase: number, precise?: boolean, atomic?: boolean }} options
+ *     parkBase: number, precise?: boolean, atomic?: boolean, lowHash?: number }} options
+ *     ram: a wide window's guest RAM (the layout's `ramMemory`), shared as `memory` is;
  *     area: where the tier's `WASM_INTERPRETER_AREA` bytes lie; statics: where the
  *     instance's `WASM_INTERPRETER_STATICS` bytes, its data and stack, lie; parkBase: the
  *     park loop's address, whose jumps the ring leaves out; precise: the engine's `precise`,
  *     the x87 bookkeeping games do not read kept as the JavaScript interpreter keeps it;
- *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier
+ *     atomic: the engine's `atomic`, every locked instruction left to the JavaScript tier;
+ *     lowHash: over a wide window whose code block is past 4 GiB, the entry hash of the
+ *     runtime for the block below it (`wideLayout`), whose code is then counted and entered
+ *     too
  * @returns {WasmInterpreter | null}
  */
-export function createWasmInterpreter({ memory, layout, area, statics, hotThreshold, trapPort,
-    parkBase, precise = false, atomic = false })
+export function createWasmInterpreter({ memory, ram, layout, area, statics, hotThreshold,
+    trapPort, parkBase, precise = false, atomic = false, lowHash = 0 })
 {
     const long = layout.bits === 64;
+    const wide = layout.ramMemory !== undefined;
+    if (wide !== (ram !== undefined))
+    {
+        throw new Error('cork: the interpreter tier takes a RAM memory with a wide window, and'
+            + ' only with one');
+    }
     if (layout.fsBase < 0
         || area + WASM_INTERPRETER_AREA > memory.buffer.byteLength
         || statics + WASM_INTERPRETER_STATICS > memory.buffer.byteLength)
@@ -153,15 +171,17 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
     let retired = ()=>0;
     let relaxedReads = ()=>0;
     let exitValue = ()=>0;
+    let exitHigh = ()=>0;
     let exitSize = ()=>0;
     /** @type {((budget: number) => number) | null} */
     let enter = null;
     const instantiate = ()=>{
         const shared = typeof SharedArrayBuffer === 'function'
             && memory.buffer instanceof SharedArrayBuffer;
-        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared, long), {
+        const exports = /** @type {any} */ (new WebAssembly.Instance(wasmModule(shared,
+            wide ? 'wide' : long ? 64 : 32), {
             env: {
-                memory, ...HOST_MATH,
+                memory, ...(wide ? { ram } : {}), ...HOST_MATH,
                 __memory_base: new WebAssembly.Global({ value: 'i32', mutable: false }, statics),
                 __stack_pointer: new WebAssembly.Global({ value: 'i32', mutable: true },
                     statics + WASM_INTERPRETER_STATICS),
@@ -179,6 +199,13 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
         if (long)
         {
             exports.configureLong(layout.gsBase);
+        }
+        if (wide)
+        {
+            exports.configureWide(/** @type {number} */ (layout.window) / 4096,
+                (layout.codeBase ?? 0) / 2 ** 32);
+            exports.configureLowHash(lowHash);
+            ({ exitHigh } = exports);
         }
         exports.configureFloat(layout.x87, layout.x87Top, layout.x87Empty, layout.x87Control,
             layout.x87Status, precise ? 1 : 0, layout.xmm, layout.mxcsr);
@@ -201,7 +228,8 @@ export function createWasmInterpreter({ memory, layout, area, statics, hotThresh
         },
         retired: ()=>retired(),
         relaxedReads: ()=>relaxedReads(),
-        exitValue: ()=>exitValue() >>> 0,
+        // A store's address in a wide window is a quadword, its high half beside the value.
+        exitValue: ()=>(exitValue() >>> 0) + exitHigh() * 2 ** 32,
         exitSize: ()=>exitSize(),
         entry(){
             if (run === null)

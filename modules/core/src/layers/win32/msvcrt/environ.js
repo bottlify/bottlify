@@ -352,6 +352,7 @@ export function createEnvironment(host){
          * without regard to case; null for none, and for no name.
          */
         getenv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -367,6 +368,7 @@ export function createEnvironment(host){
 
         /** wchar_t *_wgetenv(const wchar_t *name) */
         _wgetenv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -446,6 +448,7 @@ export function createEnvironment(host){
         getenv_s: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
                 (name >>> 0) === 0 ? null : readNarrow(name), 1),
@@ -455,6 +458,7 @@ export function createEnvironment(host){
         _wgetenv_s: {
             convention: 'cdecl',
             argBytes: 16,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
                 (name >>> 0) === 0 ? null : readWide(name), 2),
@@ -477,13 +481,13 @@ export function createEnvironment(host){
         _wdupenv_s: dupenv(2),
 
         /** char ***__p__environ(void) */
-        __p__environ: accessor('_environ'),
+        __p__environ: { ...accessor('_environ'), returns: 'pointer' },
         /** wchar_t ***__p__wenviron(void) */
-        __p__wenviron: accessor('_wenviron'),
+        __p__wenviron: { ...accessor('_wenviron'), returns: 'pointer' },
         /** char ***__p___initenv(void) */
-        __p___initenv: accessor('__initenv'),
+        __p___initenv: { ...accessor('__initenv'), returns: 'pointer' },
         /** wchar_t ***__p___winitenv(void) */
-        __p___winitenv: accessor('__winitenv'),
+        __p___winitenv: { ...accessor('__winitenv'), returns: 'pointer' },
 
         /** void _get_environ(char ***environ) */
         _get_environ: {

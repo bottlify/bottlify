@@ -7,7 +7,7 @@
 
 import { TEB, TEB64, blockLayouts } from './teb.js';
 import { createProcessors } from './processor.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
 
 /**
@@ -947,8 +947,8 @@ export function createProcessFunctions(host){
             }
             const base = (asked & FROM_ADDRESS) !== 0
                 ? (host.moduleContaining?.(name >>> 0) ?? 0) >>> 0
-                : host.moduleHandle((name >>> 0) === 0 ? null : read(name >>> 0)) >>> 0;
-            host.writeMemory(out >>> 0, Uint8Array.from(dword(base)));
+                : host.moduleHandle((name >>> 0) === 0 ? null : read(wholeAddress(name))) >>> 0;
+            host.writeMemory(wholeAddress(out), Uint8Array.from(dword(base)));
             if (base === 0)
             {
                 setError(ERROR_MOD_NOT_FOUND);
@@ -1347,7 +1347,7 @@ export function createProcessFunctions(host){
      * @param {number[]} args @param {boolean} wide
      */
     const verify = ([pointer, typeMask, maskLow, maskHigh], wide)=>{
-        const at = pointer >>> 0;
+        const at = wholeAddress(pointer);
         const extended = host.readMemory(
             at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8).slice();
         const fields = new DataView(extended.buffer);
@@ -1375,7 +1375,7 @@ export function createProcessFunctions(host){
     /**
      * @type {Record<string, { argBytes: number, handler: Function,
      *     guest?: (builder: import('./sync.js').GuestBuilder) => number,
-     *     code?: () => Uint8Array, quadwords?: number[] }>}
+     *     code?: () => Uint8Array, quadwords?: number[], sizes?: number[], returns?: string }>}
      */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
@@ -1472,15 +1472,17 @@ export function createProcessFunctions(host){
 
         /** HMODULE GetModuleHandleA(LPCSTR lpModuleName) */
         GetModuleHandleA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readCString(pointer >>> 0, WHOLE_NAME)),
+                : host.readCString(wholeAddress(pointer), WHOLE_NAME)),
         },
 
         /** HMODULE GetModuleHandleW(LPCWSTR lpModuleName) */
         GetModuleHandleW: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
@@ -1510,7 +1512,7 @@ export function createProcessFunctions(host){
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                host.writeMemory(status >>> 0,
+                host.writeMemory(wholeAddress(status),
                     Uint8Array.of(1, 128, 255, 0, ...dword(0xffffffff), ...dword(0xffffffff)));
                 return 1;
             },
@@ -1548,7 +1550,7 @@ export function createProcessFunctions(host){
                     return 0;
                 }
                 const known = (major >>> 0) >= 6 && told.edition !== undefined;
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     Uint8Array.from(dword(known ? told.edition ?? 0 : PRODUCT_UNDEFINED)));
                 return known ? 1 : 0;
             },
@@ -1643,7 +1645,7 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>{
                 const units = (BigInt(Math.floor(host.systemTimeMs())) + FILETIME_EPOCH_MS)
                     * 10_000n;
-                writeU64(pointer >>> 0, units);
+                writeU64(wholeAddress(pointer), units);
                 return 0;
             },
         },
@@ -1661,7 +1663,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, BigInt(Math.floor(host.systemTimeMs() * 10_000))
+                writeU64(wholeAddress(pointer), BigInt(Math.floor(host.systemTimeMs() * 10_000))
                     + FILETIME_EPOCH_MS * 10_000n);
                 return 0;
             },
@@ -1694,7 +1696,7 @@ export function createProcessFunctions(host){
                 {
                     if ((pointer >>> 0) !== 0)
                     {
-                        host.writeMemory(pointer >>> 0, Uint8Array.of(value & 0xff,
+                        host.writeMemory(wholeAddress(pointer), Uint8Array.of(value & 0xff,
                             value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
                     }
                 }
@@ -1707,7 +1709,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, nextCount());
+                writeU64(wholeAddress(pointer), nextCount());
                 return 1;
             },
             ...clockGuest('counter'),
@@ -1728,7 +1730,7 @@ export function createProcessFunctions(host){
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                writeU64(pointer >>> 0, BigInt(Math.floor(host.now() * 10_000)));
+                writeU64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
                 return 1;
             },
         },
@@ -1738,7 +1740,7 @@ export function createProcessFunctions(host){
             handler: ([pointer])=>{
                 if ((pointer >>> 0) !== 0)
                 {
-                    writeU64(pointer >>> 0, BigInt(Math.floor(host.now() * 10_000)));
+                    writeU64(wholeAddress(pointer), BigInt(Math.floor(host.now() * 10_000)));
                 }
                 return 0;
             },
@@ -1749,7 +1751,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                writeU64(pointer >>> 0, BigInt(performanceFrequency));
+                writeU64(wholeAddress(pointer), BigInt(performanceFrequency));
                 return 1;
             },
             ...clockGuest('frequency'),
@@ -1771,7 +1773,7 @@ export function createProcessFunctions(host){
                 // Object(h, 0) then Sleep(0), round and round -- spun out its
                 // whole turn while the thread it waited for stood in the queue:
                 // millions of calls a second, and a world loading at a crawl.
-                const wait = milliseconds >>> 0;
+                const wait = wholeAddress(milliseconds);
                 if (wait === 0)
                 {
                     return host.yieldTurn?.() ? host.park() : 0;
@@ -1842,7 +1844,7 @@ export function createProcessFunctions(host){
                     setError(ERROR_NOACCESS);
                     return 0;
                 }
-                memory.writeU32(out >>> 0, priorityBoostDisabled ? 1 : 0);
+                memory.writeU32(wholeAddress(out), priorityBoostDisabled ? 1 : 0);
                 return 1;
             },
         },
@@ -1862,11 +1864,13 @@ export function createProcessFunctions(host){
                 // DWORD_PTRs: a quadword each in a 64-bit process.
                 if ((processMask >>> 0) !== 0)
                 {
-                    host.writeMemory(processMask >>> 0, width.bytes(processors.processMask()));
+                    host.writeMemory(wholeAddress(processMask),
+                        width.bytes(processors.processMask()));
                 }
                 if ((systemMask >>> 0) !== 0)
                 {
-                    host.writeMemory(systemMask >>> 0, width.bytes(processors.systemMask()));
+                    host.writeMemory(wholeAddress(systemMask),
+                        width.bytes(processors.systemMask()));
                 }
                 return 1;
             },
@@ -1935,6 +1939,7 @@ export function createProcessFunctions(host){
          */
         SetProcessWorkingSetSize: {
             argBytes: 12,
+            sizes: [1, 2],
             handler: ()=>1,
         },
 
@@ -1982,8 +1987,8 @@ export function createProcessFunctions(host){
                     setError(ERROR_NOACCESS);
                     return 0;
                 }
-                memory.writeU32(level >>> 0, shutdown.level);
-                memory.writeU32(flags >>> 0, shutdown.flags);
+                memory.writeU32(wholeAddress(level), shutdown.level);
+                memory.writeU32(wholeAddress(flags), shutdown.flags);
                 return 1;
             },
         },
@@ -2001,11 +2006,11 @@ export function createProcessFunctions(host){
             handler: ([, minimum, maximum])=>{
                 if ((minimum >>> 0) !== 0)
                 {
-                    memory.writeU32(minimum >>> 0, 50 * 4096);
+                    memory.writeU32(wholeAddress(minimum), 50 * 4096);
                 }
                 if ((maximum >>> 0) !== 0)
                 {
-                    memory.writeU32(maximum >>> 0, 345 * 4096);
+                    memory.writeU32(wholeAddress(maximum), 345 * 4096);
                 }
                 return 1;
             },
@@ -2060,6 +2065,7 @@ export function createProcessFunctions(host){
 
         /** LPVOID TlsGetValue(DWORD dwTlsIndex) */
         TlsGetValue: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([index])=>{
@@ -2128,6 +2134,7 @@ export function createProcessFunctions(host){
          * run, so the identity is guest code, with no crossing.
          */
         EncodePointer: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>pointer >>> 0,

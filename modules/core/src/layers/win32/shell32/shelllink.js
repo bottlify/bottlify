@@ -32,6 +32,7 @@ import {
     writeShellLink,
 } from '../common/shell-link.js';
 import { listBytes, pathOfList } from './namespace.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** CLSID_ShellLink, and the interfaces the object answers to. */
 export { CLSID_SHELL_LINK };
@@ -496,7 +497,7 @@ export function createShellLink(host){
                 writeStringBuffer(host, buffer >>> 0, cch | 0, state.iconLocation, wide);
                 if ((iconIndex >>> 0) !== 0)
                 {
-                    host.writeMemory(iconIndex >>> 0, dword(state.iconIndex));
+                    host.writeMemory(wholeAddress(iconIndex), dword(state.iconIndex));
                 }
                 return S_OK;
             },
@@ -528,7 +529,7 @@ export function createShellLink(host){
         GetShowCmd: (state, [out])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(state.showCmd));
+                host.writeMemory(wholeAddress(out), dword(state.showCmd));
             }
             return S_OK;
         },
@@ -542,7 +543,7 @@ export function createShellLink(host){
         GetHotkey: (state, [out])=>{
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0,
+                host.writeMemory(wholeAddress(out),
                     new Uint8Array([state.hotkey & 0xff, (state.hotkey >>> 8) & 0xff]));
             }
             return S_OK;
@@ -587,11 +588,11 @@ export function createShellLink(host){
             const block = bytes ? host.allocate(bytes.length) : 0;
             if (!bytes || block === 0)
             {
-                host.writeMemory(out >>> 0, dword(0));
+                host.writeMemory(wholeAddress(out), dword(0));
                 return bytes ? E_FAIL : S_FALSE;
             }
             host.writeMemory(block, bytes);
-            host.writeMemory(out >>> 0, dword(block));
+            host.writeMemory(wholeAddress(out), dword(block));
             return S_OK;
         },
 
@@ -671,7 +672,7 @@ export function createShellLink(host){
          * there but is no link fails, and leaves the state as it was.
          */
         Load: (state, [name])=>{
-            const path = host.readWideString(name >>> 0, MAX_LINK_STRING * 2);
+            const path = host.readWideString(wholeAddress(name), MAX_LINK_STRING * 2);
             const files = host.files;
             const entry = files?.stat(path);
             if (!files || !entry || entry.exists === false || entry.isDirectory)
@@ -724,7 +725,7 @@ export function createShellLink(host){
          */
         Save: (state, [name, remember])=>{
             const given = (name >>> 0) === 0
-                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING * 2);
+                ? null : host.readWideString(wholeAddress(name), MAX_LINK_STRING * 2);
             const path = given ?? state.curFile;
             if (path === null)
             {
@@ -766,7 +767,7 @@ export function createShellLink(host){
         /** HRESULT SaveCompleted(LPCOLESTR pszFileName) */
         SaveCompleted: (state, [name])=>{
             state.curFile = (name >>> 0) === 0
-                ? null : host.readWideString(name >>> 0, MAX_LINK_STRING * 2);
+                ? null : host.readWideString(wholeAddress(name), MAX_LINK_STRING * 2);
             state.dirty = false;
             return S_OK;
         },
@@ -778,7 +779,7 @@ export function createShellLink(host){
          * with CoTaskMemFree. S_FALSE with a null when nothing has been saved.
          */
         GetCurFile: (state, [out])=>{
-            const slot = out >>> 0;
+            const slot = wholeAddress(out);
             if (slot === 0)
             {
                 return E_FAIL;
@@ -815,7 +816,7 @@ export function createShellLink(host){
             {
                 return E_INVALIDARG;
             }
-            const header = host.readMemory(block >>> 0, 8);
+            const header = host.readMemory(wholeAddress(block), 8);
             const view = new DataView(header.slice().buffer);
             const size = view.getUint32(0, true);
             const signature = view.getUint32(4, true);
@@ -824,7 +825,7 @@ export function createShellLink(host){
                 return E_INVALIDARG;
             }
             state.blocks = [...state.blocks.filter(known=>(known.signature >>> 0) !== signature),
-                { signature, bytes: host.readMemory(block >>> 0, size).slice() }];
+                { signature, bytes: host.readMemory(wholeAddress(block), size).slice() }];
             state.dirty = true;
             return S_OK;
         },
@@ -843,7 +844,7 @@ export function createShellLink(host){
             }
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(copy));
+                host.writeMemory(wholeAddress(out), dword(copy));
             }
             return found ? copy === 0 ? E_OUTOFMEMORY : S_OK : E_FAIL;
         },
@@ -862,7 +863,7 @@ export function createShellLink(host){
         GetFlags: (state, [out])=>{
             const darwin = state.blocks.some(block=>
                 (block.signature >>> 0) === BLOCK_SIGNATURES.DARWIN);
-            host.writeMemory(out >>> 0, dword((state.flags
+            host.writeMemory(wholeAddress(out), dword((state.flags
                 | (darwin ? LINK_FLAGS.HAS_DARWIN_ID : 0)) >>> 0));
             return S_OK;
         },

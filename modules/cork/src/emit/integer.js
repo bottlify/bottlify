@@ -35,16 +35,16 @@ import { I32, I64, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS, keepsFlags } from './region.js';
 import {
     checkAccess, emitStaleExit, looseStackStore, noteStore, operandValues, readsOnly, stackAccess,
-    windowAddress,
-    wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged,
+    stackLow, windowAddress,
+    wrapsRead, wrapMask, ramAlways, ram, ramAt, registersChanged, RARE,
 } from './memory.js';
-import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_HASH, CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { SIMD } from '../wasm/simd.js';
 import { atState, atTables, intoState, intoTables } from './bases.js';
 import { ANY_TOP, slotOf } from '../runtime/entries.js';
-import { emitLocked, isLocked } from './locked.js';
+import { emitLocked, emitLockedLong, isLocked, lockHeld } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
 const I32_EXTRA = Object.freeze({
@@ -207,7 +207,7 @@ export function profileCall(e, site, target = undefined){
     e.openIf('profile');
     atState(context, atState(context, b)).load('i32', { offset: at + 4 }).localTee(Local.t1)
         .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
-    b.localGet(Local.t1).i32const(0x9e3779b1 | 0).op(I32.mul)
+    b.localGet(Local.t1).i32const(CALL_HASH | 0).op(I32.mul)
         .i32const(32 - Math.log2(CALL_STRIDE)).op(I32.shrU).op(I32.eqz);
     e.openIf('sampled');
     b.localGet(Local.t1).i32const(Math.log2(CALL_STRIDE)).op(I32.shrU).i32const(15).op(I32.and)
@@ -584,7 +584,7 @@ function returnToCall(e, taken){
         // Long mode's whole return address (`returnLong`), which matching the
         // call's says lies inside the window.
         b.op(I64.extendU);
-        if (e.layout.codeBase !== undefined)
+        if (e.layout.codeBase)
         {
             b.i64const(BigInt(e.layout.codeBase)).op(I64.or);
         }
@@ -692,6 +692,15 @@ function predictCall(e){
 }
 
 /**
+ * Whether an indirect call's target is tested against the code block after its
+ * push rather than before (`nearTarget`): in a wide window, whose other block
+ * it may call into, the call made (`leaveFar`).
+ *
+ * @param {E} e
+ */
+const farCall = e=>isLong(e) && e.layout.window !== undefined;
+
+/**
  * Whether a long-mode indirect call's target is tested against the window
  * past its predictions (`predictCall`), not before its push: a predicted
  * callee matches the whole quadword, so a call that takes one pays no test.
@@ -729,10 +738,10 @@ export function emitInstruction(e, instruction, flagsLive){
         // a wrapped address path here.
         return false;
     }
-    if (e.context.atomic === true && isLocked(instruction))
+    if (e.context.atomic === true && isLocked(instruction) && op !== 'cmpxchg16b')
     {
-        // Long mode runs on one executor: its locked forms are the plain ones.
-        return !isLong(e) && emitLocked(e, instruction, flagsLive);
+        return isLong(e) ? emitLockedLong(e, instruction, flagsLive)
+            : emitLocked(e, instruction, flagsLive);
     }
     switch (op)
     {
@@ -855,9 +864,10 @@ export function emitInstruction(e, instruction, flagsLive){
             // host's clock): the low word to eax, the high word to edx.
             e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
-            b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
-            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
-                .localSet(registerLocal(e, 2));
+            b.localGet(Local.t64).op(I64.wrap);
+            writeReg(e, 0, 4, false);
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);
+            writeReg(e, 2, 4, false);
             return true;
         case 'mov':
             if (dst.kind === 'seg')
@@ -1330,10 +1340,10 @@ export function emitInstruction(e, instruction, flagsLive){
                 // and free between instructions; t2 is the push's scratch.
                 prepare(e, dst);
                 readOp(e, dst);
-                if (farPastPrediction(e))
+                if (farPastPrediction(e) || farCall(e))
                 {
                     b.localTee(LONG_WIDE).op(I64.wrap);
-                    if (e.blockRetired - e.blockCarried === 1)
+                    if (farPastPrediction(e) && e.blockRetired - e.blockCarried === 1)
                     {
                         // Its far exit leaves at the block's start, which then
                         // must not be an entry (`exitBefore`).
@@ -1361,6 +1371,16 @@ export function emitInstruction(e, instruction, flagsLive){
                 // every way on from here; a slot read or a push that faults
                 // left before the call.
                 e.blockRetired++;
+            }
+            if (dst.kind !== 'rel' && farCall(e) && !farPastPrediction(e))
+            {
+                // Pushed: a target in the other block leaves for it, the call made.
+                b.localGet(LONG_WIDE);
+                outsideBlock(e);
+                e.openGuard('far', EMPTY);
+                leaveFar(e, LONG_WIDE, ()=>e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE),
+                    ()=>addStack(e, 8));
+                e.close();
             }
             if (dst.kind === 'rel' && dst.target === next && !instruction.prefixes.operand)
             {
@@ -1411,8 +1431,8 @@ export function emitInstruction(e, instruction, flagsLive){
                     b.localGet(LONG_WIDE);
                     outsideBlock(e);
                     e.openGuard('far', EMPTY);
-                    addStack(e, 8);
-                    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+                    leaveFar(e, LONG_WIDE, ()=>e.exitBefore(instruction.eip, Exit.UNTRANSLATED,
+                        RARE), ()=>addStack(e, 8));
                     e.close();
                 }
                 profileCall(e, instruction.eip);
@@ -1845,6 +1865,34 @@ const outsideBlock = e=>e.b.i64const(32n).op(I64.shrU)
     .i64const(BigInt(e.layout.codeBase ?? 0) >> 32n).op(I64.ne);
 
 /**
+ * Inside the guard of a target outside the code block, in the i64 local
+ * `local`: in a wide window's other block, the instruction done, a far exit
+ * there (`exitFar`), which the host takes into that block's runtime; past the
+ * window, or in long mode's 4 GiB, which has no other block, a leave before
+ * the instruction (`before`), what it did put back first (`undo`); `done`
+ * finishes the instruction before the far exit.
+ *
+ * @param {E} e @param {number} local @param {() => void} before
+ * @param {() => void} [undo] @param {() => void} [done]
+ */
+function leaveFar(e, local, before, undo, done){
+    const { b } = e;
+    if (e.layout.window === undefined)
+    {
+        undo?.();
+        before();
+        return;
+    }
+    b.localGet(local).i64const(BigInt(e.layout.window)).op(I64.geU);
+    e.openIf('beyond');
+    undo?.();
+    before();
+    e.close();
+    done?.();
+    e.exitFar(local);
+}
+
+/**
  * An indirect jump's or call's target, read, as the dword EIP the region
  * keeps: in long mode one past the window leaves before the instruction,
  * for the interpreter to take it where it goes.
@@ -1860,7 +1908,7 @@ function nearTarget(e, instruction){
     b.localTee(LONG_WIDE);
     outsideBlock(e);
     e.openGuard('far', EMPTY);
-    e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+    leaveFar(e, LONG_WIDE, ()=>e.exitBefore(instruction.eip, Exit.UNTRANSLATED, RARE));
     e.close();
     b.localGet(LONG_WIDE).op(I64.wrap);
 }
@@ -1904,10 +1952,11 @@ function returnLong(e, instruction){
     b.localGet(Local.t64b);
     outsideBlock(e);
     e.openGuard('farReturn', EMPTY);
-    // Past the window, #GP; outside a code block (`codeBase`) but in the
-    // window, the interpreter's to take where it goes.
-    e.exitBefore(instruction.eip, e.layout.codeBase === undefined ? Exit.FAULT
-        : Exit.UNTRANSLATED, e.layout.codeBase === undefined ? 13 : 0);
+    // Past the window, #GP, or in a wide one the interpreter's to fault; in a
+    // wide window's other code block, the return made and a far exit there.
+    leaveFar(e, Local.t64b, ()=>e.exitBefore(instruction.eip,
+        e.layout.codeBase === undefined ? Exit.FAULT : Exit.UNTRANSLATED,
+        e.layout.codeBase === undefined ? 13 : 0), undefined, ()=>addStack(e, popped));
     e.close();
     addStack(e, popped);
     e.charge();
@@ -2092,7 +2141,7 @@ export function prepare(e, operand, options){
 function wrappedFirst(e, operand, store){
     const disp = operand.disp ?? 0;
     const { ramSize } = e.layout;
-    if ((ramSize & ramSize - 1) !== 0
+    if ((ramSize & ramSize - 1) !== 0 || e.guest !== null
         || operand.addressSize === 16 || (operand.base ?? -1) < 0 && (operand.index ?? -1) < 0
         || e.memPlan?.access != null || !wrapsRead(e, store))
     {
@@ -2400,8 +2449,8 @@ function windowed(e, operand, store){
         b.i32const(disp | 0).localSet(Local.addr);
         if (e.guest !== null)
         {
-            // A wide window's: the constant's high half, past 4 GiB for an image there.
-            b.i64const(BigInt(disp) & -(2n ** 32n)).localSet(e.guest.high);
+            // A wide window's: the constant whole, past 4 GiB for an image there.
+            b.i64const(BigInt(disp)).localSet(e.guest.whole);
         }
         return false;
     }
@@ -2411,6 +2460,16 @@ function windowed(e, operand, store){
         // high half the access takes (`Body.guest`) -- the high half the test left
         // is its group's, and a block tests its groups before any access of them.
         windowAddress(e, ()=>emitAddress64(e, operand));
+        return false;
+    }
+    if (e.guest !== null && wrapsRead(e, store))
+    {
+        // A wide window's read left untested: its whole address, the quadword sum
+        // wrapped into the window as a 4 GiB one's 32-bit sum is into RAM
+        // (`Body.guest`).
+        emitAddress64(e, operand);
+        b.i64const(BigInt(/** @type {number} */ (e.layout.window) - 1)).op(I64.and)
+            .localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
         return false;
     }
     if (wrapsRead(e, store) || e.memPlan?.access != null)
@@ -2434,7 +2493,7 @@ function windowed(e, operand, store){
  *
  * @param {E} e @param {Operand} operand
  */
-function emitAddress64(e, operand){
+export function emitAddress64(e, operand){
     const { b } = e;
     let pushed = false;
     if ((operand.base ?? -1) >= 0)
@@ -2867,7 +2926,7 @@ export function push(e, size, pushValue){
         if (e.context.looseStacks === true)
         {
             // Untested as esp's pushes are (`stackAccess`).
-            b.localGet(rsp).op(I64.wrap).i32const(size).op(I32.sub).localSet(Local.addr);
+            stackLow(e, size);
         }
         else
         {
@@ -4527,28 +4586,40 @@ function cmpxchg16b(e, instruction, flagsLive){
     e.openGuard('misaligned', EMPTY);
     e.exitBefore(e.current.eip, Exit.FAULT, 13);
     e.close();
-    b.localGet(Local.addr).load('i64', ram(e)).localSet(low);
-    b.localGet(Local.addr).load('i64', ram(e, 8)).localSet(high);
     if (flagsLive)
     {
         e.eagerWrite(ZF);
     }
-    b.localGet(low).localGet(registerLocal(e, 0)).op(I64.eq);
-    b.localGet(high).localGet(registerLocal(e, 2)).op(I64.eq);
-    b.op(I32.and);
-    e.openIf('equal', EMPTY);
-    noteStore(e, 16);
-    b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', ram(e));
-    b.localGet(Local.addr).localGet(registerLocal(e, 1))
-        .store('i64', ram(e, 8));
-    if (flagsLive)
+    const swap = ()=>{
+        b.localGet(Local.addr).load('i64', ram(e)).localSet(low);
+        b.localGet(Local.addr).load('i64', ram(e, 8)).localSet(high);
+        b.localGet(low).localGet(registerLocal(e, 0)).op(I64.eq);
+        b.localGet(high).localGet(registerLocal(e, 2)).op(I64.eq);
+        b.op(I32.and);
+        e.openIf('equal', EMPTY);
+        noteStore(e, 16);
+        b.localGet(Local.addr).localGet(registerLocal(e, 3)).store('i64', ram(e));
+        b.localGet(Local.addr).localGet(registerLocal(e, 1))
+            .store('i64', ram(e, 8));
+        if (flagsLive)
+        {
+            b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+        }
+        b.op(0x05); // else
+        b.localGet(low).localSet(registerLocal(e, 0));
+        b.localGet(high).localSet(registerLocal(e, 2));
+        e.close();
+    };
+    // Sixteen bytes no host atomic swaps: locked among several executors, the
+    // read, the compare and the write hold the process's lock word.
+    if (e.context.atomic === true && instruction.prefixes.lock === true)
     {
-        b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+        lockHeld(e, swap);
     }
-    b.op(0x05); // else
-    b.localGet(low).localSet(registerLocal(e, 0));
-    b.localGet(high).localSet(registerLocal(e, 2));
-    e.close();
+    else
+    {
+        swap();
+    }
     return true;
 }
 

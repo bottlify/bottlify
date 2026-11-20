@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The process debug buffer: RtlCreateQueryDebugBuffer, RtlQueryProcessDebugInformation
  * and RtlDestroyQueryDebugBuffer, what a crash reporter or a tool listing
@@ -141,6 +143,7 @@ export function createDebugBufferFunctions(host){
     return {
         /** PRTL_DEBUG_INFORMATION RtlCreateQueryDebugBuffer(ULONG Size, BOOLEAN EventPair) */
         RtlCreateQueryDebugBuffer: {
+            returns: 'pointer',
             argBytes: 8,
             handler: ()=>{
                 const buffer = host.allocate(DEBUG_BUFFER.SIZE);
@@ -160,7 +163,7 @@ export function createDebugBufferFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                const at = buffer >>> 0;
+                const at = wholeAddress(buffer);
                 if (!blocks.has(at))
                 {
                     return STATUS_INVALID_PARAMETER;
@@ -185,7 +188,7 @@ export function createDebugBufferFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([id, flags, buffer])=>{
-                const at = buffer >>> 0;
+                const at = wholeAddress(buffer);
                 if (!blocks.has(at))
                 {
                     return STATUS_INVALID_PARAMETER;

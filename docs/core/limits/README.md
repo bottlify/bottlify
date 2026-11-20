@@ -7,14 +7,19 @@ event, an error. Neither stops the program.
 
 ## Programs
 
-- 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs on one executor, with
-  its pages below 4 GiB, as far as console programs on msvcrt or vcruntime140 go, structured and
-  C++ exceptions, floating-point arguments and results, and a window program's classes,
+- 32-bit x86 programs: a PE32 image for i386. A 64-bit (PE32+) image runs with its pages below
+  4 GiB (past 4 GiB, the wide window, on one executor), as far as console programs on msvcrt or
+  vcruntime140 go, structured and C++ exceptions, floating-point arguments and results, and a window program's classes,
   windows, messages, hooks and painting, and Direct3D 9, OpenGL and DirectSound included, every
   call into them a trap: dialogs, MDI, DirectDraw and the other Direct3D versions are not there yet at
   64 bits (`roadmap/x64.md`). A message's WPARAM and LPARAM keep 32 bits there. A run whose
   first program is 64-bit is on a 64-bit Windows, where a 32-bit child runs under WOW64 without
   the file system's and the registry's redirection.
+  A 64-bit image linked past 4 GiB with no relocations needs a 64-bit WebAssembly memory
+  (memory64) of 8 GiB: a browser without one (Safari, iOS) refuses the program at its start,
+  naming that. Such a process is given about 3.7 GiB, all of it below 4 GiB, and only its
+  image's code is translated: the system libraries' own code and pages it makes executable
+  itself are interpreted, some twenty times dearer an instruction.
   A structured exception there passes no `_set_se_translator` translator. The exports that are
   i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
   `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is

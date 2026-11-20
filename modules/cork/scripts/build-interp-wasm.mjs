@@ -7,10 +7,12 @@
 /**
  * Builds the interpreter tier in wasm: `src/interp-wasm.c` compiled by clang
  * for wasm32 into `src/interp-wasm.bytes.js`, and again with LONG defined,
- * long mode's tier, into `src/interp-wasm64.bytes.js`: each module as base64
- * beside the SHA-256 of the source it came from. The generated files are committed, so a
- * checkout runs without a C compiler; `interp-wasm.test.js` fails when the
- * source changed and this was not run again.
+ * long mode's tier, into `src/interp-wasm64.bytes.js`, and with LONG and WIDE,
+ * long mode's over a wide window, into `src/interp-wasm-wide.bytes.js`: each
+ * module as base64 beside the SHA-256 of the source it came from. The
+ * generated files are committed, so a checkout runs without a C compiler;
+ * `interp-wasm.test.js` fails when the source changed and this was not run
+ * again.
  *
  *   node modules/cork/scripts/build-interp-wasm.mjs [--clang PATH | --docker]
  *
@@ -25,6 +27,9 @@
  * one memory, its statics and stack in its own state page
  * (`WASM_INTERPRETER_STATICS` bytes from 4096 past its state block). The build
  * fails if the data and the stack would not fit there.
+ *
+ * The wide window's build has the guest's RAM in a second memory, which the
+ * compiler cannot be told of: `ram-memory.mjs` puts it into the linked module.
  */
 
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -34,6 +39,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WASM_INTERPRETER_STACK, WASM_INTERPRETER_STATICS } from '../src/interp-wasm.js';
+import { withRamMemory } from './ram-memory.mjs';
 
 const args = process.argv.slice(2);
 const docker = args.includes('--docker');
@@ -125,13 +131,22 @@ function dylinkMemory(section){
 }
 
 const source = new URL('../src/interp-wasm.c', import.meta.url);
-/** The two builds of the source: 32-bit code's tier, and long mode's with LONG defined. */
+/**
+ * The builds of the source: 32-bit code's tier, long mode's with LONG defined, and
+ * long mode's over a wide window with WIDE too, which `after` finishes.
+ *
+ * @type {{ name: string, defines: string[], target: URL, what: string,
+ *     after?: (bytes: Uint8Array) => Uint8Array }[]}
+ */
 const BUILDS = [
     { name: 'interp-wasm', defines: [], target: new URL('../src/interp-wasm.bytes.js', import.meta.url),
         what: 'interp-wasm.c' },
     { name: 'interp-wasm64', defines: ['-DLONG'],
         target: new URL('../src/interp-wasm64.bytes.js', import.meta.url),
         what: 'interp-wasm.c with LONG defined' },
+    { name: 'interp-wasm-wide', defines: ['-DLONG', '-DWIDE'],
+        target: new URL('../src/interp-wasm-wide.bytes.js', import.meta.url),
+        what: 'interp-wasm.c with LONG and WIDE defined', after: withRamMemory },
 ];
 
 const dir = mkdtempSync(join(tmpdir(), 'interp-wasm-'));
@@ -152,7 +167,7 @@ try
     // Hashed with LF line ends, as the repository keeps it and the test reads it.
     const digest = createHash('sha256')
         .update(readFileSync(source, 'utf8').replaceAll('\r\n', '\n')).digest('hex');
-    for (const { name, defines, target, what } of BUILDS)
+    for (const { name, defines, target, what, after } of BUILDS)
     {
         const out = join(dir, `${name}.wasm`);
         const compiled = docker ? compileInDocker([...flags, ...defines], out) : null;
@@ -161,7 +176,8 @@ try
             execFileSync(clang, [...flags, ...defines, '-o', out, fileURLToPath(source)],
                 { stdio: 'inherit' });
         }
-        const bytes = readFileSync(out);
+        const linked = readFileSync(out);
+        const bytes = Buffer.from(after === undefined ? linked : after(linked));
         const module = new WebAssembly.Module(bytes);
         // The dylink section's memory info: the data's size and alignment, then the table's.
         const [dylink] = WebAssembly.Module.customSections(module, 'dylink.0');

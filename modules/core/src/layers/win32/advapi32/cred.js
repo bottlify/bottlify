@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * The credential manager: what a program saves a user name and a password
  * under, by target and type, and reads back. The store is the session's --
@@ -180,18 +182,18 @@ export function createCredFunctions(host){
     };
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
     /** @param {number} address @returns {string | null} */
     const textAt = address=>((address >>> 0) === 0 ? null
-        : host.readCString(address >>> 0, 0x8000));
+        : host.readCString(wholeAddress(address), 0x8000));
     /** @param {number} address @returns {string | null} */
     const wideAt = address=>{
         if ((address >>> 0) === 0)
@@ -199,7 +201,7 @@ export function createCredFunctions(host){
             return null;
         }
         let text = '';
-        for (let at = address >>> 0; text.length < 0x8000; at += 2)
+        for (let at = wholeAddress(address); text.length < 0x8000; at += 2)
         {
             const unit = host.readMemory(at, 2);
             const code = unit[0] | unit[1] << 8;
@@ -497,7 +499,8 @@ export function createCredFunctions(host){
                 }
                 for (let type = 0; type < (count >>> 0); type++)
                 {
-                    writeDword((out >>> 0) + type * 4, validType(type) ? CRED_PERSIST_SESSION : 0);
+                    writeDword(wholeAddress(out) + type * 4,
+                        validType(type) ? CRED_PERSIST_SESSION : 0);
                 }
                 return 1;
             },
@@ -525,7 +528,7 @@ export function createCredFunctions(host){
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    body = encode(host.readMemory((credential >>> 0) + 4, CERT_HASH_LENGTH));
+                    body = encode(host.readMemory(wholeAddress(credential) + 4, CERT_HASH_LENGTH));
                 }
                 else if ((kind >>> 0) === UsernameTargetCredential)
                 {

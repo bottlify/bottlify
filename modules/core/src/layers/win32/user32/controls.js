@@ -35,6 +35,7 @@ import { createTabWalk } from './tabwalk.js';
 import { directoryItems } from './dlgdir.js';
 import { createButtonV6 } from './button-v6.js';
 import { translated } from './unicode.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -2876,7 +2877,7 @@ export function createControlProcedures(host){
                 }
                 else
                 {
-                    const asked = readRect(message.lParam >>> 0);
+                    const asked = readRect(wholeAddress(message.lParam));
                     const current = formatRect(record);
                     const margins = state.margins ?? { left: 0, right: 0 };
                     const rect = (message.wParam & 1) !== 0
@@ -2975,13 +2976,13 @@ export function createControlProcedures(host){
     };
 
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address >>> 0, new Uint8Array([
+    const writeU32 = (address, value)=>host.writeMemory(wholeAddress(address), new Uint8Array([
         value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
     ]));
 
     /** @param {number} address @returns {Rect} */
     const readRect = address=>{
-        const bytes = host.readMemory(address >>> 0, 16);
+        const bytes = host.readMemory(wholeAddress(address), 16);
         const at = (/** @type {number} */ offset)=>(bytes[offset] | bytes[offset + 1] << 8
             | bytes[offset + 2] << 16 | bytes[offset + 3] << 24);
         return { left: at(0), top: at(4), right: at(8), bottom: at(12) };
@@ -3091,7 +3092,7 @@ export function createControlProcedures(host){
      * @param {number} address @param {string} text @returns {number} characters written
      */
     const writeString = (address, text)=>{
-        host.writeMemory(address >>> 0, encodeAnsi(`${text}\0`));
+        host.writeMemory(wholeAddress(address), encodeAnsi(`${text}\0`));
         return text.length;
     };
 
@@ -3267,7 +3268,7 @@ export function createControlProcedures(host){
         const items = state.items;
         const strings = keepsStrings(record);
         const text = ()=>((message.lParam >>> 0) === 0
-            ? '' : host.readCString(message.lParam >>> 0, MAX_TEXT));
+            ? '' : host.readCString(wholeAddress(message.lParam), MAX_TEXT));
         switch (message.message){
             case LB_ADDSTRING:
                 return strings ? addItem(record, sorted, text()) : addData(record, message.lParam);
@@ -3694,7 +3695,8 @@ export function createControlProcedures(host){
                 }
                 const chosen = state.items.map((item, index)=>(item.selected ? index : -1))
                     .filter(index=>index >= 0).slice(0, message.wParam | 0);
-                chosen.forEach((index, slot)=>writeU32((message.lParam >>> 0) + slot * 4, index));
+                chosen.forEach((index, slot)=>writeU32(wholeAddress(message.lParam) + slot * 4,
+                    index));
                 return chosen.length;
             }
             case LB_GETITEMHEIGHT:
@@ -3719,7 +3721,7 @@ export function createControlProcedures(host){
                 const top = (at - state.top) * height;
                 const size = host.clientSize(record);
                 [0, top, size.width, top + height].forEach((value, slot)=>
-                    writeU32((message.lParam >>> 0) + slot * 4, value));
+                    writeU32(wholeAddress(message.lParam) + slot * 4, value));
                 return 1;
             }
             case LB_SETHORIZONTALEXTENT:
@@ -5062,7 +5064,7 @@ export function createControlProcedures(host){
 
     /** @param {number} address */
     const readU32 = address=>{
-        const bytes = host.readMemory(address >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
 

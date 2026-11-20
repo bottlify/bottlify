@@ -18,6 +18,7 @@
 
 import { createCertificateFunctions } from './certificates.js';
 import { createEncodingFunctions } from './encoding.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 /** What Windows sets when the blob is damaged or the entropy is not the one it was sealed with. */
@@ -107,10 +108,11 @@ export function createCrypt32Functions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const data = readBlob(dataIn >>> 0);
+                const data = readBlob(wholeAddress(dataIn));
                 const text = (description >>> 0) === 0
-                    ? '' : host.readWideString(description >>> 0, 0x10000);
-                const mixed = (entropy >>> 0) === 0 ? new Uint8Array(0) : readBlob(entropy >>> 0);
+                    ? '' : host.readWideString(wholeAddress(description), 0x10000);
+                const mixed = (entropy >>> 0) === 0 ? new Uint8Array(0)
+                    : readBlob(wholeAddress(entropy));
                 const blob = new Uint8Array(HEADER + text.length * 2 + mixed.length + data.length);
                 const view = new DataView(blob.buffer);
                 view.setUint32(0, MAGIC, true);
@@ -143,7 +145,7 @@ export function createCrypt32Functions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const blob = readBlob(dataIn >>> 0);
+                const blob = readBlob(wholeAddress(dataIn));
                 const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
                 if (blob.length < HEADER || view.getUint32(0, true) !== MAGIC)
                 {
@@ -158,7 +160,8 @@ export function createCrypt32Functions(host){
                     return fail(NTE_BAD_DATA);
                 }
                 const mixed = blob.subarray(HEADER + textBytes, HEADER + textBytes + mixedBytes);
-                const given = (entropy >>> 0) === 0 ? new Uint8Array(0) : readBlob(entropy >>> 0);
+                const given = (entropy >>> 0) === 0 ? new Uint8Array(0)
+                    : readBlob(wholeAddress(entropy));
                 if (given.length !== mixed.length || given.some((byte, i)=>byte !== mixed[i]))
                 {
                     return fail(NTE_BAD_DATA);
@@ -179,7 +182,7 @@ export function createCrypt32Functions(host){
                     host.writeMemory(at, text);
                     const pointer = new Uint8Array(4);
                     new DataView(pointer.buffer).setUint32(0, at, true);
-                    host.writeMemory(descriptionOut >>> 0, pointer);
+                    host.writeMemory(wholeAddress(descriptionOut), pointer);
                 }
                 return 1;
             },

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * LZNT1, the compression NTFS and the Rtl compression calls use, as
  * [MS-XCA] 2.5 lays it out.
@@ -300,7 +302,7 @@ export function createCompressionFunctions(host){
         value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
     /** @param {number} address @param {number} length */
     const read = (address, length)=>((length >>> 0) === 0 ? new Uint8Array(0)
-        : host.readMemory(address >>> 0, length >>> 0).slice());
+        : host.readMemory(wholeAddress(address), length >>> 0).slice());
 
     /**
      * Decompresses into the caller's buffer: RtlDecompressBuffer's body, and
@@ -323,7 +325,7 @@ export function createCompressionFunctions(host){
         const { bytes } = result;
         if (bytes.length > 0)
         {
-            host.writeMemory(out >>> 0, bytes);
+            host.writeMemory(wholeAddress(out), bytes);
         }
         putDword(final >>> 0, bytes.length);
         return STATUS_SUCCESS;
@@ -373,7 +375,7 @@ export function createCompressionFunctions(host){
                 }
                 if (packed.length > 0)
                 {
-                    host.writeMemory(out >>> 0, packed);
+                    host.writeMemory(wholeAddress(out), packed);
                 }
                 putDword(final >>> 0, packed.length);
                 return STATUS_SUCCESS;

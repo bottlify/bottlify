@@ -1377,3 +1377,21 @@ test('GetLogicalProcessorInformationEx answers records of their own sizes, one k
     assert.equal(kinds.at(-1), 4);
     assert.equal(fns.GetLogicalProcessorInformationEx.handler([9, 0x400, 0x200]), 0);
 });
+
+test('GetSystemInfo bounds a 64-bit process\'s addresses by its memory, in quadwords', ()=>{
+    // A 64-bit program on 4 GiB is large-address aware: Windows answers
+    // 0xFFFEFFFF there, the last byte below the 64 KiB kept off the top.
+    const host = { ...fakeHost(), pointerSize: 8, ramTop: 2 ** 32 };
+    const fns = createSystemFunctions(host);
+    fns.GetSystemInfo.handler([0x200]);
+    assert.equal(host.view.getBigUint64(0x208, true), 0x10000n, 'lpMinimumApplicationAddress');
+    assert.equal(host.view.getBigUint64(0x210, true), 0xfffeffffn, 'lpMaximumApplicationAddress');
+    // Past 4 GiB, in a wider window, the quadword holds it whole.
+    const wide = { ...fakeHost(), pointerSize: 8, ramTop: 2 ** 33 };
+    createSystemFunctions(wide).GetSystemInfo.handler([0x200]);
+    assert.equal(wide.view.getBigUint64(0x210, true), 0x1fffeffffn);
+    // A 32-bit process on 2 GiB keeps the 32-bit top.
+    const narrow = { ...fakeHost(), ramTop: 2 ** 31 };
+    createSystemFunctions(narrow).GetSystemInfo.handler([0x200]);
+    assert.equal(narrow.view.getUint32(0x20c, true), 0x7ffeffff);
+});

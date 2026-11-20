@@ -41,6 +41,7 @@ import { guestEntry } from './guest-code.js';
 import * as inGuestPrint from './inguest-print.js';
 import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 import { createUcrtMathFunctions } from './ucrt-math.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -93,24 +94,18 @@ const PROCESS_DETACH = 0;
  */
 export function createUcrtbaseFunctions(crt, host){
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
-    /** A pointer's bytes: four, or eight in a 64-bit process, every address below 4 GiB. */
+    /** A pointer's bytes: four, or eight in a 64-bit process. */
     const pointer = host.pointerSize ?? 4;
-    /** @param {number} address */
-    const readPointer = readU32;
-    /** @param {number} address @param {number} value */
-    const writePointer = (address, value)=>{
-        const bytes = new Uint8Array(pointer);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
-    };
+    /** A pointer read and written whole. */
+    const { read: readPointer, write: writePointer } = pointerIo(host, pointer);
     /** The calling thread's errno, set. @param {number} code */
     const fail = code=>{
         writeU32(crt._errno.handler([]), code);
@@ -204,13 +199,13 @@ export function createUcrtbaseFunctions(crt, host){
             }
             const room = (count >>> 0) - 1;
             crt._vsnprintf.handler([buffer, room, format, list]);
-            host.writeMemory((buffer >>> 0) + Math.min(length, room), Uint8Array.of(0));
+            host.writeMemory(wholeAddress(buffer) + Math.min(length, room), Uint8Array.of(0));
             return length;
         }
         const written = crt._vsnprintf.handler([buffer, count, format, list]) | 0;
         if (written < 0 && (options & LEGACY_VSPRINTF_NULL_TERMINATION) && (count >>> 0) > 0)
         {
-            host.writeMemory((buffer >>> 0) + (count >>> 0) - 1, Uint8Array.of(0));
+            host.writeMemory(wholeAddress(buffer) + (count >>> 0) - 1, Uint8Array.of(0));
         }
         return written;
     };
@@ -235,13 +230,14 @@ export function createUcrtbaseFunctions(crt, host){
             }
             const room = (count >>> 0) - 1;
             crt._vsnwprintf.handler([buffer, room, format, list]);
-            host.writeMemory((buffer >>> 0) + Math.min(length, room) * 2, Uint8Array.of(0, 0));
+            host.writeMemory(wholeAddress(buffer) + Math.min(length, room) * 2, Uint8Array.of(0,
+                0));
             return length;
         }
         const written = crt._vsnwprintf.handler([buffer, count, format, list]) | 0;
         if (written < 0 && (options & LEGACY_VSPRINTF_NULL_TERMINATION) && (count >>> 0) > 0)
         {
-            host.writeMemory((buffer >>> 0) + ((count >>> 0) - 1) * 2, Uint8Array.of(0, 0));
+            host.writeMemory(wholeAddress(buffer) + ((count >>> 0) - 1) * 2, Uint8Array.of(0, 0));
         }
         return written;
     };
@@ -253,7 +249,7 @@ export function createUcrtbaseFunctions(crt, host){
      * @param {number} list
      */
     const pointersAt = list=>Array.from({ length: VARIADIC_SLOTS },
-        (_, index)=>readPointer((list >>> 0) + index * pointer));
+        (_, index)=>readPointer(wholeAddress(list) + index * pointer));
 
     /** What `_register_thread_local_exe_atexit_callback` was given, until exit calls it. */
     let threadLocalExit = 0;
@@ -278,7 +274,7 @@ export function createUcrtbaseFunctions(crt, host){
             const bytes = host.readMemory(at, unit);
             return unit === 1 ? bytes[0] : bytes[0] | bytes[1] << 8;
         };
-        let at = line >>> 0;
+        let at = wholeAddress(line);
         let quoted = false;
         for (let code = read(at); code > 0x20 || code !== 0 && quoted; code = read(at))
         {
@@ -351,6 +347,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** FILE *__acrt_iob_func(unsigned index): stdin, stdout and stderr are 0, 1 and 2. */
         __acrt_iob_func: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -509,6 +506,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** char **_get_initial_narrow_environment(void): the environment main is handed. */
         _get_initial_narrow_environment: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>readU32(crt.__p__environ.handler([])),
@@ -516,6 +514,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** wchar_t **_get_initial_wide_environment(void) */
         _get_initial_wide_environment: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>readU32(crt.__p__wenviron.handler([])),
@@ -575,7 +574,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return -1;
                 }
-                host.writeMemory(table >>> 0, new Uint8Array(3 * pointer));
+                host.writeMemory(wholeAddress(table), new Uint8Array(3 * pointer));
                 return 0;
             },
         },
@@ -595,7 +594,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return -1;
                 }
-                const at = table >>> 0;
+                const at = wholeAddress(table);
                 let first = readPointer(at);
                 let last = readPointer(at + pointer);
                 let end = readPointer(at + 2 * pointer);
@@ -636,7 +635,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return -1;
                 }
-                const at = table >>> 0;
+                const at = wholeAddress(table);
                 const first = readPointer(at);
                 const last = readPointer(at + pointer);
                 const functions = first === 0 ? [] : Array.from(
@@ -663,6 +662,7 @@ export function createUcrtbaseFunctions(crt, host){
          * the process ends (decisions.md A255).
          */
         _set_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -671,6 +671,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** _invalid_parameter_handler _get_invalid_parameter_handler(void) */
         _get_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>invalid.get(),
@@ -682,6 +683,7 @@ export function createUcrtbaseFunctions(crt, host){
          *     thread's own, asked before the process's.
          */
         _set_thread_local_invalid_parameter_handler: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
@@ -827,6 +829,7 @@ export function createUcrtbaseFunctions(crt, host){
          * the C locale, which a caller reads as "C".
          */
         ___lc_locale_name_func: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -837,6 +840,7 @@ export function createUcrtbaseFunctions(crt, host){
 
         /** int *__sys_nerr(void): how many messages `_sys_errlist` holds. */
         __sys_nerr: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -861,6 +865,7 @@ export function createUcrtbaseFunctions(crt, host){
         ...host.commandLine ? {
             /** char *_get_narrow_winmain_command_line(void): the line past the program's name. */
             _get_narrow_winmain_command_line: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>pastProgramName(
@@ -869,6 +874,7 @@ export function createUcrtbaseFunctions(crt, host){
             },
             /** wchar_t *_get_wide_winmain_command_line(void) */
             _get_wide_winmain_command_line: {
+                returns: 'pointer',
                 convention: 'cdecl',
                 argBytes: 0,
                 handler: ()=>pastProgramName(
@@ -966,7 +972,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return fail(EINVAL);
                 }
-                const at = stream >>> 0;
+                const at = wholeAddress(stream);
                 [[base, at + 2 * pointer], [place, at], [count, at + fileLayout(pointer).cnt]]
                     .forEach(([out, field])=>{
                         if ((out >>> 0) !== 0)
@@ -989,6 +995,7 @@ export function createUcrtbaseFunctions(crt, host){
         fread_s: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1, 2, 3],
             /** @param {number[]} args */
             handler: ([buffer, size, elementSize, count, stream])=>{
                 const wanted = (elementSize >>> 0) * (count >>> 0);
@@ -1003,7 +1010,7 @@ export function createUcrtbaseFunctions(crt, host){
                 }
                 if (wanted > (size >>> 0))
                 {
-                    host.writeMemory(buffer >>> 0, new Uint8Array(size >>> 0));
+                    host.writeMemory(wholeAddress(buffer), new Uint8Array(size >>> 0));
                     fail(ERANGE);
                     return 0;
                 }
@@ -1015,7 +1022,7 @@ export function createUcrtbaseFunctions(crt, host){
          * wchar_t *_W_Getdays(void), wchar_t *_W_Getmonths(void): the day and
          * month names `_Getdays` and `_Getmonths` list, wide.
          */
-        _W_Getdays: widened(crt._Getdays),
+        _W_Getdays: { ...widened(crt._Getdays), returns: 'pointer' },
         _W_Getmonths: widened(crt._Getmonths),
 
         /** void *_W_Gettnames(void): `_Gettnames`'s table, handed back to `_Wcsftime`. */
@@ -1029,6 +1036,7 @@ export function createUcrtbaseFunctions(crt, host){
         _Wcsftime: {
             convention: 'cdecl',
             argBytes: 20,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, time])=>
                 (standardTime?.wcsftime ?? crt.wcsftime).handler([buffer, size, format, time]),

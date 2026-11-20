@@ -31,6 +31,6 @@ test('a 64-bit program registers a class, makes a window, paints it and quits',
         const text = output.join('');
         const lines = text.split('\r\n').filter(Boolean);
         assert.deepEqual(lines.filter(line=>!line.startsWith('ok   ')), [], text);
-        assert.equal(lines.length, 22, `every check was reached:\n${text}`);
+        assert.equal(lines.length, 25, `every check was reached:\n${text}`);
         assert.equal(code, 0, text);
     });

@@ -19,7 +19,7 @@
  * about.
  */
 
-import { pointerArg } from '../common/pointers.js';
+import { pointerArg, wholeAddress } from '../common/pointers.js';
 import { createGlobalMemory, MOVEABLE_USER_FLAGS } from './moveable.js';
 import { IMAGE_ALLOCATION_PROTECT, imageLayout } from './image-protection.js';
 import { askChild } from './cross-process.js';
@@ -145,6 +145,8 @@ const ERROR_NOACCESS = 998;
 const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** A commit the machine has no memory for. */
+const ERROR_COMMITMENT_LIMIT = 1455;
 
 /** The pseudo-handle for the running process, the one process the Ex forms reach. */
 const CURRENT_PROCESS = 0xffffffff;
@@ -438,6 +440,9 @@ const STALE_LIMIT = 65536;
 const binOf = size=>(size < SMALL_LIMIT
     ? size >>> 3
     : SMALL_CLASSES + (31 - Math.clz32(size)) - (31 - Math.clz32(SMALL_LIMIT)));
+
+/** The class from which a span is taken lowest first (`fit`): spans of 256 MiB and more. */
+const LOWEST_FROM_BIN = binOf(2 ** 28);
 
 /**
  * What VirtualQuery answers for an arena page no reservation holds: free to
@@ -842,9 +847,27 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
         for (; bin < BINS; bin++)
         {
             const candidates = bins[bin];
-            if (candidates.length > 0)
+            if (candidates.length > 0 && bin < LOWEST_FROM_BIN)
             {
                 return candidates[candidates.length - 1];
+            }
+            if (candidates.length > 0)
+            {
+                // Of spans 256 MiB and more, which are few, the lowest, as Windows
+                // hands address space out from the bottom: a heap past 2 GiB is two
+                // spans of one class either side of the system's shared page, and
+                // the one above it was the one made last - every allocation of the
+                // engine's own went past 2 GiB, where a 64-bit process's code
+                // reaches no counter through a disp32.
+                let lowest = candidates[0];
+                for (let i = 1; i < candidates.length; i++)
+                {
+                    if (candidates[i].base < lowest.base)
+                    {
+                        lowest = candidates[i];
+                    }
+                }
+                return lowest;
             }
         }
         return null;
@@ -925,7 +948,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
          */
         allocateAt(address, bytes, { owner = null, reserving = false, held = false } = {}){
             const capacity = Math.max(least, roundUp(bytes, least));
-            const start = address >>> 0;
+            const start = wholeAddress(address);
             const end = start + capacity;
             if (start % least !== 0 || start < base || end > base + size)
             {
@@ -1352,6 +1375,26 @@ export function createHeapFunctions(host){
             + (holders ? ` (${holders})` : ''));
     };
 
+    /**
+     * The sizes an export declares (`sizes`), for a trap of a guest routine to
+     * declare as the export does.
+     *
+     * @param {string} name
+     * @returns {{ sizes?: number[] }}
+     */
+    const sizesOf = name=>{
+        const { sizes } = /** @type {{ sizes?: number[] }} */ (
+            /** @type {Record<string, any>} */ (table)[name]);
+        return sizes ? { sizes } : {};
+    };
+
+    /**
+     * A SIZE_T argument whole: in a 64-bit process its high dword comes beside
+     * the low one (`pointerArg`), and a size past 4 GiB is one no request in
+     * this address space meets - refused, not its low half taken.
+     */
+    const wholeSize = pointerArg;
+
     /** @param {number} address */
     const readDword = address=>{
         const bytes = host.readMemory(address, 4);
@@ -1761,6 +1804,29 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * Whether the guest may be given pages up to `to`: its memory grown to hold
+     * them and they taken from the machine's (`reach`). A commit with no room
+     * is refused before anything of it is made, as at Windows's commit limit.
+     *
+     * @param {number} to
+     */
+    const roomTo = to=>host.reach?.(to) !== false;
+
+    /**
+     * A commit refused for want of memory: the code Windows gives at its commit
+     * limit, and why.
+     *
+     * @param {number} bytes
+     * @returns {0}
+     */
+    const noRoom = bytes=>{
+        host.setLastError(ERROR_COMMITMENT_LIMIT);
+        host.divergence?.('VirtualAlloc', `a commit of ${bytes} bytes refused: the machine's`
+            + ' memory has no room for it');
+        return 0;
+    };
+
+    /**
      * Marks [from, to) of a reservation committed or not.
      *
      * @param {number} reservation @param {number} from @param {number} to
@@ -1769,7 +1835,7 @@ export function createHeapFunctions(host){
     const markCommitted = (reservation, from, to, on)=>{
         // A commit is memory the guest is given: the guest's memory grows to
         // hold it (`reach`), where its reservation did not.
-        if (on && host.reach?.(to) === false)
+        if (on && !roomTo(to))
         {
             host.divergence?.('VirtualAlloc', 'a commit up to 0x' + to.toString(16)
                 + ' past the memory the browser would give', 'loss');
@@ -2137,6 +2203,7 @@ export function createHeapFunctions(host){
         const place = (label, name, code)=>{
             const trap = builder.register(label, {
                 argBytes: table[name].argBytes,
+                ...sizesOf(name),
                 /** @param {number[]} args */
                 handler: args=>table[name].handler(args),
             });
@@ -2197,8 +2264,12 @@ export function createHeapFunctions(host){
             long: builder=>{
                 const [name, make] = longRoutines[which];
                 const placement = guestHeap.placement();
+                // The trap is the export's as the bridge must read it: its
+                // answer an address widened with zeros where the export's is.
                 return bindLong(builder, placement === null ? null : make(placement), {
                     argBytes: table[name].argBytes,
+                    returns: /** @type {{ returns?: string }} */ (table[name]).returns,
+                    ...sizesOf(name),
                     /** @param {number[]} args */
                     handler: args=>table[name].handler(args),
                 });
@@ -2208,16 +2279,22 @@ export function createHeapFunctions(host){
 
     /**
      * A reservation of exactly this span at its start, committed whole when
-     * the type asks; false where any of it is taken.
+     * the type asks; false where any of it is taken, null where it was free and
+     * the machine has no memory for the commit.
      *
      * @param {number} start @param {number} span @param {number} kind
      * @param {number} protection
-     * @returns {boolean}
+     * @returns {boolean | null}
      */
     const reserveAt = (start, span, kind, protection)=>{
         if (!allocator.allocateAt(start, span, { owner: VIRTUAL, reserving: true }))
         {
             return false;
+        }
+        if ((kind & MEM_COMMIT) !== 0 && !roomTo(start + span))
+        {
+            allocator.free(start);
+            return null;
         }
         decommitted.delete(start);
         committed.set(start, []);
@@ -2395,9 +2472,14 @@ export function createHeapFunctions(host){
      */
     const virtualAlloc = (pointer, bytes, type, protect, where)=>{
         const kind = type >>> 0;
-        const size = bytes >>> 0;
-        const requested = pointer >>> 0;
-        const protection = protect >>> 0;
+        if (bytes > 0xffffffff)
+        {
+            host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return 0;
+        }
+        const size = wholeAddress(bytes);
+        const requested = wholeAddress(pointer);
+        const protection = wholeAddress(protect);
         const acting = kind & (MEM_COMMIT | MEM_RESERVE | MEM_RESET);
         const view = (acting === MEM_COMMIT || acting === MEM_RESET) && requested !== 0
             && size !== 0 ? host.viewAt?.(requested) ?? null : null;
@@ -2438,7 +2520,12 @@ export function createHeapFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            if (!reserveAt(start, span, kind, protection))
+            const made = reserveAt(start, span, kind, protection);
+            if (made === null)
+            {
+                return noRoom(span);
+            }
+            if (!made)
             {
                 host.setLastError(ERROR_INVALID_ADDRESS);
                 host.divergence?.('VirtualAlloc', `reservation of ${span} bytes at 0x${
@@ -2518,6 +2605,10 @@ export function createHeapFunctions(host){
             // succeeding without zeroing, and an allocator that
             // commits up to its high-water mark each time it grows
             // does exactly that.
+            if (!roomTo(page + needed))
+            {
+                return noRoom(needed);
+            }
             takeBack(existing.address, page, page + needed);
             markCommitted(existing.address, page, page + needed, true);
             noteProtection(existing.address, page, page + needed, protection);
@@ -2548,6 +2639,11 @@ export function createHeapFunctions(host){
             allocator.free(placed);
         }
         const address = outside ? 0 : placed;
+        if (address !== 0 && (kind & MEM_COMMIT) !== 0 && !roomTo(address + rounded))
+        {
+            allocator.free(address);
+            return noRoom(rounded);
+        }
         if (address === 0)
         {
             // A caller checks the return and then asks why. A zero with
@@ -2758,7 +2854,7 @@ export function createHeapFunctions(host){
             host.setLastError(ERROR_INVALID_PARAMETER);
             return 0;
         }
-        const start = pointer >>> 0;
+        const start = wholeAddress(pointer);
         const block = allocator.blockContaining(start);
         if (!block || !placeholders.has(block.address) || block.address !== start
             || roundUp(bytes >>> 0, PAGE_SIZE) !== block.capacity)
@@ -2774,6 +2870,11 @@ export function createHeapFunctions(host){
         // Exactly the placeholder's span, which a split may have left off
         // an allocation granule.
         const span = block.capacity;
+        if ((rest & MEM_COMMIT) !== 0 && !roomTo(start + span))
+        {
+            // The placeholder stays: nothing of the commit was made.
+            return noRoom(span);
+        }
         release(start, start + span);
         reserveAt(start, span, rest, protect >>> 0);
         replaced.add(start);
@@ -2876,7 +2977,7 @@ export function createHeapFunctions(host){
         }
         const pointerSize = host.pointerSize ?? 4;
         /** @param {number} at */
-        const pointerAt = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer)
+        const pointerAt = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
             .getUint32(0, true);
         for (let index = 0; index < (count >>> 0); index++)
         {
@@ -2915,6 +3016,7 @@ export function createHeapFunctions(host){
     const table = {
         /** HANDLE GetProcessHeap(VOID) */
         GetProcessHeap: {
+            returns: 'pointer',
             argBytes: 0,
             handler: ()=>processHeap,
             // mov eax, fs:[0x30]; mov eax, [eax + 0x18]; ret -- PEB->ProcessHeap,
@@ -2927,7 +3029,9 @@ export function createHeapFunctions(host){
 
         /** HANDLE HeapCreate(DWORD flOptions, SIZE_T dwInitialSize, SIZE_T dwMaximumSize) */
         HeapCreate: {
+            returns: 'pointer',
             argBytes: 12,
+            sizes: [1, 2],
             /** @param {number[]} [args] */
             handler: ([options, initial, maximum] = [0, 0, 0])=>{
                 // A heap with a maximum is fixed: it is a handle of its own,
@@ -2970,9 +3074,10 @@ export function createHeapFunctions(host){
          */
         HeapSetInformation: {
             argBytes: 16,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, information, length])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (kind === HEAP_ENABLE_TERMINATION_ON_CORRUPTION)
                 {
                     return 1;
@@ -2988,7 +3093,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const value = readDword(information >>> 0);
+                const value = readDword(wholeAddress(information));
                 if (lowFragmentation.has(heap))
                 {
                     if (value === LOW_FRAGMENTATION_HEAP)
@@ -3018,9 +3123,10 @@ export function createHeapFunctions(host){
          */
         HeapQueryInformation: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: ([handle, kind, information, length, returned])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (!heaps.has(heap))
                 {
                     host.setLastError(ERROR_NOACCESS);
@@ -3033,14 +3139,14 @@ export function createHeapFunctions(host){
                 }
                 if (returned !== 0)
                 {
-                    writeDword(returned >>> 0, 4);
+                    writeDword(wholeAddress(returned), 4);
                 }
                 if ((length >>> 0) < 4 || information === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeDword(information >>> 0,
+                writeDword(wholeAddress(information),
                     lowFragmentation.has(heap) ? LOW_FRAGMENTATION_HEAP : 0);
                 return 1;
             },
@@ -3051,7 +3157,7 @@ export function createHeapFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 // Destroying the process heap takes the CRT's own allocations
                 // with it, so Windows documents it as forbidden rather than
                 // supported-but-fatal.
@@ -3078,16 +3184,19 @@ export function createHeapFunctions(host){
 
         /** LPVOID HeapAlloc(HANDLE hHeap, DWORD dwFlags, SIZE_T dwBytes) */
         HeapAlloc: {
+            returns: 'pointer',
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, flags, bytes])=>{
-                const heap = handle >>> 0;
+            handler: args=>{
+                const [handle, flags] = args;
+                const heap = wholeAddress(handle);
                 if (!heaps.has(heap))
                 {
                     return 0;
                 }
-                const size = bytes >>> 0;
-                if (!fits(heap, size, 0))
+                const whole = wholeSize(args, 2);
+                const size = wholeAddress(whole);
+                if (whole !== size || !fits(heap, size, 0))
                 {
                     host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                     return 0;
@@ -3112,11 +3221,13 @@ export function createHeapFunctions(host){
 
         /** LPVOID HeapReAlloc(HANDLE hHeap, DWORD dwFlags, LPVOID lpMem, SIZE_T dwBytes) */
         HeapReAlloc: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, flags, pointer, bytes])=>{
-                const heap = handle >>> 0;
-                const address = pointer >>> 0;
+            handler: args=>{
+                const [handle, flags, pointer, bytes] = args;
+                const heap = wholeAddress(handle);
+                const address = wholeAddress(pointer);
                 // No block to resize is no failure of memory: Windows answers
                 // NULL and clears the last error (Wine's heap test).
                 if (address === 0)
@@ -3129,7 +3240,8 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                const moved = fits(heap, bytes >>> 0, block.size)
+                const moved = wholeSize(args, 3) === bytes >>> 0
+                    && fits(heap, bytes >>> 0, block.size)
                     ? reallocate(block, bytes >>> 0, {
                         zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
                         mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
@@ -3150,7 +3262,7 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , pointer])=>{
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 // free(NULL) is a no-op in C and CRT wrappers pass it straight
                 // through, so answering TRUE keeps those wrappers honest.
                 if (address === 0)
@@ -3193,10 +3305,10 @@ export function createHeapFunctions(host){
          * is refused, as Windows refuses it.
          */
         VirtualAlloc: {
+            returns: 'pointer',
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type, protect])=>
-                virtualAlloc(pointer, bytes, type, protect, null),
+            handler: args=>virtualAlloc(args[0], wholeSize(args, 1), args[2], args[3], null),
         },
 
         /**
@@ -3213,9 +3325,11 @@ export function createHeapFunctions(host){
          * restores them (`placeholderFree`).
          */
         VirtualAlloc2: {
+            returns: 'pointer',
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([process, pointer, bytes, type, protect, list, count])=>{
+            handler: args=>{
+                const [process, pointer, , type, protect, list, count] = args;
                 if ((process >>> 0) !== 0 && (process >>> 0) !== CURRENT_PROCESS)
                 {
                     host.divergence?.('VirtualAlloc2', `process 0x${(process >>> 0)
@@ -3229,8 +3343,9 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return placeholderAlloc(pointer, bytes, type, protect, where)
-                    ?? virtualAlloc(pointer, bytes, type, protect, where);
+                const size = wholeSize(args, 2);
+                return placeholderAlloc(pointer, size, type, protect, where)
+                    ?? virtualAlloc(pointer, size, type, protect, where);
             },
         },
 
@@ -3247,10 +3362,17 @@ export function createHeapFunctions(host){
         VirtualFree: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type])=>{
-                const address = pointer >>> 0;
+            handler: args=>{
+                const [pointer, bytes, type] = args;
+                const address = wholeAddress(pointer);
                 const kind = type >>> 0;
-                const size = bytes >>> 0;
+                const size = wholeAddress(bytes);
+                if (wholeSize(args, 1) !== size)
+                {
+                    // More than the address space holds: no range of a reservation.
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 if (kind === (MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)
                     || kind === (MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
                 {
@@ -3330,16 +3452,17 @@ export function createHeapFunctions(host){
          */
         GetWriteWatch: {
             argBytes: 24,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([flags, base, bytes, addresses, count, granularity])=>{
-                const address = base >>> 0;
+                const address = wholeAddress(base);
                 const block = watchedRegion(address, bytes >>> 0);
                 if ((flags & ~WRITE_WATCH_FLAG_RESET) !== 0 || !block)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0xffffffff;
                 }
-                const room = (count >>> 0) === 0 ? -1 : readDword(count >>> 0);
+                const room = (count >>> 0) === 0 ? -1 : readDword(wholeAddress(count));
                 if (room === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -3378,9 +3501,20 @@ export function createHeapFunctions(host){
                         tracked.delete(page >>> 12);
                     }
                 }
-                written.forEach((page, at)=>writeDword((addresses >>> 0) + at * 4, page));
-                writeDword(count >>> 0, written.length);
-                writeDword(granularity >>> 0, PAGE_SIZE);
+                // PVOID and ULONG_PTR: eight bytes each in a 64-bit process, the upper half zero.
+                const wide = host.pointerSize === 8;
+                /** @param {number} at @param {number} value */
+                const writeWord = (at, value)=>{
+                    writeDword(at, value);
+                    if (wide)
+                    {
+                        writeDword(at + 4, 0);
+                    }
+                };
+                const stride = wide ? 8 : 4;
+                written.forEach((page, at)=>writeWord(wholeAddress(addresses) + at * stride, page));
+                writeWord(wholeAddress(count), written.length);
+                writeDword(wholeAddress(granularity), PAGE_SIZE);
                 return 0;
             },
         },
@@ -3392,9 +3526,10 @@ export function createHeapFunctions(host){
          */
         ResetWriteWatch: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([base, bytes])=>{
-                const address = base >>> 0;
+                const address = wholeAddress(base);
                 const block = watchedRegion(address, bytes >>> 0);
                 if (!block)
                 {
@@ -3413,14 +3548,16 @@ export function createHeapFunctions(host){
         },
 
         /**
+         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
+         *
          * The global family (`moveable.js`): a fixed block is its own handle,
          * a moveable one an entry of the process's handle table that GlobalLock
          * turns into a pointer.
-         *
-         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
          */
         GlobalAlloc: {
+            returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([flags, bytes])=>globals.global.allocate(flags >>> 0, bytes >>> 0),
             ...routine('globalAlloc'),
@@ -3428,7 +3565,9 @@ export function createHeapFunctions(host){
 
         /** HGLOBAL GlobalReAlloc(HGLOBAL hMem, SIZE_T dwBytes, UINT uFlags) */
         GlobalReAlloc: {
+            returns: 'pointer',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
                 globals.global.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
@@ -3443,6 +3582,7 @@ export function createHeapFunctions(host){
 
         /** HGLOBAL GlobalFree(HGLOBAL hMem): NULL on success, the handle back on failure. */
         GlobalFree: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.free(handle >>> 0),
@@ -3451,6 +3591,7 @@ export function createHeapFunctions(host){
 
         /** LPVOID GlobalLock(HGLOBAL hMem) */
         GlobalLock: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.lock(handle >>> 0),
@@ -3472,6 +3613,7 @@ export function createHeapFunctions(host){
          * BOOL GlobalUnWire(HGLOBAL), VOID GlobalUnfix(HGLOBAL)
          */
         GlobalWire: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.global.lock(handle >>> 0),
@@ -3507,6 +3649,7 @@ export function createHeapFunctions(host){
 
         /** HGLOBAL GlobalHandle(LPCVOID pMem) */
         GlobalHandle: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>globals.global.handleOf(address >>> 0),
@@ -3518,13 +3661,16 @@ export function createHeapFunctions(host){
          * no DDE sharing; a handle one spelling makes the other takes.
          */
         LocalAlloc: {
+            returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([flags, bytes])=>globals.local.allocate(flags >>> 0, bytes >>> 0),
         },
 
         /** HLOCAL LocalFree(HLOCAL hMem) */
         LocalFree: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>globals.local.free(handle >>> 0),
@@ -3547,7 +3693,7 @@ export function createHeapFunctions(host){
                     const data = new Uint8Array(all.length * 4);
                     const view = new DataView(data.buffer);
                     all.forEach((heap, at)=>view.setUint32(at * 4, heap, true));
-                    host.writeMemory(buffer >>> 0, data);
+                    host.writeMemory(wholeAddress(buffer), data);
                 }
                 return all.length;
             },
@@ -3589,7 +3735,7 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , address])=>{
-                const heap = handle >>> 0;
+                const heap = wholeAddress(handle);
                 if (!heaps.has(heap))
                 {
                     return 0;
@@ -3632,8 +3778,8 @@ export function createHeapFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, entry])=>{
-                const heap = handle >>> 0;
-                const at = entry >>> 0;
+                const heap = wholeAddress(handle);
+                const at = wholeAddress(entry);
                 if (!heaps.has(heap))
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
@@ -3731,8 +3877,8 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , summary])=>{
-                const heap = handle >>> 0;
-                if (summary === 0 || readDword(summary >>> 0) !== HEAP_SUMMARY_SIZE)
+                const heap = wholeAddress(handle);
+                if (summary === 0 || readDword(wholeAddress(summary)) !== HEAP_SUMMARY_SIZE)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -3747,10 +3893,10 @@ export function createHeapFunctions(host){
                 {
                     allocated += allocator.block(address)?.size ?? 0;
                 }
-                writeDword((summary >>> 0) + 4, allocated);
-                writeDword((summary >>> 0) + 8, allocated);
-                writeDword((summary >>> 0) + 12, allocated);
-                writeDword((summary >>> 0) + 16, 0);
+                writeDword(wholeAddress(summary) + 4, allocated);
+                writeDword(wholeAddress(summary) + 8, allocated);
+                writeDword(wholeAddress(summary) + 12, allocated);
+                writeDword(wholeAddress(summary) + 16, 0);
                 return 1;
             },
         },
@@ -3776,6 +3922,7 @@ export function createHeapFunctions(host){
          */
         VirtualProtect: {
             argBytes: 16,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size, protect, oldProtect])=>{
                 if (address === 0 || (size >>> 0) === 0)
@@ -3835,7 +3982,7 @@ export function createHeapFunctions(host){
                     // first, and a page already copied asked to be
                     // copy-on-write again is read-write, as a view's is.
                     takeImageCopies(image, first, end);
-                    writeDword(oldProtect >>> 0, imagePageProtection(image, first));
+                    writeDword(wholeAddress(oldProtect), imagePageProtection(image, first));
                     const record = imageRecord(image);
                     const given = imageWriteCopy(protect >>> 0);
                     for (let page = first; page < end; page += PAGE_SIZE)
@@ -3852,7 +3999,7 @@ export function createHeapFunctions(host){
                 const kept = block?.owner === VIRTUAL ? protections.get(block.address) : undefined;
                 const was = block?.owner === VIRTUAL
                     && unreadable.get(block.address)?.get(first) === true;
-                writeDword(oldProtect >>> 0, kept?.pages.get(first)
+                writeDword(wholeAddress(oldProtect), kept?.pages.get(first)
                     ?? (was ? PAGE_NOACCESS
                         : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE));
                 if (block && block.owner === VIRTUAL)
@@ -3940,7 +4087,7 @@ export function createHeapFunctions(host){
                 view.setUint32(MEMORY_BASIC_INFORMATION.State, state, true);
                 view.setUint32(MEMORY_BASIC_INFORMATION.Protect, protect, true);
                 view.setUint32(MEMORY_BASIC_INFORMATION.Type, type, true);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return MEMORY_BASIC_INFORMATION.SIZE;
             },
         },
@@ -3968,7 +4115,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_BAD_LENGTH);
                     return 0;
                 }
-                const records = host.readMemory(entries >>> 0, count * 8).slice();
+                const records = host.readMemory(wholeAddress(entries), count * 8).slice();
                 const view = new DataView(records.buffer);
                 for (let index = 0; index < count; index++)
                 {
@@ -3981,7 +4128,7 @@ export function createHeapFunctions(host){
                             | (shared ? 1 << 15 : 0);
                     view.setUint32(index * 8 + 4, attributes >>> 0, true);
                 }
-                host.writeMemory(entries >>> 0, records);
+                host.writeMemory(wholeAddress(entries), records);
                 return 1;
             },
         },
@@ -3995,9 +4142,10 @@ export function createHeapFunctions(host){
          */
         DiscardVirtualMemory: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>{
-                const at = address >>> 0;
+                const at = wholeAddress(address);
                 if ((size >>> 0) === 0 || at >= spaceTop()
                     || regionAnswer(at)[4] !== MEM_COMMIT)
                 {
@@ -4019,6 +4167,7 @@ export function createHeapFunctions(host){
          */
         VirtualLock: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>{
                 if (address === 0 || (size >>> 0) === 0)
@@ -4044,6 +4193,7 @@ export function createHeapFunctions(host){
         /** BOOL VirtualUnlock(LPVOID lpAddress, SIZE_T dwSize) */
         VirtualUnlock: {
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
         },
@@ -4086,7 +4236,7 @@ export function createHeapFunctions(host){
                     true);
                 view.setUint32(MEMORYSTATUS.dwTotalVirtual, total, true);
                 view.setUint32(MEMORYSTATUS.dwAvailVirtual, free, true);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 0;
             },
         },
@@ -4133,7 +4283,7 @@ export function createHeapFunctions(host){
                 {
                     view.setUint32(PROCESS_MEMORY_COUNTERS.PrivateUsage, used, true);
                 }
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 1;
             },
         },
@@ -4182,7 +4332,7 @@ export function createHeapFunctions(host){
                 set('PageSize', PAGE_SIZE);
                 set('ProcessCount', counts.processes);
                 set('ThreadCount', counts.threads);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 1;
             },
         },
@@ -4192,7 +4342,7 @@ export function createHeapFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                const header = buffer === 0 ? null : host.readMemory(buffer >>> 0, 4);
+                const header = buffer === 0 ? null : host.readMemory(wholeAddress(buffer), 4);
                 const length = header === null
                     ? 0
                     : new DataView(header.buffer, header.byteOffset, 4).getUint32(0, true);
@@ -4215,7 +4365,7 @@ export function createHeapFunctions(host){
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(free + total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullTotalVirtual, BigInt(total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailVirtual, BigInt(free), true);
-                host.writeMemory(buffer >>> 0, data);
+                host.writeMemory(wholeAddress(buffer), data);
                 return 1;
             },
         },
@@ -4328,7 +4478,7 @@ export function createHeapFunctions(host){
             return { state: answer[4], protect: answer[5], end: answer[0] + answer[3] };
         },
         /** LPVOID VirtualAllocEx(HANDLE, LPVOID, SIZE_T, DWORD, DWORD) */
-        VirtualAllocEx: inProcess('VirtualAlloc', 20),
+        VirtualAllocEx: { ...inProcess('VirtualAlloc', 20), returns: 'pointer', sizes: [2] },
         /**
          * PVOID VirtualAlloc2FromApp(...): VirtualAlloc2 under the name a
          * packaged app may call, whose limits -- no executable pages without
@@ -4340,10 +4490,12 @@ export function createHeapFunctions(host){
         /** BOOL VirtualProtectEx(HANDLE, LPVOID, SIZE_T, DWORD, PDWORD) */
         VirtualProtectEx: inProcess('VirtualProtect', 20),
         /** SIZE_T VirtualQueryEx(HANDLE, LPCVOID, PMEMORY_BASIC_INFORMATION, SIZE_T) */
-        VirtualQueryEx: inProcess('VirtualQuery', 16),
+        VirtualQueryEx: { ...inProcess('VirtualQuery', 16) },
         /** HLOCAL LocalReAlloc(HLOCAL hMem, SIZE_T uBytes, UINT uFlags) */
         LocalReAlloc: {
+            returns: 'pointer',
             argBytes: 12,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
                 globals.local.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
@@ -4394,14 +4546,15 @@ export function createHeapFunctions(host){
          */
         RtlMoveMemory: {
             argBytes: 12,
+            sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, length])=>{
                 if ((length >>> 0) !== 0)
                 {
                     // A copy of its own: a reader that answers a view of
                     // guest memory would see the write move under it.
-                    host.writeMemory(destination >>> 0,
-                        host.readMemory(source >>> 0, length >>> 0).slice());
+                    host.writeMemory(wholeAddress(destination),
+                        host.readMemory(wholeAddress(source), length >>> 0).slice());
                 }
                 return 0;
             },
@@ -4412,7 +4565,7 @@ export function createHeapFunctions(host){
             handler: ([destination, length])=>{
                 if ((length >>> 0) !== 0)
                 {
-                    host.fillMemory(destination >>> 0, 0, length >>> 0);
+                    host.fillMemory(wholeAddress(destination), 0, length >>> 0);
                 }
                 return 0;
             },
@@ -4423,7 +4576,7 @@ export function createHeapFunctions(host){
             handler: ([destination, length, fill])=>{
                 if ((length >>> 0) !== 0)
                 {
-                    host.fillMemory(destination >>> 0, fill & 0xff, length >>> 0);
+                    host.fillMemory(wholeAddress(destination), fill & 0xff, length >>> 0);
                 }
                 return 0;
             },

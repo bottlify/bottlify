@@ -13,8 +13,9 @@
 
 import { D3DFVF_RESERVED0 } from '../../d3d8/constants.js';
 import {
-    EAX, EBX, ECX, EDX, I386, argAt, blockAt, countAt, countLeft, dirtyPrologue, dword, highAt,
-    letHeldGo, prologue, retOf, routine, takeHeld, threadPrologue,
+    EAX, EBX, ECX, EDI, EDX, ESI, I386, argAt, blockAt, countAt, countLeft, dirtyPrologue, dword,
+    highAt, letHeldGo, movePointerOf, pointerAt, prologue, restoreOf, retOf, routine, saveOf,
+    takeHeld, testPointerOf, threadPrologue,
 } from './assemble.js';
 import {
     COMMAND, D3DFMT_D24S8, D3DUSAGE_RENDERTARGET, DRAW, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE,
@@ -388,9 +389,11 @@ export function commandCode(at, trap, shape, width = I386){
     const first = thread ? 0 : 1;
     /** @param {number} arg */
     const argIndex = arg=>first + arg - shift;
-    // The arguments a pointer is passed in, which a 64-bit process passes
-    // whole: the routine reads through them or records them as dwords.
-    const pointers = new Set([...shape.objects ?? [], ...pointer >= 0 ? [pointer] : [], ...rects,
+    // The arguments that name an object of the engine's, which lies below 4 GiB
+    // (`Width`): the routine records them as dwords and reads their blocks, and
+    // one past 4 GiB names nothing of the engine's - the host's. The program's
+    // own pointers (`pointer`, `rects`) it reads whole wherever they lie.
+    const objectArgs = new Set([...shape.objects ?? [],
         ...usagesOf(shape).map(usage=>usage.arg),
         ...shape.depthCovers ? [shape.depthCovers.target, shape.depthCovers.depth] : [],
         ...shape.vertexRange ? [shape.vertexRange.buffer] : []]);
@@ -408,15 +411,15 @@ export function commandCode(at, trap, shape, width = I386){
         { label: 'body' },
         // A device's; a thread's own context (OpenGL) is no other thread's.
         ...(thread ? [] : takeHeld(ECX, 'early')),
-        ...[...pointers].map(arg=>highAt(argIndex(arg), 'out')),
+        ...[...objectArgs].map(arg=>highAt(argIndex(arg), 'out')),
         ...commandChecks(shape, argIndex),
         ...mirror,
     ];
     if (pointer >= 0)
     {
         parts.push(
-            argAt([0x8b], EAX, argIndex(pointer)),                  // mov eax, [esp+entry+4p]
-            [0x85, 0xc0],                                        // test eax, eax
+            pointerAt(EAX, argIndex(pointer)),                   // mov eax, [esp+entry+4p]
+            testPointerOf(EAX),                                  // test eax, eax
             { jcc: 0x74, to: nullable ? 'none' : 'out', near: true }); // jz out
     }
     if (choose)
@@ -501,7 +504,8 @@ export function commandCode(at, trap, shape, width = I386){
         const steps = [
             [1, []],                                             // POINTLIST: n
             [2, [[0x01, 0xd2]]],                                 // LINELIST: add edx, edx
-            [3, [[0x42]]],                                       // LINESTRIP: inc edx
+            // LINESTRIP: inc edx - whose one byte is a prefix in a 64-bit process.
+            [3, [width.bits === 64 ? [0xff, 0xc2] : [0x42]]],
             [4, [[0x8d, 0x14, 0x52]]],                           // TRIANGLELIST: lea edx, [edx*3]
             [5, [[0x83, 0xc2, 0x02]]],                           // TRIANGLESTRIP: add edx, 2
             [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2
@@ -580,7 +584,7 @@ export function commandCode(at, trap, shape, width = I386){
             retOf(first + popped),                               // ret 4*args (+4 for this)
         ] : []),
         { label: 'take' },
-        [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
+        saveOf([EBX, ESI, EDI]),                                 // push ebx; push esi; push edi
         [0x89, 0xcb],                                            // mov ebx, ecx
         ...recordLength,
         { label: 'reserve' },
@@ -600,8 +604,8 @@ export function commandCode(at, trap, shape, width = I386){
         {
             // Its copy's address, or none for none.
             parts.push(
-                argAt([0x8b], EAX, argIndex(arg), [], 3),           // mov eax, [esp+pushed+4r]
-                [0x85, 0xc0],                                    // test eax, eax
+                pointerAt(EAX, argIndex(arg), 3),                // mov eax, [esp+pushed+4r]
+                testPointerOf(EAX),                              // test eax, eax
                 { jcc: 0x74, to: `noRect${rect}` },              // jz noRect: it stays 0
                 [0x8d, 0x87, ...dword(header + RECT_BYTES * rect)], // lea eax, [edi+copy]
                 { label: `noRect${rect}` });
@@ -609,8 +613,8 @@ export function commandCode(at, trap, shape, width = I386){
         else if (arg === pointer && nullable)
         {
             parts.push(
-                argAt([0x8b], EAX, argIndex(arg), [], 3),           // mov eax, [esp+pushed+4p]
-                [0x85, 0xc0],                                    // test eax, eax
+                pointerAt(EAX, argIndex(arg), 3),                // mov eax, [esp+pushed+4p]
+                testPointerOf(EAX),                              // test eax, eax
                 { jcc: 0x74, to: 'null' },                       // jz null: it stays 0
                 [0x8d, 0x87, ...dword(header)],                  // lea eax, [edi+header]
                 { label: 'null' });
@@ -627,7 +631,7 @@ export function commandCode(at, trap, shape, width = I386){
     {
         parts.push(
             [0x89, 0xf8],                                        // mov eax, edi
-            argAt([0x8b], 6, argIndex(pointer), [], 3),             // mov esi, [esp+pushed+4p]
+            pointerAt(ESI, argIndex(pointer), 3),                // mov esi, [esp+pushed+4p]
             [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
@@ -642,8 +646,8 @@ export function commandCode(at, trap, shape, width = I386){
     }
     rects.forEach((arg, rect)=>{
         parts.push(
-            argAt([0x8b], EAX, argIndex(arg), [], 3),               // mov eax, [esp+pushed+4r]
-            [0x85, 0xc0],                                        // test eax, eax
+            pointerAt(EAX, argIndex(arg), 3),                    // mov eax, [esp+pushed+4r]
+            testPointerOf(EAX),                                  // test eax, eax
             { jcc: 0x74, to: `copied${rect}` },                  // jz copied
             ...[0, 4, 8, 12].flatMap(offset=>[
                 [0x8b, 0x50, offset],                            // mov edx, [eax+o]
@@ -677,13 +681,13 @@ export function commandCode(at, trap, shape, width = I386){
     }
     parts.push(
         ...(thread ? [] : [letHeldGo(EBX)]),                     // mov dword [ebx+HELD], 0
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        restoreOf([EDI, ESI, EBX]),                              // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         retOf(first + popped),                                   // ret 4*args (+4 for this)
         { label: 'full' },
         ...(thread ? [] : [letHeldGo(EBX),                       // mov dword [ebx+HELD], 0
             countLeft(EBX, SHADOW.LEFT_FULL)]),                  // lock inc dword [ebx+LEFT_FULL]
-        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        restoreOf([EDI, ESI, EBX]),                              // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
     return routine(at, trap, parts, {}, width);
 }
@@ -746,11 +750,11 @@ export const TRANSFORM_MIRROR = Object.freeze([
     [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
     { jcc: 0x73, to: 'out', near: true },                        // jnc out
     { label: 'slot' },
-    argAt([0x8b], EDX, 2),                                       // mov edx, [esp+12]
-    [0x85, 0xd2],                                                // test edx, edx
+    pointerAt(EDX, 2),                                           // mov edx, [esp+12]
+    testPointerOf(EDX),                                          // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x56, 0x57],                                                // push esi; push edi
-    [0x89, 0xd6],                                                // mov esi, edx
+    saveOf([ESI, EDI]),                                          // push esi; push edi
+    movePointerOf(ESI, EDX),                                     // mov esi, edx
     [0x89, 0xc7],                                                // mov edi, eax
     [0xc1, 0xe7, 0x06],                                          // shl edi, 6
     [0x8d, 0xbc, 0x39, ...dword(SHADOW.TRANSFORMS)],             // lea edi, [ecx+edi+disp]
@@ -758,7 +762,7 @@ export const TRANSFORM_MIRROR = Object.freeze([
     [0xb9, ...dword(16)],                                        // mov ecx, 16
     [0xf3, 0xa5],                                                // rep movsd
     [0x89, 0xd1],                                                // mov ecx, edx
-    [0x5f, 0x5e],                                                // pop edi; pop esi
+    restoreOf([EDI, ESI]),                                       // pop edi; pop esi
 ]);
 
 /**
@@ -780,17 +784,17 @@ export const TRANSFORM_MIRROR_7 = Object.freeze([
 
 /** The same for SetViewport: the six dwords into the block. */
 export const VIEWPORT_MIRROR = Object.freeze([
-    argAt([0x8b], EDX, 1),                                       // mov edx, [esp+8]
-    [0x85, 0xd2],                                                // test edx, edx
+    pointerAt(EDX, 1),                                           // mov edx, [esp+8]
+    testPointerOf(EDX),                                          // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
-    [0x56, 0x57],                                                // push esi; push edi
-    [0x89, 0xd6],                                                // mov esi, edx
+    saveOf([ESI, EDI]),                                          // push esi; push edi
+    movePointerOf(ESI, EDX),                                     // mov esi, edx
     [0x8d, 0xb9, ...dword(SHADOW.VIEWPORT)],                     // lea edi, [ecx+disp]
     [0x89, 0xca],                                                // mov edx, ecx
     [0xb9, ...dword(6)],                                         // mov ecx, 6
     [0xf3, 0xa5],                                                // rep movsd
     [0x89, 0xd1],                                                // mov ecx, edx
-    [0x5f, 0x5e],                                                // pop edi; pop esi
+    restoreOf([EDI, ESI]),                                       // pop edi; pop esi
 ]);
 
 /**
@@ -914,8 +918,8 @@ const STRETCH_SURFACES = Object.freeze([
  * @returns {Part[]}
  */
 const rectWithin = (rect, surface, whole)=>[
-    argAt([0x8b], EDX, rect),                                    // mov edx, [esp+rect]
-    [0x85, 0xd2],                                                // test edx, edx
+    pointerAt(EDX, rect),                                        // mov edx, [esp+rect]
+    testPointerOf(EDX),                                          // test edx, edx
     { jcc: 0x74, to: whole, near: true },                        // jz whole
     [0x8b, 0x42, 0x08],                                          // mov eax, [edx+8]
     [0x39, 0x02],                                                // cmp [edx], eax
@@ -1036,8 +1040,8 @@ export const SAMPLER_STATE_MIRROR = Object.freeze([
  * a corner that is not negative. It may reach past the target.
  */
 export const VIEWPORT_GUARD_9 = Object.freeze([
-    argAt([0x8b], EDX, 1),                                       // mov edx, [esp+8]
-    [0x85, 0xd2],                                                // test edx, edx
+    pointerAt(EDX, 1),                                           // mov edx, [esp+8]
+    testPointerOf(EDX),                                          // test edx, edx
     { jcc: 0x74, to: 'out', near: true },                        // jz out
     [0x83, 0x3a, 0x00],                                          // cmp dword [edx], 0
     { jcc: 0x7c, to: 'out', near: true },                        // jl out

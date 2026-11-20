@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * Security descriptors read out of guest memory and written back: either form
  * a caller holds -- absolute, its parts pointers, or self-relative, its parts
@@ -58,12 +60,12 @@ const TRUSTEE_ACE_TYPES = new Set([0, 1, 2, 3, 0x11]);
 export function createDescriptorCodec(readMemory){
     /** @param {number} address */
     const readDword = address=>{
-        const bytes = readMemory(address >>> 0, 4);
+        const bytes = readMemory(wholeAddress(address), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} address */
     const readWord = address=>{
-        const bytes = readMemory(address >>> 0, 2);
+        const bytes = readMemory(wholeAddress(address), 2);
         return bytes[0] | bytes[1] << 8;
     };
 
@@ -73,14 +75,14 @@ export function createDescriptorCodec(readMemory){
         {
             return null;
         }
-        const head = readMemory(sid >>> 0, 2);
+        const head = readMemory(wholeAddress(sid), 2);
         return head[0] === 1 && head[1] <= 15
-            ? readMemory(sid >>> 0, 8 + 4 * head[1]).slice() : null;
+            ? readMemory(wholeAddress(sid), 8 + 4 * head[1]).slice() : null;
     };
 
     /** An ACL in guest memory, its whole size as its header gives it. @param {number} acl */
     const aclAt = acl=>((acl >>> 0) === 0 ? null
-        : readMemory(acl >>> 0, readWord((acl >>> 0) + 2)).slice());
+        : readMemory(wholeAddress(acl), readWord(wholeAddress(acl) + 2)).slice());
 
     /**
      * Each ACE of an ACL, walked by its sizes, or null when the ACL is not one.
@@ -130,11 +132,11 @@ export function createDescriptorCodec(readMemory){
      * @param {number} descriptor @returns {DescriptorParts | null}
      */
     const partsOf = descriptor=>{
-        if ((descriptor >>> 0) === 0 || readMemory(descriptor >>> 0, 1)[0] !== 1)
+        if ((descriptor >>> 0) === 0 || readMemory(wholeAddress(descriptor), 1)[0] !== 1)
         {
             return null;
         }
-        const at = descriptor >>> 0;
+        const at = wholeAddress(descriptor);
         const control = readWord(at + SD.CONTROL);
         const relative = (control & SE_SELF_RELATIVE) !== 0;
         /** @param {number} slot */

@@ -20,6 +20,7 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { untagged } from './handle-tags.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
@@ -142,7 +143,7 @@ export function createChangeNotifications(host){
             {
                 return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
             }
-            const asked = filter >>> 0;
+            const asked = wholeAddress(filter);
             if (asked === 0 || (asked & ~FILE_NOTIFY_CHANGE_ALL) !== 0)
             {
                 return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
@@ -152,7 +153,7 @@ export function createChangeNotifications(host){
             {
                 return noVolume.handler();
             }
-            const path = readText(pointer >>> 0, wide).replace(/\//g, '\\');
+            const path = readText(wholeAddress(pointer), wide).replace(/\//g, '\\');
             const entry = volume.stat(path);
             if (!entry || !entry.exists)
             {

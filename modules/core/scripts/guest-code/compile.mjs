@@ -30,13 +30,17 @@
  * slot it pushed with the caller's arguments. The types:
  *
  *   i32, u32  a 32-bit stack slot, signed or unsigned; EAX as a result
+ *   ptr       a pointer: a u32 in the i386, a quadword at 64 bits - the
+ *             argument's whole register, RAX whole as a result (see below)
  *   f64       a double: two stack slots; ST0 as a result
  *   f32       a float: one stack slot; ST0 as a result, a value a float holds
  *   x87       a double the caller left on the x87 stack (the last such
  *             parameter in ST0), which the function pops, as `_ftol` does
- *   i64       a result in EDX:EAX: a double truncated toward zero (NaN and
- *             out of range the integer indefinite, as `fisttp` answers), or
- *             an integer extended by its sign
+ *   i64       a parameter of two stack slots (one argument at 64 bits),
+ *             read only by `low64` and `high64`; a result in EDX:EAX (RAX at
+ *             64 bits): a double truncated toward zero (NaN and out of range
+ *             the integer indefinite, as `fisttp` and `cvttsd2si` answer), an
+ *             integer extended by its sign, or `int64(low, high)`
  *   void      no result
  *
  * A function that touches guest memory or calls a guest function takes the
@@ -155,7 +159,9 @@
  * under the x64 convention, whatever its tag names: the first four arguments
  * in RCX, RDX, R8 and R9, the rest on the stack past the 32 bytes of home
  * space the caller leaves, the caller taking them down; the result in RAX,
- * an i32 or u32 extended by its sign, as the bridge's trap answers one. The
+ * an i32 extended by its sign, a u32 (a size_t, a DWORD) and a pointer by
+ * zeros - the whole value a Win64 caller of a size_t or a pointer reads, as
+ * the bridge's trap answers each by the type declared. The
  * code keeps to the same 32-bit integers, over R8 to R11 as well: an
  * operation on a low half zero-extends into the whole register, so a
  * register the code computed holds an address as it is, and an address of
@@ -163,6 +169,27 @@
  * 2^32 as the helpers' addresses do (a register and a displacement are
  * added in 64 bits, the same sum wherever it lands in the guest's 4 GiB).
  * An argument is read as its low half, whatever the caller left above it.
+ *
+ * A pointer (`ptr`) is the exception, and the one value the x86-64 keeps as
+ * a quadword: where a 64-bit process's memory reaches past 4 GiB, an address
+ * is more than a dword. A pointer variable is a `ptr` parameter, or a `let`
+ * or `const` given a pointer expression - a pointer variable, or one with
+ * constants and integers added or taken away (`p + n`, `p - 4`, `p + (i <<
+ * 2) + j`; the integers are summed in 32 bits first, signed).
+ * It is whole where a pointer stands: the address of a load, a store, a
+ * copy or a fill; a side of a comparison with another pointer or a constant
+ * (unsigned); what a pointer variable is given (`=`, `+=`, `-=`, `++`,
+ * `--`); an argument of `call` or of a `@guestCode` function that takes a
+ * `ptr` there; the result of a `ptr` function. An integer added to it is
+ * extended as JavaScript's sum adds it: an `i32` by its sign, a `u32` by
+ * zeros. Under an operator that brings its operands to 32 bits (`| & ^ ~ <<
+ * >> >>>`), through `+` and `-`, a pointer is its low 32 bits, as
+ * JavaScript makes of it: `p & 3`, `(q - p) | 0`. Anywhere else - a
+ * product, a truth test, an integer variable, a store of it - the 32-bit
+ * code would take the low half where the handler takes the number, and the
+ * source is refused, at both widths (`checkPointers`). To the i386 the type
+ * costs nothing: the same code as a `u32`, a pointer's sum wrapping at 2^32
+ * as an address does.
  *
  * Such code is a leaf where it can be -- no stack moved, nothing its caller
  * keeps changed, which is what an unwinder takes code with no unwind data
@@ -186,7 +213,8 @@
  * XMM register of its place (or its slot past the fourth) and is read from
  * its home slot, the result goes in XMM0 (a float's rounded by `cvtsd2ss`),
  * and the expression's doubles are XMM0 to XMM3 as the x87's stack would be,
- * XMM4 and XMM5 scratch: `+ - * /`, unary `-`, `Math.sqrt` (`sqrtsd`),
+ * XMM4 and XMM5 scratch (two deeper at most, XMM6 and XMM7 saved in the
+ * frame): `+ - * /`, unary `-`, `Math.sqrt` (`sqrtsd`),
  * `Math.abs`, `Math.fround`, `Math.floor`, `Math.ceil` and `Math.trunc`
  * (through a quadword under 2^52, the sign put back), the comparisons
  * (`ucomisd`), `| 0` and `>>> 0` (`cvttsd2si` into RAX, the significand
@@ -198,7 +226,7 @@
  * `Math.sin`, `cos`, `tan`, `atan`, `atan2` and `log2`, and `X87`'s
  * operations, and `%` of doubles (`fprem`'s loop), are the x87's over doubles
  * stored below RSP and taken back (`x87OverXmm`). What only the x87 does past
- * that -- x87 arguments, the control and status words, an i64 in EDX:EAX --
+ * that -- x87 arguments, the control and status words --
  * is refused at 64 bits with its reason (`onRefused`), and the function
  * stays a trap into its handler there.
  */
@@ -219,8 +247,8 @@ import {
  *   float holds exactly
  */
 
-/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'x87'} ParamType */
-/** @typedef {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
+/** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'f32bits' | 'x87' | 'i64'} ParamType */
+/** @typedef {'i32' | 'u32' | 'ptr' | 'f64' | 'f32' | 'i64' | 'void'} ReturnType */
 
 /**
  * @typedef {Object} CompiledFunction
@@ -247,12 +275,14 @@ import {
 /**
  * @typedef {Object} Variable
  * @property {string} name
- * @property {'i32' | 'u32' | 'nat' | 'f64' | 'f32'} type
+ * @property {'i32' | 'u32' | 'nat' | 'f64' | 'f32' | 'i64'} type
  * @property {number} disp     From EBP, for one in the frame.
  * @property {number} [reg]    The register it lives in instead.
  * @property {boolean} mutable
  * @property {any} [key]       The node that declares it: what its uses are counted by.
  * @property {boolean} [onStack]  An x87 parameter left in ST0 until its one read.
+ * @property {boolean} [pointer]  A pointer: a `u32` to the i386, a quadword at 64
+ *                                bits, whole in its register or its slot.
  */
 
 /**
@@ -272,6 +302,8 @@ import {
  * @property {Set<any>} homes              x86-64 code's variables kept in the home space.
  * @property {number[]} homeSaves          The home slots left, by argument place, where
  *                                         x86-64 code keeps a register its caller keeps.
+ * @property {number} xmmKept              How many of XMM6 and XMM7, which its caller
+ *                                         keeps, x86-64 code takes: saved in the frame.
  * @property {{ locals: number, saved: number, pushed: boolean }} [frame]
  *     The bytes of variables in the frame and the registers saved above it,
  *     once a compilation with the registers has found them -- pushed there,
@@ -351,23 +383,43 @@ const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clear
 const FLOAT_BITS = ['floatBits', 'floatOfBits', 'doubleLow', 'doubleHigh'];
 
 /**
+ * A 64-bit integer's halves: `low64(x)` and `high64(x)` read an `i64`
+ * parameter's two dwords where it lies (the i386's two slots, the home slot
+ * the x86-64 entry wrote it whole into), and `int64(low, high)` is an `i64`
+ * function's result made of two 32-bit integers: EDX:EAX, or RAX. Arithmetic
+ * on the value is the source's, on its halves, in the 32-bit subset - a carry
+ * an unsigned compare, a product of halves split into 16-bit parts.
+ */
+const INT64_PARTS = ['low64', 'high64', 'int64'];
+
+/**
  * `pointerBytes`, the size of a pointer: 4 in the i386 and 8 in the x86-64,
  * a constant of each; what a source lays out a pointer it writes, or a slot
  * of a `va_list`, by.
  */
 const POINTER_BYTES = 'pointerBytes';
 
-const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange', ...X87_WORDS,
-    ...FLOAT_BITS, POINTER_BYTES]);
+/**
+ * A pointer in memory: `ptr(address)` loads one and `setPtr(address, value)`
+ * stores one, a dword in the i386 (the code of `u32` and `setU32`) and a
+ * quadword at 64 bits. What `ptr` loads is a pointer where it is given to a
+ * pointer variable, returned from a `ptr` function, passed to a call or
+ * stored by `setPtr`.
+ */
+const POINTER_LOAD = 'ptr';
+const POINTER_STORE = 'setPtr';
+
+const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES), POINTER_LOAD,
+    POINTER_STORE, 'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', 'compareExchange',
+    ...X87_WORDS, ...FLOAT_BITS, ...INT64_PARTS, POINTER_BYTES]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
     ['Int16Array', 2, true], ['Uint32Array', 4, false], ['Int32Array', 4, true],
 ]);
 
-const PARAM_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'x87']);
-const RETURN_TYPES = new Set(['i32', 'u32', 'f64', 'f32', 'i64', 'void']);
+const PARAM_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'f32bits', 'x87', 'i64']);
+const RETURN_TYPES = new Set(['i32', 'u32', 'ptr', 'f64', 'f32', 'i64', 'void']);
 
 /** Rounding control for Math.floor, Math.ceil and Math.trunc, in the control word's high byte. */
 const ROUNDING = /** @type {Record<string, number>} */ ({ floor: 0x04, ceil: 0x08, trunc: 0x0c });
@@ -406,7 +458,14 @@ const POOL = '$f64';
 const X87_DEPTH = 7;
 
 /** How many XMM registers an expression may hold at once in x86-64 code: two more are scratch. */
-const SSE_DEPTH = 4;
+const SSE_DEPTH = 6;
+/**
+ * The last XMM register the convention lets a callee change. Past it, XMM6
+ * and XMM7, which the caller keeps, are taken by an XMM stack deeper than
+ * four with an operation's scratch above it: saved in the frame at the entry
+ * and put back at the exit.
+ */
+const LAST_VOLATILE_XMM = 5;
 
 /** The name of the table of quadwords x86-64 code reads RIP-relative: doubles' bits, masks. */
 const QUADS = '$q64';
@@ -468,6 +527,13 @@ const isTyped = type=>type === 'i32' || type === 'u32' || type === 'nat';
 
 /** A double or a float. @param {string} type */
 const isFloat = type=>type === 'f64' || type === 'f32';
+/**
+ * Whether x86-64 passes a parameter in the XMM register of its place: a
+ * double, a float, and a float taken as its bits.
+ *
+ * @param {string} type
+ */
+const inXmm = type=>isFloat(type) || type === 'f32bits';
 
 /** The load of a table's entry: `mov`, or `movzx`/`movsx` of its width. @param {TableInfo} table */
 const tableOp = table=>(table.size === 4 ? [0x8b]
@@ -791,6 +857,8 @@ class FunctionCompiler {
         this.helpers = new Set();
         /** @type {ReturnType} */
         this.returns = 'void';
+        /** @type {ReturnType} */
+        this.declaredReturns = 'void';
         this.epilogue = this.a.fresh('epilogue');
         /** Where `return host()` goes: the frame taken down, then the jump. */
         this.toHost = this.a.fresh('host');
@@ -856,6 +924,21 @@ class FunctionCompiler {
         if (this.long && planned !== null)
         {
             this.temps = this.placement(planned).temps;
+        }
+        /** The highest XMM register the code writes, over the whole function. */
+        this.highestXmm = -1;
+        /**
+         * Where XMM6 and XMM7 wait while the function takes them: the frame's
+         * first sixteen bytes each, laid out before any variable so that every
+         * compilation with the plan addresses them alike.
+         *
+         * @type {number[]}
+         */
+        this.xmmSlots = [];
+        for (let i = 0; i < (planned?.xmmKept ?? 0); i++)
+        {
+            this.locals += 16;
+            this.xmmSlots.push(-this.locals);
         }
     }
 
@@ -959,10 +1042,13 @@ class FunctionCompiler {
     /**
      * Keeps EAX while an expression is made: pushed, or in x86-64 code that
      * calls nothing, in a register no variable has, where one is free -- RSP
-     * left where it is.
+     * left where it is. A pointer (`whole`) is pushed: the push and the pop
+     * that takes it back are of the quadword, the move of a dword.
+     *
+     * @param {boolean} [whole]
      */
-    hold(){
-        const reg = this.temps.find(temp=>!this.held.includes(temp));
+    hold(whole = false){
+        const reg = whole ? undefined : this.temps.find(temp=>!this.held.includes(temp));
         if (reg === undefined)
         {
             this.a.emit(0x50);                                             // push eax
@@ -1015,10 +1101,13 @@ class FunctionCompiler {
         const returned = /@returns?\s+\{(\w+)\}/.exec(doc)?.[1] ?? 'void';
         if (!RETURN_TYPES.has(returned))
         {
-            this.fail(node, `${name}: @returns {${returned}} is not i32, u32, f64, f32, i64 `
+            this.fail(node, `${name}: @returns {${returned}} is not i32, u32, ptr, f64, f32, i64 `
                 + 'or void');
         }
-        this.returns = /** @type {ReturnType} */ (returned);
+        // A pointer is an unsigned dword in the body (the i386's EAX), answered
+        // whole in RAX at 64 bits; the record keeps what the source declared.
+        this.declaredReturns = /** @type {ReturnType} */ (returned);
+        this.returns = /** @type {ReturnType} */ (returned === 'ptr' ? 'u32' : returned);
 
         const params = [...node.params];
         /** @type {string[]} */
@@ -1039,17 +1128,8 @@ class FunctionCompiler {
                 {
                     this.bind(property.key, { constant: this.word });
                 }
-                if (this.long && property.key.name === 'compareExchange')
-                {
-                    this.fail(property, 'compareExchange: the 32-bit kernel\'s exchange of a '
-                        + 'word, refused at 64 bits');
-                }
             }
             params.shift();
-        }
-        if (this.long && this.returns === 'i64')
-        {
-            this.fail(node, `${name}: an i64 is EDX:EAX at 32 bits, refused at 64 bits`);
         }
         /** @type {ParamType[]} */
         const types = [];
@@ -1079,7 +1159,8 @@ class FunctionCompiler {
             const type = declared.get(param.name);
             if (type === undefined || !PARAM_TYPES.has(type))
             {
-                this.fail(param, `@param {i32 | u32 | f64 | f32 | x87} ${param.name} is wanted`);
+                this.fail(param, `@param {i32 | u32 | ptr | f64 | f32 | f32bits | x87 | i64} `
+                    + `${param.name} is wanted`);
             }
             if (this.long && type === 'x87')
             {
@@ -1112,10 +1193,16 @@ class FunctionCompiler {
                 this.x87.push(v);
                 continue;
             }
+            const pointer = type === 'ptr';
             /** @type {Variable} */
-            const v = { name: param.name, type: /** @type {'i32' | 'u32' | 'f64' | 'f32'} */ (type),
-                disp: stack, mutable: true, key: param };
-            const reg = isFloat(type) ? undefined : this.planned?.registers.get(param);
+            const v = { name: param.name,
+                type: /** @type {'i32' | 'u32' | 'f64' | 'f32' | 'i64'} */ (pointer
+                    || type === 'f32bits' ? 'u32' : type),
+                disp: stack, mutable: type !== 'i64', key: param, ...pointer ? { pointer } : {} };
+            // An i64 stays in its slots (two in the i386, a quadword at 64
+            // bits), read by its halves where it lies.
+            const reg = isFloat(type) || type === 'i64' ? undefined
+                : this.planned?.registers.get(param);
             if (reg !== undefined)
             {
                 v.reg = reg;
@@ -1127,8 +1214,9 @@ class FunctionCompiler {
                 // with: a parameter the body assigns is a variable of its
                 // own, not the caller's slot. One in a register already is.
                 this.params.add(param);
-                const own = this.newVariable(param.name, v.type, true, param);
-                copies.push({ from: stack, to: own, size: type === 'f64' ? 8 : 4 });
+                const own = this.newVariable(param.name, v.type, true, param, pointer);
+                copies.push({ from: stack, to: own,
+                    size: type === 'f64' || pointer && this.long ? 8 : 4 });
                 this.bind(param, own);
                 stack += this.long || type === 'f64' ? 8 : 4;
                 continue;
@@ -1137,7 +1225,7 @@ class FunctionCompiler {
             this.live.add(param);
             this.bind(param, v);
             // A quadword a slot at 64 bits, whatever the value in its low half.
-            stack += this.long || type === 'f64' ? 8 : 4;
+            stack += this.long || type === 'f64' || type === 'i64' ? 8 : 4;
         }
         if (x87.some(v=>v.onStack))
         {
@@ -1154,6 +1242,7 @@ class FunctionCompiler {
                 || !this.helpers.has('host') && inRegister.has(16 + 8 * i));
         }
 
+        this.checkPointers();
         this.statements(node.body.body);
         if (this.returns !== 'void' && !ends(node.body))
         {
@@ -1300,7 +1389,7 @@ class FunctionCompiler {
         }));
         const code = out.finish(tables);
         return {
-            name, convention, params: types, returns: this.returns, uses, code,
+            name, convention, params: types, returns: this.declaredReturns, uses, code,
             ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
             ...placedTables(out.placed),
         };
@@ -1338,12 +1427,12 @@ class FunctionCompiler {
         // its slot: movsd, or movss, a float's.
         for (let i = 0; i < inRegisterArguments; i++)
         {
-            if (isFloat(types[i]))
+            if (isFloat(types[i]) || types[i] === 'f32bits' && (this.hostUsed || !byIndex.has(i)))
             {
                 out.emit(types[i] === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x11,
                     ...memory(i, { base: ESP, disp: 8 + 8 * i }));
             }
-            else if (this.hostUsed || !byIndex.has(i))
+            else if (types[i] !== 'f32bits' && (this.hostUsed || !byIndex.has(i)))
             {
                 out.emit(...storeQuad(ARGUMENTS_64[i], 8 + 8 * i));       // mov [rsp+8+8i], arg
             }
@@ -1369,9 +1458,10 @@ class FunctionCompiler {
         const moves = [];
         for (const [i, v] of byIndex)
         {
-            if (i < ARGUMENTS_64.length)
+            if (i < ARGUMENTS_64.length && types[i] !== 'f32bits')
             {
-                moves.push({ from: ARGUMENTS_64[i], to: /** @type {number} */ (v.reg), quad: false });
+                moves.push({ from: ARGUMENTS_64[i], to: /** @type {number} */ (v.reg),
+                    quad: v.pointer === true });
             }
         }
         for (const [reg, { reg: into }] of keptIn ?? [])
@@ -1382,10 +1472,23 @@ class FunctionCompiler {
             }
         }
         out.emit(...parallelMove(moves));
+        for (const [i, v] of byIndex)
+        {
+            if (i < ARGUMENTS_64.length && types[i] === 'f32bits')
+            {
+                // movd reg, xmm: a float's bits out of the XMM register of its place.
+                const reg = /** @type {number} */ (v.reg);
+                out.emit(0x66, ...reg >= 8 ? [0x41] : [], 0x0f, 0x7e, 0xc0 | i << 3 | reg & 7);
+            }
+        }
         if (this.locals > 0)
         {
             out.emit(...moveStack64(-this.locals));
         }
+        this.xmmSlots.forEach((disp, i)=>{
+            // movdqu [slot], xmm6 or xmm7: the caller's, given back at the exit.
+            out.emit(0xf3, 0x0f, 0x7f, ...memory(6 + i, { base: ESP, disp: this.locals + disp }));
+        });
         if (this.tables.size > 0)
         {
             // lea r11, [rip]: the address every table is reached from.
@@ -1396,7 +1499,8 @@ class FunctionCompiler {
         {
             if (i >= ARGUMENTS_64.length)
             {
-                out.emit(...loadDword(/** @type {number} */ (v.reg), this.paramAt(v.disp)));
+                out.emit(...(v.pointer ? loadQuad : loadDword)(/** @type {number} */ (v.reg),
+                    this.paramAt(v.disp)));
             }
         }
         for (const { from, to, size } of copies)
@@ -1411,6 +1515,11 @@ class FunctionCompiler {
         out.append(this.a);
         /** RSP and the kept registers as the caller left them. */
         const takeDown = ()=>{
+            this.xmmSlots.forEach((disp, i)=>{
+                // movdqu xmm6 or xmm7, [slot]
+                out.emit(0xf3, 0x0f, 0x6f,
+                    ...memory(6 + i, { base: ESP, disp: this.locals + disp }));
+            });
             if (this.locals > 0)
             {
                 out.emit(...moveStack64(this.locals));
@@ -1430,9 +1539,12 @@ class FunctionCompiler {
         };
         out.label(this.epilogue);
         takeDown();
-        if (this.returns === 'i32' || this.returns === 'u32')
+        if (this.returns === 'i32')
         {
-            // cdqe: the answer the trap gives, a dword extended by its sign.
+            // cdqe: a signed dword extended by its sign. An unsigned one (a
+            // size_t, a DWORD) and a pointer are RAX as the move that made EAX
+            // left it, zero-extended, which is the whole value the Win64 caller
+            // of a size_t or a pointer reads.
             out.emit(0x48, 0x98);
         }
         out.emit(0xc3);
@@ -1445,7 +1557,7 @@ class FunctionCompiler {
             // bridge's `floats`), and answers it in.
             for (let i = 0; i < inRegisterArguments; i++)
             {
-                out.emit(...isFloat(types[i])
+                out.emit(...inXmm(types[i])
                     ? [types[i] === 'f64' ? 0xf2 : 0xf3, 0x0f, 0x10,
                         ...memory(i, { base: ESP, disp: 8 + 8 * i })]     // movsd/movss xmm, [slot]
                     : loadQuad(ARGUMENTS_64[i], 8 + 8 * i));              // mov arg, [rsp+8+8i]
@@ -1474,7 +1586,7 @@ class FunctionCompiler {
             throw new Error(`guest code: ${name}'s x86-64 holds an x87 instruction`);
         }
         return {
-            name, convention, params: types, returns: this.returns, uses, code,
+            name, convention, params: types, returns: this.declaredReturns, uses, code,
             ...this.hostUsed ? { host: /** @type {number} */ (out.offsets.get('hostJump')) } : {},
             ...placedTables(out.placed),
             // No stack moved and nothing the caller keeps changed: what an
@@ -1510,15 +1622,15 @@ class FunctionCompiler {
      * A variable of this scope: in the register the plan gives it, or in the frame.
      *
      * @param {any} node @param {string} name @param {Variable['type']} type
-     * @param {boolean} mutable
+     * @param {boolean} mutable @param {boolean} [pointer]
      */
-    declare(node, name, type, mutable){
+    declare(node, name, type, mutable, pointer = false){
         const top = this.scopes[this.scopes.length - 1];
         if (this.lookupLocal(name) !== undefined)
         {
             this.fail(node, `${name} is declared twice`);
         }
-        const v = this.newVariable(name, type, mutable, node);
+        const v = this.newVariable(name, type, mutable, node, pointer);
         top.set(name, v);
         return v;
     }
@@ -1528,24 +1640,26 @@ class FunctionCompiler {
      *
      * @param {string} name @param {Variable['type']} type @param {boolean} mutable
      * @param {any} key  The node it is counted and planned by.
+     * @param {boolean} [pointer]  A pointer: a quadword at 64 bits.
      * @returns {Variable}
      */
-    newVariable(name, type, mutable, key){
+    newVariable(name, type, mutable, key, pointer = false){
         this.live.add(key);
+        const flag = pointer ? { pointer } : {};
         const reg = isFloat(type) ? undefined : this.planned?.registers.get(key);
         if (reg !== undefined)
         {
-            return { name, type, disp: 0, reg, mutable, key };
+            return { name, type, disp: 0, reg, mutable, key, ...flag };
         }
         const home = this.planned?.homes.has(key) ? this.homeFree.shift() : undefined;
         if (home !== undefined)
         {
             // Named as the argument in that slot would be.
-            return { name, type, disp: 16 + 8 * home, mutable, key };
+            return { name, type, disp: 16 + 8 * home, mutable, key, ...flag };
         }
-        const size = type === 'f64' ? 8 : 4;
+        const size = type === 'f64' || pointer && this.long ? 8 : 4;
         this.locals = Math.ceil((this.locals + size) / size) * size;
-        return { name, type, disp: -this.locals, mutable, key };
+        return { name, type, disp: -this.locals, mutable, key, ...flag };
     }
 
     // --- registers -------------------------------------------------------
@@ -1696,6 +1810,7 @@ class FunctionCompiler {
             homes,
             // The home slots the variables leave, where the kept registers wait.
             homeSaves: this.homeSlots(registers).slice(homes.size),
+            xmmKept: Math.max(0, this.highestXmm - LAST_VOLATILE_XMM),
         };
     }
 
@@ -1901,6 +2016,13 @@ class FunctionCompiler {
                     default: return undefined;
                 }
             }
+            case 'ConditionalExpression':
+            {
+                // `pointerBytes === 8 ? a : b`: the constant of the way it takes.
+                const known = this.foldTest(node.test);
+                return known === undefined ? undefined
+                    : this.fold(known ? node.consequent : node.alternate, seen);
+            }
             case 'BinaryExpression':
             {
                 const left = this.fold(node.left, seen);
@@ -1965,12 +2087,13 @@ class FunctionCompiler {
     /**
      * The x87's words are the 32-bit runtime's: a use of one in x86-64 code is
      * refused where it is made, so a source may take them and use them only
-     * in a way `pointerBytes` keeps from the x86-64.
+     * in a way `pointerBytes` keeps from the x86-64. MXCSR is both widths':
+     * the word a 64-bit runtime keeps its rounding and its exceptions in.
      *
      * @param {any} node @param {string} name
      */
     wordsAt64(node, name){
-        if (this.long)
+        if (this.long && name !== 'mxcsr' && name !== 'setMxcsr')
         {
             this.fail(node, `${name}: the x87's control and status words are the 32-bit `
                 + 'runtime\'s, refused at 64 bits');
@@ -1984,6 +2107,17 @@ class FunctionCompiler {
         for (const statement of list)
         {
             this.statement(statement);
+            // What follows an `if` on a constant whose way returns is never
+            // run: `if (pointerBytes === 8) { ... return ...; }` and then the
+            // i386's way, which may use what the x86-64 has none of.
+            const known = statement.type === 'IfStatement' ? this.foldTest(statement.test)
+                : undefined;
+            const taken = known === undefined ? null
+                : known ? statement.consequent : statement.alternate;
+            if (taken && ends(taken))
+            {
+                break;
+            }
         }
     }
 
@@ -2215,6 +2349,21 @@ class FunctionCompiler {
                 this.bind(declarator.id, { constant });
                 continue;
             }
+            if (this.isPointer(declarator.init))
+            {
+                // A pointer, by what it is given: whole at 64 bits.
+                if (this.long)
+                {
+                    this.pointerToRax(declarator.init);
+                    const v = this.declare(declarator.id, name, 'u32', node.kind === 'let', true);
+                    this.quad(0x89, EAX, v);                               // mov [v], rax
+                    continue;
+                }
+                const made = this.pointerValue(declarator.init);
+                const v = this.declare(declarator.id, name, 'u32', node.kind === 'let', true);
+                this.store(v, made, declarator.init);
+                continue;
+            }
             const value = this.expr(declarator.init);
             /** @type {Variable['type']} */
             let type;
@@ -2352,6 +2501,12 @@ class FunctionCompiler {
             case 'AssignmentExpression':
             {
                 const v = this.variable(node.left);
+                if (v.pointer && (this.long || node.operator === '='
+                    && this.isPointer(node.right)))
+                {
+                    this.pointerAssigned(v, node);
+                    return;
+                }
                 const inPlace = node.operator === '=' ? this.inPlace(v, node.right) : null;
                 if (inPlace !== null)
                 {
@@ -2435,6 +2590,11 @@ class FunctionCompiler {
                     this.fail(node, `${node.operator} on a double is written ${v.name} = `
                         + `${v.name} ${node.operator[0]} 1`);
                 }
+                if (v.pointer && this.long)
+                {
+                    this.quad(0xff, node.operator === '++' ? 0 : 1, v);    // inc/dec qword
+                    return;
+                }
                 this.op(0xff, ...this.rm(node.operator === '++' ? 0 : 1, v));
                 return;
             }
@@ -2444,6 +2604,18 @@ class FunctionCompiler {
                 if (Object.hasOwn(STORES, name) && this.helpers.has(name))
                 {
                     this.storeCall(node, name);
+                    return;
+                }
+                if (name === POINTER_STORE && this.helpers.has(name))
+                {
+                    if (this.long)
+                    {
+                        this.storePointer(node);
+                    }
+                    else
+                    {
+                        this.storeCall(node, 'setU32');
+                    }
                     return;
                 }
                 if ((name === 'copyUp' || name === 'copyDown' || name === 'fill')
@@ -2476,6 +2648,7 @@ class FunctionCompiler {
                     this.integer(value, node.arguments[0], 'typed');
                     this.toEax(value, node.arguments[0]);
                     a.emit(0x50, 0x0f, 0xae, 0x14, 0x24, 0x58);         // push; ldmxcsr [esp]; pop
+                    this.pushedAny = true;
                     return;
                 }
                 if (name === 'clearExceptions' && this.helpers.has(name))
@@ -2578,6 +2751,37 @@ class FunctionCompiler {
             {
                 this.fail(node, `the function returns an ${returns}`);
             }
+            const { callee } = node.argument;
+            if (returns === 'i64' && node.argument.type === 'CallExpression'
+                && callee.type === 'Identifier' && callee.name === 'int64'
+                && this.helpers.has('int64'))
+            {
+                this.int64Result(node.argument);
+                if (this.fpu !== 0)
+                {
+                    this.fail(node, 'the x87 stack is not empty at a return');
+                }
+                this.a.jump(-1, this.epilogue);
+                return;
+            }
+            if (this.declaredReturns === 'ptr' && this.isPointer(node.argument))
+            {
+                // The whole of RAX at 64 bits, where the epilogue extends nothing.
+                if (this.long)
+                {
+                    this.pointerToRax(node.argument);
+                }
+                else
+                {
+                    this.toEax(this.pointerValue(node.argument), node.argument);
+                }
+                if (this.fpu !== 0)
+                {
+                    this.fail(node, 'the x87 stack is not empty at a return');
+                }
+                this.a.jump(-1, this.epilogue);
+                return;
+            }
             const value = this.expr(node.argument);
             if (returns === 'f32' && value.type !== 'f32')
             {
@@ -2592,6 +2796,14 @@ class FunctionCompiler {
                     this.sse(0xf2, 0x5a, 0, 0);                            // cvtsd2ss xmm0, xmm0
                 }
                 this.fpu--;
+            }
+            else if (returns === 'i64' && isFloat(value.type) && this.long)
+            {
+                this.toFloat(value, node.argument);
+                this.fpu--;
+                // cvttsd2si rax, xmm0: truncated, NaN and out of range the
+                // integer indefinite, as the i386's fisttp answers.
+                this.a.emit(0xf2, 0x48, 0x0f, 0x2c, 0xc0);
             }
             else if (returns === 'i64' && isFloat(value.type))
             {
@@ -2615,7 +2827,16 @@ class FunctionCompiler {
                         + `is an ${value.type}`);
                 }
                 this.toEax(value, node.argument);
-                if (returns === 'i64')
+                if (returns === 'i64' && this.long)
+                {
+                    // The whole of RAX: a u32 is there zero-extended by the
+                    // move that made EAX; an i32 is extended by its sign.
+                    if (value.type !== 'u32')
+                    {
+                        this.a.emit(0x48, 0x63, 0xc0);                     // movsxd rax, eax
+                    }
+                }
+                else if (returns === 'i64')
                 {
                     this.a.emit(...value.type === 'u32' ? [0x31, 0xd2] : [0x99]); // xor edx / cdq
                 }
@@ -2626,6 +2847,39 @@ class FunctionCompiler {
             this.fail(node, 'the x87 stack is not empty at a return');
         }
         this.a.jump(-1, this.epilogue);
+    }
+
+    /**
+     * `return int64(low, high)`: the high half made first and held, the low
+     * half into EAX, then EDX:EAX - or at 64 bits the high half shifted into
+     * RAX's upper half, a 32-bit move having left it zero there.
+     *
+     * @param {any} node
+     */
+    int64Result(node){
+        this.arity(node, 2);
+        const [low, high] = node.arguments;
+        /** @param {Value} value @param {any} at */
+        const integer = (value, at)=>{
+            if (!isTyped(value.type) || isFloat(value.type))
+            {
+                this.fail(at, value.type === 'intish'
+                    ? 'a half of an i64 is brought back to 32 bits first'
+                    : `a half of an i64 is a 32-bit integer, not an ${value.type}`);
+            }
+            this.toEax(value, at);
+        };
+        integer(this.expr(high), high);
+        this.hold();                                                       // push eax
+        integer(this.expr(low), low);
+        if (this.long)
+        {
+            this.unhold(ECX);                                              // pop ecx: the high half
+            this.a.emit(0x48, 0xc1, 0xe1, 0x20);                           // shl rcx, 32
+            this.a.emit(0x48, 0x09, 0xc8);                                 // or rax, rcx
+            return;
+        }
+        this.unhold(EDX);                                                  // pop edx
     }
 
     // --- conditions ------------------------------------------------------
@@ -2720,8 +2974,17 @@ class FunctionCompiler {
     compare(node, target, when){
         const a = this.a;
         const op = node.operator;
-        const leftType = this.peekType(node.left);
-        const rightType = this.peekType(node.right);
+        const pointers = this.isPointer(node.left) || this.isPointer(node.right);
+        if (pointers && this.long)
+        {
+            this.pointerCompare(node, target, when);
+            return;
+        }
+        // A pointer and what is added to it compare as the i386's 32 bits.
+        /** @param {any} side @returns {Type} */
+        const typeOf = side=>(this.isPointer(side) ? 'u32' : this.peekType(side));
+        const leftType = pointers ? typeOf(node.left) : this.peekType(node.left);
+        const rightType = pointers ? typeOf(node.right) : this.peekType(node.right);
         if (isFloat(leftType) || isFloat(rightType))
         {
             this.toFloat(this.expr(node.left), node.left);
@@ -2902,9 +3165,19 @@ class FunctionCompiler {
         if (node.type === 'Identifier')
         {
             const v = this.lookupLocal(node.name);
-            if (v !== undefined && !('constant' in v) && !isFloat(v.type))
+            if (v !== undefined && !('constant' in v) && !isFloat(v.type) && v.type !== 'i64')
             {
                 return { where: 'var', type: v.type, v };
+            }
+        }
+        // A pointer's 32 bits, `p >>> 0` or `p | 0`: the variable's own dword.
+        if (node.type === 'BinaryExpression' && (node.operator === '>>>' || node.operator === '|')
+            && node.left.type === 'Identifier' && this.fold(node.right) === 0)
+        {
+            const v = this.lookupLocal(node.left.name);
+            if (v !== undefined && !('constant' in v) && v.pointer === true)
+            {
+                return { where: 'var', type: node.operator === '|' ? 'i32' : 'u32', v };
             }
         }
         return null;
@@ -3197,8 +3470,9 @@ class FunctionCompiler {
     // XMM(fpu - 1), the next pushed into the register past it. Scalar SSE2
     // arithmetic is IEEE double's to the last bit, as JavaScript's is, under
     // the convention's MXCSR (round to nearest, no exception unmasked). XMM0
-    // to XMM5 are the callee's to change: four deep at most, two past them
-    // for an operation's own use.
+    // to XMM5 are the callee's to change: four deep, two past them for an
+    // operation's own use. Six deep at most, XMM6 and XMM7 then saved in the
+    // frame (`LAST_VOLATILE_XMM`).
 
     /** The next XMM register an expression takes. @param {any} node */
     pushXmm(node){
@@ -3207,7 +3481,23 @@ class FunctionCompiler {
             this.fail(node, 'the expression holds more doubles at once than x86-64 code keeps '
                 + 'in registers');
         }
-        return this.fpu - 1;
+        return this.takeXmm(this.fpu - 1);
+    }
+
+    /**
+     * An XMM register the code writes: past XMM5 one its caller keeps, which
+     * the plan has it save (`xmmKept`).
+     *
+     * @param {number} reg @returns {number}
+     */
+    takeXmm(reg){
+        this.highestXmm = Math.max(this.highestXmm, reg);
+        if (this.planned !== null && reg > LAST_VOLATILE_XMM + this.planned.xmmKept)
+        {
+            throw new Error(`guest code: ${this.node.id.name} takes an XMM register its plan `
+                + 'did not save');
+        }
+        return reg;
     }
 
     /**
@@ -3245,7 +3535,7 @@ class FunctionCompiler {
      */
     masked(opcode, bits){
         const x = this.fpu - 1;
-        this.sseConstant(0xf2, 0x10, x + 1, bits);                         // movsd scratch, [mask]
+        this.sseConstant(0xf2, 0x10, this.takeXmm(x + 1), bits);           // movsd scratch, [mask]
         this.sse(0x66, opcode, x, x + 1);
     }
 
@@ -3367,8 +3657,8 @@ class FunctionCompiler {
     roundXmm(name){
         const a = this.a;
         const x = this.fpu - 1;
-        const s = x + 1;
-        const t = x + 2;
+        const s = this.takeXmm(x + 1);
+        const t = this.takeXmm(x + 2);
         const done = a.fresh('whole');
         this.sseConstant(0xf2, 0x10, s, ABS_MASK);                             // movsd s, [abs]
         this.sse(0x66, 0x54, s, x);                                            // andpd s, x
@@ -3466,9 +3756,13 @@ class FunctionCompiler {
             case 'Identifier':
             {
                 const v = this.lookupLocal(node.name);
+                if (v !== undefined && !('constant' in v) && v.type === 'i64')
+                {
+                    return this.fail(node, `${node.name} is an i64, read by low64() and high64()`);
+                }
                 if (v !== undefined && !('constant' in v))
                 {
-                    return { where: 'var', type: v.type, v };
+                    return { where: 'var', type: /** @type {Type} */ (v.type), v };
                 }
                 return this.fail(node, `${node.name} is not a variable, a constant or a `
                     + 'parameter here');
@@ -3495,8 +3789,12 @@ class FunctionCompiler {
                 const otherwise = a.fresh('else');
                 const end = a.fresh('end');
                 this.branch(node.test, otherwise, false);
-                const yes = this.expr(node.consequent);
-                const no = this.peekType(node.alternate);
+                // One of two pointers is the i386's 32 bits of each.
+                const pointers = this.isPointer(node);
+                const yes = pointers ? this.pointerValue(node.consequent)
+                    : this.expr(node.consequent);
+                const peeked = this.peekType(node.alternate);
+                const no = pointers && peeked === 'intish' ? 'u32' : peeked;
                 if (isFloat(yes.type) || isFloat(no))
                 {
                     this.toFloat(yes, node.consequent);
@@ -3510,7 +3808,8 @@ class FunctionCompiler {
                 const type = this.join(node, yes.type, no);
                 this.toEax(yes, node.consequent);
                 a.jump(-1, end).label(otherwise);
-                this.toEax(this.expr(node.alternate), node.alternate);
+                this.toEax(pointers ? this.pointerValue(node.alternate)
+                    : this.expr(node.alternate), node.alternate);
                 a.label(end);
                 return { where: 'eax', type };
             }
@@ -4263,10 +4562,15 @@ class FunctionCompiler {
         const name = callee.name;
         if (this.helpers.has(name))
         {
-            if (Object.hasOwn(LOADS, name))
+            if (name === POINTER_LOAD && this.long)
+            {
+                this.fail(node, 'ptr() loads a pointer: given to a pointer variable, returned, '
+                    + 'passed to a call or stored by setPtr');
+            }
+            if (Object.hasOwn(LOADS, name) || name === POINTER_LOAD)
             {
                 this.arity(node, 1);
-                const load = LOADS[name];
+                const load = name === POINTER_LOAD ? LOADS.u32 : LOADS[name];
                 const operand = this.address(node.arguments[0]);
                 if (isFloat(load.type) && this.long)
                 {
@@ -4302,6 +4606,16 @@ class FunctionCompiler {
             {
                 this.arity(node, 1);
                 const value = this.expr(node.arguments[0]);
+                // A float variable's bits where it lies: no fld and no
+                // cvtss2sd, which would quiet a signalling NaN and flag a
+                // denormal operand. At 64 bits a float argument lies in its
+                // home slot, where the entry put XMM's dword.
+                if (value.where === 'var' && value.type === 'f32' && !value.v.onStack
+                    && !this.x87.includes(value.v))
+                {
+                    this.op(0x8b, ...this.frameAt(EAX, value.v.disp));      // mov eax, [v]
+                    return { where: 'eax', type: 'u32' };
+                }
                 if (this.long)
                 {
                     this.toXmm(value, node.arguments[0]);
@@ -4311,20 +4625,29 @@ class FunctionCompiler {
                     this.fpu--;
                     return { where: 'eax', type: 'u32' };
                 }
-                // A float variable's bits where it lies: no fld, which would
-                // quiet a signalling NaN and flag a denormal operand.
-                if (value.where === 'var' && value.type === 'f32' && !value.v.onStack
-                    && !this.x87.includes(value.v))
-                {
-                    this.op(0x8b, ...this.frameAt(EAX, value.v.disp));      // mov eax, [v]
-                    return { where: 'eax', type: 'u32' };
-                }
                 this.toSt0(value, node.arguments[0]);
                 a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
                 a.emit(0xd9, 0x1c, 0x24);                                  // fstp dword [esp]
                 a.emit(0x58);                                              // pop eax
                 this.fpu--;
                 return { where: 'eax', type: 'u32' };
+            }
+            if (name === 'low64' || name === 'high64')
+            {
+                this.arity(node, 1);
+                const arg = node.arguments[0];
+                const v = arg.type === 'Identifier' ? this.lookupLocal(arg.name) : undefined;
+                if (v === undefined || 'constant' in v || v.type !== 'i64')
+                {
+                    this.fail(arg, `${name}: an i64 parameter, read where it lies`);
+                }
+                // mov eax, [x] or [x + 4]: a dword of the value's slots.
+                this.op(0x8b, ...this.frameAt(EAX, v.disp + (name === 'high64' ? 4 : 0)));
+                return { where: 'eax', type: 'u32' };
+            }
+            if (name === 'int64')
+            {
+                this.fail(node, 'int64(low, high) is an i64 function\'s result, returned');
             }
             if (name === 'doubleLow' || name === 'doubleHigh')
             {
@@ -4389,10 +4712,14 @@ class FunctionCompiler {
             {
                 this.arity(node, 0);
                 this.wordsAt64(node, name);
-                a.emit(0x83, 0xec, 0x04);                                  // sub esp, 4
+                // MXCSR is the x86-64's too; RSP moves by quadwords there.
+                const wide = this.long ? [0x48] : [];
+                const bytes = this.long ? 8 : 4;
+                a.emit(...wide, 0x83, 0xec, bytes);                        // sub esp, 4
                 a.emit(0x0f, 0xae, 0x1c, 0x24);                            // stmxcsr [esp]
                 a.emit(0x8b, 0x04, 0x24);                                  // mov eax, [esp]
-                a.emit(0x83, 0xc4, 0x04);                                  // add esp, 4
+                a.emit(...wide, 0x83, 0xc4, bytes);                        // add esp, 4
+                this.pushedAny = true;
                 return { where: 'eax', type: 'nat' };
             }
             if (name === 'controlWord' || name === 'statusWord')
@@ -4455,8 +4782,8 @@ class FunctionCompiler {
             this.fail(node, `${name} hands calls to the host, which it has none of here`);
         }
         if (callee.convention === 'thiscall' || callee.params.some(type=>type !== 'i32'
-            && type !== 'u32') || (callee.returns !== 'i32' && callee.returns !== 'u32'
-            && callee.returns !== 'void'))
+            && type !== 'u32' && type !== 'ptr') || (callee.returns !== 'i32'
+            && callee.returns !== 'u32' && callee.returns !== 'ptr' && callee.returns !== 'void'))
         {
             this.fail(node, `${name} takes and answers integers, cdecl or stdcall`);
         }
@@ -4477,6 +4804,13 @@ class FunctionCompiler {
         {
             this.fail(node, `${name} takes ${callee.params.length} arguments after its helpers`);
         }
+        given.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
+            if (this.isPointer(argument) && callee.params[i] !== 'ptr')
+            {
+                this.fail(argument, `${name} takes an ${callee.params[i]} here, and this is a `
+                    + 'pointer');
+            }
+        });
         if (this.fpu !== 0)
         {
             this.fail(node, 'a call is made with the x87 stack empty, as cdecl has it');
@@ -4489,9 +4823,10 @@ class FunctionCompiler {
         }
         if (this.long)
         {
-            this.longCall(given, null, ()=>void a.call(`fn:${name}`));
+            // A pointer the callee answers is RAX as it left it.
+            this.longCall(given, null, ()=>void a.call(`fn:${name}`), callee.returns === 'ptr');
             this.callees.add(name);
-            return { where: 'eax', type: callee.returns === 'u32' ? 'u32' : 'i32' };
+            return { where: 'eax', type: callee.returns === 'i32' ? 'i32' : 'u32' };
         }
         const bytes = given.length * 4;
         if (bytes > 0)
@@ -4500,7 +4835,7 @@ class FunctionCompiler {
         }
         this.grew(bytes);
         given.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
-            const value = this.expr(argument);
+            const value = this.pointerValue(argument);
             this.integer(value, argument, 'typed');
             this.toEax(value, argument);
             a.emit(0x89, ...memory(EAX, { base: ESP, disp: i * 4 }));       // mov [esp+4i], eax
@@ -4513,7 +4848,7 @@ class FunctionCompiler {
         }
         this.grew(-bytes);
         this.callees.add(name);
-        return { where: 'eax', type: callee.returns === 'u32' ? 'u32' : 'i32' };
+        return { where: 'eax', type: callee.returns === 'i32' ? 'i32' : 'u32' };
     }
 
     /** @param {any} node @param {number} count */
@@ -4608,6 +4943,555 @@ class FunctionCompiler {
         }
     }
 
+    // --- pointers ----------------------------------------------------------
+
+    /** Whether an expression is a pointer: see `isPointerExpression`. @param {any} node */
+    isPointer(node){
+        return isPointerExpression(node, name=>{
+            const v = this.lookupLocal(name);
+            return v !== undefined && !('constant' in v) && v.pointer === true;
+        }, (/** @type {string} */ name)=>this.answersPointer(name));
+    }
+
+    /**
+     * Whether a name is a `@guestCode` function of the module that answers a
+     * pointer: its call is one, whole in RAX at 64 bits.
+     *
+     * @param {string} name
+     */
+    answersPointer(name){
+        return this.scope.guests.has(name) && this.lookupLocal(name) === undefined
+            && name !== this.node.id.name
+            && this.scope.compiledOf(name, this.node).returns === 'ptr';
+    }
+
+    /**
+     * One instruction on a quadword: `opcode` with a variable as its r/m
+     * operand under REX.W.
+     *
+     * @param {number} opcode @param {number} field @param {Variable} v
+     */
+    quad(opcode, field, v){
+        this.rexBits |= Rex.W;
+        this.op(opcode, ...this.rm(field, v));
+        this.loaded = null;
+    }
+
+    /**
+     * A pointer expression taken apart: the pointer variable it starts from,
+     * the constants added to it, and the integers added or taken away as
+     * one index - their sum, made in 32 bits as any sum of integers is, and
+     * taken away as a whole where every one of them is.
+     *
+     * @param {any} node
+     * @returns {{ v: Variable, disp: number, index: { node: any, negative: boolean } | null }}
+     */
+    pointerParts(node){
+        let disp = 0;
+        /** @type {any[]} */
+        const added = [];
+        /** @type {any[]} */
+        const taken = [];
+        let inner = node;
+        while (inner.type === 'BinaryExpression')
+        {
+            const negative = inner.operator === '-';
+            const [at, other] = this.isPointer(inner.left) ? [inner.left, inner.right]
+                : [inner.right, inner.left];
+            const constant = this.fold(other);
+            if (constant !== undefined && Number.isInteger(constant))
+            {
+                disp += negative ? -constant : constant;
+            }
+            else
+            {
+                // Innermost first, as the source adds them.
+                (negative ? taken : added).unshift(other);
+            }
+            inner = at;
+        }
+        if (inner.type !== 'Identifier')
+        {
+            this.fail(node, 'a pointer loaded by ptr(), or one of two chosen by ?:, is given to '
+                + 'a pointer variable before it is moved, compared or read through');
+        }
+        if (Math.abs(disp) >= 2 ** 31)
+        {
+            this.fail(node, 'a pointer is moved by less than 2^31 at once');
+        }
+        /** @param {any} left @param {string} operator @param {any} right */
+        const sum = (left, operator, right)=>({ type: 'BinaryExpression', operator, left, right,
+            loc: node.loc });
+        const first = added.length > 0 ? added : taken;
+        const rest = added.length > 0 ? taken : [];
+        const index = first.length === 0 ? null : {
+            node: rest.reduce((left, right)=>sum(left, '-', right),
+                first.reduce((left, right)=>sum(left, '+', right))),
+            negative: added.length === 0,
+        };
+        return { v: /** @type {Variable} */ (this.lookupLocal(inner.name)), disp, index };
+    }
+
+    /**
+     * A pointer's index into RAX as the quadword JavaScript's sum adds: an
+     * `i32` extended by its sign, a `u32` by the zeros the 32-bit operation
+     * that made it left, negated where it is taken away. A sum not brought
+     * back to 32 bits is a signed dword here: an index reaches 2 GiB either
+     * way of its pointer, and no further.
+     *
+     * @param {{ node: any, negative: boolean }} index
+     */
+    pointerIndex({ node, negative }){
+        const value = this.expr(node);
+        this.integer(value, node, 'intish');
+        this.toEax(value, node);
+        if (value.type !== 'u32')
+        {
+            this.a.emit(0x48, 0x63, 0xc0);                                 // movsxd rax, eax
+        }
+        if (negative)
+        {
+            this.a.emit(0x48, 0xf7, 0xd8);                                 // neg rax
+        }
+    }
+
+    /**
+     * A pointer expression into RAX, whole. x86-64 only.
+     *
+     * @param {any} node
+     */
+    pointerToRax(node){
+        if (isPointerLoad(node))
+        {
+            this.arity(node, 1);
+            const one = this.wrapped(this.address(node.arguments[0]), EAX);
+            this.rexBits |= Rex.W;
+            this.op(0x8b, ...this.mem(EAX, one));                          // mov rax, [m]
+            this.loaded = null;
+            return;
+        }
+        if (node.type === 'CallExpression')
+        {
+            // A function of the module that answers a pointer: RAX as it left it.
+            this.moduleCall(node, node.callee.name);
+            this.loaded = null;
+            return;
+        }
+        if (node.type === 'ConditionalExpression')
+        {
+            const known = this.foldTest(node.test);
+            if (known !== undefined)
+            {
+                this.pointerToRax(known ? node.consequent : node.alternate);
+                return;
+            }
+            const otherwise = this.a.fresh('else');
+            const end = this.a.fresh('end');
+            this.branch(node.test, otherwise, false);
+            this.pointerToRax(node.consequent);
+            this.a.jump(-1, end).label(otherwise);
+            this.pointerToRax(node.alternate);
+            this.a.label(end);
+            this.loaded = null;
+            return;
+        }
+        const { v, disp, index } = this.pointerParts(node);
+        if (index !== null)
+        {
+            this.pointerIndex(index);
+            this.quad(0x03, EAX, v);                                       // add rax, [v]
+        }
+        else
+        {
+            this.quad(0x8b, EAX, v);                                       // mov rax, [v]
+        }
+        if (disp !== 0)
+        {
+            this.a.emit(0x48, 0x8d, ...memory(EAX, { base: EAX, disp }));  // lea rax, [rax+disp]
+        }
+    }
+
+    /**
+     * A value where a pointer may stand, as the i386 holds one: an expression
+     * of 32 bits, a pointer's sum among them, which wraps there as an address
+     * does.
+     *
+     * @param {any} node @returns {Value}
+     */
+    pointerValue(node){
+        const value = this.expr(node);
+        return this.isPointer(node) && value.type === 'intish' ? { ...value, type: 'u32' } : value;
+    }
+
+    /**
+     * The memory operand a pointer expression names at 64 bits: the pointer's
+     * register as it is, the index extended into RAX; null where code would
+     * have to be emitted first and `emits` is false.
+     *
+     * @param {any} node @param {boolean} emits
+     * @returns {import('./x86.mjs').Memory | null}
+     */
+    pointerAddress(node, emits){
+        const { v, disp, index } = this.pointerParts(node);
+        if (index === null)
+        {
+            if (v.reg !== undefined)
+            {
+                this.use(v);
+                return { base: v.reg, disp, whole: true };
+            }
+            if (!emits)
+            {
+                return null;
+            }
+            this.quad(0x8b, EAX, v);                                       // mov rax, [v]
+            return { base: EAX, disp, whole: true };
+        }
+        // An unsigned variable in a register is the quadword already.
+        const at = index.negative ? null : this.simple(index.node);
+        if (v.reg !== undefined && at?.where === 'var' && at.type === 'u32'
+            && at.v.reg !== undefined && !at.v.pointer)
+        {
+            this.use(v);
+            this.use(at.v);
+            return { base: v.reg, index: at.v.reg, disp, whole: true };
+        }
+        if (!emits)
+        {
+            return null;
+        }
+        this.pointerIndex(index);
+        if (v.reg !== undefined)
+        {
+            this.use(v);
+            return { base: EAX, index: v.reg, disp, whole: true };
+        }
+        this.quad(0x03, EAX, v);                                           // add rax, [v]
+        return { base: EAX, disp, whole: true };
+    }
+
+    /**
+     * A comparison with a pointer in it at 64 bits: of the quadwords,
+     * unsigned, a pointer with a pointer or a constant.
+     *
+     * @param {any} node @param {string} target @param {boolean} when
+     */
+    pointerCompare(node, target, when){
+        const a = this.a;
+        let { left, right, operator: op } = node;
+        if (!this.isPointer(left))
+        {
+            [left, right] = [right, left];
+            op = /** @type {Record<string, string>} */ ({ '<': '>', '<=': '>=', '>': '<',
+                '>=': '<=' })[op] ?? op;
+        }
+        /** @param {any} side */
+        const bare = side=>(side.type === 'Identifier' && this.isPointer(side)
+            ? /** @type {Variable} */ (this.lookupLocal(side.name)) : null);
+        const constant = this.fold(right);
+        if (constant !== undefined)
+        {
+            if (!Number.isInteger(constant) || constant < 0 || constant >= 2 ** 31)
+            {
+                this.fail(right, 'a pointer is compared with a pointer or a constant in [0, 2^31)');
+            }
+            const v = bare(left);
+            if (v?.reg !== undefined && constant === 0)
+            {
+                this.use(v);
+                this.rexBits |= Rex.W;
+                this.op(0x85, this.regs(v.reg, v.reg));                    // test reg, reg
+            }
+            else if (v !== null)
+            {
+                this.rexBits |= Rex.W;
+                this.op(...fitsByte(constant) ? [0x83, ...this.rm(ALU.cmp, v), constant]
+                    : [0x81, ...this.rm(ALU.cmp, v), ...le32(constant)]);  // cmp qword [v], imm
+            }
+            else
+            {
+                this.pointerToRax(left);
+                a.emit(0x48, 0x3d, ...le32(constant));                     // cmp rax, imm
+            }
+        }
+        else if (!this.isPointer(right))
+        {
+            this.fail(right, 'a pointer is compared with a pointer or a constant');
+        }
+        else if (bare(right) !== null)
+        {
+            const v = bare(left);
+            if (v?.reg !== undefined)
+            {
+                this.use(v);
+                this.quad(0x3b, v.reg, /** @type {Variable} */ (bare(right))); // cmp reg, [right]
+            }
+            else
+            {
+                this.pointerToRax(left);
+                this.quad(0x3b, EAX, /** @type {Variable} */ (bare(right)));   // cmp rax, [right]
+            }
+        }
+        else if (bare(left) !== null)
+        {
+            this.pointerToRax(right);
+            this.quad(0x39, EAX, /** @type {Variable} */ (bare(left)));    // cmp [left], rax
+        }
+        else
+        {
+            this.pointerToRax(right);
+            this.hold(true);                                               // push rax
+            this.pointerToRax(left);
+            this.unhold(ECX);                                              // pop rcx
+            a.emit(0x48, 0x39, 0xc8);                                      // cmp rax, rcx
+        }
+        /** @type {Record<string, number>} */
+        const codes = { '<': CC.b, '<=': CC.be, '>': CC.a, '>=': CC.ae, '===': CC.e, '!==': CC.ne };
+        a.jump(when ? codes[op] : invert(codes[op]), target);
+    }
+
+    /**
+     * An assignment to a pointer variable: a pointer whole at 64 bits; an
+     * integer as the quadword JavaScript leaves in the variable, a `u32`
+     * extended by zeros; `+=` and `-=` of the quadword.
+     *
+     * @param {Variable} v @param {any} node
+     */
+    pointerAssigned(v, node){
+        const { operator, right } = node;
+        if (operator === '=' && this.isPointer(right))
+        {
+            if (!this.long)
+            {
+                this.store(v, this.pointerValue(right), right);
+                return;
+            }
+            this.pointerToRax(right);
+            this.quad(0x89, EAX, v);                                       // mov [v], rax
+            return;
+        }
+        const value = this.expr(right);
+        if (operator === '=')
+        {
+            this.assignable(v, value.type, right);
+            this.toEax(value, right);
+            this.a.emit(0x89, 0xc0);                                       // mov eax, eax
+            this.quad(0x89, EAX, v);                                       // mov [v], rax
+            return;
+        }
+        if (operator !== '+=' && operator !== '-=')
+        {
+            this.fail(node, `${operator} on a pointer: it is moved by + and -`);
+        }
+        this.integer(value, right, 'typed');
+        const alu = operator === '+=' ? ALU.add : ALU.sub;
+        if (value.where === 'imm' && Math.abs(value.value) < 2 ** 31)
+        {
+            this.rexBits |= Rex.W;
+            this.op(...fitsByte(value.value) ? [0x83, ...this.rm(alu, v), value.value & 0xff]
+                : [0x81, ...this.rm(alu, v), ...le32(value.value)]);       // op qword [v], imm
+            return;
+        }
+        this.toEax(value, right);
+        if (value.type !== 'u32')
+        {
+            this.a.emit(0x48, 0x63, 0xc0);                                 // movsxd rax, eax
+        }
+        this.quad(alu << 3 | 1, EAX, v);                                   // op [v], rax
+    }
+
+    /**
+     * Holds the source to what a pointer is, before any code is made, at
+     * both widths alike. A pointer variable (a `ptr` parameter, or a variable
+     * declared with a pointer expression) is taken whole only where a
+     * pointer stands: the address of a load, a store, a copy or a fill, a
+     * side of a comparison, what a pointer variable is given, an argument of
+     * a call, the result of a `ptr` function. Under an operator that brings
+     * its operands to 32 bits (`| & ^ ~ << >> >>>`), through `+` and `-`, it
+     * is its low 32 bits, as JavaScript makes of it. Anywhere else the 32-bit
+     * code would take the low half where the handler takes the number, and
+     * the source is refused.
+     */
+    checkPointers(){
+        /** @type {Map<string, boolean>[]} */
+        const scopes = [new Map()];
+        /** @param {string} name */
+        const named = name=>{
+            for (let i = scopes.length - 1; i >= 0; i--)
+            {
+                const found = scopes[i].get(name);
+                if (found !== undefined)
+                {
+                    return found;
+                }
+            }
+            return false;
+        };
+        /** @param {any} node */
+        const isPointer = node=>isPointerExpression(node, named,
+            (/** @type {string} */ name)=>this.answersPointer(name));
+        for (const param of this.node.params)
+        {
+            if (param.type === 'Identifier')
+            {
+                const v = this.lookupLocal(param.name);
+                scopes[0].set(param.name, v !== undefined && !('constant' in v)
+                    && v.pointer === true);
+            }
+        }
+        if (![...scopes[0].values()].some(Boolean) && !this.helpers.has(POINTER_LOAD))
+        {
+            return;
+        }
+        const TRUNCATING = new Set(['|', '&', '^', '<<', '>>', '>>>']);
+        const COMPARING = new Set(['<', '<=', '>', '>=', '===', '!==', '==', '!=']);
+        /** @param {any} node @param {'value' | 'trunc' | 'pointer'} given */
+        const visit = (node, given)=>{
+            if (node === null || typeof node !== 'object')
+            {
+                return;
+            }
+            const context = given === 'pointer' && !isPointer(node) ? 'value' : given;
+            const inner = context === 'trunc' ? 'trunc' : 'value';
+            switch (node.type)
+            {
+                case 'Identifier':
+                    if (context === 'value' && named(node.name))
+                    {
+                        this.fail(node, `${node.name} is a pointer: its 32 bits are `
+                            + `${node.name} | 0 or ${node.name} >>> 0, and it is whole only `
+                            + 'as an address, in a comparison, as an argument of a call, or '
+                            + 'given to a pointer');
+                    }
+                    return;
+                case 'BlockStatement':
+                    scopes.push(new Map());
+                    node.body.forEach((/** @type {any} */ each)=>visit(each, 'value'));
+                    scopes.pop();
+                    return;
+                case 'ForStatement':
+                    scopes.push(new Map());
+                    for (const part of [node.init, node.test, node.update, node.body])
+                    {
+                        visit(part, 'value');
+                    }
+                    scopes.pop();
+                    return;
+                case 'VariableDeclaration':
+                    for (const declarator of node.declarations)
+                    {
+                        const pointer = declarator.init ? isPointer(declarator.init) : false;
+                        visit(declarator.init, 'pointer');
+                        if (declarator.id.type === 'Identifier')
+                        {
+                            scopes[scopes.length - 1].set(declarator.id.name, pointer);
+                        }
+                    }
+                    return;
+                case 'ReturnStatement':
+                    visit(node.argument, this.declaredReturns === 'ptr' ? 'pointer' : 'value');
+                    return;
+                case 'AssignmentExpression':
+                {
+                    const pointer = node.left.type === 'Identifier' && named(node.left.name);
+                    if (pointer && !['=', '+=', '-='].includes(node.operator))
+                    {
+                        this.fail(node, `${node.operator} on a pointer: it is moved by + and -`);
+                    }
+                    visit(node.right, pointer && node.operator === '=' ? 'pointer'
+                        : TRUNCATING.has(node.operator.slice(0, -1)) ? 'trunc' : 'value');
+                    return;
+                }
+                case 'UpdateExpression':
+                    return;
+                case 'BinaryExpression':
+                    if (COMPARING.has(node.operator))
+                    {
+                        visit(node.left, 'pointer');
+                        visit(node.right, 'pointer');
+                    }
+                    else if (TRUNCATING.has(node.operator))
+                    {
+                        visit(node.left, 'trunc');
+                        visit(node.right, 'trunc');
+                    }
+                    else if (context === 'pointer')
+                    {
+                        // The pointer's side whole, what moves it an integer.
+                        const left = isPointer(node.left);
+                        visit(left ? node.left : node.right, 'pointer');
+                        visit(left ? node.right : node.left, 'value');
+                    }
+                    else
+                    {
+                        const sum = node.operator === '+' || node.operator === '-';
+                        visit(node.left, sum ? inner : 'value');
+                        visit(node.right, sum ? inner : 'value');
+                    }
+                    return;
+                case 'UnaryExpression':
+                    visit(node.argument, node.operator === '~' ? 'trunc'
+                        : node.operator === '-' ? inner : 'value');
+                    return;
+                case 'ConditionalExpression':
+                    visit(node.test, 'value');
+                    visit(node.consequent, context === 'pointer' ? 'pointer' : inner);
+                    visit(node.alternate, context === 'pointer' ? 'pointer' : inner);
+                    return;
+                case 'CallExpression':
+                {
+                    const name = node.callee.type === 'Identifier' ? node.callee.name : '';
+                    const helper = this.helpers.has(name);
+                    if (!helper && context !== 'pointer' && this.answersPointer(name))
+                    {
+                        this.fail(node, `${name} answers a pointer, whole only given to a `
+                            + 'pointer variable, returned, passed to a call or stored by setPtr');
+                    }
+                    if (helper && name === POINTER_LOAD && context !== 'pointer')
+                    {
+                        this.fail(node, 'ptr() loads a pointer, whole only given to a pointer '
+                            + 'variable, returned, passed to a call or stored by setPtr: its '
+                            + '32 bits are u32() of the same address');
+                    }
+                    // How many of the arguments, from the first, are addresses.
+                    const addresses = !helper ? this.scope.guests.has(name) ? Infinity : 0
+                        : name === POINTER_STORE || name === 'copyUp' || name === 'copyDown' ? 2
+                            : name === 'call' || name === 'callStd' ? Infinity
+                                : Object.hasOwn(LOADS, name) || Object.hasOwn(STORES, name)
+                                    || name === POINTER_LOAD || name === 'fill'
+                                    || name === 'compareExchange' ? 1 : 0;
+                    /** @type {any[]} */ (node.arguments).forEach((argument, i)=>{
+                        visit(argument, i < addresses ? 'pointer' : 'value');
+                    });
+                    return;
+                }
+                case 'MemberExpression':
+                    if (node.computed)
+                    {
+                        visit(node.property, 'value');
+                    }
+                    return;
+                default:
+                    for (const [key, child] of Object.entries(node))
+                    {
+                        if (key === 'loc' || key === 'range')
+                        {
+                            continue;
+                        }
+                        for (const each of Array.isArray(child) ? child : [child])
+                        {
+                            if (each !== null && typeof each === 'object'
+                                && typeof each.type === 'string')
+                            {
+                                visit(each, 'value');
+                            }
+                        }
+                    }
+            }
+        };
+        visit(this.node.body, 'value');
+    }
+
     /**
      * The memory operand of an address made of variables in registers and a
      * constant, with nothing to emit first; null for any other.
@@ -4615,6 +5499,10 @@ class FunctionCompiler {
      * @param {any} node @returns {import('./x86.mjs').Memory | null}
      */
     registerAddress(node){
+        if (this.long && this.isPointer(node))
+        {
+            return this.pointerAddress(node, false);
+        }
         let disp = 0;
         let inner = node;
         while (inner.type === 'BinaryExpression' && (inner.operator === '+'
@@ -4706,6 +5594,10 @@ class FunctionCompiler {
      * @param {any} node @returns {import('./x86.mjs').Memory}
      */
     address(node){
+        if (this.long && this.isPointer(node))
+        {
+            return /** @type {import('./x86.mjs').Memory} */ (this.pointerAddress(node, true));
+        }
         let disp = 0;
         let inner = node;
         while (inner.type === 'BinaryExpression' && (inner.operator === '+'
@@ -4765,13 +5657,14 @@ class FunctionCompiler {
      * 32-bit `lea` into `scratch`, which wraps at 2^32 as the i386's address
      * and the helpers' do, where the 64-bit sum of a pointer and an index
      * holding a negative i32 would land 4 GiB past it. As it is at 32 bits,
-     * and for one register.
+     * for one register, and for a pointer's (`whole`), whose index was
+     * extended to 64 bits when it was made.
      *
      * @param {import('./x86.mjs').Memory} operand @param {number} scratch
      * @returns {import('./x86.mjs').Memory}
      */
     wrapped(operand, scratch){
-        if (!this.long || operand.index === undefined)
+        if (!this.long || operand.index === undefined || operand.whole)
         {
             return operand;
         }
@@ -4832,7 +5725,8 @@ class FunctionCompiler {
      * at the address, answering what it held -- `expected` where the value
      * was stored. The value and the address are held while the expected
      * value is made in EAX, where the instruction takes it; EDX, which a
-     * variable may have, carries the value and is put back.
+     * variable may have, carries the value and is put back. The same bytes
+     * in long mode, a slot a quadword.
      *
      * @param {any} node @returns {Value}
      */
@@ -4842,7 +5736,14 @@ class FunctionCompiler {
         const [address, expected, value] = node.arguments;
         for (const argument of [value, address])
         {
-            const made = this.expr(argument);
+            if (argument === address && this.long && this.isPointer(address))
+            {
+                this.pointerToRax(address);
+                this.hold(true);                                           // push rax
+                continue;
+            }
+            const made = argument === address ? this.pointerValue(argument)
+                : this.expr(argument);
             this.integer(made, argument, 'intish');
             this.toEax(made, argument);
             this.hold();                                                   // push eax
@@ -4851,14 +5752,56 @@ class FunctionCompiler {
         this.integer(made, expected, 'intish');
         this.toEax(made, expected);
         this.unhold(ECX);                                                  // pop ecx: the address
+        const valueAt = /** @type {number} */ (this.held.at(-1));
         a.emit(0x52);                                                      // push edx
-        this.grew(4);
-        a.emit(0x8b, 0x54, 0x24, 0x04);                                    // mov edx, [esp+4]
+        this.grew(this.word);
+        this.pushedAny = true;
+        if (valueAt < 0)
+        {
+            a.emit(0x8b, 0x54, 0x24, this.word);                           // mov edx, [esp+word]
+        }
+        else
+        {
+            this.op(0x89, this.regs(valueAt, EDX));                        // mov edx, reg
+        }
+        // The address zero-extended by the 32-bit operation that made it, or a
+        // pointer's quadword: in long mode [rcx] is the guest's address as
+        // [ecx] is in the i386.
         a.emit(0xf0, 0x0f, 0xb1, 0x11);                                    // lock cmpxchg [ecx],edx
         a.emit(0x5a);                                                      // pop edx
-        this.grew(-4);
+        this.grew(-this.word);
         this.unhold(ECX);                                                  // pop ecx: the value
         return { where: 'eax', type: 'u32' };
+    }
+
+    /**
+     * `setPtr(address, value)` at 64 bits: the quadword of a pointer, or of
+     * an integer extended by zeros, stored at the address.
+     *
+     * @param {any} node
+     */
+    storePointer(node){
+        this.arity(node, 2);
+        const operand = this.address(node.arguments[0]);
+        // The address made one register's and kept while the value is made.
+        this.rexBits |= operand.whole === true ? Rex.W : 0;
+        this.op(0x8d, ...this.mem(EAX, operand));                          // lea (r|e)ax, [m]
+        this.hold(true);                                                   // push rax
+        const value = node.arguments[1];
+        if (this.isPointer(value))
+        {
+            this.pointerToRax(value);
+        }
+        else
+        {
+            const given = this.expr(value);
+            this.integer(given, value, 'typed');
+            this.toEax(given, value);
+            this.a.emit(0x89, 0xc0);                                       // mov eax, eax
+        }
+        this.unhold(ECX);                                                  // pop rcx
+        this.a.emit(0x48, 0x89, 0x01);                                     // mov [rcx], rax
+        this.loaded = null;
     }
 
     /** @param {any} node @param {string} name */
@@ -4878,12 +5821,15 @@ class FunctionCompiler {
             this.storeTo(operand, node.arguments[1], name);
             return;
         }
+        const whole = operand.whole === true;
         if (operand.index !== undefined)
         {
-            // A 32-bit lea, whose sum wraps as the address does in long mode too.
+            // A 32-bit lea, whose sum wraps as the address does in long mode
+            // too; a pointer's is the quadword's.
+            this.rexBits |= whole ? Rex.W : 0;
             this.op(0x8d, ...this.mem(EAX, { base: operand.base, index: operand.index })); // lea
         }
-        this.hold();                                                       // push eax
+        this.hold(whole);                                                  // push eax
         const value = this.expr(node.arguments[1]);
         if (FLOAT_STORES.has(name) && this.long)
         {
@@ -4981,9 +5927,15 @@ class FunctionCompiler {
             // writes ESI or EDI, which no variable here has either. A fill's
             // byte waits in ESI while the count is made in EAX.
             node.arguments.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
+                const reg = i === 1 ? ESI : into[i];
+                if ((i === 0 || i === 1 && name !== 'fill') && this.isPointer(argument))
+                {
+                    this.pointerToRax(argument);
+                    a.emit(...moveRegister(reg, EAX, true));               // mov reg, rax
+                    return;
+                }
                 const value = this.expr(argument);
                 this.integer(value, argument, 'intish');
-                const reg = i === 1 ? ESI : into[i];
                 if (value.where === 'eax')
                 {
                     this.op(0x89, this.regs(EAX, reg));                    // mov reg, eax
@@ -5014,6 +5966,8 @@ class FunctionCompiler {
         }
         // In long mode 0x48 is a REX prefix, not `dec eax`.
         const decEax = this.long ? [0xff, 0xc8] : [0x48];
+        // RSI and RDI are stepped whole at 64 bits: a pointer's upper half stays.
+        const wide = this.long ? [0x48] : [];
         if (name === 'fill')
         {
             a.emit(0x0f, 0xb6, 0xc0, 0x69, 0xc0, ...le32(0x01010101));    // the byte, four times
@@ -5037,10 +5991,11 @@ class FunctionCompiler {
         // again: the top n & 3 bytes, then the dwords below them.
         const done = a.fresh('done');
         a.emit(0x89, 0xf0, 0x29, 0xf8, ...decEax, 0x83, 0xf8, 0x03);   // eax = esi - edi - 1
-        a.emit(0x8d, 0x74, 0x0e, 0xff, 0x8d, 0x7c, 0x0f, 0xff, 0xfd);  // lea esi/edi, ...; std
+        a.emit(...wide, 0x8d, 0x74, 0x0e, 0xff);                        // lea esi, [esi+ecx-1]
+        a.emit(...wide, 0x8d, 0x7c, 0x0f, 0xff, 0xfd);                  // lea edi, ...; std
         a.jump(CC.b, bytes);
         a.emit(0x89, 0xca, 0x83, 0xe1, 0x03, 0xf3, 0xa4);              // edx = n; rep movsb
-        a.emit(0x83, 0xee, 0x03, 0x83, 0xef, 0x03);                    // esi, edi at a dword
+        a.emit(...wide, 0x83, 0xee, 0x03, ...wide, 0x83, 0xef, 0x03);  // esi, edi at a dword
         a.emit(0x89, 0xd1, 0xc1, 0xe9, 0x02, 0xf3, 0xa5);              // n >> 2; rep movsd
         a.jump(-1, done);
         a.label(bytes);
@@ -5146,7 +6101,7 @@ class FunctionCompiler {
             this.grew(-bytes);
             return;
         }
-        const fn = this.expr(target);
+        const fn = this.pointerValue(target);
         this.integer(fn, target, 'typed');
         this.toEax(fn, target);
         a.emit(0x50);                                                      // push eax
@@ -5156,7 +6111,7 @@ class FunctionCompiler {
         }
         this.grew(bytes + 4);
         args.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
-            const value = this.expr(argument);
+            const value = this.pointerValue(argument);
             this.integer(value, argument, 'typed');
             this.toEax(value, argument);
             a.emit(0x89, ...memory(EAX, { base: ESP, disp: i * 4 }));       // mov [esp+4i], eax
@@ -5181,8 +6136,9 @@ class FunctionCompiler {
      * @param {any} target  The pointer's node, or null.
      * @param {(at: number) => void} emitCall  Emits the call, the target's
      *     slot `at` bytes above RSP.
+     * @param {boolean} [whole]  The answer a pointer: RAX kept as the callee left it.
      */
-    longCall(args, target, emitCall){
+    longCall(args, target, emitCall, whole = false){
         const a = this.a;
         const slots = Math.max(args.length, ARGUMENTS_64.length);
         const area = slots * 8 + (target === null ? 0 : 8);
@@ -5198,9 +6154,16 @@ class FunctionCompiler {
             ...args.map((/** @type {any} */ node, /** @type {number} */ i)=>({ node, at: i * 8 }))];
         for (const { node, at } of operands)
         {
-            const value = this.expr(node);
-            this.integer(value, node, 'typed');
-            this.toEax(value, node);
+            if (this.isPointer(node))
+            {
+                this.pointerToRax(node);
+            }
+            else
+            {
+                const value = this.expr(node);
+                this.integer(value, node, 'typed');
+                this.toEax(value, node);
+            }
             a.emit(...storeQuad(EAX, at));                                 // mov [rsp+at], rax
         }
         for (let i = 0; i < Math.min(args.length, ARGUMENTS_64.length); i++)
@@ -5210,8 +6173,57 @@ class FunctionCompiler {
         emitCall(slots * 8);
         a.emit(...moveStack64(size));
         this.grew(-size);
-        a.emit(0x89, 0xc0);                                                // mov eax, eax
+        if (!whole)
+        {
+            a.emit(0x89, 0xc0);                                            // mov eax, eax
+        }
     }
+}
+
+/**
+ * Whether an expression is a pointer: a pointer variable, or one with an
+ * integer added to it or taken from it; a pointer loaded by `ptr()`, the call
+ * of a function that answers one, and one of two pointers chosen by `?:`.
+ * The difference of two pointers is an integer, and their sum nothing.
+ *
+ * @param {any} node @param {(name: string) => boolean} named  Whether a name
+ *     is a pointer variable where the expression stands.
+ * @param {(name: string) => boolean} [answers]  Whether a name is a function
+ *     of the module that answers a pointer.
+ * @returns {boolean}
+ */
+function isPointerExpression(node, named, answers = NO_NAME){
+    if (node.type === 'Identifier')
+    {
+        return named(node.name);
+    }
+    if (isPointerLoad(node) || node.type === 'CallExpression'
+        && node.callee.type === 'Identifier' && answers(node.callee.name))
+    {
+        return true;
+    }
+    if (node.type === 'ConditionalExpression')
+    {
+        // One of two pointers.
+        return isPointerExpression(node.consequent, named, answers)
+            && isPointerExpression(node.alternate, named, answers);
+    }
+    if (node.type !== 'BinaryExpression' || node.operator !== '+' && node.operator !== '-')
+    {
+        return false;
+    }
+    const left = isPointerExpression(node.left, named, answers);
+    const right = isPointerExpression(node.right, named, answers);
+    return node.operator === '+' ? left !== right : left && !right;
+}
+
+/** No name: a function of no module. @type {(name: string) => boolean} */
+const NO_NAME = ()=>false;
+
+/** Whether a node is `ptr(address)`, the load of a pointer. @param {any} node */
+function isPointerLoad(node){
+    return node.type === 'CallExpression' && node.callee.type === 'Identifier'
+        && node.callee.name === POINTER_LOAD;
 }
 
 /**

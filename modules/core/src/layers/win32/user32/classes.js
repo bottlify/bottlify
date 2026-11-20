@@ -24,6 +24,8 @@
  * its current one; whether it is global is decided once, at registration.
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 const CS_GLOBALCLASS = 0x4000;
 
 const ERROR_INVALID_PARAMETER = 87;
@@ -42,7 +44,8 @@ export function createClassRegistry({ main, user32, isSystem }){
     const list = [];
 
     /** @param {number} a @param {number} b */
-    const sameModule = (a, b)=>((a >>> 0) & 0xffff0000) === ((b >>> 0) & 0xffff0000);
+    const sameModule = (a, b)=>Math.floor(wholeAddress(a) / 0x10000)
+        === Math.floor(wholeAddress(b) / 0x10000);
 
     /** @param {any} cls @param {string} folded */
     const named = (cls, folded)=>cls.name.toLowerCase() === folded;
@@ -54,9 +57,9 @@ export function createClassRegistry({ main, user32, isSystem }){
      * @returns {number | null}  null: any module's
      */
     const moduleFor = (instance, asking)=>{
-        if ((instance >>> 0) !== 0)
+        if (instance !== 0)
         {
-            return instance >>> 0;
+            return wholeAddress(instance);
         }
         return asking === 'info' ? user32() : asking === 'create' ? null : main();
     };
@@ -88,7 +91,7 @@ export function createClassRegistry({ main, user32, isSystem }){
          * @returns {number}  0, or the error code
          */
         add(cls){
-            const instance = (cls.instance >>> 0) === 0 ? main() : cls.instance >>> 0;
+            const instance = cls.instance === 0 ? main() : wholeAddress(cls.instance);
             if (user32() !== 0 && sameModule(instance, user32()))
             {
                 return ERROR_INVALID_PARAMETER;
@@ -129,9 +132,9 @@ export function createClassRegistry({ main, user32, isSystem }){
         reportedInstance: (cls, asked)=>{
             if (list.includes(cls) && !cls.global)
             {
-                return cls.instance >>> 0;
+                return wholeAddress(cls.instance);
             }
-            return user32() !== 0 && sameModule(asked, user32()) ? 0 : asked >>> 0;
+            return user32() !== 0 && sameModule(asked, user32()) ? 0 : wholeAddress(asked);
         },
 
         /** Every class, newest first. */

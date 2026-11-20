@@ -10,7 +10,7 @@ import { createMessageQueue } from './messages.js';
 import {
     DEVMODEA, DM_PELSHEIGHT, DM_PELSWIDTH, MSG, RECT, WNDCLASSA, WNDCLASSEXA,
 } from './structs.js';
-import { createWindowFunctions, endEllipsis, watchDispatch } from './windows.js';
+import { createWindowFunctions, endEllipsis, lowLevelLayout, watchDispatch } from './windows.js';
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { intersectAreas } from './paint.js';
@@ -6284,6 +6284,44 @@ test('GetWindowLongPtrW and GetClassLongPtrW read a procedure as the wide calls 
     assert.equal(fns.GetClassLongW.handler([hwnd, GCLP_WNDPROC]), 0x403000);
 });
 
+test('a 64-bit window\'s GWLP_ longs: an address zero-extended, USERDATA and ID whole', ()=>{
+    // A program linked /LARGEADDRESSAWARE keeps addresses past 2 GiB in a window: its procedure
+    // and its module, read back as themselves, not as 0xFFFFFFFF_9...; and GWLP_USERDATA, where a
+    // framework keeps its object, and GWLP_ID are LONG_PTRs kept whole by SetWindowLongPtr. One
+    // set through SetWindowLong is a LONG, read back sign-extended (Wine's set_window_long).
+    const GWLP_WNDPROC = -4;
+    const GWLP_HINSTANCE = -6;
+    const GWLP_ID = -12;
+    const GWLP_USERDATA = -21;
+    const context = setup({ pointerSize: 8 });
+    const { memory } = context;
+    const fns = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        /** @type {unknown} */ (context.fns));
+    memory.putString(CLASS_NAME, 'MainWnd');
+    memory.putU32s(CLASS_STRUCT, [0x0003, 0, WNDPROC, 0, 0, 0, HINSTANCE, 0, 0x11, 0, 0x22, 0,
+        0x33, 0, 0, 0, CLASS_NAME, 0]);
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    const hwnd = createWindow(fns, memory);
+    const high = 0x9000_2000;
+    fns.SetWindowLongPtrA.handler([hwnd, GWLP_WNDPROC, high, 0]);
+    assert.equal(fns.GetWindowLongPtrA.handler([hwnd, GWLP_WNDPROC]), BigInt(high));
+    fns.SetWindowLongPtrA.handler([hwnd, GWLP_HINSTANCE, high, 0]);
+    assert.equal(fns.GetWindowLongPtrA.handler([hwnd, GWLP_HINSTANCE]), BigInt(high));
+    for (const index of [GWLP_USERDATA, GWLP_ID])
+    {
+        assert.equal(fns.SetWindowLongPtrA.handler([hwnd, index, 0x89abcdef, 0x01234567]), 0n);
+        assert.equal(fns.GetWindowLongPtrA.handler([hwnd, index]), 0x0123456789abcdefn,
+            'all eight bytes');
+        assert.equal(fns.SetWindowLongPtrA.handler([hwnd, index, high, 0]),
+            0x0123456789abcdefn, 'answers the long it replaced, whole');
+        assert.equal(fns.GetWindowLongPtrA.handler([hwnd, index]), BigInt(high),
+            'an address past 2 GiB is itself');
+        fns.SetWindowLongA.handler([hwnd, index, -2]);
+        assert.equal(fns.GetWindowLongPtrA.handler([hwnd, index]), 0xfffffffffffffffen,
+            'a LONG set through SetWindowLong, sign-extended');
+    }
+});
+
 test('a class is unregistered by its wide name, and not while a window of it is left', ()=>{
     const { fns, memory, hwnd } = withWindow();
     putWide(memory, WIDE_CLASS, 'MainWnd');
@@ -8171,3 +8209,19 @@ test('another thread disabling a window leaves its focus where it was', ()=>{
     caller.current = maker;
     assert.equal(fns.GetFocus.handler(), hwnd);
 });
+
+test('a 64-bit process\'s low-level hook structures hold dwExtraInfo on an eight-byte boundary',
+    ()=>{
+        // winuser.h under _WIN64: MSLLHOOKSTRUCT is 32 bytes with dwExtraInfo at
+        // 24, KBDLLHOOKSTRUCT 24 bytes with it at 16; a 32-bit process's are 24
+        // and 20 bytes, the fields one after another.
+        const mouse = new Uint8Array(new Uint32Array([10, 20, 0x780000, 1, 99, 0xfeed]).buffer);
+        const keys = new Uint8Array(new Uint32Array([0x41, 0x1e, 0x10, 99, 0xfeed]).buffer);
+        assert.equal(lowLevelLayout(14, mouse, false), mouse);
+        assert.equal(lowLevelLayout(13, keys, false), keys);
+        /** @param {Uint8Array} bytes */
+        const dwords = bytes=>[...new Uint32Array(bytes.slice().buffer)];
+        assert.deepEqual(dwords(lowLevelLayout(14, mouse, true)),
+            [10, 20, 0x780000, 1, 99, 0, 0xfeed, 0]);
+        assert.deepEqual(dwords(lowLevelLayout(13, keys, true)), [0x41, 0x1e, 0x10, 99, 0xfeed, 0]);
+    });

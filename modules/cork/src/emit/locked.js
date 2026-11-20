@@ -21,28 +21,33 @@
  * such an access inside one aligned qword is a compare-and-swap of the whole
  * qword, as indivisible as the processor's; one across a qword's boundary (a
  * split lock, which hardware too makes the slow exception) is a plain
- * read-modify-write, not indivisible against another executor.
+ * read-modify-write made holding the process's lock word (`lockHeld`): no other
+ * such access comes between, and those are the only writers a program has at
+ * an address it locks across a boundary.
  *
  * Plain loads and stores stay plain: they keep the order the host's own
  * plain accesses keep, which is x86's on an x86 host and weaker on arm64
  * (`docs/core/limits/processes.md`).
  */
 
-import { registerLocal } from './width.js';
+import { LONG_WIDE, registerLocal } from './width.js';
 import { CF, ZF } from '../decode/table.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind } from './flags.js';
 import { Local } from './region.js';
-import { checkAccess, noteStore, ramAt } from './memory.js';
-import { emitAddress, mask, prepare, readOp, writeOp, writeReg } from './integer.js';
+import { checkAccess, noteStore, ramAt, windowAddress } from './memory.js';
+import {
+    emitAddress, emitAddress64, mask, prepare, readOp, writeOp, writeReg,
+} from './integer.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
 
 const I32_LE_U = 0x4d;
 const ELSE = 0x05;
-const I64 = Object.freeze({ eq: 0x51, ne: 0x52, and: 0x83, or: 0x84, xor: 0x85, shl: 0x86,
-    shrU: 0x88, wrap: 0xa7, extendU: 0xad });
+const I64 = Object.freeze({ eq: 0x51, ne: 0x52, add: 0x7c, sub: 0x7d, and: 0x83, or: 0x84,
+    xor: 0x85, shl: 0x86, shrS: 0x87, shrU: 0x88, wrap: 0xa7, extendS: 0xac, extendU: 0xad });
+const SELECT = 0x1b;
 
 /** The atomic kinds' width suffix for an operand of `size` bytes. @param {number} size */
 const width = size=>(size === 1 ? 'i32_8' : size === 2 ? 'i32_16' : 'i32');
@@ -115,8 +120,34 @@ function swapLoop(e, size, old, next){
 }
 
 /**
+ * `body`'s plain accesses made holding the process's lock word
+ * (`layout.lockWord`), spun for: what no wasm atomic spans - an access across
+ * two aligned qwords - is indivisible against every other such access of every
+ * executor. `body` leaves no way out between the word's taking and its letting
+ * go. A layout of one processor has no word, and nobody to exclude.
+ *
+ * @param {E} e @param {() => void} body
+ */
+export function lockHeld(e, body){
+    const { b } = e;
+    const at = /** @type {{ lockWord?: number }} */ (e.layout).lockWord;
+    if (at === undefined)
+    {
+        body();
+        return;
+    }
+    e.openLoop('lockWord');
+    b.i32const(at).i32const(0).i32const(1).atomic('cmpxchg_i32');
+    b.brIf(e.depthOf('lockWord'));
+    e.close();
+    body();
+    b.i32const(at).i32const(0).atomic('store_i32');
+}
+
+/**
  * An access not a multiple of its width: inside one aligned qword, a
- * compare-and-swap of the qword; across two, a plain read-modify-write.
+ * compare-and-swap of the qword; across two, a plain read-modify-write
+ * holding the lock word (`lockHeld`).
  *
  * @param {E} e @param {number} size @param {number} old @param {() => void} next
  */
@@ -155,10 +186,12 @@ function unaligned(e, size, old, next){
     b.brIf(e.depthOf('qwordLocked'));
     e.close();
     b.op(ELSE);
-    b.localGet(Local.addr).load(plainLoad(size), ramAt(offset)).localSet(old);
-    b.localGet(Local.addr);
-    next();
-    b.store(plainStore(size), ramAt(offset));
+    lockHeld(e, ()=>{
+        b.localGet(Local.addr).load(plainLoad(size), ramAt(offset)).localSet(old);
+        b.localGet(Local.addr);
+        next();
+        b.store(plainStore(size), ramAt(offset));
+    });
     e.close();
 }
 
@@ -389,15 +422,18 @@ export function emitLocked(e, instruction, flagsLive){
             b.localGet(registerLocal(e, 0)).op(I64.extendU).op(I64.or).localSet(Local.t64b);
             b.localGet(Local.addr).i32const(7).op(I32.and);
             e.openGuard('splitLock', EMPTY);
-            // Across two qwords: a plain read and, if it matched, a plain write.
-            b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
-            b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
-            e.openIf('plainEqual', EMPTY);
-            b.localGet(Local.addr);
-            b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
-            b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
-            b.store('i64', ramAt(offset));
-            e.close();
+            // Across two qwords: a plain read and, if it matched, a plain write,
+            // holding the lock word.
+            lockHeld(e, ()=>{
+                b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
+                b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
+                e.openIf('plainEqual', EMPTY);
+                b.localGet(Local.addr);
+                b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
+                b.localGet(registerLocal(e, 3)).op(I64.extendU).op(I64.or);
+                b.store('i64', ramAt(offset));
+                e.close();
+            });
             b.op(ELSE);
             b.localGet(Local.addr).localGet(Local.t64b);
             b.localGet(registerLocal(e, 1)).op(I64.extendU).i64const(32n).op(I64.shl);
@@ -418,6 +454,401 @@ export function emitLocked(e, instruction, flagsLive){
             b.localGet(Local.t64).op(I64.wrap).localSet(registerLocal(e, 0));
             b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
                 .localSet(registerLocal(e, 2));
+            e.close();
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
+/** Every bit of an operand of `size` bytes, as a quadword. @param {number} size */
+const wideBits = size=>(size === 8 ? 0xffffffffffffffffn : (1n << BigInt(size * 8)) - 1n);
+/** The atomic kinds' width suffix in long mode. @param {number} size */
+const wideWidth = size=>(size === 8 ? 'i64' : width(size));
+
+/**
+ * Long mode's indivisible swap at `Local.addr`, every value a quadword: `old`
+ * (an i64 local) takes what memory held, zero-extended, and memory what
+ * `next()` pushes from it, an i64 within the operand's bits. A
+ * compare-and-swap loop at the access's width where the address is a multiple
+ * of it; as `unaligned` otherwise - the aligned qword holding the access, or
+ * plain across two, holding the lock word.
+ *
+ * @param {E} e @param {number} size @param {number} old @param {() => void} next
+ */
+function swapLong(e, size, old, next){
+    const { b } = e;
+    const offset = e.layout.ramBase;
+    /** Narrows the quadword on the stack to the access's own type. */
+    const narrow = ()=>{
+        if (size < 8)
+        {
+            b.op(I64.wrap);
+        }
+    };
+    /** Widens what an access of the width left on the stack. */
+    const widen = ()=>{
+        if (size < 8)
+        {
+            b.op(I64.extendU);
+        }
+    };
+    const aligned = ()=>{
+        e.openLoop('locked');
+        b.localGet(Local.addr).atomic(`load_${wideWidth(size)}`, ramAt(offset));
+        widen();
+        b.localSet(old);
+        b.localGet(Local.addr).localGet(old);
+        narrow();
+        next();
+        narrow();
+        b.atomic(`cmpxchg_${wideWidth(size)}`, ramAt(offset));
+        widen();
+        b.localGet(old).op(I64.ne);
+        b.brIf(e.depthOf('locked'));
+        e.close();
+    };
+    const plain = ()=>lockHeld(e, ()=>{
+        b.localGet(Local.addr).load(size === 8 ? 'i64' : plainLoad(size), ramAt(offset));
+        widen();
+        b.localSet(old);
+        b.localGet(Local.addr);
+        next();
+        narrow();
+        b.store(size === 8 ? 'i64' : plainStore(size), ramAt(offset));
+    });
+    if (size === 1)
+    {
+        aligned();
+        return;
+    }
+    b.localGet(Local.addr).i32const(size - 1).op(I32.and);
+    e.openGuard('splitLock', EMPTY);
+    if (size === 8)
+    {
+        plain();
+    }
+    else
+    {
+        const bits = wideBits(size);
+        /** Pushes the access's bit offset in its qword, as an i64. */
+        const shift = ()=>b.localGet(Local.addr).i32const(7).op(I32.and).i32const(3).op(I32.shl)
+            .op(I64.extendU);
+        /** Pushes the qword's address. */
+        const qword = ()=>b.localGet(Local.addr).i32const(-8).op(I32.and);
+        b.localGet(Local.addr).i32const(7).op(I32.and).i32const(8 - size).op(I32_LE_U);
+        e.openIf('inQword', EMPTY);
+        e.openLoop('qwordLocked');
+        qword();
+        b.atomic('load_i64', ramAt(offset)).localSet(Local.t64);
+        b.localGet(Local.t64);
+        shift();
+        b.op(I64.shrU).i64const(bits).op(I64.and).localSet(old);
+        qword();
+        b.localGet(Local.t64);
+        b.localGet(Local.t64).i64const(bits);
+        shift();
+        b.op(I64.shl).i64const(-1n).op(I64.xor).op(I64.and);
+        next();
+        shift();
+        b.op(I64.shl).op(I64.or);
+        b.atomic('cmpxchg_i64', ramAt(offset));
+        b.localGet(Local.t64).op(I64.ne);
+        b.brIf(e.depthOf('qwordLocked'));
+        e.close();
+        b.op(ELSE);
+        plain();
+        e.close();
+    }
+    b.op(ELSE);
+    aligned();
+    e.close();
+}
+
+/**
+ * Emits a locked instruction of the atomic variant in long mode: as
+ * `emitLocked`, every value held as a quadword (the flag record's operands are
+ * quadwords there) and narrowed where a register or the record takes it.
+ * `cmpxchg16b` - sixteen bytes no host access swaps at once - is its plain form
+ * holding the lock word (`integer.js`).
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ * @returns {boolean} false where the interpreter takes it
+ */
+export function emitLockedLong(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands, size } = instruction;
+    const [dst, src] = operands;
+    const offset = e.layout.ramBase;
+    const bits = wideBits(size);
+    // Scratch quadwords no operand's address or value is made in.
+    const W0 = LONG_WIDE;
+    const W1 = LONG_WIDE + 1;
+    /** Reads an operand of the instruction's size as a quadword within its bits. */
+    const readWide = (/** @type {import('../decode/decoder.js').Operand} */ operand)=>{
+        readOp(e, operand);
+        if (size < 8)
+        {
+            mask(e, size);
+            b.op(I64.extendU);
+        }
+    };
+    /** Pushes an i64 local as the instruction's own type. @param {number} local */
+    const typed = local=>{
+        b.localGet(local);
+        if (size < 8)
+        {
+            b.op(I64.wrap);
+        }
+    };
+    /** Keeps the quadword on the stack within the operand's bits. */
+    const within = ()=>{
+        if (size < 8)
+        {
+            b.i64const(bits).op(I64.and);
+        }
+    };
+    /** The record of `kind` from what `next` makes, as the plain form leaves it. */
+    const record = (/** @type {number} */ kind, /** @type {() => void} */ next)=>{
+        next();
+        if (size < 8)
+        {
+            b.op(I64.wrap);
+        }
+        e.record(kind, size);
+        b.drop();
+    };
+    switch (op)
+    {
+        case 'xchg':
+        {
+            const mem = dst.kind === 'mem' ? dst : src;
+            const reg = dst.kind === 'mem' ? src : dst;
+            addressOf(e, mem, size);
+            readWide(reg);
+            b.localSet(W1);
+            swapLong(e, size, W0, ()=>b.localGet(W1));
+            writeOp(e, reg, ()=>typed(W0), true);
+            return true;
+        }
+        case 'add': case 'sub': case 'and': case 'or': case 'xor': case 'xadd':
+        {
+            const operation = op === 'xadd' ? 'add' : op;
+            const opcode = operation === 'add' ? I64.add : operation === 'sub' ? I64.sub
+                : operation === 'and' ? I64.and : operation === 'or' ? I64.or : I64.xor;
+            addressOf(e, dst, size);
+            readWide(src);
+            b.localSet(Local.op2);
+            const next = ()=>{
+                b.localGet(Local.op1).localGet(Local.op2).op(opcode);
+                within();
+            };
+            swapLong(e, size, Local.op1, next);
+            if (op === 'xadd')
+            {
+                writeOp(e, src, ()=>typed(Local.op1));
+            }
+            if (flagsLive)
+            {
+                record(operation === 'add' ? Kind.ADD : operation === 'sub' ? Kind.SUB
+                    : Kind.LOGIC, next);
+            }
+            return true;
+        }
+        case 'adc': case 'sbb':
+        {
+            e.pushFlag(CF);
+            b.localSet(Local.cin);
+            addressOf(e, dst, size);
+            readWide(src);
+            b.localSet(Local.op2);
+            const opcode = op === 'adc' ? I64.add : I64.sub;
+            const next = ()=>{
+                b.localGet(Local.op1).localGet(Local.op2).op(opcode);
+                b.localGet(Local.cin).op(I64.extendU).op(opcode);
+                within();
+            };
+            swapLong(e, size, Local.op1, next);
+            if (flagsLive)
+            {
+                record(op === 'adc' ? Kind.ADC : Kind.SBB, next);
+            }
+            return true;
+        }
+        case 'inc': case 'dec':
+        {
+            // As the plain form: CF stays, and with the flags dead a pending
+            // record keeps its operands.
+            const value = flagsLive ? Local.op1 : W0;
+            if (flagsLive && (e.flagsAfter & CF) !== 0)
+            {
+                e.carryIntoWord();
+            }
+            addressOf(e, dst, size);
+            const next = ()=>{
+                b.localGet(value).i64const(1n).op(op === 'inc' ? I64.add : I64.sub);
+                within();
+            };
+            swapLong(e, size, value, next);
+            if (flagsLive)
+            {
+                record(op === 'inc' ? Kind.INC : Kind.DEC, next);
+            }
+            return true;
+        }
+        case 'neg':
+        {
+            addressOf(e, dst, size);
+            const next = ()=>{
+                b.i64const(0n).localGet(Local.op2).op(I64.sub);
+                within();
+            };
+            swapLong(e, size, Local.op2, next);
+            if (flagsLive)
+            {
+                record(Kind.NEG, next);
+            }
+            return true;
+        }
+        case 'not':
+            addressOf(e, dst, size);
+            swapLong(e, size, W0, ()=>b.localGet(W0).i64const(bits).op(I64.xor));
+            return true;
+        case 'bts': case 'btr': case 'btc':
+        {
+            const count = size * 8;
+            if (src.kind !== 'imm')
+            {
+                // A bit string, as the plain form (`bitTestLong`): the register
+                // names a bit anywhere from the address, signed.
+                readOp(e, src);
+                if (size === 2)
+                {
+                    b.i32const(16).op(I32.shl).i32const(16).op(I32.shrS);
+                }
+                if (size === 8)
+                {
+                    b.localTee(W0);
+                    b.op(I64.wrap);
+                }
+                else
+                {
+                    b.localTee(Local.t2);
+                    b.op(I64.extendS).localSet(W0);
+                    b.localGet(Local.t2);
+                }
+                b.i32const(count - 1).op(I32.and).localSet(Local.count);
+                windowAddress(e, ()=>{
+                    emitAddress64(e, dst);
+                    b.localGet(W0).i64const(BigInt(Math.log2(count))).op(I64.shrS)
+                        .i64const(BigInt(Math.log2(size))).op(I64.shl).op(I64.add);
+                });
+                checkAccess(e, size, { window: true, store: true });
+                noteStore(e, size);
+            }
+            else
+            {
+                addressOf(e, dst, size);
+                readOp(e, src);
+                b.i32const(count - 1).op(I32.and).localSet(Local.count);
+            }
+            /** Pushes the bit's mask. */
+            const bit = ()=>b.i64const(1n).localGet(Local.count).op(I64.extendU).op(I64.shl);
+            const next = ()=>{
+                b.localGet(W0);
+                bit();
+                if (op === 'btr')
+                {
+                    b.i64const(-1n).op(I64.xor).op(I64.and);
+                }
+                else
+                {
+                    b.op(op === 'bts' ? I64.or : I64.xor);
+                }
+            };
+            swapLong(e, size, W0, next);
+            if (flagsLive)
+            {
+                e.eagerWrite(CF);
+                b.localGet(W0).localGet(Local.count).op(I64.extendU).op(I64.shrU).op(I64.wrap)
+                    .i32const(1).op(I32.and);
+                e.orFlag(CF);
+            }
+            return true;
+        }
+        case 'cmpxchg':
+        {
+            addressOf(e, dst, size);
+            readWide(/** @type {import('../decode/decoder.js').Operand} */ (
+                { kind: 'reg', reg: 0, size }));
+            b.localSet(Local.op1);
+            readWide(src);
+            b.localSet(W0);
+            // Memory keeps what it held unless it held the accumulator.
+            swapLong(e, size, Local.op2, ()=>{
+                b.localGet(W0).localGet(Local.op2).localGet(Local.op2).localGet(Local.op1)
+                    .op(I64.eq).op(SELECT);
+            });
+            typed(Local.op1);
+            typed(Local.op2);
+            b.op(size === 8 ? I64.sub : I32.sub);
+            mask(e, size);
+            e.record(Kind.SUB, size);
+            if (size === 8)
+            {
+                b.i64const(0n).op(I64.ne);
+            }
+            // Not equal: the accumulator takes what memory held.
+            e.openIf('differs', EMPTY);
+            typed(Local.op2);
+            writeReg(e, 0, size, false, true);
+            e.close();
+            return true;
+        }
+        case 'cmpxchg8b':
+        {
+            /** Pushes `high:low`, the low dwords of two registers. */
+            const pair = (/** @type {number} */ high, /** @type {number} */ low)=>{
+                b.localGet(registerLocal(e, high)).i64const(32n).op(I64.shl);
+                b.localGet(registerLocal(e, low)).i64const(0xffffffffn).op(I64.and).op(I64.or);
+            };
+            addressOf(e, dst, 8);
+            // edx:eax, the value expected, and ecx:ebx, the one stored.
+            pair(2, 0);
+            b.localSet(Local.t64b);
+            b.localGet(Local.addr).i32const(7).op(I32.and);
+            e.openGuard('splitLock', EMPTY);
+            // Across two qwords: a plain read and, if it matched, a plain write,
+            // holding the lock word.
+            lockHeld(e, ()=>{
+                b.localGet(Local.addr).load('i64', ramAt(offset)).localSet(Local.t64);
+                b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
+                e.openIf('plainEqual', EMPTY);
+                b.localGet(Local.addr);
+                pair(1, 3);
+                b.store('i64', ramAt(offset));
+                e.close();
+            });
+            b.op(ELSE);
+            b.localGet(Local.addr).localGet(Local.t64b);
+            pair(1, 3);
+            b.atomic('cmpxchg_i64', ramAt(offset)).localSet(Local.t64);
+            e.close();
+            if (flagsLive)
+            {
+                e.eagerWrite(ZF);
+            }
+            b.localGet(Local.t64).localGet(Local.t64b).op(I64.eq);
+            e.openIf('equal', EMPTY);
+            if (flagsLive)
+            {
+                b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+            }
+            b.op(ELSE);
+            // As dword writes: each clears its register's upper half.
+            b.localGet(Local.t64).i64const(0xffffffffn).op(I64.and).localSet(registerLocal(e, 0));
+            b.localGet(Local.t64).i64const(32n).op(I64.shrU).localSet(registerLocal(e, 2));
             e.close();
             return true;
         }

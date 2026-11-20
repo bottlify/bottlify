@@ -33,7 +33,7 @@
 import { windowsVersion } from '../kernel32/versions.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL, createGlobals } from './globals.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /** `_XcptFilter`'s answer: this filter handles nothing and passes it on. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -215,20 +215,20 @@ export function createStartupFunctions(host){
         }
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(address >>> 0, bytes);
+        host.writeMemory(wholeAddress(address), bytes);
     };
 
     /** @param {number} address @param {number} value */
     const writePointer = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            host.writeMemory(address >>> 0, width.bytes(value));
+            host.writeMemory(wholeAddress(address), width.bytes(value));
         }
     };
 
     /** @param {number} address */
     const readPointer = address=>{
-        const bytes = host.readMemory(address >>> 0, width.size);
+        const bytes = host.readMemory(wholeAddress(address), width.size);
         return width.get(new DataView(bytes.buffer, bytes.byteOffset, width.size), 0);
     };
 
@@ -358,7 +358,7 @@ export function createStartupFunctions(host){
                     globals.set(host.errnoName?.() ?? 'errno', EINVAL);
                     return EINVAL;
                 }
-                host.writeMemory(out >>> 0, dword(pointer()));
+                host.writeMemory(wholeAddress(out), dword(pointer()));
                 return 0;
             },
         });
@@ -544,6 +544,7 @@ export function createStartupFunctions(host){
          * through, and the same address every time.
          */
         __p__commode: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('commode', 0),
@@ -565,6 +566,7 @@ export function createStartupFunctions(host){
          * the calling thread's own failing calls set.
          */
         _errno: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell(host.errnoName?.() ?? 'errno', 0),
@@ -578,6 +580,7 @@ export function createStartupFunctions(host){
 
         /** int *__p___argc(void) */
         __p___argc: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -588,6 +591,7 @@ export function createStartupFunctions(host){
 
         /** char ***__p___argv(void) */
         __p___argv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>{
@@ -604,6 +608,7 @@ export function createStartupFunctions(host){
          * this way whichever start-up the program ran.
          */
         __p___wargv: {
+            returns: 'pointer',
             convention: 'cdecl',
             argBytes: 0,
             handler: ()=>cell('wargv', buildWideMainArgs().argv),
@@ -725,7 +730,7 @@ export function createStartupFunctions(host){
             /** @param {number[]} args */
             handler: ([fn])=>{
                 onExit.push(fn >>> 0);
-                return fn >>> 0;
+                return wholeAddress(fn);
             },
         },
 
@@ -772,7 +777,7 @@ export function createStartupFunctions(host){
                 writePointer(grown + count * size, fn >>> 0);
                 writePointer(pbegin, grown);
                 writePointer(pend, grown + (count + 1) * size);
-                return fn >>> 0;
+                return wholeAddress(fn);
             },
         },
 

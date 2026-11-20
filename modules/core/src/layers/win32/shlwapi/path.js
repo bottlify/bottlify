@@ -15,6 +15,7 @@
  */
 
 import { dword, u32 } from './text.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** What a path may be, terminator included. */
 export const MAX_PATH = 260;
@@ -502,14 +503,17 @@ export function createPathFunctions(host, { A, W }){
      *
      * @param {string} name @param {number} argBytes
      * @param {(width: import('./text.js').Width, args: number[]) => number} body
+     * @param {{ returns?: string }} [marshal]  `returns: 'pointer'` for one answering an address
      */
-    const both = (name, argBytes, body)=>({
-        [`${name}A`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(A, args) },
-        [`${name}W`]: { argBytes, handler: (/** @type {number[]} */ args)=>body(W, args) },
+    const both = (name, argBytes, body, marshal = {})=>({
+        [`${name}A`]: { argBytes, ...marshal,
+            handler: (/** @type {number[]} */ args)=>body(A, args) },
+        [`${name}W`]: { argBytes, ...marshal,
+            handler: (/** @type {number[]} */ args)=>body(W, args) },
     });
 
     /** @param {number} address @param {import('./text.js').Width} width @param {string} text */
-    const write = (address, width, text)=>host.writeMemory(address >>> 0, width.sz(text));
+    const write = (address, width, text)=>host.writeMemory(wholeAddress(address), width.sz(text));
 
     /**
      * The process's variables as kernel32 has them now, by upper-case name;
@@ -554,7 +558,7 @@ export function createPathFunctions(host, { A, W }){
      * @param {number} address
      */
     const countAt = address=>((address >>> 0) === 0 || !host.readMemory
-        ? null : u32(host.readMemory(address >>> 0, 4)));
+        ? null : u32(host.readMemory(wholeAddress(address), 4)));
 
     /**
      * An answer into a buffer whose room the caller counts: written with its
@@ -568,10 +572,10 @@ export function createPathFunctions(host, { A, W }){
         if (text.length < room)
         {
             write(buffer, width, text);
-            host.writeMemory(count >>> 0, dword(text.length));
+            host.writeMemory(wholeAddress(count), dword(text.length));
             return S_OK;
         }
-        host.writeMemory(count >>> 0, dword(text.length + 1));
+        host.writeMemory(wholeAddress(count), dword(text.length + 1));
         return E_POINTER;
     };
 
@@ -607,7 +611,7 @@ export function createPathFunctions(host, { A, W }){
             const dot = path === null ? 0 : extensionIndex(path);
             if (path !== null && dot < path.length)
             {
-                host.writeMemory((pointer >>> 0) + dot * width.unit, width.sz(''));
+                host.writeMemory(wholeAddress(pointer) + dot * width.unit, width.sz(''));
             }
             return 0;
         }),
@@ -629,7 +633,7 @@ export function createPathFunctions(host, { A, W }){
             const keep = strippedRoot(path);
             if ((keep ?? 0) < path.length)
             {
-                host.writeMemory((pointer >>> 0) + (keep ?? 0) * width.unit, width.sz(''));
+                host.writeMemory(wholeAddress(pointer) + (keep ?? 0) * width.unit, width.sz(''));
             }
             return keep === null ? 0 : 1;
         }),
@@ -654,7 +658,7 @@ export function createPathFunctions(host, { A, W }){
             }
             host.writeMemory(end, width.sz('\\'));
             return end + width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * LPSTR PathRemoveBackslashA(LPSTR pszPath)
@@ -675,7 +679,7 @@ export function createPathFunctions(host, { A, W }){
                 host.writeMemory(last, width.sz(''));
             }
             return last;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * BOOL PathCanonicalizeA(LPSTR pszBuf, LPCSTR pszPath)
@@ -787,7 +791,7 @@ export function createPathFunctions(host, { A, W }){
             const bytes = W.sz(path);
             const alloc = host.library?.('KERNEL32.dll')?.LocalAlloc;
             const block = alloc ? /** @type {number} */ (alloc.handler([0, bytes.length])) >>> 0 : 0;
-            host.writeMemory(out >>> 0, Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
+            host.writeMemory(wholeAddress(out), Uint8Array.of(block & 0xff, block >>> 8 & 0xff,
                 block >>> 16 & 0xff, block >>> 24 & 0xff));
             if (!block)
             {
@@ -832,7 +836,7 @@ export function createPathFunctions(host, { A, W }){
             const path = width.read(pointer);
             return path === null ? pointer >>> 0
                 : (pointer >>> 0) + argumentsAt(path) * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * void PathRemoveArgsA(LPSTR pszPath)
@@ -849,7 +853,7 @@ export function createPathFunctions(host, { A, W }){
             const at = argumentsAt(path);
             if (at > 0 && (at < path.length || path[at - 1] === ' '))
             {
-                host.writeMemory((pointer >>> 0) + (at - 1) * width.unit, width.sz(''));
+                host.writeMemory(wholeAddress(pointer) + (at - 1) * width.unit, width.sz(''));
             }
             return 0;
         }),
@@ -997,8 +1001,8 @@ export function createPathFunctions(host, { A, W }){
             {
                 write(pointer, width, `${String.fromCharCode(0x41 + (drive | 0))}:\\`);
             }
-            return pointer >>> 0;
-        }),
+            return wholeAddress(pointer);
+        }, { returns: 'pointer' }),
 
         /**
          * BOOL PathRemoveFileSpecA(LPSTR pszPath)
@@ -1013,7 +1017,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory((pointer >>> 0) + cut * width.unit, width.sz(''));
+            host.writeMemory(wholeAddress(pointer) + cut * width.unit, width.sz(''));
             return 1;
         }),
 
@@ -1073,7 +1077,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory((pointer >>> 0) + dot * width.unit, width.sz(added));
+            host.writeMemory(wholeAddress(pointer) + dot * width.unit, width.sz(added));
             return 1;
         }),
 
@@ -1095,7 +1099,7 @@ export function createPathFunctions(host, { A, W }){
             {
                 return 0;
             }
-            host.writeMemory((pointer >>> 0) + path.length * width.unit, width.sz(added));
+            host.writeMemory(wholeAddress(pointer) + path.length * width.unit, width.sz(added));
             return 1;
         }),
 
@@ -1124,7 +1128,7 @@ export function createPathFunctions(host, { A, W }){
             const path = width.read(pointer);
             const past = path === null ? null : skipRoot(path);
             return past === null ? 0 : (pointer >>> 0) + past * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * BOOL PathFileExistsDefExtA(LPSTR lpszPath, DWORD dwWhich)
@@ -1164,13 +1168,14 @@ export function createPathFunctions(host, { A, W }){
             const answer = attributes ?? INVALID_FILE_ATTRIBUTES;
             if ((out >>> 0) !== 0)
             {
-                host.writeMemory(out >>> 0, dword(answer));
+                host.writeMemory(wholeAddress(out), dword(answer));
             }
             return answer === INVALID_FILE_ATTRIBUTES ? 0 : 1;
         }),
 
         /** LPSTR PathSkipLeadingSlashesA(LPCSTR lpszSrc): past a URL's leading "//". */
         PathSkipLeadingSlashesA: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
@@ -1213,7 +1218,7 @@ export function createPathFunctions(host, { A, W }){
             }
             const cut = path.indexOf('\\');
             return (pointer >>> 0) + (cut < 0 ? path.length : cut + 1) * width.unit;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * LPCSTR PathFindSuffixArrayA(LPCSTR lpszSuffix, LPCSTR *lppszArray, int dwCount)
@@ -1229,7 +1234,7 @@ export function createPathFunctions(host, { A, W }){
             }
             for (let at = 0; at < (count | 0); at++)
             {
-                const entry = u32(host.readMemory((list >>> 0) + at * 4, 4));
+                const entry = u32(host.readMemory(wholeAddress(list) + at * 4, 4));
                 const suffix = width.read(entry);
                 if (suffix !== null && path.length >= suffix.length
                     && path.slice(path.length - suffix.length).toLowerCase()
@@ -1239,7 +1244,7 @@ export function createPathFunctions(host, { A, W }){
                 }
             }
             return 0;
-        }),
+        }, { returns: 'pointer' }),
 
         /**
          * UINT PathGetCharTypeA(UCHAR ch)
@@ -1414,7 +1419,8 @@ export function createPathFunctions(host, { A, W }){
             if ((which & bit) !== 0 && path.length + extension.length < MAX_PATH
                 && stat(path + extension)?.exists)
             {
-                host.writeMemory((buffer >>> 0) + path.length * width.unit, width.sz(extension));
+                host.writeMemory(wholeAddress(buffer) + path.length * width.unit,
+                    width.sz(extension));
                 return true;
             }
         }
@@ -1437,7 +1443,7 @@ export function createPathFunctions(host, { A, W }){
         }
         /** @type {string[]} */
         const directories = [];
-        for (let at = others >>> 0; at !== 0 && directories.length < 0x400; at += 4)
+        for (let at = wholeAddress(others); at !== 0 && directories.length < 0x400; at += 4)
         {
             const entry = u32(host.readMemory(at, 4));
             const directory = entry === 0 ? null : width.read(entry);

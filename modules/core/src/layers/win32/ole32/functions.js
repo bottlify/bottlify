@@ -48,7 +48,7 @@ import { createOle2Functions } from './ole2.js';
 import { createAdviseFunctions } from './advise.js';
 import { createClipboardFunctions } from './clipboard.js';
 import { parseCompoundFile } from './cfb.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import {
     OBJREF_BYTES, OBJREF_CUSTOM, OBJREF_CUSTOM_BYTES, OBJREF_HEADER_BYTES, OBJREF_STANDARD,
     SIGNATURE as OBJREF_SIGNATURE, decodeObjref, encodeCustomHeader, encodeObjref,
@@ -63,8 +63,6 @@ const E_NOINTERFACE = 0x80004002;
 const CO_E_NOT_SUPPORTED = 0x80004021;
 /** Some of the interfaces CoCreateInstanceEx was asked for, not all. */
 const CO_S_NOTALLINTERFACES = 0x00080012;
-/** MULTI_QI: the interface asked for, the pointer found, and the answer. */
-const MULTI_QI_SIZE = 12;
 const E_POINTER = 0x80004003;
 const E_FAIL = 0x80004005;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -312,6 +310,8 @@ const MAX_PROGID = 255;
  * @property {import('./storage.js').StorageFiles} [files]
  *           The volume, for a docfile. Absent, no storage opens.
  * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ * @property {() => number} [now]  the machine's wall clock in ms (the kernel's), which
+ *     the time stamps of the running object table read; the host's own clock where none is given
  *           A stdcall into guest code, for an object a program saves to a
  *           stream: its GetClassID and Save are the program's. The thread
  *           names whose call a second, awaited-after call answers.
@@ -412,7 +412,7 @@ const MAX_PROGID = 255;
  * @param {number} pointer @param {number} size
  */
 function reallocate(heap, memory, pointer, size){
-    const address = pointer >>> 0;
+    const address = wholeAddress(pointer);
     const wanted = size >>> 0;
     if (address === 0)
     {
@@ -551,7 +551,7 @@ export function createOleFunctions(host){
     };
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
 
     const width = pointerWidth(host.pointerSize ?? 4);
@@ -561,7 +561,8 @@ export function createOleFunctions(host){
      *
      * @param {number} address @param {number} value
      */
-    const writePointer = (address, value)=>host.writeMemory(address >>> 0, width.bytes(value));
+    const writePointer = (address, value)=>host.writeMemory(wholeAddress(address),
+        width.bytes(value));
 
     /** @param {any} value @param {(answer: any) => any} then */
     const andThen = (value, then)=>(typeof value?.then === 'function'
@@ -722,7 +723,7 @@ export function createOleFunctions(host){
         outs.forEach((out, index)=>{
             if ((out >>> 0) !== 0)
             {
-                writeU32(out >>> 0, values[index]);
+                writeU32(wholeAddress(out), values[index]);
             }
         });
     };
@@ -1513,7 +1514,7 @@ export function createOleFunctions(host){
      * @returns {string | null}
      */
     const guidAt = guidPointer=>{
-        const address = guidPointer >>> 0;
+        const address = wholeAddress(guidPointer);
         return address === 0 ? null : readGuid(host, address);
     };
 
@@ -1583,7 +1584,7 @@ export function createOleFunctions(host){
             {
                 return E_INVALIDARG;
             }
-            writeU32(out >>> 0, value);
+            writeU32(wholeAddress(out), value);
             return S_OK;
         };
         /** @param {string} name */
@@ -1759,7 +1760,7 @@ export function createOleFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([rguid, ppsz])=>{
-            const out = ppsz >>> 0;
+            const out = wholeAddress(ppsz);
             const guid = guidAt(rguid);
             if (guid === null || out === 0)
             {
@@ -1786,7 +1787,7 @@ export function createOleFunctions(host){
      * @returns {number | Promise<number>}
      */
     const coCreateInstance = ([classId, outer, context, interfaceId, ppv])=>{
-        const out = ppv >>> 0;
+        const out = wholeAddress(ppv);
         if (out === 0)
         {
             return E_POINTER;
@@ -2087,7 +2088,7 @@ export function createOleFunctions(host){
 
     /** Now, as a FILETIME's two words: when an object was registered or noted changed. */
     const fileTimeNow = ()=>{
-        const ticks = (BigInt(Date.now()) + 11644473600000n) * 10000n;
+        const ticks = (BigInt(Math.floor((host.now ?? Date.now)())) + 11644473600000n) * 10000n;
         return [Number(ticks & 0xffffffffn), Number(ticks >> 32n)];
     };
 
@@ -2174,7 +2175,7 @@ export function createOleFunctions(host){
                             flags >>> 0, host.callerThread?.());
                         if (made.hr >= 0)
                         {
-                            writeU32(cookieOut >>> 0, made.cookie);
+                            writeU32(wholeAddress(cookieOut), made.cookie);
                         }
                         return made.hr;
                     } },
@@ -2191,7 +2192,7 @@ export function createOleFunctions(host){
                         {
                             return E_INVALIDARG;
                         }
-                        writePointer(out >>> 0, 0);
+                        writePointer(wholeAddress(out), 0);
                         const thread = host.callerThread?.();
                         const entry = await runningObjects.find(moniker >>> 0, thread);
                         const pointer = entry ? await runningObjects.take(entry, thread) : 0;
@@ -2199,7 +2200,7 @@ export function createOleFunctions(host){
                         {
                             return MK_E_UNAVAILABLE;
                         }
-                        writePointer(out >>> 0, pointer);
+                        writePointer(wholeAddress(out), pointer);
                         return S_OK;
                     } },
                 { name: 'NoteChangeTime', argBytes: 12,
@@ -2209,7 +2210,8 @@ export function createOleFunctions(host){
                             return E_INVALIDARG;
                         }
                         return runTable.rotNoteChange(cookie >>> 0,
-                            [readU32(time >>> 0), readU32((time >>> 0) + 4)]) ? S_OK : E_INVALIDARG;
+                            [readU32(wholeAddress(time)),
+                                readU32(wholeAddress(time) + 4)]) ? S_OK : E_INVALIDARG;
                     } },
                 { name: 'GetTimeOfLastChange', argBytes: 12,
                     invoke: async(_object, [moniker, time])=>{
@@ -2223,8 +2225,8 @@ export function createOleFunctions(host){
                         {
                             return MK_E_UNAVAILABLE;
                         }
-                        writeU32(time >>> 0, entry.time[0]);
-                        writeU32((time >>> 0) + 4, entry.time[1]);
+                        writeU32(wholeAddress(time), entry.time[0]);
+                        writeU32(wholeAddress(time) + 4, entry.time[1]);
                         return S_OK;
                     } },
                 { name: 'EnumRunning', argBytes: 8,
@@ -2271,11 +2273,11 @@ export function createOleFunctions(host){
                             {
                                 const moniker = monikers[next++];
                                 await callMethod(moniker, SLOT_ADD_REF, [], host.callerThread?.());
-                                writeU32((into >>> 0) + fetched * 4, moniker);
+                                writeU32(wholeAddress(into) + fetched * 4, moniker);
                             }
                             if ((fetchedOut >>> 0) !== 0)
                             {
-                                writeU32(fetchedOut >>> 0, fetched);
+                                writeU32(wholeAddress(fetchedOut), fetched);
                             }
                             return fetched === (count >>> 0) ? S_OK : S_FALSE;
                         } },
@@ -2524,7 +2526,7 @@ export function createOleFunctions(host){
                     } },
                 { name: 'GetMarshalSizeMax', argBytes: 28,
                     invoke: (_object, [, , , , , out])=>{
-                        writeU32(out >>> 0, OBJREF_BYTES);
+                        writeU32(wholeAddress(out), OBJREF_BYTES);
                         return S_OK;
                     } },
                 { name: 'MarshalInterface', argBytes: 28,
@@ -2536,8 +2538,8 @@ export function createOleFunctions(host){
                 { name: 'UnmarshalInterface', argBytes: 16,
                     invoke: async(_object, [stream, riid, out])=>{
                         const thread = host.callerThread?.();
-                        writeU32(out >>> 0, 0);
-                        const packet = await readObjref(stream >>> 0, thread);
+                        writeU32(wholeAddress(out), 0);
+                        const packet = await readObjref(wholeAddress(stream), thread);
                         return packet?.kind === 'standard'
                             ? standardUnmarshal(packet, riid >>> 0, out >>> 0, thread)
                             : RPC_E_INVALID_OBJREF;
@@ -2545,7 +2547,7 @@ export function createOleFunctions(host){
                 { name: 'ReleaseMarshalData', argBytes: 8,
                     invoke: async(_object, [stream])=>{
                         const thread = host.callerThread?.();
-                        const packet = await readObjref(stream >>> 0, thread);
+                        const packet = await readObjref(wholeAddress(stream), thread);
                         const channel = remote();
                         return packet?.kind === 'standard' && channel
                             ? channel.releaseReference(packet.decoded.reference, thread)
@@ -2597,8 +2599,9 @@ export function createOleFunctions(host){
                         } },
                     { name: 'GetMarshalSizeMax', argBytes: 28,
                         invoke: (_object, [, , context, , , out])=>{
-                            writeU32(out >>> 0, inProcess(context >>> 0) ? FREE_THREADED_BYTES
-                                : OBJREF_BYTES);
+                            writeU32(wholeAddress(out),
+                                inProcess(context >>> 0) ? FREE_THREADED_BYTES
+                                    : OBJREF_BYTES);
                             return S_OK;
                         } },
                     { name: 'MarshalInterface', argBytes: 28,
@@ -2633,7 +2636,7 @@ export function createOleFunctions(host){
                     { name: 'UnmarshalInterface', argBytes: 16,
                         invoke: async(_object, [stream, riid, out])=>{
                             const thread = host.callerThread?.();
-                            writeU32(out >>> 0, 0);
+                            writeU32(wholeAddress(out), 0);
                             const packet = await readPacket(stream >>> 0, thread);
                             if (!packet)
                             {
@@ -2786,6 +2789,11 @@ export function createOleFunctions(host){
     };
 
     /**
+     * MULTI_QI in this process's layout: the interface asked for and the
+     * pointer found, each a pointer wide, then the answer.
+     */
+    const multi = width.size === 8 ? { itf: 8, hr: 16, size: 24 } : { itf: 4, hr: 8, size: 12 };
+    /**
      * What the moniker classes reach of the rest of COM: activation, the
      * running object table, docfiles and the volume, all as this layer's own
      * exports answer them.
@@ -2793,6 +2801,7 @@ export function createOleFunctions(host){
      * @type {import('./monikers.js').MonikerEnv}
      */
     const monikerEnv = {
+        pointerSize: width.size,
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         heap: host.heap,
@@ -3014,7 +3023,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 host.registry.mtaUsage.enter();
-                writeU32(cookie >>> 0, host.registry.mtaUsage.users);
+                writeU32(wholeAddress(cookie), host.registry.mtaUsage.users);
                 return S_OK;
             },
         },
@@ -3052,8 +3061,8 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 const { kind, detail, answer } = apartmentType();
-                writeU32(type >>> 0, kind);
-                writeU32(qualifier >>> 0, detail);
+                writeU32(wholeAddress(type), kind);
+                writeU32(wholeAddress(qualifier), detail);
                 return answer;
             },
         },
@@ -3094,7 +3103,7 @@ export function createOleFunctions(host){
                 {
                     return E_POINTER;
                 }
-                writePointer(out >>> 0, 0);
+                writePointer(wholeAddress(out), 0);
                 const context = currentContext();
                 if (!context)
                 {
@@ -3131,7 +3140,7 @@ export function createOleFunctions(host){
                     {
                         return E_OUTOFMEMORY;
                     }
-                    writePointer(out >>> 0, pointer);
+                    writePointer(wholeAddress(out), pointer);
                     return S_OK;
                 });
             },
@@ -3154,7 +3163,7 @@ export function createOleFunctions(host){
                 {
                     return E_POINTER;
                 }
-                writePointer(out >>> 0, 0);
+                writePointer(wholeAddress(out), 0);
                 const wanted = type >>> 0;
                 if (![APTTYPE_CURRENT, APTTYPE_STA, APTTYPE_MTA, APTTYPE_MAINSTA].includes(wanted))
                 {
@@ -3237,6 +3246,7 @@ export function createOleFunctions(host){
          * unload the library later, and nothing here ever does.
          */
         CoLoadLibrary: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name])=>host.libraries?.load(name >>> 0) ?? 0,
@@ -3281,8 +3291,8 @@ export function createOleFunctions(host){
                 let slot = spies.findIndex(entry=>!entry);
                 slot = slot < 0 ? spies.length : slot;
                 spies[slot] = held;
-                writeU32(cookie >>> 0, slot);
-                writeU32((cookie >>> 0) + 4, threadIdOf(thread));
+                writeU32(wholeAddress(cookie), slot);
+                writeU32(wholeAddress(cookie) + 4, threadIdOf(thread));
                 return S_OK;
             },
         },
@@ -3495,7 +3505,7 @@ export function createOleFunctions(host){
                 apartment.messageFilter = filter >>> 0;
                 if ((previous >>> 0) !== 0)
                 {
-                    writePointer(previous >>> 0, held);
+                    writePointer(wholeAddress(previous), held);
                 }
                 const taken = (filter >>> 0) !== 0
                     ? callMethod(filter >>> 0, SLOT_ADD_REF, [], thread) : S_OK;
@@ -3565,32 +3575,32 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                if ((server >>> 0) !== 0 && readU32((server >>> 0) + 4) !== 0)
+                if ((server >>> 0) !== 0 && readU32(wholeAddress(server) + 4) !== 0)
                 {
                     host.divergence?.('CoCreateInstanceEx',
                         'the server a program names is made on this machine');
                 }
                 /** @param {number} index */
-                const entry = index=>(results >>> 0) + index * MULTI_QI_SIZE;
+                const entry = index=>(results >>> 0) + index * multi.size;
                 for (let index = 0; index < (count >>> 0); index++)
                 {
-                    writeU32(entry(index) + 4, 0);
-                    writeU32(entry(index) + 8, E_NOINTERFACE);
+                    writeU32(entry(index) + multi.itf, 0);
+                    writeU32(entry(index) + multi.hr, E_NOINTERFACE);
                 }
                 const thread = host.callerThread?.();
                 const first = entry(0);
                 return andThen(coCreateInstance([classId, outer, context, readU32(first),
-                    first + 4]), (/** @type {number} */ made)=>{
+                    first + multi.itf]), (/** @type {number} */ made)=>{
                     if ((made | 0) < 0)
                     {
                         for (let index = 0; index < (count >>> 0); index++)
                         {
-                            writeU32(entry(index) + 8, made);
+                            writeU32(entry(index) + multi.hr, made);
                         }
                         return made;
                     }
-                    writeU32(first + 8, S_OK);
-                    const object = readU32(first + 4);
+                    writeU32(first + multi.hr, S_OK);
+                    const object = readU32(first + multi.itf);
                     /** @param {number} index @returns {number | Promise<number>} */
                     const ask = index=>{
                         if (index >= (count >>> 0))
@@ -3598,15 +3608,15 @@ export function createOleFunctions(host){
                             let found = 0;
                             for (let at = 0; at < (count >>> 0); at++)
                             {
-                                found += readU32(entry(at) + 8) === S_OK ? 1 : 0;
+                                found += readU32(entry(at) + multi.hr) === S_OK ? 1 : 0;
                             }
                             return found === (count >>> 0) ? S_OK
                                 : found === 0 ? E_NOINTERFACE : CO_S_NOTALLINTERFACES;
                         }
                         return callMethod(object, SLOT_QUERY_INTERFACE,
-                            [readU32(entry(index)), entry(index) + 4], thread)
+                            [readU32(entry(index)), entry(index) + multi.itf], thread)
                             .then(hr=>{
-                                writeU32(entry(index) + 8, hr);
+                                writeU32(entry(index) + multi.hr, hr);
                                 return ask(index + 1);
                             });
                     };
@@ -3627,7 +3637,7 @@ export function createOleFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([classId, context, , interfaceId, ppv])=>{
-                const out = ppv >>> 0;
+                const out = wholeAddress(ppv);
                 if (out === 0)
                 {
                     return E_POINTER;
@@ -3658,7 +3668,7 @@ export function createOleFunctions(host){
                                     {
                                         return E_POINTER;
                                     }
-                                    writeU32(into >>> 0, 0);
+                                    writeU32(wholeAddress(into), 0);
                                     return asked === null
                                         ? E_INVALIDARG
                                         : createBuiltIn(clsid, outer, asked, into >>> 0);
@@ -3716,7 +3726,7 @@ export function createOleFunctions(host){
                 }
                 const cookie = nextCookie++;
                 classObjects.set(cookie, { clsid, object: object >>> 0, thread });
-                writeU32(cookieOut >>> 0, cookie);
+                writeU32(wholeAddress(cookieOut), cookie);
                 const held = callMethod(object >>> 0, SLOT_ADD_REF, [], host.callerThread?.());
                 // Served to other processes too, through the run's table.
                 const channel = (context & CLSCTX_LOCAL_SERVER) !== 0 ? remote() : null;
@@ -3897,7 +3907,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const switched = threadState(host.currentThread()).callContext;
                 if (switched !== 0)
                 {
@@ -3987,7 +3997,7 @@ export function createOleFunctions(host){
                     return E_NOINTERFACE;
                 }
                 return callMethod(proxy >>> 0, SLOT_ADD_REF, [], host.callerThread?.()).then(()=>{
-                    writeU32(out >>> 0, proxy >>> 0);
+                    writeU32(wholeAddress(out), proxy >>> 0);
                     return S_OK;
                 });
             },
@@ -4099,7 +4109,7 @@ export function createOleFunctions(host){
                     .then(hr=>{
                         if ((hr | 0) >= 0 && (out >>> 0) !== 0)
                         {
-                            writeU32(out >>> 0, readU32(block));
+                            writeU32(wholeAddress(out), readU32(block));
                         }
                         host.heap.free(block);
                         return hr;
@@ -4127,7 +4137,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(indexOut >>> 0, 0);
+                writeU32(wholeAddress(indexOut), 0);
                 if ((handles >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -4161,7 +4171,7 @@ export function createOleFunctions(host){
                     {
                         return hresultFromWin32(waits.lastError(caller));
                     }
-                    writeU32(indexOut >>> 0, answer >>> 0);
+                    writeU32(wholeAddress(indexOut), answer >>> 0);
                     return S_OK;
                 };
                 if (thread?.ole32?.model !== COINIT_APARTMENTTHREADED)
@@ -4228,7 +4238,7 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pguid])=>{
-                const address = pguid >>> 0;
+                const address = wholeAddress(pguid);
                 if (address === 0)
                 {
                     return E_INVALIDARG;
@@ -4247,7 +4257,9 @@ export function createOleFunctions(host){
 
         /** LPVOID CoTaskMemAlloc(SIZE_T cb) */
         CoTaskMemAlloc: {
+            returns: 'pointer',
             argBytes: 4,
+            sizes: [0],
             /** @param {number[]} args */
             // A zero-byte request still yields a pointer that is not NULL, which
             // is what the caller tests for.
@@ -4271,7 +4283,7 @@ export function createOleFunctions(host){
                 const pointer = (context >>> 0) === MEMCTX_TASK
                     ? host.taskAllocator?.pointer() ?? 0
                     : 0;
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 if ((context >>> 0) !== MEMCTX_TASK)
                 {
                     return E_INVALIDARG;
@@ -4285,7 +4297,7 @@ export function createOleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const address = pointer >>> 0;
+                const address = wholeAddress(pointer);
                 // Documented as a no-op for NULL, so wrappers can pass it on.
                 if (address !== 0)
                 {
@@ -4297,7 +4309,9 @@ export function createOleFunctions(host){
 
         /** LPVOID CoTaskMemRealloc(LPVOID pv, SIZE_T cb) */
         CoTaskMemRealloc: {
+            returns: 'pointer',
             argBytes: 8,
+            sizes: [1],
             /** @param {number[]} args */
             handler: ([pointer, size])=>reallocate(host.heap, host, pointer, size),
         },
@@ -4307,7 +4321,7 @@ export function createOleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rguid, lpsz, cchMax])=>{
-                const out = lpsz >>> 0;
+                const out = wholeAddress(lpsz);
                 const guid = guidAt(rguid);
                 // The count includes the terminator, so a buffer of exactly 38
                 // characters is one short and nothing is written into it.
@@ -4423,7 +4437,7 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([rclsid, out])=>{
-                const slot = out >>> 0;
+                const slot = wholeAddress(out);
                 const guid = guidAt(rclsid);
                 if (guid === null || slot === 0)
                 {
@@ -4464,13 +4478,13 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([lpszProgID, lpclsid])=>{
-                const out = lpclsid >>> 0;
+                const out = wholeAddress(lpclsid);
                 if (out === 0 || (lpszProgID >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeGuid(host, out, GUID_NULL);
-                const progId = readOleString(lpszProgID >>> 0, MAX_PROGID);
+                const progId = readOleString(wholeAddress(lpszProgID), MAX_PROGID);
                 const root = host.hive?.root(HKEY_CLASSES_ROOT);
                 const key = root && progId.length > 0
                     ? host.hive?.open(root, `${progId}\\CLSID`)
@@ -4534,7 +4548,7 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([stream, riid, ppv])=>{
                 const thread = host.callerThread?.();
-                const out = ppv >>> 0;
+                const out = wholeAddress(ppv);
                 if (out === 0 || (stream >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -4562,7 +4576,7 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([riid, unknown, ppStm])=>{
                 const thread = host.callerThread?.();
-                const out = ppStm >>> 0;
+                const out = wholeAddress(ppStm);
                 const iid = guidAt(riid);
                 if (out === 0)
                 {
@@ -4605,7 +4619,7 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([stream, riid, ppv])=>{
                 const thread = host.callerThread?.();
-                const out = ppv >>> 0;
+                const out = wholeAddress(ppv);
                 if (out === 0 || (stream >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -4634,7 +4648,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(size >>> 0, OBJREF_BYTES);
+                writeU32(wholeAddress(size), OBJREF_BYTES);
                 // Nothing to ask of an object that is none, or a proxy.
                 if ((unknown >>> 0) === 0 || remote()?.isProxy(unknown >>> 0))
                 {
@@ -4644,7 +4658,7 @@ export function createOleFunctions(host){
                     const thread = host.callerThread?.();
                     const own = (unknown >>> 0) === 0 || remote()?.isProxy(unknown >>> 0) ? 0
                         : await queryPointer(unknown >>> 0, IID_IMARSHAL, thread);
-                    writeU32(size >>> 0, OBJREF_BYTES);
+                    writeU32(wholeAddress(size), OBJREF_BYTES);
                     if (own === 0)
                     {
                         return S_OK;
@@ -4663,7 +4677,8 @@ export function createOleFunctions(host){
                             writeU32(block + GUID_SIZE, 0);
                             hr = (await callMethod(own, SLOT_MARSHAL_GET_SIZE_MAX,
                                 [...args, block + GUID_SIZE], thread)) | 0;
-                            writeU32(size >>> 0, OBJREF_CUSTOM_BYTES + readU32(block + GUID_SIZE));
+                            writeU32(wholeAddress(size),
+                                OBJREF_CUSTOM_BYTES + readU32(block + GUID_SIZE));
                         }
                         host.heap.free(block);
                     }
@@ -4688,7 +4703,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 return publishHostObject(CLSID_STD_MARSHAL_OBJECT, standardMarshaler(unknown >>> 0),
                     IID_IMARSHAL, out >>> 0);
             },
@@ -4708,7 +4723,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 return publishHostObject(CLSID_FREE_MARSHALER_OBJECT, freeThreadedMarshaler(),
                     IID_IUNKNOWN, out >>> 0);
             },
@@ -4731,7 +4746,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 return (async()=>{
-                    const packet = await readObjref(stream >>> 0, thread);
+                    const packet = await readObjref(wholeAddress(stream), thread);
                     if (packet?.kind === 'custom')
                     {
                         const unmarshaler = await unmarshalerFor(packet.clsid, thread);
@@ -4824,7 +4839,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 if ((reserved >>> 0) !== 0)
                 {
                     return E_UNEXPECTED;
@@ -4845,7 +4860,7 @@ export function createOleFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return S_OK;
             },
         },
@@ -4877,7 +4892,7 @@ export function createOleFunctions(host){
                 await callMethod(moniker, SLOT_RELEASE, [], thread);
                 if (made.hr >= 0 && (cookieOut >>> 0) !== 0)
                 {
-                    writeU32(cookieOut >>> 0, made.cookie);
+                    writeU32(wholeAddress(cookieOut), made.cookie);
                 }
                 return made.hr;
             },
@@ -4895,7 +4910,7 @@ export function createOleFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const thread = host.callerThread?.();
                 const moniker = await activeObjectMoniker(clsid >>> 0);
                 if (moniker === 0)
@@ -4909,7 +4924,7 @@ export function createOleFunctions(host){
                 {
                     return MK_E_UNAVAILABLE;
                 }
-                writeU32(out >>> 0, pointer);
+                writeU32(wholeAddress(out), pointer);
                 return S_OK;
             },
         },
@@ -4932,7 +4947,7 @@ export function createOleFunctions(host){
                 {
                     return E_POINTER;
                 }
-                writeU32(out >>> 0, 0);
+                writeU32(wholeAddress(out), 0);
                 const thread = host.callerThread?.();
                 return (async()=>{
                     const context = await callExport('CreateBindCtx', slot=>[0, slot], thread);
@@ -4965,7 +4980,7 @@ export function createOleFunctions(host){
                             if ((name >>> 0) !== 0)
                             {
                                 host.divergence?.('CoGetObject', `no moniker binds ${JSON.stringify(
-                                    readOleString(name >>> 0, MAX_PROGID))}`);
+                                    readOleString(wholeAddress(name), MAX_PROGID))}`);
                             }
                             return parsed < 0 ? parsed : E_FAIL;
                         }
@@ -5011,7 +5026,7 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([lpsz, pclsid])=>{
-                const out = pclsid >>> 0;
+                const out = wholeAddress(pclsid);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
@@ -5021,7 +5036,7 @@ export function createOleFunctions(host){
                 {
                     return S_OK;
                 }
-                return writeGuid(host, out, readOleString(lpsz >>> 0))
+                return writeGuid(host, out, readOleString(wholeAddress(lpsz)))
                     ? S_OK
                     : CO_E_CLASSSTRING;
             },
@@ -5037,7 +5052,7 @@ export function createOleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([lpsz, lpiid])=>{
-                const out = lpiid >>> 0;
+                const out = wholeAddress(lpiid);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
@@ -5047,7 +5062,7 @@ export function createOleFunctions(host){
                 {
                     return S_OK;
                 }
-                return writeGuid(host, out, readOleString(lpsz >>> 0))
+                return writeGuid(host, out, readOleString(wholeAddress(lpsz)))
                     ? S_OK
                     : E_INVALIDARG;
             },
@@ -5108,8 +5123,8 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 const [low, high] = fileTimeNow();
-                writeU32(out >>> 0, low);
-                writeU32((out >>> 0) + 4, high);
+                writeU32(wholeAddress(out), low);
+                writeU32(wholeAddress(out) + 4, high);
                 return S_OK;
             },
         },
@@ -5179,7 +5194,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 const held = threadState(host.currentThread()).state;
-                writeU32(out >>> 0, held);
+                writeU32(wholeAddress(out), held);
                 if (held === 0)
                 {
                     return S_FALSE;
@@ -5205,7 +5220,7 @@ export function createOleFunctions(host){
                     return E_INVALIDARG;
                 }
                 const state = threadState(host.currentThread());
-                writeU32(old >>> 0, state.callContext);
+                writeU32(wholeAddress(old), state.callContext);
                 state.callContext = context >>> 0;
                 return S_OK;
             },

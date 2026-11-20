@@ -640,6 +640,7 @@ export function createMp3Provider(host){
 
             /** C8 *ASI_error(void) */
             ASI_error: {
+                returns: 'pointer',
                 argBytes: 0,
                 handler: ()=>{
                     if (lastError === '')

@@ -118,10 +118,12 @@ for (const [label, width, mode] of WIDTHS)
             assert.ok(routines.length > 150,
                 `every interface's command routines: ${routines.length}`);
         }
+        // The record's address is in EDI, which a 64-bit process's routine has in R11.
+        const record = width === I386 ? EDI : 11;
         for (const { name, code } of routines)
         {
             const lengths = stores(code, mode)
-                .filter(store=>store.mem.base === EDI && store.mem.index < 0
+                .filter(store=>store.mem.base === record && store.mem.index < 0
                     && store.mem.disp === COMMAND.BYTES);
             assert.equal(lengths.length, 1, `${name}: one store of the record's length`);
             assert.equal(lengths[0].op, 'xchg', `${name}: the length is published with xchg`);

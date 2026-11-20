@@ -25,6 +25,7 @@
 import { PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE }
     from './process-target.js';
 import { VIRTUAL_READ, VIRTUAL_WRITE, askChild } from './cross-process.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const STATUS_SUCCESS = 0;
 const STATUS_PARTIAL_COPY = 0x8000000d;
@@ -100,6 +101,7 @@ export function accessibleSpan(pageState, address, length, write){
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, bytes: Uint8Array) => boolean} [patchMemory]  A write
  *           through the memory layer's own protection (`writeThroughProtection`).
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose counts are eight bytes
  * @property {PageState} pageState  VirtualQuery's answer for a page (heap.js PAGE_STATE).
  * @property {(handle: number, right: number) => import('./process-target.js').ProcessTarget}
  *     processTarget
@@ -113,12 +115,19 @@ export function accessibleSpan(pageState, address, length, write){
  * @param {ProcessMemoryHost} host
  */
 export function createProcessMemory(host){
-    /** @param {number} address @param {number} value */
+    /**
+     * A count out: a SIZE_T, eight bytes in a 64-bit process. Written as a
+     * dword there, its upper half stayed whatever the caller's variable held
+     * and a reader comparing the count with what it asked saw no read at all.
+     *
+     * @param {number} address @param {number} value
+     */
     const writeCount = (address, value)=>{
         if (address !== 0)
         {
-            host.writeMemory(address, new Uint8Array([value & 0xff, value >>> 8 & 0xff,
-                value >>> 16 & 0xff, value >>> 24 & 0xff]));
+            const bytes = new Uint8Array(host.pointerSize === 8 ? 8 : 4);
+            new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+            host.writeMemory(address, bytes);
         }
     };
 
@@ -251,7 +260,7 @@ export function createProcessMemory(host){
      */
     const nativeRead = ([handle, base, buffer, size, read])=>{
         const count = size >>> 0;
-        const to = buffer >>> 0;
+        const to = wholeAddress(buffer);
         // No more is asked of a child than the caller has room for.
         const room = count === 0 ? 0 : accessibleSpan(host.pageState, to, count, true);
         return onTarget(handle, PROCESS_VM_READ, ()=>readHere(base >>> 0, to, count, read >>> 0),
@@ -337,6 +346,7 @@ export function createProcessMemory(host){
          */
         ReadProcessMemory: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: args=>{
                 // Told 0 before anything is tried: a refused handle leaves it
@@ -352,6 +362,7 @@ export function createProcessMemory(host){
          */
         WriteProcessMemory: {
             argBytes: 20,
+            sizes: [3],
             /** @param {number[]} args */
             handler: args=>asBool(write(args, 1)),
         },

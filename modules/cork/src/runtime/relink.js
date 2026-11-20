@@ -446,7 +446,11 @@ export function createRelink(state){
         const words = view();
         if (words.getUint32(profileAt, true) === 0)
         {
-            words.setUint32(profileAt + 4, 0, true);
+            // The count runs on from the reading before: begun again here, the
+            // hash kept the same calls of every stretch that began at the same
+            // place in the program - an iteration, a frame - and a few dozen of a
+            // call's four thousand callees, sampled eight times each, looked like
+            // all of them (prediction-order.itest.js).
             // The pairs a reading takes are the ones written since: the
             // calls kept are picked by a hash, not every n-th, so how many
             // there are is not the count's to say.

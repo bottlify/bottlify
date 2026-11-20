@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * D3DX's way to a program's device: the device's own methods, called through
  * the vtable its pointer leads to, as D3DX itself calls them. What a method
@@ -90,20 +92,20 @@ export function createDeviceCalls(host){
      */
     const u32 = host.readU32 ? (/** @type {number} */ at)=>/** @type {NonNullable<DeviceHost['readU32']>} */ (
         host.readU32)(at >>> 0) >>> 0 : (/** @type {number} */ at)=>{
-        const bytes = host.readMemory(at >>> 0, 4);
+        const bytes = host.readMemory(wholeAddress(at), 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number[]} values */
     const putU32s = (at, values)=>{
         if (values.length === 1 && host.writeU32)
         {
-            host.writeU32(at >>> 0, values[0] >>> 0);
+            host.writeU32(wholeAddress(at), values[0] >>> 0);
             return;
         }
         const bytes = new Uint8Array(values.length * 4);
         const view = new DataView(bytes.buffer);
         values.forEach((v, i)=>view.setUint32(i * 4, v >>> 0, true));
-        host.writeMemory(at >>> 0, bytes);
+        host.writeMemory(wholeAddress(at), bytes);
     };
     /**
      * A method of a COM object in guest memory, its answer as an unsigned HRESULT.
@@ -141,7 +143,7 @@ export function createDeviceCalls(host){
         const width = wide ? 2 : 1;
         /** @type {number[]} */
         const units = [];
-        let address = at >>> 0;
+        let address = wholeAddress(at);
         while (units.length < max)
         {
             const room = Math.min((max - units.length) * width, 0x1000 - (address & 0xfff));

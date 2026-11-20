@@ -243,7 +243,7 @@
    "category": "translator",
    "browser": false,
    "question": "What does translated code cost to run, to the instruction an iteration and for each of the guest's own instructions, workload by workload and arm against arm?",
-   "command": "node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]",
+   "command": "node tools/translator/run-count.mjs --qemu DIR [--root DIR]... [--bits 32|64|both] [--warm N] [--iters N] [--window 8|16] [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags FLAGS]] [workload...]",
    "tests": [],
    "sample": "instructions an iteration (100 warm, 20 counted), in square brackets a guest instruction's cost in them, arms: <657107ac>, <657107ac>\n  str-32                   2555529 [2.549]  2555529 [2.549] (1.0000)\n  switch-32                545575 [2.209]  545575 [2.209] (1.0000)\n  vcall-32                 2076236 [4.414]  2076236 [4.414] (1.0000)\n<657107ac>: geomean 1.0000 of the first\ndearest first (the last arm): vcall-32 4.41, str-32 2.55, switch-32 2.21",
    "source": "run-count.mjs --bits 32 str switch vcall under qemu 8.2.2 with tools/lib/qemu-count.c, node 26.13.1, one tree (cork 657107ac, 2026-11-15) as both arms of one run. Two runs started together agree to the instruction; separate runs of a tree agree to a few hundredths of a per cent on these and differ by a few per cent on load (V8's optimising compiles land when the machine has them done). The calls512 and calls4096 workloads call each callee 64 times an iteration, and V8 leaves a callee in its baseline code for some nine thousand calls: at the default --warm 100 their count is of baseline callees (calls512 on arm64 28.5 a guest instruction at warm 400, 9.4 at warm 2000) - give them --warm 2000. An arm64 host is counted with --arm64 (an arm64 node 26.13.1 under qemu-aarch64 8.2.2, --node-flags --no-wasm-bounds-checks for V8 as on macOS, --warm 400): str-32 2.270, switch-32 2.343, vcall-32 3.735 a guest instruction on cork 14eff061 (2026-11-17)",
@@ -527,6 +527,21 @@
    ]
   },
   {
+   "path": "tools/checks/check-wide-addresses.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A 64-bit process's handler answers the same call the same wherever its memory lies: RAX whole, what it writes, what it faults on",
+   "command": "node tools/checks/check-wide-addresses.mjs [--list] [--high 0x90100000] [--known FILE] [--write-known] [--trace]",
+   "tests": [
+    "tools/checks/check-wide-addresses.test.js"
+   ],
+   "parts": [
+    "tools/checks/wide-addresses-known.json",
+    "tools/checks/wide-addresses-high.json"
+   ]
+  },
+  {
    "path": "tools/checks/check-is-main.mjs",
    "category": "checks",
    "kind": "check",
@@ -572,6 +587,17 @@
    "question": "Core's package ships what its files import",
    "command": "npm run check:boundaries",
    "tests": []
+  },
+  {
+   "path": "tools/checks/check-routine-leaves.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "A 64-bit process's graphics routine, and each compiled function the build marks one, is a leaf to the unwinder",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-routine-leaves.test.js"
+   ]
   },
   {
    "path": "tools/checks/check-scan-windows.mjs",
@@ -633,6 +659,28 @@
    "command": "npm run check:boundaries",
    "tests": [
     "tools/checks/check-wide-arguments.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/check-pointer-arguments.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "The table of each function's address arguments the win32 layer declares to the bridge is what the signature comments say (--write rewrites it)",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-pointer-arguments.test.js"
+   ]
+  },
+  {
+   "path": "tools/checks/check-pointer-writes.mjs",
+   "category": "checks",
+   "kind": "check",
+   "browser": false,
+   "question": "Every guest pointer is read and written whole by the memory layer's reader and writer (or win32's pointerIo), never as a dword and a zero made by hand",
+   "command": "npm run check:boundaries",
+   "tests": [
+    "tools/checks/check-pointer-writes.test.js"
    ]
   },
   {

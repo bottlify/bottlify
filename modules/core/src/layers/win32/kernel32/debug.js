@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * What a program says about itself.
  *
@@ -60,7 +62,7 @@ export function createDebugFunctions(host){
                 {
                     return 0;
                 }
-                const said = host.readCString(text >>> 0, MAX_TRACE);
+                const said = host.readCString(wholeAddress(text), MAX_TRACE);
                 host.say(said);
                 return tell(text >>> 0, said.length + 1, false);
             },
@@ -75,7 +77,7 @@ export function createDebugFunctions(host){
                 {
                     return 0;
                 }
-                const said = host.readWideString(text >>> 0, MAX_TRACE * 2);
+                const said = host.readWideString(wholeAddress(text), MAX_TRACE * 2);
                 host.say(said);
                 return tell(text >>> 0, said.length + 1, true);
             },

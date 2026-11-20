@@ -57,6 +57,9 @@ export const HALT = 0x0f00;
 export const CALLBACK = 0x0e00;
 /** Where the host's trap is, for a function that hands a call to it: a halt. */
 export const HOST = 0x0d00;
+/** The helpers by which a source lays memory out by the pointer's size. */
+const POINTER_SIZED = ['pointerBytes', 'ptr', 'setPtr'];
+
 export const DATA = 0x10000;
 export const DATA_END = 0x40000;
 const STACK = 0x7fff0;
@@ -79,10 +82,10 @@ const SAVED = { ebx: 0x11111111, esi: 0x22222222, edi: 0x33333333, ebp: 0x444444
  * @property {(memory: Uint8Array, fn: number, args: number[]) => number} [call]
  *     Its JavaScript stand-in.
  * @property {(memory: Uint8Array, args: number[], x87: number[])
- *     => number | { st0: number }} [host]
+ *     => number | bigint | { st0: number }} [host]
  *     The host's handler a function hands a call to, over the case's memory,
- *     with the x87 arguments (the last in ST0) as the call left them: EAX, or
- *     a double that replaces them in ST0.
+ *     with the x87 arguments (the last in ST0) as the call left them: EAX, an
+ *     i64's EDX:EAX as a bigint, or a double that replaces them in ST0.
  */
 
 /** One machine per piece of code run by `runCode`, its translations kept. */
@@ -150,6 +153,16 @@ export function doubleWords(value){
     view.setFloat64(0, value, true);
     return [view.getUint32(0, true), view.getUint32(4, true)];
 }
+
+/**
+ * A dword answer as RAX holds it at 64 bits, by the type the function
+ * declares: an i32 extended by its sign; a u32 (a size_t, a DWORD) and a
+ * pointer by zeros, which is the whole value a Win64 caller of either reads.
+ *
+ * @param {string} returns @param {number} eax
+ */
+const wholeAnswer = (returns, eax)=>(returns === 'i32'
+    ? BigInt.asUintN(64, BigInt(eax | 0)) : BigInt(eax >>> 0));
 
 /** @param {number} a @param {number} b */
 const sameDouble = (a, b)=>Object.is(a, b) || Number.isNaN(a) && Number.isNaN(b);
@@ -272,14 +285,17 @@ export function equivalence(compiled, sources, model, long){
         }
         const words = input.stack ?? [];
         // The words as the 32-bit stack has them: a double's two, low first.
+        // A pointer is its register whole, where a dword's upper half is
+        // whatever the caller left there.
         let next = 0;
-        const args = fn.params.map((type, i)=>(type === 'f64'
+        const args = fn.params.map((type, i)=>(type === 'f64' || type === 'i64'
             ? BigInt(words[next++] >>> 0) | BigInt(words[next++] >>> 0) << 32n
-            : argumentOf(words[next++] ?? 0, i)));
-        const floats = fn.params.map(type=>type === 'f64' || type === 'f32');
+            : type === 'ptr' ? BigInt((words[next++] ?? 0) >>> 0)
+                : argumentOf(words[next++] ?? 0, i)));
+        const floats = fn.params.map(type=>type === 'f64' || type === 'f32' || type === 'f32bits');
         const before = m.read(DATA, span);
         const { entry, xmm, slots, halted } = callLong(m, CODE_64, { args, floats,
-            returnTo: HALT });
+            returnTo: HALT, mxcsr: input.mxcsr });
         const what = `${name}(${JSON.stringify(words)}) at 64 bits`;
         assert.ok(halted, `${what} halts`);
         // XMM6 to XMM15 are the caller's, as RBX and the rest are.
@@ -298,12 +314,13 @@ export function equivalence(compiled, sources, model, long){
             // of its place, which the trap reads it from.
             const places = fn.params.slice(0, 4);
             const owed = [...['rcx', 'rdx', 'r8', 'r9'].slice(0, places.length)
-                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'), ...KEPT_64];
+                .filter((_, i)=>places[i] !== 'f64' && places[i] !== 'f32'
+                    && places[i] !== 'f32bits'), ...KEPT_64];
             assert.deepEqual(Object.fromEntries(owed.map(reg=>[reg, m.reg(reg)])),
                 Object.fromEntries(owed.map(reg=>[reg, entry[reg]])),
                 `${handed}: the argument registers and the kept ones as the call left them`);
             places.forEach((type, i)=>{
-                if (type === 'f64' || type === 'f32')
+                if (type === 'f64' || type === 'f32' || type === 'f32bits')
                 {
                     const size = type === 'f64' ? 8 : 4;
                     assert.deepEqual(Array.from(m.xmm(i).slice(0, size)),
@@ -331,28 +348,30 @@ export function equivalence(compiled, sources, model, long){
             // an integer's low half, a double's two dwords and a float's one
             // out of the XMM register of its place among the first four.
             const trapWords = fn.params.flatMap((type, i)=>{
-                const bits = i < 4 && (type === 'f64' || type === 'f32')
+                const bits = i < 4 && (type === 'f64' || type === 'f32' || type === 'f32bits')
                     ? new DataView(xmm[i].buffer, xmm[i].byteOffset).getBigUint64(0, true)
                     : BigInt(args[i] ?? 0n);
-                return type === 'f64'
+                return type === 'f64' || type === 'i64'
                     ? [Number(BigInt.asUintN(32, bits)), Number(BigInt.asUintN(32, bits >> 32n))]
                     : [Number(BigInt.asUintN(32, bits))];
             });
             const answer = double.host(memory, trapWords, []);
-            // The trap answers as the bridge does: the dword extended by its sign, a
+            // The trap answers as the bridge does for the declared type: an i32
+            // extended by its sign, an unsigned dword and a pointer by zeros, a
             // double's or a float's answer in XMM0.
             return {
-                rax: BigInt.asUintN(64, BigInt(typeof answer === 'number' ? answer | 0 : 0)),
-                rsp: BigInt(STACK_64 + 8), kept, given, df,
+                rax: typeof answer === 'bigint' ? BigInt.asUintN(64, answer)
+                    : typeof answer !== 'number' ? 0n : wholeAnswer(fn.returns, answer),
+                rsp: BigInt(STACK_64 + 8), kept, given, df, mxcsr: m.mxcsr(),
                 data: memory.slice(DATA, DATA + data.length), handedOver: true,
-                ...typeof answer === 'number' ? {} : { xmm0: fn.returns === 'f32'
+                ...typeof answer !== 'object' ? {} : { xmm0: fn.returns === 'f32'
                     ? Math.fround(answer.st0) : answer.st0 },
             };
         }
         assert.equal(m.rip(), HALT + 1, `${what} returns to its caller's address`);
         const answer = new DataView(m.xmm(0).buffer);
         return { rax: m.reg('rax'), rsp: m.reg('rsp'), kept, given, df, data: m.read(DATA, span),
-            handedOver: false,
+            handedOver: false, mxcsr: m.mxcsr(),
             xmm0: fn.returns === 'f32' ? answer.getFloat32(0, true) : answer.getFloat64(0, true) };
     };
 
@@ -360,7 +379,8 @@ export function equivalence(compiled, sources, model, long){
      * Holds the x86-64 code to what the JavaScript answered for an input.
      *
      * @param {string} name @param {Case} input @param {Double} double
-     * @param {{ eax: number, st: number[], data: Uint8Array, handedOver: boolean }} js
+     * @param {{ eax: number, edx: number, st: number[], data: Uint8Array,
+     *     handedOver: boolean }} js
      *     The JavaScript's answer in doubles: the source's, whatever the control
      *     word, which SSE2's arithmetic has nothing of.
      * @param {string} what
@@ -380,22 +400,39 @@ export function equivalence(compiled, sources, model, long){
         const at64 = `${what} at 64 bits`;
         // A source that lays memory out by the pointer's size is held, at 64
         // bits, to its own run with pointers of eight bytes.
-        const judge = fn.uses.includes('pointerBytes') && !laidOut
+        const judge = POINTER_SIZED.some(use=>fn.uses.includes(use)) && !laidOut
             ? runJs(name, input, double, sources, undefined, 8) : js;
         assert.equal(x64.handedOver, judge.handedOver, `${at64}: handed to the host by both or by `
             + 'neither');
         assert.deepEqual(x64.kept, x64.given, `${at64}: the registers a callee keeps kept`);
         assert.equal(x64.rsp, BigInt(STACK_64 + 8), `${at64}: RSP past the return address`);
         assert.equal(x64.df, false, `${at64}: the direction flag clear`);
+        if (fn.uses.includes('mxcsr') || fn.uses.includes('setMxcsr'))
+        {
+            // Of a function that reads or loads the word: the flags SSE
+            // arithmetic raises on the way are no part of the JavaScript.
+            assert.equal(x64.mxcsr, /** @type {{ mxcsr?: number }} */ (judge).mxcsr,
+                `${at64}: MXCSR`);
+        }
         if (fn.returns === 'f64' || fn.returns === 'f32')
         {
             assert.ok(sameDouble(/** @type {number} */ (x64.xmm0), judge.st[0]),
                 `${at64}: XMM0 ${x64.xmm0} against ${judge.st[0]}`);
         }
+        else if (fn.returns === 'i64')
+        {
+            // The whole quadword in RAX, which the i386 answers in EDX:EAX;
+            // what the host answers for it is the bridge's to lay out.
+            if (!x64.handedOver)
+            {
+                assert.equal(x64.rax, BigInt(judge.edx >>> 0) << 32n | BigInt(judge.eax >>> 0),
+                    `${at64}: RAX, the i386's EDX:EAX`);
+            }
+        }
         else if (fn.returns !== 'void')
         {
-            assert.equal(x64.rax, BigInt.asUintN(64, BigInt(judge.eax | 0)),
-                `${at64}: RAX, EAX extended by its sign`);
+            assert.equal(x64.rax, wholeAnswer(fn.returns, judge.eax),
+                `${at64}: RAX, EAX extended as an ${fn.returns} is`);
         }
         const at = firstDifference(x64.data, judge.data);
         if (at >= 0)
@@ -463,7 +500,7 @@ export function equivalence(compiled, sources, model, long){
         view.setUint8(m.layout.x87Top, top);
         view.setUint8(m.layout.x87Empty, empty);
         const before = fn.host === undefined ? null : m.read(DATA, span);
-        const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 2
+        const slots = fn.params.reduce((sum, type)=>sum + (type === 'f64' || type === 'i64' ? 2
             : type === 'x87' ? 0 : 1), 0);
         const exit = m.runProgram(CODE);
         assert.equal(exit.kind, 3, `${name} halts at its return (${JSON.stringify(exit)})`);
@@ -551,8 +588,11 @@ export function equivalence(compiled, sources, model, long){
         // The trap returns as the export does: a stdcall one pops the arguments.
         const popped = compiledOf(name).convention !== 'cdecl' ? slots * 4 : 0;
         return {
-            eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: frame + 4 + popped,
-            st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
+            eax: typeof answer === 'bigint' ? Number(BigInt.asUintN(32, answer))
+                : typeof answer === 'number' ? answer >>> 0 : 0,
+            edx: typeof answer === 'bigint' ? Number(BigInt.asUintN(32, answer >> 32n)) : 0,
+            esp: frame + 4 + popped,
+            st: typeof answer === 'object' ? [answer.st0] : [], saved: SAVED, df: false,
             control: input.control ?? 0x37f, status: (input.status ?? 0) & 0xc7ff,
             mxcsr: input.mxcsr ?? 0x1f80,
             data: memory.slice(DATA, DATA + data.length), handedOver: true,
@@ -649,6 +689,11 @@ export function equivalence(compiled, sources, model, long){
                 handedOver = true;
                 const onStack = compiledOf(name).params.filter(type=>type === 'x87').length;
                 const answer = host(memory, args, st.slice(0, onStack).reverse());
+                if (typeof answer === 'bigint')
+                {
+                    edx = Number(BigInt.asUintN(32, answer >> 32n));
+                    return Number(BigInt.asUintN(32, answer));
+                }
                 if (typeof answer === 'number')
                 {
                     return answer;
@@ -692,7 +737,7 @@ export function equivalence(compiled, sources, model, long){
             assert.deepEqual(x86.saved, SAVED, `${what}: EBX, ESI, EDI and EBP kept`);
             // A thiscall function's `this` came in ECX, not in a slot of the caller's.
             const popped = fn.convention !== 'cdecl'
-                ? fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 8
+                ? fn.params.reduce((sum, type)=>sum + (type === 'f64' || type === 'i64' ? 8
                     : type === 'x87' ? 0 : 4), 0) - (fn.convention === 'thiscall' ? 4 : 0)
                 : 0;
             assert.equal(x86.esp, STACK + 4 + popped, `${what}: ESP past the return address`);
@@ -754,7 +799,7 @@ export function equivalence(compiled, sources, model, long){
                 throw new Error(`no x86-64 code for ${name}`);
             }
             const js = runJs(name, input, double, sources, bounds,
-                longOf(name)?.uses.includes('pointerBytes') ? 8 : 4);
+                POINTER_SIZED.some(use=>longOf(name)?.uses.includes(use)) ? 8 : 4);
             sameLong(name, input, double, js, `${name}(${JSON.stringify(input.stack ?? [])})`,
                 true);
             return js;

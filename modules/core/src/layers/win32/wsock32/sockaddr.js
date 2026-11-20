@@ -23,6 +23,7 @@
  */
 
 import { AF_INET, INADDR_NONE } from './constants.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const SOCKADDR_IN_SIZE = 16;
 
@@ -56,7 +57,7 @@ export function readSockaddr(readMemory, pointer){
     {
         return null;
     }
-    const bytes = readMemory(pointer >>> 0, SOCKADDR_IN_SIZE);
+    const bytes = readMemory(wholeAddress(pointer), SOCKADDR_IN_SIZE);
     if (bytes.length < 8)
     {
         return null;
@@ -83,7 +84,7 @@ export function writeSockaddr(writeMemory, pointer, address){
     view.setUint16(0, AF_INET, true);
     view.setUint16(2, address.port & 0xffff, false);
     view.setUint32(4, address.host >>> 0, false);
-    writeMemory(pointer >>> 0, bytes);
+    writeMemory(wholeAddress(pointer), bytes);
 }
 
 /**

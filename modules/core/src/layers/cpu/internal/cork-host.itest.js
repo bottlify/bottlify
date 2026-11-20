@@ -252,6 +252,48 @@ test('long mode\'s writes to the trap port run translated on the shared runtime'
     assert.ok(interpreted < 1000, `${interpreted} instructions interpreted`);
 });
 
+test('long mode over a 4 GiB memory that grows: RAM past 2 GiB held when given, used translated,'
+    + ' the window\'s last page the engine\'s', async()=>{
+    const MIB = 1 << 20;
+    const h = createCorkHost({ engine, memorySize: 2 ** 32, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+        engineArea: { at: 0x08000000 - 28 * MIB, span: 28 * MIB },
+        cork: { sliceMs: Infinity } });
+    assert.equal(h.growing(), true, 'a 64-bit process\'s memory grows as a 32-bit one\'s does');
+    assert.equal(h.ramHeld(), 128 * MIB, 'its floor, not the whole 4 GiB');
+    const far = 0xc0001000;
+    h.writeData(far, Uint8Array.of(0, 0, 0, 0));
+    assert.equal(h.ramHeld(), 2 ** 32, 'given RAM past 3 GiB, it holds it');
+    // For ecx in 0..4999: mov eax, far; mov [rax], ecx; add ebx, [rax]; hlt -- an address
+    // past 2 GiB whose upper half is zero, as a 32-bit operation leaves it.
+    load(h, 0x11000, hex('31c931dbb8001000c089080318ffc181f98813000075edf4'));
+    // A slice of a few hundred instructions, the region formed before the next.
+    h.runSlice(300);
+    while (!h.halted())
+    {
+        await h.cork().translatePending();
+        h.runSlice(300);
+    }
+    assert.equal(Number(h.readReg64('rbx') & 0xffffffffn), (4999 * 5000 / 2) >>> 0);
+    assert.equal(h.readU32(far), 4999);
+    const { interpreted } = h.corkDiagnostics();
+    assert.ok(interpreted < 1000, `${interpreted} instructions interpreted`);
+
+    // mov eax, 0xfffff000; mov dword [rax], 1; hlt: the window's last page faults.
+    const last = createCorkHost({ engine, memorySize: 2 ** 32, trapPort: 0x1234,
+        entryVector: ENTRY_VECTOR, initialStack: 0x300000, bits: 64,
+        engineArea: { at: 0x08000000 - 28 * MIB, span: 28 * MIB },
+        cork: { sliceMs: Infinity } });
+    load(last, 0x11000, hex('b800f0ffffc70001000000f4'));
+    last.growTo(2 ** 32);
+    last.runSlice(1000);
+    assert.ok(last.fault() !== null, 'a store into the window\'s last page faults');
+    assert.equal(last.readU32(0xfffff000), 0, 'and writes nothing');
+    last.writeData(0xfffff000, Uint8Array.of(1, 2, 3, 4));
+    assert.equal(last.readU32(0xfffff000), 0,
+        'the host\'s writes go around it, as an engine range');
+});
+
 /** @param {string} text */
 function hex(text){
     return (text.match(/../g) ?? []).map(byte=>parseInt(byte, 16));

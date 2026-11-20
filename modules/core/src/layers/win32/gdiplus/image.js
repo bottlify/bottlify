@@ -28,6 +28,7 @@ import {
     IMAGE_FORMAT, codecInfos, decoders, encodeBmp, encodePng, encoders,
     formatOfContainer, gifTiming,
 } from './codecs.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** PixelFormat (gdipluspixelformats.h). */
 export const PixelFormat = Object.freeze({
@@ -215,7 +216,7 @@ export function createImageFunctions(kit, host){
      * @returns {Bitmap | null}
      */
     const makeBitmap = (width, height, format, stride = 0, scan0 = 0)=>{
-        let place = scan0 >>> 0;
+        let place = wholeAddress(scan0);
         let rowBytes = stride | 0;
         if (place === 0)
         {
@@ -672,7 +673,7 @@ export function createImageFunctions(kit, host){
     const streamBytes = stream=>host.streams?.read(stream) ?? Promise.resolve(null);
     /** @param {number} name */
     const fileBytes = async name=>(host.readFile && host.readWideString
-        ? await host.readFile(host.readWideString(name >>> 0)) : null);
+        ? await host.readFile(host.readWideString(wholeAddress(name))) : null);
 
     /**
      * Rotates or flips the bitmap in place: RotateFlipType's rotation of
@@ -1634,7 +1635,7 @@ export function createImageFunctions(kit, host){
             {
                 return UnknownImageFormat;
             }
-            return host.writeFile(host.readWideString(name >>> 0), bytes) ? Ok : Win32Error;
+            return host.writeFile(host.readWideString(wholeAddress(name)), bytes) ? Ok : Win32Error;
         })),
         /**
          * Status GdipSaveImageToStream(GpImage *image, IStream *stream,
@@ -1732,7 +1733,7 @@ export function createImageFunctions(kit, host){
          * (premultiplied for PARGB), R, G, B, grey, or one of them alone.
          */
         GdipBitmapGetHistogram: fn(28, onImage((image, [format, entries, ...channels])=>{
-            const kind = format >>> 0;
+            const kind = wholeAddress(format);
             const needs = [4, 4, 3, 1, 1, 1, 1, 1][kind];
             if (needs === undefined || (entries >>> 0) !== 256
                 || channels.slice(0, needs).some(c=>(c >>> 0) === 0)

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /**
  * x64 unwinding: how a 64-bit frame is taken off the stack without running
  * any of its code.
@@ -146,7 +148,7 @@ const slotsOf = (op, info, version)=>{
 export function createUnwinder(host){
     /** @param {number} at @param {number} length */
     const view = (at, length)=>{
-        const bytes = host.readMemory(at >>> 0, length);
+        const bytes = host.readMemory(wholeAddress(at), length);
         return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     };
     const readU32 = (/** @type {number} */ at)=>view(at, 4).getUint32(0, true);
@@ -229,7 +231,7 @@ export function createUnwinder(host){
      * @returns {FunctionEntry | null}
      */
     const lookup = pc=>{
-        const at = pc >>> 0;
+        const at = wholeAddress(pc);
         const image = host.imageOf(at);
         if (image && image.table && image.table.size >= RUNTIME_FUNCTION_SIZE)
         {
@@ -319,7 +321,7 @@ export function createUnwinder(host){
      * @returns {UnwindContext | null}
      */
     const epilogue = (fn, pc, context, frameRegister)=>{
-        const code = host.readMemory(pc >>> 0, 48);
+        const code = host.readMemory(wholeAddress(pc), 48);
         const after = copyContext(context);
         let at = 0;
         /** @param {number} offset */
@@ -409,7 +411,7 @@ export function createUnwinder(host){
         };
         let info = fn.unwindInfo;
         let head = header(info);
-        const at = pc >>> 0;
+        const at = wholeAddress(pc);
         const inPrologue = at >= fn.begin && at - fn.begin < head.prolog;
         let prologOffset = inPrologue ? at - fn.begin : Infinity;
         let establisher = stackOf(context);

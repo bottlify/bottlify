@@ -25,6 +25,7 @@
  * @typedef {import('../msvcrt/guest-code.js').GuestMemory} Guest
  */
 /** @typedef {import('../msvcrt/guest-code.js').u32} u32 */
+/** @typedef {import('../msvcrt/guest-code.js').ptr} ptr */
 /** @typedef {import('../msvcrt/guest-code.js').i32} i32 */
 
 /** CP_ACP, which selects the ANSI page. */
@@ -46,8 +47,8 @@ const WC_ASCII_FLAGS = 0x6f0;
  *                         int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar)
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} page @param {u32} flags @param {u32} source
- * @param {u32} sourceBytes @param {u32} destination @param {u32} destinationChars
+ * @param {Guest} guest @param {u32} page @param {u32} flags @param {ptr} source
+ * @param {u32} sourceBytes @param {ptr} destination @param {u32} destinationChars
  * @returns {i32}
  */
 export function MultiByteToWideChar({ u8, setU16, host }, page, flags, source, sourceBytes,
@@ -114,9 +115,9 @@ export function MultiByteToWideChar({ u8, setU16, host }, page, flags, source, s
  * No default character is used for ASCII: `*lpUsedDefaultChar` is FALSE.
  *
  * @guestCode stdcall
- * @param {Guest} guest @param {u32} page @param {u32} flags @param {u32} source
- * @param {u32} sourceChars @param {u32} destination @param {u32} destinationBytes
- * @param {u32} defaultChar @param {u32} usedDefault
+ * @param {Guest} guest @param {u32} page @param {u32} flags @param {ptr} source
+ * @param {u32} sourceChars @param {ptr} destination @param {u32} destinationBytes
+ * @param {u32} defaultChar @param {ptr} usedDefault
  * @returns {i32}
  */
 export function WideCharToMultiByte({ u16, setU8, setU32, host }, page, flags, source,

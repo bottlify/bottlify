@@ -32,6 +32,7 @@
  */
 
 import { HAS_FIBER_DATA, TEB } from './teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** Where each word of a fiber's record is. The first is the program's: GetFiberData reads it. */
 const FIBER = Object.freeze({
@@ -194,6 +195,7 @@ export function createFiberFunctions(host){
     return {
         /** LPVOID ConvertThreadToFiber(LPVOID lpParameter) */
         ConvertThreadToFiber: {
+            returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([parameter])=>convert(parameter),
@@ -201,6 +203,7 @@ export function createFiberFunctions(host){
 
         /** LPVOID ConvertThreadToFiberEx(LPVOID lpParameter, DWORD dwFlags) */
         ConvertThreadToFiberEx: {
+            returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([parameter])=>convert(parameter),
@@ -229,7 +232,9 @@ export function createFiberFunctions(host){
 
         /** LPVOID CreateFiber(SIZE_T dwStackSize, LPFIBER_START_ROUTINE lpStartAddress, LPVOID lpParameter) */
         CreateFiber: {
+            returns: 'pointer',
             argBytes: 12,
+            sizes: [0],
             /** @param {number[]} args */
             handler: ([size, start, parameter])=>create(size >>> 0, 0, start >>> 0, parameter),
         },
@@ -243,7 +248,9 @@ export function createFiberFunctions(host){
          * thread's, switch them in SwitchToFiber when a program is seen to rely on it).
          */
         CreateFiberEx: {
+            returns: 'pointer',
             argBytes: 20,
+            sizes: [0, 1],
             /** @param {number[]} args */
             handler: ([commit, reserve, , start, parameter])=>
                 create(commit >>> 0, reserve >>> 0, start >>> 0, parameter),
@@ -258,7 +265,7 @@ export function createFiberFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fiber])=>{
-                const at = fiber >>> 0;
+                const at = wholeAddress(fiber);
                 if (at !== 0 && at === current())
                 {
                     return host.exitThread(1);
@@ -297,7 +304,7 @@ export function createFiberFunctions(host){
              * @param {{ restingStack: number, hostReturn: number }} [frame]
              */
             handler: ([target], frame)=>{
-                const to = target >>> 0;
+                const to = wholeAddress(target);
                 const teb = host.teb() >>> 0;
                 const from = current();
                 if (to === 0 || teb === 0 || !frame)

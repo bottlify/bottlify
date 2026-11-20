@@ -227,6 +227,7 @@ export function createModules(state){
             {
                 settings.charge?.give(held.charged);
             }
+            settings.letGo?.(held.bytes);
         }
     };
     /**

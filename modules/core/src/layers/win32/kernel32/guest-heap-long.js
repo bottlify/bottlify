@@ -464,7 +464,7 @@ export function globalFreeLongCode(p, heap){
  * is not the guest's), the trap alone.
  *
  * @param {LongBuilder} builder @param {LongRoutine | null} routine
- * @param {{ argBytes: number, handler: Function, convention?: string }} trap
+ * @param {{ argBytes: number, handler: Function, convention?: string, returns?: string }} trap
  * @returns {Uint8Array}
  */
 export function bindLong(builder, routine, trap){

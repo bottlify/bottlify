@@ -17,6 +17,7 @@
 
 import { STATUS } from './status.js';
 import { COUNTED_STRING } from './strings.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** RTL_RELATIVE_NAME_U: a counted string, a directory handle and a reference. */
 const RELATIVE_NAME_SIZE = 16;
@@ -303,7 +304,7 @@ export function createPathFunctions(host){
         view.setUint16(COUNTED_STRING.LENGTH, bytes.length - 2, true);
         view.setUint16(COUNTED_STRING.MAXIMUM_LENGTH, bytes.length, true);
         view.setUint32(COUNTED_STRING.BUFFER, buffer, true);
-        host.writeMemory(nt >>> 0, descriptor);
+        host.writeMemory(wholeAddress(nt), descriptor);
         if ((filePart >>> 0) !== 0)
         {
             // The last component, inside the buffer just handed out; none
@@ -311,18 +312,18 @@ export function createPathFunctions(host){
             // A share's server alone is no file either.
             const server = /^\\\?\?\\UNC\\[^\\]*$/.test(name);
             // Nor is a DOS device.
-            const device = dosDeviceName(host.readWideString(dos >>> 0, 0x10000)) !== null;
+            const device = dosDeviceName(host.readWideString(wholeAddress(dos), 0x10000)) !== null;
             const part = name.endsWith('\\') || server || device ? 0
                 : buffer + (name.lastIndexOf('\\') + 1) * 2;
             const out = new Uint8Array(4);
             new DataView(out.buffer).setUint32(0, part, true);
-            host.writeMemory(filePart >>> 0, out);
+            host.writeMemory(wholeAddress(filePart), out);
         }
         if ((relative >>> 0) !== 0)
         {
             // Nothing is made relative to an open directory here: every name
             // this produces is a full one.
-            host.writeMemory(relative >>> 0, new Uint8Array(RELATIVE_NAME_SIZE));
+            host.writeMemory(wholeAddress(relative), new Uint8Array(RELATIVE_NAME_SIZE));
         }
         return STATUS.SUCCESS;
     };
@@ -355,7 +356,7 @@ export function createPathFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>(path === 0 ? 0
-                : dosPathType(host.readWideString(path >>> 0, 0x10000))),
+                : dosPathType(host.readWideString(wholeAddress(path), 0x10000))),
         },
 
         /**
@@ -369,7 +370,7 @@ export function createPathFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 const found = path === 0 ? null
-                    : dosDeviceName(host.readWideString(path >>> 0, 0x10000));
+                    : dosDeviceName(host.readWideString(wholeAddress(path), 0x10000));
                 return found === null ? 0 : (found.offset << 16 | found.length) >>> 0;
             },
         },
@@ -394,7 +395,7 @@ export function createPathFunctions(host){
                 if (oem !== 0)
                 {
                     const head = new DataView(
-                        host.readMemory(oem >>> 0, COUNTED_STRING.SIZE).buffer);
+                        host.readMemory(wholeAddress(oem), COUNTED_STRING.SIZE).buffer);
                     if (head.getUint16(COUNTED_STRING.MAXIMUM_LENGTH, true) < upper.length)
                     {
                         return 0;
@@ -407,7 +408,7 @@ export function createPathFunctions(host){
                 const { legal, spaces: hasSpaces } = shortNameLegality(text);
                 if (legal && spaces !== 0)
                 {
-                    host.writeMemory(spaces >>> 0, Uint8Array.of(hasSpaces ? 1 : 0));
+                    host.writeMemory(wholeAddress(spaces), Uint8Array.of(hasSpaces ? 1 : 0));
                 }
                 return legal ? 1 : 0;
             },
@@ -424,7 +425,7 @@ export function createPathFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, size, buffer, filePart])=>{
-                if (name === 0 || host.readWideString(name >>> 0, 2 * 2) === '')
+                if (name === 0 || host.readWideString(wholeAddress(name), 2 * 2) === '')
                 {
                     return 0;
                 }
@@ -484,7 +485,7 @@ export function createPathFunctions(host){
         {
             return '';
         }
-        const head = new DataView(host.readMemory(at >>> 0, COUNTED_STRING.SIZE).buffer);
+        const head = new DataView(host.readMemory(wholeAddress(at), COUNTED_STRING.SIZE).buffer);
         const length = head.getUint16(COUNTED_STRING.LENGTH, true) & ~1;
         const bytes = host.readMemory(head.getUint32(COUNTED_STRING.BUFFER, true), length);
         let text = '';

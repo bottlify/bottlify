@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D10Seam } from './d3d10.js';
+import { COMPILED as D3D10_LONG } from './d3d10-inguest.x64.js';
 import {
     ID3D11DEVICE1_SLOTS, ID3D11DEVICECHILD_SLOTS, ID3D11DEVICECONTEXT_SLOTS, ID3D11DEVICE_SLOTS,
     ID3D11RESOURCEDESC_SLOTS, ID3D11VIEWDESC_SLOTS, miscFlagsIn, miscFlagsOut,
@@ -32,6 +33,7 @@ import { playedAtOnce } from '../remote/direct3d.js';
 import { playedDirect3D10, recordedDirect3D10 } from '../remote/d3d10.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { withPointers } from '../../memory/pointers.fixture.js';
 
 /** @param {[string, number][]} slots @param {string} name */
 const slot = (slots, name)=>{
@@ -49,7 +51,7 @@ const RELEASE = 2;
  * A flat address space, the bridge's publisher, and the seam over a recording
  * GPU: the device drawn here, or recorded and played elsewhere.
  *
- * @param {{ elsewhere?: boolean, pointerSize?: 4 | 8,
+ * @param {{ elsewhere?: boolean, pointerSize?: 4 | 8, long?: boolean, ring?: boolean,
  *     sharedHandles?: { open: (key: number) => number,
  *     resolve: (handle: number) => number | null } }} [options]
  */
@@ -62,7 +64,7 @@ function seamed(options = {}){
         next += (size + 16) & ~15;
         return at;
     };
-    const memory = {
+    const memory = withPointers({
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} value */
@@ -75,7 +77,7 @@ function seamed(options = {}){
         writeU32: (address, value)=>{
             new DataView(bytes.buffer).setUint32(address, value >>> 0, true);
         },
-    };
+    });
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;
@@ -88,6 +90,7 @@ function seamed(options = {}){
             return id;
         },
         heap: { allocate },
+        ...options.long ? { long: ()=>true } : {},
     });
     const publisher = createPublisher({
         publishInterface: (object, id)=>vtables.publish(object, id),
@@ -100,7 +103,7 @@ function seamed(options = {}){
     const divergences = [];
     const seam = createDirect3D10Seam({
         publisher,
-        memory: { readMemory: memory.readBytes, writeMemory: memory.writeBytes },
+        memory: withPointers({ readMemory: memory.readBytes, writeMemory: memory.writeBytes }),
         allocate,
         root: factoryOptions=>{
             const drawing = {
@@ -122,6 +125,8 @@ function seamed(options = {}){
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         sharedHandles: options.sharedHandles,
         ...options.pointerSize ? { pointerSize: options.pointerSize } : {},
+        // A command ring with the guest's routines: memory for it and its code.
+        ...options.ring ? { ringAllocate: allocate, allocateCode: allocate } : {},
     });
     /** @param {number[]} dwords */
     const place = dwords=>{
@@ -181,7 +186,8 @@ function seamed(options = {}){
             context: contextAt ? memory.readU32(contextAt) : 0,
         };
     };
-    return { memory, place, placeGuid, call, answer, query, create, divergences, seam };
+    return { memory, place, placeGuid, call, answer, query, create, divergences, seam, registered,
+        bytes };
 }
 
 test('D3D11CreateDevice answers S_FALSE asked for nothing, and makes a device of level 11.0'
@@ -609,3 +615,23 @@ for (const elsewhere of [false, true])
         assert.equal(s.memory.readU32(chainAt + 4), 0, 'whole');
     });
 }
+
+test('a 64-bit process places the immediate context\'s ring routines as x86-64; a FLOAT by value'
+    + ' in XMM3 stays the trap', ()=>{
+    const s = seamed({ pointerSize: 8, long: true, ring: true });
+    const { context } = s.create();
+    const view = new DataView(s.bytes.buffer);
+    const table = view.getUint32(context, true);
+    /** @param {string} name */
+    const target = name=>view.getUint32(table + slot(ID3D11DEVICECONTEXT_SLOTS, name) * 8, true);
+    for (const [name, routine] of [['Draw', 'Draw'], ['VSSetShader', 'ContextVSSetShader'],
+        ['IASetVertexBuffers', 'IASetVertexBuffers'], ['Map', 'ContextMap']])
+    {
+        const at = target(name);
+        assert.ok(!s.registered.has(at), `${name}: code, not a trap`);
+        const { code, host } = /** @type {Record<string, any>} */ (D3D10_LONG)[routine];
+        assert.deepEqual([...s.bytes.subarray(at, at + Math.min(host ?? 32, 32) - 1)],
+            [...code.subarray(0, Math.min(host ?? 32, 32) - 1)], `${name}: its x86-64`);
+    }
+    assert.ok(s.registered.has(target('ClearDepthStencilView')), 'ClearDepthStencilView: the trap');
+});

@@ -30,6 +30,7 @@
  */
 
 import { createThreadpoolApi } from './threadpool-api.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** A pool this size runs more callbacks at once than a program has reason to ask for. */
 const MAX_THREADS = 32;
@@ -586,7 +587,7 @@ export function createThreadPool(host){
      * @returns {number | any}
      */
     const complete = (owner, event, own, answers = boolAnswers)=>{
-        const handle = event >>> 0;
+        const handle = wholeAddress(event);
         if (handle === INVALID_HANDLE_VALUE)
         {
             if (owner.outstanding <= own)
@@ -977,7 +978,7 @@ export function createThreadPool(host){
      */
     const waitDone = (/** @type {number[]} */ [id, answer])=>{
         const home = /** @type {WaitThread} */ (waitThreads.get(id >>> 0));
-        const result = answer >>> 0;
+        const result = wholeAddress(answer);
         const live = (/** @type {Wait | undefined} */ wait)=>
             wait !== undefined && !wait.cancelled && wait.home === home;
         if (result < home.asked.length || (result >= WAIT_ABANDONED
@@ -1247,6 +1248,7 @@ export function createThreadPool(host){
 
             /** HANDLE CreateTimerQueue(void) */
             CreateTimerQueue: {
+                returns: 'pointer',
                 argBytes: 0,
                 handler: ()=>{
                     const handle = host.allocate(4);
@@ -1283,7 +1285,7 @@ export function createThreadPool(host){
                     {
                         return fail(made);
                     }
-                    host.writeMemory(out >>> 0, dword(made.handle));
+                    host.writeMemory(wholeAddress(out), dword(made.handle));
                     return 1;
                 },
             },
@@ -1394,7 +1396,7 @@ export function createThreadPool(host){
                     {
                         return fail(made);
                     }
-                    host.writeMemory(out >>> 0, dword(made.handle));
+                    host.writeMemory(wholeAddress(out), dword(made.handle));
                     return 1;
                 },
             },
