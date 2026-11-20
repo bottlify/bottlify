@@ -193,8 +193,29 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
     // same addresses in every process, whatever was registered before.
     let next = 1;
     let taken = 1;
+    // The layout is the runtime's, shared by every process that follows it
+    // (and read only); this table keeps how far each name has gone in it.
     /** @type {Map<string, number[]>} */
     let laid = new Map();
+    let laidFrom = 0;
+    /** @type {Map<string, number>} */
+    const laidAt = new Map();
+    /** The next slot `laid` gives `name` here, or undefined. @param {string} name */
+    const laidSlot = name=>{
+        const ids = laid.get(name);
+        if (ids === undefined)
+        {
+            return undefined;
+        }
+        let at = laidAt.get(name) ?? 0;
+        // A slot taken here before the layout was followed is not given again.
+        while (at < ids.length && (ids[at] < laidFrom || entries[ids[at]] !== undefined))
+        {
+            at++;
+        }
+        laidAt.set(name, at + 1);
+        return ids[at];
+    };
 
     return {
         /** Address of the park loop: where a terminating call returns to. */
@@ -232,8 +253,7 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                 holdEip = false,
             } = {})
         {
-            const given = laid.get(name);
-            const id = given?.length ? /** @type {number} */ (given.shift()) : next;
+            const id = laidSlot(name) ?? next;
             if (id >= slots)
             {
                 throw new Error(`cpu: the stub table is full at ${slots} slots`
@@ -279,8 +299,9 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
          * @param {{ names: Map<string, number[]>, end: number }} layout
          */
         follow(layout){
-            laid = new Map([...layout.names].map(([name, ids])=>[
-                name, ids.filter(id=>id >= next && entries[id] === undefined)]));
+            laid = layout.names;
+            laidFrom = next;
+            laidAt.clear();
             next = Math.max(next, layout.end);
         },
 
