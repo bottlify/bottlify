@@ -15,12 +15,15 @@ import {
     createMacrotask, idleWait, pacedYield, pageIsHidden, timedWait, divergenceReporter,
     pagePacing, PAGE_YIELD_MS, PENDING_YIELD_MS, relocatablePrefix, jumpBytes, clockCredit,
     feedFilmSound, filmSoundOwed, heapSizeFor, spaceAbove, engineAreaFor, ENGINE_CUT_AT,
-    placeMainStack, stackReserveOf, resourceLookup, shippedLibraryReader, areaOf, createGuestView,
-    createKernelGl, resolveOpenglEntry, answeredByEngine, mapShippedLibraries, compatibilityOf,
-    createApp, versionResourceOf, imageInMemory, runProcessId, withCpuSetup,
-    withoutFaultingTailCalls, tailCallsFault, mobileOrSafari, automaticCores, translatorsBeside,
-    allocateCleared, RESOURCE_ALIGNMENT, answeringWhile,
+    placeMainStack, stackReserveOf, shippedLibraryReader, areaOf, createGuestView, createKernelGl,
+    resolveOpenglEntry, answeredByEngine, mapShippedLibraries, createApp, runProcessId,
+    withCpuSetup, withoutFaultingTailCalls, tailCallsFault, mobileOrSafari, automaticCores,
+    translatorsBeside, answeringWhile,
 } from './app.js';
+import { allocateCleared, RESOURCE_ALIGNMENT } from './process/process-layout.js';
+import {
+    resourceLookup, compatibilityOf, versionResourceOf, imageInMemory,
+} from './process/image-resources.js';
 import { journalEvents } from './process/system-host.js';
 import { liveDumpOf } from './process/live-dump.js';
 import {

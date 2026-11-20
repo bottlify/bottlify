@@ -494,4 +494,31 @@
  * @property {number} spun        Turns in a row that retired no instruction.
  */
 
+/**
+ * What one process of a run is built with: what `createApp` was given, and
+ * what the run hands a process it starts beside the first.
+ *
+ * @typedef {AppOptions & {
+ *     events?: any,
+ *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
+ *     spawned?: (request: any) => void,
+ *     logSinks?: Map<Function, (payload: any) => void>,
+ *     system?: { namedObjects: Map<string, any>, registry: any, bundle: any, windows?: any,
+ *         sharedViews?: any, processDirectory?: Map<number, any>,
+ *         processTables?: Map<number, any>,
+ *         ids: { thread: number, process: number }, volume: any },
+ *     mainThreadId?: number,
+ *     beside?: (request: any) => void,
+ *     terminate?: (request: any, code: number) => boolean,
+ *     askChild?: (request: any, call: any) => Promise<any> | null,
+ *     debugger?: { report: (report: import('./layers/win32/kernel32/debug-events.js')
+ *         .DebugReport) => Promise<number>, debugged?: () => boolean,
+ *         object?: () => any, noInherit?: () => boolean },
+ *     suspended?: boolean,
+ *     othersRunning?: () => boolean,
+ *     com?: { table: any, process: unknown },
+ *     service?: string,
+ * }} ProcessOptions
+ */
+
 export {};
