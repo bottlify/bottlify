@@ -48,7 +48,7 @@ import {
     FSCTL_DELETE_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT,
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, namesDirectory, reparseRequest,
 } from './reparse.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -1010,6 +1010,20 @@ export function createFileFunctions(host){
         if (address !== 0)
         {
             writeDword(address, value);
+        }
+    };
+
+    const outPointer = pointerWidth(host.pointerSize);
+    /**
+     * An optional out-pointer, at the process's width: a 64-bit caller reads
+     * all eight bytes, whatever its slot held before.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointerIf = (address, value)=>{
+        if (address !== 0)
+        {
+            host.writeMemory(address, outPointer.bytes(value));
         }
     };
 
@@ -2394,7 +2408,7 @@ export function createFileFunctions(host){
             const written = text.write(buffer >>> 0, size, candidate);
             if (written === candidate.length)
             {
-                writeDwordIf(filePart >>> 0,
+                writePointerIf(filePart >>> 0,
                     (buffer >>> 0) + (candidate.lastIndexOf(SEPARATOR) + 1) * text.unit);
             }
             return written;
@@ -2564,7 +2578,7 @@ export function createFileFunctions(host){
             if (result === asked.length)
             {
                 const at = asked.lastIndexOf(SEPARATOR);
-                writeDwordIf(filePart >>> 0, asked.endsWith(SEPARATOR)
+                writePointerIf(filePart >>> 0, asked.endsWith(SEPARATOR)
                     ? 0 : (buffer >>> 0) + (at + 1) * text.unit);
             }
             return result;
@@ -2578,7 +2592,7 @@ export function createFileFunctions(host){
         {
             // Into the caller's own buffer, so the offset is in characters
             // scaled by however wide one is.
-            writeDwordIf(filePart >>> 0, at === -1 ? 0 : (buffer >>> 0) + at * text.unit);
+            writePointerIf(filePart >>> 0, at === -1 ? 0 : (buffer >>> 0) + at * text.unit);
         }
         return result;
     });

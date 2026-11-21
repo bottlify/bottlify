@@ -4305,3 +4305,29 @@ test('an overlapped transfer done at once skips the port as the handle says, and
     assert.equal(fns.ReadFile.handler([empty, BUFFER, 4, OUT_COUNT, 0x500]), 0);
     assert.deepEqual(done.at(-1), [0, 0xc0000011, false], 'nothing past the end: the end');
 });
+
+test('a 64-bit process is handed its file part as a whole pointer, over whatever its slot held',
+    ()=>{
+        // ServiceModelReg's 64-bit build read lpFilePart's upper half as the stack's
+        // leftovers and faulted on the pointer it made.
+        const { memory, fns, files, at } = setup({ pointerSize: 8 });
+        const view = new DataView(memory.bytes.buffer);
+        const filePart = ()=>Number(view.getBigUint64(OUT_PART, true));
+        files.put('C:\\WINDOWS\\system32\\cabinet.dll', 'x');
+        /** @type {[string, () => unknown, string][]} */
+        const calls = [
+            ['GetFullPathNameA', ()=>fns.GetFullPathNameA.handler(
+                [at(NAME, 'DATA\\..\\SAVE.DAT'), 0x40, OUT_TEXT, OUT_PART]), 'SAVE.DAT'],
+            ['GetFullPathNameA of \\\\?\\', ()=>fns.GetFullPathNameA.handler(
+                [at(NAME, '\\\\?\\C:\\GAME\\X.DAT'), 0x40, OUT_TEXT, OUT_PART]), 'X.DAT'],
+            ['SearchPathA', ()=>fns.SearchPathA.handler([0, at(NAME, 'cabinet'),
+                at(NAME + 0x40, '.dll'), 0x80, OUT_TEXT, OUT_PART]), 'cabinet.dll'],
+        ];
+        for (const [name, call, part] of calls)
+        {
+            view.setBigUint64(OUT_PART, 0x0382038200000000n, true);
+            call();
+            assert.ok(filePart() < 2 ** 32, `${name}: the upper half written`);
+            assert.equal(memory.string(filePart()), part, name);
+        }
+    });
