@@ -91,15 +91,15 @@ test('a timed sleep that ends a timer\'s grain late is learned, and the wait sti
         },
     });
     /** @param {number} deadlineMs */
-    const waited = deadlineMs=>{
+    const onClock = deadlineMs=>{
         const from = clock;
         pacing.wait({ ...idle, deadlineMs });
         return clock - from;
     };
-    assert.ok(waited(1) > 12, 'the first sleep finds the grain');
-    assert.ok(waited(2) <= 2.2, 'a deadline inside the grain is spun to');
+    assert.ok(onClock(1) > 12, 'the first sleep finds the grain');
+    assert.ok(onClock(2) <= 2.2, 'a deadline inside the grain is spun to');
     assert.deepEqual(asked, [1], 'with no sleep');
-    assert.ok(waited(40) <= 40.2, 'a longer one sleeps short of the deadline by the grain');
+    assert.ok(onClock(40) <= 40.2, 'a longer one sleeps short of the deadline by the grain');
     assert.ok(asked[1] < 30, `asked ${asked[1]} ms`);
     assert.equal(pacing.counts().woken, 0);
 });

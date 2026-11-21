@@ -4595,6 +4595,7 @@ export const POINTER_ARGUMENTS = Object.freeze({
     UpdateLayeredWindow: [2, 3, 5, 7],
     UpdateProcThreadAttribute: [0, 3, 5, 6],
     UpdateSemantics: [0],
+    UpdateSubresource: [1, 3, 4],
     UpdateTrace: [2, 3],
     UpdateTraceA: [2, 3],
     UpdateTraceW: [2, 3],

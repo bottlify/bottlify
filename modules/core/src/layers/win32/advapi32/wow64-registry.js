@@ -19,7 +19,7 @@
  * reached through one view keeps it for the keys opened under it.
  */
 
-import { HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE } from './registry.js';
+import { HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE } from './hkeys.js';
 
 /**
  * A hive as a process reaches it: its calls, with open, create and remove

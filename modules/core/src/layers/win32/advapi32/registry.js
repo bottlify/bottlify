@@ -31,12 +31,9 @@ import {
 import { windowsVersion } from '../kernel32/versions.js';
 import { DOCUMENT_CLASSES } from '../msxml/dom.js';
 import { USER_SID_TEXT } from './tokens.js';
+import { HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS } from './hkeys.js';
 
-/** The predefined roots. A guest names these by constant; it never opens them. */
-export const HKEY_CLASSES_ROOT = 0x80000000;
-export const HKEY_CURRENT_USER = 0x80000001;
-export const HKEY_LOCAL_MACHINE = 0x80000002;
-export const HKEY_USERS = 0x80000003;
+export { HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS } from './hkeys.js';
 
 /** Value types. The numbers are the guest's, not ours. */
 export const REG_NONE = 0;
