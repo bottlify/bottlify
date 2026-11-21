@@ -15,6 +15,7 @@ import { createSyncNatives } from './sync-natives.js';
 import { createDirectoryNatives } from './object-directories.js';
 import { overlappedLayout } from '../common/overlapped.js';
 import { wholeAddress } from '../common/pointers.js';
+import { readSecurityAttributes } from '../common/security-attributes.js';
 import { EVENT_SLOTS, EVENT_WORD_SLOTS, MUTEX_SLOTS, SEMAPHORE_SLOTS, eventStateCode,
     releaseMutexCode, waitOneCode } from './wait-one.js';
 import { COMPILED as SEMAPHORE_CODE } from './semaphore-guest.x86.js';
@@ -549,8 +550,8 @@ export function createThreadingFunctions(host){
     const handleFlags = host.handleFlags ?? new Map();
 
     /**
-     * A handle made inheritable, as SECURITY_ATTRIBUTES' bInheritHandle (its
-     * third dword) or an open's bInheritHandle asks. Answers the handle.
+     * A handle made inheritable, as SECURITY_ATTRIBUTES' bInheritHandle or an
+     * open's bInheritHandle asks. Answers the handle.
      *
      * @param {number} handle @param {boolean} inherit
      */
@@ -562,8 +563,10 @@ export function createThreadingFunctions(host){
         return handle;
     };
     /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
-    const inherits = attributes=>(attributes >>> 0) !== 0
-        && readU32(host.readMemory(wholeAddress(attributes) + 8, 4), 0) !== 0;
+    const securityOf = attributes=>readSecurityAttributes(host.readMemory,
+        wholeAddress(attributes), host.pointerSize);
+    /** @param {number} attributes  SECURITY_ATTRIBUTES, or 0 */
+    const inherits = attributes=>securityOf(attributes)?.inherit ?? false;
 
     /**
      * Whether a handle is one GetHandleInformation and SetHandleInformation
@@ -882,15 +885,14 @@ export function createThreadingFunctions(host){
         },
     };
     /**
-     * A SECURITY_ATTRIBUTES' lpSecurityDescriptor, the second of its three
-     * fields, or 0: recorded as a fresh object's security, so a label set at
-     * creation is handed back; an object opened by an existing name keeps the
-     * security it was made with, as Windows ignores the attributes on an open.
+     * A SECURITY_ATTRIBUTES' lpSecurityDescriptor, or 0: recorded as a fresh
+     * object's security, so a label set at creation is handed back; an
+     * object opened by an existing name keeps the security it was made with,
+     * as Windows ignores the attributes on an open.
      *
      * @param {number} attributes  SECURITY_ATTRIBUTES, or 0
      */
-    const descriptorOf = attributes=>((attributes >>> 0) === 0 ? 0
-        : readU32(host.readMemory(wholeAddress(attributes) + 4, 4), 0));
+    const descriptorOf = attributes=>securityOf(attributes)?.descriptor ?? 0;
 
     const createMutex = bothNamedForms(12, ([security, initialOwner, namePointer], wide)=>
         creates.mutex(nameOf(namePointer, wide), Boolean(initialOwner), descriptorOf(security),

@@ -45,6 +45,7 @@ import { readLargeInteger } from './due-time.js';
 import { INTERACTIVE_SESSION } from './teb.js';
 import { allows, mappedAccess } from './access.js';
 import { wholeAddress } from '../common/pointers.js';
+import { readSecurityAttributes } from '../common/security-attributes.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -666,8 +667,8 @@ export function createNamedPipes(host){
         return held?.kind === 'pipe' ? held.object : null;
     };
     /** What a security attributes block says of inheritance. @param {number} attributes */
-    const inheritsBy = attributes=>(attributes >>> 0) !== 0
-        && readDword(wholeAddress(attributes) + 8) !== 0;
+    const inheritsBy = attributes=>readSecurityAttributes(host.readMemory,
+        wholeAddress(attributes), host.pointerSize)?.inherit ?? false;
 
     /**
      * The pipes this process's threads wait on for an instance, by name: a

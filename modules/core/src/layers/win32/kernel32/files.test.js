@@ -4331,3 +4331,29 @@ test('a 64-bit process is handed its file part as a whole pointer, over whatever
             assert.equal(memory.string(filePart()), part, name);
         }
     });
+
+test('a file opened with SECURITY_ATTRIBUTES is inheritable as it asks, at either width', ()=>{
+    // At 64 bits lpSecurityDescriptor is eight bytes: the flag is at 16, not 8.
+    for (const pointerSize of [4, 8])
+    {
+        const word = pointerSize;
+        /** @param {number} descriptor @param {number} inherit */
+        const marked = (descriptor, inherit)=>{
+            /** @type {number[]} */
+            const inheritable = [];
+            const { memory, files, fns, at } = setup({ pointerSize,
+                inheritable: (/** @type {number} */ handle)=>inheritable.push(handle) });
+            files.put('C:\\GAME\\LOG.TXT', 'log');
+            const view = new DataView(memory.bytes.buffer);
+            view.setUint32(0x600, 3 * word, true);
+            view.setUint32(0x600 + word, descriptor, true);
+            view.setUint32(0x600 + 2 * word, inherit, true);
+            const handle = fns.CreateFileA.handler(
+                [at(NAME, 'C:\\GAME\\LOG.TXT'), GENERIC_READ, 0, 0x600, OPEN_EXISTING, 0, 0]);
+            assert.notEqual(handle, INVALID_HANDLE_VALUE);
+            return inheritable.length;
+        };
+        assert.equal(marked(0, 1), 1, `${pointerSize * 8}-bit: inheritable`);
+        assert.equal(marked(0x2000, 0), 0, `${pointerSize * 8}-bit: a descriptor is not the flag`);
+    }
+});
