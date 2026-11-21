@@ -661,7 +661,7 @@ for (const seed of [1, 2, 3])
                 answers.push(`${on} ${method} ${answer.eax}`);
                 return answer;
             };
-            /** @param {any[]} args */
+            /** @param {string} method @param {any[]} args */
             const make = (method, args)=>/** @type {string} */ (call('#0', 'device', method,
                 args).out);
             /** The objects made, each with the references the program holds. */
