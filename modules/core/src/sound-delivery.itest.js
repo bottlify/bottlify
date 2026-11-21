@@ -61,6 +61,8 @@ const play = (program, windows, stall, across)=>new Promise((resolve, reject)=>{
 /**
  * Each way of handing sound over, what it does, and the Windows it is there on;
  * `todo`, what is known still to fail, and why.
+ *
+ * @type {{ program: string, on: string[], what: string, todo?: string }[]}
  */
 const CASES = [
     { program: 'wasapi', on: ['win7', 'win10'],
