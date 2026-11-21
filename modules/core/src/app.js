@@ -3487,6 +3487,9 @@ async function buildApp(options){
     const CLOCK_CREDIT_CAP_MS = 250;
     const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
     kernel.refreshClockWith?.(()=>creditClock());
+    // A wait whose object another process of the run may set is sat through
+    // in real time, not skipped to its deadline (`othersRunningWith`).
+    kernel.othersRunningWith?.(()=>options.othersRunning?.() ?? false);
     // Callers parked on the guest's own queue are suspended calls too, answered
     // at the look each turn gives them.
     kernel.hostAnsweringWith?.(()=>bridge.waitingOnHost() > idlers.value.length);

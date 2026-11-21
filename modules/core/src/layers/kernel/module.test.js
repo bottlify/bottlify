@@ -647,6 +647,45 @@ test('a thread carries at most MAXIMUM_SUSPEND_COUNT suspensions', async()=>{
     assert.equal(kernel.resumeThread(thread), 127, 'and did not add to the count');
 });
 
+test('the clock is not moved to a deadline while another process of the run may answer the wait'
+    + ' first', async()=>{
+    // A parent that starts a child and waits for it with a timeout - ngen
+    // giving its compile worker thirty seconds to say it is up - has a clock
+    // behind the host's by every slow turn it ran. Moved to the deadline as
+    // soon as nothing of its own was ready, it timed out within the lag, in a
+    // fraction of the wall time the child had to start in, and killed it.
+    // While another process runs, the wait is sat through in real time.
+    const memory = fakeMemory();
+    const cpu = { ...fakeCpu(), captureContext: ()=>({}), restoreContext: ()=>{},
+        runSlice: (/** @type {number} */ max)=>max };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu : memory),
+            provide: ()=>{},
+        }),
+    );
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'parent' });
+    const child = kernel.createEvent({});
+    assert.equal(kernel.wait(child, thread, { deadline: kernel.clock.virtualTime() + 20,
+        result: 0x102 }), null, 'the wait blocks');
+    // The host runs ahead of the guest's clock, as a slow machine's does.
+    await new Promise(done=>setTimeout(done, 60));
+
+    let others = true;
+    kernel.othersRunningWith(()=>others);
+    kernel.runOnce();
+    assert.equal(kernel.clock.virtualTime(), 0, 'the clock stays where it was');
+    assert.equal(thread.state, 'blocked', 'and the wait goes on');
+
+    others = false;
+    kernel.runOnce();
+    assert.equal(kernel.clock.virtualTime(), 20, 'alone, the machine moves it to the deadline');
+    assert.equal(thread.waitResult, 0x102, 'and the wait times out');
+    await kernelModule.dispose();
+});
+
 test('the cpu layer is given the guest\'s clock, for the time-stamp counter', async()=>{
     /** @type {(() => number) | null} */
     let given = null;
