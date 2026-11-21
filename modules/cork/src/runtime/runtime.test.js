@@ -1162,6 +1162,66 @@ test('a runtime sharing a store instantiates the batch modules another compiled,
     assert.deepEqual([again.cacheHits, again.sharedModules, again.sharedHeld], [1, 0, null]);
 });
 
+test('a batch module the runtimes sharing a store hold is charged once, to the store\'s'
+    + ' keeping, and never to a runtime that runs it', async()=>{
+    // Its compiled code is one, whatever instances run it. Each mscorsvw.exe of
+    // the .NET Framework's ngen charged the CLR's modules again as it took them
+    // compiled: 3 GB of translation counted with 3.1 GB of the whole tab, and a
+    // machine of 5 GB refused the heap blocks its compiler asked for.
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    /** A charge as the machine's memory hands one, counting what it holds. */
+    const charge = ()=>{
+        let held = 0;
+        return { take: (/** @type {number} */ bytes)=>{
+            held += bytes;
+            return true;
+        }, give: (/** @type {number} */ bytes)=>{
+            held -= bytes;
+        }, held: ()=>held };
+    };
+    const kept = charge();
+    /** @param {any} store @param {object} [config] */
+    const run = async(store, config = {})=>{
+        const own = charge();
+        const m = machine({ store, bundleId: 'test', charge: own, sharedCharge: kept, ...config });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        await settle();
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        return { own, diagnostics: m.runtime.diagnostics() };
+    };
+    const store = memoryTranslationStore();
+    const first = await run(store);
+    const bytes = first.diagnostics.sharedHeld?.bytes ?? 0;
+    assert.ok(bytes > 0, 'the module the first emitted, kept for the others');
+    assert.equal(kept.held(), bytes, 'charged to the keeping');
+    assert.equal(first.own.held(), 0, 'not to the runtime that compiled it');
+    const second = await run(store);
+    assert.equal(second.diagnostics.sharedModules, 1);
+    assert.equal(second.own.held(), 0, 'nor to one that took it compiled');
+    assert.equal(kept.held(), bytes, 'once');
+    // Another run on the same store, with a memory of its own: what the first
+    // run keeps is paid for in the first's, so it keeps and pays for its own.
+    const other = charge();
+    const own = charge();
+    const m = machine({ store, bundleId: 'test', charge: own, sharedCharge: other });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    await settle();
+    assert.equal(m.runtime.diagnostics().sharedModules, 0, 'none of the other run\'s');
+    assert.equal(other.held(), bytes, 'the run\'s own keeping, paid in its memory');
+    assert.equal(own.held(), 0);
+    // Nothing kept: the runtime holds its code alone, and pays for it.
+    const alone = await run(memoryTranslationStore(), { sharedModuleBytes: 0 });
+    assert.ok(alone.own.held() > 0, 'the runtime that holds its module alone');
+    assert.equal(kept.held(), bytes);
+});
+
 test('a region the store answers for at once is formed once, as its record says', async()=>{
     // A loop, then its function's entry, translated twice over a store that answers
     // before forming: at once (`getNow`, a directory store's records file), or for many

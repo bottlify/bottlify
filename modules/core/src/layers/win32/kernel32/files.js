@@ -1334,6 +1334,18 @@ export function createFileFunctions(host){
         return Boolean(file.write)
             && (granted === null || (granted & (FILE_WRITE_DATA | FILE_APPEND_DATA)) !== 0);
     };
+    /**
+     * Whether a handle may only append: FILE_APPEND_DATA without
+     * FILE_WRITE_DATA, whose every write goes to the end of the file and
+     * overwrites nothing, whatever offset or file pointer it is given.
+     *
+     * @param {number} handle
+     */
+    const appendsOnly = handle=>{
+        const granted = host.handles.access?.(handle >>> 0) ?? null;
+        return granted !== null && (granted & FILE_APPEND_DATA) !== 0
+            && (granted & FILE_WRITE_DATA) === 0;
+    };
 
     /** @param {number} handle  whether it is the null device's */
     const isNul = handle=>host.handles.typeOf?.(handle >>> 0) === 'device'
@@ -4137,6 +4149,10 @@ export function createFileFunctions(host){
                     return STATUS_INVALID_PARAMETER;
                 }
             }
+            if (writing && appendsOnly(handle))
+            {
+                at = sizeOf(file);
+            }
             /** @param {number} done @param {number} code */
             const finish = (done, code)=>{
                 if (!asynchronous)
@@ -5655,9 +5671,9 @@ export function createFileFunctions(host){
                     : host.windowMemory?.(buffer >>> 0, count)
                         ?? host.readMemory(wholeAddress(buffer), count);
                 const pointer = wholeAddress(overlapped);
-                const at = pointer !== 0 && host.ports
-                    ? host.ports.offsetOf(pointer)
-                    : file.position;
+                const at = appendsOnly(handle) ? sizeOf(file)
+                    : pointer !== 0 && host.ports ? host.ports.offsetOf(pointer)
+                        : file.position;
                 /** @param {number} stored */
                 const deliver = stored=>{
                     // An overlapped write on a handle opened for it leaves the

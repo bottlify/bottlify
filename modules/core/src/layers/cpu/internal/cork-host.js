@@ -27,7 +27,7 @@
  * and page arithmetic) is handed in by `module.js`, which loaded it by URL.
  */
 
-import { guestByLength, openCharge, openMemoryBudget } from './memory-budget.js';
+import { guestByLength, openCharge, openMemoryBudget, RUN_HOLDER } from './memory-budget.js';
 import { exceptionName, hostFault } from './faults.js';
 import { releasedCode } from './gc-nudge.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
@@ -277,6 +277,28 @@ function wideMemory(engine, window, shared){
             + ` memory (memory64) of ${window / 2 ** 30} GiB, which this browser does not provide`
             + ` (${/** @type {Error} */ (e)?.message ?? e})`, { cause: e });
     }
+}
+
+/** The run's charge for the modules kept for its processes, by its budget. @type {WeakMap<object, ReturnType<typeof openCharge>>} */
+const sharedCharges = new WeakMap();
+
+/**
+ * What the translator's modules kept for every process of a run are taken from:
+ * the run's own part of its machine's memory (`RUN_HOLDER`), one charge for
+ * the run, so its processes share one keeping and another run on the same
+ * store keeps its own (`sharedModulesOf`).
+ *
+ * @param {SharedArrayBuffer | ArrayBuffer} budget  the run's (`memoryBudget`)
+ */
+function runSharedCharge(budget){
+    let charge = sharedCharges.get(budget);
+    if (charge === undefined)
+    {
+        charge = openCharge(openMemoryBudget(budget, RUN_HOLDER), 'translation',
+            TRANSLATION_WEIGHT);
+        sharedCharges.set(budget, charge);
+    }
+    return charge;
 }
 
 /**
@@ -537,6 +559,12 @@ export function createCorkHost(config){
     // weighed for what holding it costs past itself (`TRANSLATION_WEIGHT`).
     const translationCharge = machine === null ? null
         : openCharge(machine, 'translation', TRANSLATION_WEIGHT);
+    // The modules kept for every runtime sharing the run's store are the run's:
+    // they outlive this process, in the run's thread where the store is (a
+    // worker's store is its process's alone and keeps none), so they are taken
+    // from the run's own part, once, and from no process running them.
+    // One for the run, so every process of it finds the run's keeping.
+    const sharedCharge = memoryBudget === undefined ? null : runSharedCharge(memoryBudget);
     const cacheBytes = corkConfig?.cacheBytes
         ?? (translationZone === undefined ? undefined
             : corkConfig?.crossTailCalls !== false ? 0
@@ -1109,6 +1137,7 @@ export function createCorkHost(config){
             letGo: releasedCode,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(translationCharge === null ? {} : { charge: translationCharge }),
+            ...(sharedCharge === null ? {} : { sharedCharge }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         ...virtualClock ? { now } : {},
         read: (/** @type {number} */ address)=>ram[address],

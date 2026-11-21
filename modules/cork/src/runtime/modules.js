@@ -80,7 +80,15 @@ export function createModules(state){
      * (`shared-modules.js`): none for a run that keeps no store, nor where no
      * other runtime of this thread would take them. */
     const sharedModules = keepsModulesFor === null || sharesStore === null ? null
-        : sharedModulesOf(sharesStore, settings.sharedModuleBytes);
+        : sharedModulesOf(sharesStore, settings.sharedModuleBytes, settings.sharedCharge ?? null);
+    /** Modules this thread's keeping holds and pays for (`paid`), and the instances of
+     * them: their code is the keeping's, and no runtime running it pays (`chargeFor`).
+     * ponytail: one the keeping lets go later stays unpaid while a runtime still
+     * runs it - at most the keeping's cap; paid again only if it is formed again.
+     * @type {WeakSet<WebAssembly.Module>} */
+    const keptModules = new WeakSet();
+    /** @type {WeakSet<WebAssembly.Instance>} */
+    const keptInstances = new WeakSet();
     let nextTable = resumable ? TIER_SLOT + 1 : 0;
 
     /**
@@ -195,7 +203,7 @@ export function createModules(state){
             {
                 const bytes = instanceBytes.get(instance) ?? 0;
                 makeRoom(bytes);
-                const charged = chargeFor(bytes);
+                const charged = keptInstances.has(instance) ? 0 : chargeFor(bytes);
                 held = { instance, bytes, records: new Set(), ran: rt.corkRetired, keepUntil: 0,
                     charged };
                 heldModules.set(instance, held);
@@ -358,6 +366,10 @@ export function createModules(state){
             });
             counts.modules++;
             instanceBytes.set(instance, bytes);
+            if (keptModules.has(compiled))
+            {
+                keptInstances.add(instance);
+            }
             placeModule(instance);
             return instance;
         }
@@ -401,7 +413,10 @@ export function createModules(state){
         if (keepsModulesFor !== null && module !== null)
         {
             compiledBytes.set(module, bytes);
-            sharedModules?.set(key, module, bytes);
+            if (sharedModules?.set(key, module, bytes) && sharedModules.paid)
+            {
+                keptModules.add(module);
+            }
             // Kept alive where the store is kept too, for runtimes in other
             // threads: one compiling the same bytes is handed this code,
             // tiered up as it is, by the wasm engine's own cache.
@@ -420,6 +435,10 @@ export function createModules(state){
         }
         counts.sharedModules++;
         compiledBytes.set(one.module, one.bytes);
+        if (sharedModules?.paid)
+        {
+            keptModules.add(one.module);
+        }
         return one.module;
     };
     return {

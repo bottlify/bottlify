@@ -4181,6 +4181,32 @@ test('a file handle reads and writes by the rights it holds: a second handle ont
         + ' FILE_READ_ATTRIBUTES');
 });
 
+test('a handle that may only append writes at the end of the file, wherever its pointer or'
+    + ' the offset it is given says', ()=>{
+    // FILE_APPEND_DATA without FILE_WRITE_DATA: "write operations will not
+    // overwrite existing data". A log a program opens so - .NET's ngen.log -
+    // was written over from its start, each line on the last.
+    const { memory, files, handles, fns, open } = setup();
+    files.put('C:\\LOG.TXT', 'abc');
+    const file = handles.resolve(open('C:\\LOG.TXT', OPEN_EXISTING), 'file');
+    const appender = handles.open('file', file, 0x00100004);
+    memory.putString(BUFFER, 'XY');
+    assert.equal(fns.WriteFile.handler([appender, BUFFER, 2, OUT_COUNT, 0]), 1);
+    assert.equal(fns.WriteFile.handler([appender, BUFFER, 1, OUT_COUNT, 0]), 1);
+    assert.equal(files.text('C:\\LOG.TXT'), 'abcXYX', 'WriteFile appends');
+    const natives = /** @type {any} */ (fns.CreateFileW).natives;
+    const block = 0x500;
+    const offset = 0x510;
+    memory.putDword(offset, 0);
+    memory.putDword(offset + 4, 0);
+    assert.equal(natives.NtWriteFile.handler([appender, 0, 0, 0, block, BUFFER, 2, offset, 0]), 0);
+    assert.equal(files.text('C:\\LOG.TXT'), 'abcXYXXY', 'NtWriteFile at offset 0 appends');
+    // A handle that may write its data writes where it is told.
+    const writer = handles.open('file', file, 0x00100006);
+    assert.equal(natives.NtWriteFile.handler([writer, 0, 0, 0, block, BUFFER, 1, offset, 0]), 0);
+    assert.equal(files.text('C:\\LOG.TXT'), 'XbcXYXXY');
+});
+
 test('a device that holds no files opens as itself, in the mode it was opened in', ()=>{
     const { memory, fns } = setup();
     const native = /** @type {any} */ (fns.CreateFileW).natives;

@@ -1370,7 +1370,12 @@ export function createHeapFunctions(host){
         const holders = (allocator.owners?.() ?? [])
             .map((/** @type {{ owner: any, bytes: number, blocks: number }} */ one)=>
                 `${named(one.owner)} ${one.bytes} in ${one.blocks}`).join(', ');
-        host.divergence?.(api, `${size} bytes refused: ${state.largestFree} largest free`
+        // A span that fits and still no block: the guest's memory could not
+        // grow to it, the machine's memory full (`reach`), not the arena.
+        const cause = state.largestFree >= size
+            ? 'the machine\'s memory has no room for it, its arena having'
+            : 'the arena has';
+        host.divergence?.(api, `${size} bytes refused: ${cause} ${state.largestFree} largest free`
             + ` of ${state.free} free, ${state.used} used in ${state.blocks} blocks`
             + (holders ? ` (${holders})` : ''));
     };

@@ -18,23 +18,32 @@
  * Held strongly, so a module outlives the process that made it, up to a cap
  * of wasm bytes; past it the modules used longest ago go. Keyed to the store
  * object, so what shares a store shares these and nothing else does.
+ *
+ * Its code is one whatever instances run it, so the keeping pays for it, from
+ * the charge it is made with (the machine's memory), and no runtime running
+ * it does: a module the charge has no room for is not kept.
  */
 
 /**
  * @typedef {{ get: (key: string) => { module: WebAssembly.Module, bytes: number } | undefined,
- *     set: (key: string, module: WebAssembly.Module, bytes: number) => void,
+ *     set: (key: string, module: WebAssembly.Module, bytes: number) => boolean,
  *     stats: () => { held: number, bytes: number, hits: number, added: number,
- *         dropped: number } }} SharedModules
+ *         dropped: number }, paid: boolean }} SharedModules
  */
 
-/** @type {WeakMap<object, SharedModules>} */
+/** By store, then by the charge that pays for them (`UNPAID` for none).
+ * @type {WeakMap<object, WeakMap<object, SharedModules>>} */
 const byStore = new WeakMap();
+const UNPAID = {};
+
+/** @typedef {{ take: (bytes: number) => boolean, give: (bytes: number) => void }} Charge */
 
 /**
  * @param {number} cap  wasm bytes held at most
+ * @param {Charge | null} [charge]  what the modules held are taken from
  * @returns {SharedModules}
  */
-export function createSharedModules(cap){
+export function createSharedModules(cap, charge = null){
     /** @type {Map<string, { module: WebAssembly.Module, bytes: number }>} */
     const held = new Map();
     let bytes = 0;
@@ -55,9 +64,13 @@ export function createSharedModules(cap){
             return one;
         },
         set(key, module, size){
-            if (held.has(key) || size > cap)
+            if (held.has(key))
             {
-                return;
+                return held.get(key)?.module === module;
+            }
+            if (size > cap || (charge !== null && !charge.take(size)))
+            {
+                return false;
             }
             held.set(key, { module, bytes: size });
             bytes += size;
@@ -70,30 +83,44 @@ export function createSharedModules(cap){
                 }
                 held.delete(oldest);
                 bytes -= one.bytes;
+                charge?.give(one.bytes);
                 dropped++;
             }
+            return held.has(key);
         },
         stats: ()=>({ held: held.size, bytes, hits, added, dropped }),
+        // Whether what it keeps is paid for here, and so by no runtime running it.
+        paid: charge !== null,
     };
 }
 
 /**
- * The shared modules of a store, made at its first ask; none without a store
- * or with a cap of 0.
+ * The shared modules of a store paid for by `charge`, made at their first ask;
+ * none without a store or with a cap of 0. Two runs on one store, each with a
+ * memory of its own (a machine rebuilt, a tool's runs one after another), keep
+ * apart: what one keeps is paid in its memory and never handed to the other.
  *
  * @param {object | null} store @param {number} cap
+ * @param {Charge | null} [charge]  what its modules are taken from: one object
+ *     for every runtime of a run
  * @returns {SharedModules | null}
  */
-export function sharedModulesOf(store, cap){
+export function sharedModulesOf(store, cap, charge = null){
     if (store === null || typeof store !== 'object' || !(cap > 0))
     {
         return null;
     }
-    let shared = byStore.get(store);
+    let byCharge = byStore.get(store);
+    if (byCharge === undefined)
+    {
+        byCharge = new WeakMap();
+        byStore.set(store, byCharge);
+    }
+    let shared = byCharge.get(charge ?? UNPAID);
     if (shared === undefined)
     {
-        shared = createSharedModules(cap);
-        byStore.set(store, shared);
+        shared = createSharedModules(cap, charge);
+        byCharge.set(charge ?? UNPAID, shared);
     }
     return shared;
 }
