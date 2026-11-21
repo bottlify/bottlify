@@ -301,6 +301,9 @@ const readyNow = thread=>{
  *        none), or all taking turns on this one (`concentrate`), a debugging switch.
  * @param {(count: number) => void} [options.readyChanged]  Told how many threads are
  *        ready to run with no executor running them, as that changes (`readyCount`).
+ * @param {(address: number) => ({ kind: string, access: string } | undefined)} [options.regionAt]
+ *        The guest memory's region holding an address: where a stack pointer past its
+ *        thread's stack lies (`pastItsStack`). Without it no overflow is told.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -523,6 +526,33 @@ export function createScheduler(options){
     const escaped = [];
     /** @type {Map<any, number>} */
     const lowWater = new Map();
+    /**
+     * Whether a stack pointer below its thread's stack lies where no stack can:
+     * nothing mapped, another thread's stack, memory the guest may not write
+     * (the engine's tables among them). A stack the program made itself -- a
+     * fiber's, in memory it allocated -- is writable memory of another kind.
+     *
+     * Translated code writes through esp without testing the page (cork's
+     * `looseStacks`), so a thread whose stack runs out has no guard page to
+     * touch: its pushes go on through whatever lies below, and the process's
+     * own copy of the engine's tables lies under the stacks. Windows raises
+     * STATUS_STACK_OVERFLOW at the guard page and ends the process when it
+     * cannot be handled; here the process stops on the overflow at the next
+     * turn (roadmap/decisions.md), before the walk reaches anything of the
+     * engine's.
+     *
+     * @param {number} esp
+     */
+    const pastItsStack = esp=>{
+        if (options.regionAt === undefined)
+        {
+            return false;
+        }
+        const region = options.regionAt(esp);
+        return region === undefined || region.kind === 'stack' || !region.access.includes('w');
+    };
+    /** @type {Set<any>} */
+    const overflowed = new Set();
     /** @type {((thread: any) => void)[]} */
     const onExpiry = [];
 
@@ -587,6 +617,14 @@ export function createScheduler(options){
             escaped.push(`${thread.name}: esp 0x${esp.toString(16)} outside`
                 + ` 0x${(thread.stackLimit >>> 0).toString(16)}`
                 + `..0x${(thread.stackTop >>> 0).toString(16)}`);
+        }
+        if (esp < thread.stackLimit && pastItsStack(esp) && !overflowed.has(thread))
+        {
+            overflowed.add(thread);
+            cpu.raiseFault?.({ name: 'stack overflow', eip: cpu.eip?.() ?? 0,
+                detail: `${thread.name}'s stack pointer 0x${esp.toString(16)} is past the`
+                    + ` bottom of its stack (0x${(thread.stackLimit >>> 0).toString(16)}),`
+                    + ' where no stack of its own lies' });
         }
     };
 

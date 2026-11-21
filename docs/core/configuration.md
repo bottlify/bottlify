@@ -40,8 +40,9 @@ affinity mask names the executors it may run on. Executors the run names all ope
 program starts; automatic ones open as its threads want them, and the count a bundle's threads
 opened is kept in the translation store so the next run opens as many at its start. The process's
 own executor answers every call the others make, and keeps itself for those answers while a thread
-is pinned to its processor: another executor plays that processor. Without shared memory, or with its
-pages past 4 GiB (a 64-bit program over the wide window), the program runs on one executor, is told
+is pinned to its processor: another executor plays that processor. Without shared memory, on a
+thread that may not block (the engine on a page's own thread, cross-origin isolated or not), or with
+its pages past 4 GiB (a 64-bit program over the wide window), the program runs on one executor, is told
 of one, and the cpu layer's diagnostics say why (`executorsRefused`). How threads are placed: [execution in Bottlify](../architecture/cork.md#execution-in-bottlify).
 
 cork's own settings (`cork.config`, `EngineConfig` in `src/layers/cpu/engine.js`) are in

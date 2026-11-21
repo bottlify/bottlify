@@ -2693,3 +2693,19 @@ seconds in the 1.3 s of wall time after the worker started, and it killed the wo
 and gave up ("Failed to synchronize with worker process because of timeout"). Such a wait is now
 sat through in real time (`othersRunningWith` in kernel/module.js), which costs a waiter beside
 another process the shortcut a lone machine keeps. *2026-11-21.*
+
+**A285. A thread whose stack pointer leaves its stack for memory no stack of its own lies in stops
+its process.** Translated code writes through esp without testing the page (cork's `looseStacks`),
+so a thread's stack has no guard page a push can touch: a thread that ran out of stack pushed on
+through the stacks below it, the gap under the pool and the process's copy of the engine's tables,
+and the engine's thread hung in an entry hash the pushes had written over. The scheduler reads each
+thread's stack pointer before its turn (`watchStack`); one below the thread's stack that lies in
+nothing mapped, another thread's stack or memory the guest may not write stops the process on a
+`stack overflow` fault, as Windows ends a process whose STATUS_STACK_OVERFLOW nothing handles. No
+handler of the program's sees it: there is no stack left to run one on. A stack the program made
+itself (a fiber's, in memory it allocated) runs on. The walk is seen a turn late, and a turn reaches
+no further than the gap above the engine's tables for a thread's stack in the pool; the main
+thread's stack, low in the space, is not covered, which wants an esp floor in cork's back edges.
+The engine's entry hash is probed at most once round (`insert`), so one written over fails with an
+error rather than holding the thread.
+*2026-11-21.*

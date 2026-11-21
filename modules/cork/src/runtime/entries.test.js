@@ -250,3 +250,16 @@ test('the hash is cleared at the start unless it is known zero, and then left un
         }
     }
 });
+
+test('a hash written over with no slot left free fails the insert rather than probe for ever', ()=>{
+    // The hash lies in the guest's own space under a growing memory: a store that
+    // reached it (a stack walking off its end) leaves keys the map never put
+    // there, and an open-addressed probe over a hash with no empty slot found
+    // none and went round for ever, holding the engine's thread.
+    const shift = 24;
+    const bytes = 2 ** (32 - shift) * Tables.HASH_SLOT;
+    const memory = new WebAssembly.Memory({ initial: Math.ceil((bytes + 64) / 65536) });
+    const entries = createEntries({ memory, hashBase: 64, shift });
+    new Uint8Array(memory.buffer).fill(0x5a, 64, 64 + bytes);
+    assert.throws(()=>entries.add(0x401000, fn, 3, 8, 17), /entry hash .* no slot/);
+});

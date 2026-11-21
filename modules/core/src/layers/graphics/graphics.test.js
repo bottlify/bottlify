@@ -12,7 +12,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { clientDrawable, clientUncovered, graphicsModule, uncoveredRegion, windowShown,
+import { clientDrawable, clientUncovered, graphicsModule, swapChainShows, uncoveredRegion,
+    windowShown,
     windowsAbove }
     from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
@@ -1288,6 +1289,31 @@ test('OpenGL draws on a window\'s client area, whichever of its DCs names it', (
     const stranger = { ...framed, window: 0x30 };
     assert.equal(clientDrawable(stranger, windows), stranger, 'a window not listed too');
     assert.equal(clientDrawable(null, windows), null);
+});
+
+test('a swap chain\'s window that has the screen shows its frame with the windows over it laid'
+    + ' over it, not its own surface', ()=>{
+    // A box over a DXGI picture that had the screen stood on the window's own
+    // surface, black, where the frame was; full screen, it was not seen at all.
+    const size = { width: 1280, height: 720 };
+    const whole = { left: 0, top: 0, right: 1280, bottom: 720 };
+    const game = { hwnd: '0x36', rect: whole, client: whole, visible: true, parent: null };
+    const box = { hwnd: '0x50', rect: { left: 100, top: 100, right: 300, bottom: 200 },
+        client: { left: 103, top: 122, right: 297, bottom: 197 }, visible: true, parent: null };
+    for (const fullscreen of [false, true])
+    {
+        const into = { window: 0x36, fullscreen };
+        assert.equal(swapChainShows([game], into, size), 'frame', 'nothing over it');
+        assert.equal(swapChainShows([game, box], into, size), 'veil', 'a box over it');
+        assert.equal(swapChainShows([box, game], into, size), 'frame', 'a box under it');
+        assert.equal(swapChainShows([{ ...game, visible: false }, box], into, size), 'desktop',
+            'its window hidden');
+    }
+    // A windowed one smaller than the screen: the desktop, its ceiling.
+    const small = { ...game, client: { left: 100, top: 100, right: 900, bottom: 600 } };
+    assert.equal(swapChainShows([small], { window: 0x36, fullscreen: false }, size), 'frame');
+    assert.equal(swapChainShows([small, box], { window: 0x36, fullscreen: false }, size),
+        'desktop');
 });
 
 test('a device\'s window holds the screen only while it is shown, it and what it is inside',

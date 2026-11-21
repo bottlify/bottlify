@@ -49,25 +49,6 @@ export const LEND_LEAST = 64 << 10;
 const WAIT_LIMIT_MS = 10000;
 
 /**
- * Whether this thread may block on a shared word: a browser's window may
- * not, and a lend a claim cannot wait out is never made.
- */
-export function mayWait(){
-    if (typeof SharedArrayBuffer !== 'function')
-    {
-        return false;
-    }
-    try
-    {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 1, 0);
-        return true;
-    }
-    catch {
-        return false;
-    }
-}
-
-/**
  * The shared parts of a lending: the slots and the stash, made on the side
  * that lends and sent once to the side that reads.
  *

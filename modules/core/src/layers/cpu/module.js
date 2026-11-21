@@ -6,6 +6,7 @@
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { openMemoryBudget } from './internal/memory-budget.js';
+import { mayWait } from '../../system/may-wait.js';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
@@ -547,6 +548,17 @@ export function createCpuModule(){
                 log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
             }
 
+            // The process's executor waits on the others with Atomics.wait,
+            // which a page's window may not call even where it shares memory
+            // (`--coi` with the engine on the page's thread): one, said so.
+            if (settings.executors > 1 && !mayWait())
+            {
+                state.executorsRefused = `${settings.executors} asked, 1 run: `
+                    + 'the engine\'s thread may not block (a page\'s window)';
+                settings.executors = 1;
+                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+            }
+
             /** @type {(id: number) => void} */
             let dispatch = ()=>{};
 
@@ -754,11 +766,11 @@ export function createCpuModule(){
                         throw new Error(problem);
                     }
                     const several = settings.executors > 1;
-                    // Where the tab's memory is bounded, every engine is nudged: what
-                    // the heap keeps of its garbage counts against the tab too.
-                    const nudging = gcNudgeOf(config?.gcNudge
-                        ?? (settings.memoryBudget !== undefined ? true : undefined),
-                    undefined, settings.memorySize);
+                    // By the host alone, a bounded machine's memory or not: V8 keeps
+                    // little garbage to nudge out, and a buffer of a quarter of the
+                    // guest's memory every 20 ms put .NET 4.8's setup under
+                    // --machine at 72 % of its thread in V8's collector.
+                    const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
                     if (keepsTableImporters())
                     {
                         log?.warn?.('cpu', 'this host\'s WebAssembly (V8 before 13, Node.js 22)'

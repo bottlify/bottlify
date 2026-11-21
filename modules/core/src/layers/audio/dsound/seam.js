@@ -706,10 +706,13 @@ export function createPublisher({ publishInterface }){
  *        CoCreateInstance as a program calls it, guest pointers in: how a
  *        buffer's SetFX makes the effects it names, the program's own
  *        registered class included.
+ * @param {(buffer: any) => void} [deps.played]  Told at each Play, after the
+ *        buffer is playing: where the sound device gives it its voice, so the
+ *        voice starts where the cursor was put.
  */
 export function createDirectSound({
     memory, allocate, now, publishInterface, signal, callGuest, callerThread, divergence, mtaUsage,
-    pointerSize = 4, createInstance,
+    pointerSize = 4, createInstance, played,
 })
 {
     const publisher = createPublisher({ publishInterface });
@@ -1293,6 +1296,7 @@ export function createDirectSound({
             record(`b${buffers.indexOf(buffer)} Play loop=${(flags >>> 0) & 1} n=${buffer.bytes}`);
             const start = ()=>{
                 buffer.play(flags >>> 0);
+                played?.(buffer);
                 bufferMethods.AcquireResources(buffer, []);
                 return DS_OK;
             };

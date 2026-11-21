@@ -13,7 +13,8 @@
  */
 
 import { createSender, sharedNow } from './channel.js';
-import { createLendingBuffers, mayWait } from './lending.js';
+import { mayWait } from '../../../system/may-wait.js';
+import { createLendingBuffers } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
 import { recordedDirect3D7 } from './d3d7.js';
 import { recordedOpengl } from './opengl.js';

@@ -89,6 +89,31 @@ test('a frame twice the median that a 60 Hz display would not miss is no drop', 
     assert.deepEqual(frameDrops(frames).drops.map(drop=>drop.ms), [20]);
 });
 
+test('a frame parked on the graphics worker is named by what the worker spent it on', ()=>{
+    // The worker's sums grow into each frame; an ordinary frame's GPU took 6 ms
+    // and its queueing (pipelines, replay) 2.
+    /** @param {Partial<import('./frame-drops.js').FrameLike>} [change] */
+    const drawn = (change = {})=>frame({ ...change, notes: { interpreted: 100, heapDelta: 1000,
+        gfxFrames: 1, gfxToQueueMs: 2, gfxGpuMs: 6, ...change.notes } });
+    const frames = Array.from({ length: 100 }, (_, index)=>({ ...drawn(), index }));
+    /** @type {[number, Partial<import('./frame-drops.js').FrameLike>, string][]} */
+    const cases = [
+        [10, { ms: 60, idleMs: 46, notes: { gfxGpuMs: 50 } }, 'graphics worker: GPU'],
+        [20, { ms: 60, notes: { gfxToQueueMs: 44 } }, 'graphics worker: to the queue'],
+        [30, { ms: 60, idleMs: 46, notes: { gfxGpuMs: 8 } }, 'waiting'],
+        [40, { ms: 60, byKind: { guest: 54, host: 4 }, instructions: 5e6,
+            notes: { gfxGpuMs: 50 } }, 'guest work'],
+    ];
+    for (const [index, change] of cases)
+    {
+        frames[index] = { ...drawn(change), index };
+    }
+    const report = frameDrops(frames);
+    assert.equal(report.gpu, 'measured', 'the frames carry the worker\'s GPU time');
+    assert.deepEqual(report.drops.map(drop=>[drop.index, drop.cause]),
+        cases.map(([index, , cause])=>[index, cause]));
+});
+
 test('translating on the engine\'s thread is translation, and an unread heap is said', ()=>{
     const frames = Array.from({ length: 100 }, (_, index)=>({ ...frame(), index }));
     frames[50] = { ...frame({ ms: 60, byKind: { guest: 54, host: 4 },

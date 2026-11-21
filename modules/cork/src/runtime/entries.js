@@ -88,7 +88,10 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
         }
         const v = view();
         let slot = slotOf(eip, shift);
-        for (;;)
+        // Every slot at most once: the count of live ones says one is free, but
+        // the hash lies in memory a store of the guest's may reach, and a probe
+        // over slots it filled would go round for ever, holding the thread.
+        for (let tried = 0; tried < slotCount; tried++)
         {
             const at = hashBase + slot * Tables.HASH_SLOT;
             const key = v.getUint32(at, true);
@@ -108,6 +111,8 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
             }
             slot = (slot + 1) & (slotCount - 1);
         }
+        throw new Error(`cork: the entry hash at 0x${hashBase.toString(16)} has no slot free`
+            + ` with ${inHash} of ${slotCount} live: written by something else`);
     };
     /** @type {(Entry | null)[]} */
     const slots = [];
