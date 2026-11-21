@@ -3792,10 +3792,11 @@ export async function createApp(options){
     {
         const memoryBudget = createMemoryBudget(tabMemory);
         const run = openMemoryBudget(memoryBudget);
-        // The translations every process shares (compiled modules, formed
-        // regions), sized to the machine and held for the run.
+        // The regions every process shares formed, sized to the machine and
+        // held for the run. The compiled modules kept beside them are taken
+        // as they are kept, by what they cost (`sharedCharge`).
         const shared = Math.min(SHARED_MODULE_BYTES, Math.floor(tabMemory / 32));
-        run.take(shared * 2, 'translation');
+        run.take(shared, 'translation');
         // In a tab, the tab's own: the page, the engine's thread, the graphics
         // and translators' workers, the browser's code mapped in.
         if (inBrowser())

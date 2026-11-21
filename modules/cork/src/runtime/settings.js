@@ -109,6 +109,15 @@ export const SETTINGS = {
             + ' one it has no room for lets those gone longest without running go until there'
             + ' is, and where none is left one module is held past it (`unchargedBytes` in the'
             + ' diagnostics).' },
+    // The keeping's code is one whatever runtimes run it: paid once, by it.
+    sharedCharge: { kind: 'host',
+        value: /** @type {{ take(bytes: number): boolean, give(bytes: number): void } | null} */
+            (null),
+        shown: 'none',
+        doc: 'What the modules kept for the runtimes sharing a store (`sharedModuleBytes`) are'
+            + ' taken from, by the first runtime of the thread to keep one: `{ take(bytes),'
+            + ' give(bytes) }`, as `charge`. A kept module is paid for there and by no runtime'
+            + ' running it; one it has no room for is not kept.' },
     // The engine keeps a module's compiled code until a full collection finds
     // it unreachable, which a thread with a small heap may not run for minutes.
     letGo: { kind: 'host', value: /** @type {((bytes: number) => void) | null} */ (null),

@@ -27,7 +27,7 @@
  * and page arithmetic) is handed in by `module.js`, which loaded it by URL.
  */
 
-import { guestByLength, openCharge, openMemoryBudget } from './memory-budget.js';
+import { guestByLength, openCharge, openMemoryBudget, RUN_HOLDER } from './memory-budget.js';
 import { exceptionName, hostFault } from './faults.js';
 import { releasedCode } from './gc-nudge.js';
 import { captureBlockContext, restoreBlockContext } from './context.js';
@@ -537,6 +537,13 @@ export function createCorkHost(config){
     // weighed for what holding it costs past itself (`TRANSLATION_WEIGHT`).
     const translationCharge = machine === null ? null
         : openCharge(machine, 'translation', TRANSLATION_WEIGHT);
+    // The modules kept for every runtime sharing the run's store are the run's:
+    // they outlive this process, in the run's thread where the store is (a
+    // worker's store is its process's alone and keeps none), so they are taken
+    // from the run's own part, once, and from no process running them.
+    const sharedCharge = memoryBudget === undefined ? null
+        : openCharge(openMemoryBudget(memoryBudget, RUN_HOLDER), 'translation',
+            TRANSLATION_WEIGHT);
     const cacheBytes = corkConfig?.cacheBytes
         ?? (translationZone === undefined ? undefined
             : corkConfig?.crossTailCalls !== false ? 0
@@ -1109,6 +1116,7 @@ export function createCorkHost(config){
             letGo: releasedCode,
             ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(translationCharge === null ? {} : { charge: translationCharge }),
+            ...(sharedCharge === null ? {} : { sharedCharge }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         ...virtualClock ? { now } : {},
         read: (/** @type {number} */ address)=>ram[address],
