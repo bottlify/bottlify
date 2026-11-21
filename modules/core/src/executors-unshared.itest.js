@@ -6,8 +6,9 @@
 
 /**
  * Executors asked for where memory cannot be shared -- a page that is not
- * cross-origin isolated has no SharedArrayBuffer -- run the program on one, as
- * by default, and the cpu's report says why; the launch does not fail.
+ * cross-origin isolated has no SharedArrayBuffer -- or where the engine's
+ * thread may not block on it (a page's window) run the program on one, as by
+ * default, and the cpu's report says why; the launch does not fail.
  */
 
 import { test } from 'node:test';
@@ -52,6 +53,42 @@ test('three executors without SharedArrayBuffer run the program on one and say w
         finally
         {
             globalThis.SharedArrayBuffer = shared;
+        }
+    });
+
+test('three executors on a thread that may not block run the program on one and say why',
+    { timeout: 60_000 }, async()=>{
+        // A page's window shares memory once cross-origin isolated, but may not
+        // block on it: the process's executor would wait on the others there.
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            code: ({ iat })=>[0x6a, 0x07, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const wait = Atomics.wait;
+        Atomics.wait = ()=>{
+            throw new TypeError('Atomics.wait cannot be called in this context');
+        };
+        try
+        {
+            const app = await createApp({ executable, cpu: { cores: 3 } });
+            try
+            {
+                assert.equal(await app.run({ timeoutMs: 30_000 }), 7);
+                const tables = await app.diagnostics();
+                const cpu = (Array.isArray(tables) ? tables : [])
+                    .find(table=>table.name === 'cpu');
+                assert.match(String(cpu?.metrics?.executorsRefused),
+                    /3 asked, 1 run: .*may not block/);
+                assert.deepEqual(cpu?.metrics?.executors, []);
+            }
+            finally
+            {
+                await app.dispose();
+            }
+        }
+        finally
+        {
+            Atomics.wait = wait;
         }
     });
 

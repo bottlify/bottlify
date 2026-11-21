@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { LEND, LEND_SLOTS, STASH_BYTES, createBorrower, createLender,
-    createLendingBuffers, mayWait } from './lending.js';
+    createLendingBuffers } from './lending.js';
 
 /** A lender and a borrower over one memory, on this thread. */
 function pair(){
@@ -27,10 +27,6 @@ function pair(){
     };
     return { buffers, memory, lender, read };
 }
-
-test('a thread that may block can lend', ()=>{
-    assert.equal(mayWait(), true);
-});
 
 test('a lend the played side reads first is read in place, and a claim after it costs nothing',
     ()=>{

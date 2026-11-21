@@ -6,6 +6,7 @@
 
 import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { openMemoryBudget } from './internal/memory-budget.js';
+import { mayWait } from '../../system/may-wait.js';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
@@ -543,6 +544,17 @@ export function createCpuModule(){
                     + (memoryShareable(undefined)
                         ? 'the run keeps the memory unshared (sharedMemory: false)'
                         : 'no SharedArrayBuffer, the page is not cross-origin isolated');
+                settings.executors = 1;
+                log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
+            }
+
+            // The process's executor waits on the others with Atomics.wait,
+            // which a page's window may not call even where it shares memory
+            // (`--coi` with the engine on the page's thread): one, said so.
+            if (settings.executors > 1 && !mayWait())
+            {
+                state.executorsRefused = `${settings.executors} asked, 1 run: `
+                    + 'the engine\'s thread may not block (a page\'s window)';
                 settings.executors = 1;
                 log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
             }
