@@ -213,7 +213,18 @@ export function createUnwinder(host){
      * @returns {FunctionEntry}
      */
     const entryAt = (imageBase, entry)=>{
-        const fields = view(entry, RUNTIME_FUNCTION_SIZE);
+        let fields = view(entry, RUNTIME_FUNCTION_SIZE);
+        // RUNTIME_FUNCTION_INDIRECT: a part of a function the linker moved
+        // away (a cold block) is described by the function's own entry,
+        // whose RVA its UnwindData holds with the low bit set. The system's
+        // lookup answers that entry, so a caller reading UNWIND_INFO there
+        // never reads it from an odd address.
+        const unwindData = fields.getUint32(8, true);
+        if ((unwindData & 1) !== 0)
+        {
+            entry = imageBase + (unwindData & ~1) >>> 0;
+            fields = view(entry, RUNTIME_FUNCTION_SIZE);
+        }
         return {
             imageBase,
             entry,
