@@ -178,8 +178,13 @@ const traceOnBox = argv.includes('--trace-box');
 // `--trace-fault`: the trace printed when a process ends with an exception's
 // code -- the calls that led to a crash nothing reported in a box.
 const traceOnFault = argv.includes('--trace-fault');
+// `--trace-exit REGEX`: the trace and every `--cat` file printed when a process whose image
+// matches ends with any code but 0 - a program that gives up and exits on its own (ngen's worker
+// answering 1) raises nothing `--trace-fault` sees, and says why only in its log.
+const traceExit = argv.includes('--trace-exit')
+    ? new RegExp(String(argv[argv.indexOf('--trace-exit') + 1]), 'i') : null;
 const journalAt = number('--journal', 0) || traceAt
-    || (traceOnBox || traceOnFault ? 1e6 : 0);
+    || (traceOnBox || traceOnFault || traceExit ? 1e6 : 0);
 const memory = number('--memory', 0);
 /** `--machine MB`: every process of the run together held to that (createApp's machineMemory). */
 const machine = number('--machine', 0);
@@ -1047,7 +1052,39 @@ if (traceOnFault)
     app.on('process-resumed', onEnd);
     app.on('process-server-exit', onEnd);
 }
-if (journalAt > 0 && !traceOnBox && !traceOnFault)
+/** Every `--cat` file as the run has it now. @param {string} heading */
+const catNow = async heading=>{
+    for (const path of all('--cat'))
+    {
+        try
+        {
+            console.log(seconds(), `${heading} ${path}\n${new TextDecoder('latin1')
+                .decode(await app.files.read(path))}`);
+        }
+        catch (e){
+            console.log(seconds(), `${heading} failed:`, path, e instanceof Error ? e.message : e);
+        }
+    }
+};
+// `kill -USR2 <pid>`: the `--cat` files printed while the run goes on.
+process.on('SIGUSR2', ()=>{
+    void catNow('CAT-NOW');
+});
+if (traceExit)
+{
+    /** @param {any} event */
+    const onExit = event=>{
+        if ((event?.code >>> 0) !== 0 && traceExit.test(String(event?.image ?? '')))
+        {
+            console.log(seconds(), 'EXIT', event.image, (event.code >>> 0).toString(16));
+            printJournal();
+            void catNow('CAT-AT-EXIT');
+        }
+    };
+    app.on('process-resumed', onExit);
+    app.on('process-server-exit', onExit);
+}
+if (journalAt > 0 && !traceOnBox && !traceOnFault && !traceExit)
 {
     setTimeout(printJournal, journalAt * 1000);
 }
