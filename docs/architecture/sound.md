@@ -10,7 +10,8 @@
 A DirectSound buffer behaves like a voice on a sound card: a copy of its data lives in shared memory,
 and the AudioWorklet reads it from there by itself, like DMA. So the sound does not break up even
 while the engine is busy loading or translating code, as long as the program's buffer holds enough
-sound.
+sound. The voice is given at `Play` itself and starts where the cursor was put; opened at the next
+pump, it was put where the cursor had run on to meanwhile, and a sound's first milliseconds were lost.
 
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 46, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%

@@ -209,6 +209,7 @@ export function createAudioModule(){
                 // A buffer's effects are made through COM, as a program would
                 // make them, so its own registered effect is found too.
                 createInstance: config?.createInstance ?? win32?.createInstance,
+                played: (/** @type {any} */ buffer)=>attachVoice(buffer),
             });
             // The standard effects SetFX names, for COM to find.
             if (com)
@@ -377,6 +378,45 @@ export function createAudioModule(){
              * program hands over a buffer, and this one reads out of a buffer the
              * program wrote into long ago, at the rate the cursor moves.
              */
+            /**
+             * Gives a playing buffer the sound device's voice, as a sound card
+             * plays one: a mirror of the whole buffer read on the device's own
+             * clock. At Play itself, so the voice starts where the cursor was
+             * put; a voice first opened at the next pump was put where the
+             * cursor had run on to by the clock meanwhile, and the sound's first
+             * milliseconds were never heard. The pump gives one to a buffer
+             * still without (a device that came later).
+             *
+             * @param {any} buffer
+             */
+            const attachVoice = buffer=>{
+                if (buffer.device || !drained || !output.openVoice || buffer.references <= 0
+                    || (buffer.primary && dsound.cooperativeLevel() !== DSSCL_WRITEPRIMARY))
+                {
+                    return;
+                }
+                const voice = output.openVoice({
+                    sampleRate: buffer.frequency,
+                    channels: buffer.format.channels,
+                    bitsPerSample: buffer.format.bitsPerSample,
+                    float: buffer.format.float,
+                    bytes: buffer.bytes,
+                });
+                if (voice)
+                {
+                    /** @param {number} from @param {number} count */
+                    const copy = (from, count)=>{
+                        if (count > 0)
+                        {
+                            voice.write(from, buffer.effectedWindow(from, count)
+                                ?? memory.window(buffer.address + from, count));
+                        }
+                    };
+                    buffer.attachDevice(voice, copy);
+                    voices++;
+                }
+            };
+
             const feedBuffers = ()=>{
                 fills++;
                 // DirectMusic first: a segment's waves are due at a moment on
@@ -468,28 +508,9 @@ export function createAudioModule(){
                     {
                         buffer.detachDevice()?.close();
                     }
-                    if (!buffer.device && sounding && output.openVoice)
+                    if (sounding)
                     {
-                        const voice = output.openVoice({
-                            sampleRate: buffer.frequency,
-                            channels: buffer.format.channels,
-                            bitsPerSample: buffer.format.bitsPerSample,
-                            float: buffer.format.float,
-                            bytes: buffer.bytes,
-                        });
-                        if (voice)
-                        {
-                            /** @param {number} from @param {number} count */
-                            const copy = (from, count)=>{
-                                if (count > 0)
-                                {
-                                    voice.write(from, buffer.effectedWindow(from, count)
-                                        ?? memory.window(buffer.address + from, count));
-                                }
-                            };
-                            buffer.attachDevice(voice, copy);
-                            voices++;
-                        }
+                        attachVoice(buffer);
                     }
                     const voice = buffer.device;
                     if (voice)

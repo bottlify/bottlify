@@ -58,18 +58,14 @@ const CASES = [
         what: 'played as SDL plays to WASAPI, half its buffer at each event' },
     { program: 'wasapi-busy', on: ['win7', 'win10'],
         what: 'fed to WASAPI from a thread of its own while the main thread waits for its frame'
-            + ' by QueryPerformanceCounter and Sleep(1)',
-        todo: 'one gap of some 15 ms 30 ms in, the same in every run: the engine held as the'
-            + ' main thread\'s loop is first translated, longer than the track\'s two periods' },
+            + ' by QueryPerformanceCounter and Sleep(1)' },
     { program: 'wasapi-heavy', on: ['win7', 'win10'],
         what: 'fed to WASAPI from a thread of its own while the main thread makes frames',
         todo: 'the same gap as wasapi-busy, 10 ms in' },
     { program: 'waveout', on: ['winxp', 'win7', 'win10'],
         what: 'played through waveOut buffers written again as they come back' },
     { program: 'dsound', on: ['winxp', 'win7', 'win10'],
-        what: 'streamed into a looping DirectSound buffer behind its play cursor',
-        todo: 'no gap, but 100-450 frames of 48000 short, the engine held or not: some of what'
-            + ' was written behind the play cursor is not played' },
+        what: 'streamed into a looping DirectSound buffer behind its play cursor' },
 ];
 
 for (const { program, on, what, todo } of CASES)
