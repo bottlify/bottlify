@@ -494,9 +494,13 @@ const watchEvents = running=>{
         // a client's own log and its assertions, which name where it gave up.
         ...argv.includes('--debug-strings') ? ['debug'] : []])
     {
+        // An error keeps its whole stack and guest trace: the host function
+        // a fault came through and the guest frames that called it are
+        // past the length the other events are cut to.
+        const [stack, record] = name === 'error' ? [6000, 12000] : [800, 900];
         running.on(name, (/** @type {any} */ event)=>console.log(seconds(), name,
             JSON.stringify(event, (key, value)=>(key === 'error' && value
-                ? String(value.stack ?? value).slice(0, 800) : value))?.slice(0, 900)));
+                ? String(value.stack ?? value).slice(0, stack) : value))?.slice(0, record)));
     }
 };
 watchEvents(app);
