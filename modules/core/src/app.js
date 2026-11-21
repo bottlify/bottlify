@@ -3902,9 +3902,11 @@ export async function createApp(options){
     // its audio graph over that memory once. A rebuilt machine has to mix into
     // the same storage rather than make new storage nobody reads --
     // `{ table }` with a shared track table, `{ control, samples }` with the
-    // engine backend's ring.
+    // engine backend's ring. The first machine mixes into the output it was
+    // handed, if any: a process in a worker of its own is given the run's
+    // table, and built over one of its own it played where no page listened.
     /** @type {any} */
-    let audioMemory = null;
+    let audioMemory = options.audio?.memory ?? null;
     // The decoded binary's instance outlives the process too: a machine is a
     // process, the decoder is a service of the run. The child attaches to the
     // parent's compiled module and linear memory, so the first cinematic after

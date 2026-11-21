@@ -12,8 +12,9 @@
  * the engine's thread cost a collection every 75 ms and stalls of 10 to 30 ms
  * nothing on a page has - the very gaps the test is there to find.
  *
- * Its `workerData`: `{ program, windows, stall? }`, `stall` holding the engine's
- * thread `{ ms }` every `{ everyMs }`; it posts back
+ * Its `workerData`: `{ program, windows, stall?, across? }`, `stall` holding the
+ * engine's thread `{ ms }` every `{ everyMs }`, `across` the program in a worker
+ * of its own as where processes run at once (`concurrency` 2); it posts back
  * `{ exit, heard: { first, frames, hz, gaps }, win32 }`.
  */
 
@@ -170,7 +171,8 @@ const program = PROGRAMS[/** @type {keyof typeof PROGRAMS} */ (workerData.progra
 // The engine on this thread, in the mode a cross-origin isolated page runs it in.
 const app = await createApp({ host: 'thread', mode: 'isolated', executable: program(),
     imagePath: 'C:\\tone.exe', windows: workerData.windows,
-    audio: { drained: true, sampleRate: RATE } });
+    audio: { drained: true, sampleRate: RATE },
+    ...workerData.across ? { concurrency: 2 } : {} });
 const ear = listen(app, 12);
 // The engine's thread held now and then, as a busy frame holds a page's: the
 // worklet plays on regardless, and what reaches it must already be there.

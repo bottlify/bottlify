@@ -37,13 +37,14 @@ const STALL = { everyMs: 250, ms: 40 };
 
 /**
  * @param {string} program @param {string} windows
- * @param {{ everyMs: number, ms: number }} [stall]
+ * @param {{ everyMs: number, ms: number }} [stall]  the engine's thread held so
+ * @param {boolean} [across]  the program in a worker of its own
  * @returns {Promise<{ exit: number | string, heard: { first: number, frames: number,
  *     hz: number, gaps: { at: number, frames: number }[] }, win32: any }>}
  */
-const play = (program, windows, stall)=>new Promise((resolve, reject)=>{
+const play = (program, windows, stall, across)=>new Promise((resolve, reject)=>{
     const worker = new Worker(new URL('../../../tools/fixtures/sound-delivery-run.mjs',
-        import.meta.url), { workerData: { program, windows, stall } });
+        import.meta.url), { workerData: { program, windows, stall, across } });
     worker.once('message', resolve);
     worker.once('error', reject);
     worker.once('exit', code=>reject(new Error(`the run's worker exited (${code}) unanswered`)));
@@ -51,14 +52,18 @@ const play = (program, windows, stall)=>new Promise((resolve, reject)=>{
 
 /**
  * Each way of handing sound over, what it does, and the Windows it is there on;
- * `todo`, what is known still to fail, and why.
+ * `todo`, what is known still to fail, and why; `acrossTodo`, the same in a worker of
+ * its own.
  */
 const CASES = [
     { program: 'wasapi', on: ['win7', 'win10'],
         what: 'played as SDL plays to WASAPI, half its buffer at each event' },
     { program: 'wasapi-busy', on: ['win7', 'win10'],
         what: 'fed to WASAPI from a thread of its own while the main thread waits for its frame'
-            + ' by QueryPerformanceCounter and Sleep(1)' },
+            + ' by QueryPerformanceCounter and Sleep(1)',
+        acrossTodo: 'gaps through the tone, 5 runs of 6 on 2026-11-21 (up to 6000 frames): the'
+            + ' feeding thread late behind the waiting one where the process has a worker of its'
+            + ' own' },
     { program: 'wasapi-heavy', on: ['win7', 'win10'],
         what: 'fed to WASAPI from a thread of its own while the main thread makes frames',
         todo: 'the same gap as wasapi-busy, 10 ms in' },
@@ -68,17 +73,22 @@ const CASES = [
         what: 'streamed into a looping DirectSound buffer behind its play cursor' },
 ];
 
-for (const { program, on, what, todo } of CASES)
+for (const { program, on, what, todo, acrossTodo } of CASES)
 {
     for (const windows of on)
     {
-        for (const stall of [undefined, STALL])
+        // In a worker of its own, as where processes run at once: its sound
+        // goes onto the table the page reads, not one of its own nobody does.
+        for (const [stall, across] of /** @type {const} */ ([[undefined, false], [STALL, false],
+            [undefined, true]]))
         {
             const held = stall ? `, the engine held ${stall.ms} ms every ${stall.everyMs} ms` : '';
-            test(`on ${windows}, a tone ${what}${held} reaches the worklet whole: its length, its`
-                + ' pitch, no gap', { timeout: 60000, todo, skip: REALTIME ? false : ALONE },
+            const where = across ? ', in a worker of its own' : '';
+            test(`on ${windows}, a tone ${what}${held}${where} reaches the worklet whole: its`
+                + ' length, its pitch, no gap', { timeout: 60000,
+                todo: across ? acrossTodo ?? todo : todo, skip: REALTIME ? false : ALONE },
             async()=>{
-                await hear(program, windows, stall);
+                await hear(program, windows, stall, across);
             });
         }
     }
@@ -87,9 +97,10 @@ for (const { program, on, what, todo } of CASES)
 /**
  * @param {string} program @param {string} windows
  * @param {{ everyMs: number, ms: number }} [stall]
+ * @param {boolean} [across]
  */
-async function hear(program, windows, stall){
-    const { exit, heard, win32 } = await play(program, windows, stall);
+async function hear(program, windows, stall, across){
+    const { exit, heard, win32 } = await play(program, windows, stall, across);
     if (process.env.SOUND_DEBUG)
     {
         console.log(JSON.stringify({ program, windows, stall: Boolean(stall), exit,
