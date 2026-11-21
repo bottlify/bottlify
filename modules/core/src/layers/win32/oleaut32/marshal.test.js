@@ -688,3 +688,30 @@ test('a SAFEARRAY of strings oleaut32 made crosses between 64-bit processes, ele
     assert.equal(before - callee.live.size, 5,
         'the stub\'s name, its array\'s descriptor and data and both strings given back');
 });
+
+test('a record passed by value crosses between 64-bit processes by the reference its slot holds,'
+    + ' its string whole', async()=>{
+    // ICorSvcSetPrivateAttributes::SetNGenPrivateAttributes(NGenPrivateAttributes): Flags,
+    // ZapStats, then a BSTR at 8; sixteen bytes, so a 64-bit caller's slot holds its address.
+    /** @type {any} */
+    const method = { name: 'SetNGenPrivateAttributes', slot: 3, unsupported: null, parameters: [
+        { name: 'attributes', flags: PARAMFLAG_FIN, type: { kind: 'record', bytes: 16,
+            fields: [{ offset: 8, type: { kind: 'bstr' } }] } },
+    ] };
+    const caller = automatedSide('caller');
+    const callee = automatedSide('callee');
+    callee.free(callee.allocate(0x800));
+    const record = caller.allocate(16);
+    caller.put(record, 0x11);
+    caller.put(record + 4, 0x22);
+    caller.putPointer(record + 8, caller.allocateBstr(caller.wide('C:\\dbg')));
+    const request = await marshalRequest(caller, method, longFrame([record]));
+    const call = await unmarshalRequest(callee, method, request);
+    const theirs = Number(call.words[0]);
+    assert.deepEqual([callee.u32(theirs), callee.u32(theirs + 4)], [0x11, 0x22]);
+    const path = callee.pointer(theirs + 8);
+    assert.equal(text(callee.readMemory(path, callee.u32(path - 4))), 'C:\\dbg');
+    const before = callee.live.size;
+    await marshalReply(callee, method, request, call);
+    assert.ok(callee.live.size < before, 'the stub\'s copy and its string given back');
+});
