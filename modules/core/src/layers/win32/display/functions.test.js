@@ -133,3 +133,34 @@ test('the composition timing: 60 Hz, the last vertical blank on the counter cloc
     assert.equal(fns.DwmGetCompositionTimingInfo.handler([0, 0x400]) >>> 0, 0x80070057,
         'cbSize not the structure size');
 });
+
+test('a 64-bit caller is handed whole pointers and WTS_SESSION_INFO in its 24-byte layout', ()=>{
+    // .NET's 64-bit mscorsvw read the upper half of ppSessionInfo as the stack's
+    // leftovers and faulted on the pointer it made.
+    const { memory, view, host } = setup();
+    const fns = createSessionInformationFunctions({ ...host, pointerSize: 8 });
+    const garbage = 0x0050004d00000000n;
+    view.setBigUint64(0x100, garbage, true);
+    assert.equal(fns.WTSEnumerateSessionsW.handler([0, 0, 1, 0x100, 0x108]), 1);
+    const block = Number(view.getBigUint64(0x100, true));
+    assert.equal(block, 0x8000, 'the block, whole');
+    /** @param {number} at */
+    const wide = at=>{
+        let text = '';
+        for (; view.getUint16(at, true) !== 0; at += 2)
+        {
+            text += String.fromCharCode(view.getUint16(at, true));
+        }
+        return text;
+    };
+    // SessionId, pWinStationName at 8, State at 16.
+    assert.deepEqual([0, 1].map(i=>[view.getUint32(block + i * 24, true),
+        wide(Number(view.getBigUint64(block + i * 24 + 8, true))),
+        view.getUint32(block + i * 24 + 16, true)]),
+    [[0, 'Services', 4], [1, 'Console', 0]]);
+    view.setBigUint64(0x100, garbage, true);
+    assert.equal(fns.WTSQuerySessionInformationW.handler([0, 0xffffffff, 5, 0x100, 0x108]), 1);
+    assert.equal(Number(view.getBigUint64(0x100, true)), 0x8000, 'ppBuffer, whole');
+    assert.equal(wide(0x8000), 'User');
+    void memory;
+});

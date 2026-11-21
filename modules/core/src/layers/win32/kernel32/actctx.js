@@ -33,7 +33,7 @@ import { formatGuid, parseGuid } from '../ole32/guid.js';
 import {
     compareVersions, encodeIdentity, identityMatches, parseManifest,
 } from './manifest.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /** Codes and statuses these calls answer with. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -64,14 +64,41 @@ const ACTCTX_FLAG_RESOURCE_NAME_VALID = 0x8;
 const ACTCTX_FLAG_SET_PROCESS_DEFAULT = 0x10;
 const ACTCTX_FLAG_APPLICATION_NAME_VALID = 0x20;
 const ACTCTX_FLAG_HMODULE_VALID = 0x80;
-const ACTCTX = Object.freeze({ cbSize: 0, dwFlags: 4, lpSource: 8, wProcessorArchitecture: 12,
-    wLangId: 14, lpAssemblyDirectory: 16, lpResourceName: 20, lpApplicationName: 24, hModule: 28 });
-/** Each field's end, which cbSize has to reach for its flag to be valid. */
-const FIELD_ENDS = Object.freeze([
-    [ACTCTX_FLAG_PROCESSOR_ARCHITECTURE_VALID, 14], [ACTCTX_FLAG_LANGID_VALID, 16],
-    [ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID, 20], [ACTCTX_FLAG_RESOURCE_NAME_VALID, 24],
-    [ACTCTX_FLAG_APPLICATION_NAME_VALID, 28], [ACTCTX_FLAG_HMODULE_VALID, 32],
-]);
+/**
+ * The structures CreateActCtx reads and QueryActCtxW answers with, as a
+ * process of each width lays them out: a pointer or a handle is a quadword at
+ * 64 bits, aligned to eight, and what follows it moves. ACTCTX and each
+ * field's end, which cbSize has to reach for its flag to be valid;
+ * ACTIVATION_CONTEXT_BASIC_INFORMATION's flags; the detailed information's
+ * three paths, an assembly's four strings and its file count, a file's name
+ * and path. Answered at the 32-bit offsets, a 64-bit program read a path
+ * where the runtime's start read its root manifest and faulted on it.
+ */
+const STRUCTURES = Object.freeze({
+    4: Object.freeze({
+        actctx: { cbSize: 0, dwFlags: 4, lpSource: 8, wProcessorArchitecture: 12, wLangId: 14,
+            lpAssemblyDirectory: 16, lpResourceName: 20, lpApplicationName: 24, hModule: 28 },
+        ends: [14, 16, 20, 24, 28, 32],
+        basic: { size: 8, flags: 4 },
+        detailed: { size: 48, paths: [36, 40, 44] },
+        assembly: { size: 88, strings: [64, 68, 72, 76], files: 80 },
+        file: { size: 20, paths: [12, 16] },
+    }),
+    8: Object.freeze({
+        actctx: { cbSize: 0, dwFlags: 4, lpSource: 8, wProcessorArchitecture: 16, wLangId: 18,
+            lpAssemblyDirectory: 24, lpResourceName: 32, lpApplicationName: 40, hModule: 48 },
+        ends: [18, 20, 32, 40, 48, 56],
+        basic: { size: 16, flags: 8 },
+        detailed: { size: 64, paths: [40, 48, 56] },
+        assembly: { size: 104, strings: [64, 72, 80, 88], files: 96 },
+        file: { size: 32, paths: [16, 24] },
+    }),
+});
+/** The flags whose fields STRUCTURES' `ends` close, in the same order. */
+const ENDED_FLAGS = Object.freeze([ACTCTX_FLAG_PROCESSOR_ARCHITECTURE_VALID,
+    ACTCTX_FLAG_LANGID_VALID, ACTCTX_FLAG_ASSEMBLY_DIRECTORY_VALID,
+    ACTCTX_FLAG_RESOURCE_NAME_VALID, ACTCTX_FLAG_APPLICATION_NAME_VALID,
+    ACTCTX_FLAG_HMODULE_VALID]);
 
 /** RT_MANIFEST, and the resources a module's manifest is. */
 const RT_MANIFEST = 24;
@@ -160,9 +187,6 @@ const RUN_LEVEL_INFORMATION = 5;
 const COMPATIBILITY_INFORMATION = 6;
 const ACTIVATION_CONTEXT_PATH_TYPE_NONE = 1;
 const ACTIVATION_CONTEXT_PATH_TYPE_WIN32_FILE = 2;
-const DETAILED_SIZE = 48;
-const ASSEMBLY_DETAILED_SIZE = 88;
-const FILE_DETAILED_SIZE = 20;
 const COMPATIBILITY_HEADER = 8;
 const COMPATIBILITY_ELEMENT = 32;
 const ACTCTX_COMPATIBILITY_ELEMENT_TYPE_OS = 1;
@@ -247,6 +271,8 @@ const CONTEXT_MAGIC = 0xc07e3e11;
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} readWideString  limit in bytes
  * @property {(code: number) => void} setLastError
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose ACTCTX and answers are
+ *           laid out with quadword pointers.
  * @property {(bytes: number) => number} allocate  guest memory, or 0
  * @property {(bytes: number) => number} [allocateCode]
  *     Guest memory the processor executes, for the fastcall entries.
@@ -590,13 +616,21 @@ export function createActivationContexts(host){
         host.writeMemory(wholeAddress(address),
             new Uint8Array(new Uint32Array([value >>> 0]).buffer));
     };
-    /** @param {number} address @param {number} value */
-    const writeDwordIf = (address, value)=>{
+    const width = pointerWidth(host.pointerSize === 8 ? 8 : 4);
+    const { actctx: ACTCTX, ends, basic, detailed, assembly: ASSEMBLY, file: FILE } =
+        STRUCTURES[width.size];
+    const FIELD_ENDS = ENDED_FLAGS.map((flag, index)=>[flag, ends[index]]);
+    /** A pointer-sized out (a SIZE_T, a ULONG_PTR, a HANDLE), when there is one.
+     * @param {number} address @param {number} value */
+    const writeSizeIf = (address, value)=>{
         if ((address >>> 0) !== 0)
         {
-            writeDword(address, value);
+            host.writeMemory(wholeAddress(address), width.bytes(value));
         }
     };
+    /** A pointer-sized field of the caller's. @param {number} address */
+    const readPointer = address=>width.get(new DataView(host.readMemory(wholeAddress(address),
+        width.size).slice().buffer), 0);
     /** @param {number} code @param {number} [answer] */
     const fail = (code, answer = 0)=>{
         host.setLastError(code);
@@ -1474,35 +1508,36 @@ export function createActivationContexts(host){
         switch (kind)
         {
             case BASIC_INFORMATION: {
-                const bytes = new Uint8Array(8);
-                new DataView(bytes.buffer).setUint32(0, handle, true);
+                const bytes = new Uint8Array(basic.size);
+                bytes.set(width.bytes(handle), 0);
                 return { bytes };
             }
             case DETAILED_INFORMATION: {
                 if (!context)
                 {
-                    return { bytes: new Uint8Array(DETAILED_SIZE) };
+                    return { bytes: new Uint8Array(detailed.size) };
                 }
                 const root = context.rootManifestPath;
                 const app = context.appDirectory;
                 const rootBytes = root === null ? new Uint8Array(0) : wide(`${root}\0`);
                 const appBytes = wide(`${app}\0`);
-                const bytes = new Uint8Array(DETAILED_SIZE + rootBytes.length + appBytes.length);
+                const bytes = new Uint8Array(detailed.size + rootBytes.length + appBytes.length);
                 const view = new DataView(bytes.buffer);
+                const [rootPath, , appPath] = detailed.paths;
                 view.setUint32(4, 1, true);
                 view.setUint32(8, context.assemblies.length, true);
                 if (root !== null)
                 {
                     view.setUint32(12, ACTIVATION_CONTEXT_PATH_TYPE_WIN32_FILE, true);
                     view.setUint32(16, root.length, true);
-                    view.setUint32(36, buffer + DETAILED_SIZE, true);
-                    bytes.set(rootBytes, DETAILED_SIZE);
+                    bytes.set(width.bytes(buffer + detailed.size), rootPath);
+                    bytes.set(rootBytes, detailed.size);
                 }
                 view.setUint32(20, ACTIVATION_CONTEXT_PATH_TYPE_NONE, true);
                 view.setUint32(28, ACTIVATION_CONTEXT_PATH_TYPE_WIN32_FILE, true);
                 view.setUint32(32, app.length, true);
-                view.setUint32(44, buffer + DETAILED_SIZE + rootBytes.length, true);
-                bytes.set(appBytes, DETAILED_SIZE + rootBytes.length);
+                bytes.set(width.bytes(buffer + detailed.size + rootBytes.length), appPath);
+                bytes.set(appBytes, detailed.size + rootBytes.length);
                 return { bytes };
             }
             case ASSEMBLY_DETAILED_INFORMATION: {
@@ -1516,7 +1551,7 @@ export function createActivationContexts(host){
                     assembly.directoryName ?? ''];
                 const encoded = strings.map(text=>(text === '' ? new Uint8Array(0)
                     : wide(`${text}\0`)));
-                const bytes = new Uint8Array(ASSEMBLY_DETAILED_SIZE
+                const bytes = new Uint8Array(ASSEMBLY.size
                     + encoded.reduce((sum, part)=>sum + part.length, 0));
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, assembly.directory === null ? 1 : 0x10, true);
@@ -1526,12 +1561,14 @@ export function createActivationContexts(host){
                 view.setUint32(24, ACTIVATION_CONTEXT_PATH_TYPE_NONE, true);
                 view.setUint32(44, 1, true);
                 view.setUint32(60, strings[2].length * 2, true);
-                view.setUint32(80, assembly.manifest.files.length, true);
-                let at = ASSEMBLY_DETAILED_SIZE;
-                [64, 68, 76].forEach((field, part)=>{
+                view.setUint32(ASSEMBLY.files, assembly.manifest.files.length, true);
+                let at = ASSEMBLY.size;
+                // The identity, the manifest and the directory; no policy.
+                const [identity, manifest, , directory] = ASSEMBLY.strings;
+                [identity, manifest, directory].forEach((field, part)=>{
                     if (encoded[part].length > 0)
                     {
-                        view.setUint32(field, buffer + at, true);
+                        bytes.set(width.bytes(buffer + at), field);
                         bytes.set(encoded[part], at);
                         at += encoded[part].length;
                     }
@@ -1547,12 +1584,12 @@ export function createActivationContexts(host){
                     return { status: STATUS_INVALID_PARAMETER };
                 }
                 const name = wide(`${file.name}\0`);
-                const bytes = new Uint8Array(FILE_DETAILED_SIZE + name.length);
+                const bytes = new Uint8Array(FILE.size + name.length);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, 2, true);
                 view.setUint32(4, file.name.length * 2, true);
-                view.setUint32(12, buffer + FILE_DETAILED_SIZE, true);
-                bytes.set(name, FILE_DETAILED_SIZE);
+                bytes.set(width.bytes(buffer + FILE.size), FILE.paths[0]);
+                bytes.set(name, FILE.size);
                 return { bytes, written: 0 };
             }
             case RUN_LEVEL_INFORMATION: {
@@ -1604,7 +1641,7 @@ export function createActivationContexts(host){
         const target = (flags & ~known) === 0 ? queried(flags >>> 0, handle >>> 0) : null;
         if (!target)
         {
-            writeDwordIf(written, 0);
+            writeSizeIf(written, 0);
             return STATUS_INVALID_PARAMETER;
         }
         const result = answer(target.context, target.handle, kind >>> 0, subInstance >>> 0,
@@ -1615,11 +1652,11 @@ export function createActivationContexts(host){
         }
         if ((size >>> 0) < result.bytes.length || ((buffer >>> 0) === 0 && result.bytes.length > 0))
         {
-            writeDwordIf(written, result.bytes.length);
+            writeSizeIf(written, result.bytes.length);
             return STATUS_BUFFER_TOO_SMALL;
         }
         host.writeMemory(wholeAddress(buffer), result.bytes);
-        writeDwordIf(written, result.written ?? result.bytes.length);
+        writeSizeIf(written, result.written ?? result.bytes.length);
         if ((kind >>> 0) === BASIC_INFORMATION && (flags & QUERY_ACTCTX_FLAG_NO_ADDREF) === 0)
         {
             addRef(target.context && target.handle !== 0 ? target.context : null);
@@ -1653,7 +1690,7 @@ export function createActivationContexts(host){
         {
             return { error: ERROR_INVALID_PARAMETER };
         }
-        const pointer = (/** @type {number} */ field)=>readDword(actctx + field);
+        const pointer = (/** @type {number} */ field)=>readPointer(actctx + field);
         const source = pointer(ACTCTX.lpSource);
         const named = (flags & ACTCTX_FLAG_RESOURCE_NAME_VALID) !== 0;
         const resource = named ? pointer(ACTCTX.lpResourceName) : 0;
@@ -1845,7 +1882,7 @@ export function createActivationContexts(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                writeDwordIf(cookie, made);
+                writeSizeIf(cookie, made);
                 return STATUS_SUCCESS;
             },
         },
@@ -1859,7 +1896,7 @@ export function createActivationContexts(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                writeDwordIf(cookie, made);
+                writeSizeIf(cookie, made);
                 return STATUS_SUCCESS;
             },
         },
@@ -1985,7 +2022,7 @@ export function createActivationContexts(host){
             handler: ([out])=>{
                 const active = activeContext();
                 addRef(active);
-                writeDwordIf(out, active?.handle ?? 0);
+                writeSizeIf(out, active?.handle ?? 0);
                 return STATUS_SUCCESS;
             },
         },
@@ -2020,7 +2057,7 @@ export function createActivationContexts(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(cookie, made);
+                writeSizeIf(cookie, made);
                 return 1;
             },
         },
@@ -2057,7 +2094,7 @@ export function createActivationContexts(host){
                 }
                 const active = activeContext();
                 addRef(active);
-                writeDword(out, active?.handle ?? 0);
+                writeSizeIf(out, active?.handle ?? 0);
                 return 1;
             },
         },

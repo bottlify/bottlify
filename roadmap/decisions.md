@@ -2683,6 +2683,17 @@ read it at its nearest texel (said once); other stages, a multisampled depth buf
 stencil plane (X24_TYPELESS_G8_UINT) read an empty texture, said once.
 *2026-11-21.*
 
+**A284. A machine whose threads all wait moves its clock to the soonest deadline only while no
+other process of the run is running.** The clock trails the host's by every slow turn (A21 caps a
+turn's credit), and moving it to a deadline is bounded only by the host's clock, so a machine
+alone catches up at once, which no one can observe. Beside another process it can be observed:
+what a thread waits on may be the other's to set before the deadline. The .NET Framework 4.8's
+ngen gives its compile worker thirty seconds to say it is up; its clock jumped those thirty
+seconds in the 1.3 s of wall time after the worker started, and it killed the worker three times
+and gave up ("Failed to synchronize with worker process because of timeout"). Such a wait is now
+sat through in real time (`othersRunningWith` in kernel/module.js), which costs a waiter beside
+another process the shortcut a lone machine keeps. *2026-11-21.*
+
 **A285. A thread whose stack pointer leaves its stack for memory no stack of its own lies in stops
 its process.** Translated code writes through esp without testing the page (cork's `looseStacks`),
 so a thread's stack has no guard page a push can touch: a thread that ran out of stack pushed on

@@ -25,7 +25,8 @@
 import { createComObject } from '../ole32/objects.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
 import { describe } from '../quartz/describe.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { safeArrayLayout } from '../common/safearray.js';
 
 export const CLSID_SYSTEM_DEVICE_ENUM = '{62BE5D10-60EB-11D0-BD3B-00A0C911CE86}';
 export const CLSID_DEVICE_MONIKER = '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}';
@@ -171,6 +172,7 @@ export function createFilterStore(){
  * @property {(bytes: Uint8Array) => number | Promise<number>} [allocateBytes]  A SAFEARRAY
  *           of VT_UI1 holding the bytes, as SafeArrayCreateVector makes one.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose SAFEARRAYs are laid out wider.
  * @property {(clsid: string, iid: number, out: number) => number | Promise<number>} createInstance
  *           CoCreateInstance of a class in this process, for the interface at `iid`.
  * @property {(pointer: number) => any} [objectAt]  The engine's object behind an
@@ -357,9 +359,12 @@ export function createDeviceEnumeration(host, store){
             }
             else if (type === (VT_ARRAY | VT_UI1) && data !== 0)
             {
-                // SAFEARRAY: cDims, fFeatures, cbElements, cLocks, pvData, then
-                // the one dimension's count.
-                written = host.readMemory?.(host.readU32(data + 12), host.readU32(data + 16))
+                // A vector: its bytes where pvData points, as many as its one bound counts.
+                const array = safeArrayLayout(host.pointerSize);
+                const readMemory = host.readMemory;
+                const pvData = readMemory ? pointerIo({ readMemory, writeMemory: host.writeMemory },
+                    array.POINTER).read(data + array.DATA) : 0;
+                written = readMemory?.(pvData, host.readU32(data + array.BOUNDS))
                     ?? new Uint8Array(0);
             }
             else

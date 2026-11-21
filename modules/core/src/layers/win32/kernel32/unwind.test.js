@@ -263,6 +263,39 @@ test('chained unwind info applies the primary function\'s prologue too', ()=>{
     assert.equal(ctx.rip, 0x40f00);
 });
 
+test('an entry whose unwind data is marked indirect stands for the entry it points to', ()=>{
+    // A linker that moves a function's cold part away gives that part an
+    // entry of its own whose UnwindData is the RVA of the function's main
+    // entry with its low bit set (RUNTIME_FUNCTION_INDIRECT): the lookup
+    // answers the main entry, and the unwind is the main entry's.
+    const m = machine();
+    const info = 0x42000;
+    m.put(info, [1 | (UNW_FLAG.EHANDLER << 3), 5, 2, 0]);
+    m.put(info + 4, [5, 0x02 | (7 << 4)]);
+    m.put(info + 6, [1, 0x00 | (5 << 4)]);
+    m.putD(info + 8, 0x3000); // the handler's RVA
+    m.addFunction(0x48000, 0x48100, info);
+    // The main entry sorts first, at the table's start.
+    m.addFunction(0x48400, 0x48450, 0x40000 + 0x1000 + 1);
+
+    const unwinder = createUnwinder(m.host());
+    const fn = /** @type {any} */ (unwinder.lookup(0x48420));
+    assert.equal(fn.entry, 0x41000, 'the main entry, where its table holds it');
+    assert.equal(fn.begin, 0x48000);
+    assert.equal(fn.unwindInfo, info);
+
+    const rsp = 0x100000;
+    const ctx = context(rsp);
+    m.putQ(rsp + 0x40, 0xbeefn);
+    m.putQ(rsp + 0x48, 0x40f00n);
+    const unwound = unwinder.virtualUnwind(UNW_FLAG.EHANDLER, fn, 0x48420, ctx);
+    assert.equal(ctx.gpr[5], 0xbeefn, 'the main entry\'s saved rbp');
+    assert.equal(ctx.rip, 0x40f00);
+    assert.equal(unwound.handler, 0x43000, 'the main entry\'s handler');
+    assert.deepEqual(unwinder.entryAt(0x40000, 0x41000 + 12), fn,
+        'RtlVirtualUnwind handed the cold part\'s entry reads the same');
+});
+
 test('a table added at run time is searched like an image\'s', ()=>{
     const m = machine();
     const unwinder = createUnwinder(m.host());

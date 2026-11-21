@@ -190,6 +190,7 @@ export function createKernelModule(){
              * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
              *          refreshClock: (() => void) | undefined,
+             *          othersRunning: (() => boolean) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
              *          mutexWords: any, eventWords: any, semaphoreWords: any,
              *          unwake: (() => void) | null }}
@@ -206,6 +207,7 @@ export function createKernelModule(){
                 // Stops this machine hearing the link's wakes (`onWake`).
                 unwake: null,
                 refreshClock: undefined,
+                othersRunning: undefined,
                 hostAnswering: undefined,
                 // The guest word the scheduler keeps its ready count in (`mirrorReady`).
                 readyWord: 0,
@@ -270,8 +272,13 @@ export function createKernelModule(){
                 // Moved *to* the deadline rather than *by* an interval, because
                 // the clock is the one that knows the host's, and a wait nobody has
                 // to sit through must never carry the guest past real time.
+                // Nor while another process of the run is running: what a
+                // thread here waits on may be its to set before the deadline,
+                // and a clock behind the host's by every slow turn would jump
+                // past that time in one step - a parent's timed wait on a child
+                // ending before the child had the wall time to start.
                 /** @param {number} deadline */
-                skipTo: deadline=>state.clock.skipTo(deadline),
+                skipTo: deadline=>(state.othersRunning?.() ? 0 : state.clock.skipTo(deadline)),
                 // A slice that calls the host in a loop moves the clock as it
                 // goes, as between slices (`refreshClockWith`).
                 refreshClock: ()=>state.refreshClock?.(),
@@ -702,6 +709,16 @@ export function createKernelModule(){
                  */
                 refreshClockWith(refresh){
                     state.refreshClock = refresh;
+                },
+                /**
+                 * Whether another process of the run is running beside this
+                 * one: while it answers true the clock is not moved to a
+                 * deadline, and a timed wait is sat through in real time.
+                 *
+                 * @param {() => boolean} running
+                 */
+                othersRunningWith(running){
+                    state.othersRunning = running;
                 },
                 /**
                  * How the scheduler tells a host call still to answer through

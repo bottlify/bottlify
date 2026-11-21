@@ -33,8 +33,10 @@ const SLOTS = ['QueryInterface', 'AddRef', 'Release', 'Read', 'Write', 'Seek', '
 /**
  * A machine whose streams are kept by pointer, with a volume of files that
  * kernel32's handle calls read and write.
+ *
+ * @param {{ pointerSize?: 4 | 8 }} [width]  The process's, 4 when not given.
  */
-function machine(){
+function machine(width = {}){
     /** @type {Map<number, any>} */
     const objects = new Map();
     /** @type {Map<string, Uint8Array>} */
@@ -106,6 +108,7 @@ function machine(){
     };
     let taskMemory = 0x60000;
     m = shlwapiMachine({
+        ...width,
         library: name=>{
             /** @type {Record<string, (args: number[]) => number>} */
             const table = name === 'KERNEL32.dll' ? kernel32 : name === 'ole32.dll'
@@ -250,6 +253,27 @@ test('CopyTo copies what there is into another of the streams', async()=>{
     assert.equal(await m.call(source, 'CopyTo', target, 2, 0, read, written), S_OK);
     assert.deepEqual([m.dwordAt(read), m.dwordAt(written)], [1, 1]);
     assert.deepEqual([.../** @type {Uint8Array} */ (m.files.get('C:\\b'))], [0x78]);
+});
+
+test('Stat fills the STATSTG of the process\'s width, cbSize at 16 at 64 bits', async()=>{
+    for (const [pointerSize, at] of /** @type {const} */ ([
+        [4, { type: 4, size: 8, mode: 40, bytes: 72 }],
+        [8, { type: 8, size: 16, mode: 48, bytes: 80 }]]))
+    {
+        const m = machine({ pointerSize });
+        const path = m.put('C:\\t.txt', true);
+        const { stream } = await m.open(0, path, STGM_WRITE | STGM_CREATE, 0);
+        const buffer = m.put('', false, 8);
+        m.memory.set([1, 2, 3], buffer);
+        assert.equal(await m.call(stream, 'Write', buffer, 3, m.count(0)), S_OK);
+        const stat = m.put('', false, 96);
+        m.memory.fill(0xcc, stat, stat + 96);
+        assert.equal(await m.call(stream, 'Stat', stat, 1), S_OK);
+        assert.deepEqual([m.dwordAt(stat + at.type), m.dwordAt(stat + at.size),
+            m.dwordAt(stat + at.size + 4), m.dwordAt(stat + at.mode)],
+        [2, 3, 0, STGM_WRITE | STGM_CREATE], `at ${pointerSize * 8} bits`);
+        assert.equal(m.memory[stat + at.bytes], 0xcc, 'nothing past the structure');
+    }
 });
 
 test('SHCreateMemStream is a stream over a copy, read and written alike', async()=>{

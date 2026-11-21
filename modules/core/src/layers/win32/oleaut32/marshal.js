@@ -42,6 +42,7 @@ import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { safeArrayLayout } from '../common/safearray.js';
 
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
@@ -83,9 +84,9 @@ const FADF_UNKNOWN = 0x200;
 const FADF_DISPATCH = 0x400;
 const FADF_VARIANT = 0x800;
 
-const VARIANT_BYTES = 16;
-const SAFEARRAY_BOUNDS = 16;
 const LONGEST_STRING = 0x10000;
+/** A type library made for 64-bit Windows, whose vtable offsets count quadwords. */
+const SYS_WIN64 = 3;
 
 /**
  * How one value travels. A `word` is copied as its bytes; everything else
@@ -95,6 +96,11 @@ const LONGEST_STRING = 0x10000;
  * @property {'word' | 'bstr' | 'lpstr' | 'lpwstr' | 'variant' | 'interface' | 'pointer'
  *     | 'record' | 'safearray' | 'array' | 'dispparams' | 'null' | 'unsupported'} kind
  * @property {number} [bytes]            A word's or a record's size.
+ * @property {boolean} [float]           A word that is a floating-point number, which a
+ *           64-bit call passes in an XMM register.
+ * @property {WireType} [long]           A record's layout in a 64-bit process, where it
+ *           differs: one with pointers in it (EXCEPINFO, or one a library describes).
+ * @property {number} [align]            A record's alignment, where it was laid out here.
  * @property {string | null} [iid]       An interface's, when the type says.
  * @property {number} [iidFrom]          Else the parameter whose GUID names it.
  * @property {WireType} [to]             What a pointer or an array holds.
@@ -132,6 +138,8 @@ const LONGEST_STRING = 0x10000;
  * needs there.
  *
  * @typedef {Object} MarshalSide
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its pointers, the structures
+ *           that hold them and the slots of its calls' arguments are quadwords.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate       Task memory.
@@ -165,6 +173,8 @@ const LONGEST_STRING = 0x10000;
 
 /** @param {number} bytes */
 const word = bytes=>/** @type {WireType} */ ({ kind: 'word', bytes });
+/** @param {number} bytes */
+const real = bytes=>/** @type {WireType} */ ({ kind: 'word', bytes, float: true });
 /** @param {string} why */
 const unsupported = why=>/** @type {WireType} */ ({ kind: 'unsupported', why });
 /** @param {string | null} iid */
@@ -185,7 +195,13 @@ const EXCEPINFO = /** @type {WireType} */ ({ kind: 'record', bytes: 32, fields: 
     { offset: 12, type: { kind: 'bstr' } },
     { offset: 20, type: { kind: 'null' } },
     { offset: 24, type: { kind: 'null' } },
-] });
+], long: { kind: 'record', bytes: 64, fields: [
+    { offset: 8, type: { kind: 'bstr' } },
+    { offset: 16, type: { kind: 'bstr' } },
+    { offset: 24, type: { kind: 'bstr' } },
+    { offset: 40, type: { kind: 'null' } },
+    { offset: 48, type: { kind: 'null' } },
+] } });
 
 /** The type of the value a VARTYPE names, inside a variant or an array. */
 /** @param {number} vt @returns {WireType | null} */
@@ -204,11 +220,13 @@ function typeOfVartype(vt){
         case VT_INT:
         case VT_UINT:
         case VT_ERROR:
-        case VT_R4:
         case VT_HRESULT:
             return word(4);
+        case VT_R4:
+            return real(4);
         case VT_R8:
         case VT_DATE:
+            return real(8);
         case VT_CY:
         case VT_I8:
         case VT_UI8:
@@ -226,28 +244,6 @@ function typeOfVartype(vt){
     }
 }
 
-/**
- * A value's size where it is stored.
- *
- * @param {WireType} type
- */
-export function sizeOf(type){
-    switch (type.kind)
-    {
-        case 'word':
-        case 'record':
-            return /** @type {number} */ (type.bytes);
-        case 'variant':
-            return VARIANT_BYTES;
-        default:
-            return 4;
-    }
-}
-
-/** A value's size on the stack: whole words, a byte or a short widened to one. */
-/** @param {WireType} type */
-const stackSize = type=>(sizeOf(type) + 3) & ~3;
-
 /** @param {Uint8Array} bytes @param {number} at */
 const u16 = (bytes, at)=>bytes[at] | (bytes[at + 1] << 8);
 /** @param {Uint8Array} bytes @param {number} at */
@@ -258,6 +254,160 @@ const le32 = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff, (value >>>
     (value >>> 24) & 0xff);
 /** @param {Uint8Array} bytes @param {number} at @param {number} value */
 const put32 = (bytes, at, value)=>bytes.set(le32(value), at);
+
+/**
+ * Where a process of one width keeps what crosses: its pointer, and with it the
+ * structures that hold pointers -- a VARIANT (its value at 8 either way, room for
+ * two pointers after), a SAFEARRAY, a DISPPARAMS -- and the slot each argument of
+ * a call takes: a dword on a 32-bit stack, a quadword in a 64-bit frame, where a
+ * value larger than a quadword, or of an odd size, is passed by a pointer to a
+ * copy, as the x64 convention passes it.
+ *
+ * @typedef {Object} Layout
+ * @property {4 | 8} pointer
+ * @property {number} variant
+ * @property {4 | 8} slot
+ * @property {import('../common/safearray.js').SafeArrayLayout} safeArray  The process's SAFEARRAY,
+ *           oleaut32's own: pvData's offset, rgsabound's
+ * @property {{ named: number, count: number, namedCount: number, size: number }} dispParams
+ * @property {(bytes: Uint8Array, at: number) => number} read  A pointer where it is stored.
+ * @property {(value: number) => Uint8Array} bytes  A pointer as it is stored.
+ */
+
+/** @type {Map<number, Layout>} */
+const layouts = new Map();
+
+/**
+ * @param {number} [pointerSize]  4 or 8
+ * @returns {Layout}
+ */
+export function layoutOf(pointerSize = 4){
+    const known = layouts.get(pointerSize);
+    if (known)
+    {
+        return known;
+    }
+    const long = pointerSize === 8;
+    /** @type {Layout} */
+    const layout = Object.freeze({
+        pointer: long ? 8 : 4,
+        variant: long ? 24 : 16,
+        slot: long ? 8 : 4,
+        safeArray: safeArrayLayout(pointerSize),
+        dispParams: long ? { named: 8, count: 16, namedCount: 20, size: 24 }
+            : { named: 4, count: 8, namedCount: 12, size: 16 },
+        read: long
+            ? (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>u32(bytes, at)
+                + u32(bytes, at + 4) * 2 ** 32
+            : u32,
+        bytes: long
+            ? (/** @type {number} */ value)=>Uint8Array.of(...le32(value % 2 ** 32),
+                ...le32(Math.floor(value / 2 ** 32)))
+            : le32,
+    });
+    layouts.set(pointerSize, layout);
+    return layout;
+}
+
+const NARROW = layoutOf(4);
+
+/** A record as a process of the layout's width lays it out. @param {WireType} type @param {Layout} layout */
+const recordIn = (type, layout)=>(layout.pointer === 8 && type.long ? type.long : type);
+
+/**
+ * Where a value of `type` is aligned in a record at a width: on its own size up
+ * to eight, a pointer on a pointer's, a record on its most aligned member's.
+ *
+ * @param {WireType} type @param {Layout} layout
+ * @returns {number}
+ */
+const alignOf = (type, layout)=>{
+    switch (type.kind)
+    {
+        case 'word':
+            return Math.min(/** @type {number} */ (type.bytes), 8);
+        case 'record':
+            return recordIn(type, layout).align ?? 4;
+        case 'variant':
+            return 8;
+        default:
+            return layout.pointer;
+    }
+};
+
+/**
+ * A record's members laid out at a width as a compiler of that width lays them:
+ * each on its alignment, the whole a multiple of the largest. What the record
+ * holds beyond plain bytes is kept as its fields.
+ *
+ * @param {WireType[]} members @param {Layout} layout
+ * @returns {{ bytes: number, align: number, fields: { offset: number, type: WireType }[] }}
+ */
+const layOut = (members, layout)=>{
+    let at = 0;
+    let align = 1;
+    const fields = [];
+    for (const type of members)
+    {
+        const own = alignOf(type, layout);
+        at = Math.ceil(at / own) * own;
+        align = Math.max(align, own);
+        if (carries(type))
+        {
+            fields.push({ offset: at, type });
+        }
+        at += sizeOf(type, layout);
+    }
+    return { bytes: Math.ceil(at / align) * align, align, fields };
+};
+
+/**
+ * Whether a record's member is more than bytes to copy: what points somewhere,
+ * or a record that holds such a thing.
+ *
+ * @param {WireType} type
+ */
+const carries = type=>type.kind !== 'word' && !(type.kind === 'record' && !type.fields?.length
+    && !type.long?.fields?.length);
+
+/**
+ * A value's size where it is stored.
+ *
+ * @param {WireType} type @param {Layout} [layout]
+ */
+export function sizeOf(type, layout = NARROW){
+    switch (type.kind)
+    {
+        case 'word':
+            return /** @type {number} */ (type.bytes);
+        case 'record':
+            return /** @type {number} */ (recordIn(type, layout).bytes);
+        case 'variant':
+            return layout.variant;
+        default:
+            return layout.pointer;
+    }
+}
+
+/**
+ * Whether a value is passed by a pointer to a copy of it rather than in its
+ * slot: in a 64-bit frame, one larger than a quadword or of a size no register
+ * holds whole.
+ *
+ * @param {WireType} type @param {Layout} layout
+ */
+const byReference = (type, layout)=>layout.slot === 8
+    && (type.kind === 'variant' || type.kind === 'record')
+    && ![1, 2, 4, 8].includes(sizeOf(type, layout));
+
+/**
+ * A value's size in a call's frame: whole slots, a byte or a short widened to
+ * one; a 64-bit frame's slot holds anything, a value too large for it by
+ * reference.
+ *
+ * @param {WireType} type @param {Layout} layout
+ */
+const stackSize = (type, layout)=>(layout.slot === 8 ? 8 : (sizeOf(type, layout) + 3) & ~3);
 
 /** @param {number[]} words */
 function bytesOfWords(words){
@@ -387,6 +537,8 @@ function libraryTypes(library){
                     : unsupported(`the coclass ${reference.name}`);
             }
             case TKIND_RECORD: {
+                /** @type {WireType[]} */
+                const members = [];
                 /** @type {{ offset: number, type: WireType }[]} */
                 const fields = [];
                 for (const variable of reference.variables)
@@ -396,12 +548,22 @@ function libraryTypes(library){
                     {
                         return unsupported(`${reference.name}.${variable.name}: ${type.why}`);
                     }
-                    if (type.kind !== 'word' && !(type.kind === 'record' && !type.fields?.length))
+                    members.push(type);
+                    if (carries(type))
                     {
                         fields.push({ offset: variable.offset, type });
                     }
                 }
-                return { kind: 'record', bytes: reference.instanceSize, fields };
+                // The library's offsets and size are its own width's. A process
+                // of the other loads it where no library of its width is
+                // registered, and lays the record out for itself, as Windows
+                // does: a pointer there is another size.
+                const wide = library.sysKind === SYS_WIN64;
+                const stored = { bytes: reference.instanceSize, fields,
+                    align: reference.alignment || layOut(members, layoutOf(wide ? 8 : 4)).align };
+                const other = layOut(members, layoutOf(wide ? 4 : 8));
+                const [narrow, long] = wide ? [other, stored] : [stored, other];
+                return { kind: 'record', ...narrow, long: { kind: 'record', ...long } };
             }
             default:
                 return unsupported(`the type ${reference.name}`);
@@ -555,7 +717,8 @@ export function describeType(library, type){
         }
         for (const fn of described.functions)
         {
-            const slot = fn.vtableOffset >>> 2;
+            // A 64-bit library counts its vtable in quadwords.
+            const slot = Math.floor(fn.vtableOffset / (library.sysKind === SYS_WIN64 ? 8 : 4));
             const parameters = fn.parameters.map((parameter, index)=>({
                 name: parameter.name ?? `argument ${index}`,
                 flags: (parameter.flags & (PARAMFLAG_FIN | PARAMFLAG_FOUT)) || PARAMFLAG_FIN,
@@ -587,6 +750,8 @@ export function describeType(library, type){
  *     getValue: (key: any, name: string) => { data: Uint8Array } | null,
  *     subkeys?: (key: any) => string[] }} [hive]
  * @property {(path: string) => Uint8Array | Promise<Uint8Array> | null} readFile
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, which loads a library
+ *           registered for 64-bit Windows (`win64`) before one for 32-bit (`win32`).
  */
 
 /**
@@ -666,8 +831,9 @@ export function createInterfaceCatalog(host){
             return null;
         }
         const version = text(`Interface\\${iid}\\TypeLib|Version`) ?? '1.0';
-        const file = ['0', '9', '409'].map(lcid=>
-            text(`TypeLib\\${libid}\\${version}\\${lcid}\\win32|`)).find(Boolean);
+        const platforms = host.pointerSize === 8 ? ['win64', 'win32'] : ['win32'];
+        const file = platforms.flatMap(platform=>['0', '9', '409'].map(lcid=>
+            text(`TypeLib\\${libid}\\${version}\\${lcid}\\${platform}|`))).find(Boolean);
         const loaded = file ? await library(file) : null;
         const type = loaded?.typeInfos.find(candidate=>
             candidate.guid?.toUpperCase() === iid.toUpperCase());
@@ -704,6 +870,14 @@ export function createInterfaceCatalog(host){
  * @param {MarshalSide} side
  */
 export function createWire(side){
+    const layout = layoutOf(side.pointerSize);
+    /** @param {WireType} type */
+    const size = type=>sizeOf(type, layout);
+    /** A pointer where it is stored. @param {Uint8Array} bytes @param {number} [at] */
+    const pointerIn = (bytes, at = 0)=>layout.read(bytes, at);
+    const VARIANT = layout.variant;
+    const SAFEARRAY = layout.safeArray;
+    const DISPPARAMS = layout.dispParams;
     /**
      * A string's bytes before its terminator, at most LONGEST_STRING of them;
      * read a window at a time, so one at the end of what the program
@@ -761,16 +935,16 @@ export function createWire(side){
             case 'null':
                 return null;
             case 'bstr': {
-                const at = u32(bytes, 0);
+                const at = pointerIn(bytes);
                 return at === 0 ? null : readBstr(at);
             }
             case 'lpstr':
             case 'lpwstr': {
-                const at = u32(bytes, 0);
+                const at = pointerIn(bytes);
                 return at === 0 ? null : readString(at, type.kind === 'lpwstr');
             }
             case 'interface': {
-                const at = u32(bytes, 0);
+                const at = pointerIn(bytes);
                 if (at === 0)
                 {
                     return null;
@@ -779,24 +953,25 @@ export function createWire(side){
                 return { iid, reference: await side.exportInterface(at, iid, context.transfer) };
             }
             case 'pointer': {
-                const at = u32(bytes, 0);
+                const at = pointerIn(bytes);
                 const to = /** @type {WireType} */ (type.to);
                 return at === 0
                     ? null
-                    : { value: await decode(to, side.readMemory(at, sizeOf(to)), context) };
+                    : { value: await decode(to, side.readMemory(at, size(to)), context) };
             }
             case 'record': {
-                const raw = bytes.slice(0, type.bytes);
+                const record = recordIn(type, layout);
+                const raw = bytes.slice(0, record.bytes);
                 const fields = [];
-                for (const field of type.fields ?? [])
+                for (const field of record.fields ?? [])
                 {
                     fields.push(await decode(field.type,
-                        raw.subarray(field.offset, field.offset + sizeOf(field.type)), context));
+                        raw.subarray(field.offset, field.offset + size(field.type)), context));
                 }
                 return { raw, fields };
             }
             case 'array': {
-                const at = u32(bytes, 0);
+                const at = pointerIn(bytes);
                 const to = /** @type {WireType} */ (type.to);
                 if (at === 0)
                 {
@@ -807,33 +982,33 @@ export function createWire(side){
                 for (let index = 0; index < count; index++)
                 {
                     elements.push(await decode(to,
-                        side.readMemory(at + index * sizeOf(to), sizeOf(to)), context));
+                        side.readMemory(at + index * size(to), size(to)), context));
                 }
                 return elements;
             }
             case 'variant':
                 return decodeVariant(bytes, context);
             case 'safearray':
-                return decodeArray(u32(bytes, 0), context);
+                return decodeArray(pointerIn(bytes), context);
             case 'dispparams': {
-                const at = u32(bytes, 0);
+                const at = pointerIn(bytes);
                 if (at === 0)
                 {
                     return null;
                 }
-                const head = side.readMemory(at, 16);
-                const count = u32(head, 8);
-                const named = u32(head, 12);
+                const head = side.readMemory(at, DISPPARAMS.size);
+                const count = u32(head, DISPPARAMS.count);
+                const named = u32(head, DISPPARAMS.namedCount);
                 const args = [];
                 for (let index = 0; index < count; index++)
                 {
                     args.push(await decodeVariant(
-                        side.readMemory(u32(head, 0) + index * VARIANT_BYTES, VARIANT_BYTES),
+                        side.readMemory(pointerIn(head) + index * VARIANT, VARIANT),
                         context));
                 }
                 const ids = named === 0
                     ? new Uint8Array(0)
-                    : side.readMemory(u32(head, 4), named * 4);
+                    : side.readMemory(pointerIn(head, DISPPARAMS.named), named * 4);
                 return { args, named: wordsOfBytes(ids) };
             }
             default:
@@ -847,11 +1022,13 @@ export function createWire(side){
         const base = vt & VT_TYPEMASK;
         if (base === VT_DECIMAL && (vt & VT_BYREF) === 0)
         {
-            return { vt, raw: bytes.slice(0, VARIANT_BYTES) };
+            return { vt, raw: bytes.slice(0, VARIANT) };
         }
         if (vt & VT_ARRAY)
         {
-            const at = (vt & VT_BYREF) ? u32(side.readMemory(u32(bytes, 8), 4), 0) : u32(bytes, 8);
+            const at = (vt & VT_BYREF)
+                ? pointerIn(side.readMemory(pointerIn(bytes, 8), layout.pointer))
+                : pointerIn(bytes, 8);
             return { vt, value: await decodeArray(at, context) };
         }
         if (base === VT_EMPTY || base === VT_NULL)
@@ -868,11 +1045,11 @@ export function createWire(side){
             // No referent at all is apart from one that holds nothing -- a
             // BSTR* at a NULL string: the callee is handed a cell either way
             // but the first, as COM hands it.
-            const at = u32(bytes, 8);
+            const at = pointerIn(bytes, 8);
             return at === 0 ? { vt, value: null, absent: true }
-                : { vt, value: await decode(type, side.readMemory(at, sizeOf(type)), context) };
+                : { vt, value: await decode(type, side.readMemory(at, size(type)), context) };
         }
-        return { vt, value: await decode(type, bytes.subarray(8, 8 + sizeOf(type)), context) };
+        return { vt, value: await decode(type, bytes.subarray(8, 8 + size(type)), context) };
     };
 
     /** @param {number} at @param {WireContext} context */
@@ -881,7 +1058,7 @@ export function createWire(side){
         {
             return null;
         }
-        const head = side.readMemory(at, SAFEARRAY_BOUNDS);
+        const head = side.readMemory(at, SAFEARRAY.BOUNDS);
         const dims = u16(head, 0);
         const features = u16(head, 2);
         const elementBytes = u32(head, 4);
@@ -889,13 +1066,13 @@ export function createWire(side){
         let count = 1;
         for (let index = 0; index < dims; index++)
         {
-            const bound = side.readMemory(at + SAFEARRAY_BOUNDS + index * 8, 8);
+            const bound = side.readMemory(at + SAFEARRAY.BOUNDS + index * 8, 8);
             bounds.push({ elements: u32(bound, 0), lower: u32(bound, 4) | 0 });
             count *= u32(bound, 0);
         }
         const vt = vartypeOfArray(features, elementBytes);
         const type = typeOfVartype(vt);
-        const data = u32(head, 12);
+        const data = pointerIn(head, SAFEARRAY.DATA);
         if (!type || type.kind === 'word')
         {
             return { vt, bounds, data: side.readMemory(data, count * elementBytes).slice() };
@@ -925,38 +1102,38 @@ export function createWire(side){
                 return out;
             }
             case 'null':
-                return new Uint8Array(4);
+                return new Uint8Array(layout.pointer);
             case 'bstr':
-                return le32(wire === null ? 0 : side.allocateBstr(wire));
+                return layout.bytes(wire === null ? 0 : side.allocateBstr(wire));
             case 'lpstr':
             case 'lpwstr': {
                 if (wire === null)
                 {
-                    return new Uint8Array(4);
+                    return new Uint8Array(layout.pointer);
                 }
                 const unit = type.kind === 'lpwstr' ? 2 : 1;
                 const at = side.allocate(wire.length + unit);
                 side.writeMemory(at, wire);
                 side.writeMemory(at + wire.length, new Uint8Array(unit));
-                return le32(at);
+                return layout.bytes(at);
             }
             case 'interface':
-                return le32(wire === null
+                return layout.bytes(wire === null
                     ? 0
                     : await side.importInterface(wire.reference, wire.iid));
             case 'pointer': {
                 if (wire === null)
                 {
-                    return new Uint8Array(4);
+                    return new Uint8Array(layout.pointer);
                 }
                 const to = /** @type {WireType} */ (type.to);
-                const at = side.allocate(sizeOf(to));
+                const at = side.allocate(size(to));
                 side.writeMemory(at, await encode(to, wire.value, context));
-                return le32(at);
+                return layout.bytes(at);
             }
             case 'record': {
                 const out = wire.raw.slice();
-                for (const [index, field] of (type.fields ?? []).entries())
+                for (const [index, field] of (recordIn(type, layout).fields ?? []).entries())
                 {
                     out.set(await encode(field.type, wire.fields[index], context), field.offset);
                 }
@@ -965,37 +1142,41 @@ export function createWire(side){
             case 'array': {
                 if (wire === null)
                 {
-                    return new Uint8Array(4);
+                    return new Uint8Array(layout.pointer);
                 }
                 const to = /** @type {WireType} */ (type.to);
-                const at = side.allocate(Math.max(wire.length, 1) * sizeOf(to));
+                const at = side.allocate(Math.max(wire.length, 1) * size(to));
                 for (const [index, element] of wire.entries())
                 {
-                    side.writeMemory(at + index * sizeOf(to), await encode(to, element, context));
+                    side.writeMemory(at + index * size(to), await encode(to, element, context));
                 }
-                return le32(at);
+                return layout.bytes(at);
             }
             case 'variant':
                 return encodeVariant(wire, context);
             case 'safearray':
-                return le32(await encodeArray(wire, context));
+                return layout.bytes(await encodeArray(wire, context));
             case 'dispparams': {
                 if (wire === null)
                 {
-                    return new Uint8Array(4);
+                    return new Uint8Array(layout.pointer);
                 }
-                const args = side.allocate(Math.max(wire.args.length, 1) * VARIANT_BYTES);
+                const args = side.allocate(Math.max(wire.args.length, 1) * VARIANT);
                 for (const [index, argument] of wire.args.entries())
                 {
-                    side.writeMemory(args + index * VARIANT_BYTES,
+                    side.writeMemory(args + index * VARIANT,
                         await encodeVariant(argument, context));
                 }
                 const named = side.allocate(Math.max(wire.named.length, 1) * 4);
                 side.writeMemory(named, bytesOfWords(wire.named));
-                const head = side.allocate(16);
-                side.writeMemory(head, bytesOfWords(
-                    [args, named, wire.args.length, wire.named.length]));
-                return le32(head);
+                const head = side.allocate(DISPPARAMS.size);
+                const block = new Uint8Array(DISPPARAMS.size);
+                block.set(layout.bytes(args), 0);
+                block.set(layout.bytes(named), DISPPARAMS.named);
+                put32(block, DISPPARAMS.count, wire.args.length);
+                put32(block, DISPPARAMS.namedCount, wire.named.length);
+                side.writeMemory(head, block);
+                return layout.bytes(head);
             }
             default:
                 throw new Error(`cannot marshal ${type.why ?? type.kind}`);
@@ -1008,7 +1189,7 @@ export function createWire(side){
         {
             return wire.raw.slice();
         }
-        const out = new Uint8Array(VARIANT_BYTES);
+        const out = new Uint8Array(VARIANT);
         out[0] = wire.vt & 0xff;
         out[1] = wire.vt >> 8;
         const base = wire.vt & VT_TYPEMASK;
@@ -1017,14 +1198,14 @@ export function createWire(side){
             const array = await encodeArray(wire.value, context);
             if (wire.vt & VT_BYREF)
             {
-                const cell = side.allocate(4);
-                side.writeMemory(cell, le32(array));
+                const cell = side.allocate(layout.pointer);
+                side.writeMemory(cell, layout.bytes(array));
                 context.owned.push({ type: { kind: 'safearray' }, address: cell });
-                put32(out, 8, cell);
+                out.set(layout.bytes(cell), 8);
             }
             else
             {
-                put32(out, 8, array);
+                out.set(layout.bytes(array), 8);
             }
             return out;
         }
@@ -1041,10 +1222,10 @@ export function createWire(side){
             }
             // Nothing a byref variant is cleared by frees what it points at,
             // so the block is the stub's to give back.
-            const cell = side.allocate(sizeOf(type));
+            const cell = side.allocate(size(type));
             side.writeMemory(cell, await encode(type, wire.value, context));
             context.owned.push({ type, address: cell });
-            put32(out, 8, cell);
+            out.set(layout.bytes(cell), 8);
             return out;
         }
         out.set(await encode(type, wire.value, context), 8);
@@ -1062,8 +1243,8 @@ export function createWire(side){
         {
             return 0;
         }
-        const head = side.readMemory(at, SAFEARRAY_BOUNDS);
-        const data = u32(head, 12);
+        const head = side.readMemory(at, SAFEARRAY.BOUNDS);
+        const data = pointerIn(head, SAFEARRAY.DATA);
         const elementBytes = u32(head, 4);
         if (wire.data)
         {
@@ -1087,7 +1268,7 @@ export function createWire(side){
      */
     const dispose = async(type, bytes, context, transferred = false)=>{
         const at = type.kind === 'word' || type.kind === 'record' || type.kind === 'variant'
-            ? 0 : u32(bytes, 0);
+            ? 0 : pointerIn(bytes);
         switch (type.kind)
         {
             case 'bstr':
@@ -1115,15 +1296,15 @@ export function createWire(side){
                     return;
                 }
                 const to = /** @type {WireType} */ (type.to);
-                await dispose(to, side.readMemory(at, sizeOf(to)), context, transferred);
+                await dispose(to, side.readMemory(at, size(to)), context, transferred);
                 side.free(at);
                 return;
             }
             case 'record':
-                for (const field of type.fields ?? [])
+                for (const field of recordIn(type, layout).fields ?? [])
                 {
                     await dispose(field.type,
-                        bytes.subarray(field.offset, field.offset + sizeOf(field.type)),
+                        bytes.subarray(field.offset, field.offset + size(field.type)),
                         context, transferred);
                 }
                 return;
@@ -1136,7 +1317,7 @@ export function createWire(side){
                 const count = context.countOf(type.countFrom ?? -1);
                 for (let index = 0; index < count; index++)
                 {
-                    await dispose(to, side.readMemory(at + index * sizeOf(to), sizeOf(to)),
+                    await dispose(to, side.readMemory(at + index * size(to), size(to)),
                         context, transferred);
                 }
                 side.free(at);
@@ -1150,16 +1331,17 @@ export function createWire(side){
                 }
                 if (vt & VT_ARRAY)
                 {
-                    if (u32(bytes, 8) !== 0)
+                    if (pointerIn(bytes, 8) !== 0)
                     {
-                        await side.destroySafeArray(u32(bytes, 8));
+                        await side.destroySafeArray(pointerIn(bytes, 8));
                     }
                     return;
                 }
                 const inner = typeOfVartype(vt & VT_TYPEMASK);
                 if (inner && inner.kind !== 'word' && inner.kind !== 'variant')
                 {
-                    await dispose(inner, bytes.subarray(8, 12), context, transferred);
+                    await dispose(inner, bytes.subarray(8, 8 + layout.pointer), context,
+                        transferred);
                 }
                 return;
             }
@@ -1174,15 +1356,15 @@ export function createWire(side){
                 {
                     return;
                 }
-                const head = side.readMemory(at, 16);
-                for (let index = 0; index < u32(head, 8); index++)
+                const head = side.readMemory(at, DISPPARAMS.size);
+                for (let index = 0; index < u32(head, DISPPARAMS.count); index++)
                 {
                     await dispose({ kind: 'variant' },
-                        side.readMemory(u32(head, 0) + index * VARIANT_BYTES, VARIANT_BYTES),
+                        side.readMemory(pointerIn(head) + index * VARIANT, VARIANT),
                         context, transferred);
                 }
-                side.free(u32(head, 0));
-                side.free(u32(head, 4));
+                side.free(pointerIn(head));
+                side.free(pointerIn(head, DISPPARAMS.named));
                 side.free(at);
                 return;
             }
@@ -1195,32 +1377,88 @@ export function createWire(side){
     const disposeOwned = async context=>{
         for (const { type, address } of context.owned.splice(0))
         {
-            await dispose(type, side.readMemory(address, sizeOf(type)), context);
+            await dispose(type, side.readMemory(address, size(type)), context);
             side.free(address);
         }
     };
 
-    return { decode, encode, dispose, disposeOwned, decodeVariant, encodeVariant };
+    return { decode, encode, dispose, disposeOwned, decodeVariant, encodeVariant, layout };
 }
 
 /**
- * Where each parameter sits on the stack, after `this`.
+ * Where each parameter sits in the call's frame, after `this`.
  *
- * @param {MethodDescription} method
+ * @param {MethodDescription} method @param {Layout} width
  */
-function layout(method){
+function frameOf(method, width){
     const offsets = [];
     let at = 0;
     for (const parameter of method.parameters)
     {
         offsets.push(at);
-        at += stackSize(parameter.type);
+        at += stackSize(parameter.type, width);
     }
     return { offsets, bytes: at };
 }
 
-/** @param {MethodDescription} method */
-export const argumentBytes = method=>4 + layout(method).bytes;
+/**
+ * The bytes of a method's arguments as a host call counts them, `this`
+ * included: in a 64-bit process each argument after `this` is a whole slot,
+ * declared a quadword (`longSlots`) so the bridge hands it over as its two
+ * dwords.
+ *
+ * @param {MethodDescription} method @param {Layout} [width]
+ */
+export const argumentBytes = (method, width = NARROW)=>4 + frameOf(method, width).bytes;
+
+/**
+ * Where a host call declares a 64-bit method's arguments whole: each one's
+ * place among the dwords after `this`, every one a quadword. Nothing for a
+ * 32-bit one, whose stack is its arguments' bytes as they are.
+ *
+ * @param {MethodDescription} method @param {Layout} width
+ * @returns {{ quadwords?: number[] }}
+ */
+export const argumentSlots = (method, width)=>(width.slot === 8
+    ? { quadwords: method.parameters.map((_, index)=>1 + index * 2) } : {});
+
+/**
+ * Why a method cannot cross at a width where the description alone allows it:
+ * a 64-bit call passes a floating-point argument among its first four in an
+ * XMM register, which a stub calling the program has no means to set. Null
+ * when it can.
+ *
+ * @param {MethodDescription} method @param {Layout} width
+ * @returns {string | null}
+ */
+export const unsupportedAt = (method, width)=>{
+    const register = method.parameters.slice(0, 3).find(parameter=>parameter.type.float);
+    return width.slot === 8 && register
+        ? `${register.name}: a floating-point argument in an XMM register` : null;
+};
+
+/**
+ * The arguments a frame holds as a guest call takes them: a 32-bit one's
+ * dwords; a 64-bit one's slots, each a dword zero-extended or, past 4 GiB, a
+ * bigint whole.
+ *
+ * @param {Uint8Array} frame @param {Layout} width
+ * @returns {(number | bigint)[]}
+ */
+export function argumentsOf(frame, width){
+    if (width.slot === 4)
+    {
+        return wordsOfBytes(frame);
+    }
+    const values = [];
+    for (let at = 0; at < frame.length; at += 8)
+    {
+        const high = u32(frame, at + 4);
+        values.push(high === 0 ? u32(frame, at)
+            : (BigInt(high) << 32n) | BigInt(u32(frame, at)));
+    }
+    return values;
+}
 
 /**
  * A context over one call's request, for the parameters that name another's
@@ -1260,8 +1498,9 @@ const isOut = flags=>(flags & PARAMFLAG_FOUT) !== 0;
  */
 export async function marshalRequest(side, method, args){
     const wire = createWire(side);
+    const { layout } = wire;
     const bytes = bytesOfWords(args);
-    const { offsets } = layout(method);
+    const { offsets } = frameOf(method, layout);
     /** @type {any[]} */
     const request = [];
     const context = contextOver(request, false);
@@ -1273,7 +1512,12 @@ export async function marshalRequest(side, method, args){
     for (const index of order)
     {
         const parameter = method.parameters[index];
-        const at = bytes.subarray(offsets[index], offsets[index] + sizeOf(parameter.type));
+        const slot = bytes.subarray(offsets[index], offsets[index] + stackSize(parameter.type,
+            layout));
+        // A value passed by reference is read where the slot points.
+        const at = byReference(parameter.type, layout)
+            ? side.readMemory(layout.read(slot, 0), sizeOf(parameter.type, layout))
+            : slot.subarray(0, sizeOf(parameter.type, layout));
         // A caller's array of results is a buffer, not a value: it crosses
         // as whether there is one, like a pointer that is only [out].
         const crosses = parameter.type.kind === 'array'
@@ -1281,7 +1525,7 @@ export async function marshalRequest(side, method, args){
             : isIn(parameter.flags);
         request[index] = crosses
             ? await wire.decode(parameter.type, at, context)
-            : u32(at, 0) !== 0;
+            : layout.read(slot, 0) !== 0;
     }
     return request;
 }
@@ -1290,14 +1534,23 @@ export async function marshalRequest(side, method, args){
  * The callee's side: the request laid out as the method's arguments, each
  * [out] parameter given a zeroed place to write.
  *
+ * Each value is laid in its slot of the frame, or, passed by reference, in a
+ * copy the slot points at (`copies`, freed once the call is answered).
+ *
  * @param {MarshalSide} side @param {MethodDescription} method @param {any[]} request
- * @returns {Promise<{ words: number[], laid: Uint8Array[], context: WireContext }>}
+ * @returns {Promise<{ words: (number | bigint)[], laid: Uint8Array[], copies: number[],
+ *     context: WireContext }>}
  */
 export async function unmarshalRequest(side, method, request){
     const wire = createWire(side);
+    const { layout } = wire;
     const context = contextOver(request, false);
     /** @type {Uint8Array[]} */
     const laid = [];
+    /** @type {Uint8Array[]} */
+    const slots = [];
+    /** @type {number[]} */
+    const copies = [];
     for (const [index, parameter] of method.parameters.entries())
     {
         const type = parameter.type;
@@ -1308,21 +1561,39 @@ export async function unmarshalRequest(side, method, request){
             {
                 const bytes = type.kind === 'array'
                     ? Math.max(context.countOf(type.countFrom ?? -1), 1)
-                        * sizeOf(/** @type {WireType} */ (type.to))
-                    : sizeOf(/** @type {WireType} */ (type.to));
+                        * sizeOf(/** @type {WireType} */ (type.to), layout)
+                    : sizeOf(/** @type {WireType} */ (type.to), layout);
                 address = side.allocate(bytes);
                 side.writeMemory(address, new Uint8Array(bytes));
             }
-            laid.push(le32(address));
+            const given = new Uint8Array(stackSize(type, layout));
+            given.set(layout.bytes(address));
+            laid.push(given);
+            slots.push(given);
             continue;
         }
         const bytes = await wire.encode(type, request[index], context);
-        const padded = new Uint8Array(stackSize(type));
+        const padded = new Uint8Array(Math.max(stackSize(type, layout), bytes.length));
         padded.set(bytes);
         laid.push(padded);
+        if (byReference(type, layout))
+        {
+            const copy = side.allocate(bytes.length);
+            side.writeMemory(copy, bytes);
+            copies.push(copy);
+            const slot = new Uint8Array(8);
+            slot.set(layout.bytes(copy));
+            slots.push(slot);
+            continue;
+        }
+        slots.push(padded);
     }
-    const words = laid.flatMap(bytes=>wordsOfBytes(bytes));
-    return { words, laid, context };
+    const frame = new Uint8Array(slots.reduce((sum, slot)=>sum + slot.length, 0));
+    slots.reduce((at, slot)=>{
+        frame.set(slot, at);
+        return at + slot.length;
+    }, 0);
+    return { words: argumentsOf(frame, layout), laid, copies, context };
 }
 
 /**
@@ -1330,18 +1601,20 @@ export async function unmarshalRequest(side, method, request){
  * reply, and everything the stub made for the call given back.
  *
  * @param {MarshalSide} side @param {MethodDescription} method
- * @param {any[]} request @param {{ laid: Uint8Array[], context: WireContext }} call
+ * @param {any[]} request
+ * @param {{ laid: Uint8Array[], copies?: number[], context: WireContext }} call
  * @returns {Promise<any[]>}
  */
 export async function marshalReply(side, method, request, call){
     const wire = createWire(side);
+    const { layout } = wire;
     const context = { ...contextOver(request, true), owned: call.context.owned };
     /** @type {any[]} */
     const reply = [];
     for (const [index, parameter] of method.parameters.entries())
     {
         const type = parameter.type;
-        const at = u32(call.laid[index], 0);
+        const at = layout.read(call.laid[index], 0);
         if (!isOut(parameter.flags) || at === 0)
         {
             continue;
@@ -1357,12 +1630,12 @@ export async function marshalReply(side, method, request, call){
             reply[index] = await wire.decode(type, call.laid[index], context);
             continue;
         }
-        reply[index] = await wire.decode(to, side.readMemory(at, sizeOf(to)), context);
+        reply[index] = await wire.decode(to, side.readMemory(at, sizeOf(to, layout)), context);
     }
     for (const [index, parameter] of method.parameters.entries())
     {
         const type = parameter.type;
-        const at = u32(call.laid[index], 0);
+        const at = layout.read(call.laid[index], 0);
         if (isOut(parameter.flags) && type.kind !== 'dispparams')
         {
             if (at !== 0)
@@ -1374,7 +1647,7 @@ export async function marshalReply(side, method, request, call){
                 else
                 {
                     await wire.dispose(/** @type {WireType} */ (type.to),
-                        side.readMemory(at, sizeOf(/** @type {WireType} */ (type.to))),
+                        side.readMemory(at, sizeOf(/** @type {WireType} */ (type.to), layout)),
                         context, true);
                     side.free(at);
                 }
@@ -1384,6 +1657,10 @@ export async function marshalReply(side, method, request, call){
         await wire.dispose(type, call.laid[index], context);
     }
     await wire.disposeOwned(context);
+    for (const copy of call.copies ?? [])
+    {
+        side.free(copy);
+    }
     return reply;
 }
 
@@ -1395,11 +1672,13 @@ export async function marshalReply(side, method, request, call){
  * @param {number} at @param {WireContext} context
  */
 async function byrefValues(side, wire, at, context){
-    const head = side.readMemory(at, 16);
+    const { layout } = wire;
+    const head = side.readMemory(at, layout.dispParams.size);
     const updates = [];
-    for (let index = 0; index < u32(head, 8); index++)
+    for (let index = 0; index < u32(head, layout.dispParams.count); index++)
     {
-        const variant = side.readMemory(u32(head, 0) + index * VARIANT_BYTES, VARIANT_BYTES);
+        const variant = side.readMemory(layout.read(head, 0) + index * layout.variant,
+            layout.variant);
         if (u16(variant, 0) & VT_BYREF)
         {
             updates.push({ index, value: await wire.decodeVariant(variant, context) });
@@ -1417,31 +1696,32 @@ async function byrefValues(side, wire, at, context){
  */
 export async function unmarshalReply(side, method, args, request, reply){
     const wire = createWire(side);
+    const { layout } = wire;
     const context = contextOver(request, false);
     const bytes = bytesOfWords(args);
-    const { offsets } = layout(method);
+    const { offsets } = frameOf(method, layout);
     for (const [index, parameter] of method.parameters.entries())
     {
         const type = parameter.type;
-        const at = u32(bytes, offsets[index]);
+        const at = layout.read(bytes, offsets[index]);
         if (!isOut(parameter.flags) || at === 0 || reply[index] === undefined)
         {
             continue;
         }
         if (type.kind === 'dispparams')
         {
-            const head = side.readMemory(at, 16);
+            const head = side.readMemory(at, layout.dispParams.size);
             for (const update of reply[index])
             {
-                const variant = side.readMemory(u32(head, 0) + update.index * VARIANT_BYTES,
-                    VARIANT_BYTES);
+                const variant = side.readMemory(layout.read(head, 0)
+                    + update.index * layout.variant, layout.variant);
                 const target = typeOfVartype(u16(variant, 0) & VT_TYPEMASK);
-                const cell = u32(variant, 8);
+                const cell = layout.read(variant, 8);
                 if (!target || cell === 0 || update.value.absent)
                 {
                     continue;
                 }
-                await wire.dispose(target, side.readMemory(cell, sizeOf(target)), context);
+                await wire.dispose(target, side.readMemory(cell, sizeOf(target, layout)), context);
                 side.writeMemory(cell, await wire.encode(target, update.value.value, context));
             }
             continue;
@@ -1451,14 +1731,15 @@ export async function unmarshalReply(side, method, args, request, reply){
             const to = /** @type {WireType} */ (type.to);
             for (const [element, value] of reply[index].entries())
             {
-                side.writeMemory(at + element * sizeOf(to), await wire.encode(to, value, context));
+                side.writeMemory(at + element * sizeOf(to, layout),
+                    await wire.encode(to, value, context));
             }
             continue;
         }
         const to = /** @type {WireType} */ (type.to);
         if ((parameter.flags & PARAMFLAG_FIN) !== 0)
         {
-            await wire.dispose(to, side.readMemory(at, sizeOf(to)), context);
+            await wire.dispose(to, side.readMemory(at, sizeOf(to, layout)), context);
         }
         side.writeMemory(at, await wire.encode(to, reply[index], context));
     }

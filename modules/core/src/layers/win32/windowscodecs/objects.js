@@ -29,6 +29,7 @@ import { bgraOf, checkedRect, clippedSource, conversionOf, convertedSource, flip
 import { E_INVALIDARG, E_NOTIMPL, E_OUTOFMEMORY, S_OK, createKit } from './kit.js';
 import { createInfos } from './info.js';
 import { wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
 
 /** @typedef {import('./sources.js').Source} Source */
 /** @typedef {import('../ole32/objects.js').ComObject} ComObject */
@@ -60,6 +61,7 @@ const READ_CHUNK = 0x10000;
 
 /** @param {import('./kit.js').CodecsHost} host */
 export function createCodecs(host){
+    const STATSTG = statstgLayout(host.pointerSize);
     const kit = createKit(host);
     const { make, hand, u32, putU32, putF64, f64, guid, putGuid, rect, method, diverge } = kit;
     const access = { readMemory: host.readMemory, writeMemory: host.writeMemory,
@@ -770,13 +772,13 @@ export function createCodecs(host){
      * @returns {StreamBody}
      */
     const guestStreamBody = pointer=>({
-        size: caller=>withBlock(access, 72, async at=>{
+        size: caller=>withBlock(access, STATSTG.SIZE_OF, async at=>{
             const hr = await method(caller, pointer, 12, [at, 1]);
             if (hr < 0)
             {
                 throw new CodecError(hr, 'IStream::Stat');
             }
-            return u32(at + 8) + u32(at + 12) * 0x100000000;
+            return u32(at + STATSTG.SIZE) + u32(at + STATSTG.SIZE + 4) * 0x100000000;
         }),
         read: (caller, at, length)=>withBlock(access, 16 + length, async block=>{
             const seek = await method(caller, pointer, 5, [at >>> 0, Math.floor(at / 0x100000000),

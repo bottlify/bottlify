@@ -1686,3 +1686,29 @@ test('a synchronous listen parks; CancelSynchronousIo by its block ends it cance
     assert.equal(p.u32(IOSB), STATUS_CANCELLED);
     assert.deepEqual(p.woken.at(-1), { thread: 'p1:listener', result: STATUS_CANCELLED });
 });
+
+test('CreatePipe\'s ends are inheritable as SECURITY_ATTRIBUTES asks, at either width', ()=>{
+    // ngen hands its 64-bit worker the write end of a pipe by number on the
+    // command line; read at the 32-bit offset, the flag was the descriptor's
+    // low dword, the end was not inherited, and the worker's first write
+    // failed with ERROR_INVALID_HANDLE.
+    for (const pointerSize of [4, 8])
+    {
+        const word = pointerSize;
+        /** @param {number} descriptor @param {number} inherit */
+        const made = (descriptor, inherit)=>{
+            const p = processOn(new Map(), 1, { pointerSize });
+            p.view.setUint32(0x300, 3 * word, true);
+            p.view.setUint32(0x300 + word, descriptor, true);
+            p.view.setUint32(0x300 + 2 * word, inherit, true);
+            const ends = p.pipes.anonymous(0x300, 4096);
+            assert.ok(ends);
+            return { ends, inherited: p.pipes.inherited(null).map(one=>one.handle) };
+        };
+        const asked = made(0, 1);
+        assert.deepEqual(asked.inherited, [asked.ends.read, asked.ends.write],
+            `${pointerSize * 8}-bit: both ends inheritable`);
+        assert.deepEqual(made(0x2000, 0).inherited, [],
+            `${pointerSize * 8}-bit: a descriptor is not the flag`);
+    }
+});

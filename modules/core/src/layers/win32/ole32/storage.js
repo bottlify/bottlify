@@ -28,6 +28,7 @@ import {
     parseCompoundFile, serializeCompoundFile,
 } from './cfb.js';
 import { wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
 
 /** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
 const GMEM_MOVEABLE = 0x0002;
@@ -75,7 +76,6 @@ const IID_IDIRECTWRITERLOCK = '{0E6D4D92-6738-11CF-9608-00AA00680DB4}';
 const SLOT_LOCKBYTES = Object.freeze({
     ADD_REF: 1, RELEASE: 2, READ_AT: 3, WRITE_AT: 4, SET_SIZE: 6, LOCK_REGION: 7, STAT: 9,
 });
-const STATSTG_BYTES = 72;
 const LOCK_WRITE = 1;
 const LOCK_EXCLUSIVE = 2;
 const LOCK_ONLYONCE = 4;
@@ -120,12 +120,6 @@ const STREAM_SEEK_SET = 0;
 const STREAM_SEEK_CUR = 1;
 const STREAM_SEEK_END = 2;
 const STGMOVE_COPY = 1;
-
-/** STATSTG, 72 bytes. */
-const STATSTG = Object.freeze({
-    NAME: 0, TYPE: 4, SIZE: 8, MTIME: 16, CTIME: 24, ATIME: 32, MODE: 40, LOCKS: 44,
-    CLSID: 48, STATE_BITS: 64, SIZE_OF: 72,
-});
 
 export const IID_ISTORAGE = '{0000000B-0000-0000-C000-000000000046}';
 const IID_IPROPERTYSETSTORAGE = '{0000013A-0000-0000-C000-000000000046}';
@@ -186,6 +180,7 @@ const MAX_PATH = 260;
  *           on belongs to: a moveable handle's block is found, grown and freed
  *           through it, under the same handle.
  * @property {import('./objects.js').ComRegistry} registry
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *              interfaceId: string) => number }} vtables
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
@@ -281,6 +276,7 @@ const readable = mode=>(mode & STGM_ACCESS_MASK) !== STGM_WRITE;
  * @param {StorageHost} host
  */
 export function createStorageFunctions(host){
+    const STATSTG = statstgLayout(host.pointerSize);
     /** @param {number} address */
     const readU32 = address=>{
         const bytes = host.readMemory(address, WORD);
@@ -1720,12 +1716,12 @@ export function createStorageFunctions(host){
      */
     const docfileOnGuest = async(pointer, create, mode, out)=>{
         const thread = host.callerThread?.();
-        const block = host.heap.allocate(STATSTG_BYTES + WORD);
+        const block = host.heap.allocate(STATSTG.SIZE_OF + WORD);
         if (block === 0)
         {
             return E_OUTOFMEMORY;
         }
-        host.writeMemory(block, new Uint8Array(STATSTG_BYTES + WORD));
+        host.writeMemory(block, new Uint8Array(STATSTG.SIZE_OF + WORD));
         try
         {
             const stated = await callGuest(pointer, SLOT_LOCKBYTES.STAT, [block, STATFLAG_NONAME],
@@ -1734,8 +1730,8 @@ export function createStorageFunctions(host){
             {
                 return stated;
             }
-            const size = create ? 0 : Math.min(readU32(block + 8), MAX_GUEST_DOCFILE);
-            const locks = readU32(block + 44);
+            const size = create ? 0 : Math.min(readU32(block + STATSTG.SIZE), MAX_GUEST_DOCFILE);
+            const locks = readU32(block + STATSTG.LOCKS);
             if ((locks & (LOCK_WRITE | LOCK_EXCLUSIVE | LOCK_ONLYONCE)) !== 0)
             {
                 const locked = await callGuest(pointer, SLOT_LOCKBYTES.LOCK_REGION,

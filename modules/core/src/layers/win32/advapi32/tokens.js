@@ -28,7 +28,7 @@
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { createDescriptorCodec } from './descriptors.js';
 import { probedNatives } from '../ntdll/probe.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * Who the program is running as. There is one account and no way to become
@@ -256,8 +256,6 @@ const SECURITY_IMPERSONATION = 2;
  */
 const SETTABLE_TOKEN_CLASSES = new Set([4, 5, 6, 12, 18, 24, 25, 26]);
 
-/** SID_AND_ATTRIBUTES: a pointer and a DWORD. */
-const SID_AND_ATTRIBUTES_SIZE = 8;
 
 /** SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED. */
 const GROUP_ATTRIBUTES = 0x00000007;
@@ -830,6 +828,8 @@ export const accountNamed = written=>{
  *           A service handle's descriptor, self-relative with the parts asked
  *           for, or null for a handle that is not one.
  * @property {() => any} [currentThread]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose token information
+ *           has its SID pointers a quadword wide.
  *           The calling thread, whose impersonation token SetThreadToken and
  *           ImpersonateSelf set. Absent, every caller is one thread.
  * @property {(handle: number) => 'none' | 'unknown' | 'client'} [pipeClient]
@@ -842,6 +842,13 @@ export const accountNamed = written=>{
  * @param {TokenHost} host
  */
 export function createTokenFunctions(host){
+    const width = pointerWidth(host.pointerSize === 8 ? 8 : 4);
+    // SID_AND_ATTRIBUTES: a pointer and a DWORD, aligned to the pointer - 8
+    // bytes in a 32-bit process, 16 in a 64-bit one, its attributes at 8.
+    const SID_AND_ATTRIBUTES_SIZE = 2 * width.size;
+    const ATTRIBUTES = width.size;
+    // TOKEN_GROUPS: the count, then its entries on the pointer's alignment.
+    const GROUPS = width.size;
     /**
      * The token each thread impersonates with, by the thread: a thread with
      * none acts as the process, which is every thread until it is given one.
@@ -987,9 +994,9 @@ export function createTokenFunctions(host){
                 };
             // TOKEN_OWNER and TOKEN_PRIMARY_GROUP: one SID pointer each.
             case TokenOwner:
-                return { fixed: new Uint8Array(4), sids: [sidBytes(DEFAULT_OWNER)] };
+                return { fixed: new Uint8Array(width.size), sids: [sidBytes(DEFAULT_OWNER)] };
             case TokenPrimaryGroup:
-                return { fixed: new Uint8Array(4), sids: [sidBytes(PRIMARY_GROUP)] };
+                return { fixed: new Uint8Array(width.size), sids: [sidBytes(PRIMARY_GROUP)] };
             // DuplicateToken makes an impersonation token; what OpenProcessToken
             // opens is the primary one.
             case TokenType:
@@ -1018,7 +1025,7 @@ export function createTokenFunctions(host){
             case TokenDefaultDacl:
             {
                 const dacl = defaultDaclOf(token);
-                return { fixed: new Uint8Array(4), sids: dacl === null ? [] : [dacl] };
+                return { fixed: new Uint8Array(width.size), sids: dacl === null ? [] : [dacl] };
             }
             case TokenImpersonationLevel:
                 return token?.impersonationLevel === undefined ? null
@@ -1050,30 +1057,30 @@ export function createTokenFunctions(host){
             case TokenIntegrityLevel:
             {
                 const fixed = new Uint8Array(SID_AND_ATTRIBUTES_SIZE);
-                new DataView(fixed.buffer).setUint32(4, INTEGRITY_ATTRIBUTES, true);
+                new DataView(fixed.buffer).setUint32(ATTRIBUTES, INTEGRITY_ATTRIBUTES, true);
                 return { fixed, sids: [sidBytes(HIGH_INTEGRITY)] };
             }
             case TokenLogonSid:
             {
-                const fixed = new Uint8Array(4 + SID_AND_ATTRIBUTES_SIZE);
+                const fixed = new Uint8Array(GROUPS + SID_AND_ATTRIBUTES_SIZE);
                 const view = new DataView(fixed.buffer);
                 view.setUint32(0, 1, true);
-                view.setUint32(8, LOGON_ATTRIBUTES, true);
-                return { fixed, sids: [sidBytes(LOGON_SID)], slot: 4,
+                view.setUint32(GROUPS + ATTRIBUTES, LOGON_ATTRIBUTES, true);
+                return { fixed, sids: [sidBytes(LOGON_SID)], slot: GROUPS,
                     stride: SID_AND_ATTRIBUTES_SIZE };
             }
             case TokenIsAppContainer:
                 return { fixed: dwordBytes(0), sids: [] };
             case TokenGroups:
             {
-                const fixed = new Uint8Array(4 + SID_AND_ATTRIBUTES_SIZE * GROUP_SIDS.length);
+                const fixed = new Uint8Array(GROUPS + SID_AND_ATTRIBUTES_SIZE * GROUP_SIDS.length);
                 new DataView(fixed.buffer).setUint32(0, GROUP_SIDS.length, true);
                 for (let at = 0; at < GROUP_SIDS.length; at++)
                 {
                     new DataView(fixed.buffer).setUint32(
-                        4 + at * SID_AND_ATTRIBUTES_SIZE + 4, GROUP_ATTRIBUTES, true);
+                        GROUPS + at * SID_AND_ATTRIBUTES_SIZE + ATTRIBUTES, GROUP_ATTRIBUTES, true);
                 }
-                return { fixed, sids: GROUP_SIDS.map(sidBytes), slot: 4,
+                return { fixed, sids: GROUP_SIDS.map(sidBytes), slot: GROUPS,
                     stride: SID_AND_ATTRIBUTES_SIZE };
             }
             default:
@@ -3038,8 +3045,9 @@ export function createTokenFunctions(host){
                 const disabled = [];
                 for (let at = 0; at < (disableCount >>> 0); at++)
                 {
-                    const sid = sidAt(readDword(wholeAddress(disable)
-                        + at * SID_AND_ATTRIBUTES_SIZE));
+                    const sid = sidAt(width.get(new DataView(host.readMemory(
+                        wholeAddress(disable) + at * SID_AND_ATTRIBUTES_SIZE, width.size)
+                        .slice().buffer), 0));
                     if (sid === null)
                     {
                         return fail(ERROR_INVALID_SID);
@@ -3258,8 +3266,7 @@ export function createTokenFunctions(host){
                 for (let index = 0; index < answer.sids.length; index++)
                 {
                     whole.set(answer.sids[index], at);
-                    new DataView(whole.buffer).setUint32(
-                        slot + index * stride, (buffer >>> 0) + at, true);
+                    whole.set(width.bytes(wholeAddress(buffer) + at), slot + index * stride);
                     at += answer.sids[index].length;
                 }
                 // A success leaves the last error as it was.

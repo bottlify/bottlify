@@ -309,7 +309,8 @@ const MAX_PROGID = 255;
  *           name it takes is a wide string. Absent, CoLoadLibrary answers 0.
  * @property {import('./storage.js').StorageFiles} [files]
  *           The volume, for a docfile. Absent, no storage opens.
- * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown) => Promise<number>}
+ *     [call]  An argument past 4 GiB a bigint, as the bridge takes a quadword.
  * @property {() => number} [now]  the machine's wall clock in ms (the kernel's), which
  *     the time stamps of the running object table read; the host's own clock where none is given
  *           A stdcall into guest code, for an object a program saves to a
@@ -380,7 +381,8 @@ const MAX_PROGID = 255;
  * @property {(thread: unknown) => number | Promise<number>} [modalPump]
  *           What a thread waiting on a call into another apartment runs
  *           meanwhile: the messages other threads sent it, and its paints.
- * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} [guardedCall]
+ * @property {(entry: number, args: (number | bigint)[], thread: unknown) => Promise<number>}
+ *     [guardedCall]
  *           A call into guest code inside a frame that takes what it raises:
  *           how a method runs for another process.
  * @property {{ allocate?: (bytes: Uint8Array) => number }} [strings]
@@ -873,6 +875,7 @@ export function createOleFunctions(host){
         remoting = createRemoting({
             table: runTable,
             process: host.com?.process ?? null,
+            pointerSize: width.size,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             heap: host.heap,
@@ -2955,6 +2958,7 @@ export function createOleFunctions(host){
         writeMemory: host.writeMemory,
         heap: host.heap,
         globalMemory: host.globalMemory,
+        pointerSize: width.size,
         callMethod,
         queryPointer,
         callerThread: ()=>host.callerThread?.(),

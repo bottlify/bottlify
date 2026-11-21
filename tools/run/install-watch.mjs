@@ -25,19 +25,18 @@
  * wizard or checks want the runtime finds it installed, and what it writes is
  * the bottle's own, not the layer's.
  *
- * `--trace-box` prints the trace when the first box reporting an error is
- * shown instead, and `--trace-fault` when a process ends with an exception's
- * code. `--journal S` prints, S seconds in, the last cross-process COM calls and
- * message waits from the call journal (every call area on); `--trace S` prints
- * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
- * arguments -- what a process that loops without waiting keeps calling;
- * `--trace-match REGEX` keeps only the lines that match. A process that ran in a
- * worker of its own (`--concurrency`) keeps its calls in its own ring, which
- * it hands back as it ends: the first `--trace-worker N` (3) of those are
- * printed after the run's, each under its image, and then the journal of
- * every process still standing in a worker, asked of it then. A run
- * that ends sooner prints either when it ends. `--strings` peeks every pointer
- * argument for a string, so those lines name the paths and texts themselves.
+ * `--trace-box` prints the trace when the first box reporting an error is shown instead, and
+ * `--trace-fault` when a process, or a server COM started, ends with an exception's code.
+ * `--journal S` prints, S seconds in, the last cross-process COM calls and message waits from
+ * the call journal (every call area on); `--trace S` prints the last three thousand calls of
+ * every kind instead (`--trace-lines N`), with their first arguments -- what a process that
+ * loops without waiting keeps calling; `--trace-match REGEX` keeps only the lines that match. A
+ * process that ran in a worker of its own (`--concurrency`) keeps its calls in its own ring,
+ * which it hands back as it ends: the first `--trace-worker N` (3) of those are printed after
+ * the run's, each under its image, and then the journal of every process still standing in a
+ * worker, asked of it then. A run that ends sooner prints either when it ends. `--strings`
+ * peeks every pointer argument for a string, so those lines name the paths and texts
+ * themselves.
  *
  * A wizard waits in its own message loop rather than in a modal dialog an
  * unattended run answers, so a route through one is given as input: `--key
@@ -179,8 +178,13 @@ const traceOnBox = argv.includes('--trace-box');
 // `--trace-fault`: the trace printed when a process ends with an exception's
 // code -- the calls that led to a crash nothing reported in a box.
 const traceOnFault = argv.includes('--trace-fault');
+// `--trace-exit REGEX`: the trace and every `--cat` file printed when a process whose image
+// matches ends with any code but 0 - a program that gives up and exits on its own (ngen's worker
+// answering 1) raises nothing `--trace-fault` sees, and says why only in its log.
+const traceExit = argv.includes('--trace-exit')
+    ? new RegExp(String(argv[argv.indexOf('--trace-exit') + 1]), 'i') : null;
 const journalAt = number('--journal', 0) || traceAt
-    || (traceOnBox || traceOnFault ? 1e6 : 0);
+    || (traceOnBox || traceOnFault || traceExit ? 1e6 : 0);
 const memory = number('--memory', 0);
 /** `--machine MB`: every process of the run together held to that (createApp's machineMemory). */
 const machine = number('--machine', 0);
@@ -505,9 +509,13 @@ const watchEvents = running=>{
         // a client's own log and its assertions, which name where it gave up.
         ...argv.includes('--debug-strings') ? ['debug'] : []])
     {
+        // An error keeps its whole stack and guest trace: the host function
+        // a fault came through and the guest frames that called it are
+        // past the length the other events are cut to.
+        const [stack, record] = name === 'error' ? [6000, 12000] : [800, 900];
         running.on(name, (/** @type {any} */ event)=>console.log(seconds(), name,
             JSON.stringify(event, (key, value)=>(key === 'error' && value
-                ? String(value.stack ?? value).slice(0, 800) : value))?.slice(0, 900)));
+                ? String(value.stack ?? value).slice(0, stack) : value))?.slice(0, record)));
     }
 };
 watchEvents(app);
@@ -1031,15 +1039,52 @@ const printJournal = ()=>{
 if (traceOnFault)
 {
     const EXCEPTION_CODES = 0xc0000000;
-    app.on('process-resumed', (/** @type {any} */ event)=>{
+    /** @param {any} event */
+    const onEnd = event=>{
         if ((event?.code >>> 0) >= EXCEPTION_CODES)
         {
             console.log(seconds(), 'FAULT', event.image, (event.code >>> 0).toString(16));
             printJournal();
         }
-    });
+    };
+    // A child the program waited on ends through its resume; a server COM
+    // started for it (mscorsvw for ngen) ends on its own.
+    app.on('process-resumed', onEnd);
+    app.on('process-server-exit', onEnd);
 }
-if (journalAt > 0 && !traceOnBox && !traceOnFault)
+/** Every `--cat` file as the run has it now. @param {string} heading */
+const catNow = async heading=>{
+    for (const path of all('--cat'))
+    {
+        try
+        {
+            console.log(seconds(), `${heading} ${path}\n${new TextDecoder('latin1')
+                .decode(await app.files.read(path))}`);
+        }
+        catch (e){
+            console.log(seconds(), `${heading} failed:`, path, e instanceof Error ? e.message : e);
+        }
+    }
+};
+// `kill -USR2 <pid>`: the `--cat` files printed while the run goes on.
+process.on('SIGUSR2', ()=>{
+    void catNow('CAT-NOW');
+});
+if (traceExit)
+{
+    /** @param {any} event */
+    const onExit = event=>{
+        if ((event?.code >>> 0) !== 0 && traceExit.test(String(event?.image ?? '')))
+        {
+            console.log(seconds(), 'EXIT', event.image, (event.code >>> 0).toString(16));
+            printJournal();
+            void catNow('CAT-AT-EXIT');
+        }
+    };
+    app.on('process-resumed', onExit);
+    app.on('process-server-exit', onExit);
+}
+if (journalAt > 0 && !traceOnBox && !traceOnFault && !traceExit)
 {
     setTimeout(printJournal, journalAt * 1000);
 }

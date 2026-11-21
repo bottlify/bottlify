@@ -52,6 +52,7 @@ export const E_INVALIDARG = 0x80070057 | 0;
  * @property {(section: number, offset: number, bytes: number) => number} [mapSection]
  *     a view of a section, 0 when it cannot be had
  * @property {(api: string, detail: string, kind?: string) => void} [divergence]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
  */
 
 /**

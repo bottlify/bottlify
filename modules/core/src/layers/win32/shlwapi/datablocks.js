@@ -22,6 +22,7 @@
 
 import { dword } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
 
 /** Each is [ordinal, name]. @type {readonly (readonly [number, string])[]} */
 export const DATABLOCK_ORDINALS = Object.freeze([
@@ -49,7 +50,6 @@ const READ = 3;
 const WRITE = 4;
 const SEEK = 5;
 const STAT = 12;
-const STATSTG_SIZE = 72;
 const STATFLAG_NONAME = 1;
 const STREAM_SEEK_SET = 0;
 const STREAM_SEEK_CUR = 1;
@@ -63,6 +63,7 @@ const STREAM_SEEK_CUR = 1;
  * @property {(library: string) => Record<string, { handler: (args: number[]) => any }>
  *     | undefined} [library]
  * @property {(steps: Generator<{ entry: number, args: number[] }, any, number>) => any} [drive]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
  */
 
 /** @param {Uint8Array} bytes @param {number} [at] */
@@ -117,6 +118,7 @@ export function blocksOf(bytes){
  * @param {DataBlockHost} host
  */
 export function createDataBlockFunctions(host){
+    const STATSTG = statstgLayout(host.pointerSize);
     /** @param {number} address @param {number} length */
     const read = (address, length)=>(host.readMemory
         ? host.readMemory(wholeAddress(address), length).slice() : new Uint8Array(length));
@@ -456,12 +458,13 @@ export function createDataBlockFunctions(host){
                 {
                     return 0;
                 }
-                return withScratch(STATSTG_SIZE + 8, function* (at){
+                return withScratch(STATSTG.SIZE_OF + 8, function* (at){
                     if ((yield* method(stream, STAT, at, STATFLAG_NONAME)) >= 0)
                     {
-                        return readU32(at + 8) === 0 && readU32(at + 12) === 0 ? 1 : 0;
+                        return readU32(at + STATSTG.SIZE) === 0
+                            && readU32(at + STATSTG.SIZE + 4) === 0 ? 1 : 0;
                     }
-                    const count = at + STATSTG_SIZE;
+                    const count = at + STATSTG.SIZE_OF;
                     if ((yield* method(stream, READ, count + 4, 4, count)) < 0)
                     {
                         return 1;
@@ -504,11 +507,11 @@ export function createDataBlockFunctions(host){
         IStream_Size: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([stream, out])=>withScratch(STATSTG_SIZE, function* (at){
+            handler: ([stream, out])=>withScratch(STATSTG.SIZE_OF, function* (at){
                 const status = yield* method(stream, STAT, at, STATFLAG_NONAME);
                 if (status >= 0 && (out >>> 0) !== 0)
                 {
-                    host.writeMemory(wholeAddress(out), read(at + 8, 8));
+                    host.writeMemory(wholeAddress(out), read(at + STATSTG.SIZE, 8));
                 }
                 return status;
             }),

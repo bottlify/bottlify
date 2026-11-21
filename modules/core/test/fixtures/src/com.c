@@ -28,7 +28,9 @@ typedef struct
 } Vtbl;
 struct Object { const Vtbl *vtbl; };
 
-typedef struct { void *window; unsigned message; unsigned wParam, lParam, time, x, y; } MSG;
+/* WPARAM and LPARAM are pointer-sized, so the one source builds for either width. */
+typedef struct { void *window; unsigned message; __SIZE_TYPE__ wParam; __INTPTR_TYPE__ lParam;
+    unsigned time, x, y; } MSG;
 
 __declspec(dllimport) char *__stdcall GetCommandLineA(void);
 __declspec(dllimport) long __stdcall RegCreateKeyExA(void *key, const char *path, unsigned reserved,

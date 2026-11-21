@@ -25,7 +25,11 @@ const NEEDED = 0x104;
 const BUFFER = 0x200;
 const SID = 0x600;
 
-function setup(/** @type {{ currentThread?: () => any, pipeClient?: (handle: number) => any }} */ extra = {}){
+/**
+ * @param {{ currentThread?: () => any, pipeClient?: (handle: number) => any,
+ *     pointerSize?: 4 | 8 }} [extra]
+ */
+function setup(extra = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {number[]} */
     const errors = [];
@@ -1375,4 +1379,47 @@ test('SaferCreateLevel opens a level, SaferComputeTokenFromLevel makes a token a
     assert.equal(fns.SaferCreateLevel.handler([SAFER_SCOPEID_USER, 0x1234, 1, OUT, 0]), 0);
     assert.deepEqual(errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
     assert.equal(fns.SaferCloseLevel.handler([level]), 1);
+});
+
+test('a 64-bit process\'s token information has pointers a quadword wide: TOKEN_OWNER\'s SID'
+    + ' after 8, SID_AND_ATTRIBUTES 16 bytes, TOKEN_GROUPS\' entries from 8', ()=>{
+    const { bytes, fns, dword } = setup({ pointerSize: 8 });
+    assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
+    const token = dword(OUT);
+    /** The quadword at `at`, as the 64-bit program reads its pointer. @param {number} at */
+    const quad = at=>dword(at) + dword(at + 4) * 2 ** 32;
+    const TokenOwner = 4;
+    const TokenIntegrityLevel = 25;
+
+    for (const [tokenClass, fixed] of [[TokenOwner, 8], [5, 8], [TokenUser, 16],
+        [TokenIntegrityLevel, 16]])
+    {
+        bytes.fill(0xdd, BUFFER, BUFFER + 0x100);
+        assert.equal(fns.GetTokenInformation.handler([token, tokenClass, 0, 0, NEEDED]), 0);
+        const needed = dword(NEEDED);
+        assert.equal(fns.GetTokenInformation.handler([token, tokenClass, BUFFER, needed, NEEDED]),
+            1, `class ${tokenClass}`);
+        assert.equal(quad(BUFFER), BUFFER + fixed, `class ${tokenClass}: its SID after ${fixed}`
+            + ' bytes, the pointer whole');
+        assert.equal(bytes[BUFFER + fixed], 1, `class ${tokenClass}: a SID there, revision 1`);
+        assert.equal(needed, fixed + 8 + 4 * bytes[BUFFER + fixed + 1],
+            `class ${tokenClass}: as many bytes as the structure and its SID`);
+    }
+    // TOKEN_MANDATORY_LABEL's attributes are at 8, after the pointer.
+    assert.equal(fns.GetTokenInformation.handler([token, TokenIntegrityLevel, BUFFER, 0x100,
+        NEEDED]), 1);
+    assert.equal(dword(BUFFER + 8) & 0x20, 0x20, 'SE_GROUP_INTEGRITY at 8');
+
+    assert.equal(fns.GetTokenInformation.handler([token, TokenGroups, 0, 0, NEEDED]), 0);
+    const needed = dword(NEEDED);
+    assert.equal(fns.GetTokenInformation.handler([token, TokenGroups, BUFFER, needed, NEEDED]), 1);
+    const count = dword(BUFFER);
+    assert.ok(count >= 2);
+    for (let at = 0; at < count; at++)
+    {
+        const sid = quad(BUFFER + 8 + at * 16);
+        assert.ok(sid >= BUFFER + 8 + count * 16 && sid < BUFFER + needed,
+            `group ${at}: its SID after the entries, inside the buffer`);
+        assert.equal(dword(BUFFER + 8 + at * 16 + 8) & 0x4, 0x4, `group ${at}: enabled, at 8`);
+    }
 });

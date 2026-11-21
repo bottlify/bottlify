@@ -48,7 +48,8 @@ import {
     FSCTL_DELETE_REPARSE_POINT, FSCTL_GET_REPARSE_POINT, FSCTL_SET_REPARSE_POINT,
     IO_REPARSE_TAG_MOUNT_POINT, IO_REPARSE_TAG_SYMLINK, namesDirectory, reparseRequest,
 } from './reparse.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { readSecurityAttributes } from '../common/security-attributes.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -1010,6 +1011,20 @@ export function createFileFunctions(host){
         if (address !== 0)
         {
             writeDword(address, value);
+        }
+    };
+
+    const outPointer = pointerWidth(host.pointerSize);
+    /**
+     * An optional out-pointer, at the process's width: a 64-bit caller reads
+     * all eight bytes, whatever its slot held before.
+     *
+     * @param {number} address @param {number} value
+     */
+    const writePointerIf = (address, value)=>{
+        if (address !== 0)
+        {
+            host.writeMemory(address, outPointer.bytes(value));
         }
     };
 
@@ -2394,7 +2409,7 @@ export function createFileFunctions(host){
             const written = text.write(buffer >>> 0, size, candidate);
             if (written === candidate.length)
             {
-                writeDwordIf(filePart >>> 0,
+                writePointerIf(filePart >>> 0,
                     (buffer >>> 0) + (candidate.lastIndexOf(SEPARATOR) + 1) * text.unit);
             }
             return written;
@@ -2404,19 +2419,18 @@ export function createFileFunctions(host){
     const searchPath = bothForms(24, searchPathBody);
 
     /**
-     * The security descriptor a SECURITY_ATTRIBUTES points at, or 0: its
-     * lpSecurityDescriptor, the second of its three fields.
+     * A SECURITY_ATTRIBUTES, or null for none.
      *
      * @param {number} attributes
      */
-    const securityDescriptorOf = attributes=>{
-        if ((attributes >>> 0) === 0)
-        {
-            return 0;
-        }
-        const field = host.readMemory(wholeAddress(attributes) + 4, 4);
-        return (field[0] | field[1] << 8 | field[2] << 16 | field[3] << 24) >>> 0;
-    };
+    const securityOf = attributes=>readSecurityAttributes(host.readMemory,
+        wholeAddress(attributes), host.pointerSize);
+    /**
+     * The security descriptor a SECURITY_ATTRIBUTES points at, or 0.
+     *
+     * @param {number} attributes
+     */
+    const securityDescriptorOf = attributes=>securityOf(attributes)?.descriptor ?? 0;
     const createDirectory = oneName(8, ([name, attributes], text)=>{
         const path = text.path(name);
         if (wildcardName(path))
@@ -2564,7 +2578,7 @@ export function createFileFunctions(host){
             if (result === asked.length)
             {
                 const at = asked.lastIndexOf(SEPARATOR);
-                writeDwordIf(filePart >>> 0, asked.endsWith(SEPARATOR)
+                writePointerIf(filePart >>> 0, asked.endsWith(SEPARATOR)
                     ? 0 : (buffer >>> 0) + (at + 1) * text.unit);
             }
             return result;
@@ -2578,7 +2592,7 @@ export function createFileFunctions(host){
         {
             // Into the caller's own buffer, so the offset is in characters
             // scaled by however wide one is.
-            writeDwordIf(filePart >>> 0, at === -1 ? 0 : (buffer >>> 0) + at * text.unit);
+            writePointerIf(filePart >>> 0, at === -1 ? 0 : (buffer >>> 0) + at * text.unit);
         }
         return result;
     });
@@ -5436,10 +5450,9 @@ export function createFileFunctions(host){
      */
     const inheritable = open=>({ ...open, handler: (/** @type {number[]} */ args)=>{
         const handle = open.handler(args) >>> 0;
-        const attributes = args[3] >>> 0;
-        if (handle !== INVALID_HANDLE_VALUE && handle !== 0 && attributes !== 0
-            && host.handles.typeOf?.(handle) === 'file'
-            && readDword(attributes + 8) !== 0)
+        const attributes = pointerArg(args, 3);
+        if (handle !== INVALID_HANDLE_VALUE && handle !== 0
+            && host.handles.typeOf?.(handle) === 'file' && securityOf(attributes)?.inherit)
         {
             host.inheritable?.(handle);
         }

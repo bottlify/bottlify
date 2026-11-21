@@ -61,7 +61,8 @@ import {
     VT_RECORD, VT_TYPEMASK, VT_UI1, VT_UI2, VT_UI4, VT_UI8, VT_UINT, VT_UNKNOWN, VT_VARIANT,
     VT_VECTOR, DESCRIPTOR_PREFIX, FADF_HAVEVARTYPE,
 } from './vartypes.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { safeArrayLayout } from '../common/safearray.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -81,11 +82,7 @@ const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';
 const VARIANT_BYTES = 16;
 const VARIANT_VALUE = 8;
 
-/**
- * A SAFEARRAY: where its bounds start, and the feature bits that say what
- * its elements own.
- */
-const SAFEARRAY_BOUNDS = 16;
+/** The feature bits of a SAFEARRAY that say what its elements own. */
 const FADF_AUTO = 0x1;
 const FADF_STATIC = 0x2;
 const FADF_EMBEDDED = 0x4;
@@ -93,9 +90,9 @@ const FADF_FIXEDSIZE = 0x10;
 const FADF_RECORD = 0x20;
 const FADF_HAVEIID = 0x40;
 const FADF_CREATEVECTOR = 0x2000;
-/** Element sizes a SAFEARRAY takes beside what a variant holds by reference. */
-/** @type {Readonly<Record<number, number>>} */
-const ARRAY_ELEMENT_BYTES = Object.freeze({ 37: 4, 38: 4 });
+/** VT_INT_PTR and VT_UINT_PTR: an array holds them, a variant does not. */
+const VT_INT_PTR = 37;
+const VT_UINT_PTR = 38;
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
 const FADF_BSTR = 0x100;
@@ -105,7 +102,7 @@ const FADF_VARIANT = 0x800;
 const DISP_E_ARRAYISLOCKED = 0x8002000d | 0;
 
 /**
- * How many bytes one element of each array type takes.
+ * How many bytes a value of each type takes in a 32-bit process.
  *
  * @type {Readonly<Record<number, number>>}
  */
@@ -245,6 +242,8 @@ const VARCMP_NULL = 3;
  *     the pattern: the lengths are the program's, and a clear of a megabyte
  *     through writeMemory costs an allocation and two extra passes.
  * @property {AutomationHeap} heap  Where a BSTR's block comes from.
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its SAFEARRAYs, the
+ *           strings and interfaces they hold and the vtables called through.
  * @property {((api: string, detail: string, kind?: 'loss') => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
  *           goes. Said once per distinct difference by whoever receives it.
@@ -302,6 +301,36 @@ const VARCMP_NULL = 3;
  */
 export function createAutomationFunctions(host){
     const report = host.divergence ?? (()=>{});
+    const POINTER = host.pointerSize === 8 ? 8 : 4;
+    const SAFEARRAY = safeArrayLayout(POINTER);
+    const { read: readPointer, write: writePointer } = pointerIo(host, POINTER);
+    /** A variant in an array: 24 bytes at 64 bits, where a record's two pointers need them. */
+    const VARIANT_ELEMENT = POINTER === 8 ? 24 : VARIANT_BYTES;
+    /**
+     * One element of an array of `type`: a string, an interface or a pointer
+     * as wide as the process's pointers; 0 for a type no array holds.
+     *
+     * @param {number} type
+     */
+    const arrayElementBytes = type=>{
+        if ([VT_BSTR, VT_UNKNOWN, VT_DISPATCH, VT_INT_PTR, VT_UINT_PTR].includes(type))
+        {
+            return POINTER;
+        }
+        return type === VT_VARIANT ? VARIANT_ELEMENT : ELEMENT_BYTES[type] ?? 0;
+    };
+    /**
+     * The IRecordInfo a record array keeps in front of its descriptor.
+     *
+     * @param {number} psa
+     */
+    const recordInfoOf = psa=>readPointer(wholeAddress(psa) + SAFEARRAY.RECORD_INFO);
+    /**
+     * A method of a guest object: its vtable's `slot`th pointer.
+     *
+     * @param {number} object @param {number} slot
+     */
+    const methodAt = (object, slot)=>readPointer(readPointer(object) + slot * POINTER);
 
     /** @param {number} address @param {number} length */
     const peek = (address, length)=>{
@@ -730,7 +759,7 @@ export function createAutomationFunctions(host){
             return hr;
         }
         return calls.reduce((before, [object, slot, rest])=>before.then(()=>
-            call(readU32(readU32(object) + slot * 4), [object, ...rest], thread)),
+            call(methodAt(object, slot), [object, ...rest], thread)),
         Promise.resolve(0)).then(()=>hr);
     };
 
@@ -1179,7 +1208,7 @@ export function createAutomationFunctions(host){
                 writeU16(dest, VT_RECORD);
                 writeU32(dest + VARIANT_VALUE, copy);
                 writeU32(dest + VARIANT_VALUE + 4, info);
-                return call(readU32(readU32(info) + (RECORDINFO_RECORDCLEAR + 1) * 4),
+                return call(methodAt(info, RECORDINFO_RECORDCLEAR + 1),
                     [info, record, copy], thread)
                     .then(hr=>addRefOf(info).then(()=>hr));
             });
@@ -1305,7 +1334,7 @@ export function createAutomationFunctions(host){
             {
                 return E_OUTOFMEMORY;
             }
-            host.writeMemory(readU32(psa + 12), data);
+            host.writeMemory(readPointer(psa + SAFEARRAY.DATA), data);
             clear(dest, owed);
             writeU16(dest, VT_ARRAY | VT_UI1);
             writeU32(dest + VARIANT_VALUE, psa);
@@ -1706,7 +1735,7 @@ export function createAutomationFunctions(host){
         }
         const dims = readU16(psa);
         // One read for every bound: a descriptor may have 65535 of them.
-        const view = peek(psa + SAFEARRAY_BOUNDS, dims * 8);
+        const view = peek(psa + SAFEARRAY.BOUNDS, dims * 8);
         const bounds = [];
         for (let index = 0; index < dims; index++)
         {
@@ -1717,8 +1746,8 @@ export function createAutomationFunctions(host){
             dims,
             features: readU16(psa + 2),
             elementBytes: readU32(psa + 4),
-            locks: readU32(psa + 8),
-            data: readU32(psa + 12),
+            locks: readU32(psa + SAFEARRAY.LOCKS),
+            data: readPointer(psa + SAFEARRAY.DATA),
             bounds,
         };
     };
@@ -1763,15 +1792,15 @@ export function createAutomationFunctions(host){
     const releaseElement = (features, address, owed)=>{
         if ((features & FADF_BSTR) !== 0)
         {
-            freeBstr(readU32(address));
+            freeBstr(readPointer(address));
         }
         else if ((features & FADF_VARIANT) !== 0)
         {
             clear(address, owed);
         }
-        else if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(address) !== 0)
+        else if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readPointer(address) !== 0)
         {
-            owed.release.push(readU32(address));
+            owed.release.push(readPointer(address));
         }
     };
 
@@ -1799,7 +1828,7 @@ export function createAutomationFunctions(host){
             return S_OK;
         }
         const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
-        const record = (array.features & FADF_RECORD) !== 0 ? readU32(psa - 4) : 0;
+        const record = (array.features & FADF_RECORD) !== 0 ? recordInfoOf(psa) : 0;
         for (let index = 0; index < elements; index++)
         {
             const address = array.data + index * array.elementBytes;
@@ -1817,12 +1846,12 @@ export function createAutomationFunctions(host){
             // A vector's data is its descriptor's block: the array lets go
             // of it and is an ordinary array from then on.
             writeU16(psa + 2, array.features & ~FADF_CREATEVECTOR);
-            writeU32(psa + 12, 0);
+            writePointer(psa + SAFEARRAY.DATA, 0);
         }
         else if ((array.features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED)) === 0)
         {
             host.heap.free(array.data);
-            writeU32(psa + 12, 0);
+            writePointer(psa + SAFEARRAY.DATA, 0);
         }
         else
         {
@@ -1849,9 +1878,12 @@ export function createAutomationFunctions(host){
         {
             return DISP_E_ARRAYISLOCKED;
         }
-        if ((array.features & FADF_RECORD) !== 0 && readU32(psa - 4) !== 0)
+        // Only a record array has its IRecordInfo in front: one a program laid
+        // out itself may have nothing there.
+        const info = (array.features & FADF_RECORD) !== 0 ? recordInfoOf(psa) : 0;
+        if (info !== 0)
         {
-            owed.release.push(readU32(psa - 4));
+            owed.release.push(info);
         }
         if ((array.features & (FADF_AUTO | FADF_STATIC | FADF_EMBEDDED)) === 0)
         {
@@ -1883,7 +1915,7 @@ export function createAutomationFunctions(host){
      * @param {number} dims @param {number} [extra]  bytes after the bounds, for a vector's data
      */
     const allocateDescriptor = (dims, extra = 0)=>{
-        const bytes = DESCRIPTOR_PREFIX + SAFEARRAY_BOUNDS + dims * 8 + extra;
+        const bytes = DESCRIPTOR_PREFIX + SAFEARRAY.BOUNDS + dims * 8 + extra;
         const block = host.heap.allocate(bytes);
         if (block === 0)
         {
@@ -1921,7 +1953,7 @@ export function createAutomationFunctions(host){
             writeU32(psa - 4, type);
         }
         writeU16(psa + 2, features);
-        writeU32(psa + 4, ELEMENT_BYTES[type] ?? ARRAY_ELEMENT_BYTES[type] ?? 0);
+        writeU32(psa + 4, arrayElementBytes(type));
     };
 
     /**
@@ -1945,7 +1977,7 @@ export function createAutomationFunctions(host){
             return E_UNEXPECTED;
         }
         host.fillMemory(data, 0, Math.max(bytes, 1));
-        writeU32(psa + 12, data);
+        writePointer(psa + SAFEARRAY.DATA, data);
         return S_OK;
     };
 
@@ -1964,7 +1996,7 @@ export function createAutomationFunctions(host){
         {
             return { hr: E_INVALIDARG, descriptor: 0 };
         }
-        const descriptorBytes = SAFEARRAY_BOUNDS + array.dims * 8;
+        const descriptorBytes = SAFEARRAY.BOUNDS + array.dims * 8;
         const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
         const dataBytes = elements * array.elementBytes;
         const descriptor = allocateDescriptor(array.dims);
@@ -1987,12 +2019,13 @@ export function createAutomationFunctions(host){
             host.writeMemory(descriptor - DESCRIPTOR_PREFIX,
                 host.readMemory(psa - DESCRIPTOR_PREFIX, DESCRIPTOR_PREFIX).slice());
         }
-        if ((array.features & FADF_RECORD) !== 0 && readU32(psa - 4) !== 0)
+        const info = (array.features & FADF_RECORD) !== 0 ? recordInfoOf(psa) : 0;
+        if (info !== 0)
         {
-            owed.addRef.push(readU32(psa - 4));
+            owed.addRef.push(info);
         }
-        writeU32(descriptor + 8, 0);
-        writeU32(descriptor + 12, data);
+        writeU32(descriptor + SAFEARRAY.LOCKS, 0);
+        writePointer(descriptor + SAFEARRAY.DATA, data);
         if (data === 0)
         {
             return { hr: S_OK, descriptor };
@@ -2016,7 +2049,7 @@ export function createAutomationFunctions(host){
         const dataBytes = elements * array.elementBytes;
         if ((array.features & FADF_RECORD) !== 0)
         {
-            const info = readU32(psa - 4);
+            const info = recordInfoOf(psa);
             host.fillMemory(data, 0, dataBytes);
             for (let index = 0; index < elements; index++)
             {
@@ -2030,8 +2063,8 @@ export function createAutomationFunctions(host){
             host.fillMemory(data, 0, dataBytes);
             for (let index = 0; index < elements; index++)
             {
-                copyVariant(data + index * VARIANT_BYTES, array.data + index * VARIANT_BYTES,
-                    owed);
+                const offset = index * array.elementBytes;
+                copyVariant(data + offset, array.data + offset, owed);
             }
         }
         else
@@ -2041,17 +2074,17 @@ export function createAutomationFunctions(host){
             {
                 for (let index = 0; index < elements; index++)
                 {
-                    const source = readU32(array.data + index * 4);
+                    const source = readPointer(array.data + index * POINTER);
                     const copy = source === 0 ? 0 : allocateBstr(
                         host.readMemory(source, byteLengthOf(source)).slice());
-                    writeU32(data + index * 4, copy);
+                    writePointer(data + index * POINTER, copy);
                 }
             }
             else if ((array.features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
             {
                 for (let index = 0; index < elements; index++)
                 {
-                    const pointer = readU32(array.data + index * 4);
+                    const pointer = readPointer(array.data + index * POINTER);
                     if (pointer !== 0)
                     {
                         owed.addRef.push(pointer);
@@ -2611,7 +2644,7 @@ export function createAutomationFunctions(host){
             return E_OUTOFMEMORY;
         }
         host.writeMemory(block, new Uint8Array(48));
-        const invoke = readU32(readU32(dispatch) + 6 * 4);
+        const invoke = methodAt(dispatch, 6);
         return call(invoke, [dispatch, DISPID_VALUE, block + 32, lcid >>> 0,
             DISPATCH_PROPERTYGET, block + 16, block, 0, 0], thread).then(hr=>{
             const value = (hr | 0) < 0 ? hr | 0 : readOperand(block);
@@ -2902,7 +2935,7 @@ export function createAutomationFunctions(host){
      * @returns {number | Promise<number>}
      */
     const createArray = (type, dims, rgsabound, extra, vector = undefined)=>{
-        const size = ELEMENT_BYTES[type] ?? ARRAY_ELEMENT_BYTES[type] ?? 0;
+        const size = arrayElementBytes(type);
         if (dims === 0 || dims > 0xffff || (!vector && rgsabound === 0)
             || (size === 0 && type !== VT_RECORD)
             || (type === VT_RECORD && extra === 0))
@@ -2921,14 +2954,14 @@ export function createAutomationFunctions(host){
         if (vector)
         {
             writeU16(psa + 2, readU16(psa + 2) | FADF_CREATEVECTOR);
-            writeU32(psa + SAFEARRAY_BOUNDS, vector.elements);
-            writeU32(psa + SAFEARRAY_BOUNDS + 4, vector.lower);
+            writeU32(psa + SAFEARRAY.BOUNDS, vector.elements);
+            writeU32(psa + SAFEARRAY.BOUNDS + 4, vector.lower);
         }
         else
         {
             for (let index = 0; index < dims; index++)
             {
-                host.writeMemory(psa + SAFEARRAY_BOUNDS + (dims - 1 - index) * 8,
+                host.writeMemory(psa + SAFEARRAY.BOUNDS + (dims - 1 - index) * 8,
                     host.readMemory(rgsabound + index * 8, 8).slice());
             }
         }
@@ -2940,7 +2973,7 @@ export function createAutomationFunctions(host){
         const finish = ()=>{
             if (vector)
             {
-                writeU32(psa + 12, psa + SAFEARRAY_BOUNDS + 8);
+                writePointer(psa + SAFEARRAY.DATA, psa + SAFEARRAY.BOUNDS + 8);
                 return psa;
             }
             if (allocateData(psa) !== S_OK)
@@ -2960,7 +2993,7 @@ export function createAutomationFunctions(host){
                 host.heap.free(psa - DESCRIPTOR_PREFIX);
                 return 0;
             }
-            writeU32(psa - 4, extra);
+            writePointer(psa + SAFEARRAY.RECORD_INFO, extra);
             writeU32(psa + 4, bytes);
             if (vector)
             {
@@ -2994,14 +3027,14 @@ export function createAutomationFunctions(host){
             return Promise.resolve(null);
         }
         writeU32(slot, 0);
-        return call(readU32(readU32(info) + RECORDINFO_GETSIZE * 4), [info, slot],
+        return call(methodAt(info, RECORDINFO_GETSIZE), [info, slot],
             host.callerThread?.()).then(()=>readU32(slot))
             .finally(()=>host.heap.free(slot));
     };
 
     /** @param {number} object @returns {Promise<unknown>} */
     const addRefOf = object=>(host.call
-        ? host.call(readU32(readU32(object) + 4), [object], host.callerThread?.())
+        ? host.call(methodAt(object, 1), [object], host.callerThread?.())
         : Promise.resolve(0));
 
     /**
@@ -3036,7 +3069,7 @@ export function createAutomationFunctions(host){
                     return E_POINTER;
                 }
                 const psa = allocateDescriptor(dims);
-                writeU32(wholeAddress(out), psa);
+                writePointer(wholeAddress(out), psa);
                 return psa === 0 ? E_UNEXPECTED : S_OK;
             },
         },
@@ -3061,7 +3094,7 @@ export function createAutomationFunctions(host){
                     return E_POINTER;
                 }
                 const psa = allocateDescriptor(dims);
-                writeU32(wholeAddress(out), psa);
+                writePointer(wholeAddress(out), psa);
                 if (psa === 0)
                 {
                     return E_UNEXPECTED;
@@ -3243,8 +3276,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const held = readU32(wholeAddress(psa) - 4);
-                writeU32(wholeAddress(psa) - 4, info >>> 0);
+                const held = recordInfoOf(psa);
+                writePointer(wholeAddress(psa) + SAFEARRAY.RECORD_INFO, info >>> 0);
                 return settle({ addRef: (info >>> 0) !== 0 ? [info >>> 0] : [],
                     release: held !== 0 ? [held] : [], recordClear: [], recordCopy: [] },
                 host.callerThread?.(), S_OK);
@@ -3261,8 +3294,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const info = readU32(wholeAddress(psa) - 4);
-                writeU32(wholeAddress(out), info);
+                const info = recordInfoOf(psa);
+                writePointer(wholeAddress(out), info);
                 return settle({ addRef: info !== 0 ? [info] : [], release: [], recordClear: [],
                     recordCopy: [] }, host.callerThread?.(), S_OK);
             },
@@ -4789,9 +4822,9 @@ export function createAutomationFunctions(host){
                             host.readMemory(array.data, before * stride).slice());
                         host.heap.free(array.data);
                     }
-                    writeU32(wholeAddress(psa) + 12, data);
+                    writePointer(wholeAddress(psa) + SAFEARRAY.DATA, data);
                 }
-                host.writeMemory(wholeAddress(psa) + SAFEARRAY_BOUNDS,
+                host.writeMemory(wholeAddress(psa) + SAFEARRAY.BOUNDS,
                     host.readMemory(wholeAddress(psaboundNew), 8).slice());
                 return settle(owed, thread, S_OK);
             },
@@ -4822,14 +4855,14 @@ export function createAutomationFunctions(host){
                 const { features, elementBytes } = at.array;
                 if ((features & FADF_BSTR) !== 0)
                 {
-                    const source = readU32(at.address);
+                    const source = readPointer(at.address);
                     const copy = source === 0 ? 0 : allocateBstr(
                         host.readMemory(source, byteLengthOf(source)).slice());
                     if (source !== 0 && copy === 0)
                     {
                         return E_OUTOFMEMORY;
                     }
-                    writeU32(wholeAddress(pv), copy);
+                    writePointer(wholeAddress(pv), copy);
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
@@ -4837,17 +4870,18 @@ export function createAutomationFunctions(host){
                 if ((features & FADF_RECORD) !== 0)
                 {
                     // A record is copied by its own IRecordInfo.
-                    owed.recordCopy.push([readU32(wholeAddress(psa) - 4), at.address, pv >>> 0]);
+                    owed.recordCopy.push([recordInfoOf(psa), at.address, pv >>> 0]);
                     return settle(owed, thread, S_OK);
                 }
                 if ((features & FADF_VARIANT) !== 0)
                 {
-                    host.writeMemory(wholeAddress(pv), new Uint8Array(VARIANT_BYTES));
+                    host.writeMemory(wholeAddress(pv), new Uint8Array(VARIANT_ELEMENT));
                     return settle(owed, thread, copyVariant(pv >>> 0, at.address, owed));
                 }
-                if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && readU32(at.address) !== 0)
+                const held = readPointer(at.address);
+                if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0 && held !== 0)
                 {
-                    owed.addRef.push(readU32(at.address));
+                    owed.addRef.push(held);
                 }
                 host.writeMemory(wholeAddress(pv), host.readMemory(at.address,
                     elementBytes).slice());
@@ -4875,8 +4909,8 @@ export function createAutomationFunctions(host){
                     {
                         return E_OUTOFMEMORY;
                     }
-                    freeBstr(readU32(at.address));
-                    writeU32(at.address, copy);
+                    freeBstr(readPointer(at.address));
+                    writePointer(at.address, copy);
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
@@ -4890,7 +4924,7 @@ export function createAutomationFunctions(host){
                         owed.addRef.push(pv >>> 0);
                     }
                     releaseElement(features, at.address, owed);
-                    writeU32(at.address, pv >>> 0);
+                    writePointer(at.address, pv >>> 0);
                     return settle(owed, thread, S_OK);
                 }
                 if ((pv >>> 0) === 0)
@@ -4899,7 +4933,7 @@ export function createAutomationFunctions(host){
                 }
                 if ((features & FADF_RECORD) !== 0)
                 {
-                    owed.recordCopy.push([readU32(wholeAddress(psa) - 4), pv >>> 0, at.address]);
+                    owed.recordCopy.push([recordInfoOf(psa), pv >>> 0, at.address]);
                     return settle(owed, thread, S_OK);
                 }
                 if ((features & FADF_VARIANT) !== 0)
@@ -4931,7 +4965,7 @@ export function createAutomationFunctions(host){
                 {
                     return at.error;
                 }
-                writeU32(wholeAddress(ppvData), at.address);
+                writePointer(wholeAddress(ppvData), at.address);
                 return S_OK;
             },
         },
@@ -4956,8 +4990,8 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32(wholeAddress(psa) + 8, array.locks + 1);
-                writeU32(wholeAddress(out), array.data);
+                writeU32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks + 1);
+                writePointer(wholeAddress(out), array.data);
                 return S_OK;
             },
         },
@@ -4974,7 +5008,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32(wholeAddress(psa) + 8, array.locks - 1);
+                writeU32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks - 1);
                 return S_OK;
             },
         },
@@ -5058,7 +5092,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32(wholeAddress(psa) + 8, array.locks + 1);
+                writeU32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks + 1);
                 return S_OK;
             },
         },
@@ -5075,7 +5109,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_UNEXPECTED;
                 }
-                writeU32(wholeAddress(psa) + 8, array.locks - 1);
+                writeU32(wholeAddress(psa) + SAFEARRAY.LOCKS, array.locks - 1);
                 return S_OK;
             },
         },
@@ -5096,7 +5130,7 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                writeU32(wholeAddress(out), 0);
+                writePointer(wholeAddress(out), 0);
                 // No array copies as none; one with no element size, as
                 // nothing to copy.
                 if ((psa >>> 0) === 0)
@@ -5114,7 +5148,7 @@ export function createAutomationFunctions(host){
                 {
                     return copy.hr;
                 }
-                writeU32(wholeAddress(out), copy.descriptor);
+                writePointer(wholeAddress(out), copy.descriptor);
                 return settle(owed, thread, S_OK);
             },
         },

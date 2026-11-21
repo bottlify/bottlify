@@ -17,7 +17,8 @@
 import { formatGuid, parseGuid } from './guid.js';
 import { ANSI_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { publishEnumerator } from './enumerator.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -653,7 +654,6 @@ const PROPVARIANT_BYTES = 16;
 const STATPROPSTG_BYTES = 12;
 /** STATPROPSETSTG: fmtid, clsid, grfFlags, mtime, ctime, atime, dwOSVersion. */
 const STATPROPSETSTG_BYTES = 64;
-const STATSTG_BYTES = 72;
 /** The longest name or string read from the program's memory, in characters. */
 const MAX_TEXT = 1 << 16;
 
@@ -665,6 +665,7 @@ const SLOT = Object.freeze({
 
 /**
  * @typedef {Object} PropertySetEnv
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
@@ -698,9 +699,12 @@ const SLOT = Object.freeze({
 
 /** @param {PropertySetEnv} env */
 export function createPropertySetFunctions(env){
+    const STATSTG = statstgLayout(env.pointerSize);
+    const POINTER = env.pointerSize === 8 ? 8 : 4;
     /** @param {number} address */
     const readU32 = address=>new DataView(env.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
+    const readPointer = pointerIo(env, POINTER).read;
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>env.writeMemory(wholeAddress(address), u32(value));
     /** @param {number} address @param {string} text */
@@ -1524,24 +1528,26 @@ export function createPropertySetFunctions(env){
      * @param {number} storage @param {unknown} thread
      * @returns {Promise<string[] | null>}
      */
-    const setsIn = (storage, thread)=>lend(4 + STATSTG_BYTES + 4, async slot=>{
+    const setsIn = (storage, thread)=>lend(POINTER + STATSTG.SIZE_OF + 4, async slot=>{
         if (await call(storage, SLOT.ENUM_ELEMENTS, [0, 0, 0, slot], thread) < 0)
         {
             return null;
         }
-        const enumerator = readU32(slot);
+        const enumerator = readPointer(slot);
         /** @type {string[]} */
         const formats = [];
-        const item = slot + 4;
-        while (await call(enumerator, SLOT.NEXT, [1, item, item + STATSTG_BYTES], thread) === S_OK)
+        const item = slot + POINTER;
+        const fetched = item + STATSTG.SIZE_OF;
+        while (await call(enumerator, SLOT.NEXT, [1, item, fetched], thread) === S_OK)
         {
-            const name = readU32(item);
+            const name = readPointer(item + STATSTG.NAME);
             const text = name === 0 ? '' : readWideAt(name);
             if (name !== 0)
             {
                 env.heap.free(name);
             }
-            const format = readU32(item + 4) === STGTY_STREAM && text.startsWith(PROPERTY_SET_MARK)
+            const format = readU32(item + STATSTG.TYPE) === STGTY_STREAM
+                && text.startsWith(PROPERTY_SET_MARK)
                 ? formatOfName(text) : null;
             if (format !== null)
             {

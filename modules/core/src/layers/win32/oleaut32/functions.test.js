@@ -2146,6 +2146,101 @@ test('a SAFEARRAY keeps its VARTYPE or IID in front of its descriptor, as Window
         'a fixed-size array is refused as a locked one');
 });
 
+test('a 64-bit process\'s SAFEARRAY has its data at 16, its bounds at 24, and a quadword for'
+    + ' each string or interface', async()=>{
+    host = fakeHost();
+    /** @type {[number, number[]][]} */
+    const called = [];
+    fx = createAutomationFunctions({ ...host, pointerSize: 8,
+        /** @param {number} entry @param {number[]} args */
+        call: (entry, args)=>{
+            called.push([entry, args]);
+            return Promise.resolve(0);
+        } });
+    const INDEX = 0x3040;
+    const BOUND = 0x3100;
+    const HIGH = 0xdddddddd;
+    /** A pointer-sized cell whose upper half is not zero. @param {number} at */
+    const dirty = at=>{
+        host.putU32(at, HIGH);
+        host.putU32(at + 4, HIGH);
+    };
+
+    const vector = call('SafeArrayCreateVector', [VT_BSTR, 0, 3]);
+    assert.equal(host.u32(vector + 4), 8, 'cbElements: a string is a pointer');
+    const data = vector + 32;
+    assert.deepEqual([host.u32(vector + 16), host.u32(vector + 20)], [data, 0],
+        'pvData at 16, the vector\'s data after its one bound');
+    assert.deepEqual([host.u32(vector + 24), host.u32(vector + 28)], [3, 0], 'the bound at 24');
+    host.putWide(TEXT, 'second');
+    const made = call('SysAllocString', [TEXT]);
+    host.putU32(INDEX, 1);
+    assert.equal(call('SafeArrayPutElement', [vector, INDEX, made]), S_OK);
+    call('SysFreeString', [made]);
+    assert.deepEqual([host.u32(data), host.u32(data + 4)], [0, 0], 'element 0 untouched');
+    const stored = host.u32(data + 8);
+    assert.ok(stored !== 0 && host.u32(data + 12) === 0, 'element 1 is 8 bytes on, whole');
+    dirty(SLOT);
+    assert.equal(call('SafeArrayGetElement', [vector, INDEX, SLOT]), S_OK);
+    const copy = host.u32(SLOT);
+    assert.equal(host.u32(SLOT + 4), 0, 'the copy is written whole');
+    assert.equal(call('SysStringLen', [copy]), 6);
+    call('SysFreeString', [copy]);
+    dirty(SLOT);
+    assert.equal(call('SafeArrayAccessData', [vector, SLOT]), S_OK);
+    assert.deepEqual([host.u32(SLOT), host.u32(SLOT + 4)], [data, 0], 'pvData out whole');
+    assert.equal(host.u32(vector + 8), 1, 'cLocks still at 8');
+    assert.equal(call('SafeArrayUnaccessData', [vector]), S_OK);
+    assert.equal(call('SafeArrayGetUBound', [vector, 1, SLOT]), S_OK);
+    assert.equal(host.u32(SLOT), 2);
+    dirty(SLOT);
+    assert.equal(call('SafeArrayCopy', [vector, SLOT]), S_OK);
+    const duplicate = host.u32(SLOT);
+    assert.equal(host.u32(SLOT + 4), 0, 'the copy\'s descriptor written whole');
+    const duplicated = host.u32(duplicate + 16);
+    assert.ok(host.u32(duplicated + 8) !== 0 && host.u32(duplicated + 8) !== stored,
+        'the string at 8 copied, not shared');
+    assert.equal(call('SafeArrayDestroy', [duplicate]), S_OK);
+    assert.equal(call('SafeArrayDestroy', [vector]), S_OK);
+
+    host.putU32(BOUND, 2);
+    host.putU32(BOUND + 4, 0);
+    for (const [type, size] of [[VT_I4, 4], [VT_UNKNOWN, 8], [12, 24], [37, 8]])
+    {
+        const array = call('SafeArrayCreate', [type, 1, BOUND]);
+        assert.equal(call('SafeArrayGetElemsize', [array]), size, `VARTYPE ${type}`);
+        assert.equal(host.u32(array + 24), 2, `VARTYPE ${type}: the bound at 24`);
+        assert.equal(call('SafeArrayDestroy', [array]), S_OK);
+    }
+
+    // An interface element is a quadword, and the reference it takes and gives
+    // back goes through AddRef and Release, a quadword apart in the vtable.
+    const vtable = OBJECT_A + 0x100;
+    host.putU32(OBJECT_A, vtable);
+    host.putU32(vtable + 8, 0xa1);
+    host.putU32(vtable + 16, 0xb2);
+    const objects = call('SafeArrayCreate', [VT_UNKNOWN, 1, BOUND]);
+    host.putU32(INDEX, 1);
+    assert.equal(await settled('SafeArrayPutElement', [objects, INDEX, OBJECT_A]), S_OK);
+    const cells = host.u32(objects + 16);
+    assert.deepEqual([host.u32(cells + 8), host.u32(cells + 12)], [OBJECT_A, 0]);
+    assert.equal(await settled('SafeArrayDestroy', [objects]), S_OK);
+    assert.deepEqual(called, [[0xa1, [OBJECT_A]], [0xb2, [OBJECT_A]]], 'AddRef, then Release');
+
+    // A record array's IRecordInfo is the pointer before the descriptor.
+    called.length = 0;
+    dirty(SLOT);
+    assert.equal(call('SafeArrayAllocDescriptorEx', [36, 1, SLOT]), S_OK);
+    const records = host.u32(SLOT);
+    assert.equal(host.u32(SLOT + 4), 0, 'the descriptor written whole');
+    assert.equal(await settled('SafeArraySetRecordInfo', [records, OBJECT_A]), S_OK);
+    assert.deepEqual([host.u32(records - 8), host.u32(records - 4)], [OBJECT_A, 0]);
+    dirty(SLOT);
+    assert.equal(await settled('SafeArrayGetRecordInfo', [records, SLOT]), S_OK);
+    assert.deepEqual([host.u32(SLOT), host.u32(SLOT + 4)], [OBJECT_A, 0]);
+    assert.deepEqual(called, [[0xa1, [OBJECT_A]], [0xa1, [OBJECT_A]]]);
+});
+
 test('VariantChangeType turns an array of bytes into a string of them and back', ()=>{
     setUp();
     const bytes = call('SafeArrayCreateVector', [VT_UI1, 0, 4]);

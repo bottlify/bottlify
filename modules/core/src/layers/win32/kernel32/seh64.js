@@ -115,6 +115,13 @@ const WALK_LIMIT = 4096;
 export const STATUS_LONGJUMP = 0x80000026;
 
 /**
+ * An unwind that ends in a call: at the target, the record's first parameter
+ * is called with the record and answers where the thread goes on. The x64
+ * C++ runtime enters a catch block this way.
+ */
+export const STATUS_UNWIND_CONSOLIDATE = 0x80000029;
+
+/**
  * The x64 runtime's _JUMP_BUFFER: the establisher frame setjmp was called
  * with, the registers a callee keeps, where setjmp returns to and the stack
  * as that return leaves it, the two control words, then XMM6 to XMM15.
@@ -316,6 +323,10 @@ export function createSeh64(host){
     };
     /** @param {number} at */
     const readU64Low = at=>readU32(at);
+    /** A quadword whole, exact for every address a process has. @param {number} at */
+    const readQuad = at=>readU32(at) + readU32(at + 4) * 2 ** 32;
+    /** @param {number} value  Negative as a 32-bit value is, below 2^53 else. */
+    const quadOf = value=>BigInt(value < 0 ? value >>> 0 : Math.trunc(value));
     /** @param {number} at @param {number} value */
     const writeQuad = (at, value)=>{
         const bytes = new Uint8Array(8);
@@ -419,12 +430,28 @@ export function createSeh64(host){
         const view = new DataView(bytes.buffer);
         view.setUint32(RECORD64.CODE, what.code >>> 0, true);
         view.setUint32(RECORD64.FLAGS, what.flags >>> 0, true);
-        view.setBigUint64(RECORD64.ADDRESS, BigInt(what.address >>> 0), true);
+        view.setBigUint64(RECORD64.ADDRESS, quadOf(what.address), true);
         const parameters = (what.parameters ?? []).slice(0, 15);
         view.setBigUint64(RECORD64.PARAMETER_COUNT, BigInt(parameters.length), true);
         parameters.forEach((value, index)=>
-            view.setBigUint64(RECORD64.INFORMATION + index * 8, BigInt(value >>> 0), true));
+            view.setBigUint64(RECORD64.INFORMATION + index * 8, quadOf(value), true));
         host.writeMemory(at, bytes);
+    };
+
+    /**
+     * A record the program made, as it made it: RtlUnwindEx hands the frames
+     * it unwinds the program's own, whose parameters a runtime reads its
+     * state back from.
+     *
+     * @param {number} at
+     * @returns {ExceptionRecord}
+     */
+    const readRecord = at=>{
+        const count = Math.min(readU32(at + RECORD64.PARAMETER_COUNT), 15);
+        return { code: readU32(at + RECORD64.CODE), flags: readU32(at + RECORD64.FLAGS),
+            address: readQuad(at + RECORD64.ADDRESS),
+            parameters: Array.from({ length: count },
+                (_, index)=>readQuad(at + RECORD64.INFORMATION + index * 8)) };
     };
 
     /** EXCEPTION_POINTERS: the record and the context, each a quadword. */
@@ -755,6 +782,18 @@ export function createSeh64(host){
             { frame: targetFrame >>> 0, ip: targetIp >>> 0 }));
         resume.rip = targetIp >>> 0;
         resume.gpr[0] = BigInt(returnValue >>> 0);
+        const callback = record.code === STATUS_UNWIND_CONSOLIDATE
+            ? record.parameters?.[0] ?? 0 : 0;
+        if (callback !== 0)
+        {
+            // Called as a catch block is, on the target's registers: an
+            // exception it raises walks on from the target frame. It answers
+            // RIP, as a catch funclet does.
+            const scratch = scratchBelow(pass.floor);
+            writeRecord(scratch.record, record);
+            const below = passFor(record, pass.faultContext, thread, scratch.top);
+            resume.rip = await below.callNested(callback, { rcx: scratch.record }, resume) >>> 0;
+        }
         return pass.continueAt(resume);
     };
 
@@ -1038,9 +1077,7 @@ export function createSeh64(host){
      */
     const unwindCalled = (context, targetFrame, targetIp, recordPtr, returnValue)=>{
         const record = (recordPtr >>> 0) !== 0
-            ? { code: readU32(recordPtr + RECORD64.CODE),
-                flags: readU32(recordPtr + RECORD64.FLAGS),
-                address: context.rip }
+            ? readRecord(recordPtr >>> 0)
             : { code: STATUS.UNWIND, flags: EH_UNWINDING, address: context.rip };
         return unwindEx(context, targetFrame >>> 0, targetIp >>> 0, returnValue >>> 0,
             record, host.currentThread());
@@ -1396,17 +1433,19 @@ export function createSeh64(host){
              *     PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue,
              *     PCONTEXT ContextRecord, PUNWIND_HISTORY_TABLE HistoryTable)
              *
-             * Unwinds to the target, running every termination handler, then
-             * continues at the target. It does not return.
+             * Unwinds from the caller to the target, running every termination
+             * handler, then continues at the target. It does not return.
+             * ContextRecord is where the system keeps the registers while it
+             * unwinds, not where it starts: it captures the caller's into it
+             * first, so a C++ frame handler passes a local it never filled.
+             * The engine keeps them on the host, and as the call does not
+             * return nothing reads that buffer after it.
              */
             RtlUnwindEx: {
                 argBytes: 24,
                 /** @param {number[]} args */
-                handler: ([targetFrame, targetIp, recordPtr, returnValue, contextRecord])=>{
-                    const context = (contextRecord >>> 0) !== 0
-                        ? readContext(contextRecord >>> 0) : callerContext();
-                    return unwindCalled(context, targetFrame, targetIp, recordPtr, returnValue);
-                },
+                handler: ([targetFrame, targetIp, recordPtr, returnValue])=>unwindCalled(
+                    callerContext(), targetFrame, targetIp, recordPtr, returnValue),
             },
 
             /**

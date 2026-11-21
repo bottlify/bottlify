@@ -147,6 +147,7 @@ const SHLWAPI_VERSION = /** @type {[number, number, number, number]} */ ([6, 0, 
 
 /**
  * @typedef {Object} ShlwapiHost
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its STATSTG is wider.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} [readWideString]

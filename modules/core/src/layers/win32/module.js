@@ -91,6 +91,7 @@ import {
     isTokenMember,
 } from './advapi32/tokens.js';
 import { SERVICE_BY_NAME, SERVICE_SECURITY, createServiceFunctions } from './advapi32/services.js';
+import { userLayouts, writeWindowClass } from './user32/structs.js';
 import { createCryptoFunctions } from './advapi32/crypto.js';
 import {
     DIRECTX_RELEASES, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
@@ -236,6 +237,7 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
+import { safeArrayLayout } from './common/safearray.js';
 import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
@@ -873,6 +875,7 @@ export function createWin32Module(){
             const displayHost = {
                 readMemory: (address, length)=>readMemory(address, length),
                 writeMemory: (address, bytes)=>writeMemory(address, bytes),
+                pointerSize: pointerSize === 8 ? 8 : 4,
                 setLastError: code=>setError(code),
                 windowRect: (hwnd, out)=>libraries['USER32.dll'].GetWindowRect
                     .handler([hwnd, out]) >>> 0,
@@ -970,6 +973,24 @@ export function createWin32Module(){
             });
             /** @type {Record<string, Record<string, any>>} */
             const libraries = lazyLibraries.table;
+            const SAFEARRAY = safeArrayLayout(pointerSize);
+            /**
+             * A SAFEARRAY of bytes as oleaut32 makes one, holding `bytes`: a
+             * VT_UI1 vector, its data where its pvData points. 0 when none
+             * could be made.
+             *
+             * @param {Uint8Array} bytes
+             */
+            const byteVector = bytes=>{
+                const array = libraries['OLEAUT32.dll'].SafeArrayCreateVector
+                    .handler([17, 0, bytes.length]) >>> 0;
+                if (array !== 0 && bytes.length > 0)
+                {
+                    writeMemory(memory.readPointer(array + SAFEARRAY.DATA, SAFEARRAY.POINTER),
+                        bytes);
+                }
+                return array;
+            };
             /** @param {Record<string, () => Record<string, any>>} makers */
             const defineAll = makers=>{
                 for (const [name, make] of Object.entries(makers))
@@ -1932,16 +1953,8 @@ export function createWin32Module(){
                         [...text, '\0'].map(char=>char.charCodeAt(0))).buffer),
                     at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
                     readMemory: (address, length)=>memory.readBytes(address, length),
-                    allocateBytes: async bytes=>{
-                        // VT_UI1's vector, its data where pvData points.
-                        const array = await libraries['OLEAUT32.dll'].SafeArrayCreateVector
-                            .handler([17, 0, bytes.length]) >>> 0;
-                        if (array !== 0)
-                        {
-                            writeMemory(memory.readU32(array + 12), bytes);
-                        }
-                        return array;
-                    },
+                    allocateBytes: byteVector,
+                    pointerSize,
                     createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)), at=>
                         libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
                     // A DMO enumerates as the DMO wrapper filter registers it: at
@@ -2913,15 +2926,20 @@ export function createWin32Module(){
                                 : user32.DefWindowProcA.handler([hwnd, message, wParam, lParam]);
                         },
                     });
-                    const wndclass = new Uint8Array(40 + name.length);
-                    const view = new DataView(wndclass.buffer);
-                    view.setUint32(4, procedure >>> 0, true);
-                    apartmentClass = /** @type {number} */ (lent(wndclass, at=>{
-                        writeMemory(at + 40, name);
-                        view.setUint32(36, at + 40, true);
-                        writeMemory(at, wndclass.subarray(0, 40));
-                        return user32.RegisterClassA.handler([at]);
-                    }));
+                    // WNDCLASSA as RegisterClassA reads it at the process's width,
+                    // the class's name after it.
+                    const layouts = userLayouts(pointerSize);
+                    const size = layouts.WNDCLASSA.SIZE;
+                    apartmentClass = /** @type {number} */ (lent(new Uint8Array(size + name.length),
+                        at=>{
+                            writeMemory(at + size, name);
+                            writeWindowClass({ readMemory, writeMemory }, at, {
+                                style: 0, wndProc: procedure >>> 0, classExtra: 0, windowExtra: 0,
+                                instance: 0, icon: 0, cursor: 0, background: 0, menuName: 0,
+                                className: at + size, iconSm: 0,
+                            }, layouts);
+                            return user32.RegisterClassA.handler([at]);
+                        }));
                 }
                 // Known by its procedure before it exists: the messages that
                 // make a window arrive while it is being made.
@@ -3011,7 +3029,7 @@ export function createWin32Module(){
                 /** @type {import('./windowscodecs/kit.js').CodecsHost} */
                 const codecsHost = {
                     registry: com, vtables: comVtables, heap, readMemory, writeMemory,
-                    readWideString,
+                    readWideString, pointerSize,
                     objectAt: pointer=>bridge.interfaceObject(pointer),
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread(),
@@ -3625,6 +3643,7 @@ export function createWin32Module(){
             // the modules, answered from guest memory (`actctx.js`).
             const activation = createActivationContexts({
                 readMemory, writeMemory, readCString, readWideString,
+                pointerSize,
                 setLastError: setError,
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
@@ -5092,7 +5111,7 @@ export function createWin32Module(){
                 }),
 
                 'SHLWAPI.dll': ()=>({ ...createShlwapiFunctions({
-                    readCString, readWideString, readMemory, writeMemory,
+                    readCString, readWideString, readMemory, writeMemory, pointerSize,
                     // The COM helpers call methods of the program's own objects.
                     drive: steps=>bridge.drive(steps),
                     // SHCreateStreamOnFile's streams are objects of shlwapi's own.
@@ -5915,16 +5934,7 @@ export function createWin32Module(){
                             heap.free(at);
                         }
                     },
-                    byteArray: bytes=>{
-                        const array = libraries['OLEAUT32.dll'].SafeArrayCreateVector.handler(
-                            [17, 0, bytes.length]) >>> 0;
-                        if (array !== 0 && bytes.length > 0)
-                        {
-                            // SAFEARRAY's pvData, twelve bytes in.
-                            writeMemory(memory.readU32(array + 12), bytes);
-                        }
-                        return array;
-                    },
+                    byteArray: byteVector,
                     fileTimeToDate: async fileTime=>{
                         const scratch = heap.allocate(16 + 8);
                         try
@@ -6542,6 +6552,7 @@ export function createWin32Module(){
                     }),
                     ...createTokenFunctions({
                         readMemory,
+                        pointerSize,
                         // Impersonation is the thread's, not the process's.
                         currentThread: ()=>kernel.currentThread(),
                         // A pipe's client is the pipes' to know.
@@ -6562,6 +6573,7 @@ export function createWin32Module(){
                         readCString,
                         readMemory,
                         writeMemory,
+                        pointerSize,
                         hive,
                         setLastError: setError,
                         divergence: config?.divergence,
@@ -6696,9 +6708,15 @@ export function createWin32Module(){
                     // A docfile is a file on the volume, and an object a program
                     // saves into one answers GetClassID and Save on its own side.
                     files: volume,
-                    /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                    /**
+                     * @param {number} entry @param {(number | bigint)[]} args
+                     * @param {unknown} [thread]
+                     */
                     call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
-                    /** @param {number} entry @param {number[]} args @param {unknown} thread */
+                    /**
+                     * @param {number} entry @param {(number | bigint)[]} args
+                     * @param {unknown} thread
+                     */
                     guardedCall: (entry, args, thread)=>callGuarded({
                         entry, args, thread, failed: 0x80010105,
                         report: (code, at)=>config?.divergence?.('COM',
@@ -6863,6 +6881,7 @@ export function createWin32Module(){
 
                 'OLEAUT32.dll': ()=>createAutomationFunctions({
                     errorSlots,
+                    pointerSize,
                     readMemory,
                     writeMemory,
                     fillMemory,

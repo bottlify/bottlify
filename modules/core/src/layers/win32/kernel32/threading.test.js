@@ -335,8 +335,9 @@ function writtenU32(written, address){
  * @param {Record<number, string>} [names] What each name pointer spells, for the
  *   tests that are about the Win32 object namespace. Every other test passes
  *   nothing and every pointer reads as the empty name, which is no name at all.
+ * @param {Partial<import('./threading.js').ThreadingHost>} [extra]  more of the host
  */
-function setup(names){
+function setup(names, extra = {}){
     const kernel = fakeKernel();
     /** @type {any} */
     const current = { name: 'caller' };
@@ -371,6 +372,7 @@ function setup(names){
         /** @param {number} handle */
         handleType: handle=>kernel.handles.typeOf(handle),
         namedObjects: createNamedObjects(),
+        ...extra,
     };
     const fns = createThreadingFunctions(host);
     return { kernel, fns, host, parked, current, written, errors };
@@ -1836,4 +1838,28 @@ test('a duplicate carries the rights asked for, none for 0, the source\'s with S
         'a handle with every right duplicates with every right');
     assert.equal(fns.SetEvent.handler([writtenU32(written, 0x300)]), 0,
         'no EVENT_MODIFY_STATE on the duplicate with none');
+});
+
+test('an object made with SECURITY_ATTRIBUTES is inheritable as it asks, at either width', ()=>{
+    // At 64 bits lpSecurityDescriptor is eight bytes: the flag is at 16, not 8.
+    for (const pointerSize of [4, 8])
+    {
+        const word = pointerSize;
+        /** @param {number} descriptor @param {number} inherit */
+        const flagOf = (descriptor, inherit)=>{
+            const { fns, host } = setup(undefined, { pointerSize });
+            const bytes = new Uint8Array(0x1000);
+            const view = new DataView(bytes.buffer);
+            host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+            host.writeMemory = (address, data)=>bytes.set(data, address);
+            view.setUint32(0x300, 3 * word, true);
+            view.setUint32(0x300 + word, descriptor, true);
+            view.setUint32(0x300 + 2 * word, inherit, true);
+            const event = fns.CreateEventA.handler([0x300, 1, 0, 0]);
+            assert.equal(fns.GetHandleInformation.handler([event, 0x200]), 1);
+            return bytes[0x200];
+        };
+        assert.equal(flagOf(0, 1), 1, `${pointerSize * 8}-bit: HANDLE_FLAG_INHERIT`);
+        assert.equal(flagOf(0x2000, 0), 0, `${pointerSize * 8}-bit: a descriptor is not the flag`);
+    }
 });

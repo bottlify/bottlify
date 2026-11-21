@@ -23,11 +23,14 @@ import { createApp } from './app.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
-for (const concurrency of /** @type {const} */ ([1, 2, 4]))
+// The same program at either width: a 64-bit client and server reach each
+// other through the same channel, every pointer and slot a quadword.
+for (const [concurrency, fixture] of /** @type {const} */ ([[1, 'com'], [2, 'com'], [4, 'com'],
+    [1, 'com64'], [2, 'com64']]))
 {
     test(`a client's call reaches the server COM started for it, and comes back answered`
-        + ` (concurrency ${concurrency})`, { timeout: 120000 }, async t=>{
-        const program = new Uint8Array(await readFile(new URL('../test/fixtures/com.exe',
+        + ` (concurrency ${concurrency}, ${fixture})`, { timeout: 120000 }, async t=>{
+        const program = new Uint8Array(await readFile(new URL(`../test/fixtures/${fixture}.exe`,
             import.meta.url)));
         const app = await createApp({
             executable: program,
@@ -159,16 +162,17 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
     });
 }
 
-for (const [concurrency, apartment] of /** @type {const} */ ([[1, 'sta'], [2, 'sta'], [1, 'mta'],
-    [2, 'mta']]))
+for (const [concurrency, apartment, fixture] of /** @type {const} */ ([[1, 'sta', 'comservice'],
+    [2, 'sta', 'comservice'], [1, 'mta', 'comservice'], [2, 'mta', 'comservice'],
+    [1, 'sta', 'comservice64'], [2, 'mta', 'comservice64']]))
 {
     // In the multithreaded apartment COM hands the call to a thread of the
     // server's own, and the call waits on the way, as 3DMark06's SystemInfo
     // service polls its scanner's pipe inside one.
     test('a class served by a service: COM starts the service for it, and the run ends with its'
-        + ` client, the service ended with it (concurrency ${concurrency}, ${apartment})`,
-    { timeout: 120000 }, async t=>{
-        const program = new Uint8Array(await readFile(new URL('../test/fixtures/comservice.exe',
+        + ` client, the service ended with it (concurrency ${concurrency}, ${apartment},`
+        + ` ${fixture})`, { timeout: 120000 }, async t=>{
+        const program = new Uint8Array(await readFile(new URL(`../test/fixtures/${fixture}.exe`,
             import.meta.url)));
         const app = await createApp({
             executable: program,

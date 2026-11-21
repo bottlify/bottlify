@@ -16,7 +16,7 @@
  */
 
 import { processAwareness, setProcessAwareness } from '../user32/dpi.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 
@@ -49,8 +49,6 @@ const WTS_CLIENT_PROTOCOL_TYPE = 16;
 const WTS_ACTIVE = 0;
 const WTS_CURRENT_SESSION = 0xffffffff;
 const WTS_DISCONNECTED = 4;
-/** WTS_SESSION_INFO: SessionId, pWinStationName, State. */
-const WTS_SESSION_INFO_SIZE = 12;
 const ERROR_NO_TOKEN = 1008;
 const ERROR_INVALID_PARAMETER = 87;
 
@@ -68,6 +66,8 @@ const ERROR_INVALID_PARAMETER = 87;
  * @property {number} refresh  the display's rate, Hz
  * @property {() => number} now  QueryPerformanceCounter's clock, milliseconds
  * @property {number} performanceFrequency  QueryPerformanceFrequency's answer
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose out-pointers and
+ *           WTS_SESSION_INFO's name are quadwords
  */
 
 /** @param {number} value */
@@ -302,6 +302,13 @@ export function createDwmapiFunctions(host){
  *     `userToken` writes the one user's token into `out` (OpenProcessToken's).
  */
 export function createSessionInformationFunctions(host){
+    const pointer = pointerWidth(host.pointerSize);
+    /**
+     * WTS_SESSION_INFO: SessionId, then pWinStationName at its alignment, then
+     * State, the whole padded to a pointer.
+     */
+    const SESSION = pointer.size === 8 ? { name: 8, state: 16, size: 24 }
+        : { name: 4, state: 8, size: 12 };
     /** @param {string} text @param {boolean} wide */
     const textBytes = (text, wide)=>{
         const data = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
@@ -354,7 +361,7 @@ export function createSessionInformationFunctions(host){
                 return 0;
             }
             host.writeMemory(block, bytes);
-            host.writeMemory(wholeAddress(out), dword(block));
+            host.writeMemory(wholeAddress(out), pointer.bytes(block));
             host.writeMemory(wholeAddress(returned), dword(bytes.length));
             return 1;
         },
@@ -380,23 +387,23 @@ export function createSessionInformationFunctions(host){
             const sessions = [{ id: 0, name: 'Services', state: WTS_DISCONNECTED },
                 { id: 1, name: 'Console', state: WTS_ACTIVE }];
             const names = sessions.map(one=>textBytes(one.name, wide));
-            const size = sessions.length * WTS_SESSION_INFO_SIZE
+            const size = sessions.length * SESSION.size
                 + names.reduce((sum, one)=>sum + one.length, 0);
             const block = host.allocate(size);
             if (block === 0)
             {
                 return 0;
             }
-            let text = block + sessions.length * WTS_SESSION_INFO_SIZE;
+            let text = block + sessions.length * SESSION.size;
             sessions.forEach((one, at)=>{
-                const entry = block + at * WTS_SESSION_INFO_SIZE;
+                const entry = block + at * SESSION.size;
                 host.writeMemory(entry, dword(one.id));
-                host.writeMemory(entry + 4, dword(text));
-                host.writeMemory(entry + 8, dword(one.state));
+                host.writeMemory(entry + SESSION.name, pointer.bytes(text));
+                host.writeMemory(entry + SESSION.state, dword(one.state));
                 host.writeMemory(text, names[at]);
                 text += names[at].length;
             });
-            host.writeMemory(wholeAddress(out), dword(block));
+            host.writeMemory(wholeAddress(out), pointer.bytes(block));
             host.writeMemory(wholeAddress(count), dword(sessions.length));
             return 1;
         },

@@ -4305,3 +4305,55 @@ test('an overlapped transfer done at once skips the port as the handle says, and
     assert.equal(fns.ReadFile.handler([empty, BUFFER, 4, OUT_COUNT, 0x500]), 0);
     assert.deepEqual(done.at(-1), [0, 0xc0000011, false], 'nothing past the end: the end');
 });
+
+test('a 64-bit process is handed its file part as a whole pointer, over whatever its slot held',
+    ()=>{
+        // ServiceModelReg's 64-bit build read lpFilePart's upper half as the stack's
+        // leftovers and faulted on the pointer it made.
+        const { memory, fns, files, at } = setup({ pointerSize: 8 });
+        const view = new DataView(memory.bytes.buffer);
+        const filePart = ()=>Number(view.getBigUint64(OUT_PART, true));
+        files.put('C:\\WINDOWS\\system32\\cabinet.dll', 'x');
+        /** @type {[string, () => unknown, string][]} */
+        const calls = [
+            ['GetFullPathNameA', ()=>fns.GetFullPathNameA.handler(
+                [at(NAME, 'DATA\\..\\SAVE.DAT'), 0x40, OUT_TEXT, OUT_PART]), 'SAVE.DAT'],
+            ['GetFullPathNameA of \\\\?\\', ()=>fns.GetFullPathNameA.handler(
+                [at(NAME, '\\\\?\\C:\\GAME\\X.DAT'), 0x40, OUT_TEXT, OUT_PART]), 'X.DAT'],
+            ['SearchPathA', ()=>fns.SearchPathA.handler([0, at(NAME, 'cabinet'),
+                at(NAME + 0x40, '.dll'), 0x80, OUT_TEXT, OUT_PART]), 'cabinet.dll'],
+        ];
+        for (const [name, call, part] of calls)
+        {
+            view.setBigUint64(OUT_PART, 0x0382038200000000n, true);
+            call();
+            assert.ok(filePart() < 2 ** 32, `${name}: the upper half written`);
+            assert.equal(memory.string(filePart()), part, name);
+        }
+    });
+
+test('a file opened with SECURITY_ATTRIBUTES is inheritable as it asks, at either width', ()=>{
+    // At 64 bits lpSecurityDescriptor is eight bytes: the flag is at 16, not 8.
+    for (const pointerSize of [4, 8])
+    {
+        const word = pointerSize;
+        /** @param {number} descriptor @param {number} inherit */
+        const marked = (descriptor, inherit)=>{
+            /** @type {number[]} */
+            const inheritable = [];
+            const { memory, files, fns, at } = setup({ pointerSize,
+                inheritable: (/** @type {number} */ handle)=>inheritable.push(handle) });
+            files.put('C:\\GAME\\LOG.TXT', 'log');
+            const view = new DataView(memory.bytes.buffer);
+            view.setUint32(0x600, 3 * word, true);
+            view.setUint32(0x600 + word, descriptor, true);
+            view.setUint32(0x600 + 2 * word, inherit, true);
+            const handle = fns.CreateFileA.handler(
+                [at(NAME, 'C:\\GAME\\LOG.TXT'), GENERIC_READ, 0, 0x600, OPEN_EXISTING, 0, 0]);
+            assert.notEqual(handle, INVALID_HANDLE_VALUE);
+            return inheritable.length;
+        };
+        assert.equal(marked(0, 1), 1, `${pointerSize * 8}-bit: inheritable`);
+        assert.equal(marked(0x2000, 0), 0, `${pointerSize * 8}-bit: a descriptor is not the flag`);
+    }
+});
