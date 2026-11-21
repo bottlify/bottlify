@@ -24,19 +24,18 @@
  * wizard or checks want the runtime finds it installed, and what it writes is
  * the bottle's own, not the layer's.
  *
- * `--trace-box` prints the trace when the first box reporting an error is
- * shown instead, and `--trace-fault` when a process ends with an exception's
- * code. `--journal S` prints, S seconds in, the last cross-process COM calls and
- * message waits from the call journal (every call area on); `--trace S` prints
- * the last three thousand calls of every kind instead (`--trace-lines N`), with their first
- * arguments -- what a process that loops without waiting keeps calling;
- * `--trace-match REGEX` keeps only the lines that match. A process that ran in a
- * worker of its own (`--concurrency`) keeps its calls in its own ring, which
- * it hands back as it ends: the first `--trace-worker N` (3) of those are
- * printed after the run's, each under its image, and then the journal of
- * every process still standing in a worker, asked of it then. A run
- * that ends sooner prints either when it ends. `--strings` peeks every pointer
- * argument for a string, so those lines name the paths and texts themselves.
+ * `--trace-box` prints the trace when the first box reporting an error is shown instead, and
+ * `--trace-fault` when a process, or a server COM started, ends with an exception's code.
+ * `--journal S` prints, S seconds in, the last cross-process COM calls and message waits from
+ * the call journal (every call area on); `--trace S` prints the last three thousand calls of
+ * every kind instead (`--trace-lines N`), with their first arguments -- what a process that
+ * loops without waiting keeps calling; `--trace-match REGEX` keeps only the lines that match. A
+ * process that ran in a worker of its own (`--concurrency`) keeps its calls in its own ring,
+ * which it hands back as it ends: the first `--trace-worker N` (3) of those are printed after
+ * the run's, each under its image, and then the journal of every process still standing in a
+ * worker, asked of it then. A run that ends sooner prints either when it ends. `--strings`
+ * peeks every pointer argument for a string, so those lines name the paths and texts
+ * themselves.
  *
  * A wizard waits in its own message loop rather than in a modal dialog an
  * unattended run answers, so a route through one is given as input: `--key
@@ -1012,13 +1011,18 @@ const printJournal = ()=>{
 if (traceOnFault)
 {
     const EXCEPTION_CODES = 0xc0000000;
-    app.on('process-resumed', (/** @type {any} */ event)=>{
+    /** @param {any} event */
+    const onEnd = event=>{
         if ((event?.code >>> 0) >= EXCEPTION_CODES)
         {
             console.log(seconds(), 'FAULT', event.image, (event.code >>> 0).toString(16));
             printJournal();
         }
-    });
+    };
+    // A child the program waited on ends through its resume; a server COM
+    // started for it (mscorsvw for ngen) ends on its own.
+    app.on('process-resumed', onEnd);
+    app.on('process-server-exit', onEnd);
 }
 if (journalAt > 0 && !traceOnBox && !traceOnFault)
 {
