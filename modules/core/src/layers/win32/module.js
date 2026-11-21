@@ -6562,6 +6562,7 @@ export function createWin32Module(){
                         readCString,
                         readMemory,
                         writeMemory,
+                        pointerSize,
                         hive,
                         setLastError: setError,
                         divergence: config?.divergence,

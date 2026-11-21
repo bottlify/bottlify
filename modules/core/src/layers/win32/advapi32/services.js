@@ -35,7 +35,7 @@ import { createPerfFunctions } from './perf.js';
 import {
     WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes,
 } from './tokens.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -68,9 +68,7 @@ const RPC_S_SERVER_UNAVAILABLE = 1722;
 /** EnumServicesStatusEx's and QueryServiceStatusEx's one information level. */
 const SC_ENUM_PROCESS_INFO = 0;
 const SC_STATUS_PROCESS_INFO = 0;
-/** ENUM_SERVICE_STATUS_PROCESS, ENUM_SERVICE_STATUS, SERVICE_STATUS(_PROCESS). */
-const ENUM_SERVICE_STATUS_PROCESS_SIZE = 44;
-const ENUM_SERVICE_STATUS_SIZE = 36;
+/** SERVICE_STATUS(_PROCESS), dwords alone in either width. */
 const SERVICE_STATUS_SIZE = 28;
 const SERVICE_STATUS_PROCESS_SIZE = 36;
 
@@ -208,8 +206,11 @@ const HANDLE_STRIDE = 4;
  *           started by the run, stands.
  * @property {string | null} [service]  The service this process was started to run, by
  *           the manager (COM starts a class's LocalService so): its dispatcher connects.
- * @property {(entry: number, args: number[]) => unknown} [call]
- *           The program's own code called, as a ServiceMain is.
+ * @property {(entry: number, args: (number | bigint)[]) => unknown} [call]
+ *           The program's own code called, as a ServiceMain is: an argument past
+ *           4 GiB a bigint, as the bridge takes a quadword.
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process, whose service table,
+ *           argv and every structure with a pointer in it are laid out in quadwords.
  */
 
 /**
@@ -253,6 +254,24 @@ const mapAccess = (access, mapping)=>{
  */
 export function createServiceFunctions(host){
     const { hive } = host;
+    const pointer = pointerWidth(host.pointerSize);
+    /** @param {number} address */
+    const readPointer = address=>pointer.get(new DataView(Uint8Array.from(
+        host.readMemory?.(wholeAddress(address), pointer.size) ?? new Uint8Array(8)).buffer), 0);
+    /** A pointer handed to the program's own code: a quadword past 4 GiB goes whole. @param {number} value */
+    const guestArgument = value=>(value >= 2 ** 32 ? BigInt(value) : value);
+    /** Rounded up to the pointer's alignment, as a structure ending in dwords is padded. @param {number} size */
+    const padded = size=>Math.ceil(size / pointer.size) * pointer.size;
+    /**
+     * QUERY_SERVICE_CONFIG: the type, start and error control, then the path and
+     * group, the tag between them and the dependencies, the account and the
+     * display name -- each pointer at its own alignment.
+     */
+    const CONFIG = pointer.size === 8
+        ? { size: 64, tag: 32, strings: [16, 24, 40, 48, 56] }
+        : { size: 36, tag: 20, strings: [12, 16, 24, 28, 32] };
+    /** SERVICE_FAILURE_ACTIONS: the reset period, two strings, a count, a pointer. */
+    const FAILURE_ACTIONS_SIZE = padded(4) + 2 * pointer.size + padded(4) + pointer.size;
 
     /**
      * What a handle names: the manager itself, a service by name, or the
@@ -878,22 +897,23 @@ export function createServiceFunctions(host){
     const dispatcher = wide=>({
         argBytes: 4,
         /** @param {number[]} args */
-        handler: ([table])=>{
+        handler: args=>{
+            const table = pointerArg(args, 0);
             const name = host.service ?? null;
             if (name === null || !host.call || !host.readMemory || !host.allocate)
             {
                 return fail(ERROR_FAILED_SERVICE_CONTROLLER_CONNECT);
             }
-            if ((table >>> 0) === 0 || running !== null)
+            if (table === 0 || running !== null)
             {
                 return fail(ERROR_INVALID_PARAMETER);
             }
             /** @type {{ name: string, main: number }[]} */
             const entries = [];
-            for (let at = wholeAddress(table); entries.length < 64; at += 8)
+            // SERVICE_TABLE_ENTRY: two pointers, the table ended by a null name.
+            for (let at = table; entries.length < 64; at += 2 * pointer.size)
             {
-                const view = new DataView(Uint8Array.from(host.readMemory(at, 8)).buffer);
-                const [text, main] = [view.getUint32(0, true), view.getUint32(4, true)];
+                const [text, main] = [readPointer(at), readPointer(at + pointer.size)];
                 if (text === 0)
                 {
                     break;
@@ -913,12 +933,11 @@ export function createServiceFunctions(host){
             // argv: the service's name and nothing after it, as the manager
             // hands a service started without arguments.
             const text = wide ? wideBytes(name) : sz(name);
-            const argv = host.allocate(8 + text.length) >>> 0;
-            const words = new Uint8Array(8);
-            new DataView(words.buffer).setUint32(0, argv + 8, true);
-            host.writeMemory?.(argv, words);
-            host.writeMemory?.(argv + 8, text);
-            return Promise.resolve(host.call(entry.main, [1, argv])).then(()=>1);
+            const list = 2 * pointer.size;
+            const argv = wholeAddress(host.allocate(list + text.length));
+            host.writeMemory?.(argv, pointer.array([argv + list]));
+            host.writeMemory?.(argv + list, text);
+            return Promise.resolve(host.call(entry.main, [1, guestArgument(argv)])).then(()=>1);
         },
     });
 
@@ -950,7 +969,7 @@ export function createServiceFunctions(host){
     const queryConfig = wide=>({
         argBytes: 16,
         handler: (/** @type {number[]} */ [service, buffer, size, needed])=>{
-            const HEADER = 36;
+            const HEADER = CONFIG.size;
             const object = holding(service, 'service', SERVICE_QUERY_CONFIG);
             if (typeof object === 'number')
             {
@@ -989,11 +1008,11 @@ export function createServiceFunctions(host){
             view.setUint32(0, numberOf(key, 'Type', SERVICE_WIN32_OWN_PROCESS), true);
             view.setUint32(4, numberOf(key, 'Start', 3), true);
             view.setUint32(8, numberOf(key, 'ErrorControl', 1), true);
-            view.setUint32(20, numberOf(key, 'Tag', 0), true);
+            view.setUint32(CONFIG.tag, numberOf(key, 'Tag', 0), true);
             let at = HEADER;
-            for (const [index, offset] of [12, 16, 24, 28, 32].entries())
+            for (const [index, offset] of CONFIG.strings.entries())
             {
-                view.setUint32(offset, (buffer >>> 0) + at, true);
+                pointer.set(view, offset, (buffer >>> 0) + at);
                 out.set(strings[index], at);
                 at += strings[index].length;
             }
@@ -1042,12 +1061,13 @@ export function createServiceFunctions(host){
             {
                 const description = textOf(key, 'Description');
                 const text = description === null ? null : encode(wide, description);
-                total = 4 + (description === null ? 0 : (description.length + 1) * 2);
-                out = new Uint8Array(4 + (text?.length ?? 0));
+                const head = pointer.size;
+                total = head + (description === null ? 0 : (description.length + 1) * 2);
+                out = new Uint8Array(head + (text?.length ?? 0));
                 if (text)
                 {
-                    new DataView(out.buffer).setUint32(0, (buffer >>> 0) + 4, true);
-                    out.set(text, 4);
+                    pointer.set(new DataView(out.buffer), 0, (buffer >>> 0) + head);
+                    out.set(text, head);
                 }
             }
             else if (kind === SERVICE_CONFIG_PRESHUTDOWN_INFO)
@@ -1063,8 +1083,8 @@ export function createServiceFunctions(host){
             else
             {
                 // SERVICE_FAILURE_ACTIONS: no reset period, message, command or action.
-                out = new Uint8Array(20);
-                total = 20;
+                out = new Uint8Array(FAILURE_ACTIONS_SIZE);
+                total = FAILURE_ACTIONS_SIZE;
             }
             writeDword(needed, total);
             if ((buffer >>> 0) === 0 || (size >>> 0) < total)
@@ -1106,7 +1126,7 @@ export function createServiceFunctions(host){
             {
                 case SERVICE_CONFIG_DESCRIPTION:
                 {
-                    const description = reader(wide)(readDword(info), MAX_TEXT);
+                    const description = reader(wide)(readPointer(info), MAX_TEXT);
                     if (description === '')
                     {
                         hive.deleteValue(key, 'Description');
@@ -1262,7 +1282,9 @@ export function createServiceFunctions(host){
             const all = (states & ~SERVICE_ACTIVE) === 0 ? [] : allServices().filter(entry=>
                 (entry.type & types) !== 0
                 && (group === null || entry.group.toUpperCase() === group.toUpperCase()));
-            const record = extended ? ENUM_SERVICE_STATUS_PROCESS_SIZE : ENUM_SERVICE_STATUS_SIZE;
+            // ENUM_SERVICE_STATUS(_PROCESS): the two names' pointers, then the status.
+            const record = padded(2 * pointer.size
+                + (extended ? SERVICE_STATUS_PROCESS_SIZE : SERVICE_STATUS_SIZE));
             const first = (resume >>> 0) === 0 ? 0 : Math.min(readDword(resume), all.length);
             const rest = all.slice(first);
             // The A form asks for as much as the W form does: the manager
@@ -1284,12 +1306,12 @@ export function createServiceFunctions(host){
                 const name = encode(wide, entry.name);
                 const display = encode(wide, entry.display);
                 host.writeMemory?.(strings, name);
-                view.setUint32(0, strings, true);
+                pointer.set(view, 0, strings);
                 strings += name.length;
                 host.writeMemory?.(strings, display);
-                view.setUint32(4, strings, true);
+                pointer.set(view, pointer.size, strings);
                 strings += display.length;
-                out.set(statusOf(entry.name, extended), 8);
+                out.set(statusOf(entry.name, extended), 2 * pointer.size);
                 host.writeMemory?.(base + at * record, out);
             });
             writeDword(returned, fitting);
@@ -1726,16 +1748,16 @@ export function createServiceFunctions(host){
          * one of its services: NULL, ERROR_SERVICE_NOT_IN_EXE.
          */
         RegisterServiceCtrlHandlerA: { argBytes: 8,
-            handler: (/** @type {number[]} */ [name])=>register(name, false) },
+            handler: (/** @type {number[]} */ args)=>register(pointerArg(args, 0), false) },
         RegisterServiceCtrlHandlerW: { argBytes: 8,
-            handler: (/** @type {number[]} */ [name])=>register(name, true) },
+            handler: (/** @type {number[]} */ args)=>register(pointerArg(args, 0), true) },
         RegisterServiceCtrlHandlerExA: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ [name])=>register(name, false),
+            handler: (/** @type {number[]} */ args)=>register(pointerArg(args, 0), false),
         },
         RegisterServiceCtrlHandlerExW: {
             argBytes: 12,
-            handler: (/** @type {number[]} */ [name])=>register(name, true),
+            handler: (/** @type {number[]} */ args)=>register(pointerArg(args, 0), true),
         },
         /**
          * BOOL SetServiceStatus(SERVICE_STATUS_HANDLE hServiceStatus,
@@ -1746,13 +1768,14 @@ export function createServiceFunctions(host){
          */
         SetServiceStatus: {
             argBytes: 8,
-            handler: (/** @type {number[]} */ [handle, status])=>{
-                if ((handle >>> 0) !== STATUS_HANDLE || running === null || (status >>> 0) === 0)
+            handler: (/** @type {number[]} */ args)=>{
+                const [handle, status] = [args[0], pointerArg(args, 1)];
+                if ((handle >>> 0) !== STATUS_HANDLE || running === null || status === 0)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 running.state = new DataView(Uint8Array.from(
-                    host.readMemory?.(status >>> 0, SERVICE_STATUS_SIZE) ?? []).buffer)
+                    host.readMemory?.(status, SERVICE_STATUS_SIZE) ?? []).buffer)
                     .getUint32(4, true);
                 return 1;
             },
