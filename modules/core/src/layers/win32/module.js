@@ -3018,7 +3018,7 @@ export function createWin32Module(){
                 /** @type {import('./windowscodecs/kit.js').CodecsHost} */
                 const codecsHost = {
                     registry: com, vtables: comVtables, heap, readMemory, writeMemory,
-                    readWideString,
+                    readWideString, pointerSize,
                     objectAt: pointer=>bridge.interfaceObject(pointer),
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread(),
@@ -5099,7 +5099,7 @@ export function createWin32Module(){
                 }),
 
                 'SHLWAPI.dll': ()=>({ ...createShlwapiFunctions({
-                    readCString, readWideString, readMemory, writeMemory,
+                    readCString, readWideString, readMemory, writeMemory, pointerSize,
                     // The COM helpers call methods of the program's own objects.
                     drive: steps=>bridge.drive(steps),
                     // SHCreateStreamOnFile's streams are objects of shlwapi's own.

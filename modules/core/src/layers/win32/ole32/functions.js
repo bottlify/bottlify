@@ -2958,6 +2958,7 @@ export function createOleFunctions(host){
         writeMemory: host.writeMemory,
         heap: host.heap,
         globalMemory: host.globalMemory,
+        pointerSize: width.size,
         callMethod,
         queryPointer,
         callerThread: ()=>host.callerThread?.(),

@@ -23,6 +23,7 @@ import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
 import { dword, u32 } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
 
 export const IID_ISTREAM = '{0000000C-0000-0000-C000-000000000046}';
 export const IID_ISEQUENTIAL_STREAM = '{0C733A30-2A1C-11CE-ADE5-00AA0044773D}';
@@ -52,7 +53,6 @@ const STGM_DELETEONRELEASE = 0x4000000;
 
 const STATFLAG_NONAME = 1;
 const STGTY_STREAM = 2;
-const STATSTG_SIZE = 72;
 
 const GENERIC_READ = 0x80000000;
 const GENERIC_WRITE = 0x40000000;
@@ -100,6 +100,7 @@ const COPY_CHUNK = 0x10000;
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [free]
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: its STATSTG is wider.
  */
 
 /** @param {number} low @param {number} high */
@@ -471,7 +472,8 @@ export function createStreams(host){
             {
                 return STG_E_INVALIDPOINTER;
             }
-            const record = new Uint8Array(STATSTG_SIZE);
+            const STATSTG = statstgLayout(host.pointerSize);
+            const record = new Uint8Array(STATSTG.SIZE_OF);
             const view = new DataView(record.buffer);
             if ((flags & STATFLAG_NONAME) === 0 && state.backing.name !== null)
             {
@@ -490,11 +492,11 @@ export function createStreams(host){
                     text[i * 2 + 1] = name.charCodeAt(i) >>> 8;
                 }
                 host.writeMemory(at, text);
-                view.setUint32(0, at, true);
+                view.setUint32(STATSTG.NAME, at, true);
             }
-            view.setUint32(4, STGTY_STREAM, true);
-            record.set(quadBytes(await state.backing.size()), 8);
-            view.setUint32(40, state.mode >>> 0, true);
+            view.setUint32(STATSTG.TYPE, STGTY_STREAM, true);
+            record.set(quadBytes(await state.backing.size()), STATSTG.SIZE);
+            view.setUint32(STATSTG.MODE, state.mode >>> 0, true);
             host.writeMemory(wholeAddress(out), record);
             return S_OK;
         } },

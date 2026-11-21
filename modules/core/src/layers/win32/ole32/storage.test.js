@@ -132,7 +132,8 @@ function fakeFiles(){
     };
 }
 
-function setup(){
+/** @param {{ pointerSize?: 4 | 8 }} [width]  The process's, 4 when not given. */
+function setup(width = {}){
     const bytes = new Uint8Array(0x40000);
     /** @type {string[]} */
     const reported = [];
@@ -290,6 +291,7 @@ function setup(){
         /** The docfile at PATH, parsed. */
         document: ()=>parseCompoundFile(
             /** @type {Uint8Array} */ (host.files.files.get(PATH.toUpperCase()))),
+        ...width,
     };
     const fns = createStorageFunctions(host);
     /** @type {(pointer: number, name: string, args: number[]) => any} */
@@ -408,6 +410,39 @@ test('a 64-bit program seeks a stream: the LARGE_INTEGER one slot, the origin af
     assert.equal(answer, S_OK, 'END - 2, its origin read from R8');
     assert.equal(host.u32(OUT2), 3);
     assert.equal(host.u32(OUT2 + 4), 0);
+});
+
+test('Stat fills a STATSTG laid out for the process, past the padding at 64 bits', ()=>{
+    // A 64-bit STATSTG has its pointer eight bytes wide and its ULARGE_INTEGER
+    // aligned to eight: type at 8, cbSize at 16, grfMode at 48, clsid at 56,
+    // and 80 bytes in all, where a 32-bit one has them at 4, 8, 40 and 48 in
+    // 72. A worker that sized the interface it marshaled into an HGlobal stream
+    // read a cbSize of 0 at 16 and sent nothing.
+    for (const [pointerSize, at] of /** @type {const} */ ([
+        [4, { type: 4, size: 8, mode: 40, clsid: 48, bytes: 72 }],
+        [8, { type: 8, size: 16, mode: 48, clsid: 56, bytes: 80 }]]))
+    {
+        const { host, fns, write, call, createDocfile } = setup({ pointerSize });
+        assert.equal(fns.CreateStreamOnHGlobal.handler([0, 1, OUT]), S_OK);
+        const stream = host.u32(OUT);
+        write(stream, new Uint8Array(0x48));
+        host.bytes.fill(0xcc, STAT, STAT + 96);
+        assert.equal(call(stream, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
+        assert.equal(host.u32(STAT + at.type), STGTY_STREAM, `type at ${at.type} (${pointerSize})`);
+        assert.equal(host.u32(STAT + at.size), 0x48, `cbSize at ${at.size} (${pointerSize})`);
+        assert.equal(host.u32(STAT + at.size + 4), 0);
+        assert.equal(host.u32(STAT + at.mode) & 3, STGM.READWRITE, `grfMode at ${at.mode}`);
+        assert.equal(host.bytes[STAT + at.bytes - 1], 0, 'the whole structure is written');
+        assert.equal(host.bytes[STAT + at.bytes], 0xcc, 'and nothing past it');
+
+        const root = createDocfile();
+        host.putGuid(GUID_AT, CLSID_A);
+        assert.equal(call(root, 'SetClass', [GUID_AT]), S_OK);
+        assert.equal(call(root, 'Stat', [STAT, STATFLAG_NONAME]), S_OK);
+        assert.equal(host.u32(STAT + at.type), STGTY_STORAGE);
+        assert.equal(formatGuid(host.bytes.subarray(STAT + at.clsid, STAT + at.clsid + 16)),
+            CLSID_A, `clsid at ${at.clsid} (${pointerSize})`);
+    }
 });
 
 test('a stream reads short at its end, seeks from three origins, grows and shrinks', ()=>{

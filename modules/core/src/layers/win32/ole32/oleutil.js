@@ -18,6 +18,7 @@
 
 import { GUID_SIZE, parseGuid } from './guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { statstgLayout } from '../common/statstg.js';
 
 const S_OK = 0;
 
@@ -35,9 +36,6 @@ export const SLOT = Object.freeze({
 export const FORMATETC_SIZE = 20;
 /** STGMEDIUM: tymed, the handle or pointer, pUnkForRelease. */
 export const STGMEDIUM_SIZE = 12;
-/** STATSTG, and where its CLSID lies. */
-export const STATSTG_SIZE = 72;
-export const STATSTG_CLSID = 48;
 
 export const TYMED = Object.freeze({
     NULL: 0, HGLOBAL: 1, FILE: 2, ISTREAM: 4, ISTORAGE: 8, GDI: 16, MFPICT: 32, ENHMF: 64,
@@ -105,10 +103,12 @@ const READ_MAX = 1 << 20;
  *     => number | Promise<number> | null) | undefined} [system]
  *           Another library's export, as ole32's import of it calls it.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ * @property {4 | 8} [pointerSize]  8 in a 64-bit process: the STATSTG it is given is wider.
  */
 
 /** @param {OleEnv} env */
 export function createOleUtil(env){
+    const STATSTG = statstgLayout(env.pointerSize);
     /** @param {number} address */
     const readU32 = address=>{
         const bytes = env.readMemory(wholeAddress(address), 4);
@@ -281,9 +281,9 @@ export function createOleUtil(env){
      * @param {number} storage @param {unknown} thread
      * @returns {Promise<{ hr: number, clsid: Uint8Array }>}
      */
-    const storageClass = async(storage, thread)=>(await withScratch(STATSTG_SIZE, async block=>{
+    const storageClass = async(storage, thread)=>(await withScratch(STATSTG.SIZE_OF, async block=>{
         const hr = (await env.callMethod(storage, SLOT.STORAGE_STAT, [block, 1], thread)) | 0;
-        return { hr, clsid: env.readMemory(block + STATSTG_CLSID, GUID_SIZE).slice() };
+        return { hr, clsid: env.readMemory(block + STATSTG.CLSID, GUID_SIZE).slice() };
     })) ?? { hr: 0x8007000e | 0, clsid: new Uint8Array(GUID_SIZE) };
 
     /**
