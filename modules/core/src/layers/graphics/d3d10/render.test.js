@@ -1909,7 +1909,8 @@ test('a typeless depth buffer is kept as depth, drawn through one view and read 
     assert.deepEqual(h.divergences, []);
 });
 
-test('a depth buffer read through a float view is read, as a depth texture', async()=>{
+test('a depth buffer read through a float view, on a device that filters no 32-bit float, is'
+    + ' read as a depth texture', async()=>{
     // A shadow map or a depth read back: the shader declares a float texture,
     // which binds no depth texture in WebGPU; it was read as an empty one.
     const h = harness();
@@ -1946,6 +1947,128 @@ test('a depth buffer read through a float view is read, as a depth texture', asy
     assert.deepEqual(h.gpu.errors, []);
     assert.equal(h.gpu.count('draw'), 1);
 });
+
+for (const shape of [
+    { name: 'R24G8_TYPELESS through D24_UNORM_S8_UINT, read as R24_UNORM_X8_TYPELESS',
+        typeless: DXGI_FORMAT.R24G8_TYPELESS, dsv: DXGI_FORMAT.D24_UNORM_S8_UINT,
+        srv: DXGI_FORMAT.R24_UNORM_X8_TYPELESS, slices: 1 },
+    { name: 'R32_TYPELESS through D32_FLOAT, read as R32_FLOAT',
+        typeless: DXGI_FORMAT.R32_TYPELESS, dsv: DXGI_FORMAT.D32_FLOAT,
+        srv: DXGI_FORMAT.R32_FLOAT, slices: 1 },
+    { name: 'R16_TYPELESS through D16_UNORM, read as R16_UNORM',
+        typeless: DXGI_FORMAT.R16_TYPELESS, dsv: DXGI_FORMAT.D16_UNORM,
+        srv: DXGI_FORMAT.R16_UNORM, slices: 1 },
+    { name: 'an array of two R32_TYPELESS slices, read as an R32_FLOAT array',
+        typeless: DXGI_FORMAT.R32_TYPELESS, dsv: DXGI_FORMAT.D32_FLOAT,
+        srv: DXGI_FORMAT.R32_FLOAT, slices: 2 },
+])
+{
+    test('a depth buffer drawn into and sampled as floats through a filtering sampler reads its'
+        + ` depth: ${shape.name}`, async()=>{
+        // Shadow maps, SSAO and soft particles: depth drawn through a
+        // depth-stencil view, then sampled, filtered, as a float texture.
+        // WebGPU binds a depth texture to no float binding: it was read as an
+        // empty texture, or at its nearest texel through a depth declaration.
+        // The draw reads a float twin, filled from the depth before each read
+        // that follows a write into it.
+        const h = harness({ fake: { features: ['float32-filterable'] } });
+        const { device } = h;
+        const array = shape.slices > 1;
+        /** @type {{ resource?: any }} */
+        const depth = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2X2, Width: 8, Height: 8, ArraySize: shape.slices, Format: shape.typeless,
+            BindFlags: D3D10_BIND.DEPTH_STENCIL | D3D10_BIND.SHADER_RESOURCE,
+        }, null, depth), S_OK);
+        const made = h.gpu.of('createTexture').at(-1);
+        assert.match(made.descriptor.format, /^depth/);
+        /** @type {{ view?: any }} */
+        const dsv = {};
+        assert.equal(device.CreateDepthStencilView(depth.resource, array
+            ? { Format: shape.dsv, ViewDimension: 4, MipSlice: 0, FirstArraySlice: 1,
+                ArraySize: 1 }
+            : { Format: shape.dsv, ViewDimension: 3, MipSlice: 0 }, dsv), S_OK);
+        /** @type {{ view?: any }} */
+        const srv = {};
+        assert.equal(device.CreateShaderResourceView(depth.resource, array
+            ? { Format: shape.srv, ViewDimension: 5, MostDetailedMip: 0, MipLevels: 1,
+                FirstArraySlice: 0, ArraySize: 2 }
+            : { Format: shape.srv, ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 },
+        srv), S_OK);
+        /** @type {{ state?: any }} */
+        const sampler = {};
+        assert.equal(device.CreateSamplerState({
+            Filter: D3D10_FILTER.MIN_MAG_MIP_LINEAR,
+            AddressU: D3D10_TEXTURE_ADDRESS.CLAMP, AddressV: D3D10_TEXTURE_ADDRESS.CLAMP,
+            AddressW: D3D10_TEXTURE_ADDRESS.CLAMP, MipLODBias: 0, MaxAnisotropy: 1,
+            ComparisonFunc: 0, BorderColor: [0, 0, 0, 0], MinLOD: 0, MaxLOD: 8,
+        }, sampler), S_OK);
+        const drawn = bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+        /** @type {{ shader?: any }} */
+        const reader = {};
+        assert.equal(device.CreatePixelShader(assemble({
+            kind: SHADER_KIND.PIXEL,
+            outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+            instructions: [
+                dclResource(0, array ? RESOURCE_DIMENSION.TEXTURE2DARRAY
+                    : RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT), dclSampler(0),
+                dclOutput(o(0)), sample(o(0), r(0), t(0), s(0)), ret(),
+            ],
+        }), reader), S_OK);
+        const write = ()=>{
+            device.PSSetShaderResources(0, [null]);
+            device.PSSetShader(drawn.ps);
+            device.OMSetRenderTargets([h.renderTargetView], dsv.view);
+            device.Draw(3, 0);
+        };
+        const read = ()=>{
+            device.OMSetRenderTargets([h.renderTargetView], null);
+            device.PSSetShader(reader.shader);
+            device.PSSetShaderResources(0, [srv.view]);
+            device.PSSetSamplers(0, [sampler.state]);
+            device.Draw(3, 0);
+        };
+        device.ClearDepthStencilView(dsv.view, D3D10_CLEAR.DEPTH, 0.5, 0);
+        write();
+        read();
+        write();
+        read();
+        // Nothing drawn into the depth since: the twin holds it already.
+        read();
+        await h.present();
+
+        assert.deepEqual(h.divergences.filter(detail=>/empty texture|nearest texel/.test(detail)),
+            []);
+        assert.deepEqual(h.gpu.errors, []);
+        const draws = h.gpu.calls.flatMap((/** @type {any} */ call, /** @type {number} */ at)=>
+            (call.op === 'draw' ? [at] : []));
+        assert.equal(draws.length, 5);
+        const fills = h.gpu.calls.flatMap((/** @type {any} */ call, /** @type {number} */ at)=>
+            (call.op === 'dispatchWorkgroups' && (call.group?.entries ?? []).some(
+                (/** @type {any} */ entry)=>entry.resource?.texture === made.texture) ? [at] : []));
+        assert.equal(fills.length, 2, 'filled after each draw into the depth, and only then');
+        assert.ok(draws[0] < fills[0] && fills[0] < draws[1], 'the first read sees the first draw');
+        assert.ok(draws[2] < fills[1] && fills[1] < draws[3], 'the second read sees the second');
+        const fill = h.gpu.calls[fills[0]];
+        const twin = fill.group.entries.find((/** @type {any} */ entry)=>
+            entry.resource?.texture && entry.resource.texture !== made.texture).resource.texture;
+        assert.equal(twin.descriptor.format, 'r32float');
+        assert.equal(twin.descriptor.size.depthOrArrayLayers ?? 1, shape.slices);
+        // Each read binds a view of the twin where the shader samples t0, and
+        // the depth texture itself is bound to no draw.
+        const groups = h.gpu.of('createBindGroup').map((/** @type {any} */ call)=>
+            call.descriptor.entries);
+        assert.ok(groups.some((/** @type {any[]} */ entries)=>entries.some(entry=>
+            entry.resource?.texture === twin)), 'the twin is bound');
+        assert.ok(!groups.some((/** @type {any[]} */ entries)=>entries.some(entry=>
+            entry.resource?.texture === made.texture)
+            && !entries.some(entry=>entry.resource?.texture === twin)),
+        'the depth texture is bound only where its twin is filled');
+        assert.ok(h.gpu.of('createShaderModule').some(call=>
+            new RegExp(`var t0: texture_${array ? '2d_array' : '2d'}<f32>;`)
+                .test(call.descriptor.code)), 'declared as a float texture');
+    });
+}
 
 test('a depth buffer cleared and then read through a view, not bound, is cleared before the draw'
     + ' reads it (test_depth_stencil_sampling, d3d11.c:10676)', async()=>{

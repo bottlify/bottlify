@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS,
+    D3D10_BIND, D3D10_CLEAR, D3D10_CPU_ACCESS, D3D10_MAP, D3D10_USAGE, D3D11_BIND_UNORDERED_ACCESS,
     D3D11_BUFFER_UAV_FLAG, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL, DXGI_FORMAT, S_OK,
 } from './constants.js';
 import { D3D11CreateDevice } from './device.js';
@@ -21,9 +21,10 @@ import { SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 import { RESOURCE_DIMENSION, RETURN_TYPE } from './sm4.js';
 import {
     assemble, atomicIadd, dclGlobalFlags, dclOutput, dclOutputSiv, dclTemps, dclThreadGroup,
-    dclUavRaw, dclUavStructured, dclUavTyped, immAtomicAlloc, ishl, l, lu, mov, o, r, ret,
+    dclResource, dclUavRaw, dclUavStructured, dclUavTyped, immAtomicAlloc, ishl, l, ld, lu, mov,
+    o, r, ret,
     passThroughVertexShader, solidPixelShader, storeRaw, storeUavTyped,
-    triangleGeometryShader, u, vThreadID,
+    t, triangleGeometryShader, u, vThreadID,
 } from './shader-fixtures.js';
 import { BINDING } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -36,9 +37,10 @@ const UAV_TEXTURE2D = 4;
  * A level 11 device over the recording GPU, and its immediate context.
  *
  * @param {(descriptor: any, made: (descriptor: any) => any) => any} [createTexture]
+ * @param {string[]} [features]  the optional features the GPU device says it has
  */
-function harness(createTexture){
-    const gpu = createFakeDevice();
+function harness(createTexture, features = []){
+    const gpu = createFakeDevice({ features });
     /** @type {string[]} */
     const divergences = [];
     const backend = createBackend({ device: gpu.device, queue: gpu.queue,
@@ -245,6 +247,63 @@ test('a texture a shader writes is a storage texture, viewed at the view\'s leve
         .bindGroupLayouts[0].descriptor.entries[0];
     assert.deepEqual(layout.storageTexture,
         { access: 'write-only', format: 'r32float', viewDimension: '2d' });
+});
+
+test('a compute shader loading a depth buffer through a float view reads the depth, not an'
+    + ' empty texture', async()=>{
+    // A depth reduction or a light culling pass reads the depth as floats.
+    // Only the vertex and pixel stages had the depth declared as one: a
+    // compute shader's read was an empty texture.
+    const h = harness(undefined, ['float32-filterable']);
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(h.device.CreateTexture2D({
+        Width: 8, Height: 8, MipLevels: 1, ArraySize: 1, Format: DXGI_FORMAT.R32_TYPELESS,
+        SampleDesc: { Count: 1, Quality: 0 }, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.DEPTH_STENCIL | D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0,
+        MiscFlags: 0,
+    }, null, depth), S_OK);
+    const made = h.gpu.of('createTexture').at(-1);
+    /** @type {any} */
+    const views = {};
+    assert.equal(h.device.CreateDepthStencilView(depth.resource,
+        { Format: DXGI_FORMAT.D32_FLOAT, ViewDimension: 3, MipSlice: 0 }, views), S_OK);
+    const dsv = views.view;
+    assert.equal(h.device.CreateShaderResourceView(depth.resource,
+        { Format: DXGI_FORMAT.R32_FLOAT, ViewDimension: 4, MostDetailedMip: 0, MipLevels: 1 },
+        views), S_OK);
+    const srv = views.view;
+    const out = texture2D(h, DXGI_FORMAT.R32_FLOAT, D3D11_BIND_UNORDERED_ACCESS, 8, 8);
+    h.context.ClearDepthStencilView(dsv, D3D10_CLEAR.DEPTH, 0.25, 0);
+    h.context.CSSetShader(computeShader(h, [
+        dclThreadGroup(8, 8, 1),
+        dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+        dclUavTyped(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+        dclTemps(1),
+        ld(r(0), vThreadID('xyyy'), t(0)),
+        storeUavTyped(u(0, 'xyzw'), vThreadID('xyyy'), r(0)),
+        ret(),
+    ]), null, 0);
+    h.context.CSSetShaderResources(0, [srv]);
+    h.context.CSSetUnorderedAccessViews(0, [uavOf(h, out, { Format: DXGI_FORMAT.R32_FLOAT,
+        ViewDimension: UAV_TEXTURE2D, MipSlice: 0 })], null);
+    h.context.Dispatch(1, 1, 1);
+    h.context.Flush();
+    await h.device.idle();
+    assert.deepEqual(h.divergences.filter(detail=>/empty texture/.test(detail)), []);
+    assert.deepEqual(h.gpu.errors, []);
+    const dispatches = h.gpu.of('dispatchWorkgroups');
+    assert.equal(dispatches.length, 2, 'the fill, then the program\'s dispatch');
+    const [depthEntry, twinEntry] = dispatches[0].group.descriptor.entries;
+    assert.equal(depthEntry.resource.texture, made.texture);
+    const twin = twinEntry.resource.texture;
+    assert.equal(twin.descriptor.format, 'r32float');
+    assert.ok(dispatches[1].group.descriptor.entries.some((/** @type {any} */ entry)=>
+        entry.resource?.texture === twin), 'the program reads the twin');
+    const clear = h.gpu.of('beginRenderPass').find((/** @type {any} */ call)=>
+        call.descriptor.depthStencilAttachment?.view.texture === made.texture);
+    assert.ok(clear && h.gpu.calls.indexOf(clear) < h.gpu.calls.indexOf(dispatches[0]),
+        'the clear is made before the fill reads the depth');
 });
 
 /** @param {ReturnType<typeof harness>} h @param {number} format @param {number} bind */

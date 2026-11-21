@@ -2669,3 +2669,16 @@ than its layout says is refused where it is placed (`shapeOf`), loudly. 50 hello
 node: heap 622 MiB before the lazy tables, 321 MiB with them and graphics' made the same way
 (and the trap layout shared, not copied); 125 ms a start, 67.
 *2026-11-20.*
+
+**A283. A Direct3D 10/11 depth buffer read as floats is read through an r32float copy of it.**
+A shader resource view of one channel over a depth buffer (R32_FLOAT over D32, R24_UNORM_X8 over
+D24S8, R16_UNORM over D16) is sampled, filtered and loaded as any float texture; WebGPU binds a
+depth texture only as a depth one and filters it only when it compares. Where the device filters
+32-bit floats (`float32-filterable`), a draw or dispatch that reads such a view in any stage reads
+an r32float twin of the texture, which a compute pass fills from the depth before the first read
+after a write into it (`depthFloatOf` in d3d10/render.js): the values are Direct3D's, filtered as
+Direct3D filters them, at the price of a second texture and a pass per write that is read. On a
+device without the feature the vertex and pixel stages declare the slot as a depth texture and
+read it at its nearest texel (said once); other stages, a multisampled depth buffer and the
+stencil plane (X24_TYPELESS_G8_UINT) read an empty texture, said once.
+*2026-11-21.*

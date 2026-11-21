@@ -552,6 +552,24 @@ const depthReadbackShader = format=>{
 };
 
 /**
+ * The pass that fills a depth texture's float twin (`depthFloatOf`) at one
+ * level, every slice: each texel's depth as the red of an r32float texel.
+ * Direct3D reads D16 and D24 through a UNORM view and D32 through a FLOAT
+ * one as that same number in .r; the stencil plane stays behind.
+ */
+const DEPTH_FLOAT_SHADER = [
+    '@group(0) @binding(0) var depthTexture: texture_depth_2d_array;',
+    '@group(0) @binding(1) var floats: texture_storage_2d_array<r32float, write>;',
+    '@compute @workgroup_size(8, 8)',
+    'fn computeMain(@builtin(global_invocation_id) id: vec3u) {',
+    '    let size = textureDimensions(depthTexture);',
+    '    if (id.x >= size.x || id.y >= size.y) { return; }',
+    '    let depth = textureLoad(depthTexture, id.xy, id.z, 0);',
+    '    textureStore(floats, id.xy, id.z, vec4<f32>(depth, 0.0, 0.0, 1.0));',
+    '}',
+].join('\n');
+
+/**
  * @param {RenderServices} services
  */
 export function createRenderer(services){
@@ -584,6 +602,15 @@ export function createRenderer(services){
 
     /** Whether the device blends 32-bit float targets (float32-blendable). */
     const float32Blending = backend ? backend.hasFeature?.('float32-blendable') === true : false;
+
+    /**
+     * Whether a depth texture a shader reads as floats is read through an
+     * r32float twin (`depthFloatOf`): only where the device filters 32-bit
+     * floats, so the twin binds where the shader declares a filtered float
+     * texture. Without it the shader declares a depth texture there
+     * (`variantOf`), read at its nearest texel.
+     */
+    const depthFloats = backend ? backend.hasFeature?.('float32-filterable') === true : false;
 
     /** Said once per distinct detail, so a loop of draws does not flood. */
     const reported = new Set();
@@ -1284,6 +1311,11 @@ export function createRenderer(services){
                 continue;
             }
             const { backing, twin } = use;
+            if (twin.depth)
+            {
+                fillDepthFloats(backing, twin);
+                continue;
+            }
             if (twin.words)
             {
                 const level = backing.layout.levels[use.mip];
@@ -1296,7 +1328,7 @@ export function createRenderer(services){
                         depthOrArrayLayers: use.count } });
                 if (back)
                 {
-                    backing.gpuDirty = true;
+                    wroteOnGpu(backing);
                 }
                 continue;
             }
@@ -1316,7 +1348,7 @@ export function createRenderer(services){
             }
             if (back)
             {
-                backing.gpuDirty = true;
+                wroteOnGpu(backing);
             }
         }
     };
@@ -1338,6 +1370,116 @@ export function createRenderer(services){
         twinUses = uses;
         syncTwins(true);
         twinUses = new Map();
+    };
+
+    /**
+     * The GPU's copy of a texture changed: what the host keeps of it is
+     * behind (`gpuDirty`), and a twin filled from it before is stale
+     * (`writes`, which `fillDepthFloats` compares).
+     *
+     * @param {any} backing
+     */
+    const wroteOnGpu = backing=>{
+        backing.gpuDirty = true;
+        rewritten(backing);
+    };
+    /** @param {any} backing  a texture whose GPU texels were just written */
+    const rewritten = backing=>{
+        backing.writes = (backing.writes ?? 0) + 1;
+    };
+
+    /**
+     * A depth texture read where a shader declares a float texture: the
+     * view of one channel Direct3D reads a depth buffer through (R32_FLOAT
+     * over D32, R24_UNORM_X8 over D24S8, R16_UNORM over D16), sampled,
+     * filtered or loaded as any float texture. WebGPU binds a depth texture
+     * only as a depth one and filters it only when it compares, so the draw
+     * reads an r32float twin of the texture instead, which a compute pass
+     * fills from the depth (`fillDepthFloats`) before a read that follows a
+     * write into it. It is only read: nothing goes back.
+     *
+     * @param {any} gpu  the depth view (`viewOf`) @param {any} view  the program's view
+     * @returns {any | null}  the twin's view, in `viewOf`'s shape, or null where
+     *     there is none to read (a multisampled or stencil view, no twin made)
+     */
+    const depthFloatOf = (gpu, view)=>{
+        if (!depthFloats || gpu.multisampled || gpu.stencil || !gpu.backing.made)
+        {
+            return null;
+        }
+        const backing = gpu.backing;
+        if (gpu.floats === undefined)
+        {
+            if (backing.depthFloats === undefined)
+            {
+                const texture = madeTexture({
+                    label: 'd3d10:depth-floats',
+                    size: backing.made.size,
+                    mipLevelCount: backing.made.mipLevelCount,
+                    dimension: '2d',
+                    format: 'r32float',
+                    usage: TextureUsage.TEXTURE_BINDING | TextureUsage.STORAGE_BINDING,
+                });
+                backing.depthFloats = texture ? { id: nextBacking++, texture, depth: true,
+                    filled: -1, fills: [] } : null;
+            }
+            const twin = backing.depthFloats;
+            gpu.floats = twin ? { ...gpu, sampleType: sampleTypeOf('r32float', undefined), twin,
+                view: twin.texture.createView({
+                    label: 'd3d10:view:depth-floats',
+                    format: 'r32float',
+                    dimension: gpu.dimension,
+                    baseMipLevel: view.range.mip,
+                    mipLevelCount: view.range.levels,
+                    baseArrayLayer: view.range.first,
+                    arrayLayerCount: view.range.count,
+                }) } : null;
+        }
+        if (gpu.floats)
+        {
+            useTwin(backing, gpu.floats.twin, view.range, false);
+        }
+        return gpu.floats;
+    };
+
+    /**
+     * Records the passes that copy a depth texture's every level and slice
+     * into its float twin, where the texture was written since the last.
+     *
+     * @param {any} backing @param {any} twin
+     */
+    const fillDepthFloats = (backing, twin)=>{
+        const writes = backing.writes ?? 0;
+        if (twin.filled === writes)
+        {
+            return;
+        }
+        twin.filled = writes;
+        const layers = backing.made.size.depthOrArrayLayers ?? 1;
+        const pipeline = computePipelineFor('depth-floats', DEPTH_FLOAT_SHADER,
+            [{ binding: 0, visibility: STAGE.COMPUTE,
+                texture: { sampleType: 'depth', viewDimension: '2d-array' } },
+            { binding: 1, visibility: STAGE.COMPUTE, storageTexture: { access: 'write-only',
+                format: 'r32float', viewDimension: '2d-array' } }],
+            'd3d10:depth-floats');
+        for (let mip = 0; mip < backing.made.mipLevelCount; mip++)
+        {
+            const level = backing.layout.levels[mip];
+            /** @param {any} texture @param {object} aspect */
+            const slices = (texture, aspect)=>texture.createView({ label: 'd3d10:depth-floats',
+                dimension: '2d-array', ...aspect, baseMipLevel: mip, mipLevelCount: 1,
+                baseArrayLayer: 0, arrayLayerCount: layers });
+            twin.fills[mip] ??= [{ binding: 0, resource: slices(backing.texture,
+                { aspect: 'depth-only' }) }, { binding: 1, resource: slices(twin.texture, {}) }];
+            record({
+                kind: 'dispatch',
+                what: 'a depth texture read as floats was not copied into the texture read',
+                ids: [backing.id],
+                pipeline,
+                entries: twin.fills[mip],
+                grid: [Math.ceil(level.width / 8), Math.ceil(level.height / 8), layers],
+            });
+        }
     };
 
     /**
@@ -2096,7 +2238,9 @@ export function createRenderer(services){
      * of one with several samples, read by sample; and, after a bar, the
      * slots where it declares a float texture and the view is of a depth
      * buffer, declared as a depth texture -- a shadow map, a depth read back
-     * -- which a float texture's binding does not take. Empty for nearly
+     * -- which a float texture's binding does not take, on a device that
+     * filters no 32-bit float (one that does reads a float twin of the
+     * depth there, `depthFloatOf`). Empty for nearly
      * every draw, and found from the few textures the shader declares.
      *
      * @param {any} stage
@@ -2125,7 +2269,7 @@ export function createRenderer(services){
             {
                 multisampled.push(texture.slot);
             }
-            else if (gpu.sampleType === 'depth' && !gpu.multisampled
+            else if (gpu.sampleType === 'depth' && !gpu.multisampled && !depthFloats
                 && texture.returnType !== RETURN_TYPE.UINT
                 && texture.returnType !== RETURN_TYPE.SINT
                 && DEPTH_DIMENSIONS.has(texture.dimension))
@@ -3110,11 +3254,13 @@ export function createRenderer(services){
             if (entry.texture)
             {
                 const view = stage.shaderResources[entry.binding - BINDING.TEXTURE];
-                const gpu = view ? viewOf(view) : null;
-                if (view && !gpu)
+                const own = view ? viewOf(view) : null;
+                if (view && !own)
                 {
                     diverge(unbackedView(view));
                 }
+                const gpu = own?.sampleType === 'depth' && entry.texture.sampleType !== 'depth'
+                    ? depthFloatOf(own, view) ?? own : own;
                 if (gpu && !(ACCEPTS[entry.texture.sampleType] ?? []).includes(gpu.sampleType))
                 {
                     diverge(`a ${gpu.sampleType} texture bound where the shader reads a`
@@ -3216,7 +3362,7 @@ export function createRenderer(services){
                     origin: { x: 0, y: 0, z: dst.slice } },
                 size: { width: level.width, height: level.height, depthOrArrayLayers: 1 },
             });
-            to.gpuDirty = true;
+            wroteOnGpu(to);
             return true;
         }
         if (from.texture && from.layout.storage.depth && from.sampleCount === 1
@@ -3278,7 +3424,7 @@ export function createRenderer(services){
                 },
                 size,
             });
-            to.gpuDirty = true;
+            wroteOnGpu(to);
             return true;
         }
         // A staging resource: the level comes back whole, and the box is
@@ -3509,6 +3655,7 @@ export function createRenderer(services){
             entries: [{ binding: 0, resource: { buffer: buffer.gpu, offset: 0,
                 size: words.byteLength } }],
         });
+        rewritten(backing);
         backend.releaseDynamicBuffer(buffer);
     };
 
@@ -3594,7 +3741,7 @@ export function createRenderer(services){
             from.gpu.markRead();
             record({ kind: 'copyBuffer', source: from.gpu.gpu, sourceOffset: left,
                 destination: to.gpu.gpu, destinationOffset: offset, size });
-            to.gpuDirty = true;
+            wroteOnGpu(to);
             return true;
         }
         if (destination.desc.Usage !== D3D10_USAGE.STAGING)
@@ -3722,7 +3869,7 @@ export function createRenderer(services){
         }
         record({ kind: 'blit', ids: [backing.id], what: 'mips were not generated',
             pipeline: mipPipelineFor(format), steps });
-        backing.gpuDirty = true;
+        wroteOnGpu(backing);
     };
 
     /** @type {Map<string, Promise<any>>} kind and format -> the pipeline that draws it */
@@ -3808,7 +3955,7 @@ export function createRenderer(services){
                 }) }],
             }],
         });
-        to.gpuDirty = true;
+        wroteOnGpu(to);
     };
 
     /**
@@ -4196,7 +4343,7 @@ export function createRenderer(services){
         useTwin(backing, mirror, { mip, levels: 1, first, count }, true);
         mirror.words.markRead();
         mirror.uniform.markRead();
-        backing.gpuDirty = true;
+        wroteOnGpu(backing);
         writes.add(backing.id);
         return mirror;
     };
@@ -4247,7 +4394,7 @@ export function createRenderer(services){
             }
             if (made)
             {
-                made.backing.gpuDirty = true;
+                wroteOnGpu(made.backing);
                 writes.add(made.backing.id);
             }
             return { binding: entry.binding,
@@ -4272,7 +4419,7 @@ export function createRenderer(services){
                 resource: { buffer: fallback.writable.gpu, offset: 0, size: 16 } };
         }
         backing.gpu.markRead();
-        backing.gpuDirty = true;
+        wroteOnGpu(backing);
         writes.add(backing.id);
         return { binding: entry.binding, resource: { buffer: backing.gpu.gpu, offset: 0,
             size: Math.ceil(resource.desc.ByteWidth / 4) * 4 } };
@@ -4327,7 +4474,7 @@ export function createRenderer(services){
         uniform.unlock(lock);
         uniform.markRead();
         const level = backing.layout.levels[view.range.mip];
-        backing.gpuDirty = true;
+        wroteOnGpu(backing);
         record({
             kind: 'dispatch',
             what: 'an unordered-access view was not cleared',
@@ -4755,7 +4902,7 @@ export function createRenderer(services){
                 counters.clears++;
                 for (const target of slices)
                 {
-                    target.backing.gpuDirty = true;
+                    wroteOnGpu(target.backing);
                     record({ kind: 'clear', target, color: (target.writeMask & 0x8) === 0
                         && target.writeMask !== 0 ? [color[0], color[1], color[2], 1]
                         : [...color] });
@@ -4781,7 +4928,7 @@ export function createRenderer(services){
                 return;
             }
             counters.clears++;
-            target.backing.gpuDirty = true;
+            wroteOnGpu(target.backing);
             record({ kind: 'clearDepth', target, flags, depth, stencil });
         },
 
@@ -4936,7 +5083,7 @@ export function createRenderer(services){
                     }, target=>{
                         if (target)
                         {
-                            backing.gpuDirty = true;
+                            wroteOnGpu(backing);
                             record({ kind: 'clear', target, color: colour });
                         }
                     });
@@ -4965,7 +5112,7 @@ export function createRenderer(services){
                 }
                 staged.unlock(lock);
                 staged.markRead();
-                backing.gpuDirty = true;
+                wroteOnGpu(backing);
                 const last = view.range.first + view.range.count - 1;
                 for (let layer = view.range.first; layer <= last; layer++)
                 {
@@ -5430,6 +5577,20 @@ export function createRenderer(services){
                 }
                 syncTwins(true);
                 twinUses = new Map();
+                // Counted once the draw is recorded: a read of a depth
+                // twin before it, in it, was filled with what it tests
+                // against (`fillDepthFloats`); one after it is filled again.
+                for (const drawn of colour)
+                {
+                    if (drawn?.backing)
+                    {
+                        rewritten(drawn.backing);
+                    }
+                }
+                if (depth?.backing && (depth.readOnly & D3D11_DSV_FLAG.READ_ONLY_DEPTH) === 0)
+                {
+                    rewritten(depth.backing);
+                }
             };
             // Primitives a shader sends to layers of array targets are drawn
             // once a layer, each keeping its own (`linkProgram`'s `layerPass`).
