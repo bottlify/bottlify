@@ -42,6 +42,7 @@ import { placementOf } from '../../modules/installer/src/prefix.js';
 import { modeOf } from '../run/play/modes.js';
 import { relayFromArgv, rootsFromArgv } from '../lib/relay-option.mjs';
 import { bundleDir, hostFiles, number, option, options } from '../lib/common.mjs';
+import { cpuProfiler } from '../lib/thread-profile.mjs';
 
 
 /** @param {string[]} argv */
@@ -493,54 +494,6 @@ function seriesRow(app, last, began){
         + ` ${parallelShare(point.parallel, last?.parallel ?? null)}`
         + ` worstSliceMs=${kernel.worstSliceMs ?? '-'}`);
     return point;
-}
-
-/**
- * A CPU profile of this thread from `from` seconds on for `for` seconds (to the
- * run's end when not given), written to the file when it stops.
- *
- * @param {string} spec  FILE[:FROM[:FOR]]
- */
-async function cpuProfiler(spec){
-    const [file, from = '0', length = ''] = spec.split(':');
-    const { Session } = await import('node:inspector');
-    const session = new Session();
-    session.connect();
-    /** @param {string} method @param {object} [params] @returns {Promise<any>} */
-    const post = (method, params = {})=>new Promise((resolve, reject)=>
-        session.post(method, params, (error, result)=>(error ? reject(error) : resolve(result))));
-    await post('Profiler.enable');
-    await post('Profiler.setSamplingInterval', { interval: 1000 });
-    let state = 'waiting';
-    const stop = async()=>{
-        if (state !== 'running')
-        {
-            state = 'done';
-            return;
-        }
-        state = 'done';
-        const { profile } = await post('Profiler.stop');
-        writeFileSync(file, JSON.stringify(profile));
-        console.log(`  cpu profile written to ${file}`);
-        session.disconnect();
-    };
-    setTimeout(()=>{
-        if (state !== 'waiting')
-        {
-            return;
-        }
-        state = 'running';
-        post('Profiler.start').then(()=>{
-            console.log(`  cpu profile started at ${from} s`);
-            if (length !== '')
-            {
-                setTimeout(()=>{
-                    stop();
-                }, Number(length) * 1000).unref();
-            }
-        });
-    }, Number(from) * 1000).unref();
-    return { stop };
 }
 
 /**

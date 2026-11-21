@@ -453,6 +453,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 
 - [`lib/common.mjs`](lib/common.mjs) - isMain, options, a median, where bundles lie (BOTTLIFY_BUNDLES)
 - [`lib/closed-clock.mjs`](lib/closed-clock.mjs) - the machine's time taken out of a counted run: the clock and the timers moved by what the program does
+- [`lib/thread-profile.mjs`](lib/thread-profile.mjs) - a V8 CPU profile of the Node thread a tool runs the engine on, over a window of the run (install-watch and launch-probe --cpu-profile FILE:FROM:FOR)
 - [`lib/qemu-count.mjs`](lib/qemu-count.mjs) - node under qemu-x86_64 with the counting plugin: marks, totals by kind of code, the plugin built
 - [`lib/btl.mjs`](lib/btl.mjs) - The tools' path to core's bundle reader and writer
 - [`lib/relay-option.mjs`](lib/relay-option.mjs) - --network and --roots for the runners

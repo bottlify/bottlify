@@ -15,6 +15,7 @@
  *       | --bundle ID [--which PATH]
  *       [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--machine MB] [--key Code@S]... [--click X,Y@S]...
+ *       [--cpu-profile FILE[:FROM[:FOR]]] [--calls N]
  *       [--shots DIR] [--list 'C:\Program Files'] [--collect]
  *       [--screen 1024x768] [--cat 'C:\WINDOWS\DirectX.log']... [--siblings]
  *       [--copy 'C:\WINDOWS\TEMP' temp]... [--layers dotnet48-x86,...]
@@ -121,6 +122,7 @@ import { deflateSync } from 'node:zlib';
 import { openBundle } from '../lib/btl.mjs';
 import { relayFromArgv, rootsFromArgv } from '../lib/relay-option.mjs';
 import { diskDirectory } from '../lib/disk-directory.mjs';
+import { cpuProfiler } from '../lib/thread-profile.mjs';
 import { createOpfsStore } from '../../modules/core/src/layers/filesystem/internal/opfs-store.js';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../../modules/core/src/app.js';
@@ -146,6 +148,14 @@ if (!file)
 const every = number('--every', 30);
 const shotsAt = argv.includes('--shots') ? argv[argv.indexOf('--shots') + 1] : null;
 const profileOut = argv.includes('--profile-out') ? argv[argv.indexOf('--profile-out') + 1] : null;
+/**
+ * `--cpu-profile FILE[:FROM[:FOR]]`: a V8 CPU profile of this thread, the one
+ * every process of the run turns on, over FOR seconds from FROM: what a phase
+ * the CORK and status lines only total is made of.
+ */
+const topCalls = argv.includes('--calls') ? Number(argv[argv.indexOf('--calls') + 1]) : 0;
+const profiling = argv.includes('--cpu-profile')
+    ? await cpuProfiler(argv[argv.indexOf('--cpu-profile') + 1]) : null;
 
 /**
  * Every value a repeatable flag was given.
@@ -819,6 +829,15 @@ setInterval(async()=>{
                 suspended: bridge.suspendedCalls, windows: win32.windows,
                 procedures: win32.windowProcedures, messages: win32.messages,
             }).slice(0, 1500));
+            // `--calls N`: the N host functions that took this process's host
+            // time so far, heaviest first, and the time in all: what a trap
+            // phase the CORK line only totals is made of.
+            if (topCalls > 0)
+            {
+                console.log(seconds(), 'CALLS', image.split('\\').pop(), JSON.stringify({
+                    hostMs: bridge.hostMs, byFunction: (bridge.byFunction ?? []).slice(0, topCalls),
+                }));
+            }
             // A process in a worker of its own: that worker's heap, which ends
             // the process unsaid when it runs out.
             if (diagnostics.some((/** @type {any} */ entry)=>entry.name === 'heap'))
@@ -1267,4 +1286,5 @@ for (const [library, names] of unresolved)
     console.log('unresolved', library, names.length, names.slice(0, 40).join(' '));
 }
 console.log('seconds', seconds());
+await profiling?.stop();
 process.exit(0);

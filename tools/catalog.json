@@ -879,6 +879,15 @@
    "tests": []
   },
   {
+   "path": "tools/lib/thread-profile.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "a V8 CPU profile of the Node thread a tool runs the engine on, over a window of the run (install-watch and launch-probe --cpu-profile FILE:FROM:FOR)",
+   "command": "",
+   "tests": []
+  },
+  {
    "path": "tools/lib/qemu-count.mjs",
    "category": "lib",
    "kind": "library",
