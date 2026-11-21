@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 import { parseTypeLib } from './typelib.js';
+import { createAutomationFunctions } from './functions.js';
 import {
     IID_IDISPATCH, PARAMFLAG_FIN, PARAMFLAG_FOUT, argumentBytes, argumentSlots,
     createInterfaceCatalog, describeType, layoutOf, marshalReply, marshalRequest, unmarshalReply,
@@ -597,4 +598,93 @@ test('a SAFEARRAY crosses between 64-bit processes in its 64-bit layout', async(
     assert.deepEqual([0, 1, 2].map(index=>callee.u32(values + index * 4)), [10, 20, 30]);
     await marshalReply(callee, method, request, call);
     assert.equal(callee.live.size, 0, 'the stub\'s array is destroyed');
+});
+
+/**
+ * A 64-bit process whose arrays and strings are oleaut32's own, as the stub
+ * a server runs makes them: SafeArrayCreate's layout, not one a test wrote.
+ *
+ * @param {string} name
+ */
+function automatedSide(name){
+    const self = longSide(name);
+    const automation = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        createAutomationFunctions({ pointerSize: 8, readMemory: self.readMemory,
+            writeMemory: self.writeMemory,
+            fillMemory: (at, value, length)=>self.bytes.fill(value, at, at + length),
+            heap: { allocate: self.allocate, free: at=>{
+                self.free(at);
+                return true;
+            } } }));
+    /** @param {string} export_ @param {number[]} args */
+    const call = (export_, args)=>Number(automation[export_].handler(args)) >>> 0;
+    const bounds = self.allocate(64);
+    return Object.assign(self, {
+        call,
+        /** @param {Uint8Array} content */
+        allocateBstr: content=>{
+            const source = self.allocate(content.length + 2);
+            self.writeMemory(source, Uint8Array.of(...content, 0, 0));
+            const made = call('SysAllocStringByteLen', [source, content.length]);
+            self.free(source);
+            return made;
+        },
+        /** @param {number} at */
+        freeBstr: at=>call('SysFreeString', [at]),
+        /** @param {number} vt @param {{ elements: number, lower: number }[]} given */
+        createSafeArray: (vt, given)=>{
+            given.forEach((bound, index)=>{
+                self.put(bounds + index * 8, bound.elements);
+                self.put(bounds + index * 8 + 4, bound.lower);
+            });
+            return call('SafeArrayCreate', [vt, given.length, bounds]);
+        },
+        /** @param {number} array */
+        destroySafeArray: array=>call('SafeArrayDestroy', [array]),
+    });
+}
+
+test('a SAFEARRAY of strings oleaut32 made crosses between 64-bit processes, element by'
+    + ' element', async()=>{
+    // As ICorSvcWorker::OptimizeAssembly sends its load lists.
+    /** @type {any} */
+    const method = { name: 'Optimize', slot: 4, unsupported: null, parameters: [
+        { name: 'name', flags: PARAMFLAG_FIN, type: { kind: 'bstr' } },
+        { name: 'list', flags: PARAMFLAG_FIN, type: { kind: 'safearray' } },
+    ] };
+    const caller = automatedSide('caller');
+    const callee = automatedSide('callee');
+    callee.free(callee.allocate(0x800));
+    const index = caller.allocate(4);
+    const list = caller.call('SafeArrayCreateVector', [8, 0, 2]);
+    for (const [at, word] of /** @type {[number, string][]} */ ([[0, 'mscorlib'], [1, 'System']]))
+    {
+        caller.put(index, at);
+        const made = caller.allocateBstr(caller.wide(word));
+        assert.equal(caller.call('SafeArrayPutElement', [list, index, made]), 0);
+        caller.freeBstr(made);
+    }
+    const name = caller.allocateBstr(caller.wide('System.Core'));
+    const request = await marshalRequest(caller, method, longFrame([name, list]));
+    const call = await unmarshalRequest(callee, method, request);
+    const [given, theirs] = call.words.map(Number);
+    assert.equal(text(callee.readMemory(given, callee.u32(given - 4))), 'System.Core');
+    const slot = callee.allocate(8);
+    const position = callee.allocate(4);
+    const read = [];
+    for (let at = 0; at < 2; at++)
+    {
+        callee.put(position, at);
+        assert.equal(callee.call('SafeArrayGetElement', [theirs, position, slot]), 0);
+        const element = callee.pointer(slot);
+        read.push(text(callee.readMemory(element, callee.u32(element - 4))));
+        callee.freeBstr(element);
+    }
+    assert.deepEqual(read, ['mscorlib', 'System'], 'each string whole, a quadword apart');
+    callee.free(slot);
+    callee.free(position);
+    const before = callee.live.size;
+    await marshalReply(callee, method, request, call);
+    assert.equal(before - callee.live.size, 5,
+        'the stub\'s name, its array\'s descriptor and data and both strings given back');
 });

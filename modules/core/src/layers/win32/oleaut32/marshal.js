@@ -42,6 +42,7 @@ import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { readToTerminator } from '../common/scan-windows.js';
+import { safeArrayLayout } from '../common/safearray.js';
 
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
@@ -265,7 +266,8 @@ const put32 = (bytes, at, value)=>bytes.set(le32(value), at);
  * @property {4 | 8} pointer
  * @property {number} variant
  * @property {4 | 8} slot
- * @property {{ data: number, bounds: number }} safeArray  pvData's offset, and rgsabound's
+ * @property {import('../common/safearray.js').SafeArrayLayout} safeArray  The process's SAFEARRAY,
+ *           oleaut32's own: pvData's offset, rgsabound's
  * @property {{ named: number, count: number, namedCount: number, size: number }} dispParams
  * @property {(bytes: Uint8Array, at: number) => number} read  A pointer where it is stored.
  * @property {(value: number) => Uint8Array} bytes  A pointer as it is stored.
@@ -290,7 +292,7 @@ export function layoutOf(pointerSize = 4){
         pointer: long ? 8 : 4,
         variant: long ? 24 : 16,
         slot: long ? 8 : 4,
-        safeArray: long ? { data: 16, bounds: 24 } : { data: 12, bounds: 16 },
+        safeArray: safeArrayLayout(pointerSize),
         dispParams: long ? { named: 8, count: 16, namedCount: 20, size: 24 }
             : { named: 4, count: 8, namedCount: 12, size: 16 },
         read: long
@@ -987,7 +989,7 @@ export function createWire(side){
         {
             return null;
         }
-        const head = side.readMemory(at, SAFEARRAY.bounds);
+        const head = side.readMemory(at, SAFEARRAY.BOUNDS);
         const dims = u16(head, 0);
         const features = u16(head, 2);
         const elementBytes = u32(head, 4);
@@ -995,13 +997,13 @@ export function createWire(side){
         let count = 1;
         for (let index = 0; index < dims; index++)
         {
-            const bound = side.readMemory(at + SAFEARRAY.bounds + index * 8, 8);
+            const bound = side.readMemory(at + SAFEARRAY.BOUNDS + index * 8, 8);
             bounds.push({ elements: u32(bound, 0), lower: u32(bound, 4) | 0 });
             count *= u32(bound, 0);
         }
         const vt = vartypeOfArray(features, elementBytes);
         const type = typeOfVartype(vt);
-        const data = pointerIn(head, SAFEARRAY.data);
+        const data = pointerIn(head, SAFEARRAY.DATA);
         if (!type || type.kind === 'word')
         {
             return { vt, bounds, data: side.readMemory(data, count * elementBytes).slice() };
@@ -1172,8 +1174,8 @@ export function createWire(side){
         {
             return 0;
         }
-        const head = side.readMemory(at, SAFEARRAY.bounds);
-        const data = pointerIn(head, SAFEARRAY.data);
+        const head = side.readMemory(at, SAFEARRAY.BOUNDS);
+        const data = pointerIn(head, SAFEARRAY.DATA);
         const elementBytes = u32(head, 4);
         if (wire.data)
         {

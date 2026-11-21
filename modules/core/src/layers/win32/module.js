@@ -237,6 +237,7 @@ import { CLSID_MF_READ_WRITE_CLASS_FACTORY, createMfReadWriteFunctions }
 import { createPropsysFunctions } from './propsys/functions.js';
 import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
+import { safeArrayLayout } from './common/safearray.js';
 import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
@@ -972,6 +973,24 @@ export function createWin32Module(){
             });
             /** @type {Record<string, Record<string, any>>} */
             const libraries = lazyLibraries.table;
+            const SAFEARRAY = safeArrayLayout(pointerSize);
+            /**
+             * A SAFEARRAY of bytes as oleaut32 makes one, holding `bytes`: a
+             * VT_UI1 vector, its data where its pvData points. 0 when none
+             * could be made.
+             *
+             * @param {Uint8Array} bytes
+             */
+            const byteVector = bytes=>{
+                const array = libraries['OLEAUT32.dll'].SafeArrayCreateVector
+                    .handler([17, 0, bytes.length]) >>> 0;
+                if (array !== 0 && bytes.length > 0)
+                {
+                    writeMemory(memory.readPointer(array + SAFEARRAY.DATA, SAFEARRAY.POINTER),
+                        bytes);
+                }
+                return array;
+            };
             /** @param {Record<string, () => Record<string, any>>} makers */
             const defineAll = makers=>{
                 for (const [name, make] of Object.entries(makers))
@@ -1934,16 +1953,8 @@ export function createWin32Module(){
                         [...text, '\0'].map(char=>char.charCodeAt(0))).buffer),
                     at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
                     readMemory: (address, length)=>memory.readBytes(address, length),
-                    allocateBytes: async bytes=>{
-                        // VT_UI1's vector, its data where pvData points.
-                        const array = await libraries['OLEAUT32.dll'].SafeArrayCreateVector
-                            .handler([17, 0, bytes.length]) >>> 0;
-                        if (array !== 0)
-                        {
-                            writeMemory(memory.readU32(array + 12), bytes);
-                        }
-                        return array;
-                    },
+                    allocateBytes: byteVector,
+                    pointerSize,
                     createInstance: (clsid, iid, out)=>lent(/** @type {Uint8Array} */ (parseGuid(clsid)), at=>
                         libraries['ole32.dll'].CoCreateInstance.handler([at, 0, 1, iid, out])),
                     // A DMO enumerates as the DMO wrapper filter registers it: at
@@ -5922,16 +5933,7 @@ export function createWin32Module(){
                             heap.free(at);
                         }
                     },
-                    byteArray: bytes=>{
-                        const array = libraries['OLEAUT32.dll'].SafeArrayCreateVector.handler(
-                            [17, 0, bytes.length]) >>> 0;
-                        if (array !== 0 && bytes.length > 0)
-                        {
-                            // SAFEARRAY's pvData, twelve bytes in.
-                            writeMemory(memory.readU32(array + 12), bytes);
-                        }
-                        return array;
-                    },
+                    byteArray: byteVector,
                     fileTimeToDate: async fileTime=>{
                         const scratch = heap.allocate(16 + 8);
                         try
@@ -6877,6 +6879,7 @@ export function createWin32Module(){
 
                 'OLEAUT32.dll': ()=>createAutomationFunctions({
                     errorSlots,
+                    pointerSize,
                     readMemory,
                     writeMemory,
                     fillMemory,

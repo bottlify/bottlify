@@ -23,14 +23,18 @@ const MK_E_NOSTORAGE = 0x800401ed;
 const NOT_FOUND = 0x80070002;
 const FILTER = '{22222222-0000-0000-0000-000000000001}';
 
-function machine(){
+/** @param {4 | 8} [pointerSize] */
+function machine(pointerSize = 4){
     const memory = new DataView(new ArrayBuffer(0x40000));
     let next = 0x20000;
     /** @type {Map<number, any>} */
     const objects = new Map();
     /** @type {[string, number, number][]} */
     const created = [];
+    // SAFEARRAY: pvData at 12 and the bound at 16, or at 16 and 24 at 64 bits.
+    const [DATA, BOUND] = pointerSize === 8 ? [16, 24] : [12, 16];
     const host = {
+        pointerSize,
         /** @param {number} at */
         readU32: at=>memory.getUint32(at, true),
         /** @param {number} at @param {number} limit */
@@ -65,13 +69,13 @@ function machine(){
         objectAt: pointer=>objects.get(pointer) ?? null,
         /** @param {number} at @param {number} length */
         readMemory: (at, length)=>new Uint8Array(memory.buffer.slice(at, at + length)),
-        /** @param {Uint8Array} bytes a SAFEARRAY of the bytes, its data at +12, count at +16 */
+        /** @param {Uint8Array} bytes a SAFEARRAY of the bytes */
         allocateBytes: bytes=>{
-            const array = host.allocate(24);
+            const array = host.allocate(32);
             const data = host.allocate(bytes.length);
             bytes.forEach((b, i)=>memory.setUint8(data + i, b));
-            memory.setUint32(array + 12, data, true);
-            memory.setUint32(array + 16, bytes.length, true);
+            memory.setUint32(array + DATA, data, true);
+            memory.setUint32(array + BOUND, bytes.length, true);
             return array;
         },
         allocateString: (/** @type {string} */ text)=>{
@@ -215,6 +219,26 @@ test('a property is read back in the type it was written in: a number, bytes, a 
     m.memory.setUint16(0x600, 8, true);
     assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Read', [0x300, 0x600, 0]) >>> 0, 0x80070057,
         'asked for another type: E_INVALIDARG');
+});
+
+test('a 64-bit process\'s bytes are read where its SAFEARRAY keeps them: pvData at 16, the'
+    + ' count at 24', async()=>{
+    const m = machine(8);
+    const filter = { category: CLSID_LEGACY_AM_FILTER_CATEGORY, instance: FILTER, clsid: FILTER,
+        name: 'A filter', merit: 0, pins: [], properties: new Map() };
+    m.store.register(filter);
+    const moniker = m.objects.get(m.devices.monikerFor(filter));
+    m.host.writeMemory(0x100, /** @type {Uint8Array} */ (parseGuid(IID_IPROPERTY_BAG)));
+    m.call(moniker, IID_IMONIKER, 'BindToStorage', [0, 0, 0x100, 0x200]);
+    const bag = m.objects.get(m.memory.getUint32(0x200, true));
+    m.putWide('Bytes', 0x300);
+    const array = m.host.allocateBytes(new Uint8Array([4, 5, 6, 7]));
+    m.memory.setUint16(0x500, 0x2011, true);
+    m.memory.setUint32(0x508, array, true);
+    assert.equal(await m.call(bag, IID_IPROPERTY_BAG, 'Write', [0x300, 0x500]), S_OK);
+    const stored = /** @type {Uint8Array} */ (filter.properties.get('Bytes'));
+    assert.equal(stored?.length, 4, 'as many bytes as the bound at 24 counts');
+    assert.deepEqual([...stored], [4, 5, 6, 7]);
 });
 
 test('Windows\' registrations are written for the classes made here, and every category', ()=>{
