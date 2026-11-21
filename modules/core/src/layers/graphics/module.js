@@ -147,6 +147,37 @@ export function clientUncovered(windows, handle, screen){
 }
 
 /**
+ * What the screen shows for a window a DXGI swap chain presents into, which
+ * DWM shows in place of what GDI drew there: `frame`, the device's last frame
+ * as it is, while the window is shown and nothing over it reaches its client
+ * area; `veil`, the frame with the windows over it laid over it, while it has
+ * the screen (full screen, or a window whose client area is the screen); else
+ * `desktop`, composed. The ceiling: the desktop around a smaller window is not
+ * shown, and a window over a smaller one shows its own surface under it.
+ *
+ * @param {ListedWindow[]} windows  bottom to top
+ * @param {{ window: number, fullscreen: boolean }} into
+ * @param {{ width: number, height: number }} screen
+ * @returns {'frame' | 'veil' | 'desktop'}
+ */
+export function swapChainShows(windows, into, screen){
+    const tree = windowTree(windows);
+    const window = tree.byHandle.get(`0x${(into.window >>> 0).toString(16)}`);
+    if (!window || !tree.shown(window))
+    {
+        return 'desktop';
+    }
+    if (clientUncovered(windows, into.window, screen))
+    {
+        return 'frame';
+    }
+    const { client } = window;
+    const screenHeld = into.fullscreen || (client.left <= 0 && client.top <= 0
+        && client.right >= screen.width && client.bottom >= screen.height);
+    return screenHeld ? 'veil' : 'desktop';
+}
+
+/**
  * Where the shown top-level windows over a window lie on the screen, bottom
  * to top: what a picture that has the screen to itself is to show over it.
  * None for a window not listed.
@@ -1674,38 +1705,32 @@ export function createGraphicsModule(){
                         veilOver(covering);
                         return;
                     }
-                    state.shown.overlay(null, []);
                     const screen = screens.screen();
-                    // A DXGI swap chain's frames are its window's
-                    // client area, which DWM shows in place of what GDI drew
-                    // there; here a process's picture is its desktop or its
-                    // device's frame, so while nothing over that window
-                    // reaches its client area - full screen or a window
-                    // smaller than the screen - the desktop composed again,
-                    // the window's own surface black or white, would hide
-                    // every frame between two presents: a click that repaints
-                    // the window's border flashed it. The ceiling: the desktop
-                    // around a smaller window is not shown.
-                    // DWM shows it whether or not its application is active.
-                    // A full-screen swap chain's window is the screen while
-                    // it is shown, as a full-screen Direct3D 8 or 9 device's.
+                    // A DXGI swap chain's frames are its window's client area,
+                    // which DWM shows in place of what GDI drew there, whether
+                    // or not its application is active (`swapChainShows`). The
+                    // desktop composed again, the window's own surface black or
+                    // white, would hide every frame between two presents: a
+                    // click that repaints the window's border flashed it, and a
+                    // box over the picture stood on black.
                     const into = state.seam?.presentedWindow?.() ?? null;
                     desktops.window = into?.window ?? 0;
                     if (screen && into)
                     {
                         const listed = win32.windows?.() ?? [];
                         const hex = `0x${(into.window >>> 0).toString(16)}`;
-                        const window = listed.find((/** @type {ListedWindow} */ each)=>
-                            each.hwnd === hex);
-                        desktops.client = window?.client ?? null;
+                        desktops.client = listed.find((/** @type {ListedWindow} */ each)=>
+                            each.hwnd === hex)?.client ?? null;
                         desktops.screen = { width: screen.width, height: screen.height };
-                        if (into.fullscreen ? window?.visible === true
-                            : clientUncovered(listed, into.window, screen))
+                        const shows = swapChainShows(listed, into, screen);
+                        if (shows !== 'desktop')
                         {
                             desktops.keptBack++;
+                            veilOver(into.window);
                             return;
                         }
                     }
+                    state.shown.overlay(null, []);
                     if (screen)
                     {
                         desktops.presented++;
