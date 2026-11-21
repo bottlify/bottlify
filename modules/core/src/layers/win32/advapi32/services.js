@@ -35,7 +35,7 @@ import { createPerfFunctions } from './perf.js';
 import {
     WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes,
 } from './tokens.js';
-import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { pointerArg, pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -255,9 +255,11 @@ const mapAccess = (access, mapping)=>{
 export function createServiceFunctions(host){
     const { hive } = host;
     const pointer = pointerWidth(host.pointerSize);
-    /** @param {number} address */
-    const readPointer = address=>pointer.get(new DataView(Uint8Array.from(
-        host.readMemory?.(wholeAddress(address), pointer.size) ?? new Uint8Array(8)).buffer), 0);
+    const { read: readPointer } = pointerIo({
+        readMemory: (address, length)=>Uint8Array.from(
+            host.readMemory?.(wholeAddress(address), length) ?? new Uint8Array(length)),
+        writeMemory: (address, bytes)=>host.writeMemory?.(wholeAddress(address), bytes),
+    }, pointer.size);
     /** A pointer handed to the program's own code: a quadword past 4 GiB goes whole. @param {number} value */
     const guestArgument = value=>(value >= 2 ** 32 ? BigInt(value) : value);
     /** Rounded up to the pointer's alignment, as a structure ending in dwords is padded. @param {number} size */

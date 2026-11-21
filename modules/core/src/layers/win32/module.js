@@ -874,6 +874,7 @@ export function createWin32Module(){
             const displayHost = {
                 readMemory: (address, length)=>readMemory(address, length),
                 writeMemory: (address, bytes)=>writeMemory(address, bytes),
+                pointerSize: pointerSize === 8 ? 8 : 4,
                 setLastError: code=>setError(code),
                 windowRect: (hwnd, out)=>libraries['USER32.dll'].GetWindowRect
                     .handler([hwnd, out]) >>> 0,

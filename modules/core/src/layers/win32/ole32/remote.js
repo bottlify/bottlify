@@ -52,7 +52,7 @@ import {
     createInterfaceCatalog, layoutOf, marshalReply, marshalRequest, unmarshalReply,
     unmarshalRequest, unsupportedAt,
 } from '../oleaut32/marshal.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 /**
@@ -600,11 +600,10 @@ export function createRemoting(host){
     const POINTER = width.pointer;
     const MESSAGE = MESSAGES[POINTER];
     const catalog = createInterfaceCatalog({ ...host.catalog, pointerSize: POINTER });
-    /** @param {number} address */
-    const readPointer = address=>width.read(host.readMemory(wholeAddress(address), POINTER), 0);
-    /** @param {number} address @param {number} value */
-    const writePointer = (address, value)=>host.writeMemory(wholeAddress(address),
-        width.bytes(value));
+    const { read: readPointer, write: writePointer } = pointerIo({
+        readMemory: (address, length)=>host.readMemory(wholeAddress(address), length),
+        writeMemory: (address, bytes)=>host.writeMemory(wholeAddress(address), bytes),
+    }, POINTER);
     /** An argument to a guest call: a pointer past 4 GiB goes whole. @param {number | bigint} value */
     const guestValue = value=>(typeof value === 'number' && value >= 2 ** 32 ? BigInt(value)
         : value);
