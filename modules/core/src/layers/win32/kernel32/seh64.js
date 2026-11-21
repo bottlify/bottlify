@@ -1396,17 +1396,19 @@ export function createSeh64(host){
              *     PEXCEPTION_RECORD ExceptionRecord, PVOID ReturnValue,
              *     PCONTEXT ContextRecord, PUNWIND_HISTORY_TABLE HistoryTable)
              *
-             * Unwinds to the target, running every termination handler, then
-             * continues at the target. It does not return.
+             * Unwinds from the caller to the target, running every termination
+             * handler, then continues at the target. It does not return.
+             * ContextRecord is where the system keeps the registers while it
+             * unwinds, not where it starts: it captures the caller's into it
+             * first, so a C++ frame handler passes a local it never filled.
+             * The engine keeps them on the host, and as the call does not
+             * return nothing reads that buffer after it.
              */
             RtlUnwindEx: {
                 argBytes: 24,
                 /** @param {number[]} args */
-                handler: ([targetFrame, targetIp, recordPtr, returnValue, contextRecord])=>{
-                    const context = (contextRecord >>> 0) !== 0
-                        ? readContext(contextRecord >>> 0) : callerContext();
-                    return unwindCalled(context, targetFrame, targetIp, recordPtr, returnValue);
-                },
+                handler: ([targetFrame, targetIp, recordPtr, returnValue])=>unwindCalled(
+                    callerContext(), targetFrame, targetIp, recordPtr, returnValue),
             },
 
             /**

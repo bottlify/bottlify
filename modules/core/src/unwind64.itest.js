@@ -61,3 +61,58 @@ test('a 64-bit RtlUnwind lands at its target with the value and does not return'
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 50000 }), 0x55);
     });
+
+/*
+ * RtlUnwindEx with a CONTEXT of the caller's own: a buffer the unwind keeps
+ * its registers in, not where it starts from. The C++ frame handler of the
+ * x64 CRT passes a local it never filled; the unwind begins from the
+ * caller's registers all the same. Here the buffer is 0xcc throughout, so an
+ * unwind that started from it would land nowhere.
+ */
+test('a 64-bit RtlUnwindEx starts from its caller, not from the context buffer it is given',
+    { timeout: 60000 }, async t=>{
+        const helperAt = 0x40;
+        const landingAt = 0xa0;
+        const program = buildExe({
+            bits: 64, codeSize: 0x100,
+            imports: { 'KERNEL32.dll': ['RtlUnwindEx', 'ExitProcess'] },
+            code: ({ iat, code })=>{
+                /** @param {number} at @param {number[]} op @param {number} to */
+                const rel = (at, op, to)=>[...op, ...u32(to - (code(at) + op.length + 4))];
+                const main = [
+                    0x48, 0x83, 0xec, 0x28, // sub rsp, 40
+                    ...rel(4, [0xe8], code(helperAt)), // call helper
+                    0x31, 0xc9, // xor ecx, ecx: the helper came back
+                    ...rel(11, [0xff, 0x15], iat('ExitProcess')),
+                ];
+                const helper = [
+                    0x48, 0x81, 0xec, ...u32(0x508), // sub rsp, 0x508
+                    0x48, 0x8d, 0x7c, 0x24, 0x30, // lea rdi, [rsp+0x30]: the buffer
+                    0xb9, ...u32(0x4d0), // mov ecx, sizeof(CONTEXT)
+                    0xb0, 0xcc, // mov al, 0xcc
+                    0xf3, 0xaa, // rep stosb
+                    0x48, 0x8d, 0x44, 0x24, 0x30, // lea rax, [rsp+0x30]
+                    0x48, 0x89, 0x44, 0x24, 0x20, // mov [rsp+0x20], rax: ContextRecord
+                    0x48, 0xc7, 0x44, 0x24, 0x28, ...u32(0), // mov qword [rsp+0x28], 0
+                    0x48, 0x89, 0xe1, // mov rcx, rsp: this frame
+                ];
+                helper.push(...rel(helperAt + helper.length, [0x48, 0x8d, 0x15],
+                    code(landingAt))); // lea rdx, [landing]
+                helper.push(0x45, 0x31, 0xc0); // xor r8d, r8d: no record
+                helper.push(0x41, 0xb9, ...u32(0x55)); // mov r9d, 0x55
+                helper.push(...rel(helperAt + helper.length, [0xff, 0x15], iat('RtlUnwindEx')));
+                helper.push(0xb9, ...u32(1)); // mov ecx, 1: RtlUnwindEx came back
+                helper.push(...rel(helperAt + helper.length, [0xff, 0x15], iat('ExitProcess')));
+                const landing = [
+                    0x89, 0xc1, // mov ecx, eax
+                    ...rel(landingAt + 2, [0xff, 0x15], iat('ExitProcess')),
+                ];
+                return [...main, ...new Array(helperAt - main.length).fill(0xcc),
+                    ...helper, ...new Array(landingAt - helperAt - helper.length).fill(0xcc),
+                    ...landing];
+            },
+        });
+        const app = await createApp({ executable: program });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 50000 }), 0x55);
+    });
