@@ -279,6 +279,28 @@ function wideMemory(engine, window, shared){
     }
 }
 
+/** The run's charge for the modules kept for its processes, by its budget. @type {WeakMap<object, ReturnType<typeof openCharge>>} */
+const sharedCharges = new WeakMap();
+
+/**
+ * What the translator's modules kept for every process of a run are taken from:
+ * the run's own part of its machine's memory (`RUN_HOLDER`), one charge for
+ * the run, so its processes share one keeping and another run on the same
+ * store keeps its own (`sharedModulesOf`).
+ *
+ * @param {SharedArrayBuffer | ArrayBuffer} budget  the run's (`memoryBudget`)
+ */
+function runSharedCharge(budget){
+    let charge = sharedCharges.get(budget);
+    if (charge === undefined)
+    {
+        charge = openCharge(openMemoryBudget(budget, RUN_HOLDER), 'translation',
+            TRANSLATION_WEIGHT);
+        sharedCharges.set(budget, charge);
+    }
+    return charge;
+}
+
 /**
  * Builds the cork host over a memory of its own.
  *
@@ -541,9 +563,8 @@ export function createCorkHost(config){
     // they outlive this process, in the run's thread where the store is (a
     // worker's store is its process's alone and keeps none), so they are taken
     // from the run's own part, once, and from no process running them.
-    const sharedCharge = memoryBudget === undefined ? null
-        : openCharge(openMemoryBudget(memoryBudget, RUN_HOLDER), 'translation',
-            TRANSLATION_WEIGHT);
+    // One for the run, so every process of it finds the run's keeping.
+    const sharedCharge = memoryBudget === undefined ? null : runSharedCharge(memoryBudget);
     const cacheBytes = corkConfig?.cacheBytes
         ?? (translationZone === undefined ? undefined
             : corkConfig?.crossTailCalls !== false ? 0

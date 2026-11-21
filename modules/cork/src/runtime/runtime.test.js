@@ -1203,6 +1203,19 @@ test('a batch module the runtimes sharing a store hold is charged once, to the s
     assert.equal(second.diagnostics.sharedModules, 1);
     assert.equal(second.own.held(), 0, 'nor to one that took it compiled');
     assert.equal(kept.held(), bytes, 'once');
+    // Another run on the same store, with a memory of its own: what the first
+    // run keeps is paid for in the first's, so it keeps and pays for its own.
+    const other = charge();
+    const own = charge();
+    const m = machine({ store, bundleId: 'test', charge: own, sharedCharge: other });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    await settle();
+    assert.equal(m.runtime.diagnostics().sharedModules, 0, 'none of the other run\'s');
+    assert.equal(other.held(), bytes, 'the run\'s own keeping, paid in its memory');
+    assert.equal(own.held(), 0);
     // Nothing kept: the runtime holds its code alone, and pays for it.
     const alone = await run(memoryTranslationStore(), { sharedModuleBytes: 0 });
     assert.ok(alone.own.held() > 0, 'the runtime that holds its module alone');

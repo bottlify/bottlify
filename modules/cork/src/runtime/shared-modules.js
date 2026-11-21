@@ -31,8 +31,10 @@
  *         dropped: number }, paid: boolean }} SharedModules
  */
 
-/** @type {WeakMap<object, SharedModules>} */
+/** By store, then by the charge that pays for them (`UNPAID` for none).
+ * @type {WeakMap<object, WeakMap<object, SharedModules>>} */
 const byStore = new WeakMap();
+const UNPAID = {};
 
 /** @typedef {{ take: (bytes: number) => boolean, give: (bytes: number) => void }} Charge */
 
@@ -93,11 +95,14 @@ export function createSharedModules(cap, charge = null){
 }
 
 /**
- * The shared modules of a store, made at its first ask; none without a store
- * or with a cap of 0.
+ * The shared modules of a store paid for by `charge`, made at their first ask;
+ * none without a store or with a cap of 0. Two runs on one store, each with a
+ * memory of its own (a machine rebuilt, a tool's runs one after another), keep
+ * apart: what one keeps is paid in its memory and never handed to the other.
  *
  * @param {object | null} store @param {number} cap
- * @param {Charge | null} [charge]  what its modules are taken from, at its making
+ * @param {Charge | null} [charge]  what its modules are taken from: one object
+ *     for every runtime of a run
  * @returns {SharedModules | null}
  */
 export function sharedModulesOf(store, cap, charge = null){
@@ -105,11 +110,17 @@ export function sharedModulesOf(store, cap, charge = null){
     {
         return null;
     }
-    let shared = byStore.get(store);
+    let byCharge = byStore.get(store);
+    if (byCharge === undefined)
+    {
+        byCharge = new WeakMap();
+        byStore.set(store, byCharge);
+    }
+    let shared = byCharge.get(charge ?? UNPAID);
     if (shared === undefined)
     {
         shared = createSharedModules(cap, charge);
-        byStore.set(store, shared);
+        byCharge.set(charge ?? UNPAID, shared);
     }
     return shared;
 }
