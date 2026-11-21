@@ -6551,6 +6551,7 @@ export function createWin32Module(){
                     }),
                     ...createTokenFunctions({
                         readMemory,
+                        pointerSize,
                         // Impersonation is the thread's, not the process's.
                         currentThread: ()=>kernel.currentThread(),
                         // A pipe's client is the pipes' to know.
