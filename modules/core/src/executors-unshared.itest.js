@@ -13,6 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createApp } from './app.js';
+import { spawnSync } from 'node:child_process';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
@@ -52,4 +53,28 @@ test('three executors without SharedArrayBuffer run the program on one and say w
         {
             globalThis.SharedArrayBuffer = shared;
         }
+    });
+
+test('the engine loads and runs a program where SharedArrayBuffer never existed',
+    { timeout: 60_000 },
+    ()=>{
+        // A page served without COOP/COEP has none from its first module on: a
+        // module that makes one as it loads stops the page before anything
+        // runs, which removing it after the import above cannot see.
+        const app = new URL('./app.js', import.meta.url).href;
+        const pe = new URL('../../../tools/fixtures/make-pe.mjs', import.meta.url).href;
+        const script = `delete globalThis.SharedArrayBuffer;
+            const { createApp } = await import(${JSON.stringify(app)});
+            const { buildExe } = await import(${JSON.stringify(pe)});
+            const executable = buildExe({ imports: { 'KERNEL32.dll': ['ExitProcess'] },
+                code: ({ iat })=>{ const at = iat('ExitProcess');
+                    return [0x6a, 0x07, 0xff, 0x15, at & 0xff, (at >>> 8) & 0xff,
+                        (at >>> 16) & 0xff, (at >>> 24) & 0xff]; } });
+            const run = await createApp({ executable });
+            const code = await run.run({ timeoutMs: 30000 });
+            await run.dispose();
+            process.stdout.write('exit ' + code);`;
+        const child = spawnSync(process.execPath, ['--input-type=module', '-e', script],
+            { encoding: 'utf8', timeout: 50_000 });
+        assert.equal(child.stdout.trim(), 'exit 7', child.stderr.slice(0, 2000));
     });

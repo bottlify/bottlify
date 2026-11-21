@@ -26,8 +26,14 @@ const TURN_MS = 0.25;
 /** How long a flush looks on the engine's thread before it goes on through its event loop, ms. */
 const FLUSH_LOOK_MS = 20;
 
-/** The word a flush's own sequentially consistent operation is made on. */
-const FENCE = new Int32Array(new SharedArrayBuffer(4));
+/**
+ * The word a flush's own sequentially consistent operation is made on. A page
+ * without SharedArrayBuffer (not cross-origin isolated) runs one executor and
+ * has no other to order against: a plain buffer serves it, and the module
+ * still loads there.
+ */
+const FENCE = new Int32Array(typeof SharedArrayBuffer === 'function'
+    ? new SharedArrayBuffer(4) : new ArrayBuffer(4));
 
 /**
  * FlushProcessWriteBuffers: done once every other executor that was running
