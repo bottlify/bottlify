@@ -111,6 +111,13 @@ const WRITE_NO_OVERWRITE = 5;
 const MOST = 16;
 
 /**
+ * The most shader resources a record copies: every input resource slot of a
+ * stage (D3D10_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT). A program binds
+ * twenty at once, past the sixteen of the other arrays.
+ */
+const MOST_RESOURCES = 128;
+
+/**
  * Room for a record of `length` bytes in the ring of the device whose block
  * is `block`, with the device's lock taken: its address, or 0 -- no block,
  * no ring, the host's flag, the lock held elsewhere, no room -- and then
@@ -181,13 +188,13 @@ export function one({ u32, setU32, compareExchange, pointerBytes }, self, slot, 
  * @guestCode stdcall
  * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
  * @param {ptr} self @param {u32} slot @param {u32} start
- * @param {u32} count @param {ptr} objects
+ * @param {u32} count @param {ptr} objects @param {u32} most  the most a record copies
  * @returns {u32}
  */
 export function slots({ u32, setU32, compareExchange, pointerBytes }, self, slot, start, count,
-    objects)
+    objects, most)
 {
-    if (count > MOST || (objects === 0 && count !== 0))
+    if (count > most || (objects === 0 && count !== 0))
     {
         return 1;
     }
@@ -380,7 +387,7 @@ export function VSSetConstantBuffers({ u32, setU32, compareExchange, host, point
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_CONSTANT_BUFFERS,
         start, count,
-        buffers) !== 0)
+        buffers, MOST) !== 0)
     {
         return host();
     }
@@ -401,7 +408,7 @@ export function PSSetConstantBuffers({ u32, setU32, compareExchange, host, point
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_CONSTANT_BUFFERS,
         start, count,
-        buffers) !== 0)
+        buffers, MOST) !== 0)
     {
         return host();
     }
@@ -422,7 +429,7 @@ export function GSSetConstantBuffers({ u32, setU32, compareExchange, host, point
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_CONSTANT_BUFFERS,
         start, count,
-        buffers) !== 0)
+        buffers, MOST) !== 0)
     {
         return host();
     }
@@ -444,7 +451,7 @@ export function VSSetShaderResources({ u32, setU32, compareExchange, host, point
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_SHADER_RESOURCES,
         start, count,
-        views) !== 0)
+        views, MOST_RESOURCES) !== 0)
     {
         return host();
     }
@@ -466,7 +473,7 @@ export function PSSetShaderResources({ u32, setU32, compareExchange, host, point
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_SHADER_RESOURCES,
         start, count,
-        views) !== 0)
+        views, MOST_RESOURCES) !== 0)
     {
         return host();
     }
@@ -488,7 +495,7 @@ export function GSSetShaderResources({ u32, setU32, compareExchange, host, point
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_SHADER_RESOURCES,
         start, count,
-        views) !== 0)
+        views, MOST_RESOURCES) !== 0)
     {
         return host();
     }
@@ -508,7 +515,7 @@ export function VSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes
     samplers)
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, VS_SET_SAMPLERS, start, count,
-        samplers) !== 0)
+        samplers, MOST) !== 0)
     {
         return host();
     }
@@ -528,7 +535,7 @@ export function PSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes
     samplers)
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, PS_SET_SAMPLERS, start, count,
-        samplers) !== 0)
+        samplers, MOST) !== 0)
     {
         return host();
     }
@@ -548,7 +555,7 @@ export function GSSetSamplers({ u32, setU32, compareExchange, host, pointerBytes
     samplers)
 {
     if (slots({ u32, setU32, compareExchange, pointerBytes }, self, GS_SET_SAMPLERS, start, count,
-        samplers) !== 0)
+        samplers, MOST) !== 0)
     {
         return host();
     }
