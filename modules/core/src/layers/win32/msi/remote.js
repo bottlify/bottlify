@@ -167,20 +167,28 @@ export async function serveCustomAction(channel, start, calls, say){
 
 /**
  * The server's side of one call: asked of the installation, answered with
- * its result, or null when the installation is gone.
+ * its result, or null when the installation is gone. An answer names no call,
+ * so the action's threads ask one at a time: each call is sent once the one
+ * before it has its answer, and no thread reads another's.
  *
  * @param {Channel} channel
  */
 export function sessionClient(channel){
+    /** The last call asked, settled once it has its answer. @type {Promise<unknown>} */
+    let last = Promise.resolve();
     return {
         /** @param {string} call @param {...any} args @returns {Promise<any>} */
-        ask: async(call, ...args)=>{
-            if (!await channel.send({ call, args }))
-            {
-                return null;
-            }
-            const reply = await channel.receive();
-            return reply === null ? null : reply.result;
+        ask: (call, ...args)=>{
+            const asked = last.then(async()=>{
+                if (!await channel.send({ call, args }))
+                {
+                    return null;
+                }
+                const reply = await channel.receive();
+                return reply === null ? null : reply.result;
+            });
+            last = asked.catch(()=>{});
+            return asked;
         },
     };
 }
