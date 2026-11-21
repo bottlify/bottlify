@@ -2682,3 +2682,19 @@ device without the feature the vertex and pixel stages declare the slot as a dep
 read it at its nearest texel (said once); other stages, a multisampled depth buffer and the
 stencil plane (X24_TYPELESS_G8_UINT) read an empty texture, said once.
 *2026-11-21.*
+
+**A284. A thread whose stack pointer leaves its stack for memory no stack of its own lies in stops
+its process.** Translated code writes through esp without testing the page (cork's `looseStacks`),
+so a thread's stack has no guard page a push can touch: a thread that ran out of stack pushed on
+through the stacks below it, the gap under the pool and the process's copy of the engine's tables,
+and the engine's thread hung in an entry hash the pushes had written over. The scheduler reads each
+thread's stack pointer before its turn (`watchStack`); one below the thread's stack that lies in
+nothing mapped, another thread's stack or memory the guest may not write stops the process on a
+`stack overflow` fault, as Windows ends a process whose STATUS_STACK_OVERFLOW nothing handles. No
+handler of the program's sees it: there is no stack left to run one on. A stack the program made
+itself (a fiber's, in memory it allocated) runs on. The walk is seen a turn late, and a turn reaches
+no further than the gap above the engine's tables for a thread's stack in the pool; the main
+thread's stack, low in the space, is not covered, which wants an esp floor in cork's back edges.
+The engine's entry hash is probed at most once round (`insert`), so one written over fails with an
+error rather than holding the thread.
+*2026-11-21.*

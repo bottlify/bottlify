@@ -1840,3 +1840,45 @@ test('a thread here whose deadline passes while another executor\'s thread keeps
     assert.equal(turn.ran, main, 'main woke at its deadline and ran in the same turn');
     assert.ok(rings <= 4, `after the rings that took the clock past it: ${rings}`);
 });
+
+test('a stack pointer past its stack into memory no stack of its own holds stops the process', ()=>{
+    // Translated pushes test no page, so a thread whose stack ran out walked on
+    // through what lay below its stack, the engine's tables among it, and the
+    // engine's thread hung on the hash it wrote over. A fiber's stack is writable
+    // memory of another kind the program allocated, and runs on.
+    /** @type {Record<string, any>} */
+    const regions = {
+        gap: undefined,
+        neighbour: { kind: 'stack', access: 'rw' },
+        engine: { kind: 'reserved', access: 'none' },
+        fiber: { kind: 'virtual', access: 'rw' },
+    };
+    for (const [where, region] of Object.entries(regions))
+    {
+        /** @type {{ name: string, eip: number, detail: string }[]} */
+        const faults = [];
+        let esp = 0x1ff000;
+        const cpu = { ...fakeCpu(), readReg32: ()=>esp, eip: ()=>0x401234,
+            raiseFault: (/** @type {any} */ fault)=>faults.push(fault) };
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            regionAt: ()=>region });
+        sched.create({ entry: 1, stackTop: 0x200000, stackLimit: 0x100000, tebAddress: 0xa000,
+            name: 'main' });
+        sched.runOnce();
+        assert.equal(faults.length, 0, `${where}: inside its stack, nothing`);
+        esp = 0xff000;
+        sched.runOnce();
+        sched.runOnce();
+        if (where === 'fiber')
+        {
+            assert.equal(faults.length, 0, 'a stack the program made runs on');
+        }
+        else
+        {
+            assert.equal(faults.length, 1, `${where}: told once`);
+            assert.equal(faults[0].name, 'stack overflow');
+            assert.equal(faults[0].eip, 0x401234);
+            assert.match(faults[0].detail, /main's stack pointer 0xff000 is past/);
+        }
+    }
+});

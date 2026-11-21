@@ -296,6 +296,9 @@ export function createKernelModule(){
                     }
                 },
                 ids: config?.ids,
+                // Where a stack pointer that left its stack lies: an overflow
+                // stops the process before it reaches the engine's tables.
+                regionAt: (/** @type {number} */ address)=>memory.find?.(address),
                 hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
             });
