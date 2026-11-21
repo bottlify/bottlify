@@ -163,6 +163,91 @@ export function createPrivateData(){
  */
 
 /**
+ * An object's count, kept on the host or in a word of guest memory the
+ * bridge gives it (`seam/com.js`'s `createCountCells`, `place`): there the
+ * guest's own AddRef and Release (`bridge/internal/vtable.js`, `COUNT_CODE`)
+ * move it without coming into the host, and only a crossing of zero is the
+ * host's. Direct3D 10 and 11 programs take and give back references to
+ * buffers, views and blobs hundreds of times a frame; each was a crossing.
+ * A move here is a compare-exchange: the guest's AddRef and Release on
+ * another executor move a placed count meanwhile.
+ */
+class PlacedCount {
+    #kept;
+    /** @type {{ address: number, read: () => number, write: (value: number) => void,
+     *     exchange?: (expected: number, value: number) => number } | null} */
+    #cell = null;
+    /** @type {() => boolean} */
+    #gone;
+
+    /** @param {number} value @param {() => boolean} gone */
+    constructor(value, gone){
+        this.#kept = value;
+        this.#gone = gone;
+    }
+
+    get value(){
+        return this.#cell ? this.#cell.read() >>> 0 : this.#kept;
+    }
+
+    /** No reference left and nothing binding it: its cell may go to another object. */
+    get destroyed(){
+        return this.#gone();
+    }
+
+    /**
+     * The count moved by `step`, unless it is 0 and the step down.
+     *
+     * @param {number} step  1 or -1
+     * @returns {{ was: number, now: number }}
+     */
+    move(step){
+        for (;;)
+        {
+            const was = this.value;
+            if (was === 0 && step < 0)
+            {
+                return { was, now: 0 };
+            }
+            const now = (was + step) >>> 0;
+            const cell = this.#cell;
+            if (cell === null)
+            {
+                this.#kept = now;
+                return { was, now };
+            }
+            if (cell.exchange === undefined)
+            {
+                cell.write(now);
+                return { was, now };
+            }
+            if ((cell.exchange(was, now) >>> 0) === was)
+            {
+                return { was, now };
+            }
+        }
+    }
+
+    /** @param {{ address: number, read: () => number, write: (value: number) => void } | null} cell */
+    place(cell){
+        const value = this.value;
+        this.#cell = cell;
+        if (cell)
+        {
+            cell.write(value);
+        }
+        else
+        {
+            this.#kept = value;
+        }
+    }
+
+    get placed(){
+        return this.#cell?.address ?? 0;
+    }
+}
+
+/**
  * @template T
  * @param {T} target
  * @param {ComAttachOptions} options
@@ -176,7 +261,8 @@ export function attachCom(target, options){
     const interfaces = new Set([IID.IUnknown, ...options.interfaces.flatMap(id=>
         (D3D11_TWIN[id] ? [id, D3D11_TWIN[id]] : [id]))]);
     const privateData = createPrivateData();
-    let count = options.implicit ? 0 : 1;
+    const gone = ()=>counter.value === 0 && !(/** @type {any} */ (target).bound > 0);
+    const counter = new PlacedCount(options.implicit ? 0 : 1, gone);
     if (!options.implicit)
     {
         options.onFirstRef?.();
@@ -189,21 +275,21 @@ export function attachCom(target, options){
         },
 
         addRef(){
-            if (count === 0)
+            const { was, now } = counter.move(1);
+            if (was === 0)
             {
                 options.onFirstRef?.();
             }
-            count++;
-            return count;
+            return now;
         },
 
         release(){
-            if (count === 0)
+            const { was, now } = counter.move(-1);
+            if (was === 0)
             {
                 return 0;
             }
-            count--;
-            if (count === 0)
+            if (now === 0)
             {
                 options.onLastRef?.();
                 // Gone, unless a context still keeps it bound: what it held
@@ -213,7 +299,7 @@ export function attachCom(target, options){
                     privateData.clear();
                 }
             }
-            return count;
+            return now;
         },
 
         /**
@@ -261,7 +347,7 @@ export function attachCom(target, options){
     if (!Object.hasOwn(/** @type {any} */ (target), 'destroyed'))
     {
         Object.defineProperty(target, 'destroyed', {
-            get: ()=>count === 0 && !(/** @type {any} */ (target).bound > 0),
+            get: gone,
             enumerable: false, configurable: true,
         });
         // The bridge keeps an interface whose count went to zero published
@@ -280,6 +366,8 @@ export function attachCom(target, options){
         release: method(methods.release),
         QueryInterface: method(methods.QueryInterface),
         GetParent: method(methods.GetParent),
-        refCount: { get: ()=>count, enumerable: true, configurable: true },
+        refCount: { get: ()=>counter.value, enumerable: true, configurable: true },
+        // The bridge places it in guest memory (`seam/com.js`, `countCell`).
+        counter: { value: counter, enumerable: false, configurable: true, writable: true },
     });
 }

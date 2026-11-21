@@ -307,9 +307,11 @@ function machine(guestCode, worker, eleven = false){
             assert.ok(pointer !== undefined, `${arg} is a pointer this machine handed out`);
             return pointer;
         });
+        // IUnknown's AddRef and Release come before every interface's own.
+        const unknown = ['AddRef', 'Release'].indexOf(call.method);
         const index = SLOTS[call.kind].findIndex(([entry])=>entry === call.method);
-        assert.ok(index >= 0, `${call.method} is a ${call.kind} slot`);
-        const slot = 3 + index;
+        assert.ok(unknown >= 0 || index >= 0, `${call.method} is a ${call.kind} slot`);
+        const slot = unknown >= 0 ? 1 + unknown : 3 + index;
         /** @type {number[]} */
         const bytes = [];
         for (const value of [...values].reverse())
@@ -415,6 +417,8 @@ async function play(seed, steps, guestCode, worker){
     const answers = [];
     /** How many of the device's calls reached the host, and which. */
     let trapped = 0;
+    /** Shader resources bound within the stage's 128 slots that reached the host. */
+    let resourcesTrapped = 0;
     /** @type {Map<string, number>} */
     const trappedBy = new Map();
     /** The ring's calls the program made, by the routine that carries each. @type {Set<string>} */
@@ -433,6 +437,10 @@ async function play(seed, steps, guestCode, worker){
         {
             trapped++;
             trappedBy.set(method, (trappedBy.get(method) ?? 0) + 1);
+            if (method.endsWith('SetShaderResources') && Number(args[0]) + Number(args[1]) <= 128)
+            {
+                resourcesTrapped++;
+            }
         }
         // Where a map puts the bytes is the device's to choose: that it put them somewhere is
         // what the program sees.
@@ -521,7 +529,10 @@ async function play(seed, steps, guestCode, worker){
                         ()=>pick.pick([constants, 0])) }]);
                 device(`${stage}SetSamplers`, [pick.below(3), Math.min(count, 2), { words:
                     Array.from({ length: Math.min(count, 2) }, ()=>pick.pick(samplers)) }]);
-                device(`${stage}SetShaderResources`, [pick.below(3), 1, { words: [0] }]);
+                // Every input resource slot a record copies (128), and one past it.
+                const views = pick.pick([0, 1, 20, 128 - 2, 129]);
+                device(`${stage}SetShaderResources`, [pick.below(3), views,
+                    { words: Array.from({ length: views }, ()=>0) }]);
             }
         },
         states: ()=>{
@@ -597,7 +608,7 @@ async function play(seed, steps, guestCode, worker){
     }
     call('#1', 'chain', 'Present', [0, 0]);
     await idle(m.gpu);
-    return { answers, reads: m.reads, trapped, trappedBy, carried };
+    return { answers, reads: m.reads, trapped, trappedBy, carried, resourcesTrapped };
 }
 
 for (const seed of [1, 2, 3, 5, 6, 7])
@@ -614,10 +625,84 @@ for (const seed of [1, 2, 3, 5, 6, 7])
         assert.ok(traps.trapped > 200, 'every call trapped without guest code');
         assert.ok(ring.trapped < traps.trapped / 4, `the ring carried the calls (${ring.trapped}`
             + ` of ${traps.trapped} trapped: ${JSON.stringify([...ring.trappedBy])})`);
+        assert.ok(traps.resourcesTrapped > 0, 'shader resources were bound');
+        assert.equal(ring.resourcesTrapped, 0, 'every stage\'s 128 resources go in the ring');
         assert.deepEqual(ring.answers, traps.answers, 'every answer, through the ring');
         assert.deepEqual(ring.reads, traps.reads, 'what every draw read, through the ring');
         assert.deepEqual(elsewhere.answers, traps.answers, 'every answer, drawn elsewhere');
         assert.deepEqual(elsewhere.reads, traps.reads, 'what every draw read, drawn elsewhere');
+    });
+}
+
+/**
+ * The references a program takes and gives back on what it made, the device
+ * and the objects it binds, side by side on the machine where every call is a
+ * trap and on the one with the guest code, which keeps each count in a word
+ * of guest memory: every AddRef and Release answers the same count, the last
+ * Release of a bound buffer leaves it drawn from, and on the guest's machine
+ * only a crossing of zero reaches the host - Direct3D 10 programs move these
+ * counts hundreds of times a frame.
+ */
+for (const seed of [1, 2, 3])
+{
+    test(`Direct3D 10: references counted in the guest answer as they do with every call a trap,`
+        + ` and only a crossing of zero reaches the host (seed ${seed})`, ()=>{
+        const runs = [false, true].map(guestCode=>{
+            const m = machine(guestCode, false);
+            const draw = random(seed);
+            const pick = ()=>draw.below(1000) / 1000;
+            /** @type {string[]} */
+            const answers = [];
+            let crossedAbove = 0;
+            /** @param {string} on @param {string} kind @param {string} method @param {any[]} [args] */
+            const call = (on, kind, method, args = [])=>{
+                const answer = m.run({ on, kind, method, args },
+                    method.startsWith('Create') || method === 'GetBuffer');
+                answers.push(`${on} ${method} ${answer.eax}`);
+                return answer;
+            };
+            /** @param {any[]} args */
+            const make = (method, args)=>/** @type {string} */ (call('#0', 'device', method,
+                args).out);
+            /** The objects made, each with the references the program holds. */
+            const held = new Map([['#0', { kind: 'device', refs: 1 }]]);
+            for (let i = 0; i < 4; i++)
+            {
+                held.set(make('CreateBuffer', [{ words: [256, D3D10_USAGE.DEFAULT,
+                    D3D10_BIND.VERTEX_BUFFER, 0, 0] }, 0, 'out']), { kind: 'buffer', refs: 1 });
+            }
+            const names = [...held.keys()];
+            for (let step = 0; step < 300; step++)
+            {
+                const name = names[Math.floor(pick() * names.length)];
+                const entry = /** @type {{ kind: string, refs: number }} */ (held.get(name));
+                if (entry.refs === 0)
+                {
+                    continue;
+                }
+                const choice = pick();
+                if (choice < 0.15 && entry.kind === 'buffer')
+                {
+                    // Bound, so its last Release leaves it alive while bound.
+                    call('#0', 'device', 'IASetVertexBuffers', [0, 1, { words: [/** @type {any} */
+                        (m.pointerOf.get(name))] }, { words: [32] }, { words: [0] }]);
+                    continue;
+                }
+                const up = choice < 0.6 || (entry.refs === 1 && name === '#0');
+                const answer = call(name, entry.kind, up ? 'AddRef' : 'Release');
+                // The count it answers, the runtime's own references included.
+                entry.refs = answer.eax;
+                // Above zero both ways: the guest's to answer.
+                if (guestCode && entry.refs > 0 && (up ? entry.refs > 1 : true)
+                    && answer.traps.length > 0)
+                {
+                    crossedAbove++;
+                }
+            }
+            return { answers, crossedAbove };
+        });
+        assert.deepEqual(runs[1].answers, runs[0].answers);
+        assert.equal(runs[1].crossedAbove, 0, 'every move above zero stayed in the guest');
     });
 }
 
@@ -777,7 +862,10 @@ async function play11(seed, steps, guestCode, worker){
                         ()=>pick.pick([constants, 0])) }]);
                 context(`${stage}SetSamplers`, [pick.below(3), Math.min(count, 2), { words:
                     Array.from({ length: Math.min(count, 2) }, ()=>pick.pick(samplers)) }]);
-                context(`${stage}SetShaderResources`, [pick.below(3), 1, { words: [0] }]);
+                // Every input resource slot a record copies (128), and one past it.
+                const views = pick.pick([0, 1, 20, 128 - 2, 129]);
+                context(`${stage}SetShaderResources`, [pick.below(3), views,
+                    { words: Array.from({ length: views }, ()=>0) }]);
             }
         },
         states: ()=>{
