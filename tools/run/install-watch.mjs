@@ -800,6 +800,7 @@ setInterval(async()=>{
         console.log(seconds(), 'MEM', JSON.stringify({ rss: mb(usage.rss),
             heapUsed: mb(usage.heapUsed), external: mb(usage.external),
             arrayBuffers: mb(usage.arrayBuffers) }));
+        let machineSaid = false;
         for (const [place, standing] of (await app.standing()).entries())
         {
             // A process standing in a worker of its own may not have said
@@ -826,6 +827,18 @@ setInterval(async()=>{
                     JSON.stringify(metrics('heap')));
             }
             const cpu = metrics('cpu');
+            // The machine's memory every process takes from, said once a tick:
+            // a refusal under `--machine` is read off its kinds, not the heap's.
+            if (cpu.machineMemory && !machineSaid)
+            {
+                machineSaid = true;
+                const said = cpu.machineMemory;
+                console.log(seconds(), 'MACHINE', JSON.stringify({ limitMB: mb(said.limit),
+                    usedMB: mb(said.used), peakMB: mb(said.peak), refused: said.refused,
+                    made: said.made, dropped: said.dropped, byKindMB: Object.fromEntries(
+                        Object.entries(said.byKind ?? {})
+                            .map(([kind, bytes])=>[kind, mb(bytes)])) }));
+            }
             console.log(seconds(), 'CPU', image.split('\\').pop(), JSON.stringify({
                 recent: (cpu.recent ?? []).slice(-4), ran: ranSince(image, cpu),
                 traps: `${cpu.traps}/${cpu.trapCapacity}`,

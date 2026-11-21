@@ -711,6 +711,23 @@ test('a commit the machine has no memory for is refused, and leaves nothing behi
         0x04]), RESERVING_ARENA.base, 'nothing of the refused commits holds the arena');
 });
 
+test('a heap block the machine has no memory for says so, not that the arena was full', ()=>{
+    // .NET's ngen ran out at 5 GB of machine with 770 MB of its arena free,
+    // and the report named only the free arena: the cause was not in it.
+    const limit = RESERVING_ARENA.base + GRANULARITY;
+    /** @type {string[]} */
+    const said = [];
+    const fns = createHeapFunctions({ ...fakeHost(),
+        arena: { ...RESERVING_ARENA, reach: (/** @type {number} */ end)=>end <= limit },
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>{
+            said.push(`${api}: ${detail}`);
+        } });
+    const heap = fns.GetProcessHeap.handler();
+    assert.equal(fns.HeapAlloc.handler([heap, 0, 2 * GRANULARITY]), 0);
+    assert.equal(said.length, 1);
+    assert.match(said[0], /^HeapAlloc: \d+ bytes refused: the machine's memory has no room/);
+});
+
 test('the allocator places a block at a chosen address only when all of it is free', ()=>{
     const allocator = createHeapAllocator({ base: 0x10000, size: 0x40000 });
 
@@ -1190,7 +1207,7 @@ test('a refused allocation says what was asked and what was left', ()=>{
     assert.equal(reports.length, 2);
     assert.equal(reports[0][0], 'HeapAlloc');
     assert.match(reports[0][1],
-        /^\d+ bytes refused: \d+ largest free of \d+ free, \d+ used in 1 blocks \(heap 0x[0-9a-f]+ \d+ in 1\)$/,
+        /^\d+ bytes refused: the arena has \d+ largest free of \d+ free, \d+ used in 1 blocks \(heap 0x[0-9a-f]+ \d+ in 1\)$/,
         'with who holds what');
     assert.equal(reports[1][0], 'VirtualAlloc');
 });
