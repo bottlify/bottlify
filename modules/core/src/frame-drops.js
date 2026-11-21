@@ -35,9 +35,13 @@
  *   otherwise the page's other work or the system's scheduling. Where no
  *   frame carries the heap (a worker cannot read it), `gc` says "not measured".
  *
- * The GPU's own time and the wait to present are not in the frame record; a
- * drop they caused falls in `outside the engine`, and `gpu` says so as "not
- * measured" until a record carries it.
+ * - `graphics worker: GPU` / `graphics worker: to the queue`: the engine was
+ *   parked or outside its phases while the graphics worker's sums for the
+ *   frame grew - the GPU's own drawing (`gfxGpuMs`), or the frame's pipelines
+ *   and replay before its work reached the queue (`gfxToQueueMs`) - by at least
+ *   half of what the parked part grew. A present held by the frame-latency
+ *   bound waits there. Where no frame carries the worker's sums (graphics on
+ *   the engine's thread), `gpu` says "not measured".
  *
  * @typedef {{ ms: number, byKind: Record<string, number>, idleMs?: number,
  *     waits?: number, compiles?: number, instructions?: number,
@@ -95,11 +99,11 @@ const partsOf = frame=>{
 
 /**
  * @param {FrameLike[]} frames  Oldest first, as `app.log.frames` answers them.
- * @param {{ gpuMeasured?: boolean }} [options]
  * @returns {DropReport}
  */
-export function frameDrops(frames, options = {}){
-    const gpu = options.gpuMeasured ? 'measured' : 'not measured';
+export function frameDrops(frames){
+    const gpu = frames.some(frame=>frame.notes?.gfxGpuMs !== undefined)
+        ? 'measured' : 'not measured';
     const gc = frames.some(frame=>frame.notes?.heapDelta !== undefined)
         ? 'measured' : 'not measured';
     const timed = frames.filter(frame=>frame.ms > 0);
@@ -123,6 +127,8 @@ export function frameDrops(frames, options = {}){
         interpreted: median(frame=>frame.notes?.interpreted ?? 0),
         compiles: median(frame=>frame.compiles ?? 0),
         translateMs: median(frame=>frame.notes?.translateMs ?? 0),
+        gfxGpuMs: median(frame=>frame.notes?.gfxGpuMs ?? 0),
+        gfxToQueueMs: median(frame=>frame.notes?.gfxToQueueMs ?? 0),
     };
 
     /** @type {Drop[]} */
@@ -140,8 +146,8 @@ export function frameDrops(frames, options = {}){
             Object.entries(parts).map(([part, ms])=>[part,
                 ms - ordinary[/** @type {keyof typeof parts} */ (part)]]))
             .sort((one, two)=>two[1] - one[1]);
-        const [part] = grew[0];
-        const cause = causeOf(part, frame, ordinary);
+        const [part, partGrew] = grew[0];
+        const cause = causeOf(part, partGrew, frame, ordinary);
         byCause[cause] = (byCause[cause] ?? 0) + 1;
         drops.push({ index: frame.index ?? -1, ms: frame.ms, cause,
             excessMs: frame.ms - medianMs, parts });
@@ -165,11 +171,21 @@ export function frameDrops(frames, options = {}){
  * most and what else the frame says about it.
  *
  * @param {string} part
+ * @param {number} partGrew  How much longer that part was than the ordinary frame's.
  * @param {FrameLike} frame
  * @param {{ instructions: number, interpreted: number, compiles: number,
- *     translateMs: number }} ordinary
+ *     translateMs: number, gfxGpuMs: number, gfxToQueueMs: number }} ordinary
  */
-function causeOf(part, frame, ordinary){
+function causeOf(part, partGrew, frame, ordinary){
+    if (part === 'idle' || part === 'outside')
+    {
+        const gpuGrew = (frame.notes?.gfxGpuMs ?? 0) - ordinary.gfxGpuMs;
+        const queueGrew = (frame.notes?.gfxToQueueMs ?? 0) - ordinary.gfxToQueueMs;
+        if (Math.max(gpuGrew, queueGrew) >= partGrew / 2)
+        {
+            return gpuGrew >= queueGrew ? 'graphics worker: GPU' : 'graphics worker: to the queue';
+        }
+    }
     if (part === 'guest')
     {
         if ((frame.compiles ?? 0) > ordinary.compiles
