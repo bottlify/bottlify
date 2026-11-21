@@ -626,3 +626,53 @@ test('Common Controls 6 redirects its window classes to their versioned names', 
     assert.equal(t.functions.DeactivateActCtx.handler([0, t.dword(0x314)]), 1);
     assert.equal(t.loaderApi.windowClass('Button'), null);
 });
+
+test('a 64-bit process\'s ACTCTX is read and its answers laid out with quadword pointers: the'
+    + ' detailed paths at 40 and 56, an assembly\'s strings from 64 by eight, a file\'s at 16',
+async()=>{
+    const t = setup({ 'C:\\app\\test2.manifest': MANIFEST2,
+        'C:\\app\\testdep.manifest': TESTDEP3 }, { pointerSize: 8 });
+    /** The quadword at `at`, as the program reads its pointer. @param {number} at */
+    const quad = at=>t.dword(at) + t.dword(at + 4) * 2 ** 32;
+    // ACTCTXW at 64 bits: cbSize 56, lpSource a quadword at 8.
+    t.bytes.fill(0, SCRATCH, SCRATCH + 56);
+    t.view.setUint32(SCRATCH, 56, true);
+    t.view.setBigUint64(SCRATCH + 8, BigInt(t.putWide(0x200, 'test2.manifest')), true);
+    const handle = await t.functions.CreateActCtxW.handler([SCRATCH]);
+    assert.ok(handle !== 0 && handle !== 0xffffffff, 'the source read from its quadword');
+
+    t.bytes.fill(0xdd, 0x300, 0x320);
+    assert.equal(t.functions.QueryActCtxW.handler([0x80000000, handle, 0, 1, 0x300, 16, 0x310]), 1);
+    assert.equal(quad(0x300), handle, 'the handle whole');
+    assert.equal(t.dword(0x308), 0, 'its flags at 8');
+    assert.equal(quad(0x310), 16, 'what was written, a SIZE_T');
+
+    t.bytes.fill(0xdd, 0x400, 0x500);
+    assert.equal(t.functions.QueryActCtxW.handler([0, handle, 0, 2, 0x400, 0x100, 0x310]), 1);
+    assert.equal(quad(0x310), 64 + ('C:\\app\\test2.manifest'.length + 1) * 2
+        + ('C:\\app\\'.length + 1) * 2, 'the structure is 64 bytes before its strings');
+    assert.equal(t.wideAt(quad(0x400 + 40), 21), 'C:\\app\\test2.manifest');
+    assert.equal(quad(0x400 + 48), 0, 'no configuration');
+    assert.equal(t.wideAt(quad(0x400 + 56), 7), 'C:\\app\\');
+
+    t.view.setUint32(0x320, 2, true);
+    t.bytes.fill(0xdd, 0x500, 0x700);
+    assert.equal(t.functions.QueryActCtxW.handler([0, handle, 0x320, 3, 0x500, 0x200, 0x310]), 1);
+    const encoded = 'testdep,processorArchitecture="x86",type="win32",version="6.5.4.3"';
+    assert.equal(t.wideAt(quad(0x500 + 64), encoded.length), encoded);
+    assert.equal(t.wideAt(quad(0x500 + 72), 23), 'C:\\app\\testdep.manifest');
+    assert.equal(quad(0x500 + 80), 0, 'no policy');
+    assert.ok(quad(0x500 + 88) > 0x500, 'a directory');
+    assert.equal(t.dword(0x500 + 96), 2, 'two files, at 96');
+
+    t.view.setUint32(0x330, 1, true);
+    t.view.setUint32(0x334, 1, true);
+    t.bytes.fill(0xdd, 0x700, 0x760);
+    assert.equal(t.functions.QueryActCtxW.handler([0, handle, 0x330, 4, 0x700, 0x60, 0x310]), 1);
+    assert.equal(t.wideAt(quad(0x700 + 16), 12), 'testlib2.dll');
+    assert.equal(quad(0x700 + 24), 0, 'no path');
+
+    t.bytes.fill(0xdd, 0x340, 0x348);
+    assert.equal(t.functions.ActivateActCtx.handler([handle, 0x340]), 1);
+    assert.equal(t.dword(0x344), 0, 'the cookie a ULONG_PTR, written whole');
+});

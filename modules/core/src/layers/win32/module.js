@@ -3643,6 +3643,7 @@ export function createWin32Module(){
             // the modules, answered from guest memory (`actctx.js`).
             const activation = createActivationContexts({
                 readMemory, writeMemory, readCString, readWideString,
+                pointerSize,
                 setLastError: setError,
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
