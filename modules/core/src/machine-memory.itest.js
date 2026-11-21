@@ -210,6 +210,11 @@ for (const guestCharge of CHARGES)
         const machine = cpu?.metrics?.machineMemory;
         assert.ok(machine && machine.limit === limit, JSON.stringify(machine));
         assert.ok(machine.peak <= machine.limit);
+        // A bound on the machine's memory nudges no collector V8 runs: it sizes
+        // its young generation by what it allocates, and an untouched buffer of
+        // a quarter of the guest's memory every 20 ms only forces full
+        // collections (api.md: on by default where JavaScriptCore runs alone).
+        assert.equal(cpu.metrics.gcNudges, null, 'no nudge on V8');
     });
 }
 

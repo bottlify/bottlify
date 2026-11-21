@@ -754,11 +754,11 @@ export function createCpuModule(){
                         throw new Error(problem);
                     }
                     const several = settings.executors > 1;
-                    // Where the tab's memory is bounded, every engine is nudged: what
-                    // the heap keeps of its garbage counts against the tab too.
-                    const nudging = gcNudgeOf(config?.gcNudge
-                        ?? (settings.memoryBudget !== undefined ? true : undefined),
-                    undefined, settings.memorySize);
+                    // By the host alone, a bounded machine's memory or not: V8 keeps
+                    // little garbage to nudge out, and a buffer of a quarter of the
+                    // guest's memory every 20 ms put .NET 4.8's setup under
+                    // --machine at 72 % of its thread in V8's collector.
+                    const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
                     if (keepsTableImporters())
                     {
                         log?.warn?.('cpu', 'this host\'s WebAssembly (V8 before 13, Node.js 22)'
