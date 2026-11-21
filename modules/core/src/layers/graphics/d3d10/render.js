@@ -50,7 +50,8 @@ const NO_VIEWS = Object.freeze([]);
  * four-component element at the largest aligned offset an element may have.
  */
 const UNBOUND_ATTRIBUTE_BYTES = 2048 + 16;
-import { convertTexels, convertedTexelBytes, isSixteenBit, programTexelBytes, sixteenBitFromFloats }
+import { convertTexels, convertedTexelBytes, isSixteenBit, isThreeWords, programTexelBytes,
+    sixteenBitFromFloats, threeWordsFromFour }
     from './blocks.js';
 import {
     INDEX_FORMAT, PULLED_VERTEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES,
@@ -1666,6 +1667,11 @@ export function createRenderer(services){
             return image=>deliver(image ? { ...image,
                 data: sixteenBitFromFloats(conversion, image.data) } : null);
         }
+        if (isThreeWords(conversion))
+        {
+            return image=>deliver(image ? { ...image, data: threeWordsFromFour(image.data) }
+                : null);
+        }
         if (conversion !== 'a8')
         {
             return deliver;
@@ -2547,6 +2553,19 @@ export function createRenderer(services){
             backend.createShaderModule({ code: program.vertex, label: `d3d10:vs#${idOf(vs)}` }),
             backend.createShaderModule({ code: program.fragment, label: `d3d10:ps#${idOf(ps)}` }),
         ]);
+        // Direct3D binds 128 resources to a stage; a GPU binds as many
+        // textures as its limit, 16 at least. A stage reading more cannot be
+        // drawn there, and is said so before the device refuses the layout
+        // and with it the frame.
+        const most = backend.limit?.('maxSampledTexturesPerShaderStage') ?? null;
+        program.groups.forEach((entries, index)=>{
+            const textures = entries.filter(entry=>entry.texture).length;
+            if (most !== null && textures > most)
+            {
+                throw new Error(`its ${['vertex', 'pixel'][index] ?? 'domain'} shader reads`
+                    + ` ${textures} textures, past the ${most} this GPU binds to one stage`);
+            }
+        });
         const groupLayouts = [...program.groups,
             ...(state.hullShader ? [/** @type {any[]} */(DOMAIN_ENTRIES)]
                 : state.geometry ? [/** @type {any[]} */(GEOMETRY_DRAW_ENTRIES)] : [])]

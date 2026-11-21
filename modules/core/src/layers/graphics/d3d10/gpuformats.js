@@ -171,6 +171,17 @@ export const TEXEL_BYTES = Object.freeze({
 });
 
 /**
+ * The formats of three 32-bit channels, which WebGPU has no texture of, by
+ * the four-channel format each is kept in (`blocks.js`, `ThreeWords`).
+ *
+ * @type {Readonly<Record<number, import('./blocks.js').ThreeWords>>}
+ */
+const THREE_WORD_STORAGE = Object.freeze({
+    [DXGI_FORMAT.R32G32B32_FLOAT]: 'rgba32float', [DXGI_FORMAT.R32G32B32_UINT]: 'rgba32uint',
+    [DXGI_FORMAT.R32G32B32_SINT]: 'rgba32sint',
+});
+
+/**
  * The format a family keeps its typeless resources in when nothing binds them
  * as a depth stencil: the member a view most often names, so the view that
  * has to reinterpret is the rare one.
@@ -179,6 +190,7 @@ export const TEXEL_BYTES = Object.freeze({
  */
 const TYPELESS_STORAGE = Object.freeze({
     [DXGI_FORMAT.R32G32B32A32_TYPELESS]: DXGI_FORMAT.R32G32B32A32_FLOAT,
+    [DXGI_FORMAT.R32G32B32_TYPELESS]: DXGI_FORMAT.R32G32B32_FLOAT,
     [DXGI_FORMAT.R16G16B16A16_TYPELESS]: DXGI_FORMAT.R16G16B16A16_FLOAT,
     [DXGI_FORMAT.R32G32_TYPELESS]: DXGI_FORMAT.R32G32_FLOAT,
     [DXGI_FORMAT.R10G10B10A2_TYPELESS]: DXGI_FORMAT.R10G10B10A2_UNORM,
@@ -350,6 +362,11 @@ export function textureStorage(dxgiFormat, bindFlags, options = {}){
         return options.compressed
             ? kept(compressed.format, null)
             : kept(compressed.decoded, compressed.conversion);
+    }
+    const three = THREE_WORD_STORAGE[typed];
+    if (three)
+    {
+        return kept(three, three);
     }
     const format = TEXTURE_FORMAT[typed];
     if (SIXTEEN_BIT_NORMALISED.has(format)

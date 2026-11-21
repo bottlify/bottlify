@@ -21,7 +21,26 @@ import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { decodeBc67 } from './bc67.js';
 
 /** @typedef {'bc1' | 'bc2' | 'bc3' | 'bc4u' | 'bc4s' | 'bc5u' | 'bc5s' | 'bc6hu' | 'bc6hs'
- *     | 'bc7' | 'a8' | SixteenBit} Conversion */
+ *     | 'bc7' | 'a8' | ThreeWords | SixteenBit} Conversion */
+
+/**
+ * A format of three 32-bit channels, which WebGPU has no texture of: kept in
+ * four, the fourth what sampling one answers (one, or 1.0), named by the
+ * format that stands in.
+ *
+ * @typedef {'rgba32float' | 'rgba32uint' | 'rgba32sint'} ThreeWords
+ */
+
+/** Each three-word conversion's fourth word: 1.0's bits for floats, 1 for integers. */
+const THREE_WORDS = Object.freeze({ rgba32float: 0x3f800000, rgba32uint: 1, rgba32sint: 1 });
+
+/**
+ * Whether a conversion keeps a format of three 32-bit channels in four.
+ *
+ * @param {Conversion | null | undefined} conversion
+ * @returns {conversion is ThreeWords}
+ */
+export const isThreeWords = conversion=>!!conversion && conversion in THREE_WORDS;
 
 /**
  * A 16-bit normalised format kept in 32-bit floats of its channels, on a GPU
@@ -57,7 +76,30 @@ export function programTexelBytes(conversion){
     {
         return SIXTEEN_BIT[conversion].channels * 2;
     }
+    if (isThreeWords(conversion))
+    {
+        return 12;
+    }
     return conversion === 'a8' ? 1 : 0;
+}
+
+/**
+ * Texels kept in four 32-bit channels as the program's three: the fourth dropped.
+ *
+ * @param {Uint8Array} four
+ * @returns {Uint8Array}
+ */
+export function threeWordsFromFour(four){
+    const words = new Uint32Array(four.buffer.slice(four.byteOffset,
+        four.byteOffset + (four.byteLength & ~15)));
+    const out = new Uint32Array((words.length >>> 2) * 3);
+    for (let index = 0; index < out.length / 3; index++)
+    {
+        out[index * 3] = words[index * 4];
+        out[index * 3 + 1] = words[index * 4 + 1];
+        out[index * 3 + 2] = words[index * 4 + 2];
+    }
+    return new Uint8Array(out.buffer);
 }
 
 /**
@@ -169,6 +211,10 @@ export function convertedTexelBytes(conversion){
         case 'bc6hu':
         case 'bc6hs':
             return 8;
+        case 'rgba32float':
+        case 'rgba32uint':
+        case 'rgba32sint':
+            return 16;
         default:
             return isSixteenBit(conversion) ? SIXTEEN_BIT[conversion].channels * 4 : 4;
     }
@@ -217,6 +263,26 @@ export function convertTexels(conversion, bytes, width, height){
                     : view.getUint16(at * 2, true) / 65535;
             }
             return new Uint8Array(values.buffer);
+        }
+        case 'rgba32float':
+        case 'rgba32uint':
+        case 'rgba32sint': {
+            const count = width * height;
+            if (bytes.length < count * 12)
+            {
+                return null;
+            }
+            const words = new Uint32Array(bytes.buffer.slice(bytes.byteOffset,
+                bytes.byteOffset + count * 12));
+            const out = new Uint32Array(count * 4);
+            for (let index = 0; index < count; index++)
+            {
+                out[index * 4] = words[index * 3];
+                out[index * 4 + 1] = words[index * 3 + 1];
+                out[index * 4 + 2] = words[index * 3 + 2];
+                out[index * 4 + 3] = THREE_WORDS[conversion];
+            }
+            return new Uint8Array(out.buffer);
         }
         case 'a8': {
             if (bytes.length < width * height)

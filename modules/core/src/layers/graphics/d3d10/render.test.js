@@ -1091,6 +1091,32 @@ test('a frame is written down on asking: each clear and draw a line, handed over
     assert.equal(liveDump.dumpFrames, 0);
 });
 
+test('a texture of three 32-bit channels is kept in four, the fourth what sampling one answers',
+    ()=>{
+        for (const [format, kept, fourth] of /** @type {[number, string, number][]} */ ([
+            [DXGI_FORMAT.R32G32B32_FLOAT, 'rgba32float', 0x3f800000],
+            [DXGI_FORMAT.R32G32B32_UINT, 'rgba32uint', 1],
+            [DXGI_FORMAT.R32G32B32_SINT, 'rgba32sint', 1]]))
+        {
+            const h = harness();
+            /** @type {{ resource?: any }} */
+            const texture = {};
+            const words = Uint32Array.of(1, 2, 3, 4, 5, 6);
+            assert.equal(h.device.CreateTexture1D({
+                Width: 2, MipLevels: 1, ArraySize: 1, Format: format,
+                Usage: D3D10_USAGE.DEFAULT, BindFlags: D3D10_BIND.SHADER_RESOURCE,
+                CPUAccessFlags: 0, MiscFlags: 0,
+            }, [{ pSysMem: new Uint8Array(words.buffer), SysMemPitch: 24 }], texture), S_OK);
+            assert.equal(h.gpu.of('createTexture').at(-1).descriptor.format, kept);
+            const [upload] = h.gpu.of('writeTexture');
+            assert.deepEqual([...new Uint32Array(upload.bytes.slice().buffer)],
+                [1, 2, 3, fourth, 4, 5, 6, fourth]);
+            assert.equal(upload.layout.bytesPerRow, 32);
+            assert.ok(!h.divergences.some(line=>/cannot be backed|did not make/.test(line)),
+                h.divergences.join(' / '));
+        }
+    });
+
 test('a 16-bit normalised texture on a GPU without texture-formats-tier1 is kept in floats of its'
     + ' codes', ()=>{
     const h = harness();
@@ -2231,6 +2257,32 @@ test('an unbound or mistyped slot is fed a texture of the type and shape the sha
         assert.equal(bound(17).texture.descriptor.size.depthOrArrayLayers, 6);
         assert.ok(diverged(h, 'where the shader reads a uint one'), h.divergences.join('\n'));
     });
+
+test('a stage reading more textures than the GPU binds is not drawn, and says why', async()=>{
+    const h = harness({ fake: { limits: { maxSampledTexturesPerShaderStage: 2 } } });
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclResource(1, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclResource(2, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)), ld(o(0), r(0), t(0)), ld(o(0), r(0), t(1)), ld(o(0), r(0), t(2)),
+            ret(),
+        ],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 0);
+    assert.ok(h.divergences.some(line=>line.includes('reads 3 textures, past the 2')),
+        h.divergences.join('\n'));
+    assert.equal(h.gpu.of('createBindGroupLayout').length, 0, 'no layout the device refuses');
+});
 
 test('an instanced draw starts its per-instance streams at the first instance asked for',
     async()=>{

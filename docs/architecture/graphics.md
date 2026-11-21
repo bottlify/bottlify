@@ -143,7 +143,10 @@ flowchart TB
   default (`graphics.compressedTextures` in [`core/configuration.md`](../core/configuration.md#graphics)).
   In Direct3D 10 and 11 a DXT volume stays compressed only where the GPU has
   `texture-compression-bc-sliced-3d`, and a 16-bit normalised texture is kept in 32-bit floats
-  where those filter: a browser samples its 16-bit normalised formats unfiltered alone.
+  where those filter: a browser samples its 16-bit normalised formats unfiltered alone. A
+  format of three 32-bit channels (`R32G32B32_FLOAT`, `_UINT`, `_SINT`), which WebGPU has no
+  texture of, is kept in four, the fourth what sampling one answers. A stage that reads more
+  textures than the GPU binds to one (16 at least, Direct3D 128) is not drawn, and says so.
 - **Windows on surfaces of their own.** Inside a process the screen is composed as Windows 7's
   desktop window manager composes it (`graphics/gdi/screen.js`): each top-level window draws on a
   surface of its own, unclipped by the other top-level windows, and the screen is the desktop's
