@@ -310,6 +310,20 @@ test('a client is uninitialized until it is, and once only; exclusive mode is no
     assert.equal(s.view.getUint32(OUT, true), 0);
 });
 
+test('a shared-mode buffer is two engine periods at least, however short the duration asked', ()=>{
+    // An event-driven client usually asks for 0 and sizes itself by what it
+    // is given: the engine's period and the one being written, 20 ms.
+    for (const asked of [0, 10000, 100000, 199999])
+    {
+        const s = setup();
+        const client = s.activate();
+        s.bytes.set(format(), FORMAT);
+        assert.equal(s.call(client, 'Initialize', [0, 0x40000, asked, 0, 0, 0, FORMAT, 0]), S_OK);
+        assert.equal(s.call(client, 'GetBufferSize', [OUT]), S_OK);
+        assert.equal(s.view.getUint32(OUT, true), 2 * RATE / 100, `${asked} asked: 20 ms`);
+    }
+});
+
 test('a 64-bit program initializes a client: each REFERENCE_TIME one slot, then the format', ()=>{
     // SDL2's WASAPI in a 64-bit game: Initialize(mode, flags, duration, period,
     // format, session) is this in RCX, mode, flags and the duration in RDX, R8

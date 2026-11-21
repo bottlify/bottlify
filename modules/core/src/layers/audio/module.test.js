@@ -268,6 +268,22 @@ test('with shared memory, a playing buffer is a sound card\'s voice over the buf
             'byte-equal to what the guest wrote');
     });
 
+test('with shared memory, a buffer\'s voice plays from where Play found the cursor, not from where'
+    + ' it stood at the next pump', async()=>{
+    // The voice was opened at the next pump while the cursor ran on by the
+    // clock from Play, and was put where it had got to: the first few
+    // milliseconds of every sound were never heard (a streamed tone came out
+    // 4-6 ms short).
+    const loud = await playing({ shared: true });
+    loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    const header = new Int32Array(loud.api.output().table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    assert.equal(Atomics.load(header, KIND), KIND_DMA, 'the voice is there at Play');
+    assert.equal(Atomics.load(header, PLAYING) !== 0, true);
+    loud.advance(5);
+    loud.api.pump();
+    assert.equal(Atomics.load(header, POSITION), 0, 'from the start of the buffer');
+});
+
 test('a silenced buffer is mixed at its own gain, not at full', async()=>{
     const f = await playing();
     f.call(f.buffer, 'SetVolume', [-10000]);

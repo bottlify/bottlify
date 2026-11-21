@@ -66,6 +66,11 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
     };
     /** Machines taking turns on this thread: one of several may not block it. */
     let machines = 1;
+    /**
+     * How much later than asked a timed sleep last ended, the timer's grain:
+     * risen at once to a later one, eased down after.
+     */
+    let grain = 0;
     const yieldNow = pacedYield({ macrotask: ()=>{
         counts.yields++;
         return macrotask();
@@ -139,8 +144,30 @@ export function ringPacing({ inbound, macrotask, now, intervalMs, sleep = waitDo
             }
             const limit = Math.max(0, Math.min(deadlineMs ?? IDLE_SLEEP_MS, IDLE_SLEEP_MS));
             const started = now();
+            const end = started + limit;
             counts.slept++;
-            if (sleep(inbound.bell, seen, limit) !== 'timed-out')
+            let woken = false;
+            // Slept short of the deadline by the timer's grain, the rest spun:
+            // a timed sleep ends when the system's timer next ticks, on Windows
+            // 8-15 ms after a wait of 1 (up to 29), and a program sleeping a
+            // millisecond at a time had its timers and its sound events fire
+            // that late. ponytail: a program that sleeps 1 ms in a loop spins
+            // this thread, as the engine's own thread spins macrotasks.
+            if (limit > grain)
+            {
+                const asked = limit - grain;
+                woken = sleep(inbound.bell, seen, asked) !== 'timed-out';
+                if (!woken)
+                {
+                    const late = Math.max(0, now() - started - asked);
+                    grain = late > grain ? late : grain * 0.95 + late * 0.05;
+                }
+            }
+            while (!woken && now() < end)
+            {
+                woken = doorbellOf(inbound.bell) !== seen;
+            }
+            if (woken)
             {
                 counts.woken++;
             }
