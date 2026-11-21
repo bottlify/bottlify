@@ -71,6 +71,7 @@ const IMPORTS = {
             'GlobalAlloc@8', 'GlobalFree@4', 'lstrlenA@4', 'lstrlenW@4', 'lstrcpyA@8',
             'EnumSystemLocalesA@8', 'IsWow64Process@8', 'GetNativeSystemInfo@4',
             'GetSystemWow64DirectoryA@8', 'GetEnvironmentVariableA@12', 'GetStartupInfoA@4',
+            'RtlUnwindEx@24',
         ],
     },
     'SHELL32.dll': {
@@ -210,6 +211,8 @@ const PROGRAMS = [
     { name: 'big64', source: 'big64.c', cxx: false, x64: true },
     { name: 'jit64', source: 'jit64.c', cxx: false, x64: true },
     { name: 'seh64', source: 'seh64.c', cxx: false, x64: true,
+        guestHandler: 'via_guest_handler' },
+    { name: 'consolidate64', source: 'consolidate64.c', cxx: false, x64: true,
         guestHandler: 'via_guest_handler' },
     { name: 'float64', source: 'float64.c', cxx: false, x64: true },
     { name: 'window64', source: 'window64.c', cxx: false, x64: true },
