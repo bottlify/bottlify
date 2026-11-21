@@ -86,6 +86,7 @@ const RS_SET_VIEWPORTS = 30;
 const RS_SET_SCISSOR_RECTS = 31;
 const CLEAR_RENDER_TARGET_VIEW = 35;
 const CLEAR_DEPTH_STENCIL_VIEW = 36;
+const UPDATE_SUBRESOURCE = 34;
 /** The ring's record of a buffer's unmap, numbered past the device's slots (`commands.js`). */
 const BUFFER_UNMAP = 98;
 /** Direct3D 11's viewports, six floats each: the record after the buffer's unmap. */
@@ -116,6 +117,13 @@ const MOST = 16;
  * twenty at once, past the sixteen of the other arrays.
  */
 const MOST_RESOURCES = 128;
+
+/**
+ * The most bytes a buffer's update copies into the ring: constant buffers,
+ * which programs update whole every draw, are a few hundred bytes; a larger
+ * update is rarer and would crowd the ring's 64 KiB.
+ */
+const MOST_UPDATE = 4096;
 
 /**
  * Room for a record of `length` bytes in the ring of the device whose block
@@ -1043,8 +1051,10 @@ export function ContextMap({ u32, setU32, compareExchange, host, pointerBytes },
  */
 export function mapStorage({ u32, setU32, compareExchange, pointerBytes }, buffer, type){
     const block = u32(buffer + pointerBytes);
+    // A buffer with no storage (`B_CURRENT` 0) has a block for its updates
+    // alone: its bytes live on the host.
     if (block === 0 || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0
-        || u32(block + B_MAPPED) !== 0
+        || u32(block + B_CURRENT) === 0 || u32(block + B_MAPPED) !== 0
         || (type !== WRITE_DISCARD && type !== WRITE_NO_OVERWRITE))
     {
         return 0;
@@ -1154,4 +1164,76 @@ export function unmapStorage({ u32, setU32, compareExchange, pointerBytes }, buf
     setU32(record + ARGS + 8, u32(block + B_MAPPED));
     setU32(block + B_MAPPED, 0);
     return publish({ setU32, compareExchange }, device, record, BUFFER_UNMAP, ARGS + 12);
+}
+
+/**
+ * void UpdateSubresource(this, ID3D10Resource*, UINT subresource,
+ * const D3D10_BOX*, const void *data, UINT rowPitch, UINT depthPitch): a
+ * buffer of this device updated whole, with no box, goes into the ring with
+ * its bytes copied after the arguments -- the call copies them as it is
+ * made, and the program may write its source again at once. A texture, a
+ * box, a buffer past `MOST_UPDATE` or of a length not whole words are the
+ * host's.
+ *
+ * @guestCode stdcall
+ * @param {Guest} guest @param {ptr} self @param {u32} resource @param {u32} subresource
+ * @param {u32} box @param {ptr} data @param {u32} rowPitch @param {u32} depthPitch
+ * @returns {u32}
+ */
+export function UpdateSubresource({ u32, setU32, compareExchange, host, pointerBytes }, self,
+    resource, subresource, box, data, rowPitch, depthPitch)
+{
+    if (updateBuffer({ u32, setU32, compareExchange, pointerBytes }, self, resource, subresource,
+        box, data, rowPitch, depthPitch) !== 0)
+    {
+        return host();
+    }
+    return 0;
+}
+
+/**
+ * A buffer's whole update into the ring: 0 once written, 1 where the host
+ * has to make it. The buffer's block names its device, so a buffer of
+ * another device, or a resource with no block (a texture), is the host's.
+ *
+ * @guestCode stdcall
+ * @param {Pick<Guest, 'u32' | 'setU32' | 'compareExchange' | 'pointerBytes'>} guest
+ * @param {ptr} self @param {u32} resource @param {u32} subresource @param {u32} box
+ * @param {ptr} data @param {u32} rowPitch @param {u32} depthPitch
+ * @returns {u32}
+ */
+export function updateBuffer({ u32, setU32, compareExchange, pointerBytes }, self, resource,
+    subresource, box, data, rowPitch, depthPitch)
+{
+    if (resource === 0 || subresource !== 0 || box !== 0 || data === 0)
+    {
+        return 1;
+    }
+    const device = u32(self + pointerBytes);
+    const block = u32(resource + pointerBytes);
+    if (device === 0 || block === 0 || u32(block + B_DEVICE) !== device
+        || (u32(block + B_FLAGS) & FLAG_SLOW_PATH) !== 0)
+    {
+        return 1;
+    }
+    const bytes = u32(block + B_LENGTH);
+    if (bytes > MOST_UPDATE || (bytes & 3) !== 0)
+    {
+        return 1;
+    }
+    const length = (ARGS + 16 + bytes) >>> 0;
+    const record = reserve({ u32, compareExchange }, device, length);
+    if (record === 0)
+    {
+        return 1;
+    }
+    setU32(record + ARGS, resource);
+    setU32(record + ARGS + 4, rowPitch);
+    setU32(record + ARGS + 8, depthPitch);
+    setU32(record + ARGS + 12, bytes);
+    for (let at = 0; at < (bytes | 0); at += 4)
+    {
+        setU32(record + ARGS + 16 + at, u32(data + at));
+    }
+    return publish({ setU32, compareExchange }, device, record, UPDATE_SUBRESOURCE, length);
 }

@@ -478,6 +478,10 @@ async function play(seed, steps, guestCode, worker){
         D3D10_BIND.INDEX_BUFFER, 0, 0] }, { words: [STRUCTS + 0x200, 0, 0] }, 'out']);
     const constants = make('CreateBuffer', [{ words: [16, D3D10_USAGE.DYNAMIC,
         D3D10_BIND.CONSTANT_BUFFER, D3D10_CPU_ACCESS.WRITE, 0] }, 0, 'out']);
+    // Constants the program updates whole, as programs do every draw: the
+    // first pixel shader's colour after the ring is played.
+    const updated = make('CreateBuffer', [{ words: [16, D3D10_USAGE.DEFAULT,
+        D3D10_BIND.CONSTANT_BUFFER, 0, 0] }, 0, 'out']);
     const vsCode = colouredVertexShader();
     const vs = make('CreateVertexShader', [{ words: words(vsCode) }, vsCode.length, 'out']);
     const pixel = [colouredPixelShader(), constantPixelShader()].map(bytes=>make(
@@ -526,7 +530,7 @@ async function play(seed, steps, guestCode, worker){
                 const count = pick.pick([0, 1, 2, 17]);
                 device(`${stage}SetConstantBuffers`, [pick.below(3), count, count > 0
                     && pick.below(10) === 0 ? 0 : { words: Array.from({ length: count },
-                        ()=>pick.pick([constants, 0])) }]);
+                        ()=>pick.pick([constants, updated, 0])) }]);
                 device(`${stage}SetSamplers`, [pick.below(3), Math.min(count, 2), { words:
                     Array.from({ length: Math.min(count, 2) }, ()=>pick.pick(samplers)) }]);
                 // Every input resource slot a record copies (128), and one past it.
@@ -572,6 +576,19 @@ async function play(seed, steps, guestCode, worker){
                     pick.float(), 1]).buffer));
             }
             call(constants, 'buffer', 'Unmap');
+        },
+        update: ()=>{
+            // Whole and with no box, which the guest carries; a box, a second
+            // subresource or a texture is the host's. The source is the
+            // argument area the next call writes over, so a ring that copied
+            // the bytes late would draw with that call's.
+            const resource = pick.pick([updated, updated, updated, fixed, depthTexture]);
+            const length = resource === fixed ? VERTICES * STRIDE / 4
+                : resource === depthTexture ? 16 * 16 : 4;
+            const box = pick.below(5) === 0 ? { words: [0, 0, 0, 8, 1, 1] } : 0;
+            device('UpdateSubresource', [resource, pick.below(6) === 0 ? 1 : 0, box,
+                { words: Array.from({ length }, ()=>floatWord(pick.float())) },
+                16 * pick.below(2), 0]);
         },
         draw: ()=>{
             const count = 3 * (1 + pick.below(4));

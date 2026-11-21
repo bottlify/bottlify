@@ -62,7 +62,9 @@ flowchart TB
   dynamic buffer's map and unmap run in the guest too: NO_OVERWRITE hands out the storage the
   buffer is on, DISCARD moves it onto another storage the host has let go of (a buffer is given
   more, up to 32, when a DISCARD finds none), and the unmap is a record in the ring naming the
-  storage, whose written pages the host takes in its turn (decision A74).
+  storage, whose written pages the host takes in its turn (decision A74). Every other buffer
+  has a block too, with no storage, for its whole updates: an `UpdateSubresource` of a buffer
+  with no box, up to 4 KiB, is a record carrying the bytes, copied as the call is made.
 - **Direct3D 11 over the same device.** Direct3D 10 put the pipeline on the device; 11 moved it
   to a context. Here one device serves both (`d3d10/device.js`): Direct3D 11's immediate context
   is the device's own pipeline under another interface (`d3d11/context.js`), so a call through

@@ -70,10 +70,11 @@ test('the offsets and slots the guest code reads are the block\'s and the device
                 name);
         }
     }
-    assert.equal(checked, 28, 'every routine has its slot');
+    assert.equal(checked, 29, 'every routine has its slot');
     assert.equal(literal('BUFFER_UNMAP'), D3D10_COMMANDS.commandSlot('Buffer.Unmap'));
     for (const [name, offset] of Object.entries({ B_FLAGS: BUFFER10.FLAGS,
-        B_DEVICE: BUFFER10.DEVICE, B_CURRENT: BUFFER10.CURRENT, B_MAPPED: BUFFER10.MAPPED,
+        B_DEVICE: BUFFER10.DEVICE, B_CURRENT: BUFFER10.CURRENT, B_LENGTH: BUFFER10.LENGTH,
+        B_MAPPED: BUFFER10.MAPPED,
         B_FREE: BUFFER10.FREE, B_STORAGES: BUFFER10.STORAGES }))
     {
         assert.equal(literal(name), offset, name);
@@ -161,7 +162,7 @@ for (const [pointer, judged] of WIDTHS)
 
 for (const [pointer, judged] of WIDTHS)
 {
-    test(`a dynamic buffer's map and unmap in the guest answer and write as their JavaScript (${
+    test(`a buffer's map, unmap and update in the guest answer and write as their JavaScript (${
         pointer * 8} bits)`, ()=>{
         const next = random(12);
         // A buffer's block past the arrays, its device's block the one above.
@@ -181,10 +182,13 @@ for (const [pointer, judged] of WIDTHS)
             const at = BUFFER - DATA;
             view.setUint32(at + BUFFER10.FLAGS, next() % 10 === 0 ? FLAG_SLOW_PATH : 0, true);
             view.setUint32(at + BUFFER10.DEVICE, next() % 12 === 0 ? 0 : BLOCK, true);
-            view.setUint32(at + BUFFER10.CURRENT, 0x20000 + (next() % 4) * 0x1000, true);
-            view.setUint32(at + BUFFER10.LENGTH, 0x800, true);
+            // A buffer the guest does not map has a block with no storage.
+            const stored = next() % 6 !== 0;
+            view.setUint32(at + BUFFER10.CURRENT, stored ? 0x20000 + (next() % 4) * 0x1000 : 0,
+                true);
+            view.setUint32(at + BUFFER10.LENGTH, [0x800, 16, 64, 18, 0x2000][next() % 5], true);
             view.setUint32(at + BUFFER10.MAPPED, [0, 0, 0, 4, 5][next() % 5], true);
-            const storages = 1 + next() % 4;
+            const storages = stored ? 1 + next() % 4 : 0;
             view.setUint32(at + BUFFER10.COUNT, storages, true);
             view.setUint32(at + BUFFER10.FREE, next() & ((1 << storages) - 1), true);
             for (let index = 0; index < storages; index++)
@@ -206,6 +210,13 @@ for (const [pointer, judged] of WIDTHS)
                 next() % 3 === 0 ? 0x100000 : 0, out], memory }, HANDED);
             judged('ContextUnmap', { stack: [CONTEXT, SELF, next() % 8 === 0 ? 1 : 0], memory },
                 HANDED);
+            // An update of the buffer through a device whose word is the device's block, or
+            // another's; the bytes are the arrays' words.
+            const DEVICE = ARRAYS + 0x180;
+            view.setUint32(DEVICE - DATA + pointer, next() % 8 === 0 ? BUFFER : BLOCK, true);
+            judged('UpdateSubresource', { stack: [DEVICE, next() % 12 === 0 ? 0 : SELF,
+                next() % 8 === 0 ? 1 : 0, next() % 8 === 0 ? ARRAYS : 0,
+                next() % 10 === 0 ? 0 : ARRAYS, next() % 64, next() % 64], memory }, HANDED);
         }
     });
 }

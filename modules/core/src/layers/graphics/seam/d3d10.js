@@ -98,9 +98,9 @@ const describeAt = (id, slots, implemented, guests = {}, released = undefined)=>
  * ID3D10Device's methods that run in the guest (`d3d10-inguest.js`): each
  * writes its call into the device's command ring.
  */
-const RING_METHODS = Object.freeze(['VSSetShader', 'PSSetShader', 'GSSetShader',
-    'IASetInputLayout', 'IASetPrimitiveTopology', 'RSSetState', 'VSSetConstantBuffers',
-    'PSSetConstantBuffers', 'GSSetConstantBuffers', 'VSSetShaderResources',
+const RING_METHODS = Object.freeze(['UpdateSubresource', 'VSSetShader', 'PSSetShader',
+    'GSSetShader', 'IASetInputLayout', 'IASetPrimitiveTopology', 'RSSetState',
+    'VSSetConstantBuffers', 'PSSetConstantBuffers', 'GSSetConstantBuffers', 'VSSetShaderResources',
     'PSSetShaderResources', 'GSSetShaderResources', 'VSSetSamplers', 'PSSetSamplers',
     'GSSetSamplers', 'IASetVertexBuffers', 'IASetIndexBuffer', 'OMSetRenderTargets',
     'OMSetBlendState', 'OMSetDepthStencilState', 'RSSetViewports', 'RSSetScissorRects', 'Draw',
@@ -874,32 +874,40 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
     /** @param {any} object */
     const ringOf = object=>ringsOf.get(object) ?? null;
     /**
-     * A dynamic buffer the program writes, whose bytes live in guest memory,
-     * gets a block its map and unmap in the guest read and write
-     * (`BufferMap`): made before it is published, since publishing writes
-     * the block's address beside each of its interface pointers.
+     * A buffer gets a block made before it is published, since publishing
+     * writes the block's address beside each of its interface pointers: a
+     * dynamic one the program writes, whose bytes live in guest memory, for
+     * its map and unmap in the guest (`BufferMap`), every other for its whole
+     * updates (`UpdateSubresource`).
      *
      * @param {any} device @param {any} buffer
      */
     const attachBuffer = (device, buffer)=>{
         const ring = ringOf(device);
-        if (!ring || buffer.desc?.Usage !== D3D10_USAGE.DYNAMIC
-            || ((buffer.desc?.CPUAccessFlags ?? 0) & D3D10_CPU_ACCESS.WRITE) === 0)
+        if (!ring)
         {
             return;
         }
-        const block = ring.attachBuffer(buffer);
+        const mapped = buffer.desc?.Usage === D3D10_USAGE.DYNAMIC
+            && ((buffer.desc?.CPUAccessFlags ?? 0) & D3D10_CPU_ACCESS.WRITE) !== 0;
+        const block = ring.attachBuffer(buffer, mapped);
         if (block !== 0)
         {
             ringsOf.set(buffer, ring);
             buffer.guestState = ()=>block;
+            if (mapped)
+            {
+                mappedInGuest.add(buffer);
+            }
         }
     };
-    /** @type {Record<string, number>} usage -> maps of buffers with no block of their own */
+    /** The buffers whose maps the guest makes. @type {WeakSet<object>} */
+    const mappedInGuest = new WeakSet();
+    /** @type {Record<string, number>} usage -> maps of buffers the guest does not map */
     const unattachedMaps = {};
     /** @param {any} buffer */
     const countUnattached = buffer=>{
-        if (!ringOf(buffer))
+        if (!mappedInGuest.has(buffer))
         {
             const usage = String(buffer.desc?.Usage ?? '?');
             unattachedMaps[usage] = (unattachedMaps[usage] ?? 0) + 1;

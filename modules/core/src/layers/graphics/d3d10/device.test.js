@@ -2505,6 +2505,23 @@ test('from level 11 stream output may follow the domain shader: a stage of no sh
     ten.device.release();
 });
 
+test('an update of a subresource the resource does not have, or of a box past it, is ignored'
+    + ' and says so', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    const device = createDevice({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>divergences.push(`${api}: ${detail}`) });
+    const texture = createTexture2D(device, { Width: 4, Height: 4 });
+    device.UpdateSubresource(texture, 9, null, new Uint8Array(64), 16, 0);
+    device.UpdateSubresource(texture, 0, { left: 0, top: 0, front: 0, right: 8, bottom: 1,
+        back: 1 }, new Uint8Array(64), 32, 0);
+    assert.ok(divergences.some(line=>line.includes('a subresource the resource does not have')),
+        divergences.join('\n'));
+    assert.ok(divergences.some(line=>line.includes('a box past its subresource')),
+        divergences.join('\n'));
+    texture.release();
+});
+
 test('an update\'s pitch of zero reads every row from the same bytes'
     + ' (test_copy_subresource_region)', async()=>{
     const device = createDevice();

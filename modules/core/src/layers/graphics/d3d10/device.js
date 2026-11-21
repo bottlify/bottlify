@@ -1144,6 +1144,34 @@ export function createDevice(options = {}){
     };
 
     /**
+     * A subresource's size in texels (a buffer's in bytes), or null for one
+     * the resource does not have.
+     *
+     * @param {any} resource @param {number} subresource
+     * @returns {{ width: number, height: number, depth: number } | null}
+     */
+    const subresourceExtent = (resource, subresource)=>{
+        const desc = resource.desc;
+        if (resource.dimension === D3D10_RESOURCE_DIMENSION.BUFFER)
+        {
+            return subresource === 0 ? { width: desc.ByteWidth, height: 1, depth: 1 } : null;
+        }
+        const levels = desc.MipLevels;
+        if (subresource >= levels * (desc.ArraySize ?? 1))
+        {
+            return null;
+        }
+        const level = subresource % levels;
+        /** @param {number} size */
+        const at = size=>Math.max(1, size >>> level);
+        return {
+            width: at(desc.Width),
+            height: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE1D ? 1 : at(desc.Height),
+            depth: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D ? at(desc.Depth) : 1,
+        };
+    };
+
+    /**
      * A copy's two resources have to be the same kind of thing; the runtime
      * ignores a copy that is not, and so does this, saying so.
      *
@@ -2090,6 +2118,19 @@ export function createDevice(options = {}){
             }
             if (box && (box.right <= box.left || box.bottom <= box.top || box.back <= box.front))
             {
+                return;
+            }
+            const extent = subresourceExtent(resource, subresource);
+            if (!extent)
+            {
+                diverge('UpdateSubresource of a subresource the resource does not have is'
+                    + ' ignored');
+                return;
+            }
+            if (box && (box.right > extent.width || box.bottom > extent.height
+                || box.back > extent.depth))
+            {
+                diverge('UpdateSubresource of a box past its subresource is ignored');
                 return;
             }
             renderer.updateSubresource(resource, subresource, box, data, rowPitch, depthPitch);

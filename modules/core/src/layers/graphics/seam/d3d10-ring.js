@@ -84,7 +84,8 @@ const HELD_WAIT_MS = 200;
  * @param {number} [deps.ringBytes]
  * @returns {{ address: () => number, slow: (raised: boolean) => void, sync: () => void,
  *     taken: () => number, counters: () => RingCounters,
- *     attachBuffer: (buffer: any) => number, hostMap: (buffer: any, type: number) => void,
+ *     attachBuffer: (buffer: any, mapped: boolean) => number,
+ *     hostMap: (buffer: any, type: number) => void,
  *     hostUnmap: (buffer: any) => boolean, released: (buffer: any) => void } | null}
  *     null where there is no memory for one
  */
@@ -135,6 +136,12 @@ export function createDeviceRing(deps){
      * @type {WeakMap<object, { block: number, last: number }>}
      */
     const buffers = new WeakMap();
+    /**
+     * Every buffer's block, those with no storage of their own included.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const blocks = new WeakMap();
     /** Blocks are carved out of pages of their own. */
     let pool = { at: 0, left: 0 };
     /** @param {number} address */
@@ -246,16 +253,21 @@ export function createDeviceRing(deps){
             write(block + SHADOW.FLAGS, raised ? FLAG_SLOW_PATH : 0);
         },
         /**
-         * A dynamic buffer's block, made for one whose bytes live in guest
-         * memory, before the buffer is published: what the guest's map and
-         * unmap read and write.
+         * A buffer's block, made before the buffer is published: for one
+         * whose bytes live in guest memory (a dynamic buffer the program
+         * writes) what the guest's map and unmap read and write, for any
+         * other what its whole updates in the guest read (`updateBuffer`).
          *
          * @param {any} buffer
+         * @param {boolean} mapped  whether the guest maps it (dynamic, written by the CPU)
          * @returns {number} the block, 0 for none
          */
-        attachBuffer(buffer){
-            const base = buffer.base;
-            const length = buffer.length;
+        attachBuffer(buffer, mapped){
+            // A buffer the guest does not map has a block for its updates
+            // alone: no storage, so its maps stay the host's.
+            const base = mapped ? buffer.base : 0;
+            const length = mapped ? buffer.length : buffer.desc?.ByteWidth;
+            const own = mapped && typeof base === 'number';
             if (typeof base !== 'number' || typeof length !== 'number')
             {
                 return 0;
@@ -275,10 +287,14 @@ export function createDeviceRing(deps){
             words[BUFFER10.DEVICE >>> 2] = block;
             words[BUFFER10.CURRENT >>> 2] = base;
             words[BUFFER10.LENGTH >>> 2] = length;
-            words[BUFFER10.COUNT >>> 2] = 1;
+            words[BUFFER10.COUNT >>> 2] = own ? 1 : 0;
             words[BUFFER10.STORAGES >>> 2] = base;
             memory.writeMemory(at, new Uint8Array(words.buffer));
-            buffers.set(buffer, { block: at, last: base });
+            blocks.set(buffer, at);
+            if (own)
+            {
+                buffers.set(buffer, { block: at, last: base });
+            }
             return at;
         },
         /**
@@ -288,10 +304,10 @@ export function createDeviceRing(deps){
          * @param {any} buffer
          */
         released(buffer){
-            const held = buffers.get(buffer);
-            if (held)
+            const at = blocks.get(buffer);
+            if (at !== undefined)
             {
-                write(held.block + BUFFER10.FLAGS, FLAG_SLOW_PATH);
+                write(at + BUFFER10.FLAGS, FLAG_SLOW_PATH);
             }
         },
         /**

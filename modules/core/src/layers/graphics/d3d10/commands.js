@@ -115,6 +115,10 @@ const TABLE = {
     ClearDepthStencilView: { args: 4, objects: [0], make: (d, c)=>{
         d.ClearDepthStencilView(c.object(), c.arg(1), floatOf(c.arg(2)), c.arg(3) & 0xff);
     } },
+    // A buffer updated whole: the buffer, the pitches, how many bytes, then the bytes.
+    UpdateSubresource: { args: 4, objects: [0], kept: true, make: (d, c)=>{
+        d.UpdateSubresource(c.object(), 0, null, c.copy(c.arg(3)), c.arg(1), c.arg(2));
+    } },
     // The buffer, the storage it is on, and how it was mapped.
     'Buffer.Unmap': { args: 3, objects: [0], make: (d, c)=>{
         c.object()?.UnmapStorage(c.arg(1), c.arg(2));
