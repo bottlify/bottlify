@@ -2683,7 +2683,7 @@ read it at its nearest texel (said once); other stages, a multisampled depth buf
 stencil plane (X24_TYPELESS_G8_UINT) read an empty texture, said once.
 *2026-11-21.*
 
-**A284. A thread whose stack pointer leaves its stack for memory no stack of its own lies in stops
+**A285. A thread whose stack pointer leaves its stack for memory no stack of its own lies in stops
 its process.** Translated code writes through esp without testing the page (cork's `looseStacks`),
 so a thread's stack has no guard page a push can touch: a thread that ran out of stack pushed on
 through the stacks below it, the gap under the pool and the process's copy of the engine's tables,
