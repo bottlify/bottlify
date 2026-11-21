@@ -217,6 +217,9 @@ const PROGRAMS = [
     { name: 'd3d9_64', source: 'd3d9_64.c', cxx: false, x64: true },
     { name: 'gl64', source: 'gl64.c', cxx: false, x64: true },
     { name: 'addr64', source: 'addr64.c', cxx: false, x64: true },
+    // The out-of-process servers again at 64 bits, from the same sources.
+    { name: 'com64', source: 'com.c', cxx: false, x64: true },
+    { name: 'comservice64', source: 'comservice.c', cxx: false, x64: true },
     { name: 'wow64', source: 'wow64.c', cxx: false, x64: true },
     { name: 'wow64_child', source: 'wow64_child.c', cxx: false },
     { name: 'cxxeh64', source: 'cxxeh64.cpp', cxx: true, x64: true,

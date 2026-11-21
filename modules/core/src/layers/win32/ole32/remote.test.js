@@ -146,7 +146,7 @@ function channel({ exporter, worker = true, window = false, modalPump, windowsFo
             calls.push([method, thread]);
             if (method === 0x9000)
             {
-                view.setUint32(args[2], args[0], true);
+                view.setUint32(Number(args[2]), Number(args[0]), true);
             }
             return 0;
         },

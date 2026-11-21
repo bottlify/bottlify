@@ -109,7 +109,7 @@ export function createGuardedCaller(host){
     };
 
     /**
-     * @param {{ entry: number, args: number[], thread: any, failed: number,
+     * @param {{ entry: number, args: (number | bigint)[], thread: any, failed: number,
      *     report?: (code: string, address: string) => void }} call
      * @returns {Promise<number>} what the routine answered, `failed` when it raised
      */
