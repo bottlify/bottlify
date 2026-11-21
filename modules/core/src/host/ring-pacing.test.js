@@ -72,6 +72,38 @@ test('an idle engine sleeps on the doorbell and a write from another thread wake
         await writer.terminate();
     });
 
+test('a timed sleep that ends a timer\'s grain late is learned, and the wait still ends at the'
+    + ' deadline: the rest of it spun', ()=>{
+    // Windows' timer: a blocking wait of 1 ms slept 8-15 ms, up to 29. A
+    // process in a worker of its own whose program sleeps a millisecond at a
+    // time fired its timers and its sound events that late, and the sound
+    // thread fed a 20 ms buffer too late to keep it full.
+    let clock = 0;
+    /** @type {number[]} */
+    const asked = [];
+    const { pacing } = pacingOver([], {
+        now: ()=>(clock += 0.05),
+        /** @param {any} _bell @param {number} _seen @param {number} timeoutMs */
+        sleep: (_bell, _seen, timeoutMs)=>{
+            asked.push(timeoutMs);
+            clock += timeoutMs + 12;
+            return 'timed-out';
+        },
+    });
+    /** @param {number} deadlineMs */
+    const waited = deadlineMs=>{
+        const from = clock;
+        pacing.wait({ ...idle, deadlineMs });
+        return clock - from;
+    };
+    assert.ok(waited(1) > 12, 'the first sleep finds the grain');
+    assert.ok(waited(2) <= 2.2, 'a deadline inside the grain is spun to');
+    assert.deepEqual(asked, [1], 'with no sleep');
+    assert.ok(waited(40) <= 40.2, 'a longer one sleeps short of the deadline by the grain');
+    assert.ok(asked[1] < 30, `asked ${asked[1]} ms`);
+    assert.equal(pacing.counts().woken, 0);
+});
+
 test('a sleep ends at the guest\'s own deadline, and a message already written is read rather than'
     + ' slept through', ()=>{
     /** @type {any[]} */

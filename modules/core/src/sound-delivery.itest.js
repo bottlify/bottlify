@@ -52,18 +52,14 @@ const play = (program, windows, stall, across)=>new Promise((resolve, reject)=>{
 
 /**
  * Each way of handing sound over, what it does, and the Windows it is there on;
- * `todo`, what is known still to fail, and why; `acrossTodo`, the same in a worker of
- * its own.
+ * `todo`, what is known still to fail, and why.
  */
 const CASES = [
     { program: 'wasapi', on: ['win7', 'win10'],
         what: 'played as SDL plays to WASAPI, half its buffer at each event' },
     { program: 'wasapi-busy', on: ['win7', 'win10'],
         what: 'fed to WASAPI from a thread of its own while the main thread waits for its frame'
-            + ' by QueryPerformanceCounter and Sleep(1)',
-        acrossTodo: 'gaps through the tone, 5 runs of 6 on 2026-11-21 (up to 6000 frames): the'
-            + ' feeding thread late behind the waiting one where the process has a worker of its'
-            + ' own' },
+            + ' by QueryPerformanceCounter and Sleep(1)' },
     { program: 'wasapi-heavy', on: ['win7', 'win10'],
         what: 'fed to WASAPI from a thread of its own while the main thread makes frames',
         todo: 'the same gap as wasapi-busy, 10 ms in' },
@@ -73,7 +69,7 @@ const CASES = [
         what: 'streamed into a looping DirectSound buffer behind its play cursor' },
 ];
 
-for (const { program, on, what, todo, acrossTodo } of CASES)
+for (const { program, on, what, todo } of CASES)
 {
     for (const windows of on)
     {
@@ -85,8 +81,8 @@ for (const { program, on, what, todo, acrossTodo } of CASES)
             const held = stall ? `, the engine held ${stall.ms} ms every ${stall.everyMs} ms` : '';
             const where = across ? ', in a worker of its own' : '';
             test(`on ${windows}, a tone ${what}${held}${where} reaches the worklet whole: its`
-                + ' length, its pitch, no gap', { timeout: 60000,
-                todo: across ? acrossTodo ?? todo : todo, skip: REALTIME ? false : ALONE },
+                + ' length, its pitch, no gap', { timeout: 60000, todo,
+                skip: REALTIME ? false : ALONE },
             async()=>{
                 await hear(program, windows, stall, across);
             });
