@@ -717,8 +717,9 @@ test('a heap block the machine has no memory for says so, not that the arena was
     const limit = RESERVING_ARENA.base + GRANULARITY;
     /** @type {string[]} */
     const said = [];
-    const fns = createHeapFunctions({ ...fakeHost(),
-        arena: { ...RESERVING_ARENA, reach: (/** @type {number} */ end)=>end <= limit },
+    const fns = createHeapFunctions({ ...fakeHost(), arena: RESERVING_ARENA,
+        allocator: createHeapAllocator({ ...RESERVING_ARENA,
+            reach: (/** @type {number} */ end)=>end <= limit }),
         divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>{
             said.push(`${api}: ${detail}`);
         } });
