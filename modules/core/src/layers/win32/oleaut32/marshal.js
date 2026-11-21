@@ -99,7 +99,8 @@ const SYS_WIN64 = 3;
  * @property {boolean} [float]           A word that is a floating-point number, which a
  *           64-bit call passes in an XMM register.
  * @property {WireType} [long]           A record's layout in a 64-bit process, where it
- *           differs: one with pointers in it the library describes itself (EXCEPINFO).
+ *           differs: one with pointers in it (EXCEPINFO, or one a library describes).
+ * @property {number} [align]            A record's alignment, where it was laid out here.
  * @property {string | null} [iid]       An interface's, when the type says.
  * @property {number} [iidFrom]          Else the parameter whose GUID names it.
  * @property {WireType} [to]             What a pointer or an array holds.
@@ -314,6 +315,62 @@ const NARROW = layoutOf(4);
 const recordIn = (type, layout)=>(layout.pointer === 8 && type.long ? type.long : type);
 
 /**
+ * Where a value of `type` is aligned in a record at a width: on its own size up
+ * to eight, a pointer on a pointer's, a record on its most aligned member's.
+ *
+ * @param {WireType} type @param {Layout} layout
+ * @returns {number}
+ */
+const alignOf = (type, layout)=>{
+    switch (type.kind)
+    {
+        case 'word':
+            return Math.min(/** @type {number} */ (type.bytes), 8);
+        case 'record':
+            return recordIn(type, layout).align ?? 4;
+        case 'variant':
+            return 8;
+        default:
+            return layout.pointer;
+    }
+};
+
+/**
+ * A record's members laid out at a width as a compiler of that width lays them:
+ * each on its alignment, the whole a multiple of the largest. What the record
+ * holds beyond plain bytes is kept as its fields.
+ *
+ * @param {WireType[]} members @param {Layout} layout
+ * @returns {{ bytes: number, align: number, fields: { offset: number, type: WireType }[] }}
+ */
+const layOut = (members, layout)=>{
+    let at = 0;
+    let align = 1;
+    const fields = [];
+    for (const type of members)
+    {
+        const own = alignOf(type, layout);
+        at = Math.ceil(at / own) * own;
+        align = Math.max(align, own);
+        if (carries(type))
+        {
+            fields.push({ offset: at, type });
+        }
+        at += sizeOf(type, layout);
+    }
+    return { bytes: Math.ceil(at / align) * align, align, fields };
+};
+
+/**
+ * Whether a record's member is more than bytes to copy: what points somewhere,
+ * or a record that holds such a thing.
+ *
+ * @param {WireType} type
+ */
+const carries = type=>type.kind !== 'word' && !(type.kind === 'record' && !type.fields?.length
+    && !type.long?.fields?.length);
+
+/**
  * A value's size where it is stored.
  *
  * @param {WireType} type @param {Layout} [layout]
@@ -480,6 +537,8 @@ function libraryTypes(library){
                     : unsupported(`the coclass ${reference.name}`);
             }
             case TKIND_RECORD: {
+                /** @type {WireType[]} */
+                const members = [];
                 /** @type {{ offset: number, type: WireType }[]} */
                 const fields = [];
                 for (const variable of reference.variables)
@@ -489,12 +548,22 @@ function libraryTypes(library){
                     {
                         return unsupported(`${reference.name}.${variable.name}: ${type.why}`);
                     }
-                    if (type.kind !== 'word' && !(type.kind === 'record' && !type.fields?.length))
+                    members.push(type);
+                    if (carries(type))
                     {
                         fields.push({ offset: variable.offset, type });
                     }
                 }
-                return { kind: 'record', bytes: reference.instanceSize, fields };
+                // The library's offsets and size are its own width's. A process
+                // of the other loads it where no library of its width is
+                // registered, and lays the record out for itself, as Windows
+                // does: a pointer there is another size.
+                const wide = library.sysKind === SYS_WIN64;
+                const stored = { bytes: reference.instanceSize, fields,
+                    align: reference.alignment || layOut(members, layoutOf(wide ? 8 : 4)).align };
+                const other = layOut(members, layoutOf(wide ? 4 : 8));
+                const [narrow, long] = wide ? [other, stored] : [stored, other];
+                return { kind: 'record', ...narrow, long: { kind: 'record', ...long } };
             }
             default:
                 return unsupported(`the type ${reference.name}`);

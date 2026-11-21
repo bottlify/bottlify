@@ -12,7 +12,8 @@ import { parseTypeLib } from './typelib.js';
 import { createAutomationFunctions } from './functions.js';
 import {
     IID_IDISPATCH, PARAMFLAG_FIN, PARAMFLAG_FOUT, argumentBytes, argumentSlots,
-    createInterfaceCatalog, describeType, layoutOf, marshalReply, marshalRequest, unmarshalReply,
+    createInterfaceCatalog, describeType, layoutOf, marshalReply, marshalRequest, sizeOf,
+    unmarshalReply,
     unmarshalRequest, unsupportedAt,
 } from './marshal.js';
 
@@ -714,4 +715,55 @@ test('a record passed by value crosses between 64-bit processes by the reference
     const before = callee.live.size;
     await marshalReply(callee, method, request, call);
     assert.ok(callee.live.size < before, 'the stub\'s copy and its string given back');
+});
+
+/**
+ * A library of `sysKind` holding ICorSvcSetPrivateAttributes and the record it
+ * takes by value, NGenPrivateAttributes: two DWORDs and a BSTR, laid out as a
+ * library of that width stores it.
+ *
+ * @param {1 | 3} sysKind  SYS_WIN32 or SYS_WIN64.
+ */
+const privateAttributesLibrary = sysKind=>{
+    const wide = sysKind === 3;
+    const word = (/** @type {string} */ name, /** @type {number} */ offset)=>({ name, offset,
+        type: { vt: 19 } });
+    return /** @type {any} */ ({ sysKind, imports: [], typeInfos: [
+        { name: 'ICorSvcSetPrivateAttributes', guid: '{B18E0B40-C089-4350-8328-066C668BCCC2}',
+            kind: 3, flags: 0, implementedTypes: [], variables: [], functions: [
+                { name: 'SetNGenPrivateAttributes', vtableOffset: 3 * (wide ? 8 : 4),
+                    callingConvention: 4, parameters: [
+                        { name: 'attributes', flags: 1, type: { vt: 29, hreftype: 0x64 } }] }] },
+        { name: 'NGenPrivateAttributes', kind: 1, instanceSize: wide ? 16 : 12,
+            alignment: wide ? 8 : 4, implementedTypes: [], functions: [], variables: [
+                word('Flags', 0), word('ZapStats', 4),
+                { name: 'DbgDir', offset: 8, type: { vt: 8 } }] },
+    ] });
+};
+
+test('a record a library of the other width describes is laid out for the process: a 64-bit'
+    + ' one\'s from a 32-bit library has its string at 8 and is 16 bytes', async()=>{
+    for (const sysKind of /** @type {(1 | 3)[]} */ ([1, 3]))
+    {
+        const library = privateAttributesLibrary(sysKind);
+        const method = /** @type {any} */ (describeType(library, library.typeInfos[0]).methods[3]);
+        const type = method.parameters[0].type;
+        assert.deepEqual([sizeOf(type, layoutOf(4)), sizeOf(type, layoutOf(8))], [12, 16],
+            `sysKind ${sysKind}: 12 bytes at 32 bits, 16 at 64`);
+        const caller = automatedSide('caller');
+        const callee = automatedSide('callee');
+        callee.free(callee.allocate(0x800));
+        const record = caller.allocate(16);
+        caller.put(record, 0x11);
+        caller.put(record + 4, 0x22);
+        caller.putPointer(record + 8, caller.allocateBstr(caller.wide('C:\\dbg')));
+        const request = await marshalRequest(caller, method, longFrame([record]));
+        const call = await unmarshalRequest(callee, method, request);
+        const theirs = Number(call.words[0]);
+        assert.deepEqual([callee.u32(theirs), callee.u32(theirs + 4)], [0x11, 0x22]);
+        const path = callee.pointer(theirs + 8);
+        assert.equal(text(callee.readMemory(path, callee.u32(path - 4))), 'C:\\dbg',
+            `sysKind ${sysKind}: the string whole, at 8`);
+        await marshalReply(callee, method, request, call);
+    }
 });
