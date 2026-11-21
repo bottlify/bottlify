@@ -2314,16 +2314,20 @@ export function createHarness(canvas, how = {}){
 
         // What the program wrote. A game of this age keeps its own log, and it says
         // in plain words what it thought went wrong.
-        result.files = app.session.export().map((/** @type {any} */ file)=>({
-            path: file.path,
-            bytes: file.bytes.length,
-            truncated: file.bytes.length > LIMITS.file,
-            text: new TextDecoder('latin1')
-                .decode(file.bytes.subarray(0, LIMITS.file)),
-            // The bytes themselves, whole, for a run that will feed a file
-            // back in: the text above is a reading of it, not the file.
-            base64: request.wholeFiles ? toBase64(file.bytes) : undefined,
-        }));
+        // A file of a session laid under the writable layer that the program
+        // did not touch comes as `{ path, size, read }`, not its bytes: it is
+        // the session's, not what the program wrote, and is left out.
+        result.files = app.session.export().filter((/** @type {any} */ file)=>file.bytes)
+            .map((/** @type {any} */ file)=>({
+                path: file.path,
+                bytes: file.bytes.length,
+                truncated: file.bytes.length > LIMITS.file,
+                text: new TextDecoder('latin1')
+                    .decode(file.bytes.subarray(0, LIMITS.file)),
+                // The bytes themselves, whole, for a run that will feed a file
+                // back in: the text above is a reading of it, not the file.
+                base64: request.wholeFiles ? toBase64(file.bytes) : undefined,
+            }));
 
         result.failures = collected.failures;
         // The journal's tail, taken before the layer is disposed with the
