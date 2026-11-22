@@ -200,6 +200,8 @@ export const wrongChunks = (files, at, handle, which)=>
  * @param {ContentServer[]} options.servers
  * @param {string} [options.installscript]  The app's own (`extended.installscript`).
  * @param {string} [options.executable]  The program Steam starts, as a path in the app.
+ * @param {'x86' | 'amd64'} [options.machine]  The bottle's machine, which the
+ *     redistributables install for; the program's width when absent.
  * @param {InstallProgress | null} [options.resume]
  * @param {(progress: InstallProgress) => unknown} [options.onSave]
  * @param {Parameters<typeof downloadFiles>[0]['decode']} [options.decode]
@@ -212,7 +214,7 @@ export const wrongChunks = (files, at, handle, which)=>
  *     entry: Uint8Array | null, said: string[] }>}
  */
 export async function installBundle({ handle, depots, servers, installscript, executable,
-    resume = null, onSave, decode = downloadChunk, fetch: get, jobs, signal, onProgress })
+    machine, resume = null, onSave, decode = downloadChunk, fetch: get, jobs, signal, onProgress })
 {
     const listed = [];
     for (const opening of depots)
@@ -234,7 +236,7 @@ export async function installBundle({ handle, depots, servers, installscript, ex
 
     // The redistributables, over the files in place; what they write goes after them.
     const { tree, settle, find } = treeInPlace(handle, placed, 'steam');
-    const said = await installSteamRedistributables(tree, { installscript, executable,
+    const said = await installSteamRedistributables(tree, { installscript, executable, machine,
         shared: listed.filter(({ opening })=>opening.shared)
             .flatMap(({ manifest: one })=>one.files.map(file=>file.name)) });
     const bundled = settle();

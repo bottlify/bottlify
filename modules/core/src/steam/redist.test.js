@@ -30,6 +30,9 @@ import { managedExe } from '../../../../tools/fixtures/managed-exe.mjs';
 const installRedistributables = (/** @type {string} */ directory,
     /** @type {string[]} */ scripts, /** @type {'x86' | 'amd64'} */ machine)=>
     redist.installRedistributables(directoryTree(directory), scripts, machine);
+/** And Steam's own step over one. @param {string} directory @param {any} what */
+const installSteamRedistributables = (directory, what)=>
+    redist.installSteamRedistributables(directoryTree(directory), what);
 
 const HKLM = 0x80000002;
 const HKCU = 0x80000001;
@@ -225,6 +228,35 @@ test('an app\'s install scripts and the runtimes it carries are installed into i
             await rm(app, { recursive: true, force: true });
         }
     });
+
+test('a Steam app installs on the machine it is told, whatever its program\'s width', async()=>{
+    const app = await mkdtemp(join(tmpdir(), 'redist-'));
+    try
+    {
+        const vc = join(app, '_CommonRedist', 'vc');
+        await mkdir(vc, { recursive: true });
+        await writeFile(join(vc, 'vc_redist.x64.exe'),
+            await bootstrapper({ wide: true, version: '14.0.1', size: 40, fill: 1 }));
+        await writeFile(join(vc, 'installscript.vdf'), String.raw`"InstallScript"
+{ "Run Process" { "x64" { "process 1" "%INSTALLDIR%\\_CommonRedist\\vc\\vc_redist.x64.exe" } } }`);
+        // A 32-bit program: on its own it makes the machine a 32-bit one.
+        await writeFile(join(app, 'game.exe'), peImage(0x14c));
+        const shared = ['_CommonRedist\\vc\\installscript.vdf',
+            '_CommonRedist\\vc\\vc_redist.x64.exe'];
+        const narrow = await installSteamRedistributables(app, { shared, executable: 'game.exe' });
+        assert.match(String(narrow.at(-1)), /^redistributables: 0 file\(s\)/,
+            'by its program, a 32-bit machine: no 64-bit runtime');
+        await rm(join(app, '.bottlify'), { recursive: true, force: true });
+        const wide = await installSteamRedistributables(app,
+            { shared, executable: 'game.exe', machine: 'amd64' });
+        assert.match(String(wide.at(-1)), /^redistributables: 1 file\(s\)/,
+            'told a 64-bit machine, which holds both widths: the 64-bit runtime too');
+    }
+    finally
+    {
+        await rm(app, { recursive: true, force: true });
+    }
+});
 
 /** A PE image of a machine, as much of one as says which. @param {number} machine */
 function peImage(machine){

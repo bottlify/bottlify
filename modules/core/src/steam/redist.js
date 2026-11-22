@@ -972,14 +972,20 @@ export async function installRedistributables(tree, scripts, machine, programs =
  * @param {Object} what
  * @param {string} [what.installscript]  The app's own, as its product info names it.
  * @param {string[]} what.shared  The paths of the redistributables' depots' files.
- * @param {string} [what.executable]  The program Steam starts: its width is the machine's.
+ * @param {string} [what.executable]  The program Steam starts: its width is the machine's
+ *     unless `machine` says.
+ * @param {'x86' | 'amd64'} [what.machine]  The bottle's machine: a 64-bit one holds both
+ *     widths' runtimes, so a 32-bit build of a game that ships both runs too.
  * @returns {Promise<string[]>}
  */
-export async function installSteamRedistributables(tree, { installscript, shared, executable }){
+export async function installSteamRedistributables(tree, { installscript, shared, executable,
+    machine: told })
+{
     const { find } = await finder(tree);
     const scripts = [installscript, ...shared.filter(name=>/(^|\\)installscript\.vdf$/i.test(name))]
         .map(find).filter(/** @returns {path is string} */ path=>path !== undefined);
     const program = find(executable);
-    const machine = program ? imageMachine((await tree.read(program)).subarray(0, 4096)) : 'x86';
+    const machine = told
+        ?? (program ? imageMachine((await tree.read(program)).subarray(0, 4096)) : 'x86');
     return installRedistributables(tree, scripts, machine);
 }
