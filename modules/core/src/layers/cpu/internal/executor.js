@@ -199,6 +199,11 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             Promise.resolve(store.put(ask.key, ask.bytes, ask.options)).catch(()=>{});
             return;
         }
+        if (ask.method === 'append' && ask.bytes instanceof Uint8Array)
+        {
+            Promise.resolve(store.append?.(ask.key, ask.bytes)).catch(()=>{});
+            return;
+        }
         if (ask.method === 'touch')
         {
             store.touch?.(ask.key);

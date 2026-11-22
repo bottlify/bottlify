@@ -28,7 +28,42 @@
  */
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
-/** @typedef {{ offset: number, length: number, session: number }} Place */
+/**
+ * A record's place in the records file: one stretch, or the stretches an `append` added to
+ * it, read in order as one record (`pieces`; `length` is their sum then).
+ * @typedef {{ offset: number, length: number, session: number,
+ *     pieces?: [number, number][] }} Place
+ */
+
+/** @param {Place} place @returns {[number, number][]} */
+const piecesOf = place=>place.pieces ?? [[place.offset, place.length]];
+
+/**
+ * The parts of a record as one, or null where one could not be read.
+ * @param {(Uint8Array | null)[]} parts
+ */
+const joined = parts=>{
+    if (parts.length === 1 || parts.some(part=>part === null))
+    {
+        return parts.length === 1 ? parts[0] : null;
+    }
+    const whole = new Uint8Array(parts.reduce((sum, part)=>sum
+        + /** @type {Uint8Array} */ (part).length, 0));
+    let at = 0;
+    for (const part of /** @type {Uint8Array[]} */ (parts))
+    {
+        whole.set(part, at);
+        at += part.length;
+    }
+    return whole;
+};
+
+/**
+ * The milliseconds the touches of a session's reads wait before they are named in the index:
+ * written with the next put or past 512 of them otherwise, a run its page's going away ended
+ * kept none, and a record it read at every start aged out of the store all the same.
+ */
+const TOUCHES_WAIT_MS = 2000;
 /**
  * What a store holds and what its opening found and kept (`stats`): records and
  * bytes before, the records kept and their bytes, the bytes the cap left out,
@@ -46,6 +81,7 @@
  * @typedef {TranslationStore & {
  *     flush: () => Promise<void>, close: () => Promise<void>, prepare: () => Promise<void>,
  *     getNow: (key: string) => Uint8Array | null | undefined,
+ *     append: (key: string, bytes: Uint8Array) => Promise<void>,
  *     touch: (key: string) => void, stats: () => StoreStats,
  *     seed: (source: Uint8Array | null | Promise<Uint8Array | null>, identity?: string)
  *         => Promise<{ taken: boolean, added: number, present: number }>,
@@ -663,6 +699,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
     };
 
+    /** A record's bytes, its pieces read in order. @param {Place} place */
+    const readPlace = async place=>joined(await Promise.all(piecesOf(place)
+        .map(([offset, length])=>readAt(offset, length))));
+
     /**
      * The last session each record was used in: its own, or a later one of a
      * region naming it as its module.
@@ -760,7 +800,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         const copy = async write=>{
             for (const [recordName, place] of live)
             {
-                const bytes = await readAt(place.offset, place.length);
+                const bytes = await readPlace(place);
                 if (bytes === null)
                 {
                     continue;
@@ -876,11 +916,17 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                         // A place past the file's end is a write the index outran
                         // (the page went away between the two): not a record; nor
                         // is a line cut short, which reads as a length of zero.
-                        if (parts.length === 3 && recordName && lengthText !== ''
+                        // `+` after a place: a piece `append` added to the record.
+                        const piece = parts.length === 4 && parts[3] === '+';
+                        if ((parts.length === 3 || piece) && recordName && lengthText !== ''
                             && Number.isInteger(offset) && Number.isInteger(length)
                             && length > 0 && offset + length <= end)
                         {
-                            places.set(recordName, { offset, length, session: last });
+                            const before = piece ? places.get(recordName) : undefined;
+                            places.set(recordName, before === undefined
+                                ? { offset, length, session: last }
+                                : { ...before, length: before.length + length, session: last,
+                                    pieces: [...piecesOf(before), [offset, length]] });
                         }
                     }
                 }
@@ -1083,7 +1129,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         if (place && place.session !== session)
         {
             place.session = session;
-            pendingLines.push(`${recordName} ${place.offset} ${place.length}\n`);
+            // Every piece again, in order: one line of the whole length would read the
+            // bytes after the first piece as the record.
+            piecesOf(place).forEach(([offset, length], at)=>pendingLines.push(
+                `${recordName} ${offset} ${length}${at === 0 ? '' : ' +'}\n`));
             const module = needsOf.get(recordName);
             if (module !== undefined)
             {
@@ -1093,8 +1142,64 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             {
                 publish();
             }
+            else
+            {
+                touchesSoon();
+            }
         }
         return place;
+    };
+
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let touchesTimer = null;
+    /** The touches named in the index a while after the first of them (`TOUCHES_WAIT_MS`). */
+    function touchesSoon(){
+        if (touchesTimer !== null)
+        {
+            return;
+        }
+        touchesTimer = setTimeout(()=>{
+            touchesTimer = null;
+            if (!closing && !broken && pendingLines.length > 0)
+            {
+                publish();
+            }
+        }, TOUCHES_WAIT_MS);
+        // Keeps no Node process alive; a page's timer has no unref.
+        /** @type {any} */ (touchesTimer).unref?.();
+    }
+
+    /**
+     * Adds bytes to the end of a record (`append`): a piece of its own in the records file,
+     * named in the index after the record's earlier ones.
+     *
+     * @param {string} key @param {Uint8Array} bytes
+     */
+    const appendNow = async(key, bytes)=>{
+        const recordName = fileNameOf(key);
+        await ready();
+        if (broken)
+        {
+            return;
+        }
+        try
+        {
+            const offset = end;
+            const { length } = bytes;
+            end += length;
+            await appendRecords([[offset, bytes]]);
+            const all = /** @type {Map<string, Place>} */ (places);
+            const before = all.get(recordName);
+            all.set(recordName, before === undefined ? { offset, length, session }
+                : { ...before, length: before.length + length, session,
+                    pieces: [...piecesOf(before), [offset, length]] });
+            pendingLines.push(`${recordName} ${offset} ${length}`
+                + `${before === undefined ? '' : ' +'}\n`);
+            await publish();
+        }
+        catch {
+            broken = true;
+        }
     };
 
     /** The puts under way, which a close waits for. @type {Set<Promise<void>>} */
@@ -1160,7 +1265,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             const place = use(key);
             try
             {
-                return place ? await readAt(place.offset, place.length) : null;
+                return place ? await readPlace(place) : null;
             }
             catch {
                 broken = true;
@@ -1190,7 +1295,8 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             const place = use(key);
             try
             {
-                return place ? readNow(place.offset, place.length) : null;
+                return place ? joined(piecesOf(place)
+                    .map(([offset, length])=>readNow(offset, length))) : null;
             }
             catch {
                 broken = true;
@@ -1213,6 +1319,22 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             puts.add(putting);
             putting.finally(()=>puts.delete(putting));
             return putting;
+        },
+        /**
+         * Adds bytes to the end of a record, or makes one of them: a record that grows by
+         * what each run adds to it is not written whole every time.
+         *
+         * @param {string} key @param {Uint8Array} bytes
+         */
+        append(key, bytes){
+            if (closing)
+            {
+                return Promise.resolve();
+            }
+            const adding = appendNow(key, bytes);
+            puts.add(adding);
+            adding.finally(()=>puts.delete(adding));
+            return adding;
         },
         flush,
         /**
@@ -1325,8 +1447,9 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 {
                     continue;
                 }
-                const bytes = whole === null ? await readAt(place.offset, place.length)
-                    : whole.subarray(place.offset, place.offset + place.length);
+                const bytes = whole === null ? await readPlace(place)
+                    : joined(piecesOf(place).map(([offset, length])=>
+                        whole.subarray(offset, offset + length)));
                 if (bytes !== null && bytes.length === place.length)
                 {
                     out.push([recordName, bytes]);

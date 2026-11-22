@@ -394,11 +394,11 @@ export function createDiagnostics(state){
         return forms;
     };
 
-    /** @type {{ put: string[], missed: string[] }} */
-    const storeTrace = { put: [], missed: [] };
+    /** @type {{ put: string[], missed: string[], hit: string[] }} */
+    const storeTrace = { put: [], missed: [], hit: [] };
     // The other parts name the list rather than hold it: a property they read keeps
     // its name in a production bundle, which drops the instrument only from here.
-    /** @param {'put' | 'missed'} list
+    /** @param {'put' | 'missed' | 'hit'} list
      * @param {{ region: { entry: number, hash: string, blocks?: { start: number, end: number }[] },
      *     entryTop: number }} one */
     const trace = (list, one)=>{

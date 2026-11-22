@@ -36,7 +36,7 @@ function machine(config = {}, ramSize = 4 << 20, imports = {}){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, rdtsc: ()=>0n, ...imports },
+        imports: { trap: ()=>0, rdtsc: ()=>0, ...imports },
         // A page's rewrites all at one moment: what makes it volatile is how
         // many there were, never how long a busy machine took between them.
         now: ()=>0,
@@ -834,7 +834,7 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, 0) });
     assert.throws(()=>createCorkRuntime({
         memory, layout, config: {}, read: ()=>0,
-        imports: { trap: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
     }), /before the tables/);
 });
 
@@ -1599,21 +1599,25 @@ test('a block of a stored region that can no longer be published is translated a
         assert.equal(second.reg(1), 0);
     });
 
-test('every runtime of a run adds its blocks to the store\'s map, and one that adds none puts '
-    + 'no map', async()=>{
+test('every runtime of a run appends its new blocks to the store\'s map while it runs, and the '
+    + 'map is put whole again once half of it is repeats', async t=>{
+    t.mock.timers.enable({ apis: ['setInterval'] });
     const { memoryTranslationStore } = await import('./cache.js');
-    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const settle = ()=>new Promise(resolve=>setImmediate(resolve));
     const inner = memoryTranslationStore();
-    let maps = 0;
+    let appends = 0;
+    let puts = 0;
     let mapKey = '';
-    const store = { ...inner, put: (/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
-        if (key.endsWith('/blocks'))
-        {
-            maps++;
+    const store = { ...inner,
+        put: (/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            puts += key.endsWith('/blocks') ? 1 : 0;
+            return inner.put(key, bytes);
+        },
+        append: (/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            appends++;
             mapKey = key;
-        }
-        return inner.put(key, bytes);
-    } };
+            return inner.append(key, bytes);
+        } };
     const OTHER = CODE + 0x100;
     /** Hot at `at`, a countdown's entry or its loop's head, whose loop has an entry then.
      * @param {ReturnType<typeof machine>} m @param {number} at @param {number} loop */
@@ -1627,14 +1631,18 @@ test('every runtime of a run adds its blocks to the store\'s map, and one that a
         assert.ok(m.runtime.entryOf(loop) >= 0);
         return m.runtime.diagnostics();
     };
-    // Two processes of one run, the tool's runtime started before the program's put its map.
+    // Two processes of one run, neither ever flushed: a page that goes away ends them so.
     const tool = machine({ store, bundleId: 'test' });
     const program = machine({ store, bundleId: 'test' });
     await runAt(program, CODE, CODE + 5);
-    await program.runtime.flush();
     await runAt(tool, OTHER, OTHER + 5);
-    await tool.runtime.flush();
-    assert.equal(maps, 2);
+    assert.equal(appends, 0, 'nothing before the interval');
+    t.mock.timers.tick(3000);
+    await settle();
+    assert.equal(appends, 2, 'each runtime its own blocks');
+    t.mock.timers.tick(3000);
+    await settle();
+    assert.equal(appends, 2, 'blocks sent once');
     for (const at of [CODE, OTHER])
     {
         const next = machine({ store, bundleId: 'test' });
@@ -1643,23 +1651,20 @@ test('every runtime of a run adds its blocks to the store\'s map, and one that a
         assert.equal(d.cacheMisses, 0);
         await next.runtime.flush();
     }
-    assert.equal(maps, 2, 'runs that added nothing to the map');
-    // A map of a thousand blocks more: a run adding its three is not worth putting it whole.
+    assert.equal(appends, 2, 'a run that formed what the map names appends nothing');
+    assert.equal(puts, 0, 'nor puts it');
+    // The same blocks appended again and again: read as one, the map is put whole once.
     const held = /** @type {Uint8Array} */ (await inner.get(mapKey));
-    const larger = new Uint8Array(held.length + 1000 * 12);
-    larger.set(held);
-    const more = new DataView(larger.buffer, held.length);
-    for (let at = 0; at < 1000; at++)
+    for (let again = 0; again < 2; again++)
     {
-        more.setUint32(at * 12, 0x200000 + at * 16, true);
-        more.setUint32(at * 12 + 4, 0x200000, true);
+        await inner.append(mapKey, held.slice());
     }
-    await inner.put(mapKey, larger);
     const third = machine({ store, bundleId: 'test' });
-    third.write(CODE + 0x200, COUNTDOWN);
-    await runAt(third, CODE + 0x200, CODE + 0x205);
+    await runAt(third, CODE + 5, CODE + 5);
+    await settle();
+    assert.equal(puts, 1);
+    assert.equal((await inner.get(mapKey))?.length, held.length, 'each block once');
     await third.runtime.flush();
-    assert.equal(maps, 2, 'three blocks added to a thousand');
 });
 
 test('an entry that moved to another precision control is taken from the store as it moved',
@@ -4479,7 +4484,7 @@ test('with callReturn no more calls wait as wasm calls than the module\'s depth,
             const stack = String(new Error().stack);
             Error.stackTraceLimit = limit;
             frames = Math.max(frames, stack.split('\n').filter(line=>/wasm/.test(line)).length);
-            return 0n;
+            return 0;
         };
         const m = machine({ leafCalls: false, callTargets: false, ...config }, 4 << 20,
             { rdtsc });

@@ -662,6 +662,59 @@ test('a store closed straight after its puts has them on disk for the next run',
     }
 });
 
+test('a record appended to reads whole, in its pieces\' order, reopened and compacted alike',
+    async()=>{
+        for (const sync of [false, true])
+        {
+            const root = fakeDirectory(undefined, sync);
+            const limits = { keepSessions: 1, compactFloor: 0, cap: 1 << 20 };
+            const first = await createDirectoryTranslationStore(root, 'bundle');
+            await first.append('map', new Uint8Array([1, 2]));
+            await first.put('dead', new Uint8Array(64));
+            await first.append('map', new Uint8Array([3]));
+            await first.append('map', new Uint8Array([4, 5]));
+            const whole = [1, 2, 3, 4, 5];
+            assert.deepEqual([...(await first.get('map')) ?? []], whole);
+            if (sync)
+            {
+                assert.deepEqual([...first.getNow('map') ?? []], whole, 'at once');
+            }
+            const lines = (await indexOf(root, 'bundle')).split('\n');
+            assert.equal(lines.filter(line=>line.startsWith(fileNameOf('map'))
+                && line.endsWith(' +')).length, 2, 'two pieces named after the first');
+            // Not closed: a page that goes away leaves its store so.
+            const next = await createDirectoryTranslationStore(root, 'bundle');
+            assert.deepEqual([...(await next.get('map')) ?? []], whole, 'reopened');
+            await next.close();
+            // 'dead' unread for a session: the next opening copies the live records.
+            const compacted = await createDirectoryTranslationStore(root, 'bundle', limits);
+            assert.deepEqual([...(await compacted.get('map')) ?? []], whole, 'compacted');
+            assert.equal(compacted.stats().opened.compacted, true);
+            assert.equal(await compacted.get('dead'), null);
+            await compacted.close();
+        }
+    });
+
+test('the touches of a run\'s reads are in the index a while after, the store left open',
+    async t=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        await first.put('read', new Uint8Array([3]));
+        await first.close();
+        t.mock.timers.enable({ apis: ['setTimeout'] });
+        const second = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal((await second.get('read'))?.[0], 3);
+        const name = fileNameOf('read');
+        const named = async()=>(await indexOf(root, 'bundle')).split(`# 2\n`)[1] ?? '';
+        assert.equal(await named(), '', 'not at once');
+        t.mock.timers.tick(2000);
+        for (let turn = 0; turn < 20 && !(await named()).includes(name); turn++)
+        {
+            await new Promise(resolve=>setImmediate(resolve));
+        }
+        assert.match(await named(), new RegExp(`^${name} 0 1$`, 'm'));
+    });
+
 test('a run that only reads keeps what it read young', async()=>{
     // Its touches were written only past 512 lines: a warm run reading a
     // hundred records left them as old as the run that wrote them.

@@ -284,7 +284,7 @@ export const SETTINGS = {
             + ' instantiating and publishing, and the record of long holds.' },
     // What tells two runs' keys apart.
     traceStore: { kind: 'debug', value: false,
-        doc: 'Translation store keys put and missed, as `entry:hash:top`.' },
+        doc: 'Translation store keys put, missed and hit, as `entry:hash:top`.' },
     // Translated code a write left standing, formed again when it is asked for.
     checkStale: { kind: 'debug', value: false,
         doc: 'Regions still published whose bytes no longer form as they did'

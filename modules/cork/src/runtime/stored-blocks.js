@@ -31,6 +31,9 @@ export class StoredBlocks {
         this.size = words.length / WORDS;
     }
 
+    /** The bytes of a block in the record. */
+    static BYTES = WORDS * 4;
+
     /** None. */
     static empty(){
         return new StoredBlocks(new Uint32Array(0));
@@ -125,54 +128,6 @@ export class StoredBlocks {
             }
         }
         return undefined;
-    }
-
-    /**
-     * These blocks with `added` over them, and how many of `added` changed
-     * anything: a merge of two sorted lists.
-     *
-     * @param {Map<number, number>} added  owner by block
-     * @returns {{ blocks: StoredBlocks, changed: number }}
-     */
-    with(added){
-        let changed = 0;
-        /** @type {Map<number, number>} */
-        const news = new Map();
-        for (const [block, owner] of added)
-        {
-            if (this.get(block) !== owner)
-            {
-                news.set(block, owner);
-                changed++;
-            }
-        }
-        if (changed === 0)
-        {
-            return { blocks: this, changed };
-        }
-        const fresh = StoredBlocks.fromMap(news).words;
-        const words = new Uint32Array(this.words.length + fresh.length);
-        let at = 0;
-        let old = 0;
-        let add = 0;
-        while (old < this.size || add < fresh.length / WORDS)
-        {
-            const a = old < this.size ? blockAt(this.words, old) : Infinity;
-            const b = add < fresh.length / WORDS ? blockAt(fresh, add) : Infinity;
-            if (b <= a)
-            {
-                words.set(fresh.subarray(add * WORDS, add * WORDS + WORDS), at);
-                add++;
-                old += a === b ? 1 : 0;
-            }
-            else
-            {
-                words.set(this.words.subarray(old * WORDS, old * WORDS + WORDS), at);
-                old++;
-            }
-            at += WORDS;
-        }
-        return { blocks: new StoredBlocks(words.slice(0, at)), changed };
     }
 
     /** The record's bytes. */

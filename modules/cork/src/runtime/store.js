@@ -14,8 +14,9 @@
  * answers at once (`recordBefore`, `prefetch`), a credit's worth a call after
  * it (`lookUpOn`), or a turn later; each formed region is then settled as a
  * hit or a miss (`settle`). The map of blocks to their regions (`storedBlocks`)
- * lets a candidate inside a stored region be formed as that region, and
- * `flushStore` puts back what this run added to it.
+ * lets a candidate inside a stored region be formed as that region; what this run adds to
+ * it is appended to its record a few seconds after it is formed (`sendBlocks`), so a run its
+ * page's going away ends leaves it all the same.
  */
 
 import { formRegion } from '../region.js';
@@ -31,10 +32,10 @@ import { StoredBlocks } from './stored-blocks.js';
 /** @typedef {import('./state.js').Forming} Forming */
 
 /**
- * The least share of the store's map of blocks to regions (`storedBlocks`) a
- * runtime adds before it puts the map again: one part in this many.
+ * The milliseconds between two appends of this run's new blocks to the store's map
+ * (`sendBlocks`): a few kilobytes each, written by the store's writer, not this thread.
  */
-const MAP_SHARE = 64;
+const BLOCKS_EVERY_MS = 3000;
 
 /**
  * @param {object} state  the runtime's state (`state.js`), typed inside: its type is
@@ -422,11 +423,72 @@ export function createStore(state){
             const bytes = store === null || typeof store.get !== 'function' ? null
                 : await store.get(blocksKey());
             storedBlocks = bytes === null ? StoredBlocks.empty() : StoredBlocks.fromBytes(bytes);
+            // The map grows by appends, a block met again in another run appended again:
+            // past half of it such repeats, it is put whole once more, as it reads. An append
+            // another process makes between this read and the put is lost - a block left for
+            // the run that forms it again.
+            if (bytes !== null && typeof store.append === 'function'
+                && storedBlocks.size * 2 * StoredBlocks.BYTES < bytes.length)
+            {
+                store.put(blocksKey(), storedBlocks.bytes().slice()).catch(()=>{});
+            }
         }
         catch {
             storedBlocks = StoredBlocks.empty();
         }
+        startSending(store);
     })();
+    /** The regions whose blocks are in the store's map already, sent by this runtime. */
+    const sentBlocks = new WeakSet();
+    /**
+     * Appends to the store's map the blocks of the regions published since the last call,
+     * those it does not name with the same region already (a region the store gave this
+     * run is there). The work here is this run's new regions alone; the map's own bytes
+     * are neither read nor written whole.
+     * @param {any} store
+     */
+    const sendBlocks = store=>{
+        /** @type {Map<number, number>} */
+        const ours = new Map();
+        for (const record of regions)
+        {
+            if (sentBlocks.has(record))
+            {
+                continue;
+            }
+            sentBlocks.add(record);
+            const owner = keyOf(record.entry, record.entryTop);
+            for (const slot of record.slots)
+            {
+                const { eip, top } = entries.at(slot);
+                const block = keyOf(eip, top);
+                if (storedBlocks?.get(block) !== owner)
+                {
+                    ours.set(block, owner);
+                }
+            }
+        }
+        return ours.size === 0 ? Promise.resolve()
+            : store.append(blocksKey(), StoredBlocks.fromMap(ours).bytes()).catch(()=>{});
+    };
+    /** @type {ReturnType<typeof setInterval> | null} */
+    let sending = null;
+    /**
+     * `sendBlocks` every `BLOCKS_EVERY_MS`, where the store appends.
+     * ponytail: walks every published region each time (a WeakSet check apiece); a list of
+     * the regions published since, if a run of hundreds of thousands shows it.
+     * @param {any} store
+     */
+    function startSending(store){
+        if (store === null || typeof store.append !== 'function' || sending !== null)
+        {
+            return;
+        }
+        sending = setInterval(()=>{
+            sendBlocks(store);
+        }, BLOCKS_EVERY_MS);
+        /** @type {any} */ (sending).unref?.();
+    }
     /**
      * The candidates sent on to the stored region holding them (`storedOwner`), by
      * key: once each. A region the store names that this run cannot publish - its
@@ -533,6 +595,7 @@ export function createStore(state){
         if (one.cached !== null)
         {
             counts.cacheHits++;
+            trace('hit', one);
         }
         else
         {
@@ -850,43 +913,17 @@ export function createStore(state){
      * from the processes still running. */
     const flushStore = async()=>{
         const store = storeHere();
-        if (store !== null && regions.size > 0)
+        if (sending !== null)
         {
-            // Where this run's regions have entries, beside what the store
-            // holds now -- not what it held when this runtime started: every
-            // process of the run has a runtime of its own, and a program that
-            // runs a tool again and again (Far Cry, its shader compiler 45
-            // times a run) would have each one put back the map it read,
-            // dropping what the others added since, and put it whole even
-            // when it added nothing: 46 maps of 2.5 MB a run.
+            clearInterval(sending);
+            sending = null;
+        }
+        // This run's blocks not yet in the map, and every process of the run appends its own:
+        // a tool's runtime started before the program's appends no map it read.
+        if (store !== null && typeof store.append === 'function')
+        {
             await blocksRead;
-            let now = storedBlocks ?? StoredBlocks.empty();
-            try
-            {
-                const bytes = await store.get(blocksKey());
-                now = bytes === null ? now : StoredBlocks.fromBytes(bytes);
-            }
-            catch {
-                // The map read at the start stands for it.
-            }
-            /** @type {Map<number, number>} */
-            const ours = new Map();
-            for (const record of regions)
-            {
-                for (const slot of record.slots)
-                {
-                    const { eip, top } = entries.at(slot);
-                    ours.set(keyOf(eip, top), keyOf(record.entry, record.entryTop));
-                }
-            }
-            const { blocks, changed } = now.with(ours);
-            // Put whole, the map is worth it only for what this runtime adds to
-            // it: a tool's process adding a few blocks to a game's map of
-            // 200 000 wrote 2.5 MB for each of its runs.
-            if (changed > 0 && changed * MAP_SHARE >= blocks.size)
-            {
-                await store.put(blocksKey(), blocks.bytes()).catch(()=>{});
-            }
+            await sendBlocks(store);
         }
         await settings.store?.flush?.();
     };

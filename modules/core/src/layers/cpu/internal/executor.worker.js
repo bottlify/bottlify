@@ -134,6 +134,10 @@ function processStore(send){
                 whole ? [bytes.buffer] : []);
             return Promise.resolve();
         },
+        append(key, bytes){
+            send({ type: 'store', method: 'append', key, bytes });
+            return Promise.resolve();
+        },
         touch: key=>send({ type: 'store', method: 'touch', key }),
     };
 }
