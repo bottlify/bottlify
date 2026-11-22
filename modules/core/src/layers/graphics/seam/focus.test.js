@@ -15,7 +15,9 @@ const STUB = 0x7f0000;
 const STATES = { OK: 'ok', LOST: 'lost', NOT_RESET: 'notreset' };
 
 /** user32 as far as the focus window's hook calls it, every call recorded. */
-function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0] } = {}){
+function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0],
+    minimised = false } = {})
+{
     /** @type {[string, number[]][]} */
     const calls = [];
     /** @type {Map<number, number>} */
@@ -29,7 +31,7 @@ function harness({ visible = false, foreground = 0, threads = {}, screen = [0, 0
     /** The procedures made other than the focus window's, by their address. */
     /** @type {Map<number, (args: number[]) => unknown>} */
     const procedures = new Map();
-    let iconic = false;
+    let iconic = minimised;
     /** @type {((args: number[]) => unknown) | null} */
     let hook = null;
     /** @type {((args: number[]) => unknown) | null} */
@@ -505,4 +507,20 @@ test('the screen is held by a full-screen device\'s window while it has the acti
     windows.take(device, HOW);
     windows.release(device);
     assert.equal(windows.screen(), 0, 'released');
+});
+
+test('a full-screen device taking the screen restores a minimised window before it places it', ()=>{
+    // A game minimised its window as it made it and waited for it to be
+    // restored before it drew: Windows leaves that to the taskbar, which there
+    // is none of here, as on regaining the activation (decision A87).
+    const { windows, device, calls } = harness({ minimised: true });
+    windows.take(device, HOW);
+    const steps = calls.filter(([name])=>name === 'ShowWindow' || name === 'SetWindowPos')
+        .map(([name, args])=>[name, args[name === 'ShowWindow' ? 1 : 4]]);
+    assert.deepEqual(steps, [['ShowWindow', 9], ['SetWindowPos', 640]],
+        'SW_RESTORE, then the mode\'s size');
+    const shown = harness();
+    shown.windows.take(shown.device, HOW);
+    assert.ok(!shown.calls.some(([name])=>name === 'ShowWindow'),
+        'a window not minimised is not restored');
 });
