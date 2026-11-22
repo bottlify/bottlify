@@ -410,6 +410,7 @@ test('a bundle kept on this device crosses as its file and is read from it a ran
         const { bundle } = built();
         assert.deepEqual([...await bundle.fetch(1000, 4)], [232, 233, 234, 235]);
         await assert.rejects(()=>bundle.fetch(4090, 10), /past the bundle's end/);
+        assert.equal(bundle.local, true, 'a file on this device: a miss reads what it asks');
     });
 
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
@@ -421,6 +422,7 @@ test('start rebuilds on the worker what could not cross: fetch, device, watch, s
     const options = built();
     assert.equal(typeof options.bundle.fetch, 'function');
     assert.equal(options.bundle.id, 'b');
+    assert.equal(options.bundle.local, false, 'a bundle at a URL is read in windows');
     // The canvas and its context cross to the presenter the app makes, and the
     // frame account stays here; there is no ready-made copy function any more.
     assert.equal(typeof options.device.canvas, 'object');
