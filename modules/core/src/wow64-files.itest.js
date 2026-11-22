@@ -100,6 +100,37 @@ test('a 32-bit program on a 64-bit Windows loads a system library from SysWOW64,
     assert.equal(await app.run({ timeoutMs: 50000 }), 0, 'LoadLibraryA found the 32-bit one');
 });
 
+test('a 32-bit program on a 32-bit Windows over a 64-bit one\'s volume is told it is not under'
+    + ' WOW64, and still reaches the 32-bit libraries in SysWOW64', { timeout: 60000 }, async t=>{
+    // Exits with a bit a wrong answer each: 1 IsWow64Process said TRUE, 2 the
+    // library did not load, 4 GetNativeSystemInfo named another processor than the i386.
+    const probe = buildExe({
+        imports: { 'KERNEL32.dll': ['IsWow64Process', 'LoadLibraryA', 'GetNativeSystemInfo',
+            'ExitProcess'] },
+        data: { name: ansi('wowprobe.dll'), out: [0, 0, 0, 0], info: new Array(36).fill(0) },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('out')), 0x6a, 0xff, 0xff, 0x15, ...u32(iat('IsWow64Process')),
+            0x68, ...u32(at('info')), 0xff, 0x15, ...u32(iat('GetNativeSystemInfo')),
+            0x68, ...u32(at('name')), 0xff, 0x15, ...u32(iat('LoadLibraryA')),
+            0x85, 0xc0, 0x0f, 0x94, 0xc0, 0x0f, 0xb6, 0xc0,  // test eax, eax; sete al; movzx
+            0x01, 0xc0,                                      // add eax, eax
+            0x0b, 0x05, ...u32(at('out')),                   // or eax, [out]
+            0x0f, 0xb7, 0x0d, ...u32(at('info')),            // movzx ecx, word [info]
+            0x85, 0xc9, 0x0f, 0x95, 0xc1, 0x0f, 0xb6, 0xc9,  // test ecx, ecx; setne cl; movzx
+            0xc1, 0xe1, 0x02, 0x09, 0xc8,                    // shl ecx, 2; or eax, ecx
+            0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const app = await createApp({ executable: probe, imagePath: 'C:\\App\\probe.exe',
+        machine: 'x86', layout: 'amd64', files: [
+            { path: 'C:\\WINDOWS\\SysWOW64\\wowprobe.dll', bytes: library(32) },
+            { path: 'C:\\WINDOWS\\system32\\wowprobe.dll', bytes: library(64) },
+        ] });
+    t.after(()=>app.dispose());
+    assert.equal(await app.run({ timeoutMs: 50000 }), 0);
+});
+
 test('a 32-bit program on a 32-bit Windows has its System32', { timeout: 60000 }, async t=>{
     const app = await createApp({ executable: program() });
     t.after(()=>app.dispose());

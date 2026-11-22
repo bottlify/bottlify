@@ -2709,3 +2709,18 @@ thread's stack, low in the space, is not covered, which wants an esp floor in co
 The engine's entry hash is probed at most once round (`insert`), so one written over fails with an
 error rather than holding the thread.
 *2026-11-21.*
+
+**A286. A 32-bit machine can run over a 64-bit Windows's volume, saying it is a 32-bit Windows.**
+No Windows does this: a 32-bit one has no SysWOW64 and no Wow6432Node. It is here so a bottle laid
+out on a 64-bit machine, which holds both widths' runtimes, can start a game's 32-bit build when
+the game picks its build by the system's width - a launcher that asks IsWow64Process starts its
+64-bit build on any 64-bit Windows, and cork runs the 32-bit one faster. With `machine: 'x86'`
+over `layout: 'amd64'` each process reaches the files and the registry through the view WOW64
+would give a 32-bit process (System32 is SysWOW64, HKLM\SOFTWARE is under Wow6432Node, Program
+Files is Program Files (x86)), so the 32-bit runtimes are where the program looks; what the system
+says of itself is a 32-bit Windows's: IsWow64Process and IsWow64Process2 say no WOW64,
+GetNativeSystemInfo the i386, GetSystemWow64Directory fails, redirection cannot be turned off, and
+the environment has no PROCESSOR_ARCHITEW6432, ProgramFiles(x86) or ProgramW6432. A 64-bit image still starts there,
+on a 64-bit machine of its own: refusing it as a 32-bit Windows does is not done yet. The launcher
+runs a 64-bit bottle's 32-bit program this way unless the bottle's settings choose the 64-bit
+build. *2026-11-22.*

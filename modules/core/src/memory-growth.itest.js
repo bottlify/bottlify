@@ -10,7 +10,8 @@
  * half a gigabyte has a memory of that order, not the whole RAM it may reach.
  * A memory of 4 GiB is a 64-bit Windows's: it gives a program linked
  * /LARGEADDRESSAWARE addresses past 2 GiB under WOW64, and any other program none;
- * on a machine named 32-bit, none at all.
+ * on a machine named 32-bit, a 32-bit Windows started with /3GB, such a program
+ * gets them up to 3 GiB.
  */
 
 import { test } from 'node:test';
@@ -92,14 +93,14 @@ test('a process\'s memory holds what the program commits, not its whole RAM',
     });
 
 /**
- * A program that commits a page at 0x90000000, writes a dword there and exits
- * with what it reads back; 7 where the commit is refused.
+ * A program that commits a page at `address`, 0x90000000 unless said, writes a
+ * dword there and exits with what it reads back; 7 where the commit is refused.
  *
- * @param {boolean} largeAddressAware
+ * @param {boolean} largeAddressAware @param {number} [address]
  */
-const highCommit = largeAddressAware=>buildExe({ imports, largeAddressAware, codeSize: 0x80,
-    code: ({ iat })=>assemble([
-        ...commit(iat, 0x90000000, 0x10000),
+const highCommit = (largeAddressAware, address = 0x90000000)=>buildExe({ imports,
+    largeAddressAware, codeSize: 0x80, code: ({ iat })=>assemble([
+        ...commit(iat, address, 0x10000),
         0xc7, 0x00, ...u32(0x12345678), //                       mov dword [eax], 0x12345678
         0x8b, 0x18, 0x53, //                                     mov ebx, [eax]; push ebx
         0xff, 0x15, ...u32(iat('ExitProcess')),
@@ -127,8 +128,14 @@ test('a memory of 4 GiB is a 64-bit Windows: a large-address-aware program past 
         const narrow = await createApp({ executable: highCommit(true),
             imagePath: 'C:\\App\\aware.exe', memorySize: ram, machine: 'x86' });
         t.after(()=>narrow.dispose());
-        assert.equal(await narrow.run({ timeoutMs: 60_000 }), 7,
-            'a 32-bit Windows gives none, whatever the program is linked for');
+        assert.equal(await narrow.run({ timeoutMs: 60_000 }), 0x12345678,
+            'a 32-bit Windows with more than 2 GiB is one started with /3GB');
+        await narrow.dispose();
+
+        const past = await createApp({ executable: highCommit(true, 0xc0000000),
+            imagePath: 'C:\App\aware.exe', memorySize: ram, machine: 'x86' });
+        t.after(()=>past.dispose());
+        assert.equal(await past.run({ timeoutMs: 60_000 }), 7, 'and nothing past 3 GiB');
     });
 
 test('a memory grown whole keeps the shared page past the heap\'s end, where it is its own',

@@ -173,6 +173,14 @@
  *     width of the run's first program, so a run started with a 64-bit one is
  *     on a 64-bit machine and its 32-bit children under WOW64. A process in a
  *     worker of its own is handed the run's.
+ * @property {'x86' | 'amd64'} [layout]
+ *     The machine the volume's Windows was laid out for, `machine` when not
+ *     given. A 32-bit machine over a 64-bit layout is a 32-bit Windows that runs
+ *     the 32-bit side of a 64-bit one's volume: each process reaches the files and
+ *     the registry through the view WOW64 would give it (SysWOW64, Wow6432Node),
+ *     while IsWow64Process, GetNativeSystemInfo and the environment say a
+ *     32-bit Windows - so a launcher that picks its build by the system's width
+ *     picks the 32-bit one (`roadmap/decisions.md`).
  * @property {import('./mode.js').RunMode} [mode]
  *     How much rides on shared memory: `isolated` shares the guest's memory with the
  *     graphics worker, `compatible` keeps it the engine thread's own and copies what

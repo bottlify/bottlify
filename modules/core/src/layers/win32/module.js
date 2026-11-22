@@ -603,10 +603,13 @@ export function createWin32Module(){
             // what the program says it knows; everything else keeps the truth.
             const reported = reportedVersion(windows, config?.compatibility);
             const pointerSize = config?.bits === 64 ? 8 : 4;
-            // The machine is a 64-bit Windows when the run says so, which its
-            // 64-bit processes always do: a 32-bit process on it runs under
-            // WOW64 (`roadmap/x64.md`).
-            const machine64 = config?.machine === 'amd64' || pointerSize === 8;
+            // The volume is a 64-bit Windows's when the run says so, which its
+            // 64-bit processes always do: a 32-bit process reaches it through
+            // WOW64's view (`roadmap/x64.md`).
+            const machine64 = (config?.layout ?? config?.machine) === 'amd64' || pointerSize === 8;
+            // And the system says it is one. A 32-bit machine over a 64-bit
+            // layout says it is not (`AppOptions.layout`).
+            const says64 = config?.machine === 'amd64' || pointerSize === 8;
             // The shell's folders as this process has them: a 32-bit one's
             // program folder on a 64-bit Windows is Program Files (x86).
             const folders = shellFolders(windows, { machine64, long: pointerSize === 8 });
@@ -818,7 +821,7 @@ export function createWin32Module(){
              * session's first program's - the machine's, with what the
              * registry's environment keys hold over them.
              */
-            const ownWidth = { long: pointerSize === 8, wow64: machine64 && pointerSize === 4 };
+            const ownWidth = { long: pointerSize === 8, wow64: says64 && pointerSize === 4 };
             // A Steam game is started as the client starts one, its launch in
             // the environment (`steamLaunchEnvironment`).
             const startingEnvironment = ()=>(config?.environment === undefined
@@ -827,7 +830,7 @@ export function createWin32Module(){
                     environmentValues(HKEY_LOCAL_MACHINE, MACHINE_ENVIRONMENT),
                     environmentValues(HKEY_CURRENT_USER, 'Environment')),
                 ...config?.steam?.appId ? steamLaunchEnvironment(config.steam.appId) : {} }
-                : machine64 ? machineArchitecture(config.environment, ownWidth)
+                : says64 ? machineArchitecture(config.environment, ownWidth)
                     : config.environment);
 
             // What the run's processes share, as one Windows does: handed in
@@ -4467,7 +4470,8 @@ export function createWin32Module(){
                     ...createSystemFunctions({
                         processors,
                         pointerSize,
-                        machine64,
+                        // What the system says of itself, not the volume's view.
+                        machine64: says64,
                         fsRedirection,
                         // Another process's width, off its image's headers: the
                         // machine of the optional header's magic.

@@ -650,6 +650,8 @@ export async function layerConfig(deps){
                 && address < engineCode.end,
             // And the machine it runs on (`AppOptions.machine`).
             machine: long ? 'amd64' : options.machine ?? 'x86',
+            // And the one its volume was laid out for (`AppOptions.layout`).
+            layout: long ? 'amd64' : options.layout ?? options.machine ?? 'x86',
             // The Windows the machine is, and what the program says it knows,
             // which is all Windows 10 needs to decide what to tell it.
             windows: options.windows,

@@ -251,8 +251,9 @@ export async function buildSystemHost(deps){
     journalEvents(events, journal.journal?.() ?? journal, { shaders: options.log?.shaders });
     system.registry = createRunRegistry({
         windows: options.windows,
-        // A 64-bit Windows keeps its machine keys in both views.
-        machine: options.machine,
+        // A 64-bit Windows keeps its machine keys in both views: a volume laid
+        // out by one has them so whatever machine runs it.
+        machine: options.layout ?? options.machine,
         directx: options.graphicsApi
             ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
         processorMhz: CORK_TSC_MHZ,
@@ -484,7 +485,8 @@ export async function buildSystemHost(deps){
             read: path=>readWholeFile(filesystem, blocks, path),
         },
         /** @param {string} path */
-        readImage: path=>readProgramImage(filesystem, blocks, path, options.machine),
+        readImage: path=>readProgramImage(filesystem, blocks, path,
+            options.layout ?? options.machine),
         /**
          * The program's tables as it last answered -- asked again now, for the
          * next reader -- with the journal and the sound output this thread

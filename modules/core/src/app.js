@@ -460,6 +460,12 @@ const ENGINE_FIRST_MIB = 28;
 const LARGE_ADDRESS_TOP = 0xfffe0000;
 
 /**
+ * And on a 32-bit Windows started with /3GB (IncreaseUserVa 3072): the last
+ * 64 KiB below 3 GiB are never the program's either.
+ */
+const INCREASED_USER_VA_TOP = 0xbfff0000;
+
+/**
  * The engine's range in a process's guest space: its tables and other
  * executors' pages (19.25 MiB an executor, 4.2 MiB of a record they share past
  * one). With it the memory holds only the RAM the guest has been given and
@@ -1534,14 +1540,16 @@ async function buildApp(options){
     // pool with room for only one thread.
     const threadStackSize = Math.min(stackReserveOf(mainImage.stackReserve),
         Math.floor(STACK_POOL_WHOLE / 16));
-    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB on a
-    // 64-bit Windows, where the RAM reaches them; any other stays below, where it
-    // may keep a pointer's sign, and so does every program on a 32-bit one.
+    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB where the
+    // RAM reaches them: up to 4 GiB on a 64-bit Windows, up to 3 GiB on a 32-bit
+    // one, which with more than 2 GiB is one started with /3GB. Any other stays
+    // below, where it may keep a pointer's sign.
     const HEAP_SIZE = (memorySize > 2 ** 31 || programLoaded.wide !== undefined)
         && mainImage.largeAddressAware
-        && (long || options.machine === 'amd64')
         && options.heapSize === undefined
-        ? LARGE_ADDRESS_TOP - HEAP_BASE : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
+        ? (long || options.machine === 'amd64' ? LARGE_ADDRESS_TOP : INCREASED_USER_VA_TOP)
+            - HEAP_BASE
+        : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
     /**
      * The process's modules, win32's among them, filled in below. win32 is
