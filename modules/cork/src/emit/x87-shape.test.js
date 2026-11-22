@@ -154,7 +154,7 @@ test('a region whose entry keeps finding another shape is translated again check
     const runtime = createCorkRuntime({
         memory, layout, config: {},
         read: address=>new Uint8Array(memory.buffer)[layout.ramBase + address],
-        imports: { trap: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
     });
     runtime.noteHot(CODE, 0);
     assert.equal(await runtime.translatePending(), 1);
@@ -211,7 +211,7 @@ async function heldAtSix(code, callee, translated){
         const runtime = createCorkRuntime({
             memory, layout, config: { callReturn: true, leafCalls: false },
             read: address=>bytes[layout.ramBase + address],
-            imports: { trap: ()=>0, rdtsc: ()=>0n },
+            imports: { trap: ()=>0, rdtsc: ()=>0 },
         });
         for (let turn = 0; turn < 1000; turn++)
         {

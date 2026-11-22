@@ -32,7 +32,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /**
  * @param {{ ramSize?: number, trapPort?: number,
- *     trap?: (value: number) => number, rdtsc?: () => bigint,
+ *     trap?: (value: number) => number, rdtsc?: () => number,
  *     leaveOut?: string[], precise?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
  *     processors?: number, shared?: boolean, growing?: { floor: number, tablesAt: number },
@@ -205,7 +205,7 @@ export function createTestMachine(given = {}){
                 env: {
                     memory, ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     trap: trap ?? (()=>0),
-                    rdtsc: rdtsc ?? (()=>0n), ...bases,
+                    rdtsc: rdtsc ?? (()=>0), ...bases,
                 },
             });
             const run = /** @type {import('../runtime/entries.js').Entry['fn']} */ (

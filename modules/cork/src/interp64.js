@@ -201,7 +201,7 @@ class BlockState64 {
      * @param {WebAssembly.Memory} memory
      * @param {import('../../core/src/layers/cpu/engine.js').StateLayout} layout
      * @param {((address: number, size: number) => void) | null} onCodeWrite
-     * @param {(() => bigint) | undefined} rdtsc
+     * @param {(() => number) | undefined} rdtsc
      * @param {import('./ir64.js').State64['ports']} ports
      * @param {WebAssembly.Memory} [ram]  a wide layout's RAM (`ramMemory`)
      */
@@ -329,7 +329,7 @@ class BlockState64 {
  * @param {{ memory: WebAssembly.Memory, ram?: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint, ports?: import('./ir64.js').State64['ports'],
+ *     rdtsc?: () => number, ports?: import('./ir64.js').State64['ports'],
  *     readThrough?: [number, number][], atomic?: boolean }} what
  *     `readThrough` and `atomic` as `blockState`'s
  */

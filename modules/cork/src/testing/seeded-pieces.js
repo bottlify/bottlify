@@ -26,7 +26,7 @@ export function machine(config = {}){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
         // A page's rewrites timed on a clock of the test's, standing still: how
         // many make a page volatile, not how fast the machine made them.
         now: ()=>0,

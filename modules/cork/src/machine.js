@@ -103,7 +103,7 @@ export function createMachine({ ramSize = 16 << 20, config = {}, trapPort, featu
         view().setUint32(layout.wrap, ramNow - 1, true);
     }
     const started = performance.now();
-    const rdtsc = ()=>BigInt(Math.round((performance.now() - started) * 1e6));
+    const rdtsc = ()=>Math.round((performance.now() - started) * 1e6);
     /** @type {number[]} */
     const trapped = [];
     /** Instructions retired by every run so far: the program's clock (`PROGRAM_MS`). */

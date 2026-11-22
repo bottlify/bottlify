@@ -156,7 +156,8 @@ export function engineContractProblem(engineModule, url){
  *     The trap port write. Answers 1 when the handler moved EIP, so the region goes on
  *     where it points through the entry hash, and 2 (`TRAP_END_TURN`) when the turn is to
  *     end there and the region leaves for the host.
- * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the host's clock.
+ * @property {() => number} rdtsc      The time-stamp counter `rdtsc` reads: the host's clock, a
+ *                                    whole count below 2^53.
  */
 
 /**

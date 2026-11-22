@@ -75,7 +75,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {boolean} halted
  * @property {number} retired
  * @property {number[]} trapped    the values written to the trap port, in order
- * @property {() => bigint} [rdtsc]  the host's time-stamp counter; absent, it reads zero
+ * @property {() => number} [rdtsc]  the host's time-stamp counter, a whole count below 2^53;
+ *     absent, it reads zero
  * @property {{ trapPort: number, read: (port: number, size: number) => number,
  *     write: (port: number, size: number, value: number) => void }} [ports]
  *     the machine's I/O ports; absent, every `out` is a trap-port write
@@ -1028,9 +1029,9 @@ export function evaluate(instruction, state){
         {
             // The time-stamp counter is the host's clock: the low word to eax,
             // the high word to edx.
-            const value = state.rdtsc ? state.rdtsc() : 0n;
-            state.reg[0] = Number(value & 0xffffffffn);
-            state.reg[2] = Number((value >> 32n) & 0xffffffffn);
+            const value = state.rdtsc ? state.rdtsc() : 0;
+            state.reg[0] = value % 2 ** 32 >>> 0;
+            state.reg[2] = Math.floor(value / 2 ** 32) >>> 0;
             return;
         }
         default:

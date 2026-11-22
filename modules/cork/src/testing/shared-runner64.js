@@ -75,7 +75,7 @@ export function createSharedRunner64({ memory, layout, precise = true, leafCalls
         m.exportFunction('region', translation.functionIndex);
         const built = m.toBytes();
         const instance = new WebAssembly.Instance(new WebAssembly.Module(built), {
-            env: { memory, ...mathImports(), ...helpers, trap: ()=>0, rdtsc: ()=>0n },
+            env: { memory, ...mathImports(), ...helpers, trap: ()=>0, rdtsc: ()=>0 },
         });
         const unit = { fn: /** @type {Function} */ (instance.exports.region),
             labels: translation.labels };

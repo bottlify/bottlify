@@ -359,7 +359,7 @@ export function createModules(state){
             const instance = new WebAssembly.Instance(compiled, {
                 env: {
                     memory, ...ram === undefined ? {} : { ram }, trap: imports.trap,
-                    rdtsc: imports.rdtsc ?? (()=>0n),
+                    rdtsc: imports.rdtsc ?? (()=>0),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     ...baseGlobals,
                 },
