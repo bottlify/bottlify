@@ -13,7 +13,7 @@ import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { DEBUG_EVENT, attachEvents, createDebuggerFunctions } from './kernel32/debug-events.js';
 import {
-    ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, IMAGE_MAPPED, PAGE_STATE, TABLES,
+    ALIGNMENT_64, GLOBAL_MEMORY, GUARD_PAGES, IMAGE_MAPPED, PAGE_STATE, STACKS, TABLES,
     createHeapAllocator, createHeapFunctions,
 } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState, PERFORMANCE_FREQUENCY }
@@ -2173,6 +2173,16 @@ export function createWin32Module(){
                         ? { ...options, owner: options.owner() } : options),
                 /** @param {number} address */
                 free: address=>(engineOwns(address) ? true : heapAllocator.free(address)),
+            });
+            // A thread's stack once the kernel's pool is full: the arena's
+            // address space, as VirtualAlloc's is, given back when the thread
+            // is gone - on Windows every stack is such a reservation.
+            kernel.lendStacks?.({
+                take: (/** @type {number} */ bytes)=>allocator.allocate(bytes,
+                    { alignment: 0x10000, owner: STACKS }) || 0,
+                give: (/** @type {number} */ base)=>{
+                    allocator.free(base);
+                },
             });
             // Counted by the mapping calls as they go.
             const mappings = { views: 0, waited: 0, failed: 0 };

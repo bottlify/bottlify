@@ -54,3 +54,24 @@ test('in a gone process\'s memory a stack is zeroed as it is first taken, below 
     assert.deepEqual(fresh.filled, [], 'a memory just made: nothing to zero');
     assert.equal(own.reached(), base + GRANULE);
 });
+
+test('a stack the pool has no room for is taken from its lender and given back once let go', ()=>{
+    const base = 0x08000000;
+    const pool = createStackPool({ memory: fakeMemory(), base, size: GRANULE,
+        limit: base + 2 * GRANULE });
+    assert.equal(pool.allocate({}, ()=>false)?.base, base);
+    assert.equal(pool.allocate({}, ()=>false)?.base, base + GRANULE);
+    assert.equal(pool.allocate({}, ()=>false), null, 'full, and no lender: no stack');
+    /** @type {number[]} */
+    const given = [];
+    pool.lend({ take: bytes=>(bytes === GRANULE ? 0x20000000 : 0), give: at=>given.push(at) });
+    const lent = pool.allocate({}, ()=>false);
+    assert.equal(lent?.base, 0x20000000, 'the lender\'s, at the size the pool would have given');
+    assert.equal(pool.diagnostics().stacksLent, 1);
+    if (lent)
+    {
+        lent.owner = { gone: true };
+    }
+    pool.allocate({}, owner=>owner?.gone === true);
+    assert.deepEqual(given, [0x20000000], 'given back once its thread let it go');
+});

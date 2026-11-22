@@ -13,12 +13,26 @@
  * longer needs it: a program that makes a worker per task and lets each one
  * end has only ever had a few alive, and a pool that never took one back ran
  * out after as many threads as it holds stacks.
+ *
+ * The pool is a fixed span below the heap, sixteen of the stacks a program
+ * linked for four megabytes and more gets. A thread past them takes its stack
+ * from the process's free address space, as every stack is on Windows, through
+ * a lender the layer that owns that space gives (`lend`); without one it is not
+ * made.
  */
 
 /** What a stack's size is rounded up to: the allocation granularity. */
 const GRANULE = 0x10000;
 /** What a commit that outgrows the default reserve is rounded up to. */
 const MEGABYTE = 0x100000;
+
+/**
+ * Where a stack the pool has no room for comes from: address space taken and
+ * given back by whoever owns it. `take` answers the base of `bytes` of memory
+ * the guest may write, on the allocation granularity, or 0.
+ *
+ * @typedef {{ take: (bytes: number) => number, give: (base: number) => void }} StackLender
+ */
 
 /**
  * @param {Object} options
@@ -34,6 +48,10 @@ const MEGABYTE = 0x100000;
 export function createStackPool({ memory, base, size, limit, dirtyTo = base }){
     /** @type {{ base: number, size: number, name: string, owner: any }[]} */
     const held = [];
+    /** Stacks taken from the lender, outside the pool's span. @type {typeof held} */
+    const lent = [];
+    /** @type {StackLender | null} */
+    let lender = null;
     let issued = 0;
     /** Where the stacks this process took end, the highest: below it they are its own. */
     let reached = base;
@@ -80,6 +98,14 @@ export function createStackPool({ memory, base, size, limit, dirtyTo = base }){
                     held.splice(at, 1);
                 }
             }
+            for (let at = lent.length - 1; at >= 0; at--)
+            {
+                if (lent[at].owner !== null && released(lent[at].owner))
+                {
+                    lender?.give(lent[at].base);
+                    lent.splice(at, 1);
+                }
+            }
             const bytes = Math.ceil(reserveFor(asked) / GRANULE) * GRANULE;
             held.sort((a, b)=>a.base - b.base);
             let from = base;
@@ -93,7 +119,15 @@ export function createStackPool({ memory, base, size, limit, dirtyTo = base }){
             }
             if (from + bytes > limit)
             {
-                return null;
+                const taken = lender?.take(bytes) ?? 0;
+                if (taken === 0)
+                {
+                    return null;
+                }
+                issued++;
+                const slot = { base: taken, size: bytes, name: `stack-${issued}`, owner: null };
+                lent.push(slot);
+                return slot;
             }
             // A stack past the highest the pool reached is the guest's to write:
             // taken from the machine's memory, none where it has no room.
@@ -128,8 +162,18 @@ export function createStackPool({ memory, base, size, limit, dirtyTo = base }){
          */
         reached: ()=>Math.max(reached, dirtyTo),
 
+        /**
+         * Where stacks past the pool's span come from from now on.
+         *
+         * @param {StackLender} by
+         */
+        lend: by=>{
+            lender = by;
+        },
+
         diagnostics: ()=>({
             stacksHeld: held.length,
+            stacksLent: lent.length,
             stacksIssued: issued,
             stackBytesHeld: held.reduce((total, slot)=>total + slot.size, 0),
         }),

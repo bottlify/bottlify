@@ -332,6 +332,12 @@ const VIRTUAL = Symbol('virtual');
 export const TABLES = Symbol('tables');
 
 /**
+ * Marks the threads' stacks the kernel's pool had no room for, taken from the
+ * arena as VirtualAlloc's address space is (`lendStacks`).
+ */
+export const STACKS = Symbol('thread stacks');
+
+/**
  * The heap's user values and the global family's handle table, for the
  * libraries that stand on them: ntdll's RtlGetUserInfoHeap family, and a
  * memory stream over an HGLOBAL. Carried under a symbol, so no export is made

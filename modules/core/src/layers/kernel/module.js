@@ -612,6 +612,16 @@ export function createKernelModule(){
                 },
 
                 /**
+                 * Where a thread's stack comes from once the pool is full: the
+                 * process's free address space, which win32 owns (`StackLender`).
+                 *
+                 * @param {import('./internal/stacks.js').StackLender} lender
+                 */
+                lendStacks(lender){
+                    stacks.lend(lender);
+                },
+
+                /**
                  * Stops the running thread where it stands, and says where its stub
                  * would have returned to.
                  *
