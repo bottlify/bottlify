@@ -86,6 +86,25 @@ export function processesBeside(deps){
                         : Promise.reject(new Error(`no process ${id} stands`));
                 },
                 /**
+                 * The last `count` frames a process by its id presented, the
+                 * first's or one running beside it: where a launcher started
+                 * the game, the frames are the game's.
+                 *
+                 * @param {number} id @param {number} count
+                 */
+                framesOf: (id, count)=>{
+                    if (id === (options.processId ?? FIRST_PROCESS_ID))
+                    {
+                        return firstProcess().log.frames(count);
+                    }
+                    const child = [...standingBeside].find(each=>each.id === id);
+                    if (!child)
+                    {
+                        throw new Error(`no process ${id} stands beside`);
+                    }
+                    return child.frames(count);
+                },
+                /**
                  * Bytes of a process's memory by its id, the first's or one
                  * running beside it: an OVERLAPPED a program polls, a buffer it
                  * waits on.
@@ -851,10 +870,13 @@ export function processesBeside(deps){
             let child = null;
             /** The code a child that never started ends with. */
             let failed = 2;
-            // Where the run's output has nothing to lend -- the engine's own
-            // mixer, in `compatible` mode -- a table of the child's own would
-            // reach no speaker: it mixes onto its parent's output instead.
-            const sound = !shared && parent.audio?.borrow ? borrowSound(parent) : ownSound();
+            // One device, one table: the child takes slots of the run's, as a
+            // process in a worker does, and its mixer, told it stands beside
+            // another, leaves the parent's open. Where the run's output has
+            // nothing to lend -- the engine's own mixer, in `compatible` mode --
+            // it mixes onto its parent's output instead.
+            const sound = shared ? { announce(){}, ...lendSound(parent) }
+                : parent.audio?.borrow ? borrowSound(parent) : ownSound();
             try
             {
                 const image = request.image ?? await parent.readImage(request.imagePath);
@@ -936,6 +958,7 @@ export function processesBeside(deps){
             }
             const listed = { id: request.id, image: request.imagePath, beside: /** @type {true} */ (true),
                 diagnostics: ()=>line.current.diagnostics(),
+                frames: (/** @type {number} */ count)=>line.current.log.frames(count),
                 read: (/** @type {number} */ address, /** @type {number} */ length)=>
                     line.current.debug.read(address, length),
                 hook: (/** @type {number} */ address, /** @type {any} */ how)=>

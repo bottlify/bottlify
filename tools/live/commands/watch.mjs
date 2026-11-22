@@ -24,7 +24,8 @@ import { connect } from '../../lib/connect.mjs';
 
 const args = process.argv.slice(2);
 const lastAt = args.indexOf('--last');
-const file = args.find((arg, at)=>!arg.startsWith('--') && at !== lastAt + 1) ?? 'dbg/watch.jsonl';
+const file = args.find((arg, at)=>!arg.startsWith('--') && (lastAt < 0 || at !== lastAt + 1))
+    ?? 'dbg/watch.jsonl';
 
 if (lastAt >= 0)
 {
@@ -34,7 +35,10 @@ if (lastAt >= 0)
     const window = lines.filter(line=>line.at >= until - seconds * 1000);
     const frames = window.flatMap(line=>line.frames ?? []);
     const sorted = frames.map(frame=>frame.ms).sort((a, b)=>a - b);
-    console.log(`last ${seconds} s: ${frames.length} frames,`
+    const unmeasured = window.map(line=>line.framesNotMeasured).find(Boolean);
+    console.log(frames.length === 0 && unmeasured
+        ? `last ${seconds} s: frames not measured - ${unmeasured}`
+        : `last ${seconds} s: ${frames.length} frames,`
         + ` median ${sorted[sorted.length >> 1]?.toFixed(1)} ms,`
         + ` worst ${sorted.at(-1)?.toFixed(0)} ms`);
     /** @type {Map<string, [number, number]>} */
@@ -77,7 +81,8 @@ if (lastAt >= 0)
     {
         console.log('blits a pixel at a time:', JSON.stringify(why));
     }
-    console.log('slowest frames:');
+    console.log(frames.length === 0 && unmeasured ? `slowest frames: not measured - ${unmeasured}`
+        : 'slowest frames:');
     for (const frame of [...frames].sort((a, b)=>b.ms - a.ms).slice(0, 5))
     {
         console.log(`  ${frame.ms.toFixed(0)} ms (host ${frame.host}, guest ${frame.guest})`
@@ -104,7 +109,16 @@ for (let tick = 0; ; tick++)
     const line = { at: Date.now() };
     try
     {
-        const frames = await evaluate(`const fr = await app.log.frames(200);
+        // The frames of the process that presents them: where a launcher
+        // started the game beside it, the game's, not the launcher's none.
+        const frames = await evaluate(`const listed = (await app.debug?.processes?.()) ?? [];
+            const beside = listed.filter(one=>one.beside && app.debug.framesOf);
+            let fr = await app.log.frames(200);
+            for (const one of beside)
+            {
+                const theirs = await app.debug.framesOf(one.id, 200);
+                if ((theirs?.length ?? 0) > (fr?.length ?? 0)) fr = theirs;
+            }
             return JSON.stringify(fr.map(x=>({ index: x.index, ms: x.ms, at: x.startedAt,
                 host: Math.round(x.byKind?.host ?? 0),
                 guest: Math.round(x.byKind?.guest ?? 0) })));`);
@@ -113,6 +127,11 @@ for (let tick = 0; ; tick++)
         if (newest < lastFrame)
         {
             lastFrame = -1;
+        }
+        if ((frames ?? []).length === 0)
+        {
+            line.framesNotMeasured = await evaluate(`return JSON.stringify(
+                (await app.log.profile(1))?.notMeasured ?? null);`);
         }
         line.frames = (frames ?? []).filter((/** @type {any} */ frame)=>frame.index > lastFrame)
             .map((/** @type {any} */ frame)=>({ ...frame, at: performance.timeOrigin + frame.at }));

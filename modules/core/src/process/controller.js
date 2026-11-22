@@ -680,6 +680,7 @@ export function processController(deps){
             recent: count=>core.api('log').recent(count),
             /** The journal this machine writes into, for the next process of the run to share. */
             journal: ()=>core.api('log').journal?.() ?? null,
+            profiler: ()=>core.api('log').profiler?.() ?? null,
             /** @param {string} category @param {string | number} level */
             setLevel: (category, level)=>core.api('log').setLevel(category, level),
             /** @param {string | number} level */
