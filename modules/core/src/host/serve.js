@@ -414,12 +414,47 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     /** @type {any} */
     let app = null;
     /**
-     * The ring from the page with `concurrency`, read between turns and before
-     * each posted message.
+     * The ring from the page with `concurrency`, read between turns, before
+     * each posted message and as the page rings its bell (`watchInbound`).
      *
      * @type {ReturnType<typeof createInboundReader> | null}
      */
     let inboundReader = null;
+    /** Whether the engine's port was closed: the ring's watch ends. */
+    let closed = false;
+    /**
+     * Reads the ring each time the page rings its bell, on this thread's event
+     * loop. With concurrency every program stands in a worker of its own and
+     * this thread runs none, so no turn boundary comes to read it at: read
+     * only before a posted message, the pointer's motion waited for the page's
+     * next request and reached the program in one burst, which its window's
+     * queue folded into a single WM_MOUSEMOVE. Where Atomics.waitAsync is
+     * missing the ring is looked at on the worker's yield interval instead.
+     *
+     * @param {ReturnType<typeof createInboundReader>} reader
+     */
+    const watchInbound = reader=>{
+        const word = new Int32Array(reader.bell.buffer);
+        const at = reader.bell.index;
+        const waitAsync = /** @type {any} */ (Atomics).waitAsync;
+        if (typeof waitAsync !== 'function')
+        {
+            const timer = setInterval(()=>(closed ? clearInterval(timer) : reader.drain()),
+                WORKER_YIELD_MS);
+            return;
+        }
+        const look = ()=>{
+            if (closed)
+            {
+                return;
+            }
+            const seen = Atomics.load(word, at);
+            reader.drain();
+            const waited = waitAsync(word, at, seen);
+            (waited.async ? waited.value : Promise.resolve()).then(look);
+        };
+        look();
+    };
     /** The relay transport opened for the run, closed with it. @type {any} */
     let transport = null;
     /** The sound posted to a worklet that cannot share memory. @type {any} */
@@ -653,6 +688,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 if (ring)
                 {
                     inboundReader = createInboundReader(ring, receive);
+                    watchInbound(inboundReader);
                     return ringPacing({ inbound: inboundReader, macrotask: breathe, now: clock,
                         intervalMs: threaded ? WORKER_YIELD_MS : PAGE_YIELD_MS, posted });
                 }
@@ -1022,6 +1058,12 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         close(){
             port.onmessage = null;
             breathe.close();
+            closed = true;
+            // The ring's watch, woken to see it is over.
+            if (inboundReader)
+            {
+                Atomics.notify(new Int32Array(inboundReader.bell.buffer), inboundReader.bell.index);
+            }
         },
     };
 }
