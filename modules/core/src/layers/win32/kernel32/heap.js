@@ -1121,9 +1121,15 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
 
         diagnostics(){
             let used = 0;
+            /** @type {any} */
+            let highest = null;
             for (const block of live.values())
             {
                 used += block ? block.capacity : 0;
+                if (block && (highest === null || block.address > highest.address))
+                {
+                    highest = block;
+                }
             }
             let free = 0;
             let largestFree = 0;
@@ -1135,7 +1141,15 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
             // A large free total next to a small largest span is
             // fragmentation, and it is the reason an allocation fails while
             // the heap looks half empty.
-            return { blocks: liveBlocks, used, free, largestFree };
+            // The block highest in the arena and whose it is: a growing memory reaches
+            // it however little lies below, and its owner says why it is there.
+            const ownerOf = (/** @type {any} */ owner)=>(owner === null || owner === undefined
+                ? 'none' : typeof owner === 'number' ? `0x${(owner >>> 0).toString(16)}`
+                    : typeof owner === 'string' ? owner
+                        : String(owner.name ?? owner.kind ?? 'object'));
+            return { blocks: liveBlocks, used, free, largestFree, handedTo,
+                highest: highest === null ? null : { address: highest.address,
+                    capacity: highest.capacity, owner: ownerOf(highest.owner) } };
         },
 
         /**
