@@ -1882,3 +1882,19 @@ test('a stack pointer past its stack into memory no stack of its own holds stops
         }
     }
 });
+
+test('a ready thread whose own executor is busy runs here before a thread it outranks', ()=>{
+    // A game's sound thread, at a priority above the others and homed on an
+    // executor its renderer held, waited there for 40 to 900 ms while this one
+    // ran a thread below it: its buffer ran dry and the sound broke. Windows
+    // runs the highest priority thread ready.
+    const { cpu } = twoExecutors();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const renderer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'renderer' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(renderer), 1, 'the renderer holds the other executor');
+    const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'sound' });
+    Object.assign(sound, { home: 1, priority: 2 });
+    assert.equal(sched.runOnce().ran, sound, 'the sound thread runs here, over main');
+});
