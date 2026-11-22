@@ -185,7 +185,7 @@ function setup(width = {}){
         fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
-        /** @param {number} entry @param {number[]} args */
+        /** @param {number} entry @param {(number | bigint)[]} args */
         call: (entry, args)=>{
             const fn = guestEntries.get(entry);
             if (!fn)
@@ -193,7 +193,7 @@ function setup(width = {}){
                 return Promise.reject(new Error(`no guest code at 0x${entry.toString(16)}`));
             }
             guestCalls.push(`${entry.toString(16)}(${args.map(a=>a.toString(16)).join(',')})`);
-            return Promise.resolve(fn(args));
+            return Promise.resolve(fn(/** @type {number[]} */ (args)));
         },
         guestCalls,
         /** @param {number} address */

@@ -24,7 +24,7 @@
  */
 
 import { stableSort } from './stable-sort.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} DataHost
@@ -32,7 +32,8 @@ import { pointerIo, wholeAddress } from '../common/pointers.js';
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(name: string) => ((args: number[]) => any) | undefined} [kernel32]
  *           kernel32's handlers, looked up when called.
- * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown)
+ *     => number | Promise<number>} [call]
  * @property {() => unknown} [callerThread]
  * @property {4 | 8} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
@@ -130,7 +131,7 @@ export function createDataStructureFunctions(host){
     const processHeap = ()=>wholeAddress(kernel('GetProcessHeap', []));
     /** DPASTREAMINFO: the item's place, and the item, a pointer after it. */
     const INFO_SIZE = 2 * P;
-    const call = (/** @type {number} */ entry, /** @type {number[]} */ args)=>
+    const call = (/** @type {number} */ entry, /** @type {(number | bigint)[]} */ args)=>
         /** @type {NonNullable<DataHost['call']>} */ (host.call)(entry >>> 0, args,
             host.callerThread?.());
 
@@ -417,15 +418,15 @@ export function createDataStructureFunctions(host){
 
     /** IStream::Read, Write or Seek on the program's stream. */
     const stream = {
-        /** @param {number} stm @param {number} method @param {number[]} rest */
+        /** @param {number} stm @param {number} method @param {(number | bigint)[]} rest */
         invoke: async(stm, method, rest)=>{
             const vtable = readPtr(stm);
             return (await call(readPtr(vtable + method * P), [stm, ...rest])) | 0;
         },
         /** @param {number} stm @param {number} origin @param {number} offset */
         seek: async(stm, offset, origin, scratch = 0)=>
-            stream.invoke(stm, ISTREAM_SEEK, [offset >>> 0, offset < 0 ? 0xffffffff : 0, origin,
-                scratch]),
+            stream.invoke(stm, ISTREAM_SEEK,
+                [...pointerWidth(P).quadword(offset), origin, scratch]),
     };
     /** A guest block the stream calls write into, from the process heap. */
     const scratch = (/** @type {number} */ bytes)=>kernel('HeapAlloc', [processHeap(),

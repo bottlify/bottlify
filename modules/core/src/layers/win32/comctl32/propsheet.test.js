@@ -388,7 +388,7 @@ function setup({ modal = false, guest = false } = {}){
             {
                 throw new Error(`no callback at 0x${entry.toString(16)}`);
             }
-            return run(procedure, args);
+            return run(procedure, /** @type {number[]} */ (args));
         },
         callerThread: ()=>THREAD,
         procedure: (name, handler)=>register(handler),

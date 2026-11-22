@@ -79,7 +79,7 @@ const READ_MAX = 1 << 20;
  * @property {() => import('../kernel32/moveable.js').GlobalMemory | undefined} [globalMemory]
  *           kernel32's global family, through which a moveable HGLOBAL's
  *           bytes are found.
- * @property {(object: number, slot: number, args: number[], thread?: unknown)
+ * @property {(object: number, slot: number, args: (number | bigint)[], thread?: unknown)
  *     => Promise<number>} callMethod
  * @property {(object: number, iid: string, thread: unknown) => Promise<number>} queryPointer
  *           QueryInterface: the pointer, which the caller releases, or 0.

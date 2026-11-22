@@ -250,7 +250,8 @@ function world(){
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         heap,
-        callMethod,
+        // A 32-bit process: its arguments are dwords.
+        callMethod: (pointer, slot, args)=>callMethod(pointer, slot, /** @type {number[]} */ (args)),
         queryPointer: async(pointer, iid)=>{
             const out = heap.allocate(4);
             const at = heap.allocate(16);

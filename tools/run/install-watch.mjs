@@ -504,7 +504,7 @@ const hiveBefore = resumed?.before ?? app.registry().toJSON();
 const watchEvents = running=>{
     for (const name of ['process-create', 'process-child', 'process-started', 'process-resumed',
         'process-server', 'process-server-exit', 'error', 'exit', 'divergence', 'message-box',
-        'unimplemented',
+        'unimplemented', 'library-missing', 'libraries-missing',
         // `--debug-strings`: what the programs say through OutputDebugString --
         // a client's own log and its assertions, which name where it gave up.
         ...argv.includes('--debug-strings') ? ['debug'] : []])

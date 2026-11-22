@@ -127,7 +127,7 @@ function machine(){
         readMemory, writeMemory, imageLists: lists,
         allocate,
         release: address=>released.push(address),
-        call,
+        call: (entry, args, thread)=>call(entry, /** @type {number[]} */ (args), thread),
         callerThread: ()=>'caller',
     });
     const fns = /** @type {Record<string, { argBytes: number,

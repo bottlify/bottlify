@@ -376,7 +376,8 @@ export function oleProcess(options = {}){
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         heap,
-        callMethod,
+        // A 32-bit process: its arguments are dwords.
+        callMethod: (pointer, slot, args)=>callMethod(pointer, slot, /** @type {number[]} */ (args)),
         queryPointer,
         // The thread whose call is answered, and the one running: one thread
         // while a call is answered, as the engine has them.

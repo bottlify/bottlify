@@ -32,7 +32,7 @@ import {
 import {
     CLSID_PICTURE_DIB, CLSID_PICTURE_ENHMETAFILE, CLSID_PICTURE_METAFILE,
 } from './datacache.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -529,7 +529,8 @@ export function createOle2Functions(env){
                 : (flags & ~OLESTREAM_CONVERT) >>> 0;
             if (wanted !== flags || read.bytes.length < 8)
             {
-                await env.callMethod(opened.stream, SLOT.STREAM_SEEK, [4, 0, 0, 0], thread);
+                await env.callMethod(opened.stream, SLOT.STREAM_SEEK,
+                    [...pointerWidth(env.pointerSize ?? 4).quadword(4), 0, 0], thread);
                 const word = new Uint8Array(4);
                 new DataView(word.buffer).setUint32(0, wanted, true);
                 hr = await util.writeStream(opened.stream, word, thread);

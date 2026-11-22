@@ -29,6 +29,13 @@ test('a 64-bit pointer is a qword whose high half is zero', ()=>{
     assert.deepEqual([...width.array([7])], [7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 });
 
+test('a 64-bit integer by value: two dwords to a 32-bit callee, one slot to a 64-bit one', ()=>{
+    assert.deepEqual(pointerWidth(4).quadword(0x1_0000_0002), [2, 1]);
+    assert.deepEqual(pointerWidth(4).quadword(-1), [0xffffffff, 0xffffffff]);
+    assert.deepEqual(pointerWidth(8).quadword(0x1_0000_0002), [0x1_0000_0002n]);
+    assert.deepEqual(pointerWidth(8).quadword(-2), [0xffff_ffff_ffff_fffen]);
+});
+
 test('no other width', ()=>{
     assert.throws(()=>pointerWidth(2), RangeError);
 });

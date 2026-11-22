@@ -49,7 +49,8 @@ import { wholeAddress } from '../common/pointers.js';
  *           memory through (dpa.js).
  * @property {(bytes: number) => number} [allocate]
  * @property {(address: number) => void} [release]
- * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown)
+ *     => number | Promise<number>} [call]
  * @property {() => unknown} [callerThread]
  * @property {(name: string, handler: (args: number[]) => number | Promise<number>) => number}
  *     [procedure]

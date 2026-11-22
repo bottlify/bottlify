@@ -27,7 +27,7 @@ import {
     MAX_NAME_LENGTH, createEntry, createRoot, isCompoundFile, nameKey,
     parseCompoundFile, serializeCompoundFile,
 } from './cfb.js';
-import { wholeAddress } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
 
 /** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
@@ -185,7 +185,8 @@ const MAX_PATH = 260;
  *              interfaceId: string) => number }} vtables
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  * @property {StorageFiles} [files]  Without it no docfile opens.
- * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ * @property {(entry: number, args: (number | bigint)[], thread?: unknown) => Promise<number>}
+ *     [call]
  *           A stdcall into guest code, for an object a program persists.
  *           The thread is whose call is being answered: a second call after
  *           the first has been awaited is made from nobody's turn, and the
@@ -1698,10 +1699,15 @@ export function createStorageFunctions(host){
     /**
      * A method of the program's object, on the thread whose call this is.
      *
-     * @param {number} pointer @param {number} slot @param {number[]} args @param {unknown} thread
+     * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
+     * @param {unknown} thread
      */
     const callGuest = async(pointer, slot, args, thread)=>(await /** @type {NonNullable<StorageHost['call']>} */ (
-        host.call)(readU32(readU32(pointer) + slot * WORD), [pointer, ...args], thread)) | 0;
+        host.call)(readU32(readU32(pointer) + slot * slotBytes), [pointer, ...args], thread)) | 0;
+    // A 64-bit program's table holds a quadword a slot, and its ULARGE_INTEGER
+    // arguments are one slot each.
+    const slotBytes = host.pointerSize === 8 ? 8 : WORD;
+    const quad = pointerWidth(slotBytes).quadword;
 
     /**
      * A docfile in an ILockBytes the program implemented. The tree is read
@@ -1735,7 +1741,8 @@ export function createStorageFunctions(host){
             if ((locks & (LOCK_WRITE | LOCK_EXCLUSIVE | LOCK_ONLYONCE)) !== 0)
             {
                 const locked = await callGuest(pointer, SLOT_LOCKBYTES.LOCK_REGION,
-                    [DOCFILE_LOCK_OFFSET, 0, DOCFILE_LOCK_LENGTH, 0, LOCK_ONLYONCE], thread);
+                    [...quad(DOCFILE_LOCK_OFFSET), ...quad(DOCFILE_LOCK_LENGTH),
+                        LOCK_ONLYONCE], thread);
                 if (locked < 0)
                 {
                     return locked;
@@ -1751,7 +1758,7 @@ export function createStorageFunctions(host){
                 }
                 writeU32(buffer + size, 0);
                 const read = await callGuest(pointer, SLOT_LOCKBYTES.READ_AT,
-                    [0, 0, buffer, size, buffer + size], thread);
+                    [...quad(0), buffer, size, buffer + size], thread);
                 contents = read < 0 ? contents
                     : host.readMemory(buffer, readU32(buffer + size)).slice();
                 host.heap.free(buffer);
@@ -1838,13 +1845,13 @@ export function createStorageFunctions(host){
             {
                 writeU32(buffer + SIGNATURE_BYTES, 0);
                 await callGuest(pointer, SLOT_LOCKBYTES.READ_AT,
-                    [0, 0, buffer, SIGNATURE_BYTES, buffer + SIGNATURE_BYTES], thread);
+                    [...quad(0), buffer, SIGNATURE_BYTES, buffer + SIGNATURE_BYTES], thread);
                 if (!isCompoundFile(host.readMemory(buffer, SIGNATURE_BYTES).slice()))
                 {
                     return STG_E_INVALIDHEADER;
                 }
             }
-            const sized = await callGuest(pointer, SLOT_LOCKBYTES.SET_SIZE, [bytes.length, 0],
+            const sized = await callGuest(pointer, SLOT_LOCKBYTES.SET_SIZE, quad(bytes.length),
                 thread);
             if (sized < 0)
             {
@@ -1853,7 +1860,7 @@ export function createStorageFunctions(host){
             host.writeMemory(buffer, bytes);
             writeU32(buffer + bytes.length, 0);
             const hr = await callGuest(pointer, SLOT_LOCKBYTES.WRITE_AT,
-                [0, 0, buffer, bytes.length, buffer + bytes.length], thread);
+                [...quad(0), buffer, bytes.length, buffer + bytes.length], thread);
             return hr < 0 ? hr : S_OK;
         }
         finally

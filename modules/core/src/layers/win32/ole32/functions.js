@@ -557,6 +557,8 @@ export function createOleFunctions(host){
         .getUint32(0, true);
 
     const width = pointerWidth(host.pointerSize ?? 4);
+    /** An IStream::Seek's offset of zero, as the process's width passes it. */
+    const noOffset = width.quadword(0);
     /**
      * An interface pointer written out, whole: a 64-bit caller reads eight
      * bytes, and a high half left as it was is no pointer.
@@ -575,7 +577,7 @@ export function createOleFunctions(host){
      * Calls a method of a guest object through its vtable: `this` first, as
      * a COM method takes it.
      *
-     * @param {number} object @param {number} slot @param {number[]} args
+     * @param {number} object @param {number} slot @param {(number | bigint)[]} args
      * @param {unknown} [thread]
      * @returns {Promise<number>}
      */
@@ -2031,10 +2033,10 @@ export function createOleFunctions(host){
                 return null;
             }
             const clsid = readGuid(host, work);
-            await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_END, work + GUID_SIZE],
-                thread);
+            await callMethod(stream, SLOT_STREAM_SEEK,
+                [...noOffset, STREAM_SEEK_END, work + GUID_SIZE], thread);
             const size = readU32(work + GUID_SIZE);
-            await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+            await callMethod(stream, SLOT_STREAM_SEEK, [...noOffset, STREAM_SEEK_SET, 0], thread);
             const bytes = size > 0 ? await readStream(stream, size, thread) : new Uint8Array(0);
             return clsid && bytes ? { clsid, bytes } : null;
         }
@@ -2077,7 +2079,7 @@ export function createOleFunctions(host){
         host.writeMemory(block, saved.bytes);
         await callMethod(stream.value, SLOT_STREAM_WRITE, [block, saved.bytes.length, 0], thread);
         host.heap.free(block);
-        await callMethod(stream.value, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+        await callMethod(stream.value, SLOT_STREAM_SEEK, [...noOffset, STREAM_SEEK_SET, 0], thread);
         const loaded = (await callMethod(made.value, SLOT_PERSIST_LOAD, [stream.value],
             thread)) | 0;
         await callMethod(stream.value, SLOT_RELEASE, [], thread);
@@ -4606,7 +4608,8 @@ export function createOleFunctions(host){
                         writePointer(out, 0);
                         return hr;
                     }
-                    await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+                    await callMethod(stream, SLOT_STREAM_SEEK, [...noOffset, STREAM_SEEK_SET, 0],
+                        thread);
                     return S_OK;
                 })();
             },

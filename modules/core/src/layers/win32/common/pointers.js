@@ -23,6 +23,13 @@
  * @property {(view: DataView, offset: number) => number} get
  * @property {(value: number) => Uint8Array} bytes  one pointer, as memory holds it
  * @property {(values: number[]) => Uint8Array} array  the pointers and a null after them
+ * @property {(value: number) => (number | bigint)[]} quadword
+ *     A 64-bit integer passed by value -- a LARGE_INTEGER, a REFERENCE_TIME -- as
+ *     the arguments of a call the host makes into the guest: two dwords, low
+ *     first, in a 32-bit process; one slot, a bigint the bridge writes whole,
+ *     in a 64-bit one. Given as two dwords there, it moved every argument after
+ *     it one slot on: an IStream::Seek took its origin for the position's out-
+ *     pointer and wrote through address 2.
  */
 
 /** @type {Map<number, PointerWidth>} */
@@ -69,6 +76,11 @@ export function pointerWidth(size = 4){
             const view = new DataView(bytes.buffer);
             values.forEach((value, index)=>set(view, index * size, value));
             return bytes;
+        },
+        quadword: value=>{
+            const whole = BigInt.asUintN(64, BigInt(Math.trunc(value)));
+            return size === 8 ? [whole]
+                : [Number(whole & 0xffffffffn), Number(whole >> 32n)];
         },
     };
     widths.set(size, width);

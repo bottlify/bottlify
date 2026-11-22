@@ -17,7 +17,7 @@
 import { formatGuid, parseGuid } from './guid.js';
 import { ANSI_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { publishEnumerator } from './enumerator.js';
-import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
 
 const S_OK = 0;
@@ -670,7 +670,7 @@ const SLOT = Object.freeze({
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => unknown }} heap
  *     Task memory, as CoTaskMemAlloc hands it out.
- * @property {(object: number, slot: number, args: number[], thread?: unknown)
+ * @property {(object: number, slot: number, args: (number | bigint)[], thread?: unknown)
  *     => number | Promise<number>} callMethod
  * @property {(object: number, iid: string, thread: unknown) => Promise<number>} queryPointer
  * @property {() => unknown} callerThread
@@ -701,6 +701,7 @@ const SLOT = Object.freeze({
 export function createPropertySetFunctions(env){
     const STATSTG = statstgLayout(env.pointerSize);
     const POINTER = env.pointerSize === 8 ? 8 : 4;
+    const quad = pointerWidth(POINTER).quadword;
     /** @param {number} address */
     const readU32 = address=>new DataView(env.readMemory(wholeAddress(address), 4).slice().buffer)
         .getUint32(0, true);
@@ -749,7 +750,10 @@ export function createPropertySetFunctions(env){
         }
         return block;
     };
-    /** @param {number} pointer @param {number} slot @param {number[]} args @param {unknown} thread */
+    /**
+     * @param {number} pointer @param {number} slot @param {(number | bigint)[]} args
+     * @param {unknown} thread
+     */
     const call = async(pointer, slot, args, thread)=>
         (await env.callMethod(pointer, slot, args, thread)) | 0;
     /** @param {number} pointer @param {unknown} thread */
@@ -785,12 +789,12 @@ export function createPropertySetFunctions(env){
      * @returns {Promise<Uint8Array | null>}
      */
     const readStream = (stream, thread)=>lend(8, async position=>{
-        if (await call(stream, SLOT.SEEK, [0, 0, STREAM_SEEK_END, position], thread) < 0)
+        if (await call(stream, SLOT.SEEK, [...quad(0), STREAM_SEEK_END, position], thread) < 0)
         {
             return null;
         }
         const size = Math.min(readU32(position), 1 << 24);
-        await call(stream, SLOT.SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+        await call(stream, SLOT.SEEK, [...quad(0), STREAM_SEEK_SET, 0], thread);
         return lend(size + 4, async buffer=>{
             const hr = await call(stream, SLOT.READ, [buffer, size, buffer + size], thread);
             return hr < 0 ? null : env.readMemory(buffer, readU32(buffer + size)).slice();
@@ -803,8 +807,8 @@ export function createPropertySetFunctions(env){
      * @param {number} stream @param {Uint8Array} bytes @param {unknown} thread
      */
     const writeStream = async(stream, bytes, thread)=>{
-        await call(stream, SLOT.SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
-        const sized = await call(stream, SLOT.SET_SIZE, [bytes.length, 0], thread);
+        await call(stream, SLOT.SEEK, [...quad(0), STREAM_SEEK_SET, 0], thread);
+        const sized = await call(stream, SLOT.SET_SIZE, quad(bytes.length), thread);
         if (sized < 0)
         {
             return sized;
