@@ -597,6 +597,48 @@ test('a read of a bundle in a file on this device waits for its own blocks alone
     assert.ok(behind > 0, 'the blocks around a miss were asked for, behind its read');
 });
 
+for (const local of [false, true])
+{
+    test(local
+        ? 'a bundle in a file on this device is read as it is: no checksum, no second read'
+        : 'a block that arrives damaged from a server is asked for again', { timeout: 60000 },
+    async t=>{
+        // A bottle kept in the browser is the only copy there is: a block read
+        // again from its file is the same bytes, and nothing could fetch a good
+        // one. Checked on every read, a game whose files outgrew the block cache
+        // had its engine thread computing the checksums of the same blocks over
+        // and over (Outlast's menu: 1.7 s of a minute) while its reads waited.
+        const source = await bundleWith(PLANTED, 2 << 20);
+        t.after(()=>source.cleanup());
+        let damaged = 0;
+        let opened = Infinity;
+        /** @param {number} offset @param {number} length */
+        const flaky = async(offset, length)=>{
+            const bytes = await source.fetch(offset, length);
+            // The first read after opening loses its last byte to the wire.
+            if (source.fetched.calls > opened && damaged === 0)
+            {
+                damaged++;
+                bytes[bytes.length - 1] ^= 0xff;
+            }
+            return bytes;
+        };
+        const app = await createApp({
+            executable: buildReaderExe('C:\\Data\\big.bin'),
+            bundle: { fetch: flaky, ...local ? { local: true } : {}, prefix: '', store: null,
+                prefetch: false },
+        });
+        t.after(()=>app.dispose());
+        let retried = 0;
+        app.on('bundle-retry', ()=>retried++);
+        opened = source.fetched.calls;
+        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 20000 }), 0);
+        assert.equal(damaged, 1, 'a read came back damaged');
+        assert.equal(retried, local ? 0 : 1, local ? 'the file was read once, as it is'
+            : 'the damaged block was asked for again');
+    });
+}
+
 test('a far bundle is read in wide windows: a forward reader waits for a round trip or two',
     { timeout: 60000 }, async t=>{
         // A bucket this far away: each request waits this long before its bytes,

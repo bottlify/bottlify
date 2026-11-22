@@ -32,6 +32,10 @@ flowchart TD
   OV --> OUT
 ```
 
+- **A bottle kept on this device is read as it is:** its file (`bundle.local`) is the only copy,
+  so a block read from it is not checked against its CRC-32 nor read again on a mismatch - the
+  same bytes would come back. Only a block fetched from a server is checked, and asked for again
+  when it arrived damaged.
 - **The block cache does not keep the bundle in memory:** a program can be larger than a gigabyte.
   If the bitmap's size does not match the bundle, the bitmap is reset and the blocks are fetched
   again.

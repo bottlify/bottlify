@@ -885,7 +885,12 @@ export async function mountOneBundle({ spec, id, layer, events, translationStore
         const span = group.end - group.start;
         ranges.requests++;
         ranges.bytes += span;
-        const whole = await fetchRange(group.start, span, bytes=>{
+        // A file on this device is the only copy of the bottle: read again, a
+        // block is the same bytes, and nothing could bring a good one, so its
+        // blocks are taken as they are. Checked, a game whose files outgrew the
+        // block cache had the engine's thread computing the same blocks'
+        // checksums over and over while its reads waited.
+        const whole = await fetchRange(group.start, span, spec.local === true ? undefined : bytes=>{
             for (const block of group.blocks)
             {
                 const expected = bundle.block(block.index).crc;
