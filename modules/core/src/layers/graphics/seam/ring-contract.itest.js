@@ -666,6 +666,19 @@ const shared = drawable=>({
         { label: 'a type there is not', args: [9, 1, 'data', 16], data: TRIANGLE,
             setup: drawable },
     ],
+    // The indices in the first sixteen bytes, the triangle's vertices after them.
+    DrawIndexedPrimitiveUP: [
+        { label: 'a triangle by 16-bit indices', args: [4, 0, 3, 1, 'data', 101, 'data+16', 16],
+            data: [0x00010000, 0x00000002, 0, 0, ...TRIANGLE], setup: drawable },
+        { label: 'by 32-bit indices', args: [4, 0, 3, 1, 'data', 102, 'data+16', 16],
+            data: [0, 1, 2, 0, ...TRIANGLE], setup: drawable },
+        { label: 'its vertices past a lowest index', args: [4, 1, 2, 1, 'data', 101, 'data+16',
+            16], data: [0x00020001, 0x00000001, 0, 0, ...TRIANGLE], setup: drawable },
+        { label: 'outside a scene', args: [4, 0, 3, 1, 'data', 101, 'data+16', 16],
+            data: [0x00010000, 0x00000002, 0, 0, ...TRIANGLE] },
+        { label: 'a type there is not', args: [9, 0, 3, 1, 'data', 101, 'data+16', 16],
+            data: [0x00010000, 0x00000002, 0, 0, ...TRIANGLE], setup: drawable },
+    ],
 });
 
 /**
@@ -706,6 +719,10 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                 { label: 'a target', args: [0, 'target'], setup: offscreen },
                 { label: 'the second target', args: [1, 'target'], setup: offscreen },
                 { label: 'none', args: [0, 0] },
+                // A game unsets its other targets before every pass.
+                { label: 'the second unset', args: [1, 0] },
+                { label: 'the fourth unset', args: [3, 0] },
+                { label: 'a fifth there is not', args: [4, 0] },
                 { label: 'a depth surface for a target', args: [0, 'depth'], setup: offscreen },
                 // Wine's test_render_target_device_mismatch.
                 { label: 'a target another device made', args: [0, 'targetElsewhere'],

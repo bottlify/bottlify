@@ -23,7 +23,7 @@
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
 import { DRAW, SHADOW } from '../seam/block.js';
-import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
+import { D3DERR_INVALIDCALL, D3DFMT_INDEX, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';
 
@@ -81,8 +81,8 @@ const first = (kind, length)=>{
  *     reused by the next record
  * @property {(bytes: number) => Uint8Array} copy  the first `bytes` of the copy, as a copy
  *     of its own, for a method that keeps them or reads more than the scratch holds
- * @property {(bytes: number) => Uint8Array} view  the same bytes in place, for a method
- *     that copies what it reads before it returns
+ * @property {(bytes: number, from?: number) => Uint8Array} view  the same bytes in place,
+ *     `from` bytes into the copy, for a method that copies what it reads before it returns
  */
 
 /**
@@ -116,6 +116,8 @@ const first = (kind, length)=>{
  * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
+ * @property {IndexedVertices} [indexedVertices]  or an indexed draw's indices and the
+ *     vertices they reach, two copies (`commandCode`)
  * @property {readonly number[]} [rects]  or arguments each pointing at a RECT or null,
  *     sixteen bytes a place in order (`commandCode`)
  * @property {boolean} [kept]  its copy is read in place (`view`, `copy`), not through the scratch
@@ -274,9 +276,9 @@ export function commandSet(slots, table){
             floats,
             ints,
             first,
-            view: bytes=>{
+            view: (bytes, offset = 0)=>{
                 const from = records.byteOffset
-                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
+                    + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4 + offset;
                 return new Uint8Array(records.buffer, from, bytes);
             },
             copy: bytes=>{
@@ -360,6 +362,32 @@ const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
 }));
 
 /**
+ * The arguments of an indexed draw from the program's memory, and the most its two copies
+ * come to: the indices its primitives take, `format` saying their width, then from the
+ * first vertex up to `minIndex` and `vertices` past it, `stride` bytes each, which is
+ * what the indices may reach. The vertices start at the next whole dword (`indexedBytes`).
+ *
+ * @typedef {{ type: number, minIndex: number, vertices: number, count: number,
+ *     indices: number, format: number, data: number, stride: number, most: number }}
+ *     IndexedVertices
+ */
+
+/**
+ * An indexed draw's copies by its arguments: the indices' bytes, where the vertices start
+ * in the copy, and their bytes. The routine writes them so (`commandCode`) and the model
+ * of it reads them so (`shadow.js`).
+ *
+ * @param {number} type @param {number} count  primitives
+ * @param {number} format  D3DFMT_INDEX @param {number} reach  minIndex plus the vertices
+ * @param {number} stride
+ */
+export function indexedBytes(type, count, format, reach, stride){
+    const indices = vertexCountOf(type, count) * (format === D3DFMT_INDEX.INDEX32 ? 4 : 2);
+    const at = (indices + 3) & ~3;
+    return { indices, at, vertices: reach * stride };
+}
+
+/**
  * The most a draw from the program's own memory copies into a record: past
  * it the host reads the vertices itself, as it does without a ring.
  */
@@ -429,6 +457,18 @@ export const SHARED_COMMANDS = {
         needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
             c.view(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
+    // The occlusion boxes and the quads a game draws by the thousand a second: a crossing
+    // each held the drawing thread for the engine thread's answer.
+    DrawIndexedPrimitiveUP: { args: 8, kept: true, draws: true,
+        indexedVertices: { type: 0, minIndex: 1, vertices: 2, count: 3, indices: 4, format: 5,
+            data: 6, stride: 7, most: UP_BYTES },
+        needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
+        make: (d, c)=>{
+            const copied = indexedBytes(c.arg(0), c.arg(3), c.arg(5), c.arg(1) + c.arg(2),
+                c.arg(7));
+            return d.DrawIndexedPrimitiveUP(c.arg(0), c.arg(1), c.arg(2), c.arg(3),
+                c.view(copied.indices), c.arg(5), c.view(copied.vertices, copied.at), c.arg(7));
+        } },
 };
 
 /**
