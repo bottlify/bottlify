@@ -46,7 +46,7 @@ export async function layerConfig(deps){
         engineCode, events, exitsAtFrameStart, fetchBundleBlocks, findModule, foreground, framed,
         giveBackBlocks, handed, heapAtFrameStart, heapReadable, heapUsed, holdBlock, imagesTold,
         interpretedAtFrameStart, journalCall, lastCreated, lastErrorOfWin32, layerTraces, long,
-        mainImage, mainStack, memorySize, modules, mouseHeld, options, processBits,
+        mainImage, mainStack, memorySize, modules, mouseHeld, options, processBits, ramLimit,
         programLoaded, reportDivergence, retiredAtFrameStart, runPresenter, showCursor,
         systemCursor, threadLocalImages, threadLocals, threadStackSize, translateAtFrameStart,
         translationStore, withoutThreadCalls, workerAtFrameStart, workerFrameTimes,
@@ -98,6 +98,8 @@ export async function layerConfig(deps){
             // An image past 4 GiB: the RAM the wide window holds, the image in it.
             memorySize: programLoaded.wide === undefined ? memorySize
                 : programLoaded.wide.window - 4096,
+            // What the program may be given of it: its RAM (`AppOptions.memorySize`).
+            ramLimit,
             ...(engineArea ? { engineArea } : {}),
             ...(options.memoryBudget ? { memoryBudget: options.memoryBudget,
                 memoryCredit: options.memoryCredit, memoryHolder: options.memoryHolder,
@@ -937,6 +939,8 @@ export async function layerConfig(deps){
                 restore: (context, images)=>core().api('cpu').fpu.restore?.(context, images)
                     ?? false,
             },
+            // The machine's RAM as the program is told it (`AppOptions.memorySize`).
+            ramLimit,
             // In a gone process's memory, where the bytes it left end: each block
             // zeroed below it as it is handed out (`createHeapAllocator`).
             arena: { base: HEAP_BASE, size: HEAP_SIZE,

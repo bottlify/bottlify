@@ -1122,6 +1122,10 @@ export function createWin32Module(){
             // look again. Each is read when a guest calls, never now, so the caller
             // can fill them in after the graph is built.
             const arena = config?.arena ?? { base: 0, size: 0 };
+            // The machine's RAM as the program is told it: the run's limit on what
+            // it may be given, which its address space (the arena) may pass or fall
+            // short of, as a machine's RAM does.
+            const physicalMemory = config?.ramLimit ?? arena.size;
             const modules = config?.modules ?? {
                 find: ()=>null, byBase: ()=>null, imagePath: ()=>'',
             };
@@ -3007,7 +3011,7 @@ export function createWin32Module(){
             // machine.
             registerWbemClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                physicalMemory: arena.size, processors: processors.count(), windows: reported,
+                physicalMemory, processors: processors.count(), windows: reported,
                 divergence: config?.divergence, processorMhz: config?.processorMhz,
             });
 
@@ -3074,7 +3078,7 @@ export function createWin32Module(){
             // and a configuration tool how much video memory there is.
             registerDxDiagClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                windows, directx, screen: config?.screen, physicalMemory: arena.size,
+                windows, directx, screen: config?.screen, physicalMemory,
                 divergence: config?.divergence,
             });
 
@@ -4116,8 +4120,8 @@ export function createWin32Module(){
                     ...debuggerSide.functions,
                     ...createHeapFunctions({
                         pointerSize,
-                        arena, allocator, readMemory, writeMemory, fillMemory, viewAt,
-                        reach: arenaReach,
+                        arena, physicalMemory, allocator, readMemory, writeMemory, fillMemory,
+                        viewAt, reach: arenaReach,
                         guestHeap,
                         // A child's memory, reached where the child runs.
                         processTarget,

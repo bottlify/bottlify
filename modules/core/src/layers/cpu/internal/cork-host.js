@@ -133,7 +133,11 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @typedef {Object} CorkHostConfig
  * @property {any} engine  The cork engine module: `{ createEngine, ownLayout,
  *     pagesFor, Tables, STATE_BLOCK_SIZE }`.
- * @property {number} memorySize   Guest RAM in bytes.
+ * @property {number} memorySize   The guest's window: the RAM its address space
+ *     reaches, which a growing memory holds only as far as it is given.
+ * @property {number} [ramLimit]  What the guest may be given of it in all (images,
+ *     stacks, the heap's reach): its RAM, the program's limit; a gift past it is
+ *     refused (`chargeGuest`). None where not given.
  * @property {number} [window]     A 64-bit process's wide window, 8 or 16 GiB (cork's
  *     `wideLayout`): the guest's RAM a memory64 memory of its own; 4 GiB in the one memory
  *     when absent.
@@ -311,7 +315,7 @@ export function createCorkHost(config){
         closedBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
-        memoryHolder, guestCharge } = config;
+        memoryHolder, guestCharge, ramLimit = Infinity } = config;
     // Whether the guest's memory counts by its length, not by what it was given.
     // A wide window is 8 GiB long whatever its program takes of it, more than
     // any machine's memory here: counted by what was given wherever it runs.
@@ -1185,6 +1189,9 @@ export function createCorkHost(config){
     let closedPastHeld = null;
     /** Grows the machine's memory refused this process (`memoryBudget`). */
     let refusedGrows = 0;
+    /** What the guest was given of its RAM (`chargeGuest`), and what was refused past its limit. */
+    let ramGiven = 0;
+    let refusedPastLimit = 0;
     /**
      * Grows a growing memory to hold `end` bytes of RAM, in a power of two up to
      * the ceiling: its pages added, the views taken again, the new pages opened
@@ -2343,14 +2350,31 @@ export function createCorkHost(config){
          *
          * @param {number} bytes
          */
-        chargeGuest: bytes=>machineBudget === null || byLength || machineBudget.take(bytes),
+        chargeGuest: bytes=>{
+            // The program's RAM limit first (`ramLimit`): what it was given past it
+            // is refused, however far its memory may grow.
+            if (ramGiven + bytes > ramLimit)
+            {
+                refusedPastLimit++;
+                return false;
+            }
+            if (machineBudget !== null && !byLength && !machineBudget.take(bytes))
+            {
+                return false;
+            }
+            ramGiven += bytes;
+            return true;
+        },
         /** Bytes the guest was given back. @param {number} bytes */
         giveGuest: bytes=>{
+            ramGiven = Math.max(0, ramGiven - bytes);
             if (machineBudget !== null && !byLength)
             {
                 machineBudget.give(bytes);
             }
         },
+        /** What the guest holds of its RAM limit, and the gifts refused past it. */
+        ramGiven: ()=>({ given: ramGiven, limit: ramLimit, refused: refusedPastLimit }),
         /**
          * How many executors, from the first, may hold a gone process's state in
          * this memory once this process has gone: what the next process to take it

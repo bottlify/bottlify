@@ -19,9 +19,10 @@ kernel, and where a system call would be, a trap into the bridge fires instead (
 | Server | The code of cork and its worker (`/engine/cork/`). A bundle may bring translations ready-made |
 
 **Memory.** All of the program's memory is one `WebAssembly.Memory`, shared in the `isolated`
-mode: up to 1 GiB for the program by default. In a 32-bit process over shared memory it holds only
-the RAM the program has been given and grows as it is given more, by powers of two (256 MiB at the
-start); cork's tables and the other executors' pages then lie in a range of the program's own
+mode. Its window is the program's address space (2 GiB, 4 GiB for a large-address-aware program);
+`memorySize` (1 GiB by default) is a limit on what the program is given of it, refused past it at
+the commit limit. In a 32-bit process over shared memory it holds only the RAM the program has been
+given and grows as it is given more, by powers of two (256 MiB at the start); cork's tables and the other executors' pages then lie in a range of the program's own
 space the process keeps from it (at the top of the libraries' space under the thread stacks, or at
 the heap's start). With four executors or more the first executor's tables stay there and the
 other executors' pages are cut out of the heap at 0x14000000, which the memory reaches only when
@@ -243,8 +244,8 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 An x86-64 program (a PE32+ image) runs on the same translator and runtime at a 64-bit width: the
 sixteen 64-bit registers live in the state block, and its memory is a 4 GiB window, every page
 below 4 GiB and an image whose base is above it relocated down; over shared memory it grows as
-the program is given more, as a 32-bit process's does, up to the whole 4 GiB with `memorySize`
-4 GiB (the window's last page kept from it). A 64-bit process runs on as many executors as a 32-bit one (its locked instructions one indivisible access each, as at 32 bits); one whose pages lie past 4 GiB (the wide window) runs on one, and the cpu layer says so (`executorsRefused`). Over the wide window the image's 4 GiB block and the one below it, where the system's libraries, the heap and a JIT's pages lie, are each translated by a runtime of its own; a call, jump or return from one into the other leaves translated code with the whole address (a far exit), and the host goes on in the other's runtime. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
+the program is given more, as a 32-bit process's does, up to the whole 4 GiB for a
+large-address-aware program (the window's last page kept from it), `memorySize` bounding what it is given. A 64-bit process runs on as many executors as a 32-bit one (its locked instructions one indivisible access each, as at 32 bits); one whose pages lie past 4 GiB (the wide window) runs on one, and the cpu layer says so (`executorsRefused`). Over the wide window the image's 4 GiB block and the one below it, where the system's libraries, the heap and a JIT's pages lie, are each translated by a runtime of its own; a call, jump or return from one into the other leaves translated code with the whole address (a far exit), and the host goes on in the other's runtime. A run whose first program is 64-bit, or whose `memorySize` is past 2 GiB, is a 64-bit
 Windows (`machine: 'amd64'`, [API](../core/api.md#what-runs)), where a 32-bit child runs under
 WOW64. What the Windows layer has at 64 bits is in
 [the limits](../core/limits/README.md#programs).

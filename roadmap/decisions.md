@@ -2724,3 +2724,16 @@ the environment has no PROCESSOR_ARCHITEW6432, ProgramFiles(x86) or ProgramW6432
 on a 64-bit machine of its own: refusing it as a 32-bit Windows does is not done yet. The launcher
 runs a 64-bit bottle's 32-bit program this way unless the bottle's settings choose the 64-bit
 build. *2026-11-22.*
+
+**A287. The memory asked for is the program's RAM, a limit; its address space is Windows's.**
+`memorySize` bounds what a process is given in all - images, stacks, the heap up to the highest
+address it handed out - and a gift past it is refused at the commit limit; it is what
+GlobalMemoryStatusEx calls physical memory. It no longer sizes the address space: a program gets
+2 GiB, and one linked large-address-aware 4 GiB under WOW64 or 3 GiB on a 32-bit Windows, which is
+taken as started with /3GB whatever its RAM (a launcher refuses its game without addresses past
+2 GiB, and no RAM size says /3GB was not set). Two departures from Windows: the heap is counted by
+its highest address, not by the pages committed, so a commit far above the rest counts the gap
+(blocks are handed out from the bottom, where the two agree); and a memory that cannot grow (no
+shared memory) is made whole, as large as the RAM, so its address space is cut to the RAM. A
+browser counts each memory a thread holds by its length against that thread's heap limit, which is
+why the memory follows what was given and not the address space. *2026-11-22.*

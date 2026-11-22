@@ -468,6 +468,9 @@ export function createCpuModule(){
                 // its textures, models and sound into the heap and asks for
                 // hundreds of megabytes of it.
                 memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
+                // What the guest may be given of it in all: the program's RAM,
+                // its memory growing only as it is given (`CorkHostConfig.ramLimit`).
+                ramLimit: config?.ramLimit,
                 // A gone process's memory, taken in place of a new one where it
                 // fits (`CorkHostConfig.reused`).
                 reused: config?.reused,
@@ -781,6 +784,7 @@ export function createCpuModule(){
                     }
                     const hostConfig = {
                         memorySize: settings.memorySize,
+                        ...settings.ramLimit === undefined ? {} : { ramLimit: settings.ramLimit },
                         trapPort: settings.trapPort,
                         entryVector: settings.entryVector,
                         initialStack: settings.initialStack,
@@ -1901,7 +1905,8 @@ export function createCpuModule(){
                     // The guest's memory: the RAM it may reach, what the memory holds of
                     // it now, and whether it grows as the guest is given more.
                     guestMemory: instance.host?.ramHeld ? { ceiling: instance.memorySize,
-                        held: instance.host.ramHeld(), growing: instance.host.growing?.() === true }
+                        held: instance.host.ramHeld(), growing: instance.host.growing?.() === true,
+                        ...instance.host.ramGiven?.() }
                         : null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),

@@ -1508,15 +1508,23 @@ async function buildApp(options){
         memorySize: size,
         moduleBase: MODULE_BASE, stackPoolStart: STACK_POOL_START, heapStart: HEAP_START,
         executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
-    // Past 2 GiB the RAM is all of wasm's 4 GiB, which only a memory that grows
-    // holds -- its tables inside the guest's space, not past it: 2 GiB otherwise.
+    // `memorySize` is the program's RAM: a limit on what it is given in all, not
+    // its address space. The address space is Windows's: 2 GiB, and for a program
+    // linked /LARGEADDRESSAWARE 4 GiB under WOW64 or 3 GiB on a 32-bit Windows
+    // (`HEAP_SIZE`), whatever RAM the machine has. A memory that grows holds only
+    // what the program was given of that space, so its window is the whole of it;
+    // one that cannot grow is made whole, and is as large as the RAM.
+    // Past 2 GiB the window is all of wasm's 4 GiB -- the tables inside the
+    // guest's space, not past it -- and only a memory that grows holds it.
     // A wide window's space below is laid out as a 2 GiB one - its libraries and stacks
     // where any process has them - and its heap reaches on to 4 GiB (`HEAP_SIZE`): its
     // RAM is the window, and the image's low dword span is cut from that heap. Nothing
     // is handed out past 4 GiB (`roadmap/x64.md`).
-    // More than 4 GiB asked for is 4 GiB: what a process's own space holds here.
+    const ramLimit = Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE, 2 ** 32);
+    const largeSpace = mainImage.largeAddressAware && options.heapSize === undefined;
     const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
-        : Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE, 2 ** 32);
+        : !mayGrow ? ramLimit
+            : largeSpace ? 2 ** 32 : 2 ** 31;
     const memorySize = askedMemory > 2 ** 31 && areaFor(askedMemory) === undefined ? 2 ** 31
         : askedMemory;
     const engineArea = areaFor(memorySize);
@@ -1540,13 +1548,12 @@ async function buildApp(options){
     // pool with room for only one thread.
     const threadStackSize = Math.min(stackReserveOf(mainImage.stackReserve),
         Math.floor(STACK_POOL_WHOLE / 16));
-    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB where the
-    // RAM reaches them: up to 4 GiB on a 64-bit Windows, up to 3 GiB on a 32-bit
-    // one, which with more than 2 GiB is one started with /3GB. Any other stays
-    // below, where it may keep a pointer's sign.
+    // A program linked /LARGEADDRESSAWARE is given addresses past 2 GiB: up to
+    // 4 GiB on a 64-bit Windows, up to 3 GiB on a 32-bit one, taken as started
+    // with /3GB (`roadmap/decisions.md` A287). Any other stays below, where it may
+    // keep a pointer's sign.
     const HEAP_SIZE = (memorySize > 2 ** 31 || programLoaded.wide !== undefined)
-        && mainImage.largeAddressAware
-        && options.heapSize === undefined
+        && largeSpace
         ? (long || options.machine === 'amd64' ? LARGE_ADDRESS_TOP : INCREASED_USER_VA_TOP)
             - HEAP_BASE
         : heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
@@ -2195,7 +2202,7 @@ async function buildApp(options){
         engineCode, events, exitsAtFrameStart, fetchBundleBlocks, findModule, foreground, framed,
         giveBackBlocks, handed, heapAtFrameStart, heapReadable, heapUsed, holdBlock, imagesTold,
         interpretedAtFrameStart, journalCall, lastCreated, lastErrorOfWin32, layerTraces, long,
-        mainImage, mainStack, memorySize, modules, mouseHeld, options, processBits,
+        mainImage, mainStack, memorySize, modules, mouseHeld, options, processBits, ramLimit,
         programLoaded, reportDivergence, retiredAtFrameStart, runPresenter, showCursor,
         systemCursor, threadLocalImages, threadLocals, threadStackSize, translateAtFrameStart,
         translationStore, withoutThreadCalls, workerAtFrameStart, workerFrameTimes,

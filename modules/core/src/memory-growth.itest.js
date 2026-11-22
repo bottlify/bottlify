@@ -196,6 +196,37 @@ for (const [name, options] of /** @type {[string, Record<string, any>][]} */ ([
     });
 }
 
+test('the memory asked for is the program\'s RAM, a limit on what it is given, not its space',
+    { timeout: 300_000 }, async t=>{
+        const ram = 2 ** 31;
+        const made = watchMemories(t, ram);
+        // Its address space is Windows's: past 2 GiB under WOW64, whatever the
+        // RAM. 3 GiB, no power of two, was a window of 2 GiB, the commit refused.
+        const high = await createApp({ executable: highCommit(true),
+            imagePath: 'C:\\App\\aware.exe', memorySize: 3 * 2 ** 30, machine: 'amd64' });
+        t.after(()=>high.dispose());
+        assert.equal(await high.run({ timeoutMs: 60_000 }), 0x12345678,
+            'a large-address-aware program commits at 0x90000000 on a machine of 3 GiB');
+        await high.dispose();
+
+        // And it is given no more than its RAM: blocks of 64 MiB up to about
+        // 2 GiB, the next one refused.
+        const many = await createApp({ executable: commitsAnywhere(34),
+            imagePath: 'C:\\App\\many.exe', memorySize: ram, machine: 'amd64' });
+        t.after(()=>many.dispose());
+        assert.equal(await many.run({ timeoutMs: 120_000 }), 7,
+            '2176 MiB asked of a machine of 2 GiB: a commit refused');
+        await many.dispose();
+
+        const fits = await createApp({ executable: commitsAnywhere(8),
+            imagePath: 'C:\\App\\fits.exe', memorySize: 2 ** 30, machine: 'amd64' });
+        t.after(()=>fits.dispose());
+        const top = await fits.run({ timeoutMs: 120_000 });
+        assert.ok(top > 0 && top < 1024, `512 MiB of a machine of 1 GiB given: ends at ${top} MiB`);
+        assert.ok((made.at(-1)?.buffer.byteLength ?? 0) <= 2 ** 30 + MIB,
+            'and its memory no longer than what it was given, as a power of two');
+    });
+
 test('a memory grown whole keeps the shared page past the heap\'s end, where it is its own',
     { timeout: 120_000 }, async t=>{
         const ram = 2 ** 28;
