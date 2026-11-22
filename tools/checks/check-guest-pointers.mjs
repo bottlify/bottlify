@@ -287,8 +287,8 @@ async function build(){
         filesystem,
         log: standIn('log', { enabled: ()=>false, Level: {}, write: ()=>{} }),
         kernel: standIn('kernel', {
-            // The win32 layer lends the stack pool its arena as it is made.
-            lendStacks(){},
+            // Where the win32 layer lends the pool its thread stacks, at create.
+            lendStacks: ()=>{},
             handles: standIn('kernel.handles', {
                 /** @param {string} type @param {any} object */
                 open(type, object){
