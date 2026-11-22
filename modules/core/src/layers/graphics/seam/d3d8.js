@@ -425,13 +425,22 @@ export function createDirect3D8Seam(
     });
     const presents = createPresentQueue(raster);
     /**
-     * How the device presents, as its creation or last reset asked.
+     * How each device presents, as its creation or last reset asked: a program
+     * may make a second device - a first start probing its card - and let it go,
+     * and the one it draws with keeps its own (`pacedPresent`).
+     *
+     * @type {WeakMap<any, { windowed: boolean, swapEffect: number, interval: number,
+     *     rate: number }>}
+     */
+    const pacingOf = new WeakMap();
+    /**
+     * How the device that presented last presents.
      *
      * @type {{ windowed: boolean, swapEffect: number, interval: number, rate: number } | null}
      */
     let pacing = null;
     /** @param {any} parameters */
-    const pacingOf = parameters=>({ windowed: parameters.windowed === true,
+    const pacingOfParameters = parameters=>({ windowed: parameters.windowed === true,
         swapEffect: parameters.swapEffect >>> 0,
         interval: parameters.fullScreenPresentationInterval >>> 0,
         rate: parameters.fullScreenRefreshRateInHz >>> 0 });
@@ -443,9 +452,11 @@ export function createDirect3D8Seam(
      * An answer still to come already waited.
      *
      * @param {number | Promise<number>} hr
+     * @param {any} device  the device presenting
      * @returns {any}
      */
-    const pacedPresent = hr=>{
+    const pacedPresent = (hr, device)=>{
+        pacing = pacingOf.get(device) ?? pacing;
         if (typeof hr !== 'number' || hr === D3D_OK)
         {
             presented?.();
@@ -836,7 +847,8 @@ export function createDirect3D8Seam(
             Present: (chain, [sourceRect, destinationRect, override])=>{
                 presentRects(sourceRect, destinationRect);
                 return pacedPresent(chain.Present(shows(owners.get(chain),
-                    (override >>> 0) || chainWindows.get(chain) || deviceWindow)));
+                    (override >>> 0) || chainWindows.get(chain) || deviceWindow)),
+                owners.get(chain));
             },
             /** @param {any} chain @param {number[]} args */
             GetBackBuffer: (chain, [index, type, out])=>{
@@ -1536,7 +1548,7 @@ export function createDirect3D8Seam(
             {
                 showScreen(device);
             }
-            return pacedPresent(device.Present(shown));
+            return pacedPresent(device.Present(shown), device);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1565,7 +1577,7 @@ export function createDirect3D8Seam(
                 // fills.
                 deviceWindow = (next.hDeviceWindow >>> 0) || deviceWindow;
                 const taken = takeScreen(device, next, deviceWindow);
-                pacing = pacingOf(next);
+                pacingOf.set(device, pacingOfParameters(next));
                 // The block is brought to what the device now holds, not to
                 // what it held before: a reset is the host changing state on
                 // its own.
@@ -3088,7 +3100,7 @@ export function createDirect3D8Seam(
                     noWindowChanges: ((behaviourFlags >>> 0) & D3DCREATE_NOWINDOWCHANGES) !== 0,
                     extended: false });
                 taken = takeScreen(held.device, wanted, deviceWindow);
-                pacing = pacingOf(wanted);
+                pacingOf.set(held.device, pacingOfParameters(wanted));
             }
             if (hr !== D3D_OK || !held.device)
             {

@@ -340,8 +340,8 @@ export function createDirect3D9Seam(
      * often the page shows a frame.
      */
     const modeRefresh = ()=>{
-        const asked = lastParameters && !lastParameters.windowed
-            ? lastParameters.fullScreenRefreshRateInHz >>> 0 : 0;
+        const asked = presenting && !presenting.windowed
+            ? presenting.fullScreenRefreshRateInHz >>> 0 : 0;
         return refreshRatesOf(screen()).includes(asked) ? asked : refresh();
     };
     const raster = createRaster({
@@ -356,10 +356,16 @@ export function createDirect3D9Seam(
      * under that queue. An answer still to come -- the device holding the call
      * while the GPU catches up -- already waited.
      *
+     * Paced by the presenting device's own interval and mode: a program may make a
+     * second device - a first start probing its card, IMMEDIATE - and let it go,
+     * and the one it draws with keeps its own.
+     *
      * @param {number | Promise<number>} hr
+     * @param {any} device  the device presenting
      * @returns {any}
      */
-    const pacedPresent = hr=>{
+    const pacedPresent = (hr, device)=>{
+        presenting = parametersOf.get(device) ?? presenting;
         if (typeof hr !== 'number' || hr === D3D_OK)
         {
             presented?.();
@@ -368,7 +374,7 @@ export function createDirect3D9Seam(
         {
             return hr;
         }
-        const wait = presents.present(now(), lastParameters?.presentationInterval ?? 0);
+        const wait = presents.present(now(), presenting?.presentationInterval ?? 0);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
 
@@ -1637,7 +1643,7 @@ export function createDirect3D9Seam(
             {
                 showScreen(chainOwners.get(chain));
             }
-            return pacedPresent(chain.Present(shown));
+            return pacedPresent(chain.Present(shown), chainOwners.get(chain));
         },
         // The caller waits while the picture comes back from the GPU.
         /** @param {any} chain @param {number[]} args */
@@ -2016,7 +2022,7 @@ export function createDirect3D9Seam(
             if (hr === D3D_OK)
             {
                 writePresentParameters(parameters >>> 0, next);
-                lastParameters = next;
+                parametersOf.set(device, next);
                 // The window is this resolution now, and a fullscreen reset has
                 // to take it with it the way a created one does; a window left
                 // at the old size has the program clipping its cursor to a
@@ -2049,16 +2055,16 @@ export function createDirect3D9Seam(
             // A window already at the mode's size hears nothing from the
             // placement at creation, so it is told once, at the device's
             // first frame, when both it and the device are there to hear it.
-            if (!announced.has(device) && lastParameters && !lastParameters.windowed)
+            const own = parametersOf.get(device);
+            if (!announced.has(device) && own && !own.windowed)
             {
                 announced.add(device);
-                resolution?.(lastParameters.backBufferWidth >>> 0,
-                    lastParameters.backBufferHeight >>> 0, {
-                        window: windowsOf.get(device)?.noWindowChanges ? 0 : deviceWindow,
-                        fullscreen: true, announce: true,
-                    });
+                resolution?.(own.backBufferWidth >>> 0, own.backBufferHeight >>> 0, {
+                    window: windowsOf.get(device)?.noWindowChanges ? 0 : deviceWindow,
+                    fullscreen: true, announce: true,
+                });
             }
-            return pacedPresent(device.Present(shown));
+            return pacedPresent(device.Present(shown), device);
         },
 
         /** @param {any} device @param {number[]} args */
@@ -3685,7 +3691,7 @@ export function createDirect3D9Seam(
             return hr;
         }
         writePresentParameters(parameters >>> 0, wanted);
-        lastParameters = wanted;
+        parametersOf.set(held.device, wanted);
         if (allocate)
         {
             // Made before the interface is published, because publishing is
@@ -3886,8 +3892,10 @@ export function createDirect3D9Seam(
 
     /** @type {any} */
     let lastDevice = null;
-    /** The present parameters the last device was created or reset with. @type {any} */
-    let lastParameters = null;
+    /** Each device's present parameters, as it was created or last reset. @type {WeakMap<any, any>} */
+    const parametersOf = new WeakMap();
+    /** The present parameters of the device that presented last. @type {any} */
+    let presenting = null;
     /** @type {WeakSet<any>} devices whose window has been told the mode at a first frame */
     const announced = new WeakSet();
     // The window the last device was created into. A Reset's present
@@ -4068,8 +4076,8 @@ export function createDirect3D9Seam(
          * rate they were held to, and the mode the device asked for.
          */
         presentPacing: ()=>({ ...presents.diagnostics(),
-            windowed: lastParameters ? Boolean(lastParameters.windowed) : null,
-            askedHz: lastParameters ? lastParameters.fullScreenRefreshRateInHz >>> 0 : null }),
+            windowed: presenting ? Boolean(presenting.windowed) : null,
+            askedHz: presenting ? presenting.fullScreenRefreshRateInHz >>> 0 : null }),
 
         /** What that device's program set in the guest, and the calls that never crossed. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),
