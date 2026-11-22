@@ -133,7 +133,7 @@ test('a memory of 4 GiB is a 64-bit Windows: a large-address-aware program past 
         await narrow.dispose();
 
         const past = await createApp({ executable: highCommit(true, 0xc0000000),
-            imagePath: 'C:\App\aware.exe', memorySize: ram, machine: 'x86' });
+            imagePath: 'C:\\App\\aware.exe', memorySize: ram, machine: 'x86' });
         t.after(()=>past.dispose());
         assert.equal(await past.run({ timeoutMs: 60_000 }), 7, 'and nothing past 3 GiB');
     });
