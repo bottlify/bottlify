@@ -153,6 +153,19 @@ From `live.mjs profile --file dbg/leak/start-profile/w10-engine.cpuprofile, then
 Needs the shared browser, a GPU or a phone: no sample yet from this
 machine's data. Run `node tools/read/trace-summary.mjs <Trace-*.json.gz> (a trace the person saved)` and put what it prints here.
 
+### How long may the WebAssembly memories one browser thread holds be before its collector runs without stop?
+
+[`read/wasm-memory-gc.mjs`](read/wasm-memory-gc.mjs): `node tools/read/wasm-memory-gc.mjs [GIBxHOLDERS,...=3x1,3x2,4x2,8x1] [--seconds 6]  (CDP_TEST_CHROME names the browser)`
+
+```
+3 GiB x 1 (3072 MB held): 117 full collections in 6 s, 0 for external memory pressure, 104 ms paused; global limit 3239 MB
+3 GiB x 2 (6144 MB held): 90 full collections in 6 s, 1 for external memory pressure, 79 ms paused; global limit 6312 MB
+4 GiB x 2 (8192 MB held): 163 full collections in 6 s, 139 for external memory pressure, 183 ms paused; global limit 8192 MB
+8 GiB x 1 (8192 MB held): 168 full collections in 6 s, 144 for external memory pressure, 179 ms paused; global limit 8192 MB
+```
+
+From `headless Chromium 1243 (/opt/pw-browsers) on the project's 4-core VM, 2026-11-22`. Each line is one arm: memories of GIB GiB, HOLDERS of them held by one worker. The global limit follows what the thread holds, its memories counted by their length, up to about 8 GiB; once it is there, full collections are made for "external memory pressure" every few megabytes allocated (139 of 163 here). A run whose threads' guest memories sum past that collects half the time (C19 on the board).
+
 ### What do a title's real frames cost the graphics worker, played again in Node?
 
 [`read/graphics-replay.mjs`](read/graphics-replay.mjs): `node tools/read/graphics-replay.mjs <capture> (from game.mjs --graphics-capture FILE)`

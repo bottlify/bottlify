@@ -131,6 +131,13 @@ export function processMemories(deps){
             {
                 dropSpare(spareMemories.shift());
             }
+            // Nor more than SPARE_BYTES of length in all: a browser counts every
+            // memory a thread holds by its length against that thread's heap.
+            while (spareMemories.length > 0 && spareMemories.reduce((total, one)=>total
+                + one.memory.buffer.byteLength, 0) > SPARE_BYTES)
+            {
+                dropSpare(spareMemories.shift());
+            }
             // A spare holds its whole length of the machine's memory: past three
             // quarters of it, the oldest go, so a process that needs a memory of
             // its own still finds room (one made anew starts at its floor).
@@ -277,6 +284,16 @@ export function processMemories(deps){
  * those it takes at once: each is the size of a process's whole address space.
  */
 const SPARE_MEMORIES = 4;
+
+/**
+ * And how long they may be together. Chrome counts each memory a thread holds
+ * by its length against the limit V8 sets that thread's heap, about 8 GiB:
+ * past it every few megabytes the thread allocates make a full collection,
+ * and the thread spends half its time in them. A run's processes' own memories
+ * are as long as they need; the spares, which nothing runs in, stay within 2 GiB,
+ * so a gone 4 GiB process's memory is never kept.
+ */
+const SPARE_BYTES = 2 ** 31;
 
 /**
  * What a process's start takes of the machine's memory where the run has one

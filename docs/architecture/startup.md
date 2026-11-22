@@ -94,7 +94,7 @@ libraries made modules; `library-loader.js`: imports resolved, libraries loaded 
 `system-host.js`: what a run's processes share, built once; `controller.js`: the object a process is
 to whoever started it; `beside.js`: the processes a run starts beside its first, each in
 a worker of its own or in this thread; `memories.js`: the guest memories of processes gone, kept for
-the next, and each process's part of the machine's memory; `sound.js`: the sound output each process plays into; `servers.js`: the
+the next (2 GiB of them in all: a browser counts each memory a thread holds against that thread's heap), and each process's part of the machine's memory; `sound.js`: the sound output each process plays into; `servers.js`: the
 class servers COM starts beside a process; `sidecar.js`: a bundle's sidecar hooks bound;
 `run-waits.js`: how it waits while it runs; `layer-config.js`: what each layer of a
 process is configured with; `image-resources.js`: an image's resources read without running it;

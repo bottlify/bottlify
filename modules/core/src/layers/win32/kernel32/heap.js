@@ -838,7 +838,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
      */
     const fit = need=>{
         let bin = binOf(need);
-        if (need >= SMALL_LIMIT)
+        if (need >= SMALL_LIMIT && bin < LOWEST_FROM_BIN)
         {
             const candidates = bins[bin];
             for (let i = candidates.length - 1; i >= 0; i--)
@@ -850,33 +850,34 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
             }
             bin++;
         }
-        for (; bin < BINS; bin++)
+        for (; bin < LOWEST_FROM_BIN; bin++)
         {
             const candidates = bins[bin];
-            if (candidates.length > 0 && bin < LOWEST_FROM_BIN)
+            if (candidates.length > 0)
             {
                 return candidates[candidates.length - 1];
             }
-            if (candidates.length > 0)
+        }
+        // Of spans 256 MiB and more, which are few, the lowest of every class, as
+        // Windows hands address space out from the bottom. A heap past 2 GiB is
+        // two spans either side of the system's shared page, and on a 32-bit
+        // Windows started with /3GB the one above it is the smaller, a class
+        // below the one under it: taken by class, every block went past 2 GiB
+        // while the lower span was empty, and the guest's memory, a power of two,
+        // held the whole 4 GiB from the first.
+        /** @type {FreeSpan | null} */
+        let lowest = null;
+        for (; bin < BINS; bin++)
+        {
+            for (const one of bins[bin])
             {
-                // Of spans 256 MiB and more, which are few, the lowest, as Windows
-                // hands address space out from the bottom: a heap past 2 GiB is two
-                // spans of one class either side of the system's shared page, and
-                // the one above it was the one made last - every allocation of the
-                // engine's own went past 2 GiB, where a 64-bit process's code
-                // reaches no counter through a disp32.
-                let lowest = candidates[0];
-                for (let i = 1; i < candidates.length; i++)
+                if (one.size >= need && (lowest === null || one.base < lowest.base))
                 {
-                    if (candidates[i].base < lowest.base)
-                    {
-                        lowest = candidates[i];
-                    }
+                    lowest = one;
                 }
-                return lowest;
             }
         }
-        return null;
+        return lowest;
     };
 
     if (size > 0)
