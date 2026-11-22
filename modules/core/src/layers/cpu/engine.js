@@ -433,6 +433,11 @@ export function engineContractProblem(engineModule, url){
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
+ * @property {(key: string) => [number, number][] | null | undefined} [placeOf]  Where a record
+ *     is in the records file (`recordsFile`), its pieces, as `getNow` would read it: an
+ *     executor holding a handle of its own reads it there. Optional.
+ * @property {() => any} [recordsFile]  The records file a reader beside the store may open,
+ *     or null. Optional.
  * @property {(keys: string[]) => (Uint8Array | null)[] | undefined} [getManyNow]  Every
  *     record named, at once and in order, as `getNow` answers one: a store across a link
  *     answers a batch's names in one wait. Optional.

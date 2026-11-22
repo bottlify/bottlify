@@ -183,7 +183,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
      * put or touched is the store's from here on.
      *
      * @param {{ id?: number, method: string, key: string, bytes?: Uint8Array,
-     *     options?: { needs?: string } }} ask
+     *     options?: { needs?: string }, place?: boolean }} ask
      */
     const answerStore = ask=>{
         if (store === null)
@@ -207,6 +207,15 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         if (ask.method === 'touch')
         {
             store.touch?.(ask.key);
+            return;
+        }
+        // An executor reading the records file itself is told where the record is: the
+        // read and its copy across were the engine thread's, a twentieth of it at a film's
+        // start, every executor's lookups answered here.
+        const pieces = ask.place === true ? store.placeOf?.(ask.key) : undefined;
+        if (pieces !== undefined)
+        {
+            worker.post({ type: 'store', id: ask.id, pieces });
             return;
         }
         const now = store.getNow?.(ask.key);
@@ -292,6 +301,14 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         await worker.terminate().catch(()=>{});
         throw e;
     }
+    // The records file, once the store is open, for the executor to read its records from.
+    Promise.resolve(store?.prepare?.()).then(()=>{
+        const file = store?.recordsFile?.() ?? null;
+        if (file !== null && !closing)
+        {
+            worker.post({ type: 'records', file });
+        }
+    }).catch(()=>{});
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);
     const aside = new Uint8Array(own.length);

@@ -59,6 +59,21 @@ const joined = parts=>{
 };
 
 /**
+ * A record's bytes read through a synchronous access handle on the records file, its
+ * pieces in order (`placeOf`), or null where one is cut short: the store's own reads and
+ * those of an executor that holds a handle of its own.
+ *
+ * @param {{ read: (bytes: Uint8Array, options: { at: number }) => number }} access
+ * @param {[number, number][]} pieces
+ */
+export function readPieces(access, pieces){
+    return joined(pieces.map(([offset, length])=>{
+        const bytes = new Uint8Array(length);
+        return access.read(bytes, { at: offset }) === length ? bytes : null;
+    }));
+}
+
+/**
  * The milliseconds the touches of a session's reads wait before they are named in the index:
  * written with the next put or past 512 of them otherwise, a run its page's going away ended
  * kept none, and a record it read at every start aged out of the store all the same.
@@ -81,6 +96,8 @@ const TOUCHES_WAIT_MS = 2000;
  * @typedef {TranslationStore & {
  *     flush: () => Promise<void>, close: () => Promise<void>, prepare: () => Promise<void>,
  *     getNow: (key: string) => Uint8Array | null | undefined,
+ *     placeOf: (key: string) => [number, number][] | null | undefined,
+ *     recordsFile: () => any,
  *     append: (key: string, bytes: Uint8Array) => Promise<void>,
  *     touch: (key: string) => void, stats: () => StoreStats,
  *     seed: (source: Uint8Array | null | Promise<Uint8Array | null>, identity?: string)
@@ -1295,14 +1312,41 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             const place = use(key);
             try
             {
-                return place ? joined(piecesOf(place)
-                    .map(([offset, length])=>readNow(offset, length))) : null;
+                return place ? readPieces(access, piecesOf(place)) : null;
             }
             catch {
                 broken = true;
                 return null;
             }
         },
+        /**
+         * Where a record is, as `getNow` would read it, for a reader with a handle of its
+         * own on the records file (`recordsFile`): its pieces, null for none, undefined
+         * where the store cannot answer at once. Counted as used, as a read is.
+         *
+         * @param {string} key
+         * @returns {[number, number][] | null | undefined}
+         */
+        placeOf(key){
+            if (broken)
+            {
+                return null;
+            }
+            if (!opened || seedsTaking > 0 || access === null)
+            {
+                open();
+                return undefined;
+            }
+            const place = use(key);
+            return place ? piecesOf(place) : null;
+        },
+        /**
+         * The records file, for an executor to read the records it is told the places of
+         * (`placeOf`) through a handle of its own: only where the store's own handle is one
+         * that stands beside others (a writer's), and once opened - a compaction, the only
+         * thing that moves the file, happens while it opens. Null otherwise.
+         */
+        recordsFile: ()=>(opened && !broken && access !== null && writer !== null ? records : null),
         /** Opens the store ahead of its first lookup: its index read, its files open. */
         prepare: ()=>open(),
         /**

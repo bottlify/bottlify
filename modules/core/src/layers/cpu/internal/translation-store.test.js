@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     clearTranslations, createDirectoryTranslationStore, createMemoryDirectory, fileNameOf,
-    resolveTranslationStore,
+    readPieces, resolveTranslationStore,
     SEED_FORMAT, STORE_VERSION, unpackSeed,
 } from './translation-store.js';
 
@@ -1116,6 +1116,37 @@ test('with a records writer the store\'s own thread writes no record, found once
         const next = await createDirectoryTranslationStore(root, 'game');
         assert.deepEqual(await next.get('cork/41/a/module/m'), bytes, 'and the next run finds it');
     });
+
+test('a reader with a handle of its own on the records file reads by the places the store '
+    + 'names what the store reads, and none is named without a writer', async()=>{
+    const root = fakeDirectory({ probes: 0, syncReads: 0, writes: 0 }, true);
+    const writer = heldWriter();
+    writer.release();
+    const store = await createDirectoryTranslationStore(root, 'game', undefined,
+        { writer: writer.factory });
+    await store.get('cork/41/a/none');
+    const keys = ['cork/41/a/one', 'cork/41/a/two', 'cork/41/a/grown'];
+    await store.put(keys[0], Uint8Array.from({ length: 300 }, (_, at)=>at * 5));
+    await store.put(keys[1], Uint8Array.from({ length: 7 }, (_, at)=>at + 1));
+    await store.append(keys[2], new Uint8Array([9, 8]));
+    await store.append(keys[2], new Uint8Array([7]));
+    const file = store.recordsFile();
+    assert.ok(file !== null, 'the file, the store\'s handle standing beside others');
+    const own = await file.createSyncAccessHandle({ mode: 'readwrite-unsafe' });
+    for (const key of keys)
+    {
+        const pieces = store.placeOf(key);
+        assert.ok(Array.isArray(pieces), key);
+        assert.deepEqual(readPieces(own, /** @type {[number, number][]} */ (pieces)),
+            store.getNow(key), key);
+    }
+    assert.equal(store.placeOf('cork/41/a/never'), null);
+    // Without a writer the store's handle is the file's only one.
+    const alone = await createDirectoryTranslationStore(fakeDirectory(undefined, true), 'game',
+        undefined, { writer: ()=>null });
+    await alone.get('cork/41/a/none');
+    assert.equal(alone.recordsFile(), null);
+});
 
 test('a record is handed to the writer, one inside a larger buffer copied out', async()=>{
     const root = fakeDirectory({ probes: 0, syncReads: 0, writes: 0 }, true);
