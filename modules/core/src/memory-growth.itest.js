@@ -138,6 +138,95 @@ test('a memory of 4 GiB is a 64-bit Windows: a large-address-aware program past 
         assert.equal(await past.run({ timeoutMs: 60_000 }), 7, 'and nothing past 3 GiB');
     });
 
+/**
+ * A program that commits `blocks` blocks of 64 MiB anywhere, writes the last byte
+ * of each, and exits with the highest block's top in MiB; 7 where one is refused.
+ *
+ * @param {number} blocks
+ */
+const commitsAnywhere = blocks=>buildExe({ imports, largeAddressAware: true, codeSize: 0x100,
+    code: ({ iat })=>assemble([
+        0xbe, ...u32(blocks), //                              mov esi, blocks
+        0x31, 0xff, //                                        xor edi, edi
+        { label: 'next' },
+        ...commit(iat, 0, 64 * MIB),
+        0x05, ...u32(64 * MIB), //                            add eax, 64 MiB
+        0xc6, 0x40, 0xff, 1, //                               mov byte [eax - 1], 1
+        0x39, 0xc7, 0x73, 0x02, 0x89, 0xc7, //                cmp edi, eax; jae +2; mov edi, eax
+        0x4e, { jump: 'jnz', to: 'next' }, //                dec esi; jnz next
+        0xc1, 0xef, 20, 0x57, //                              shr edi, 20; push edi
+        0xff, 0x15, ...u32(iat('ExitProcess')),
+        ...failing(iat),
+    ]) });
+
+// Chrome counts each guest memory's length against its thread's V8 heap limit
+// (about 8 GiB a thread): past it every allocation makes a full collection. A
+// memory that held the whole 4 GiB from its first block made a game and its
+// launcher on one thread cross it (`roadmap/decisions.md`).
+for (const [name, options] of /** @type {[string, Record<string, any>][]} */ ([
+    ['a 64-bit Windows', {}],
+    ['a 32-bit Windows started with /3GB', { machine: 'x86' }],
+    ['a 32-bit machine over a 64-bit layout', { machine: 'x86', layout: 'amd64' }],
+]))
+{
+    test(`on ${name} of 4 GiB a large-address-aware program's memory holds what it`
+        + ' commits, from the bottom up', { timeout: 300_000 }, async t=>{
+        const ram = 2 ** 32;
+        const made = watchMemories(t, ram);
+        const few = await createApp({ executable: commitsAnywhere(8),
+            imagePath: 'C:\\App\\few.exe', memorySize: ram, ...options });
+        t.after(()=>few.dispose());
+        const top = await few.run({ timeoutMs: 120_000 });
+        assert.ok(top > 0 && top <= 2048,
+            `512 MiB committed below 2 GiB: the highest ends at ${top} MiB`);
+        // The memory is a power of two (a read left untested is wrapped into it
+        // by a mask), and a few pages past it.
+        const held = made.at(-1)?.buffer.byteLength ?? 0;
+        assert.ok(held <= 2 ** 30 + MIB,
+            `and the memory the power of two above that: ${held / MIB} MiB`);
+        await few.dispose();
+
+        // Past what lies below the shared page: on into the span above it.
+        const many = await createApp({ executable: commitsAnywhere(34),
+            imagePath: 'C:\\App\\many.exe', memorySize: ram, ...options });
+        t.after(()=>many.dispose());
+        const past = await many.run({ timeoutMs: 120_000 });
+        assert.ok(past > 2048 && past <= 2048 + 1024,
+            `2176 MiB committed: the highest block ends at ${past} MiB, past the shared page`);
+    });
+}
+
+test('the memory asked for is the program\'s RAM, a limit on what it is given, not its space',
+    { timeout: 300_000 }, async t=>{
+        const ram = 2 ** 31;
+        const made = watchMemories(t, ram);
+        // Its address space is Windows's: past 2 GiB under WOW64, whatever the
+        // RAM. 3 GiB, no power of two, was a window of 2 GiB, the commit refused.
+        const high = await createApp({ executable: highCommit(true),
+            imagePath: 'C:\\App\\aware.exe', memorySize: 3 * 2 ** 30, machine: 'amd64' });
+        t.after(()=>high.dispose());
+        assert.equal(await high.run({ timeoutMs: 60_000 }), 0x12345678,
+            'a large-address-aware program commits at 0x90000000 on a machine of 3 GiB');
+        await high.dispose();
+
+        // And it is given no more than its RAM: blocks of 64 MiB up to about
+        // 2 GiB, the next one refused.
+        const many = await createApp({ executable: commitsAnywhere(34),
+            imagePath: 'C:\\App\\many.exe', memorySize: ram, machine: 'amd64' });
+        t.after(()=>many.dispose());
+        assert.equal(await many.run({ timeoutMs: 120_000 }), 7,
+            '2176 MiB asked of a machine of 2 GiB: a commit refused');
+        await many.dispose();
+
+        const fits = await createApp({ executable: commitsAnywhere(8),
+            imagePath: 'C:\\App\\fits.exe', memorySize: 2 ** 30, machine: 'amd64' });
+        t.after(()=>fits.dispose());
+        const top = await fits.run({ timeoutMs: 120_000 });
+        assert.ok(top > 0 && top < 1024, `512 MiB of a machine of 1 GiB given: ends at ${top} MiB`);
+        assert.ok((made.at(-1)?.buffer.byteLength ?? 0) <= 2 ** 30 + MIB,
+            'and its memory no longer than what it was given, as a power of two');
+    });
+
 test('a memory grown whole keeps the shared page past the heap\'s end, where it is its own',
     { timeout: 120_000 }, async t=>{
         const ram = 2 ** 28;

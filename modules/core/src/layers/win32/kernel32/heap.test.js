@@ -2846,3 +2846,17 @@ test('a placeholder is replaced by exactly its span, split, joined and given bac
     assert.equal(fns.VirtualFree.handler([plain, 0, PRESERVE]), 0,
         'only an allocation that replaced a placeholder goes back to one');
 });
+
+test('of the large spans the lowest is handed out first, whatever their sizes', ()=>{
+    // A heap past 2 GiB split by the shared page: 1.8 GiB below it, 1 GiB above
+    // (a 32-bit Windows started with /3GB), the smaller span a class below.
+    const base = 0x0c000000;
+    const shared = 0x7ffe0000;
+    const allocator = createHeapAllocator({ base, size: 0xbfff0000 - base });
+    assert.ok(allocator.allocateAt(shared, 0x20000), 'the shared page held out');
+    const small = allocator.allocate(0x100);
+    const large = allocator.allocate(64 << 20);
+    assert.ok(small < shared && large < shared,
+        `blocks from the bottom while the span below has room: 0x${small.toString(16)},`
+        + ` 0x${large.toString(16)}`);
+});

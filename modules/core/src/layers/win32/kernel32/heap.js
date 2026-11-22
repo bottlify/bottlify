@@ -838,7 +838,7 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
      */
     const fit = need=>{
         let bin = binOf(need);
-        if (need >= SMALL_LIMIT)
+        if (need >= SMALL_LIMIT && bin < LOWEST_FROM_BIN)
         {
             const candidates = bins[bin];
             for (let i = candidates.length - 1; i >= 0; i--)
@@ -850,33 +850,34 @@ export function createHeapAllocator({ base, size, alignment: least = ALIGNMENT, 
             }
             bin++;
         }
-        for (; bin < BINS; bin++)
+        for (; bin < LOWEST_FROM_BIN; bin++)
         {
             const candidates = bins[bin];
-            if (candidates.length > 0 && bin < LOWEST_FROM_BIN)
+            if (candidates.length > 0)
             {
                 return candidates[candidates.length - 1];
             }
-            if (candidates.length > 0)
+        }
+        // Of spans 256 MiB and more, which are few, the lowest of every class, as
+        // Windows hands address space out from the bottom. A heap past 2 GiB is
+        // two spans either side of the system's shared page, and on a 32-bit
+        // Windows started with /3GB the one above it is the smaller, a class
+        // below the one under it: taken by class, every block went past 2 GiB
+        // while the lower span was empty, and the guest's memory, a power of two,
+        // held the whole 4 GiB from the first.
+        /** @type {FreeSpan | null} */
+        let lowest = null;
+        for (; bin < BINS; bin++)
+        {
+            for (const one of bins[bin])
             {
-                // Of spans 256 MiB and more, which are few, the lowest, as Windows
-                // hands address space out from the bottom: a heap past 2 GiB is two
-                // spans of one class either side of the system's shared page, and
-                // the one above it was the one made last - every allocation of the
-                // engine's own went past 2 GiB, where a 64-bit process's code
-                // reaches no counter through a disp32.
-                let lowest = candidates[0];
-                for (let i = 1; i < candidates.length; i++)
+                if (one.size >= need && (lowest === null || one.base < lowest.base))
                 {
-                    if (candidates[i].base < lowest.base)
-                    {
-                        lowest = candidates[i];
-                    }
+                    lowest = one;
                 }
-                return lowest;
             }
         }
-        return null;
+        return lowest;
     };
 
     if (size > 0)
@@ -1215,6 +1216,8 @@ const viewPageProtection = (view, page)=>{
 /**
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
+ * @property {number} [physicalMemory]  The machine's RAM as the program is told it: the
+ *     run's limit on what it may be given; the arena's size where not given.
  * @property {(end: number) => boolean} [reach]  Grows the guest's memory to hold `end`
  *           (`createHeapAllocator`'s); false where it cannot.
  * @property {number} [pointerSize]  8 in a 64-bit process, whose
@@ -1308,6 +1311,18 @@ export function createHeapFunctions(host){
     /** The arena's free bytes; a wrapped allocator without the running total walks its spans. */
     const freeInArena = ()=>(/** @type {any} */ (allocator).freeTotal?.()
         ?? allocator.diagnostics().free);
+    /**
+     * The machine's memory as the program is told it now: its RAM (`physicalMemory`,
+     * the run's limit on what it is given) and what of it is free - no more than the
+     * RAM less what the arena has handed out, nor than the arena has left - and the
+     * arena's free bytes, the address space left.
+     */
+    const memoryNow = ()=>{
+        const free = freeInArena();
+        const total = host.physicalMemory ?? host.arena.size;
+        const used = Math.max(0, host.arena.size - free);
+        return { free, total, availPhys: Math.max(0, Math.min(total - used, free)) };
+    };
     /** The most the arena has had handed out at any GetProcessMemoryInfo. */
     let peakUsed = 0;
 
@@ -4227,15 +4242,14 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                const free = freeInArena();
-                const total = host.arena.size;
+                const { free, total, availPhys } = memoryNow();
                 const data = new Uint8Array(MEMORYSTATUS.SIZE);
                 const view = new DataView(data.buffer);
                 view.setUint32(MEMORYSTATUS.dwLength, MEMORYSTATUS.SIZE, true);
                 view.setUint32(MEMORYSTATUS.dwMemoryLoad,
-                    total === 0 ? 0 : Math.round((total - free) / total * 100), true);
+                    total === 0 ? 0 : Math.round((total - availPhys) / total * 100), true);
                 view.setUint32(MEMORYSTATUS.dwTotalPhys, total, true);
-                view.setUint32(MEMORYSTATUS.dwAvailPhys, free, true);
+                view.setUint32(MEMORYSTATUS.dwAvailPhys, Math.min(availPhys, 0xffffffff), true);
                 // The commit limit: memory and the page file Windows manages
                 // itself, as large as memory by default. A program refuses a
                 // machine whose limit is no more than its memory -- paging
@@ -4336,10 +4350,11 @@ export function createHeapFunctions(host){
                     value >>> 0, true);
                 set('cb', PERFORMANCE_INFORMATION.SIZE);
                 set('CommitTotal', pages(used));
-                set('CommitLimit', pages(host.arena.size));
+                const { total, availPhys } = memoryNow();
+                set('CommitLimit', pages(total));
                 set('CommitPeak', pages(peakUsed));
-                set('PhysicalTotal', pages(host.arena.size));
-                set('PhysicalAvailable', pages(host.arena.size - used));
+                set('PhysicalTotal', pages(total));
+                set('PhysicalAvailable', pages(availPhys));
                 set('PageSize', PAGE_SIZE);
                 set('ProcessCount', counts.processes);
                 set('ThreadCount', counts.threads);
@@ -4362,19 +4377,19 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const free = freeInArena();
-                const total = host.arena.size;
+                const { free, total, availPhys } = memoryNow();
                 const data = new Uint8Array(MEMORYSTATUSEX.SIZE);
                 const view = new DataView(data.buffer);
                 view.setUint32(MEMORYSTATUSEX.dwLength, MEMORYSTATUSEX.SIZE, true);
                 view.setUint32(MEMORYSTATUSEX.dwMemoryLoad,
-                    total === 0 ? 0 : Math.round((total - free) / total * 100), true);
+                    total === 0 ? 0 : Math.round((total - availPhys) / total * 100), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullTotalPhys, BigInt(total), true);
-                view.setBigUint64(MEMORYSTATUSEX.ullAvailPhys, BigInt(free), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullAvailPhys, BigInt(availPhys), true);
                 // Memory and a system-managed page file as large (GlobalMemoryStatus).
                 view.setBigUint64(MEMORYSTATUSEX.ullTotalPageFile, BigInt(2 * total), true);
-                view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(free + total), true);
-                view.setBigUint64(MEMORYSTATUSEX.ullTotalVirtual, BigInt(total), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(availPhys + total), true);
+                // The address space is the arena's, whatever the RAM.
+                view.setBigUint64(MEMORYSTATUSEX.ullTotalVirtual, BigInt(host.arena.size), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailVirtual, BigInt(free), true);
                 host.writeMemory(wholeAddress(buffer), data);
                 return 1;
