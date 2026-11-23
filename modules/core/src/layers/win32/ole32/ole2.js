@@ -1099,8 +1099,8 @@ export function createOle2Functions(env){
         OleRun: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([unknown])=>((unknown >>> 0) === 0 ? E_INVALIDARG
-                : throughRunnable(unknown >>> 0, RUNNABLE.RUN, [0], S_OK)),
+            handler: ([unknown])=>(wholeAddress(unknown) === 0 ? E_INVALIDARG
+                : throughRunnable(wholeAddress(unknown), RUNNABLE.RUN, [0], S_OK)),
         },
 
         /**
@@ -1112,8 +1112,8 @@ export function createOle2Functions(env){
         OleIsRunning: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: async([object])=>((object >>> 0) === 0 ? 0
-                : ((await throughRunnable(object >>> 0, RUNNABLE.IS_RUNNING, [], 1)) !== 0
+            handler: async([object])=>(wholeAddress(object) === 0 ? 0
+                : ((await throughRunnable(wholeAddress(object), RUNNABLE.IS_RUNNING, [], 1)) !== 0
                     ? 1 : 0)),
         },
 
@@ -1121,8 +1121,9 @@ export function createOle2Functions(env){
         OleLockRunning: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([unknown, lock, closes])=>((unknown >>> 0) === 0 ? E_INVALIDARG
-                : throughRunnable(unknown >>> 0, RUNNABLE.LOCK_RUNNING, [lock, closes], S_OK)),
+            handler: ([unknown, lock, closes])=>(wholeAddress(unknown) === 0 ? E_INVALIDARG
+                : throughRunnable(wholeAddress(unknown), RUNNABLE.LOCK_RUNNING, [lock, closes],
+                    S_OK)),
         },
 
         /**
@@ -1134,8 +1135,9 @@ export function createOle2Functions(env){
         OleSetContainedObject: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([unknown, contained])=>((unknown >>> 0) === 0 ? E_INVALIDARG
-                : throughRunnable(unknown >>> 0, RUNNABLE.SET_CONTAINED, [contained], S_OK)),
+            handler: ([unknown, contained])=>(wholeAddress(unknown) === 0 ? E_INVALIDARG
+                : throughRunnable(wholeAddress(unknown), RUNNABLE.SET_CONTAINED, [contained],
+                    S_OK)),
         },
 
         /**
@@ -1148,12 +1150,12 @@ export function createOle2Functions(env){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([unknown, aspect, hdc, bounds])=>{
-                if ((unknown >>> 0) === 0)
+                if (wholeAddress(unknown) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const view = await env.queryPointer(unknown >>> 0, IID_IVIEWOBJECT, thread);
+                const view = await env.queryPointer(wholeAddress(unknown), IID_IVIEWOBJECT, thread);
                 if (view === 0)
                 {
                     return DV_E_NOIVIEWOBJECT;
@@ -1175,29 +1177,31 @@ export function createOle2Functions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([persist, storage, same])=>{
-                if ((persist >>> 0) === 0 || (storage >>> 0) === 0)
+                if (wholeAddress(persist) === 0 || wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
                 const classed = await withScratch(GUID_SIZE, async block=>{
-                    const hr = (await env.callMethod(persist >>> 0, PERSIST.GET_CLASS_ID,
+                    const hr = (await env.callMethod(wholeAddress(persist), PERSIST.GET_CLASS_ID,
                         [block], thread)) | 0;
                     return hr < 0 ? hr
-                        : (await env.callMethod(storage >>> 0, SLOT.STORAGE_SET_CLASS, [block],
+                        : (await env.callMethod(wholeAddress(storage), SLOT.STORAGE_SET_CLASS,
+                            [block],
                             thread)) | 0;
                 }) ?? E_OUTOFMEMORY;
                 if (classed < 0)
                 {
                     return classed;
                 }
-                const saved = (await env.callMethod(persist >>> 0, PERSIST.SAVE,
+                const saved = (await env.callMethod(wholeAddress(persist), PERSIST.SAVE,
                     [storage, same], thread)) | 0;
                 if (saved < 0)
                 {
                     return saved;
                 }
-                return (await env.callMethod(storage >>> 0, SLOT.STORAGE_COMMIT, [0], thread)) | 0;
+                return (await env.callMethod(wholeAddress(storage), SLOT.STORAGE_COMMIT, [0],
+                    thread)) | 0;
             },
         },
 
@@ -1217,14 +1221,14 @@ export function createOle2Functions(env){
             argBytes: 28,
             /** @param {number[]} args */
             handler: async([rclsid, riid, renderopt, formatEtc, site, storage, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
                 const render = wholeAddress(renderopt);
-                if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || (storage >>> 0) === 0
-                    || (render === OLERENDER.FORMAT && (formatEtc >>> 0) === 0))
+                if ((rclsid >>> 0) === 0 || (riid >>> 0) === 0 || wholeAddress(storage) === 0
+                    || (render === OLERENDER.FORMAT && wholeAddress(formatEtc) === 0))
                 {
                     return E_INVALIDARG;
                 }
@@ -1236,8 +1240,9 @@ export function createOle2Functions(env){
                 }
                 // The storage is the class's from here on, as OleLoad reads
                 // it back (ole2.c: the storage's class after OleCreate).
-                await env.callMethod(storage >>> 0, SLOT.STORAGE_SET_CLASS, [rclsid >>> 0], thread);
-                let hr = await prepare(made.unknown, site >>> 0, async persist=>
+                await env.callMethod(wholeAddress(storage), SLOT.STORAGE_SET_CLASS, [rclsid >>> 0],
+                    thread);
+                let hr = await prepare(made.unknown, wholeAddress(site), async persist=>
                     (await env.callMethod(persist, PERSIST.INIT_NEW, [storage], thread)) | 0,
                 thread);
                 if (hr >= 0 && (render === OLERENDER.DRAW || render === OLERENDER.FORMAT))
@@ -1249,14 +1254,15 @@ export function createOle2Functions(env){
                     {
                         hr = await withScratch(FORMATETC_SIZE + 4, async block=>{
                             util.writeWords(block, [0, 0, DVASPECT_CONTENT, -1, 0]);
-                            const format = render === OLERENDER.FORMAT ? formatEtc >>> 0 : block;
+                            const format =
+                                render === OLERENDER.FORMAT ? wholeAddress(formatEtc) : block;
                             return (await env.callMethod(cache, OLECACHE_CACHE,
                                 [format, ADVF_PRIMEFIRST, block + FORMATETC_SIZE], thread)) | 0;
                         }) ?? E_OUTOFMEMORY;
                         await release(cache, thread);
                     }
                 }
-                return handOut(made.unknown, riid >>> 0, out >>> 0, hr, thread);
+                return handOut(made.unknown, riid >>> 0, wholeAddress(out), hr, thread);
             },
         },
 
@@ -1273,17 +1279,17 @@ export function createOle2Functions(env){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([storage, riid, site, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                if ((storage >>> 0) === 0 || (riid >>> 0) === 0)
+                if (wholeAddress(storage) === 0 || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const stat = await util.storageClass(storage >>> 0, thread);
+                const stat = await util.storageClass(wholeAddress(storage), thread);
                 if (stat.hr < 0)
                 {
                     return stat.hr;
@@ -1305,9 +1311,9 @@ export function createOle2Functions(env){
                 {
                     return made.hr;
                 }
-                const hr = await prepare(made.unknown, site >>> 0, async persist=>
+                const hr = await prepare(made.unknown, wholeAddress(site), async persist=>
                     (await env.callMethod(persist, PERSIST.LOAD, [storage], thread)) | 0, thread);
-                return handOut(made.unknown, riid >>> 0, out >>> 0, hr, thread);
+                return handOut(made.unknown, riid >>> 0, wholeAddress(out), hr, thread);
             },
         },
 
@@ -1322,7 +1328,7 @@ export function createOle2Functions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rclsid, form, out])=>{
-                if ((out >>> 0) === 0 || (rclsid >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (rclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1352,7 +1358,7 @@ export function createOle2Functions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rclsid, aspect, out])=>{
-                if ((out >>> 0) === 0 || (rclsid >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (rclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1380,7 +1386,7 @@ export function createOle2Functions(env){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([rclsid, out])=>{
-                if ((out >>> 0) === 0 || (rclsid >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (rclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1417,7 +1423,7 @@ export function createOle2Functions(env){
                             util.writeWords(at, [item.verb, name, item.flags, item.attributes]);
                             return true;
                         },
-                    }, out >>> 0);
+                    }, wholeAddress(out));
             },
         },
 
@@ -1431,7 +1437,7 @@ export function createOle2Functions(env){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([old, out])=>{
-                if ((out >>> 0) === 0 || (old >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (old >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1541,17 +1547,17 @@ export function createOle2Functions(env){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([storage, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((storage >>> 0) === 0)
+                if (wholeAddress(storage) === 0)
                 {
                     writeGuid(out, GUID_NULL);
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const stat = await util.storageClass(storage >>> 0, thread);
+                const stat = await util.storageClass(wholeAddress(storage), thread);
                 if (stat.hr < 0)
                 {
                     return stat.hr;
@@ -1562,23 +1568,25 @@ export function createOle2Functions(env){
                 {
                     return target.hr;
                 }
-                const old = await readCompObj(storage >>> 0, thread);
+                const old = await readCompObj(wholeAddress(storage), thread);
                 const set = await withScratch(GUID_SIZE, async block=>{
                     writeGuid(block, target.guid);
-                    return (await env.callMethod(storage >>> 0, SLOT.STORAGE_SET_CLASS, [block],
+                    return (await env.callMethod(wholeAddress(storage), SLOT.STORAGE_SET_CLASS,
+                        [block],
                         thread)) | 0;
                 }) ?? E_OUTOFMEMORY;
                 if (set < 0)
                 {
                     return set;
                 }
-                const written = await writeCompObj(storage >>> 0, old.record?.format ?? null,
+                const written = await writeCompObj(wholeAddress(storage),
+                    old.record?.format ?? null,
                     userTypeOf(target.guid, USERCLASSTYPE_FULL), thread);
                 if (written < 0)
                 {
                     return written;
                 }
-                const converted = await setConvert(storage >>> 0, true, thread);
+                const converted = await setConvert(wholeAddress(storage), true, thread);
                 if (converted < 0)
                 {
                     return converted;
@@ -1599,7 +1607,7 @@ export function createOle2Functions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([storage, cf, userType])=>{
-                if ((storage >>> 0) === 0)
+                if (wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1608,8 +1616,9 @@ export function createOle2Functions(env){
                 const name = await util.formatName(id, thread);
                 /** @type {CompObjFormat} */
                 const format = id === 0 ? null : name !== null ? { name } : { id };
-                return writeCompObj(storage >>> 0, format,
-                    (userType >>> 0) === 0 ? null : util.readWide(wholeAddress(userType)), thread);
+                return writeCompObj(wholeAddress(storage), format,
+                    wholeAddress(userType) === 0 ? null : util.readWide(wholeAddress(userType)),
+                    thread);
             },
         },
 
@@ -1624,31 +1633,31 @@ export function createOle2Functions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([storage, pcf, out])=>{
-                if ((pcf >>> 0) !== 0)
+                if (wholeAddress(pcf) !== 0)
                 {
                     writeU16(pcf, 0);
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writeU32(out, 0);
                 }
-                if ((storage >>> 0) === 0)
+                if (wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const read = await readCompObj(storage >>> 0, thread);
+                const read = await readCompObj(wholeAddress(storage), thread);
                 if (!read.record)
                 {
                     return read.hr;
                 }
                 const { format, userType } = read.record;
-                if ((pcf >>> 0) !== 0 && format !== null)
+                if (wholeAddress(pcf) !== 0 && format !== null)
                 {
                     writeU16(pcf, 'id' in format ? format.id
                         : await util.registerFormat(format.name, thread));
                 }
-                if ((out >>> 0) !== 0 && userType !== null)
+                if (wholeAddress(out) !== 0 && userType !== null)
                 {
                     const block = util.lendWide(userType);
                     if (block === 0)
@@ -1670,8 +1679,8 @@ export function createOle2Functions(env){
         SetConvertStg: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([storage, convert])=>((storage >>> 0) === 0 ? E_INVALIDARG
-                : setConvert(storage >>> 0, convert !== 0, env.callerThread())),
+            handler: ([storage, convert])=>(wholeAddress(storage) === 0 ? E_INVALIDARG
+                : setConvert(wholeAddress(storage), convert !== 0, env.callerThread())),
         },
 
         /**
@@ -1684,12 +1693,12 @@ export function createOle2Functions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([storage])=>{
-                if ((storage >>> 0) === 0)
+                if (wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const opened = await util.openStream(storage >>> 0, OLE_STREAM,
+                const opened = await util.openStream(wholeAddress(storage), OLE_STREAM,
                     STGM_SHARE_EXCLUSIVE | STGM_READ, false, thread);
                 if (opened.hr < 0)
                 {
@@ -1717,13 +1726,13 @@ export function createOle2Functions(env){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([accel, count, message, out])=>{
-                const command = await acceleratorFor(accel >>> 0, count | 0, message >>> 0,
+                const command = await acceleratorFor(accel >>> 0, count | 0, wholeAddress(message),
                     env.callerThread());
                 if (command === null)
                 {
                     return 0;
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writeU16(out, command);
                 }
@@ -1742,18 +1751,19 @@ export function createOle2Functions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([frame, info, message])=>{
-                if ((info >>> 0) === 0 || (message >>> 0) === 0)
+                if (wholeAddress(info) === 0 || wholeAddress(message) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
                 const command = await acceleratorFor(readU32(wholeAddress(info) + FRAMEINFO_ACCEL),
-                    readU32(wholeAddress(info) + FRAMEINFO_ACCEL_COUNT), message >>> 0, thread);
-                if (command === null || (frame >>> 0) === 0)
+                    readU32(wholeAddress(info)
+                        + FRAMEINFO_ACCEL_COUNT), wholeAddress(message), thread);
+                if (command === null || wholeAddress(frame) === 0)
                 {
                     return S_FALSE;
                 }
-                return (await env.callMethod(frame >>> 0, FRAME_TRANSLATE_ACCELERATOR,
+                return (await env.callMethod(wholeAddress(frame), FRAME_TRANSLATE_ACCELERATOR,
                     [message, command], thread)) | 0;
             },
         },
@@ -1775,7 +1785,7 @@ export function createOle2Functions(env){
                 }
                 const bytes = new Uint8Array(4 + MENU_WIDTHS_SIZE);
                 new DataView(bytes.buffer).setUint32(0, menu >>> 0, true);
-                if ((widths >>> 0) !== 0)
+                if (wholeAddress(widths) !== 0)
                 {
                     bytes.set(env.readMemory(wholeAddress(widths), MENU_WIDTHS_SIZE), 4);
                 }
@@ -1823,12 +1833,14 @@ export function createOle2Functions(env){
                 {
                     return CO_E_NOTINITIALIZED;
                 }
-                if ((data >>> 0) === 0 || (source >>> 0) === 0 || (effect >>> 0) === 0)
+                if (wholeAddress(data) === 0 || wholeAddress(source) === 0
+                    || wholeAddress(effect) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const answer = await dragAndDrop(data >>> 0, source >>> 0, allowed >>> 0, thread);
+                const answer = await dragAndDrop(wholeAddress(data), wholeAddress(source),
+                    allowed >>> 0, thread);
                 writeU32(effect, answer.effect);
                 return answer.hr;
             },
@@ -1845,14 +1857,14 @@ export function createOle2Functions(env){
         OleQueryCreateFromData: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([data])=>((data >>> 0) === 0 ? E_INVALIDARG
-                : creatableFrom(data >>> 0, env.callerThread())),
+            handler: ([data])=>(wholeAddress(data) === 0 ? E_INVALIDARG
+                : creatableFrom(wholeAddress(data), env.callerThread())),
         },
         OleQueryLinkFromData: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([data])=>((data >>> 0) === 0 ? E_INVALIDARG
-                : linkableFrom(data >>> 0, env.callerThread())),
+            handler: ([data])=>(wholeAddress(data) === 0 ? E_INVALIDARG
+                : linkableFrom(wholeAddress(data), env.callerThread())),
         },
 
         /**
@@ -1868,16 +1880,16 @@ export function createOle2Functions(env){
             argBytes: 28,
             /** @param {number[]} args */
             handler: async([data, , , , , storage, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                if ((data >>> 0) === 0 || (storage >>> 0) === 0)
+                if (wholeAddress(data) === 0 || wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const query = await creatableFrom(data >>> 0, env.callerThread());
+                const query = await creatableFrom(wholeAddress(data), env.callerThread());
                 if (query === S_FALSE)
                 {
                     return DV_E_FORMATETC;
@@ -1903,16 +1915,16 @@ export function createOle2Functions(env){
             argBytes: 28,
             /** @param {number[]} args */
             handler: async([data, , , , , storage, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                if ((data >>> 0) === 0 || (storage >>> 0) === 0)
+                if (wholeAddress(data) === 0 || wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((await linkableFrom(data >>> 0, env.callerThread())) !== S_OK)
+                if ((await linkableFrom(wholeAddress(data), env.callerThread())) !== S_OK)
                 {
                     return OLE_E_CANT_GETMONIKER;
                 }
@@ -1935,20 +1947,21 @@ export function createOle2Functions(env){
             argBytes: 28,
             /** @param {number[]} args */
             handler: async([data, riid, renderopt, formatEtc, , storage, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writeU32(out, 0);
                 }
-                if ((out >>> 0) === 0 || (storage >>> 0) === 0 || (data >>> 0) === 0
+                if (wholeAddress(out) === 0 || wholeAddress(storage) === 0
+                    || wholeAddress(data) === 0
                     || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((renderopt >>> 0) !== OLERENDER.FORMAT || (formatEtc >>> 0) === 0)
+                if ((renderopt >>> 0) !== OLERENDER.FORMAT || wholeAddress(formatEtc) === 0)
                 {
                     util.sayOnce('OleCreateStaticFromData',
                         'only a picture of the format named is made');
-                    return (formatEtc >>> 0) === 0 ? E_INVALIDARG : DV_E_FORMATETC;
+                    return wholeAddress(formatEtc) === 0 ? E_INVALIDARG : DV_E_FORMATETC;
                 }
                 const cf = util.readU16(wholeAddress(formatEtc));
                 const clsid = STATIC_CLASSES.get(cf);
@@ -1956,8 +1969,9 @@ export function createOle2Functions(env){
                 {
                     return DV_E_CLIPFORMAT;
                 }
-                return makeStatic(data >>> 0, cf, clsid, formatEtc >>> 0, storage >>> 0,
-                    riid >>> 0, out >>> 0);
+                return makeStatic(wholeAddress(data), cf, clsid, wholeAddress(formatEtc),
+                    wholeAddress(storage),
+                    riid >>> 0, wholeAddress(out));
             },
         },
 
@@ -1997,18 +2011,18 @@ export function createOle2Functions(env){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([outer, rclsid, riid, out])=>{
-                if ((out >>> 0) === 0 || (riid >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
                 const iid = guidAt(riid);
-                if ((outer >>> 0) !== 0 && iid !== IID_IUNKNOWN)
+                if (wholeAddress(outer) !== 0 && iid !== IID_IUNKNOWN)
                 {
                     return E_INVALIDARG;
                 }
                 const caches = env.dataCaches;
-                const object = caches?.create(outer >>> 0,
+                const object = caches?.create(wholeAddress(outer),
                     (rclsid >>> 0) === 0 ? GUID_NULL : guidAt(rclsid));
                 if (!caches || !object)
                 {
@@ -2032,7 +2046,7 @@ export function createOle2Functions(env){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([rclsid, outer, riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -2041,8 +2055,9 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                return env.defaultHandlers.create(guidAt(rclsid), outer >>> 0, 0, 0, guidAt(riid),
-                    out >>> 0, env.callerThread());
+                return env.defaultHandlers.create(guidAt(rclsid), wholeAddress(outer), 0, 0,
+                    guidAt(riid),
+                    wholeAddress(out), env.callerThread());
             },
         },
 
@@ -2057,7 +2072,7 @@ export function createOle2Functions(env){
             argBytes: 24,
             /** @param {number[]} args */
             handler: async([rclsid, outer, flags, factory, riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -2066,8 +2081,8 @@ export function createOle2Functions(env){
                 {
                     return E_INVALIDARG;
                 }
-                return env.defaultHandlers.create(guidAt(rclsid), outer >>> 0, flags >>> 0,
-                    factory >>> 0, guidAt(riid), out >>> 0, env.callerThread());
+                return env.defaultHandlers.create(guidAt(rclsid), wholeAddress(outer), flags >>> 0,
+                    wholeAddress(factory), guidAt(riid), wholeAddress(out), env.callerThread());
             },
         },
         // HGLOBAL OleGetIconOfClass(REFCLSID, LPOLESTR, BOOL): NULL on failure.

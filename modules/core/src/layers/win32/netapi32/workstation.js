@@ -91,7 +91,7 @@ export function createWorkstationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([bytes, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -120,8 +120,8 @@ export function createWorkstationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([buffer, out])=>{
-                const size = buffers.get(buffer >>> 0);
-                if (size === undefined || (out >>> 0) === 0)
+                const size = buffers.get(wholeAddress(buffer));
+                if (size === undefined || wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -142,7 +142,7 @@ export function createWorkstationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([server, out, status])=>{
-                if ((out >>> 0) === 0 || (status >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(status) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -183,7 +183,7 @@ export function createWorkstationFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([server, level, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }

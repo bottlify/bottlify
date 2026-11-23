@@ -1448,7 +1448,7 @@ export function createWindowFunctions(host){
         // A window's own procedure reads text in the encoding it was set in; a
         // procedure named by its address, as CallWindowProc names one, is
         // handed the message as it came.
-        const reads = unicode ?? (record && (wholeAddress(address)) === record.wndProc
+        const reads = unicode ?? (record && wholeAddress(address) === record.wndProc
             ? procReads(record) : message.unicode === true);
         return translated(host, message, reads,
             text=>watchDispatch(host, text, host.dispatch(wholeAddress(address), text, thread)),
@@ -8559,13 +8559,13 @@ export function createWindowFunctions(host){
         CallMsgFilterA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([msg, code])=>msgFilter(msg >>> 0, code | 0, host.callerThread?.()),
+            handler: ([msg, code])=>msgFilter(wholeAddress(msg), code | 0, host.callerThread?.()),
         },
         /** BOOL CallMsgFilterW(LPMSG lpMsg, int nCode) */
         CallMsgFilterW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([msg, code])=>msgFilter(msg >>> 0, code | 0, host.callerThread?.()),
+            handler: ([msg, code])=>msgFilter(wholeAddress(msg), code | 0, host.callerThread?.()),
         },
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
@@ -8705,7 +8705,8 @@ export function createWindowFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([parent, after, className, windowName])=>
-                findWindow(parent >>> 0, after >>> 0, className >>> 0, windowName >>> 0),
+                findWindow(parent >>> 0, after >>> 0, wholeAddress(className),
+                    wholeAddress(windowName)),
         },
 
         /**
@@ -8718,7 +8719,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([className, windowName])=>
-                findWindow(0, 0, className >>> 0, windowName >>> 0),
+                findWindow(0, 0, wholeAddress(className), wholeAddress(windowName)),
         },
 
         /** HWND FindWindowW(LPCWSTR lpClassName, LPCWSTR lpWindowName) */
@@ -8726,7 +8727,7 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([className, windowName])=>
-                findWindow(0, 0, className >>> 0, windowName >>> 0, true),
+                findWindow(0, 0, wholeAddress(className), wholeAddress(windowName), true),
         },
 
         /** HWND FindWindowExW(HWND, HWND, LPCWSTR lpszClass, LPCWSTR lpszWindow) */
@@ -8734,7 +8735,8 @@ export function createWindowFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([parent, after, className, windowName])=>
-                findWindow(parent >>> 0, after >>> 0, className >>> 0, windowName >>> 0, true),
+                findWindow(parent >>> 0, after >>> 0, wholeAddress(className),
+                    wholeAddress(windowName), true),
         },
 
         /**
@@ -8948,7 +8950,7 @@ export function createWindowFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                const view = (info >>> 0) === 0 ? null
+                const view = wholeAddress(info) === 0 ? null
                     : new DataView(host.readMemory(wholeAddress(info), 20).slice().buffer);
                 if (!view || view.getUint32(0, true) !== 20)
                 {
@@ -9021,7 +9023,7 @@ export function createWindowFunctions(host){
                 }
                 const id = object | 0;
                 const control = id === OBJID_CLIENT;
-                if ((out >>> 0) === 0 || readU32(host, out) !== SCROLLBARINFO_SIZE
+                if (wholeAddress(out) === 0 || readU32(host, out) !== SCROLLBARINFO_SIZE
                     || (!control && id !== OBJID_VSCROLL && id !== OBJID_HSCROLL)
                     || (control && String(record.className).toLowerCase() !== 'scrollbar'))
                 {
@@ -9069,7 +9071,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, wholeAddress(string),
                     host.callerThread?.()), ()=>1);
             },
         },
@@ -9097,11 +9099,11 @@ export function createWindowFunctions(host){
                 const readsWide = own
                     ? own === controlProcedures['#32770'] && record.unicode === true
                     : procReads(record);
-                if (!readsWide && !host.allocate && (string >>> 0) !== 0)
+                if (!readsWide && !host.allocate && wholeAddress(string) !== 0)
                 {
                     return 0;
                 }
-                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                return andThen(sendAcross(record.hwnd, WM_SETTEXT, 0, wholeAddress(string),
                     host.callerThread?.(), true), ()=>1);
             },
         },
@@ -9149,7 +9151,7 @@ export function createWindowFunctions(host){
                     return writeText(host, out, record.title, room, false);
                 }
                 return (/** @type {any} */ (table)).SendMessageA.handler([record.hwnd, WM_GETTEXT,
-                    room, out >>> 0]);
+                    room, wholeAddress(out)]);
             },
         },
 
@@ -9174,7 +9176,7 @@ export function createWindowFunctions(host){
                     return writeText(host, out, record.title, room, true);
                 }
                 return (/** @type {any} */ (table)).SendMessageW.handler([record.hwnd, WM_GETTEXT,
-                    room, out >>> 0]);
+                    room, wholeAddress(out)]);
             },
         },
 
@@ -9190,7 +9192,7 @@ export function createWindowFunctions(host){
             handler: ([hwnd, out, maxCount])=>{
                 const record = live(hwnd);
                 const room = maxCount | 0;
-                if (!record || room <= 0 || (out >>> 0) === 0)
+                if (!record || room <= 0 || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -9466,12 +9468,12 @@ export function createWindowFunctions(host){
                     host.divergence?.('UpdateLayeredWindow', 'a layered window\'s alpha and colour'
                         + ' key are drawn opaque: its surface shows nothing behind it');
                 }
-                const [x, y] = (at >>> 0) === 0 ? [0, 0]
+                const [x, y] = wholeAddress(at) === 0 ? [0, 0]
                     : [readU32(host, at) | 0, readU32(host, at + 4) | 0];
-                const [width, height] = (size >>> 0) === 0 ? [0, 0]
+                const [width, height] = wholeAddress(size) === 0 ? [0, 0]
                     : [readU32(host, size) | 0, readU32(host, size + 4) | 0];
-                const keep = ((at >>> 0) === 0 ? SWP_NOMOVE : 0)
-                    | ((size >>> 0) === 0 ? SWP_NOSIZE : 0);
+                const keep = (wholeAddress(at) === 0 ? SWP_NOMOVE : 0)
+                    | (wholeAddress(size) === 0 ? SWP_NOSIZE : 0);
                 const placed = keep === (SWP_NOMOVE | SWP_NOSIZE) ? 1 : /** @type {any} */ (table)
                     .SetWindowPos.handler([hwnd, 0, x, y, width, height,
                         keep | SWP_NOZORDER | SWP_NOACTIVATE]);
@@ -9480,7 +9482,7 @@ export function createWindowFunctions(host){
                     {
                         return 1;
                     }
-                    const [sx, sy] = (from >>> 0) === 0 ? [0, 0]
+                    const [sx, sy] = wholeAddress(from) === 0 ? [0, 0]
                         : [readU32(host, from) | 0, readU32(host, from + 4) | 0];
                     const box = geometry.windowRect(record);
                     const t = /** @type {any} */ (table);
@@ -9573,12 +9575,12 @@ export function createWindowFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HOOK_FILTER);
                     return 0;
                 }
-                if ((proc >>> 0) === 0)
+                if (wholeAddress(proc) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_FILTER_PROC);
                     return 0;
                 }
-                if ((thread >>> 0) === 0 && (module >>> 0) === 0 && kind !== WH_KEYBOARD_LL
+                if ((thread >>> 0) === 0 && wholeAddress(module) === 0 && kind !== WH_KEYBOARD_LL
                     && kind !== WH_MOUSE_LL)
                 {
                     host.setLastError?.(ERROR_HOOK_NEEDS_HMOD);
@@ -9636,7 +9638,7 @@ export function createWindowFunctions(host){
             handler: ([type, proc])=>{
                 const id = threadIdOf(host.callerThread?.());
                 const hook = [...hooks].reverse().find(each=>each.type === (type | 0)
-                    && each.proc === (proc >>> 0) && (id === null || each.thread === id));
+                    && each.proc === wholeAddress(proc) && (id === null || each.thread === id));
                 return hook ? table.UnhookWindowsHookEx.handler([hook.handle]) : 0;
             },
         },
@@ -10074,7 +10076,7 @@ export function createWindowFunctions(host){
                 {
                     return WAIT_TIMEOUT;
                 }
-                if (total > 0 && (alertable || !pollable(handles >>> 0, total)))
+                if (total > 0 && (alertable || !pollable(wholeAddress(handles), total)))
                 {
                     // Kernel32's to hold. Waiting for any, input to the thread
                     // ends it too: a message another process sends while this
@@ -10275,8 +10277,8 @@ export function createWindowFunctions(host){
                 const children = (flags & SW_SCROLLCHILDREN) !== 0;
                 const size = geometry.clientSize(record);
                 const client = { left: 0, top: 0, right: size.width, bottom: size.height };
-                const scroll = (scrollRect >>> 0) === 0 ? client : readRect(host, scrollRect);
-                const clip = (clipRect >>> 0) === 0 ? client : readRect(host, clipRect);
+                const scroll = wholeAddress(scrollRect) === 0 ? client : readRect(host, scrollRect);
+                const clip = wholeAddress(clipRect) === 0 ? client : readRect(host, clipRect);
                 const origin = geometry.clientRect(record);
                 const shownPart = geometry.visibleClientRect(record);
                 const visible = !shown(record) || frozen(record) || isEmpty(shownPart) ? []
@@ -10337,7 +10339,7 @@ export function createWindowFunctions(host){
             handler: ([hwnd, dx, dy, scrollRect, clipRect])=>
                 andThen((/** @type {any} */ (table)).ScrollWindowEx.handler([hwnd, dx, dy,
                     scrollRect, clipRect, 0, 0,
-                    0x0002 | 0x0004 | ((scrollRect >>> 0) === 0 ? 0x0001 : 0)]),
+                    0x0002 | 0x0004 | (wholeAddress(scrollRect) === 0 ? 0x0001 : 0)]),
                 (/** @type {number} */ kind)=>(kind !== REGION_ERROR ? 1 : 0)),
         },
 
@@ -10360,8 +10362,8 @@ export function createWindowFunctions(host){
                 }
                 const visible = draw?.area?.(hdc >>> 0) ?? [];
                 const all = boundsOf(visible);
-                const scroll = (scrollRect >>> 0) === 0 ? all : readRect(host, scrollRect);
-                const clip = (clipRect >>> 0) === 0 ? all : readRect(host, clipRect);
+                const scroll = wholeAddress(scrollRect) === 0 ? all : readRect(host, scrollRect);
+                const clip = wholeAddress(clipRect) === 0 ? all : readRect(host, clipRect);
                 const { uncovered } = scrollPixels(hdc >>> 0, visible, scroll, clip,
                     dx | 0, dy | 0);
                 handScrollBack(uncovered, region, updateRect);

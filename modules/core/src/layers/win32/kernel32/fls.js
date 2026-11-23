@@ -35,6 +35,7 @@
  */
 
 import { TEB, TEB64 } from './teb.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** FLS_MAXIMUM_AVAILABLE: indexes 1 to 127, 0 being none. */
 export const FLS_SLOTS = 128;
@@ -290,7 +291,7 @@ export function createFiberLocalStorage(host){
                             host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                             return FLS_OUT_OF_INDEXES;
                         }
-                        allocated.set(index, callback >>> 0);
+                        allocated.set(index, wholeAddress(callback));
                         // A new index reads as nothing in every fiber, whatever
                         // was left at it.
                         for (const block of blocks)

@@ -301,7 +301,7 @@ export function createDesktopFunctions(host){
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([message, data])=>appBarMessage(message >>> 0, data >>> 0),
+            handler: ([message, data])=>appBarMessage(message >>> 0, wholeAddress(data)),
         },
 
         /**
@@ -314,7 +314,7 @@ export function createDesktopFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([state, mask])=>{
-                if ((state >>> 0) === 0 || !host.readMemory)
+                if (wholeAddress(state) === 0 || !host.readMemory)
                 {
                     return 0;
                 }

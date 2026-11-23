@@ -345,8 +345,8 @@ export function createCompressionFunctions(host){
                 {
                     return refusal;
                 }
-                putDword(buffer >>> 0, WORKSPACE);
-                putDword(fragment >>> 0, FRAGMENT_WORKSPACE);
+                putDword(wholeAddress(buffer), WORKSPACE);
+                putDword(wholeAddress(fragment), FRAGMENT_WORKSPACE);
                 return STATUS_SUCCESS;
             },
         },
@@ -377,7 +377,7 @@ export function createCompressionFunctions(host){
                 {
                     host.writeMemory(wholeAddress(out), packed);
                 }
-                putDword(final >>> 0, packed.length);
+                putDword(wholeAddress(final), packed.length);
                 return STATUS_SUCCESS;
             },
         },

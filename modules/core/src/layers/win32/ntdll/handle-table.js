@@ -127,7 +127,7 @@ export function createHandleTableFunctions(host){
                     write(table + HANDED_OUT, handed + 1);
                 }
                 host.writeMemory(record, new Uint8Array(size));
-                if ((index >>> 0) !== 0)
+                if (wholeAddress(index) !== 0)
                 {
                     write(index, (record - first) / size);
                 }
@@ -144,7 +144,7 @@ export function createHandleTableFunctions(host){
             /** @param {number[]} args */
             handler: ([table, record])=>{
                 const first = read(table + FIRST_HANDLE);
-                if ((record >>> 0) < first || (record >>> 0) >= read(table + MAX_HANDLE)
+                if (wholeAddress(record) < first || wholeAddress(record) >= read(table + MAX_HANDLE)
                     || (read(record) & ALLOCATED) === 0)
                 {
                     return 0;
@@ -163,11 +163,11 @@ export function createHandleTableFunctions(host){
             handler: ([table, record])=>{
                 const first = read(table + FIRST_HANDLE);
                 const size = read(table + HANDLE_SIZE);
-                if (size === 0 || (record >>> 0) < first || (record - first) % size !== 0)
+                if (size === 0 || wholeAddress(record) < first || (record - first) % size !== 0)
                 {
                     return 0;
                 }
-                return inUseAt(table, (record - first) / size) === (record >>> 0) ? 1 : 0;
+                return inUseAt(table, (record - first) / size) === wholeAddress(record) ? 1 : 0;
             },
         },
         /**

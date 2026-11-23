@@ -677,7 +677,7 @@ export function createIphlpapiTables(host, model){
             /** @param {number[]} args */
             handler: ([out, size, order, family, tableClass])=>{
                 const kind = wholeAddress(tableClass);
-                if ((size >>> 0) === 0 || kind > 8
+                if (wholeAddress(size) === 0 || kind > 8
                     || ((family >>> 0) !== AF_INET && (family >>> 0) !== AF_INET6))
                 {
                     return ERROR_INVALID_PARAMETER;
@@ -714,7 +714,7 @@ export function createIphlpapiTables(host, model){
             /** @param {number[]} args */
             handler: ([out, size, order, family, tableClass])=>{
                 const kind = wholeAddress(tableClass);
-                if ((size >>> 0) === 0 || kind > 2
+                if (wholeAddress(size) === 0 || kind > 2
                     || ((family >>> 0) !== AF_INET && (family >>> 0) !== AF_INET6))
                 {
                     return ERROR_INVALID_PARAMETER;
@@ -739,7 +739,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([family, out])=>{
-                if ((out >>> 0) === 0 || ![AF_UNSPEC, AF_INET, AF_INET6].includes(family >>> 0))
+                if (wholeAddress(out) === 0 || ![AF_UNSPEC, AF_INET,
+                    AF_INET6].includes(family >>> 0))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -793,12 +794,12 @@ export function createIphlpapiTables(host, model){
             /** @param {number[]} args */
             handler: ([sources, sourceCount, destinations, count, , out, outCount])=>{
                 const n = count >>> 0;
-                if ((sources >>> 0) !== 0 || (sourceCount >>> 0) !== 0)
+                if (wholeAddress(sources) !== 0 || (sourceCount >>> 0) !== 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((destinations >>> 0) === 0 || n === 0 || (out >>> 0) === 0
-                    || (outCount >>> 0) === 0 || n > 500)
+                if (wholeAddress(destinations) === 0 || n === 0 || wholeAddress(out) === 0
+                    || wholeAddress(outCount) === 0 || n > 500)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -861,7 +862,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([level, out])=>{
-                if ((out >>> 0) === 0 || (level >>> 0) > 2)
+                if (wholeAddress(out) === 0 || (level >>> 0) > 2)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -884,7 +885,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([family, out])=>{
-                if ((out >>> 0) === 0 || ![AF_UNSPEC, AF_INET, AF_INET6].includes(family >>> 0))
+                if (wholeAddress(out) === 0 || ![AF_UNSPEC, AF_INET,
+                    AF_INET6].includes(family >>> 0))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -903,7 +905,7 @@ export function createIphlpapiTables(host, model){
                 {
                     rows.sort((a, b)=>a.address - b.address);
                 }
-                if ((size >>> 0) !== 0 && rows.length === 0)
+                if (wholeAddress(size) !== 0 && rows.length === 0)
                 {
                     return ERROR_NO_DATA;
                 }
@@ -922,7 +924,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([family, out])=>{
-                if ((out >>> 0) === 0 || ![AF_UNSPEC, AF_INET, AF_INET6].includes(family >>> 0))
+                if (wholeAddress(out) === 0 || ![AF_UNSPEC, AF_INET,
+                    AF_INET6].includes(family >>> 0))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -974,7 +977,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([row])=>{
-                if ((row >>> 0) === 0 || readU32(wholeAddress(row)) !== TCP_DELETE_TCB)
+                if (wholeAddress(row) === 0 || readU32(wholeAddress(row)) !== TCP_DELETE_TCB)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1046,16 +1049,16 @@ export function createIphlpapiTables(host, model){
                 view.setUint32(268, 0, true);
                 // BROADCAST_NODETYPE: no WINS server to ask.
                 view.setUint32(312, 1, true);
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((out >>> 0) === 0 || readU32(wholeAddress(size)) < bytes.length)
+                if (wholeAddress(out) === 0 || readU32(wholeAddress(size)) < bytes.length)
                 {
                     writeU32(wholeAddress(size), bytes.length);
                     return 111;
                 }
-                view.setUint32(264, (out >>> 0) + 268, true);
+                view.setUint32(264, wholeAddress(out) + 268, true);
                 host.writeMemory(wholeAddress(out), bytes);
                 return NO_ERROR;
             },
@@ -1070,7 +1073,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([index, out, size])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1082,7 +1085,7 @@ export function createIphlpapiTables(host, model){
                 const bytes = new Uint8Array(52);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, one.type === MIB_IF_TYPE_LOOPBACK ? 0 : 1, true);
-                if ((out >>> 0) === 0 || readU32(wholeAddress(size)) < bytes.length)
+                if (wholeAddress(out) === 0 || readU32(wholeAddress(size)) < bytes.length)
                 {
                     writeU32(wholeAddress(size), bytes.length);
                     return 111;
@@ -1097,7 +1100,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, out])=>{
-                if ((name >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(name) === 0 || wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1117,7 +1120,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1136,7 +1139,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([address, out])=>{
-                if ((address >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(address) === 0 || wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1167,7 +1170,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([, , , destination, , out, source])=>{
-                if ((destination >>> 0) === 0 || (out >>> 0) === 0 || (source >>> 0) === 0)
+                if (wholeAddress(destination) === 0 || wholeAddress(out) === 0
+                    || wholeAddress(source) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1198,7 +1202,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([row])=>{
-                if ((row >>> 0) === 0)
+                if (wholeAddress(row) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1207,7 +1211,8 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const one = namedBy(row >>> 0, IP_INTERFACE_ROW.LUID, IP_INTERFACE_ROW.INDEX);
+                const one = namedBy(wholeAddress(row), IP_INTERFACE_ROW.LUID,
+                    IP_INTERFACE_ROW.INDEX);
                 if (!one || family === AF_INET6)
                 {
                     return ERROR_NOT_FOUND;
@@ -1222,7 +1227,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([row])=>{
-                if ((row >>> 0) === 0)
+                if (wholeAddress(row) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1232,7 +1237,7 @@ export function createIphlpapiTables(host, model){
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const one = namedBy(row >>> 0, UNICAST_ROW.LUID, UNICAST_ROW.INDEX);
+                const one = namedBy(wholeAddress(row), UNICAST_ROW.LUID, UNICAST_ROW.INDEX);
                 if (!one)
                 {
                     return ERROR_FILE_NOT_FOUND;
@@ -1253,7 +1258,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([family, out])=>{
-                if ((out >>> 0) === 0 || ![AF_UNSPEC, AF_INET, AF_INET6].includes(family >>> 0))
+                if (wholeAddress(out) === 0 || ![AF_UNSPEC, AF_INET,
+                    AF_INET6].includes(family >>> 0))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1267,12 +1273,12 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([index, luid])=>{
-                if ((luid >>> 0) === 0)
+                if (wholeAddress(luid) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
                 const one = byIndex(index >>> 0);
-                writeLuid(luid >>> 0, one ? luidOf(one) : 0n);
+                writeLuid(wholeAddress(luid), one ? luidOf(one) : 0n);
                 return one ? NO_ERROR : ERROR_FILE_NOT_FOUND;
             },
         },
@@ -1282,7 +1288,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([luid, index])=>{
-                if ((luid >>> 0) === 0 || (index >>> 0) === 0)
+                if (wholeAddress(luid) === 0 || wholeAddress(index) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1297,7 +1303,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([luid, guid])=>{
-                if ((luid >>> 0) === 0 || (guid >>> 0) === 0)
+                if (wholeAddress(luid) === 0 || wholeAddress(guid) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1345,7 +1351,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return 0;
                 }
@@ -1361,7 +1367,7 @@ export function createIphlpapiTables(host, model){
             /** @param {number[]} args */
             handler: ([index, name])=>{
                 const one = byIndex(index >>> 0);
-                if (!one || (name >>> 0) === 0)
+                if (!one || wholeAddress(name) === 0)
                 {
                     return 0;
                 }
@@ -1377,7 +1383,7 @@ export function createIphlpapiTables(host, model){
             handler: ([length, mask])=>{
                 if ((length >>> 0) > 32)
                 {
-                    if ((mask >>> 0) !== 0)
+                    if (wholeAddress(mask) !== 0)
                     {
                         writeU32(wholeAddress(mask), INADDR_NONE);
                     }
@@ -1406,7 +1412,7 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([text, guid])=>{
-                const value = (text >>> 0) === 0 ? '' : readWide(wholeAddress(text), 64);
+                const value = wholeAddress(text) === 0 ? '' : readWide(wholeAddress(text), 64);
                 if (!/^\{[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\}$/i
                     .test(value))
                 {
@@ -1511,7 +1517,8 @@ export function createIphlpapiTables(host, model){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([reply])=>{
-                const count = (reply >>> 0) !== 0 && readU32(wholeAddress(reply) + 4) === IP_SUCCESS
+                const count = wholeAddress(reply) !== 0 && readU32(wholeAddress(reply)
+                    + 4) === IP_SUCCESS
                     && readU32(wholeAddress(reply)) !== 0 ? 1 : 0;
                 host.setLastError?.(count === 0 ? IP_REQ_TIMED_OUT : 0);
                 return count;
@@ -1532,7 +1539,7 @@ export function createIphlpapiTables(host, model){
         GetOwnerModuleFromTcpEntry: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([entry, , , size])=>((entry >>> 0) === 0 || (size >>> 0) === 0
+            handler: ([entry, , , size])=>(wholeAddress(entry) === 0 || wholeAddress(size) === 0
                 ? ERROR_INVALID_PARAMETER : ERROR_NOT_FOUND),
         },
         GetOwnerModuleFromTcp6Entry: {

@@ -280,7 +280,7 @@ export function createDeclarationFunctions(host){
             /** @param {number[]} args */
             handler: ([fvf, out])=>{
                 const elements = declaratorFromFvf(fvf >>> 0);
-                if (!elements || (out >>> 0) === 0)
+                if (!elements || wholeAddress(out) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -293,7 +293,7 @@ export function createDeclarationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([declaration, out])=>{
-                if ((declaration >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(declaration) === 0 || wholeAddress(out) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -311,7 +311,7 @@ export function createDeclarationFunctions(host){
         D3DXGetDeclVertexSize: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([declaration, stream])=>((declaration >>> 0) === 0 ? 0
+            handler: ([declaration, stream])=>(wholeAddress(declaration) === 0 ? 0
                 : declVertexSize(readDeclaration(host.readMemory, declaration) ?? [],
                     stream >>> 0)),
         },
@@ -319,7 +319,7 @@ export function createDeclarationFunctions(host){
         D3DXGetDeclLength: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([declaration])=>((declaration >>> 0) === 0 ? 0
+            handler: ([declaration])=>(wholeAddress(declaration) === 0 ? 0
                 : readDeclaration(host.readMemory, declaration)?.length ?? MAX_FVF_DECL_SIZE),
         },
     };

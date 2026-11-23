@@ -94,7 +94,7 @@ export function createDxva2Functions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -117,7 +117,7 @@ export function createDxva2Functions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((count >>> 0) !== 1 || (array >>> 0) === 0)
+                if ((count >>> 0) !== 1 || wholeAddress(array) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -143,7 +143,7 @@ export function createDxva2Functions(host){
         DestroyPhysicalMonitors: {
             argBytes: 8,
             handler: ([count, array])=>{
-                if ((count >>> 0) !== 0 && (array >>> 0) === 0)
+                if ((count >>> 0) !== 0 && wholeAddress(array) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }

@@ -723,7 +723,7 @@ export function createRegistryHelpers(host){
             structs: { 0: 4 },
             /** @param {number[]} args */
             handler: args=>{
-                const out = args[5] >>> 0;
+                const out = wholeAddress(args[5]);
                 if (out === 0)
                 {
                     return E_INVALIDARG;
@@ -753,8 +753,8 @@ export function createRegistryHelpers(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const text = (pointer >>> 0) === 0 ? null
-                    : host.readWideString?.(pointer >>> 0, 0x100 * 2) ?? null;
+                const text = wholeAddress(pointer) === 0 ? null
+                    : host.readWideString?.(wholeAddress(pointer), 0x100 * 2) ?? null;
                 if (text === null || text === '')
                 {
                     return 0;

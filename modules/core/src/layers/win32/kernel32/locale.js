@@ -2210,7 +2210,7 @@ export function createLocaleFunctions(host){
                 {
                     return name.length + 1;
                 }
-                if ((room | 0) < name.length + 1 || (buffer >>> 0) === 0)
+                if ((room | 0) < name.length + 1 || wholeAddress(buffer) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
@@ -2230,11 +2230,12 @@ export function createLocaleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, flags])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return LCID_EN_US;
                 }
-                const asked = readWide(wholeAddress(name), host.stringLength(name >>> 0, 2));
+                const asked = readWide(wholeAddress(name), host.stringLength(wholeAddress(name),
+                    2));
                 if (asked === '')
                 {
                     return LOCALE_INVARIANT;
@@ -2262,11 +2263,12 @@ export function createLocaleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return 0;
                 }
-                const asked = readWide(wholeAddress(name), host.stringLength(name >>> 0, 2));
+                const asked = readWide(wholeAddress(name), host.stringLength(wholeAddress(name),
+                    2));
                 return asked === '' || lcidOfName(asked, true) !== 0 ? 1 : 0;
             },
         },
@@ -2376,7 +2378,7 @@ export function createLocaleFunctions(host){
                     return 0;
                 }
                 const named = [];
-                for (let at = list >>> 0, length; at !== 0
+                for (let at = wholeAddress(list), length; at !== 0
                     && (length = host.stringLength(at, 2)) !== 0; at += (length + 1) * 2)
                 {
                     named.push(readWide(at, length));
@@ -2391,9 +2393,9 @@ export function createLocaleFunctions(host){
                 }
                 state.languages = known;
                 state.ui = 0;
-                if (known.length !== 0 && (count >>> 0) !== 0)
+                if (known.length !== 0 && wholeAddress(count) !== 0)
                 {
-                    writeLong(count >>> 0, known.length);
+                    writeLong(wholeAddress(count), known.length);
                 }
                 return 1;
             },
@@ -2510,7 +2512,7 @@ export function createLocaleFunctions(host){
                 const page = ((flags >>> 0) & LOCALE_USE_CP_ACP) !== 0 ? ANSI_CODE_PAGE
                     : record.ansi || ANSI_CODE_PAGE;
                 return compareSpans(flags >>> 0, COMPARE_FLAGS & ~SORT_DIGITSASNUMBERS,
-                    first >>> 0, firstLength | 0, second >>> 0, secondLength | 0,
+                    wholeAddress(first), firstLength | 0, wholeAddress(second), secondLength | 0,
                     (address, length)=>readAnsiIn(address, length, page));
             },
         },
@@ -2521,8 +2523,8 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, flags, first, firstLength, second, secondLength])=>(
                 localeOf(locale >>> 0) === null ? refuse(ERROR_INVALID_PARAMETER)
-                    : compareSpans(flags >>> 0, COMPARE_FLAGS, first >>> 0, firstLength | 0,
-                        second >>> 0, secondLength | 0, readWideCounted)),
+                    : compareSpans(flags >>> 0, COMPARE_FLAGS, wholeAddress(first), firstLength | 0,
+                        wholeAddress(second), secondLength | 0, readWideCounted)),
         },
 
         /**
@@ -2533,9 +2535,9 @@ export function createLocaleFunctions(host){
             argBytes: 36,
             /** @param {number[]} args */
             handler: ([name, flags, first, firstLength, second, secondLength])=>(
-                localeOfName(name >>> 0) === null ? refuse(ERROR_INVALID_PARAMETER)
-                    : compareSpans(flags >>> 0, COMPARE_FLAGS, first >>> 0, firstLength | 0,
-                        second >>> 0, secondLength | 0, readWideCounted)),
+                localeOfName(wholeAddress(name)) === null ? refuse(ERROR_INVALID_PARAMETER)
+                    : compareSpans(flags >>> 0, COMPARE_FLAGS, wholeAddress(first), firstLength | 0,
+                        wholeAddress(second), secondLength | 0, readWideCounted)),
         },
 
         /**
@@ -2566,15 +2568,16 @@ export function createLocaleFunctions(host){
             },
             /** @param {number[]} args */
             handler: ([first, firstLength, second, secondLength, ignoreCase])=>{
-                if ((first >>> 0) === 0 || (second >>> 0) === 0 || (ignoreCase >>> 0) > 1)
+                if (wholeAddress(first) === 0 || wholeAddress(second) === 0
+                    || (ignoreCase >>> 0) > 1)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
                 const upper = (/** @type {string} */ text)=>((ignoreCase >>> 0) === 0 ? text
                     : String.fromCharCode(...Array.from(text,
                         unit=>upcaseUnit(unit.charCodeAt(0)))));
-                const left = upper(readWideCounted(first >>> 0, firstLength | 0));
-                const right = upper(readWideCounted(second >>> 0, secondLength | 0));
+                const left = upper(readWideCounted(wholeAddress(first), firstLength | 0));
+                const right = upper(readWideCounted(wholeAddress(second), secondLength | 0));
                 for (let at = 0; at < Math.min(left.length, right.length); at++)
                 {
                     if (left.charCodeAt(at) !== right.charCodeAt(at))
@@ -2592,7 +2595,7 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([locale, type, buffer, count])=>localeInfo(
-                locale >>> 0, type >>> 0, buffer >>> 0, count | 0, false),
+                locale >>> 0, type >>> 0, wholeAddress(buffer), count | 0, false),
         },
 
         /** BOOL SetLocaleInfoA(LCID Locale, LCTYPE LCType, LPCSTR lpLCData) */
@@ -2600,7 +2603,7 @@ export function createLocaleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([locale, type, data])=>setLocaleInfo(locale >>> 0, type >>> 0,
-                (data >>> 0) === 0 ? null : readAnsiSpan(data >>> 0, -1)),
+                wholeAddress(data) === 0 ? null : readAnsiSpan(wholeAddress(data), -1)),
         },
 
         /** BOOL SetLocaleInfoW(LCID Locale, LCTYPE LCType, LPCWSTR lpLCData) */
@@ -2608,7 +2611,7 @@ export function createLocaleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([locale, type, data])=>setLocaleInfo(locale >>> 0, type >>> 0,
-                (data >>> 0) === 0 ? null : readWideSpan(data >>> 0, -1)),
+                wholeAddress(data) === 0 ? null : readWideSpan(wholeAddress(data), -1)),
         },
 
         /** int GetLocaleInfoW(LCID Locale, LCTYPE LCType, LPWSTR lpLCData, int cchData) */
@@ -2616,7 +2619,7 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([locale, type, buffer, count])=>localeInfo(
-                locale >>> 0, type >>> 0, buffer >>> 0, count | 0, true),
+                locale >>> 0, type >>> 0, wholeAddress(buffer), count | 0, true),
         },
 
         /**
@@ -2713,7 +2716,7 @@ export function createLocaleFunctions(host){
         GetCPInfo: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([page, info])=>pageInfo(page, info >>> 0, null),
+            handler: ([page, info])=>pageInfo(page, wholeAddress(info), null),
         },
 
         /**
@@ -2747,10 +2750,10 @@ export function createLocaleFunctions(host){
                 // Windows answers with an error code. A negative destination
                 // size is refused with it, before anything is written: unlike
                 // the source's, it has no "up to the terminator" meaning.
-                const span = (source >>> 0) === 0
-                    ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceBytes), 1);
+                const span = wholeAddress(source) === 0
+                    ? { length: 0 } : sourceSpan(wholeAddress(source), anyNegative(sourceBytes), 1);
                 if (span.length === 0 || (destinationChars | 0) < 0 || resolved > 0xffff
-                    || ((destination >>> 0) === 0 && (destinationChars | 0) !== 0))
+                    || (wholeAddress(destination) === 0 && (destinationChars | 0) !== 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2821,7 +2824,7 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler(args){
                 const [page, flags, source, sourceChars, destination, destinationBytes] = args;
-                const usedDefaultOut = args[7] >>> 0;
+                const usedDefaultOut = wholeAddress(args[7]);
                 const resolved = pageOf(page);
                 const span = (source >>> 0) === 0
                     ? { length: 0 } : sourceSpan(source >>> 0, anyNegative(sourceChars), 2);
@@ -2831,7 +2834,7 @@ export function createLocaleFunctions(host){
                 if (span.length === 0 || (destinationBytes | 0) < 0 || resolved > 0xffff
                     || ((destination >>> 0) === 0 && (destinationBytes | 0) !== 0)
                     || ((resolved === CP_UTF7 || resolved === CP_SYMBOL)
-                        && ((args[6] >>> 0) !== 0 || usedDefaultOut !== 0)))
+                        && (wholeAddress(args[6]) !== 0 || usedDefaultOut !== 0)))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2847,7 +2850,7 @@ export function createLocaleFunctions(host){
                 const invalid = resolved === CP_UTF8 && (flags & WC_ERR_INVALID_CHARS) !== 0
                     && utf8FromUnits(Array.from({ length: text.length },
                         (_, at)=>text.charCodeAt(at))).unmapped;
-                const encoded = encodeIn(resolved, text, flags, args[6] >>> 0);
+                const encoded = encodeIn(resolved, text, flags, wholeAddress(args[6]));
                 const room = destinationBytes | 0;
                 const short = room !== 0 && encoded.bytes.length > room;
                 const written = short ? encoded.fit(room) : encoded.bytes.length;
@@ -2885,13 +2888,13 @@ export function createLocaleFunctions(host){
             /** @param {number[]} args */
             handler: ([locale, infoType, source, count, types])=>{
                 void locale;
-                if (stringType(infoType >>> 0, 0) === null || (source >>> 0) === 0
-                    || (types >>> 0) === 0)
+                if (stringType(infoType >>> 0, 0) === null || wholeAddress(source) === 0
+                    || wholeAddress(types) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const span = sourceSpan(source >>> 0, count, 1);
+                const span = sourceSpan(wholeAddress(source), count, 1);
                 const raw = host.readMemory(wholeAddress(source), span.length);
                 const text = decodeSingleByte(raw, ANSI_CODE_PAGE);
                 const out = new Uint8Array(text.length * 2);
@@ -2917,13 +2920,13 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([infoType, source, count, types])=>{
-                if (stringType(infoType >>> 0, 0) === null || (source >>> 0) === 0
-                    || (types >>> 0) === 0)
+                if (stringType(infoType >>> 0, 0) === null || wholeAddress(source) === 0
+                    || wholeAddress(types) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const span = sourceSpan(source >>> 0, count, 2);
+                const span = sourceSpan(wholeAddress(source), count, 2);
                 const text = readWide(wholeAddress(source), span.length);
                 const out = new Uint8Array(text.length * 2);
                 const view = new DataView(out.buffer);
@@ -2949,8 +2952,8 @@ export function createLocaleFunctions(host){
             handler: ([locale, flags, source, sourceChars, destination, destinationChars])=>{
                 const record = localeOf(locale >>> 0);
                 return record === null ? refuse(ERROR_INVALID_PARAMETER)
-                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
-                        destination >>> 0, destinationChars | 0, false);
+                    : mapString(record, flags >>> 0, wholeAddress(source), sourceChars | 0,
+                        wholeAddress(destination), destinationChars | 0, false);
             },
         },
 
@@ -2964,8 +2967,8 @@ export function createLocaleFunctions(host){
             handler: ([locale, flags, source, sourceChars, destination, destinationChars])=>{
                 const record = localeOf(locale >>> 0);
                 return record === null ? refuse(ERROR_INVALID_PARAMETER)
-                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
-                        destination >>> 0, destinationChars | 0, true);
+                    : mapString(record, flags >>> 0, wholeAddress(source), sourceChars | 0,
+                        wholeAddress(destination), destinationChars | 0, true);
             },
         },
 
@@ -2980,11 +2983,11 @@ export function createLocaleFunctions(host){
             handler: ([name, flags, source, sourceChars, destination, destinationChars])=>{
                 // Only case and sort keys are a locale's; kana and widths are
                 // mapped whatever the name.
-                const record = localeOfName(name >>> 0)
+                const record = localeOfName(wholeAddress(name))
                     ?? ((flags & (LCMAP_TITLECASE | LCMAP_SORTKEY)) === 0 ? MACHINE_LOCALE : null);
                 return record === null ? refuse(ERROR_INVALID_PARAMETER)
-                    : mapString(record, flags >>> 0, source >>> 0, sourceChars | 0,
-                        destination >>> 0, destinationChars | 0, true);
+                    : mapString(record, flags >>> 0, wholeAddress(source), sourceChars | 0,
+                        wholeAddress(destination), destinationChars | 0, true);
             },
         },
 
@@ -3053,7 +3056,7 @@ export function createLocaleFunctions(host){
         EnumDateFormatsExEx: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: args=>(localeOfName(args[1] >>> 0) === null
+            handler: args=>(localeOfName(wholeAddress(args[1])) === null
                 ? refuse(ERROR_INVALID_PARAMETER)
                 : enumerateDateFormats(args[0], args[2] >>> 0, true,
                     [CAL_GREGORIAN, /** @type {number} */ (forwarded(args, 3, true))])),
@@ -3170,9 +3173,9 @@ export function createLocaleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, type, buffer, count])=>{
-                const record = localeOfName(name >>> 0);
+                const record = localeOfName(wholeAddress(name));
                 return record === null ? refuse(ERROR_INVALID_PARAMETER)
-                    : answerInfo(record, type >>> 0, buffer >>> 0, count | 0, true);
+                    : answerInfo(record, type >>> 0, wholeAddress(buffer), count | 0, true);
             },
         },
 
@@ -3226,11 +3229,12 @@ export function createLocaleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, room])=>{
-                const asked = (name >>> 0) === 0 ? null : readWideSpan(name >>> 0, -1);
+                const asked = wholeAddress(name) === 0 ? null : readWideSpan(wholeAddress(name),
+                    -1);
                 const resolved = asked === null
                     || asked.toLowerCase() === '!x-sys-default-locale'
                     ? MACHINE_LOCALE.name : resolvedName(asked);
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     return resolved.length + 1;
                 }

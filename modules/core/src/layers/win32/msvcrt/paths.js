@@ -725,7 +725,7 @@ export function createPathFunctions(host){
             handler: ([path, size, drive, directory, name, extension])=>{
                 const read = (/** @type {number} */ pointer)=>(
                     (pointer >>> 0) === 0 ? '' : readString(pointer));
-                const text = (path >>> 0) === 0 || (size >>> 0) === 0 ? null
+                const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
                     : makePath(read(drive), read(directory), read(name), read(extension));
                 return writeSecure(path, size, text, false);
             },
@@ -783,7 +783,7 @@ export function createPathFunctions(host){
                 /** @param {number[]} args */
                 handler: ([buffer, size])=>{
                     const text = host.files.currentDirectory();
-                    if ((buffer >>> 0) === 0)
+                    if (wholeAddress(buffer) === 0)
                     {
                         const allocated = host.allocate(Math.max(text.length + 1, size | 0) * 2);
                         writeWide(allocated, text);
@@ -824,7 +824,7 @@ export function createPathFunctions(host){
                 /** @param {number[]} args */
                 handler: ([destination, relative, max])=>{
                     const text = fullPath(readWide(relative), host.files.currentDirectory());
-                    if ((destination >>> 0) === 0)
+                    if (wholeAddress(destination) === 0)
                     {
                         const allocated = host.allocate((text.length + 1) * 2);
                         writeWide(allocated, text);
@@ -863,7 +863,7 @@ export function createPathFunctions(host){
                 handler: ([path, size, drive, directory, name, extension])=>{
                     const read = (/** @type {number} */ pointer)=>(
                         (pointer >>> 0) === 0 ? '' : readWide(pointer));
-                    const text = (path >>> 0) === 0 || (size >>> 0) === 0 ? null
+                    const text = wholeAddress(path) === 0 || (size >>> 0) === 0 ? null
                         : makePath(read(drive), read(directory), read(name), read(extension));
                     return writeSecure(path, size, text, true);
                 },
@@ -913,7 +913,7 @@ export function createPathFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, relative, max])=>{
                 const text = fullPath(readString(relative), host.files.currentDirectory());
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     const allocated = host.allocate(text.length + 1);
                     writeString(allocated, text);
@@ -942,7 +942,7 @@ export function createPathFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, size])=>{
                 const text = host.files.currentDirectory();
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     const allocated = host.allocate(Math.max(text.length + 1, size | 0));
                     writeString(allocated, text);
@@ -971,8 +971,8 @@ export function createPathFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dir, prefix])=>{
-                const text = temporaryName((dir >>> 0) === 0 ? null : readString(dir),
-                    (prefix >>> 0) === 0 ? '' : readString(prefix));
+                const text = temporaryName(wholeAddress(dir) === 0 ? null : readString(dir),
+                    wholeAddress(prefix) === 0 ? '' : readString(prefix));
                 const address = host.allocate(encodeAnsi(text).length + 1);
                 writeString(address, text);
                 return address;
@@ -994,7 +994,7 @@ export function createPathFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([template])=>{
-                if ((template >>> 0) === 0)
+                if (wholeAddress(template) === 0)
                 {
                     fail(EINVAL);
                     return 0;
@@ -1016,7 +1016,7 @@ export function createPathFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([template])=>{
-                if ((template >>> 0) === 0)
+                if (wholeAddress(template) === 0)
                 {
                     fail(EINVAL);
                     return 0;
@@ -1076,8 +1076,8 @@ export function createPathFunctions(host){
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([dir, prefix])=>{
-                    const text = temporaryName((dir >>> 0) === 0 ? null : readWide(dir),
-                        (prefix >>> 0) === 0 ? '' : readWide(prefix));
+                    const text = temporaryName(wholeAddress(dir) === 0 ? null : readWide(dir),
+                        wholeAddress(prefix) === 0 ? '' : readWide(prefix));
                     const bytes = new Uint8Array((text.length + 1) * 2);
                     [...text].forEach((c, at)=>new DataView(bytes.buffer)
                         .setUint16(at * 2, c.charCodeAt(0), true));

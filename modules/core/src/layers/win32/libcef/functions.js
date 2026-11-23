@@ -242,7 +242,7 @@ export function createLibcefFunctions(host){
          */
         cef_initialize: { convention: 'cdecl', argBytes: 16,
             handler: (/** @type {number[]} */ [, , application])=>{
-                app = application >>> 0;
+                app = wholeAddress(application);
                 uiThread = host.currentThread();
                 loop.quit = false;
                 return 1;

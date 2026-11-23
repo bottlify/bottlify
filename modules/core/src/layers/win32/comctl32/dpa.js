@@ -568,7 +568,7 @@ export function createDataStructureFunctions(host){
         DPA_Sort: {
             argBytes: 12,
             handler: (/** @type {number[]} */ [dpa, compare, lParam])=>sort(dpa >>> 0,
-                compare >>> 0, lParam),
+                wholeAddress(compare), lParam),
         },
 
         /**
@@ -584,7 +584,7 @@ export function createDataStructureFunctions(host){
             handler: async(/** @type {number[]} */ [handle, find, start, compare, lParam,
                 options])=>{
                 const dpa = wholeAddress(handle);
-                if (dpa === 0 || compare >>> 0 === 0)
+                if (dpa === 0 || wholeAddress(compare) === 0)
                 {
                     return DPA_ERR;
                 }
@@ -641,14 +641,15 @@ export function createDataStructureFunctions(host){
                 merge, lParam])=>{
                 const dest = wholeAddress(destHandle);
                 const source = wholeAddress(sourceHandle);
-                if (dest === 0 || source === 0 || compare >>> 0 === 0 || merge >>> 0 === 0)
+                if (dest === 0 || source === 0 || wholeAddress(compare) === 0
+                    || wholeAddress(merge) === 0)
                 {
                     return 0;
                 }
                 if (!(flags & DPAM_SORTED))
                 {
-                    await sort(dest, compare >>> 0, lParam);
-                    await sort(source, compare >>> 0, lParam);
+                    await sort(dest, wholeAddress(compare), lParam);
+                    await sort(source, wholeAddress(compare), lParam);
                 }
                 const deleting = (flags & (DPAM_INTERSECT | DPAM_NORMAL)) !== 0;
                 const inserting = (flags & (DPAM_UNION | DPAM_NORMAL)) !== 0;
@@ -658,10 +659,10 @@ export function createDataStructureFunctions(host){
                 while (d >= 0 || s >= 0)
                 {
                     const order = d < 0 ? -1 : s < 0 ? 1
-                        : (await call(compare >>> 0, [item(dest, d), from[s], lParam])) | 0;
+                        : (await call(wholeAddress(compare), [item(dest, d), from[s], lParam])) | 0;
                     if (order === 0)
                     {
-                        const merged = (await call(merge >>> 0, [DPAMM_MERGE, item(dest, d),
+                        const merged = (await call(wholeAddress(merge), [DPAMM_MERGE, item(dest, d),
                             from[s], lParam])) >>> 0;
                         if (merged === 0)
                         {
@@ -677,7 +678,7 @@ export function createDataStructureFunctions(host){
                         if (deleting)
                         {
                             const removed = remove(dest, d);
-                            await call(merge >>> 0, [DPAMM_DELETE, removed, 0, lParam]);
+                            await call(wholeAddress(merge), [DPAMM_DELETE, removed, 0, lParam]);
                         }
                         d--;
                     }
@@ -686,7 +687,8 @@ export function createDataStructureFunctions(host){
                         // Only in the source: it goes after the destination's item at d.
                         if (inserting)
                         {
-                            const added = (await call(merge >>> 0, [DPAMM_INSERT, from[s], 0,
+                            const added = (await call(wholeAddress(merge), [DPAMM_INSERT, from[s],
+                                0,
                                 lParam])) >>> 0;
                             if (added === 0)
                             {
@@ -711,7 +713,7 @@ export function createDataStructureFunctions(host){
                 if (dpa >>> 0 !== 0)
                 {
                     await enumerate(index=>item(dpa >>> 0, index), ()=>count(dpa >>> 0),
-                        callback >>> 0, data);
+                        wholeAddress(callback), data);
                 }
                 return 0;
             },
@@ -724,7 +726,7 @@ export function createDataStructureFunctions(host){
                 if (dpa >>> 0 !== 0)
                 {
                     await enumerate(index=>item(dpa >>> 0, index), ()=>count(dpa >>> 0),
-                        callback >>> 0, data);
+                        wholeAddress(callback), data);
                     destroyDpa(dpa >>> 0);
                 }
                 return 0;
@@ -742,7 +744,7 @@ export function createDataStructureFunctions(host){
             argBytes: 16,
             handler: async(/** @type {number[]} */ [handle, pfn, stm, data])=>{
                 const dpa = wholeAddress(handle);
-                if (dpa === 0 || pfn >>> 0 === 0 || stm >>> 0 === 0)
+                if (dpa === 0 || wholeAddress(pfn) === 0 || wholeAddress(stm) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -756,13 +758,13 @@ export function createDataStructureFunctions(host){
                 const header = info + INFO_SIZE;
                 try
                 {
-                    let result = await stream.seek(stm >>> 0, 0, STREAM_SEEK_CUR, position);
+                    let result = await stream.seek(wholeAddress(stm), 0, STREAM_SEEK_CUR, position);
                     if (result < 0)
                     {
                         return result;
                     }
                     const start = read32(position);
-                    result = await stream.invoke(stm >>> 0, ISTREAM_WRITE, [header,
+                    result = await stream.invoke(wholeAddress(stm), ISTREAM_WRITE, [header,
                         STREAM_HEADER, 0]);
                     if (result < 0)
                     {
@@ -773,20 +775,21 @@ export function createDataStructureFunctions(host){
                     {
                         write32(info, saved);
                         writePtr(info + P, item(dpa, saved));
-                        result = (await call(pfn >>> 0, [info, stm, data])) | 0;
+                        result = (await call(wholeAddress(pfn), [info, stm, data])) | 0;
                         if (result < 0)
                         {
                             break;
                         }
                     }
-                    await stream.seek(stm >>> 0, 0, STREAM_SEEK_CUR, position);
+                    await stream.seek(wholeAddress(stm), 0, STREAM_SEEK_CUR, position);
                     const end = read32(position);
                     write32(header, end - start);
                     write32(header + 4, STREAM_FORMAT);
                     write32(header + 8, saved);
-                    await stream.seek(stm >>> 0, start, STREAM_SEEK_SET);
-                    await stream.invoke(stm >>> 0, ISTREAM_WRITE, [header, STREAM_HEADER, 0]);
-                    await stream.seek(stm >>> 0, end, STREAM_SEEK_SET);
+                    await stream.seek(wholeAddress(stm), start, STREAM_SEEK_SET);
+                    await stream.invoke(wholeAddress(stm), ISTREAM_WRITE, [header, STREAM_HEADER,
+                        0]);
+                    await stream.seek(wholeAddress(stm), end, STREAM_SEEK_SET);
                     return result < 0 ? result : S_OK;
                 }
                 finally
@@ -806,7 +809,7 @@ export function createDataStructureFunctions(host){
         DPA_LoadStream: {
             argBytes: 16,
             handler: async(/** @type {number[]} */ [out, pfn, stm, data])=>{
-                if (out >>> 0 === 0 || pfn >>> 0 === 0 || stm >>> 0 === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(pfn) === 0 || wholeAddress(stm) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -821,13 +824,13 @@ export function createDataStructureFunctions(host){
                 const got = header + STREAM_HEADER;
                 try
                 {
-                    await stream.seek(stm >>> 0, 0, STREAM_SEEK_CUR, position);
+                    await stream.seek(wholeAddress(stm), 0, STREAM_SEEK_CUR, position);
                     const start = read32(position);
-                    let result = await stream.invoke(stm >>> 0, ISTREAM_READ, [header,
+                    let result = await stream.invoke(wholeAddress(stm), ISTREAM_READ, [header,
                         STREAM_HEADER, got]);
                     if (result < 0 || read32(got) < STREAM_HEADER)
                     {
-                        await stream.seek(stm >>> 0, start, STREAM_SEEK_SET);
+                        await stream.seek(wholeAddress(stm), start, STREAM_SEEK_SET);
                         return result < 0 ? result : E_FAIL;
                     }
                     if (read32(header + 4) !== STREAM_FORMAT)
@@ -846,7 +849,7 @@ export function createDataStructureFunctions(host){
                     {
                         write32(info, loaded);
                         writePtr(info + P, 0);
-                        result = (await call(pfn >>> 0, [info, stm, data])) | 0;
+                        result = (await call(wholeAddress(pfn), [info, stm, data])) | 0;
                         if (result < 0)
                         {
                             break;
@@ -893,7 +896,7 @@ export function createDataStructureFunctions(host){
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, dest])=>{
                 const dsa = wholeAddress(handle);
-                if (dsa === 0 || dest >>> 0 === 0 || (index | 0) < 0
+                if (dsa === 0 || wholeAddress(dest) === 0 || (index | 0) < 0
                     || (index | 0) >= dsaCount(dsa))
                 {
                     return 0;
@@ -922,7 +925,7 @@ export function createDataStructureFunctions(host){
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, source])=>{
                 const dsa = wholeAddress(handle);
-                if (dsa === 0 || (index | 0) < 0 || source >>> 0 === 0)
+                if (dsa === 0 || (index | 0) < 0 || wholeAddress(source) === 0)
                 {
                     return DPA_ERR;
                 }
@@ -952,7 +955,7 @@ export function createDataStructureFunctions(host){
             argBytes: 12,
             handler: (/** @type {number[]} */ [handle, index, source])=>{
                 const dsa = wholeAddress(handle);
-                if (dsa === 0 || (index | 0) < 0 || source >>> 0 === 0)
+                if (dsa === 0 || (index | 0) < 0 || wholeAddress(source) === 0)
                 {
                     return 0;
                 }
@@ -1023,7 +1026,7 @@ export function createDataStructureFunctions(host){
                 if (dsa >>> 0 !== 0)
                 {
                     await enumerate(index=>dsaItem(dsa >>> 0, index), ()=>dsaCount(dsa >>> 0),
-                        callback >>> 0, data);
+                        wholeAddress(callback), data);
                 }
                 return 0;
             },
@@ -1036,7 +1039,7 @@ export function createDataStructureFunctions(host){
                 if (dsa >>> 0 !== 0)
                 {
                     await enumerate(index=>dsaItem(dsa >>> 0, index), ()=>dsaCount(dsa >>> 0),
-                        callback >>> 0, data);
+                        wholeAddress(callback), data);
                     destroyDsa(dsa >>> 0);
                 }
                 return 0;

@@ -323,7 +323,8 @@ export function createStringOperations(host){
             handler: ([destination, source])=>{
                 if (source === 0)
                 {
-                    writeDescriptor(destination >>> 0, { length: 0, maximumLength: 0, buffer: 0 });
+                    writeDescriptor(wholeAddress(destination), { length: 0, maximumLength: 0,
+                        buffer: 0 });
                     return STATUS.SUCCESS;
                 }
                 const text = host.readWideString(wholeAddress(source), MAX_WIDE_BYTES + 2 * 2);
@@ -331,8 +332,8 @@ export function createStringOperations(host){
                 {
                     return STATUS.NAME_TOO_LONG;
                 }
-                writeDescriptor(destination >>> 0, { length: text.length * 2,
-                    maximumLength: text.length * 2 + 2, buffer: source >>> 0 });
+                writeDescriptor(wholeAddress(destination), { length: text.length * 2,
+                    maximumLength: text.length * 2 + 2, buffer: wholeAddress(source) });
                 return STATUS.SUCCESS;
             },
         },
@@ -345,7 +346,7 @@ export function createStringOperations(host){
                 if (source === 0)
                 {
                     const to = readDescriptor(wholeAddress(destination));
-                    writeDescriptor(destination >>> 0, { ...to, length: 0 });
+                    writeDescriptor(wholeAddress(destination), { ...to, length: 0 });
                     return 0;
                 }
                 copyInto(destination, narrowBytes(source), 1, false);
@@ -555,7 +556,8 @@ export function createStringOperations(host){
                 }
                 if (from.length === 0 && !always)
                 {
-                    writeDescriptor(destination >>> 0, { length: 0, maximumLength: 0, buffer: 0 });
+                    writeDescriptor(wholeAddress(destination), { length: 0, maximumLength: 0,
+                        buffer: 0 });
                     return STATUS.SUCCESS;
                 }
                 const size = from.length + (terminate ? 2 : 0);
@@ -572,7 +574,7 @@ export function createStringOperations(host){
                 {
                     host.writeMemory(buffer + from.length, new Uint8Array(2));
                 }
-                writeDescriptor(destination >>> 0,
+                writeDescriptor(wholeAddress(destination),
                     { length: from.length, maximumLength: size, buffer });
                 return STATUS.SUCCESS;
             },
@@ -588,7 +590,7 @@ export function createStringOperations(host){
                 {
                     host.writeMemory(to.buffer, new Uint8Array(to.maximumLength));
                 }
-                writeDescriptor(string >>> 0, { ...to, length: 0 });
+                writeDescriptor(wholeAddress(string), { ...to, length: 0 });
                 return 0;
             },
         },
@@ -762,7 +764,7 @@ export function createStringOperations(host){
                     return STATUS.BUFFER_OVERFLOW;
                 }
                 host.writeMemory(to.buffer, wideBytes(`${text}\0`));
-                writeDescriptor(string >>> 0, { ...to, length: text.length * 2 });
+                writeDescriptor(wholeAddress(string), { ...to, length: text.length * 2 });
                 return STATUS.SUCCESS;
             },
         },
@@ -810,7 +812,7 @@ export function createStringOperations(host){
                     return STATUS.NO_MEMORY;
                 }
                 host.writeMemory(buffer, wideBytes(`${text}\0`));
-                writeDescriptor(string >>> 0,
+                writeDescriptor(wholeAddress(string),
                     { length: text.length * 2, maximumLength: (text.length + 1) * 2, buffer });
                 return STATUS.SUCCESS;
             },
@@ -892,7 +894,7 @@ export function createStringOperations(host){
                     0x20000);
                 // A va_list is a pointer to the first argument, passed by
                 // address; an array is passed as itself.
-                const slots = list === 0 ? 0 : asked(isArray) ? list >>> 0
+                const slots = list === 0 ? 0 : asked(isArray) ? wholeAddress(list)
                     : readU32(wholeAddress(list));
                 const total = Math.floor((size >>> 0) / 2);
                 const room = total - 1;

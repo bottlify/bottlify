@@ -529,7 +529,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fn])=>{
-                quickExit.push(fn >>> 0);
+                quickExit.push(wholeAddress(fn));
                 return 0;
             },
         },
@@ -570,7 +570,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([table])=>{
-                if ((table >>> 0) === 0)
+                if (wholeAddress(table) === 0)
                 {
                     return -1;
                 }
@@ -590,7 +590,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([table, fn])=>{
-                if ((table >>> 0) === 0)
+                if (wholeAddress(table) === 0)
                 {
                     return -1;
                 }
@@ -631,7 +631,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([table])=>{
-                if ((table >>> 0) === 0)
+                if (wholeAddress(table) === 0)
                 {
                     return -1;
                 }
@@ -769,7 +769,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(EINVAL);
                 }
@@ -788,10 +788,10 @@ export function createUcrtbaseFunctions(crt, host){
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([text, end])=>{
-                    const scanned = (text >>> 0) === 0 ? null
+                    const scanned = wholeAddress(text) === 0 ? null
                         : scanStandardDecimal(/** @type {NonNullable<typeof host.readCString>} */ (
-                            host.readCString)(text >>> 0, 1024));
-                    if ((end >>> 0) !== 0)
+                            host.readCString)(wholeAddress(text), 1024));
+                    if (wholeAddress(end) !== 0)
                     {
                         writePointer(end, scanned ? text + scanned.end : text);
                     }
@@ -916,7 +916,7 @@ export function createUcrtbaseFunctions(crt, host){
             quadwords: [0],
             /** @param {number[]} args */
             handler: ([options, , stream, format, , list])=>{
-                if ((format >>> 0) === 0)
+                if (wholeAddress(format) === 0)
                 {
                     fail(EINVAL);
                     return -1;
@@ -968,7 +968,7 @@ export function createUcrtbaseFunctions(crt, host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([stream, base, place, count])=>{
-                if ((stream >>> 0) === 0)
+                if (wholeAddress(stream) === 0)
                 {
                     return fail(EINVAL);
                 }
@@ -1003,7 +1003,7 @@ export function createUcrtbaseFunctions(crt, host){
                 {
                     return 0;
                 }
-                if ((buffer >>> 0) === 0 || (stream >>> 0) === 0)
+                if (wholeAddress(buffer) === 0 || wholeAddress(stream) === 0)
                 {
                     fail(EINVAL);
                     return 0;

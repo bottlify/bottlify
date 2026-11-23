@@ -1276,7 +1276,7 @@ export function createThreadPool(host){
                 argBytes: 28,
                 /** @param {number[]} args */
                 handler: ([out, queue, callback, parameter, due, period, flags])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
@@ -1387,7 +1387,7 @@ export function createThreadPool(host){
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: ([out, object, callback, context, timeout, flags])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
@@ -1448,11 +1448,12 @@ export function createThreadPool(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([routine, context])=>{
-                    if ((routine >>> 0) === 0)
+                    if (wholeAddress(routine) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    dispatch({ entry: routine >>> 0, args: [context >>> 0], owner: workItems });
+                    dispatch({ entry: wholeAddress(routine), args: [wholeAddress(context)],
+                        owner: workItems });
                     return 1;
                 },
             },

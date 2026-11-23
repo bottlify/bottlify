@@ -996,7 +996,7 @@ export function createProfileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([section, key, structure, size, file])=>{
-                if ((structure >>> 0) === 0)
+                if (wholeAddress(structure) === 0)
                 {
                     return put(pathOf(file), section, key, 0);
                 }

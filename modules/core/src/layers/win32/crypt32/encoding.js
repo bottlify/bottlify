@@ -609,7 +609,7 @@ export function createEncodingFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([algorithm, , , pointer, length, out, size])=>{
-                if ((algorithm >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(algorithm) === 0 || wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -624,7 +624,7 @@ export function createEncodingFunctions(host){
                 {
                     digest.update(host.readMemory(wholeAddress(pointer), length >>> 0));
                 }
-                return answerBytes(digest.digest(), out >>> 0, size >>> 0);
+                return answerBytes(digest.digest(), wholeAddress(out), wholeAddress(size));
             },
         },
 
@@ -645,7 +645,7 @@ export function createEncodingFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([, structType, pointer, length, flags, , out, size])=>{
-                if ((pointer >>> 0) === 0 || (size >>> 0) === 0 && ((flags >>> 0)
+                if (wholeAddress(pointer) === 0 || wholeAddress(size) === 0 && ((flags >>> 0)
                     & CRYPT_DECODE_ALLOC_FLAG) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -677,25 +677,25 @@ export function createEncodingFunctions(host){
                 {
                     const block = host.localAlloc(size0);
                     host.writeMemory(block, build(block));
-                    setDword(out >>> 0, block);
-                    if ((size >>> 0) !== 0)
+                    setDword(wholeAddress(out), block);
+                    if (wholeAddress(size) !== 0)
                     {
-                        setDword(size >>> 0, size0);
+                        setDword(wholeAddress(size), size0);
                     }
                     return 1;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
-                    setDword(size >>> 0, size0);
+                    setDword(wholeAddress(size), size0);
                     return 1;
                 }
-                if (dword(size >>> 0) < size0)
+                if (dword(wholeAddress(size)) < size0)
                 {
-                    setDword(size >>> 0, size0);
+                    setDword(wholeAddress(size), size0);
                     return fail(ERROR_MORE_DATA);
                 }
-                host.writeMemory(wholeAddress(out), build(out >>> 0));
-                setDword(size >>> 0, size0);
+                host.writeMemory(wholeAddress(out), build(wholeAddress(out)));
+                setDword(wholeAddress(size), size0);
                 return 1;
             },
         },
@@ -709,12 +709,12 @@ export function createEncodingFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([, structType, info, flags, , out, size])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const type = structOf(structType);
-                const bytes = type < 0 ? null : encode(type, info >>> 0);
+                const bytes = type < 0 ? null : encode(type, wholeAddress(info));
                 if (!bytes)
                 {
                     host.divergence?.('CryptEncodeObjectEx',
@@ -725,18 +725,18 @@ export function createEncodingFunctions(host){
                 {
                     const block = host.localAlloc(bytes.length);
                     host.writeMemory(block, bytes);
-                    setDword(out >>> 0, block);
-                    if ((size >>> 0) !== 0)
+                    setDword(wholeAddress(out), block);
+                    if (wholeAddress(size) !== 0)
                     {
-                        setDword(size >>> 0, bytes.length);
+                        setDword(wholeAddress(size), bytes.length);
                     }
                     return 1;
                 }
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                return answerBytes(bytes, out >>> 0, size >>> 0);
+                return answerBytes(bytes, wholeAddress(out), wholeAddress(size));
             },
         },
 
@@ -778,7 +778,7 @@ export function createEncodingFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([, algorithm, , , info, out, size])=>{
-                if ((info >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(info) === 0 || wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -798,7 +798,7 @@ export function createEncodingFunctions(host){
                     derElement(TAG.BIT_STRING, Uint8Array.of(dword(at + 20) & 7), key));
                 const digest = make();
                 digest.update(encoded);
-                return answerBytes(digest.digest(), out >>> 0, size >>> 0);
+                return answerBytes(digest.digest(), wholeAddress(out), wholeAddress(size));
             },
         },
     };

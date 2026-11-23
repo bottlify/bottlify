@@ -224,8 +224,8 @@ export function createWin9xFunctions(host){
         MapLS: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>(((pointer >>> 0) & SELECTOR_MASK) === 0
-                ? pointer >>> 0 : mapLS.handler()),
+            handler: ([pointer])=>((wholeAddress(pointer) & SELECTOR_MASK) === 0
+                ? wholeAddress(pointer) : mapLS.handler()),
         },
         MapSL: {
             argBytes: 4,

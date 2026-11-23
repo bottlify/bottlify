@@ -1036,7 +1036,7 @@ export function createConstantTableObjects(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([code, out])=>{
-                if ((code >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(code) === 0 || wholeAddress(out) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -1045,7 +1045,7 @@ export function createConstantTableObjects(host){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                const found = findConstantTable(u32, code >>> 0);
+                const found = findConstantTable(u32, wholeAddress(code));
                 if (!found)
                 {
                     return D3DERR_INVALIDCALL;

@@ -130,10 +130,10 @@ export function createMfplatFunctions(host){
             hand(out, objects.createSample()) },
         /** HRESULT MFCreateMemoryBuffer(DWORD max, IMFMediaBuffer **buffer) */
         MFCreateMemoryBuffer: { argBytes: 8, handler: (/** @type {number[]} */ [max, out])=>
-            ((out >>> 0) === 0 ? E_INVALIDARG : hand(out, objects.createBuffer(max))) },
+            (wholeAddress(out) === 0 ? E_INVALIDARG : hand(out, objects.createBuffer(max))) },
         /** HRESULT MFCreateAlignedMemoryBuffer(DWORD max, DWORD alignment, IMFMediaBuffer **buffer) */
         MFCreateAlignedMemoryBuffer: { argBytes: 12,
-            handler: (/** @type {number[]} */ [max, mask, out])=>((out >>> 0) === 0 ? E_INVALIDARG
+            handler: (/** @type {number[]} */ [max, mask, out])=>(wholeAddress(out) === 0 ? E_INVALIDARG
                 : hand(out, objects.createBuffer(max, mask))) },
 
         /**
@@ -142,7 +142,7 @@ export function createMfplatFunctions(host){
          */
         MFCreateMediaEvent: { argBytes: 20,
             handler: (/** @type {number[]} */ [type, extended, status, value, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
@@ -166,7 +166,7 @@ export function createMfplatFunctions(host){
         /** HRESULT MFFrameRateToAverageTimePerFrame(UINT32 numerator, UINT32 denominator, UINT64 *time) */
         MFFrameRateToAverageTimePerFrame: { argBytes: 12,
             handler: (/** @type {number[]} */ [numerator, denominator, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
@@ -176,7 +176,7 @@ export function createMfplatFunctions(host){
         /** HRESULT MFAverageTimePerFrameToFrameRate(UINT64 time, UINT32 *numerator, UINT32 *denominator) */
         MFAverageTimePerFrameToFrameRate: { argBytes: 16, quadwords: [0],
             handler: (/** @type {number[]} */ [low, high, numerator, denominator])=>{
-                if ((numerator >>> 0) === 0 || (denominator >>> 0) === 0)
+                if (wholeAddress(numerator) === 0 || wholeAddress(denominator) === 0)
                 {
                     return E_POINTER;
                 }
@@ -198,7 +198,7 @@ export function createMfplatFunctions(host){
          */
         MFCalculateImageSize: { argBytes: 16,
             handler: (/** @type {number[]} */ [subtype, width, height, out])=>{
-                if ((out >>> 0) === 0 || (subtype >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (subtype >>> 0) === 0)
                 {
                     return E_POINTER;
                 }
@@ -216,15 +216,15 @@ export function createMfplatFunctions(host){
                 host.heap.allocate(Math.max(size >>> 0, 1)) >>> 0 },
         /** void MFHeapFree(void *block) */
         MFHeapFree: { argBytes: 4, handler: (/** @type {number[]} */ [block])=>{
-            if ((block >>> 0) !== 0)
+            if (wholeAddress(block) !== 0)
             {
-                host.heap.free(block >>> 0);
+                host.heap.free(wholeAddress(block));
             }
             return 0;
         } },
         /** HRESULT MFGetTimerPeriodicity(DWORD *period): 10 ms, the platform timer's. */
         MFGetTimerPeriodicity: { argBytes: 4, handler: (/** @type {number[]} */ [out])=>{
-            if ((out >>> 0) === 0)
+            if (wholeAddress(out) === 0)
             {
                 return E_POINTER;
             }
@@ -238,7 +238,7 @@ export function createMfplatFunctions(host){
         /** HRESULT MFGetAttributesAsBlobSize(IMFAttributes *attributes, UINT32 *size) */
         MFGetAttributesAsBlobSize: { argBytes: 8,
             handler: (/** @type {number[]} */ [attributes, out])=>{
-                if ((attributes >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(attributes) === 0 || wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
@@ -256,7 +256,7 @@ export function createMfplatFunctions(host){
          */
         MFGetAttributesAsBlob: { argBytes: 12,
             handler: (/** @type {number[]} */ [attributes, buffer, size])=>{
-                if ((attributes >>> 0) === 0 || (buffer >>> 0) === 0)
+                if (wholeAddress(attributes) === 0 || wholeAddress(buffer) === 0)
                 {
                     return E_POINTER;
                 }
@@ -280,7 +280,7 @@ export function createMfplatFunctions(host){
          */
         MFInitAttributesFromBlob: { argBytes: 12,
             handler: (/** @type {number[]} */ [attributes, buffer, size])=>{
-                if ((attributes >>> 0) === 0 || (buffer >>> 0) === 0)
+                if (wholeAddress(attributes) === 0 || wholeAddress(buffer) === 0)
                 {
                     return E_POINTER;
                 }
@@ -299,7 +299,7 @@ export function createMfplatFunctions(host){
          */
         MFCreateFile: { argBytes: 20,
             handler: (/** @type {number[]} */ [access, open, flags, url, out])=>{
-                if ((out >>> 0) === 0 || (url >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(url) === 0)
                 {
                     return E_POINTER;
                 }
@@ -317,7 +317,7 @@ export function createMfplatFunctions(host){
          */
         MFCreateTempFile: { argBytes: 16,
             handler: (/** @type {number[]} */ [access, open, flags, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
@@ -337,7 +337,7 @@ export function createMfplatFunctions(host){
          */
         MFCreateAsyncResult: { argBytes: 16,
             handler: (/** @type {number[]} */ [object, callback, state, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -368,7 +368,7 @@ export function createMfplatFunctions(host){
             {
                 return MF_E_SHUTDOWN;
             }
-            if ((callback >>> 0) === 0)
+            if (wholeAddress(callback) === 0)
             {
                 return E_INVALIDARG;
             }
@@ -394,7 +394,7 @@ export function createMfplatFunctions(host){
         } },
         /** HRESULT MFAllocateWorkQueue(DWORD *queue) */
         MFAllocateWorkQueue: { argBytes: 4, handler: (/** @type {number[]} */ [out])=>{
-            if ((out >>> 0) === 0)
+            if (wholeAddress(out) === 0)
             {
                 return E_INVALIDARG;
             }

@@ -278,7 +278,7 @@ export function createDataBlockFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([slot, item])=>{
-                if ((slot >>> 0) === 0 || (item >>> 0) === 0)
+                if (wholeAddress(slot) === 0 || wholeAddress(item) === 0)
                 {
                     return 0;
                 }
@@ -297,7 +297,7 @@ export function createDataBlockFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([slot, signature])=>{
-                if ((slot >>> 0) === 0)
+                if (wholeAddress(slot) === 0)
                 {
                     return 0;
                 }
@@ -323,13 +323,13 @@ export function createDataBlockFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([list, signature])=>{
-                if ((list >>> 0) === 0)
+                if (wholeAddress(list) === 0)
                 {
                     return 0;
                 }
                 const found = blocksOf(listBytes(list))
                     .find(entry=>u32(entry.block, 4) === signature >>> 0);
-                return found ? (list >>> 0) + found.at : 0;
+                return found ? wholeAddress(list) + found.at : 0;
             },
         },
 
@@ -338,7 +338,7 @@ export function createDataBlockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                if ((list >>> 0) !== 0)
+                if (wholeAddress(list) !== 0)
                 {
                     kernel32('LocalFree', [list]);
                 }
@@ -357,12 +357,12 @@ export function createDataBlockFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([stream, list])=>{
-                if ((stream >>> 0) === 0)
+                if (wholeAddress(stream) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const entries = (list >>> 0) === 0 ? []
-                    : blocksOf(listBytes(list)).map(found=>({ at: (list >>> 0) + found.entry,
+                const entries = wholeAddress(list) === 0 ? []
+                    : blocksOf(listBytes(list)).map(found=>({ at: wholeAddress(list) + found.entry,
                         size: found.size }));
                 return withScratch(8, function* (count){
                     host.writeMemory(count + 4, dword(0));
@@ -394,7 +394,7 @@ export function createDataBlockFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([stream, slot])=>{
-                if ((stream >>> 0) === 0 || (slot >>> 0) === 0)
+                if (wholeAddress(stream) === 0 || wholeAddress(slot) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -454,7 +454,7 @@ export function createDataBlockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([stream])=>{
-                if ((stream >>> 0) === 0)
+                if (wholeAddress(stream) === 0)
                 {
                     return 0;
                 }
@@ -509,7 +509,7 @@ export function createDataBlockFunctions(host){
             /** @param {number[]} args */
             handler: ([stream, out])=>withScratch(STATSTG.SIZE_OF, function* (at){
                 const status = yield* method(stream, STAT, at, STATFLAG_NONAME);
-                if (status >= 0 && (out >>> 0) !== 0)
+                if (status >= 0 && wholeAddress(out) !== 0)
                 {
                     host.writeMemory(wholeAddress(out), read(at + STATSTG.SIZE, 8));
                 }

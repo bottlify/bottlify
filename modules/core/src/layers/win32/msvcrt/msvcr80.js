@@ -233,7 +233,7 @@ export function createMsvcr80Functions(crt, host){
             /** @param {number[]} args */
             handler: ([handler])=>{
                 const before = purecallHandler;
-                purecallHandler = handler >>> 0;
+                purecallHandler = wholeAddress(handler);
                 return before;
             },
         },
@@ -301,7 +301,7 @@ export function createMsvcr80Functions(crt, host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([file, name, mode])=>{
-                if ((file >>> 0) === 0)
+                if (wholeAddress(file) === 0)
                 {
                     return fail(EINVAL);
                 }
@@ -447,7 +447,7 @@ export function createMsvcr80Functions(crt, host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([stream, format, list])=>{
-                if ((format >>> 0) === 0)
+                if (wholeAddress(format) === 0)
                 {
                     fail(EINVAL);
                     return -1;

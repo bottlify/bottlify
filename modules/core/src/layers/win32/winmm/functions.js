@@ -1273,7 +1273,8 @@ export function createWinmmFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([delay, , proc, user, flags])=>
-                host.timers ? host.timers.set(delay >>> 0, proc >>> 0, user >>> 0, flags >>> 0) : 0,
+                host.timers ? host.timers.set(delay >>> 0, wholeAddress(proc), user >>> 0,
+                    flags >>> 0) : 0,
         },
         timeKillEvent: {
             argBytes: 4,
@@ -1307,7 +1308,7 @@ export function createWinmmFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([caps, size])=>{
-                if ((caps >>> 0) === 0 || (size >>> 0) < 8)
+                if (wholeAddress(caps) === 0 || (size >>> 0) < 8)
                 {
                     return TIMERR_NOCANDO;
                 }
@@ -1337,7 +1338,7 @@ export function createWinmmFunctions(host){
                 {
                     return target;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1402,7 +1403,7 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
-                if ((caps >>> 0) < NEVER_MAPPED)
+                if (wholeAddress(caps) < NEVER_MAPPED)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1433,7 +1434,7 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
-                if ((caps >>> 0) < NEVER_MAPPED)
+                if (wholeAddress(caps) < NEVER_MAPPED)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1522,7 +1523,7 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_BADDEVICEID;
                 }
-                if ((format >>> 0) === 0)
+                if (wholeAddress(format) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1535,7 +1536,7 @@ export function createWinmmFunctions(host){
                 if (judged.result !== MMSYSERR_NOERROR)
                 {
                     // An open that fails leaves no handle; a query touches nothing.
-                    if (((flags >>> 0) & WAVE_FORMAT_QUERY) === 0 && (out >>> 0) !== 0)
+                    if (((flags >>> 0) & WAVE_FORMAT_QUERY) === 0 && wholeAddress(out) !== 0)
                     {
                         host.writeMemory(wholeAddress(out), dword(0));
                     }
@@ -1910,13 +1911,13 @@ export function createWinmmFunctions(host){
         mciGetDeviceIDA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))
+            handler: ([name])=>(wholeAddress(name) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))
                 || (video?.deviceId(ansiAt(name, 128)) ?? 0)),
         },
         mciGetDeviceIDW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))
+            handler: ([name])=>(wholeAddress(name) === 0 ? 0 : deviceIdOf(wideAt(name, 128))
                 || (video?.deviceId(wideAt(name, 128)) ?? 0)),
         },
         /**

@@ -1944,7 +1944,8 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, vertices, count, mesh, entries, mode])=>{
                 const dc = dcOf(handle);
-                if (!dc || (vertices >>> 0) === 0 || (count >>> 0) === 0 || (mesh >>> 0) === 0
+                if (!dc || wholeAddress(vertices) === 0 || (count >>> 0) === 0
+                    || wholeAddress(mesh) === 0
                     || (entries >>> 0) === 0 || (mode >>> 0) > GRADIENT_FILL_TRIANGLE)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
@@ -1972,7 +1973,8 @@ export function createDrawingFunctions(
                         return known;
                     }
                     placed.set(index, used.length);
-                    used.push(readVertex(dc, ((vertices >>> 0) + index * TRIVERTEX_SIZE) >>> 0));
+                    used.push(readVertex(dc,
+                        (wholeAddress(vertices) + index * TRIVERTEX_SIZE) >>> 0));
                     return used.length - 1;
                 }));
                 if (corners === 3 && shapes.some(([a, b, c])=>
@@ -2076,12 +2078,13 @@ export function createDrawingFunctions(
             handler: ([handle, bitmap, start, lines, bits, info, usage])=>{
                 const record = objects.get(bitmap);
                 const dc = dcOf(handle);
-                if (!dc || !record || record.type !== 'bitmap' || (bits >>> 0) === 0
-                    || (info >>> 0) === 0)
+                if (!dc || !record || record.type !== 'bitmap' || wholeAddress(bits) === 0
+                    || wholeAddress(info) === 0)
                 {
                     return 0;
                 }
-                return setDIBits(bitmap >>> 0, start >>> 0, lines >>> 0, bits >>> 0, info >>> 0,
+                return setDIBits(bitmap >>> 0, start >>> 0, lines >>> 0, wholeAddress(bits),
+                    wholeAddress(info),
                     usage >>> 0, dc);
             },
         },
@@ -2291,11 +2294,11 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, points, count])=>{
                 const interfaces = bound(handle);
-                if (!interfaces || (count | 0) < 2 || (points >>> 0) === 0)
+                if (!interfaces || (count | 0) < 2 || wholeAddress(points) === 0)
                 {
                     return 0;
                 }
-                const through = pointsAt(points >>> 0, count | 0);
+                const through = pointsAt(wholeAddress(points), count | 0);
                 const back = interfaces.moveToEx(handle >>> 0, through[0].x, through[0].y);
                 for (const point of through.slice(1))
                 {
@@ -2319,11 +2322,11 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, points, count])=>{
                 const interfaces = bound(handle);
-                if (!interfaces || (points >>> 0) === 0)
+                if (!interfaces || wholeAddress(points) === 0)
                 {
                     return 0;
                 }
-                lineThrough(interfaces, handle, pointsAt(points >>> 0, count >>> 0));
+                lineThrough(interfaces, handle, pointsAt(wholeAddress(points), count >>> 0));
                 return 1;
             },
         },
@@ -2369,12 +2372,12 @@ export function createDrawingFunctions(
             handler: ([handle, points, count])=>{
                 const dc = dcOf(handle);
                 const interfaces = bound(handle);
-                if (!interfaces || (points >>> 0) === 0 || (count >>> 0) === 0
+                if (!interfaces || wholeAddress(points) === 0 || (count >>> 0) === 0
                     || (count >>> 0) % 3 !== 0)
                 {
                     return 0;
                 }
-                const through = pointsAt(points >>> 0, count >>> 0);
+                const through = pointsAt(wholeAddress(points), count >>> 0);
                 let from = { ...dc.position };
                 for (let at = 0; at < through.length; at += 3)
                 {
@@ -2410,13 +2413,13 @@ export function createDrawingFunctions(
                 const interfaces = bound(handle);
                 const total = count | 0;
                 if (!interfaces || total < 0 || (total > 0
-                    && ((points >>> 0) === 0 || (kinds >>> 0) === 0)))
+                    && (wholeAddress(points) === 0 || wholeAddress(kinds) === 0)))
                 {
                     return 0;
                 }
                 const types = total === 0 ? new Uint8Array(0)
                     : host.readMemory(wholeAddress(kinds), total);
-                const through = pointsAt(points >>> 0, total);
+                const through = pointsAt(wholeAddress(points), total);
                 const began = { ...dc.position };
                 const path = dc.path?.open ? dc.path : null;
                 const restart = path?.pending ? path.restart : null;
@@ -2487,11 +2490,11 @@ export function createDrawingFunctions(
             handler: ([handle, points, count])=>{
                 const dc = dcOf(handle);
                 const interfaces = bound(handle);
-                if (!interfaces || (points >>> 0) === 0 || (count | 0) < 2)
+                if (!interfaces || wholeAddress(points) === 0 || (count | 0) < 2)
                 {
                     return 0;
                 }
-                return interfaces.polygon(handle >>> 0, pointsAt(points >>> 0, count | 0),
+                return interfaces.polygon(handle >>> 0, pointsAt(wholeAddress(points), count | 0),
                     dc.polyFillMode) ? 1 : 0;
             },
         },
@@ -2560,11 +2563,12 @@ export function createDrawingFunctions(
             handler: ([handle, points, count])=>{
                 const interfaces = bound(handle);
                 const total = count >>> 0;
-                if (!interfaces || (points >>> 0) === 0 || total === 0 || (total - 1) % 3 !== 0)
+                if (!interfaces || wholeAddress(points) === 0 || total === 0
+                    || (total - 1) % 3 !== 0)
                 {
                     return 0;
                 }
-                const through = pointsAt(points >>> 0, total);
+                const through = pointsAt(wholeAddress(points), total);
                 const back = interfaces.moveToEx(handle >>> 0, through[0].x, through[0].y);
                 for (let at = 1; at + 2 < through.length; at += 3)
                 {
@@ -3147,9 +3151,9 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                if ((old >>> 0) !== 0)
+                if (wholeAddress(old) !== 0)
                 {
-                    writeU32s(host, old >>> 0, [bitsOf(dc.miterLimit)]);
+                    writeU32s(host, wholeAddress(old), [bitsOf(dc.miterLimit)]);
                 }
                 dc.miterLimit = value;
                 return 1;
@@ -3166,9 +3170,9 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [bitsOf(dc.miterLimit)]);
+                    writeU32s(host, wholeAddress(out), [bitsOf(dc.miterLimit)]);
                 }
                 return 1;
             },
@@ -3452,7 +3456,7 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>
-                (rect >>> 0) === 0 ? 0 : newRegion(readRect(host, rect)),
+                wholeAddress(rect) === 0 ? 0 : newRegion(readRect(host, rect)),
         },
 
         /**
@@ -3478,11 +3482,11 @@ export function createDrawingFunctions(
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                const { left, top, right, bottom } = readRect(host, rect >>> 0);
+                const { left, top, right, bottom } = readRect(host, wholeAddress(rect));
                 return functions.CreateEllipticRgn.handler([left, top, right, bottom]);
             },
         },
@@ -3513,11 +3517,12 @@ export function createDrawingFunctions(
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([points, count, mode])=>{
-                if ((points >>> 0) === 0 || (count | 0) < 2 || !isFillMode(mode))
+                if (wholeAddress(points) === 0 || (count | 0) < 2 || !isFillMode(mode))
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                return regionHolding(polygonArea([pointsAt(points >>> 0, count | 0)], mode | 0));
+                return regionHolding(polygonArea([pointsAt(wholeAddress(points), count | 0)],
+                    mode | 0));
             },
         },
 
@@ -3559,7 +3564,7 @@ export function createDrawingFunctions(
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([xform, size, data])=>{
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
@@ -3570,12 +3575,12 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                const values = readI32s((data >>> 0) + RGNDATAHEADER_SIZE, count * 4);
+                const values = readI32s(wholeAddress(data) + RGNDATAHEADER_SIZE, count * 4);
                 const rects = Array.from({ length: count }, (_, index)=>{
                     const [left, top, right, bottom] = values.slice(index * 4, index * 4 + 4);
                     return orderedRect(left, top, right, bottom);
                 }).filter(rect=>!isEmpty(rect));
-                if ((xform >>> 0) === 0)
+                if (wholeAddress(xform) === 0)
                 {
                     return regionHolding(rects);
                 }
@@ -3715,13 +3720,13 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([region, out])=>{
                 const area = areaOfRegion(region);
-                if (!area || (out >>> 0) === 0)
+                if (!area || wholeAddress(out) === 0)
                 {
                     return REGION_ERROR;
                 }
                 // An empty region has no position: Windows keeps it as zeros.
                 const box = areaBox(area);
-                writeU32s(host, out >>> 0, [box.left, box.top, box.right, box.bottom]);
+                writeU32s(host, wholeAddress(out), [box.left, box.top, box.right, box.bottom]);
                 return areaKind(area);
             },
         },
@@ -3949,9 +3954,9 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const previous = dc.brushOrg ?? { x: 0, y: 0 };
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [previous.x, previous.y]);
+                    writeU32s(host, wholeAddress(out), [previous.x, previous.y]);
                 }
                 dc.brushOrg = { x: x | 0, y: y | 0 };
                 if (dc.boundSurface)
@@ -3973,12 +3978,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const origin = dc.brushOrg ?? { x: 0, y: 0 };
-                writeU32s(host, out >>> 0, [origin.x, origin.y]);
+                writeU32s(host, wholeAddress(out), [origin.x, origin.y]);
                 return 1;
             },
         },
@@ -3996,12 +4001,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const origin = dc.bounds ?? { left: 0, top: 0 };
-                writeU32s(host, out >>> 0, [origin.left, origin.top]);
+                writeU32s(host, wholeAddress(out), [origin.left, origin.top]);
                 return 1;
             },
         },
@@ -4017,11 +4022,11 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, rect])=>{
                 const dc = dcOf(handle);
-                if (!dc || (rect >>> 0) === 0)
+                if (!dc || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const asked = readRect(host, rect >>> 0);
+                const asked = readRect(host, wholeAddress(rect));
                 const area = deviceArea(dc, asked.left, asked.top, asked.right, asked.bottom);
                 return drawnAreaOf(dc).every(piece=>isEmpty(intersect(piece, area))) ? 0 : 1;
             },
@@ -4062,7 +4067,7 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, rect])=>{
                 const dc = dcOf(handle);
-                if (!dc || (rect >>> 0) === 0)
+                if (!dc || wholeAddress(rect) === 0)
                 {
                     return REGION_ERROR;
                 }
@@ -4071,7 +4076,7 @@ export function createDrawingFunctions(
                     : { left: 0, top: 0, right: 0, bottom: 0 };
                 const a = toLogical(dc, { x: box.left, y: box.top });
                 const b = toLogical(dc, { x: box.right, y: box.bottom });
-                writeU32s(host, rect >>> 0, [Math.min(a.x, b.x), Math.min(a.y, b.y),
+                writeU32s(host, wholeAddress(rect), [Math.min(a.x, b.x), Math.min(a.y, b.y),
                     Math.max(a.x, b.x), Math.max(a.y, b.y)]);
                 return areaKind(area);
             },
@@ -4229,12 +4234,12 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const held = record.attributes.entries;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return held.length;
                 }
                 const copied = held.slice(start >>> 0, (start >>> 0) + (count >>> 0));
-                writeU32s(host, out >>> 0, copied);
+                writeU32s(host, wholeAddress(out), copied);
                 return copied.length;
             },
         },
@@ -4256,7 +4261,7 @@ export function createDrawingFunctions(
                 const record = objects.get(handle);
                 // The stock palette is the system's, and no program changes it.
                 if (!record || record.type !== 'palette' || record.stock
-                    || (entries >>> 0) === 0)
+                    || wholeAddress(entries) === 0)
                 {
                     return 0;
                 }
@@ -4299,7 +4304,7 @@ export function createDrawingFunctions(
             handler: ([, start, count, out])=>{
                 // The palette is the system's, not the DC's: it is written
                 // whatever handle came with the call, a stale one included.
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -4342,7 +4347,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const needed = RGNDATAHEADER_SIZE + RECT_SIZE * area.length;
-                if ((out >>> 0) === 0 || (count >>> 0) < needed)
+                if (wholeAddress(out) === 0 || (count >>> 0) < needed)
                 {
                     return needed;
                 }
@@ -4370,14 +4375,14 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([region, rect])=>{
                 const area = areaOfRegion(region);
-                if (!area || (rect >>> 0) === 0)
+                if (!area || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
                 // Any overlap at all, not containment: the question is whether
                 // the region has to be redrawn, and a single shared pixel says
                 // it does.
-                const asked = readRect(host, rect >>> 0);
+                const asked = readRect(host, wholeAddress(rect));
                 const box = orderedRect(asked.left, asked.top, asked.right, asked.bottom);
                 return intersectArea(area, box).length > 0 ? 1 : 0;
             },
@@ -4460,7 +4465,7 @@ export function createDrawingFunctions(
             handler: ([handle, start, count, entries])=>{
                 const record = objects.get(handle);
                 const held = record?.attributes?.entries;
-                if (record?.type !== 'palette' || record.stock || (entries >>> 0) === 0
+                if (record?.type !== 'palette' || record.stock || wholeAddress(entries) === 0
                     || (start >>> 0) >= held.length)
                 {
                     return 0;
@@ -4516,12 +4521,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const dc = dcOf(handle);
-                if (!dc || (out >>> 0) === 0)
+                if (!dc || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const filtered = ((dc.mapperFlags ?? 0) & ASPECT_FILTERING) !== 0;
-                writeU32s(host, out >>> 0, filtered ? [LOGICAL_DPI, LOGICAL_DPI] : [0, 0]);
+                writeU32s(host, wholeAddress(out), filtered ? [LOGICAL_DPI, LOGICAL_DPI] : [0, 0]);
                 return 1;
             },
         },
@@ -4544,9 +4549,9 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const previous = record.attributes.dimension ?? { cx: 0, cy: 0 };
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [previous.cx, previous.cy]);
+                    writeU32s(host, wholeAddress(out), [previous.cx, previous.cy]);
                 }
                 record.attributes.dimension = { cx: width | 0, cy: height | 0 };
                 return 1;
@@ -4557,12 +4562,12 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([bitmap, out])=>{
                 const record = objects.get(bitmap);
-                if (record?.type !== 'bitmap' || (out >>> 0) === 0)
+                if (record?.type !== 'bitmap' || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
                 const dimension = record.attributes.dimension ?? { cx: 0, cy: 0 };
-                writeU32s(host, out >>> 0, [dimension.cx, dimension.cy]);
+                writeU32s(host, wholeAddress(out), [dimension.cx, dimension.cy]);
                 return 1;
             },
         },
@@ -4642,7 +4647,7 @@ export function createDrawingFunctions(
             /** @param {number[]} args */
             handler: ([handle, size, data])=>{
                 const dc = dcOf(handle);
-                if (!dc || ((size >>> 0) !== 0 && (data >>> 0) === 0))
+                if (!dc || ((size >>> 0) !== 0 && wholeAddress(data) === 0))
                 {
                     return 0;
                 }
@@ -4693,13 +4698,13 @@ export function createDrawingFunctions(
                 const from = dcOf(source);
                 const interfaces = bound(dest);
                 const record = (mask >>> 0) === 0 ? null : objects.get(mask);
-                if (!dc || !from || !interfaces || (points >>> 0) === 0 || !bound(source)
+                if (!dc || !from || !interfaces || wholeAddress(points) === 0 || !bound(source)
                     || ((mask >>> 0) !== 0 && (record?.type !== 'bitmap'
                         || record.attributes.bitCount !== 1)))
                 {
                     return 0;
                 }
-                const corners = pointsAt(points >>> 0, 3).map(point=>toDevice(dc, point));
+                const corners = pointsAt(wholeAddress(points), 3).map(point=>toDevice(dc, point));
                 const area = deviceRect(from, x, y, width, height);
                 /** @param {number} [maskDc] */
                 const blit = maskDc=>interfaces.plgBlt(dest >>> 0, corners, source >>> 0, area,
@@ -4757,7 +4762,7 @@ export function createDrawingFunctions(
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, ramp])=>{
-                if (!dcOf(handle) || (ramp >>> 0) === 0)
+                if (!dcOf(handle) || wholeAddress(ramp) === 0)
                 {
                     return 0;
                 }
@@ -4789,7 +4794,7 @@ export function createDrawingFunctions(
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, ramp])=>{
-                if (!dcOf(handle) || (ramp >>> 0) === 0)
+                if (!dcOf(handle) || wholeAddress(ramp) === 0)
                 {
                     return 0;
                 }
@@ -4820,7 +4825,7 @@ export function createDrawingFunctions(
                 {
                     return 0;
                 }
-                if ((point >>> 0) !== 0)
+                if (wholeAddress(point) !== 0)
                 {
                     writeU32s(host, point, [dc.viewportOrg.x | 0, dc.viewportOrg.y | 0]);
                 }
@@ -4841,7 +4846,7 @@ export function createDrawingFunctions(
                 {
                     return refuse(ERROR_INVALID_HANDLE);
                 }
-                if (!services.pixelFormat || (descriptor >>> 0) === 0)
+                if (!services.pixelFormat || wholeAddress(descriptor) === 0)
                 {
                     return 0;
                 }
@@ -4870,7 +4875,7 @@ export function createDrawingFunctions(
                     return 0;
                 }
                 const count = services.pixelFormat.count() | 0;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return count;
                 }

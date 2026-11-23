@@ -542,7 +542,7 @@ export function createShellExtras(host, parts){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([path, out, attributes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -554,7 +554,7 @@ export function createShellExtras(host, parts){
                 }
                 const list = listFor(found.text);
                 writeU32(out, list);
-                if ((attributes >>> 0) !== 0)
+                if (wholeAddress(attributes) !== 0)
                 {
                     writeU32(attributes, readU32(attributes) & found.attributes);
                 }
@@ -573,7 +573,7 @@ export function createShellExtras(host, parts){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([name, , out, wanted, attributesOut])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -607,7 +607,7 @@ export function createShellExtras(host, parts){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([id, , token, out])=>{
-                if ((out >>> 0) === 0 || (id >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (id >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -633,7 +633,7 @@ export function createShellExtras(host, parts){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([id, flags, token, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -671,7 +671,7 @@ export function createShellExtras(host, parts){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([state, length])=>{
-                if ((state >>> 0) === 0 || (length | 0) < CABINETSTATE_SIZE)
+                if (wholeAddress(state) === 0 || (length | 0) < CABINETSTATE_SIZE)
                 {
                     return 0;
                 }
@@ -751,7 +751,7 @@ export function createShellExtras(host, parts){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -786,7 +786,7 @@ export function createShellExtras(host, parts){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([id, flags, info])=>{
-                if ((info >>> 0) === 0 || readU32(info) !== SHSTOCKICONINFO_SIZE)
+                if (wholeAddress(info) === 0 || readU32(info) !== SHSTOCKICONINFO_SIZE)
                 {
                     return E_INVALIDARG;
                 }
@@ -821,7 +821,7 @@ export function createShellExtras(host, parts){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([index, riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -872,7 +872,7 @@ export function createShellExtras(host, parts){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([window, , , , count, entries])=>{
-                if ((count | 0) <= 0 || (entries >>> 0) === 0 || (window >>> 0) === 0)
+                if ((count | 0) <= 0 || wholeAddress(entries) === 0 || (window >>> 0) === 0)
                 {
                     return 0;
                 }
@@ -922,7 +922,7 @@ export function createShellExtras(host, parts){
         SHOpenFolderAndSelectItems: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([folder])=>((folder >>> 0) === 0 ? E_INVALIDARG : S_OK),
+            handler: ([folder])=>(wholeAddress(folder) === 0 ? E_INVALIDARG : S_OK),
         },
 
         /**
@@ -946,7 +946,8 @@ export function createShellExtras(host, parts){
             /** @param {number[]} args */
             handler: ([create, out])=>{
                 writeU32(out, 0);
-                return (create >>> 0) === 0 || (out >>> 0) === 0 ? E_INVALIDARG : E_NOTIMPL;
+                return wholeAddress(create) === 0 || wholeAddress(out) === 0
+                    ? E_INVALIDARG : E_NOTIMPL;
             },
         },
 

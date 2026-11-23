@@ -529,7 +529,7 @@ export function createCrtSeh(host){
                 /** @param {number[]} args */
                 handler: ([frame, stop])=>{
                     const asked = host.currentThread?.();
-                    return localUnwind(frame >>> 0, stop >>> 0, {
+                    return localUnwind(wholeAddress(frame), stop >>> 0, {
                         thread: asked,
                         stackAtRest: (host.registers().esp - 0x10 & ~0xf) >>> 0,
                     }).then(()=>0);

@@ -602,11 +602,11 @@ export function createOrdinalFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([sink, riid, connect, unknown, cookie, pointOut])=>{
-                if ((pointOut >>> 0) !== 0)
+                if (wholeAddress(pointOut) !== 0)
                 {
                     writeU32(pointOut, 0);
                 }
-                if ((unknown >>> 0) === 0)
+                if (wholeAddress(unknown) === 0)
                 {
                     return E_FAIL;
                 }
@@ -627,8 +627,8 @@ export function createOrdinalFunctions(host){
                     status = (connect | 0) !== 0
                         ? yield* method(point, SLOT.Advise, sink, cookie)
                         : yield* method(point, SLOT.Unadvise,
-                            (cookie >>> 0) === 0 ? 0 : readU32(cookie));
-                    if (status < 0 || (pointOut >>> 0) === 0)
+                            wholeAddress(cookie) === 0 ? 0 : readU32(cookie));
+                    if (status < 0 || wholeAddress(pointOut) === 0)
                     {
                         yield* release(point);
                     }
@@ -672,7 +672,7 @@ export function createOrdinalFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([unknown, service, group, command, options, input, output])=>{
-                if ((unknown >>> 0) === 0)
+                if (wholeAddress(unknown) === 0)
                 {
                     return E_FAIL;
                 }
@@ -710,7 +710,7 @@ export function createOrdinalFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([unknown, service, provided, cookie])=>{
-                if ((unknown >>> 0) === 0)
+                if (wholeAddress(unknown) === 0)
                 {
                     return E_FAIL;
                 }
@@ -729,7 +729,7 @@ export function createOrdinalFunctions(host){
                         return status;
                     }
                     const proffer = readU32(out + 4);
-                    if ((provided >>> 0) !== 0)
+                    if (wholeAddress(provided) !== 0)
                     {
                         status = yield* method(proffer, SLOT.ProfferService, service, provided,
                             cookie);
@@ -737,8 +737,8 @@ export function createOrdinalFunctions(host){
                     else
                     {
                         status = yield* method(proffer, SLOT.RevokeService,
-                            (cookie >>> 0) === 0 ? 0 : readU32(cookie));
-                        if ((cookie >>> 0) !== 0)
+                            wholeAddress(cookie) === 0 ? 0 : readU32(cookie));
+                        if (wholeAddress(cookie) !== 0)
                         {
                             writeU32(cookie, 0);
                         }
@@ -759,9 +759,9 @@ export function createOrdinalFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([unknown, clsid])=>{
-                if ((unknown >>> 0) === 0)
+                if (wholeAddress(unknown) === 0)
                 {
-                    if ((clsid >>> 0) !== 0)
+                    if (wholeAddress(clsid) !== 0)
                     {
                         host.writeMemory(wholeAddress(clsid), new Uint8Array(16));
                     }
@@ -793,7 +793,8 @@ export function createOrdinalFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([bag, name, value])=>{
-                if ((bag >>> 0) === 0 || (name >>> 0) === 0 || (value >>> 0) === 0)
+                if (wholeAddress(bag) === 0 || wholeAddress(name) === 0
+                    || wholeAddress(value) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -833,7 +834,7 @@ export function createOrdinalFunctions(host){
                 {
                     return 0;
                 }
-                if ((data >>> 0) !== 0 && (size >>> 0) !== 0)
+                if (wholeAddress(data) !== 0 && (size >>> 0) !== 0)
                 {
                     const view = (await kernel32('MapViewOfFile',
                         [mapping, FILE_MAP_ALL_ACCESS, 0, 0, 0])) >>> 0;
@@ -993,7 +994,7 @@ export function createOrdinalFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([keys, values, length, key])=>{
-                if ((keys >>> 0) === 0 || (values >>> 0) === 0)
+                if (wholeAddress(keys) === 0 || wholeAddress(values) === 0)
                 {
                     return -1;
                 }
@@ -1022,7 +1023,7 @@ export function createOrdinalFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([size, inc, info, mem, blocks])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return 0;
                 }
@@ -1162,7 +1163,7 @@ export function createOrdinalFunctions(host){
                     if (hwnd)
                     {
                         await user32('SetWindowLongA', [hwnd, 0, extra]);
-                        if ((procedure >>> 0) !== 0)
+                        if (wholeAddress(procedure) !== 0)
                         {
                             await user32('SetWindowLongA', [hwnd, GWLP_WNDPROC, procedure]);
                         }
@@ -1176,9 +1177,9 @@ export function createOrdinalFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([text, guid])=>{
-                const bytes = (text >>> 0) === 0 ? null
+                const bytes = wholeAddress(text) === 0 ? null
                     : parseGuid(host.readCString(wholeAddress(text), 64));
-                if (bytes === null || (guid >>> 0) === 0)
+                if (bytes === null || wholeAddress(guid) === 0)
                 {
                     return 0;
                 }
@@ -1192,9 +1193,9 @@ export function createOrdinalFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([text, guid])=>{
-                const bytes = (text >>> 0) === 0 || !host.readWideString ? null
+                const bytes = wholeAddress(text) === 0 || !host.readWideString ? null
                     : parseGuid(host.readWideString(wholeAddress(text), 64 * 2));
-                if (bytes === null || (guid >>> 0) === 0)
+                if (bytes === null || wholeAddress(guid) === 0)
                 {
                     return 0;
                 }
@@ -1217,7 +1218,7 @@ export function createOrdinalFunctions(host){
             argBytes: 12 + PACK_MOST * 12,
             /** @param {number[]} args */
             handler: ([params, variants, count, ...rest])=>{
-                if ((params >>> 0) === 0)
+                if (wholeAddress(params) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1256,7 +1257,7 @@ export function createOrdinalFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([app, key, out, room, file])=>{
-                if ((room >>> 0) === 0 || (out >>> 0) === 0)
+                if ((room >>> 0) === 0 || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -1292,7 +1293,7 @@ export function createOrdinalFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([, clsid])=>{
-                if ((clsid >>> 0) === 0)
+                if (wholeAddress(clsid) === 0)
                 {
                     return 0;
                 }
@@ -1411,7 +1412,7 @@ export function createOrdinalFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: async([flags, subKey, value, type, dataOut, count])=>{
-                if ((dataOut >>> 0) === 0)
+                if (wholeAddress(dataOut) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1444,7 +1445,7 @@ export function createOrdinalFunctions(host){
                             return fromWin32(status);
                         }
                         writeU32(dataOut, block);
-                        if ((count >>> 0) !== 0)
+                        if (wholeAddress(count) !== 0)
                         {
                             writeU32(count, readU32(size));
                         }

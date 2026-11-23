@@ -1463,9 +1463,9 @@ export function createServiceFunctions(host){
                 {
                     return fail(object);
                 }
-                if ((status >>> 0) !== 0)
+                if (wholeAddress(status) !== 0)
                 {
-                    host.writeMemory?.(status >>> 0,
+                    host.writeMemory?.(wholeAddress(status),
                         statusOf(/** @type {string} */ (object.name), false));
                 }
                 return fail(ERROR_SERVICE_NOT_ACTIVE);
@@ -1487,7 +1487,7 @@ export function createServiceFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((status >>> 0) === 0)
+                if (wholeAddress(status) === 0)
                 {
                     return fail(ERROR_INVALID_ADDRESS);
                 }
@@ -1495,7 +1495,7 @@ export function createServiceFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                host.writeMemory?.(status >>> 0, statusOf(/** @type {string} */ (object.name),
+                host.writeMemory?.(wholeAddress(status), statusOf(/** @type {string} */ (object.name),
                     false));
                 return 1;
             },
@@ -1518,7 +1518,7 @@ export function createServiceFunctions(host){
                 }
                 if ((size >>> 0) < SERVICE_STATUS_PROCESS_SIZE)
                 {
-                    if ((needed >>> 0) === 0)
+                    if (wholeAddress(needed) === 0)
                     {
                         return fail(ERROR_INVALID_ADDRESS);
                     }
@@ -1530,11 +1530,11 @@ export function createServiceFunctions(host){
                 {
                     return fail(object);
                 }
-                if ((needed >>> 0) === 0 || (buffer >>> 0) === 0)
+                if (wholeAddress(needed) === 0 || wholeAddress(buffer) === 0)
                 {
                     return fail(ERROR_INVALID_ADDRESS);
                 }
-                host.writeMemory?.(buffer >>> 0, statusOf(/** @type {string} */ (object.name),
+                host.writeMemory?.(wholeAddress(buffer), statusOf(/** @type {string} */ (object.name),
                     true));
                 return 1;
             },
@@ -1558,15 +1558,15 @@ export function createServiceFunctions(host){
                     return fail(object);
                 }
                 const bytes = describe(/** @type {string} */ (object.name), wanted >>> 0);
-                if ((needed >>> 0) !== 0)
+                if (wholeAddress(needed) !== 0)
                 {
                     writeDword(needed, bytes.length);
                 }
-                if ((buffer >>> 0) === 0 || (size >>> 0) < bytes.length)
+                if (wholeAddress(buffer) === 0 || (size >>> 0) < bytes.length)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                host.writeMemory?.(buffer >>> 0, bytes);
+                host.writeMemory?.(wholeAddress(buffer), bytes);
                 return 1;
             },
         },
@@ -1592,7 +1592,7 @@ export function createServiceFunctions(host){
                 {
                     return fail(object);
                 }
-                const read = descriptorParts(descriptor >>> 0);
+                const read = descriptorParts(wholeAddress(descriptor));
                 if (!read)
                 {
                     return fail(ERROR_INVALID_SECURITY_DESCR);

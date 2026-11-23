@@ -12,6 +12,7 @@
  */
 
 import { STATUS } from './status.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /** HandleAttributes: the duplicate is inherited by a child. */
 const OBJ_INHERIT = 0x02;
@@ -111,7 +112,7 @@ export function createHandleNatives({ kernel32 }){
             handler: ([sourceProcess, source, targetProcess, target, access, attributes,
                 options])=>{
                 const shared = options & (DUPLICATE_CLOSE_SOURCE | DUPLICATE_SAME_ACCESS);
-                if ((target >>> 0) === 0 && (options & DUPLICATE_CLOSE_SOURCE) !== 0)
+                if (wholeAddress(target) === 0 && (options & DUPLICATE_CLOSE_SOURCE) !== 0)
                 {
                     const [closed] = keepingLastError(()=>
                         kernel32.CloseHandle?.handler([source]) ?? 0);

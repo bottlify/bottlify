@@ -115,7 +115,7 @@ export function createTelephonyFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, , , , count])=>{
-                if ((out >>> 0) === 0 || (count >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(count) === 0)
                 {
                     return LINEERR_INVALPOINTER;
                 }

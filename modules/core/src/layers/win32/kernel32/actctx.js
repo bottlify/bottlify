@@ -1969,8 +1969,9 @@ export function createActivationContexts(host){
         RtlFindActivationContextSectionString: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([flags, guid, id, key, data])=>findString(flags >>> 0, guid >>> 0, id >>> 0,
-                readUnicodeString(wholeAddress(key)), data >>> 0),
+            handler: ([flags, guid, id, key, data])=>findString(flags >>> 0, wholeAddress(guid),
+                id >>> 0,
+                readUnicodeString(wholeAddress(key)), wholeAddress(data)),
         },
         /**
          * NTSTATUS RtlFindActivationContextSectionGuid(ULONG flags, const GUID *,
@@ -1979,8 +1980,9 @@ export function createActivationContexts(host){
         RtlFindActivationContextSectionGuid: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([flags, guid, id, key, data])=>findGuid(flags >>> 0, guid >>> 0, id >>> 0,
-                key >>> 0, data >>> 0),
+            handler: ([flags, guid, id, key, data])=>findGuid(flags >>> 0, wholeAddress(guid),
+                id >>> 0,
+                wholeAddress(key), wholeAddress(data)),
         },
         /** NTSTATUS RtlQueryInformationActiveActivationContext(ULONG, PVOID, SIZE_T, SIZE_T *) */
         RtlQueryInformationActiveActivationContext: {
@@ -2048,7 +2050,7 @@ export function createActivationContexts(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, cookie])=>{
-                if ((cookie >>> 0) === 0)
+                if (wholeAddress(cookie) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2088,7 +2090,7 @@ export function createActivationContexts(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2151,11 +2153,12 @@ export function createActivationContexts(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([flags, guid, id, key, data])=>{
-                if ((data >>> 0) === 0 || (key >>> 0) === 0)
+                if (wholeAddress(data) === 0 || wholeAddress(key) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const status = findGuid(flags >>> 0, guid >>> 0, id >>> 0, key >>> 0, data >>> 0);
+                const status = findGuid(flags >>> 0, wholeAddress(guid), id >>> 0,
+                    wholeAddress(key), wholeAddress(data));
                 if (status !== STATUS_SUCCESS)
                 {
                     return fail(errorOf(status));

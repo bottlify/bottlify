@@ -2360,7 +2360,7 @@ export function createObjectFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, handle, item, out])=>{
                 const menu = menuOf(handle);
-                if (!menu || (item >>> 0) >= menu.items.length || (out >>> 0) === 0)
+                if (!menu || (item >>> 0) >= menu.items.length || wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -2409,7 +2409,7 @@ export function createObjectFunctions(options){
                 {
                     return 0;
                 }
-                if ((out >>> 0) === 0 || readU32(out) !== MENUBARINFO_SIZE)
+                if (wholeAddress(out) === 0 || readU32(out) !== MENUBARINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -2691,12 +2691,12 @@ export function createObjectFunctions(options){
         LoadMenuIndirectA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([template])=>((template >>> 0) === 0 ? 0 : loadMenuIndirect(template)),
+            handler: ([template])=>(wholeAddress(template) === 0 ? 0 : loadMenuIndirect(template)),
         },
         LoadMenuIndirectW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([template])=>((template >>> 0) === 0 ? 0 : loadMenuIndirect(template)),
+            handler: ([template])=>(wholeAddress(template) === 0 ? 0 : loadMenuIndirect(template)),
         },
 
         /**
@@ -3149,7 +3149,7 @@ export function createObjectFunctions(options){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -3353,7 +3353,7 @@ export function createObjectFunctions(options){
                 };
                 const icon = held('icon');
                 const object = icon ?? held('cursor');
-                if (!object || (out >>> 0) === 0)
+                if (!object || wholeAddress(out) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_CURSOR_HANDLE);
                     return 0;
@@ -3413,7 +3413,7 @@ export function createObjectFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, bar, info])=>{
                 const record = live(hwnd);
-                if (!record || (info >>> 0) === 0
+                if (!record || wholeAddress(info) === 0
                     || readU32(info + SCROLLINFO.cbSize) !== SCROLLINFO.SIZE)
                 {
                     return 0;
@@ -3453,7 +3453,7 @@ export function createObjectFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, bar, info])=>{
                 const record = live(hwnd);
-                if (!record || (info >>> 0) === 0
+                if (!record || wholeAddress(info) === 0
                     || readU32(info + SCROLLINFO.cbSize) !== SCROLLINFO.SIZE)
                 {
                     return 0;
@@ -3511,13 +3511,13 @@ export function createObjectFunctions(options){
                     return 0;
                 }
                 const held = scrollOf(record, bar);
-                if ((minOut >>> 0) !== 0)
+                if (wholeAddress(minOut) !== 0)
                 {
-                    writeU32s(minOut >>> 0, [held.min]);
+                    writeU32s(wholeAddress(minOut), [held.min]);
                 }
-                if ((maxOut >>> 0) !== 0)
+                if (wholeAddress(maxOut) !== 0)
                 {
-                    writeU32s(maxOut >>> 0, [held.max]);
+                    writeU32s(wholeAddress(maxOut), [held.max]);
                 }
                 return 1;
             },

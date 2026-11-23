@@ -213,7 +213,7 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const room = count >>> 0;
-                if ((source >>> 0) === 0 || ((destination >>> 0) === 0 && room !== 0))
+                if (wholeAddress(source) === 0 || (wholeAddress(destination) === 0 && room !== 0))
                 {
                     host.errno?.(EINVAL);
                     return 0x7fffffff;
@@ -240,7 +240,7 @@ export function createWideFunctions(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([text])=>{
-                    if ((text >>> 0) === 0)
+                    if (wholeAddress(text) === 0)
                     {
                         return 0;
                     }
@@ -310,9 +310,9 @@ export function createWideFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, delimiters])=>{
-                if ((string >>> 0) !== 0)
+                if (wholeAddress(string) !== 0)
                 {
-                    wideTokenAt = string >>> 0;
+                    wideTokenAt = wholeAddress(string);
                 }
                 if (wideTokenAt === 0)
                 {
@@ -374,13 +374,13 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
-                if ((source >>> 0) === 0)
+                if (wholeAddress(source) === 0)
                 {
                     host.errno?.(EINVAL);
                     return -1;
                 }
                 const text = readNarrowUnits(source);
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     return text.length;
                 }
@@ -408,13 +408,14 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const text = readWide(source);
-                const converted = (destination >>> 0) === 0 ? text : text.slice(0, count >>> 0);
+                const converted = wholeAddress(destination) === 0 ? text : text.slice(0,
+                    count >>> 0);
                 if (/[^\0-\xff]/.test(converted))
                 {
                     host.errno?.(EILSEQ);
                     return -1;
                 }
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     return text.length;
                 }
@@ -436,7 +437,7 @@ export function createWideFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, unit])=>{
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     // Asking whether the encoding is stateful. It is not.
                     return 0;
@@ -465,7 +466,7 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
-                if ((source >>> 0) === 0)
+                if (wholeAddress(source) === 0)
                 {
                     return 0;
                 }
@@ -474,7 +475,7 @@ export function createWideFunctions(host){
                     return -2;
                 }
                 const byte = host.readMemory(source, 1)[0];
-                if ((destination >>> 0) !== 0)
+                if (wholeAddress(destination) !== 0)
                 {
                     writeWide(destination, String.fromCharCode(byte), false);
                 }
@@ -489,7 +490,7 @@ export function createWideFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([source, count])=>{
-                if ((source >>> 0) === 0)
+                if (wholeAddress(source) === 0)
                 {
                     return 0;
                 }
@@ -513,7 +514,7 @@ export function createWideFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, unit])=>{
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     return 1;
                 }
@@ -545,7 +546,7 @@ export function createWideFunctions(host){
                     width.size)
                     .slice().buffer), 0);
                 const text = readNarrowUnits(source);
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     return text.length;
                 }
@@ -576,12 +577,12 @@ export function createWideFunctions(host){
                     width.size)
                     .slice().buffer), 0);
                 const text = readWide(source);
-                const room = (destination >>> 0) === 0 ? text.length + 1 : count >>> 0;
+                const room = wholeAddress(destination) === 0 ? text.length + 1 : count >>> 0;
                 const converted = text.slice(0, room);
                 const refused = converted.search(/[^\0-\xff]/);
                 if (refused >= 0)
                 {
-                    if ((destination >>> 0) !== 0)
+                    if (wholeAddress(destination) !== 0)
                     {
                         writeNarrow(destination, converted.slice(0, refused), false);
                         host.writeMemory(wholeAddress(from), width.bytes(source + refused * 2));
@@ -589,7 +590,7 @@ export function createWideFunctions(host){
                     host.errno?.(EILSEQ);
                     return -1;
                 }
-                if ((destination >>> 0) === 0)
+                if (wholeAddress(destination) === 0)
                 {
                     return text.length;
                 }
@@ -608,12 +609,12 @@ export function createWideFunctions(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
-                if ((source >>> 0) === 0 || (count >>> 0) === 0)
+                if (wholeAddress(source) === 0 || (count >>> 0) === 0)
                 {
                     return 0;
                 }
                 const byte = host.readMemory(source, 1)[0];
-                if ((destination >>> 0) !== 0)
+                if (wholeAddress(destination) !== 0)
                 {
                     writeWide(destination, String.fromCharCode(byte), false);
                 }
@@ -860,7 +861,7 @@ export function createMultiByteFunctions(narrow, host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([text, count])=>{
-                if ((text >>> 0) === 0)
+                if (wholeAddress(text) === 0)
                 {
                     return 0;
                 }

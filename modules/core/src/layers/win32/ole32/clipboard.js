@@ -486,15 +486,15 @@ export function createClipboardFunctions(env){
                     return CLIPBRD_E_CANT_EMPTY;
                 }
                 await drop(thread);
-                if ((data >>> 0) !== 0)
+                if (wholeAddress(data) !== 0)
                 {
-                    await env.callMethod(data >>> 0, SLOT.ADD_REF, [], thread);
-                    board.source = data >>> 0;
+                    await env.callMethod(wholeAddress(data), SLOT.ADD_REF, [], thread);
+                    board.source = wholeAddress(data);
                     board.owner = thread;
-                    board.formats = await util.formatsOf(data >>> 0, thread);
+                    board.formats = await util.formatsOf(wholeAddress(data), thread);
                     if (opened !== null)
                     {
-                        await render(data >>> 0, board.formats, thread);
+                        await render(wholeAddress(data), board.formats, thread);
                         await publishOwn(board.formats, thread);
                     }
                 }
@@ -517,7 +517,7 @@ export function createClipboardFunctions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -576,7 +576,7 @@ export function createClipboardFunctions(env){
         OleIsCurrentClipboard: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([data])=>((data >>> 0) !== 0 && (data >>> 0) === board.source
+            handler: ([data])=>(wholeAddress(data) !== 0 && wholeAddress(data) === board.source
                 ? S_OK : S_FALSE),
         },
     };

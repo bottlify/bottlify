@@ -376,7 +376,7 @@ export function createMsdmoFunctions(host){
                 const key = objectKey(id);
                 host.registry.create(key);
                 // No name is an empty one: the object is still registered.
-                host.registry.set(key, '', wide((name >>> 0) === 0 ? ''
+                host.registry.set(key, '', wide(wholeAddress(name) === 0 ? ''
                     : host.readWideString(wholeAddress(name), NAME_BYTES * 4)), false);
                 host.registry.set(key, INPUT_TYPES,
                     pairBytes(typesAt(inTypes, inCount >>> 0)), true);
@@ -437,7 +437,7 @@ export function createMsdmoFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([category, flags, inCount, inTypes, outCount, outTypes, out])=>{
-                if ((out >>> 0) === 0 || (category >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (category >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -461,7 +461,7 @@ export function createMsdmoFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([clsid, out])=>{
-                if ((clsid >>> 0) === 0 || (out >>> 0) === 0)
+                if ((clsid >>> 0) === 0 || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -516,19 +516,19 @@ export function createMsdmoFunctions(host){
         MoInitMediaType: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([type, formatBytes])=>((type >>> 0) === 0 ? E_POINTER
-                : initType(type >>> 0, formatBytes >>> 0)),
+            handler: ([type, formatBytes])=>(wholeAddress(type) === 0 ? E_POINTER
+                : initType(wholeAddress(type), formatBytes >>> 0)),
         },
         /** HRESULT MoFreeMediaType(DMO_MEDIA_TYPE *pmt) */
         MoFreeMediaType: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([type])=>{
-                if ((type >>> 0) === 0)
+                if (wholeAddress(type) === 0)
                 {
                     return E_POINTER;
                 }
-                freeFormat(type >>> 0);
+                freeFormat(wholeAddress(type));
                 return S_OK;
             },
         },
@@ -536,15 +536,15 @@ export function createMsdmoFunctions(host){
         MoCopyMediaType: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([to, from])=>((to >>> 0) === 0 || (from >>> 0) === 0 ? E_POINTER
-                : copyType(to >>> 0, from >>> 0)),
+            handler: ([to, from])=>(wholeAddress(to) === 0 || wholeAddress(from) === 0 ? E_POINTER
+                : copyType(wholeAddress(to), wholeAddress(from))),
         },
         /** HRESULT MoCreateMediaType(DMO_MEDIA_TYPE **ppmt, DWORD cbFormat) */
         MoCreateMediaType: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([out, formatBytes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
@@ -569,12 +569,12 @@ export function createMsdmoFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([type])=>{
-                if ((type >>> 0) === 0)
+                if (wholeAddress(type) === 0)
                 {
                     return E_POINTER;
                 }
-                freeFormat(type >>> 0);
-                host.free(type >>> 0);
+                freeFormat(wholeAddress(type));
+                host.free(wholeAddress(type));
                 return S_OK;
             },
         },
@@ -583,7 +583,7 @@ export function createMsdmoFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([out, from])=>{
-                if ((out >>> 0) === 0 || (from >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(from) === 0)
                 {
                     return E_POINTER;
                 }
@@ -592,7 +592,7 @@ export function createMsdmoFunctions(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                const copied = copyType(type, from >>> 0);
+                const copied = copyType(type, wholeAddress(from));
                 if (copied !== S_OK)
                 {
                     host.free(type);

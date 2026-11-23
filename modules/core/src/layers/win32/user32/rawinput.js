@@ -391,13 +391,13 @@ export function createRawInput({ host, isWindow, focus, foreground }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([array, count, size])=>{
-                if ((array >>> 0) === 0 || (count >>> 0) === 0
+                if (wholeAddress(array) === 0 || (count >>> 0) === 0
                     || (size >>> 0) !== RAWINPUTDEVICE_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                return register(array >>> 0, count >>> 0);
+                return register(wholeAddress(array), count >>> 0);
             },
         },
 
@@ -412,13 +412,13 @@ export function createRawInput({ host, isWindow, focus, foreground }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([array, countAt, size])=>{
-                if ((countAt >>> 0) === 0 || (size >>> 0) !== RAWINPUTDEVICE_SIZE)
+                if (wholeAddress(countAt) === 0 || (size >>> 0) !== RAWINPUTDEVICE_SIZE)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const devices = [...registered.values()]
                     .sort((one, two)=>one.page - two.page || one.usage - two.usage);
-                if ((array >>> 0) === 0)
+                if (wholeAddress(array) === 0)
                 {
                     writeU32s(host, countAt, [devices.length]);
                     return 0;
@@ -434,7 +434,7 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 devices.forEach((device, index)=>writeU32s(host,
-                    (array >>> 0) + index * RAWINPUTDEVICE_SIZE,
+                    wholeAddress(array) + index * RAWINPUTDEVICE_SIZE,
                     [(device.usage << 16 | device.page) >>> 0, device.flags, device.hwnd]));
                 return devices.length;
             },
@@ -451,11 +451,11 @@ export function createRawInput({ host, isWindow, focus, foreground }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([list, countAt, size])=>{
-                if ((countAt >>> 0) === 0 || (size >>> 0) !== RAWINPUTDEVICELIST_SIZE)
+                if (wholeAddress(countAt) === 0 || (size >>> 0) !== RAWINPUTDEVICELIST_SIZE)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((list >>> 0) === 0)
+                if (wholeAddress(list) === 0)
                 {
                     writeU32s(host, countAt, [DEVICES.length]);
                     return 0;
@@ -466,7 +466,8 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 DEVICES.forEach((device, index)=>writeU32s(host,
-                    (list >>> 0) + index * RAWINPUTDEVICELIST_SIZE, [device.handle, device.type]));
+                    wholeAddress(list) + index * RAWINPUTDEVICELIST_SIZE, [device.handle,
+                        device.type]));
                 return DEVICES.length;
             },
         },
@@ -508,7 +509,7 @@ export function createRawInput({ host, isWindow, focus, foreground }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([data, sizeAt, headerSize])=>{
-                if ((sizeAt >>> 0) === 0 || (headerSize >>> 0) !== RAWINPUTHEADER_SIZE)
+                if (wholeAddress(sizeAt) === 0 || (headerSize >>> 0) !== RAWINPUTHEADER_SIZE)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -517,20 +518,20 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                     last: WM_INPUT, remove }) ?? null;
                 const waiting = next(false);
                 const first = waiting ? reports.get(waiting.lParam >>> 0) : undefined;
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
-                    writeU32s(host, sizeAt >>> 0, [first ? first.length : 0]);
+                    writeU32s(host, wholeAddress(sizeAt), [first ? first.length : 0]);
                     return 0;
                 }
-                const room = readU32(host, sizeAt >>> 0);
+                const room = readU32(host, wholeAddress(sizeAt));
                 if (!first)
                 {
-                    writeU32s(host, sizeAt >>> 0, [0]);
+                    writeU32s(host, wholeAddress(sizeAt), [0]);
                     return 0;
                 }
                 if (first.length > room)
                 {
-                    writeU32s(host, sizeAt >>> 0, [first.length]);
+                    writeU32s(host, wholeAddress(sizeAt), [first.length]);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
                 let used = 0;
@@ -568,13 +569,13 @@ export function createRawInput({ host, isWindow, focus, foreground }){
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 const whole = (command >>> 0) === RID_INPUT;
-                if ((headerSize >>> 0) !== RAWINPUTHEADER_SIZE || (sizeAt >>> 0) === 0
+                if ((headerSize >>> 0) !== RAWINPUTHEADER_SIZE || wholeAddress(sizeAt) === 0
                     || (!whole && (command >>> 0) !== RID_HEADER))
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const size = whole ? bytes.length : RAWINPUTHEADER_SIZE;
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     writeU32s(host, sizeAt, [size]);
                     return 0;

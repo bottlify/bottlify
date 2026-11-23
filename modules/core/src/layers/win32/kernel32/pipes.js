@@ -2627,10 +2627,11 @@ export function createNamedPipes(host){
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
                 begin(overlapped);
-                const answer = listen(end, handle >>> 0, { overlapped: overlapped >>> 0 });
+                const answer = listen(end, handle >>> 0, { overlapped: wholeAddress(overlapped) });
                 if (answer === STATUS.PENDING)
                 {
-                    overlappedResult(writeDword, layout, overlapped >>> 0, STATUS.PENDING, 0);
+                    overlappedResult(writeDword, layout, wholeAddress(overlapped), STATUS.PENDING,
+                        0);
                     return fail(ERROR_IO_PENDING);
                 }
                 if (answer === STATUS_PIPE_CONNECTED)
@@ -2739,7 +2740,7 @@ export function createNamedPipes(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((modePointer >>> 0) === 0)
+                if (wholeAddress(modePointer) === 0)
                 {
                     return 1;
                 }
@@ -3105,8 +3106,8 @@ export function createNamedPipes(host){
                     return STATUS.INVALID_PARAMETER;
                 }
                 const count = wholeAddress(maxInstances);
-                const due = (timeout >>> 0) === 0 ? 0n
-                    : readLargeInteger(host.readMemory, timeout >>> 0);
+                const due = wholeAddress(timeout) === 0 ? 0n
+                    : readLargeInteger(host.readMemory, wholeAddress(timeout));
                 // A pipe made with no name is one of its own: nothing opens
                 // it by a name, so asking to open one finds none.
                 if (pipeName === null && asked === 'open')
@@ -3137,7 +3138,7 @@ export function createNamedPipes(host){
                     return NATIVE_REFUSALS.get(made.error) ?? STATUS.UNSUCCESSFUL;
                 }
                 writeDword(out, made.handle);
-                if ((status >>> 0) !== 0)
+                if (wholeAddress(status) !== 0)
                 {
                     writeDword(status, STATUS.SUCCESS);
                     writeDword(wholeAddress(status) + 4, FILE_CREATED);

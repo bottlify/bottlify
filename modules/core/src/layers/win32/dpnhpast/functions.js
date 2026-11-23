@@ -44,7 +44,7 @@ export function createDpnhpastFunctions(host){
             handler: ([, , out])=>{
                 host.divergence?.('DllGetClassObject', 'dpnhpast.dll makes no NAT helper: '
                     + 'there is no DirectPlay 8 to use one');
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 }

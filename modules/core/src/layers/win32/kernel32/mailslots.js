@@ -639,7 +639,7 @@ export function createMailslots(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, maxSize, timeout])=>create(
-                (name >>> 0) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
+                wholeAddress(name) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
                 maxSize, timeout),
         },
         /** HANDLE CreateMailslotW(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES) */
@@ -647,7 +647,8 @@ export function createMailslots(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, maxSize, timeout])=>create(
-                (name >>> 0) === 0 ? null : host.readWideString(wholeAddress(name), WHOLE_NAME * 2),
+                wholeAddress(name) === 0 ? null : host.readWideString(wholeAddress(name),
+                    WHOLE_NAME * 2),
                 maxSize, timeout),
         },
 
@@ -666,10 +667,11 @@ export function createMailslots(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDwordIf(maxSize >>> 0, slot.maxSize);
-                writeDwordIf(nextSize >>> 0, slot.messages[0]?.length ?? MAILSLOT_NO_MESSAGE);
-                writeDwordIf(count >>> 0, slot.messages.length);
-                writeDwordIf(timeout >>> 0, slot.timeout);
+                writeDwordIf(wholeAddress(maxSize), slot.maxSize);
+                writeDwordIf(wholeAddress(nextSize),
+                    slot.messages[0]?.length ?? MAILSLOT_NO_MESSAGE);
+                writeDwordIf(wholeAddress(count), slot.messages.length);
+                writeDwordIf(wholeAddress(timeout), slot.timeout);
                 host.setLastError(ERROR_SUCCESS);
                 return 1;
             },

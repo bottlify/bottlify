@@ -186,7 +186,7 @@ export function createUiaFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([type, guid])=>{
-                if ((guid >>> 0) === 0)
+                if (wholeAddress(guid) === 0)
                 {
                     return 0;
                 }
@@ -219,7 +219,7 @@ export function createUiaFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -283,7 +283,7 @@ export function createUiaFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putU32(out, 0);
                 }

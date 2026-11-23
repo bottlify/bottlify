@@ -595,14 +595,14 @@ export function createDriveFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([flags, name, target])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const device = read(wholeAddress(name));
                 const key = device.toLowerCase();
-                const given = (target >>> 0) === 0 ? null : read(wholeAddress(target));
+                const given = wholeAddress(target) === 0 ? null : read(wholeAddress(target));
                 const path = given === null || (flags & DDD_RAW_TARGET_PATH) !== 0
                     ? given : `\\??\\${given.replace(/\//g, '\\')}`;
                 if ((flags & DDD_REMOVE_DEFINITION) !== 0)
@@ -705,7 +705,7 @@ export function createDriveFunctions(host){
                     host.setLastError(ERROR_FILENAME_EXCED_RANGE);
                     return 0;
                 }
-                const text = (point >>> 0) === 0 ? '' : read(wholeAddress(point)).replace(/\//g, '\\');
+                const text = wholeAddress(point) === 0 ? '' : read(wholeAddress(point)).replace(/\//g, '\\');
                 if (!text.endsWith('\\'))
                 {
                     host.setLastError(ERROR_INVALID_NAME);
@@ -750,8 +750,8 @@ export function createDriveFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, room])=>{
-                const text = (name >>> 0) === 0 ? '' : read(wholeAddress(name));
-                if (text === '' || (buffer >>> 0) === 0 || (room >>> 0) === 0)
+                const text = wholeAddress(name) === 0 ? '' : read(wholeAddress(name));
+                if (text === '' || wholeAddress(buffer) === 0 || (room >>> 0) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -786,7 +786,7 @@ export function createDriveFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, buffer, room, needed])=>{
-                const text = (name >>> 0) === 0 ? '' : read(wholeAddress(name));
+                const text = wholeAddress(name) === 0 ? '' : read(wholeAddress(name));
                 if (!/^\\\\\?\\Volume\{[0-9a-f-]{36}\}\\$/i.test(text))
                 {
                     host.setLastError(ERROR_INVALID_NAME);
@@ -799,8 +799,8 @@ export function createDriveFunctions(host){
                     return 0;
                 }
                 const list = `${letter}:\\\0\0`;
-                writeDwordIf(needed >>> 0, list.length);
-                if ((buffer >>> 0) === 0 || (room >>> 0) < list.length)
+                writeDwordIf(wholeAddress(needed), list.length);
+                if (wholeAddress(buffer) === 0 || (room >>> 0) < list.length)
                 {
                     host.setLastError(ERROR_MORE_DATA);
                     return 0;
@@ -1377,9 +1377,9 @@ export function createDriveFunctions(host){
                     }
                     host.writeMemory(wholeAddress(buffer), encodeWide(text + '\0'));
                 }
-                writeDwordIf(serial >>> 0, facts.serial);
-                writeDwordIf(componentLength >>> 0, facts.component);
-                writeDwordIf(flags >>> 0, facts.flags);
+                writeDwordIf(wholeAddress(serial), facts.serial);
+                writeDwordIf(wholeAddress(componentLength), facts.component);
+                writeDwordIf(wholeAddress(flags), facts.flags);
                 return 1;
             },
             natives: { NtQueryVolumeInformationFile: queryVolumeInformation },

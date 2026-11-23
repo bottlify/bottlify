@@ -314,7 +314,7 @@ export function createProcessFunctions(host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([command])=>((command >>> 0) === 0 ? 0 : noInterpreter.handler()),
+            handler: ([command])=>(wholeAddress(command) === 0 ? 0 : noInterpreter.handler()),
         },
 
         /**
@@ -352,7 +352,7 @@ export function createProcessFunctions(host){
             argBytes: 8 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: ([mode, name, ...rest])=>{
-                if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
+                if ((mode >>> 0) >= SPAWN_MODES || wholeAddress(name) === 0)
                 {
                     host.errno(EINVAL);
                     return 0xffffffff;
@@ -371,13 +371,13 @@ export function createProcessFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([mode, name, argv])=>{
-                if ((mode >>> 0) >= SPAWN_MODES || (name >>> 0) === 0)
+                if ((mode >>> 0) >= SPAWN_MODES || wholeAddress(name) === 0)
                 {
                     host.errno(EINVAL);
                     return 0xffffffff;
                 }
                 const { readU32 } = host;
-                const list = (argv >>> 0) === 0 || !readU32 ? []
+                const list = wholeAddress(argv) === 0 || !readU32 ? []
                     : untilNull(index=>readU32(wholeAddress(argv) + index * 4), MOST_ARGUMENTS);
                 return spawn(mode >>> 0, name, list);
             },

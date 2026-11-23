@@ -27,6 +27,7 @@ import {
 import {
     bindLong, callocLongCode, freeLongCode, mallocLongCode, msizeLongCode, reallocLongCode,
 } from '../kernel32/guest-heap-long.js';
+import { wholeAddress } from '../common/pointers.js';
 
 
 /** The key the heap's later functions are carried under in msvcrt's table. */
@@ -407,7 +408,7 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: ([address, size])=>{
                 const bytes = size >>> 0;
-                if ((address >>> 0) === 0)
+                if (wholeAddress(address) === 0)
                 {
                     return malloc(bytes);
                 }
@@ -524,7 +525,7 @@ export function createHeapFunctions(host){
             sizes: [1, 2],
             /** @param {number[]} args */
             handler: ([block, size, alignment])=>
-                alignedResize(block >>> 0, size >>> 0, alignment >>> 0, 0),
+                alignedResize(wholeAddress(block), size >>> 0, alignment >>> 0, 0),
         },
         _aligned_offset_realloc: {
             returns: 'pointer',
@@ -533,7 +534,7 @@ export function createHeapFunctions(host){
             sizes: [1, 2, 3],
             /** @param {number[]} args */
             handler: ([block, size, alignment, offset])=>
-                alignedResize(block >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
+                alignedResize(wholeAddress(block), size >>> 0, alignment >>> 0, offset >>> 0),
         },
 
         // What the 2005 runtime added to the heap's functions: msvcrt.dll has
@@ -554,7 +555,8 @@ export function createHeapFunctions(host){
                 sizes: [1, 2, 3],
                 /** @param {number[]} args */
                 handler: ([block, count, size, alignment])=>
-                    alignedRecalloc(block >>> 0, count >>> 0, size >>> 0, alignment >>> 0, 0),
+                    alignedRecalloc(wholeAddress(block), count >>> 0, size >>> 0, alignment >>> 0,
+                        0),
             },
             _aligned_offset_recalloc: {
                 returns: 'pointer',
@@ -562,7 +564,8 @@ export function createHeapFunctions(host){
                 argBytes: 20,
                 sizes: [1, 2, 3, 4],
                 /** @param {number[]} args */
-                handler: ([block, count, size, alignment, offset])=>alignedRecalloc(block >>> 0,
+                handler: ([block, count, size, alignment,
+                    offset])=>alignedRecalloc(wholeAddress(block),
                     count >>> 0, size >>> 0, alignment >>> 0, offset >>> 0),
             },
 
@@ -577,12 +580,12 @@ export function createHeapFunctions(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([block, alignment])=>{
-                    if ((block >>> 0) === 0)
+                    if (wholeAddress(block) === 0)
                     {
                         host.errno?.(EINVAL);
                         return 0xffffffff;
                     }
-                    return alignedSize(block >>> 0, alignment >>> 0);
+                    return alignedSize(wholeAddress(block), alignment >>> 0);
                 },
             },
 
@@ -605,7 +608,8 @@ export function createHeapFunctions(host){
                         host.errno?.(ENOMEM);
                         return 0;
                     }
-                    const before = (block >>> 0) === 0 ? 0 : host.block(block >>> 0)?.size ?? 0;
+                    const before =
+                        wholeAddress(block) === 0 ? 0 : host.block(wholeAddress(block))?.size ?? 0;
                     const moved = table.realloc.handler([block, bytes]);
                     if (moved !== 0 && bytes > before)
                     {
@@ -622,9 +626,9 @@ export function createHeapFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                if ((block >>> 0) !== 0)
+                if (wholeAddress(block) !== 0)
                 {
-                    host.free(alignedBase(block >>> 0));
+                    host.free(alignedBase(wholeAddress(block)));
                 }
                 return 0;
             },

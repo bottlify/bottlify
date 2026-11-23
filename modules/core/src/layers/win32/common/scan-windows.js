@@ -53,7 +53,7 @@ export function* scanWindows(memory, address, unit = 1){
         {
             return;
         }
-        at = (at + length) >>> 0;
+        at = wholeAddress(at + length);
     }
 }
 

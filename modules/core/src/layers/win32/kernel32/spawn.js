@@ -1028,13 +1028,13 @@ export function createSpawnFunctions(host){
             /** @param {number[]} args */
             handler: ([application, commandLine, , , inherit, flags, environment, directory,
                 startup, information])=>create(
-                (application >>> 0) === 0 ? null : host.readCString(wholeAddress(application),
+                wholeAddress(application) === 0 ? null : host.readCString(wholeAddress(application),
                     WHOLE_NAME),
-                (commandLine >>> 0) === 0
+                wholeAddress(commandLine) === 0
                     ? ''
                     : host.readCString(wholeAddress(commandLine), MAX_COMMAND_LINE),
                 flags >>> 0, information, startup,
-                (directory >>> 0) === 0 ? '' : host.readCString(wholeAddress(directory),
+                wholeAddress(directory) === 0 ? '' : host.readCString(wholeAddress(directory),
                     WHOLE_NAME),
                 false, environment, inherit !== 0),
         },
@@ -1126,7 +1126,7 @@ export function createSpawnFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([list, count, flags, size])=>{
-                if ((flags >>> 0) !== 0 || (size >>> 0) === 0)
+                if ((flags >>> 0) !== 0 || wholeAddress(size) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1134,7 +1134,7 @@ export function createSpawnFunctions(host){
                 const needed = ATTRIBUTE_LIST_HEADER + (count >>> 0) * ATTRIBUTE_ENTRY;
                 const room = readDword(wholeAddress(size));
                 writeDword(wholeAddress(size), needed);
-                if ((list >>> 0) === 0 || room < needed)
+                if (wholeAddress(list) === 0 || room < needed)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
@@ -1189,7 +1189,7 @@ export function createSpawnFunctions(host){
                 const entry = at + ATTRIBUTE_LIST_HEADER + count * ATTRIBUTE_ENTRY;
                 writeDword(entry, wanted);
                 writeDword(entry + 4, length);
-                writeDword(entry + 8, value >>> 0);
+                writeDword(entry + 8, wholeAddress(value));
                 writeDword(at + 8, count + 1);
                 writeDword(at, (mask | bit) >>> 0);
                 return 1;
@@ -1213,7 +1213,7 @@ export function createSpawnFunctions(host){
                 const wanted = id >>> 0;
                 const known = wanted === ((host.processId ?? 0x1000) >>> 0)
                     || kernel.processes.all().some((/** @type {any} */ made)=>made.id === wanted);
-                if (!known || (out >>> 0) === 0)
+                if (!known || wholeAddress(out) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1241,7 +1241,7 @@ export function createSpawnFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([commandLine])=>{
-                const line = (commandLine >>> 0) === 0
+                const line = wholeAddress(commandLine) === 0
                     ? ''
                     : host.readCString(wholeAddress(commandLine), MAX_COMMAND_LINE);
                 if (!record('', line, 0))

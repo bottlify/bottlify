@@ -501,7 +501,7 @@ export function createIoCompletionPorts(host){
                 }
                 /** @type {CompletionOut} */
                 const out = {
-                    form: 'win32', bytes: bytes >>> 0, key: wholeAddress(key),
+                    form: 'win32', bytes: wholeAddress(bytes), key: wholeAddress(key),
                     overlapped: wholeAddress(overlapped),
                 };
                 const queued = take(port);
@@ -721,7 +721,7 @@ export function createIoCompletionPorts(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([out, , attributes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -750,7 +750,7 @@ export function createIoCompletionPorts(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, , attributes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -810,7 +810,7 @@ export function createIoCompletionPorts(host){
                 {
                     return port;
                 }
-                if ((key >>> 0) === 0 || (apc >>> 0) === 0 || (iosb >>> 0) === 0)
+                if (wholeAddress(key) === 0 || wholeAddress(apc) === 0 || wholeAddress(iosb) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -867,12 +867,12 @@ export function createIoCompletionPorts(host){
                 {
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
                 writeDword(wholeAddress(buffer), port.queue.length);
-                writeDwordIf(returned >>> 0, 4);
+                writeDwordIf(wholeAddress(returned), 4);
                 return STATUS.SUCCESS;
             },
         },

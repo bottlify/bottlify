@@ -227,7 +227,7 @@ export function createImmFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, count])=>{
-                if ((count >>> 0) !== 0)
+                if (wholeAddress(count) !== 0)
                 {
                     host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }
@@ -326,7 +326,7 @@ export function createImmFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, count])=>{
-                if ((count >>> 0) !== 0)
+                if (wholeAddress(count) !== 0)
                 {
                     host.writeMemory(wholeAddress(count), new Uint8Array(4));
                 }

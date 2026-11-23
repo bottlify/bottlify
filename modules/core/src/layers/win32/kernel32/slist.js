@@ -196,7 +196,7 @@ export function createSListFunctions(host){
         QueryDepthSList: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>readHeader(header >>> 0).depth,
+            handler: ([header])=>readHeader(wholeAddress(header)).depth,
         },
 
         /** PSLIST_ENTRY InterlockedPushEntrySList(PSLIST_HEADER, PSLIST_ENTRY) */
@@ -204,7 +204,8 @@ export function createSListFunctions(host){
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([header, entry])=>pushList(header >>> 0, entry >>> 0, entry >>> 0, 1),
+            handler: ([header, entry])=>pushList(wholeAddress(header), wholeAddress(entry),
+                wholeAddress(entry), 1),
             natives: {
                 RtlInterlockedPushListSList: pushListFast,
                 /**
@@ -218,7 +219,8 @@ export function createSListFunctions(host){
                     argBytes: 16,
                     /** @param {number[]} args */
                     handler: ([header, first, last, count])=>
-                        pushList(header >>> 0, first >>> 0, last >>> 0, count >>> 0),
+                        pushList(wholeAddress(header), wholeAddress(first), wholeAddress(last),
+                            count >>> 0),
                 },
             },
         },
@@ -228,8 +230,10 @@ export function createSListFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
-                header: [read32(now.next), now.depth - 1, now.sequence + 1], answer: now.next })),
+            handler: ([header])=>change(wholeAddress(header), now=>(now.next === 0
+                ? { answer: 0 }
+                : { header: [read32(now.next), now.depth - 1, now.sequence + 1],
+                    answer: now.next })),
         },
 
         /**
@@ -243,8 +247,9 @@ export function createSListFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
-                header: [0, 0, now.sequence + 1], answer: now.next })),
+            handler: ([header])=>change(wholeAddress(header),
+                now=>(now.next === 0 ? { answer: 0 } : {
+                    header: [0, 0, now.sequence + 1], answer: now.next })),
         },
     };
 }

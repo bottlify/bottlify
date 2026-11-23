@@ -410,7 +410,8 @@ export function createSyncNatives(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>{
-                resources.set(address >>> 0, { active: 0, owner: null, shared: [], exclusive: [] });
+                resources.set(wholeAddress(address), { active: 0, owner: null, shared: [],
+                    exclusive: [] });
                 return 0;
             },
         },
@@ -419,7 +420,7 @@ export function createSyncNatives(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>{
-                resources.delete(address >>> 0);
+                resources.delete(wholeAddress(address));
                 return 0;
             },
         },
@@ -814,7 +815,7 @@ export function createSyncNatives(host){
                 {
                     return timer;
                 }
-                if ((dueTime >>> 0) === 0)
+                if (wholeAddress(dueTime) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -826,10 +827,10 @@ export function createSyncNatives(host){
                 const due = kernel.clock.virtualTime() + dueInMs(
                     readLargeInteger(host.readMemory, dueTime), kernel.clock.wallClock());
                 const thread = host.currentThread();
-                const fired = (routine >>> 0) === 0 || !host.queueApc ? null : ()=>{
+                const fired = wholeAddress(routine) === 0 || !host.queueApc ? null : ()=>{
                     const filetime = BigInt(Math.floor(kernel.clock.wallClock()
                         + FILETIME_EPOCH_MS)) * 10000n;
-                    host.queueApc?.(thread, routine >>> 0, [context >>> 0,
+                    host.queueApc?.(thread, wholeAddress(routine), [wholeAddress(context),
                         Number(filetime & 0xffffffffn), Number(filetime >> 32n & 0xffffffffn)]);
                 };
                 kernel.armTimer(timer, due, period | 0, fired);

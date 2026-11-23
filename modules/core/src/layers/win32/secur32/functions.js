@@ -251,7 +251,7 @@ export function createNcryptFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return NTE_INVALID_PARAMETER;
                 }

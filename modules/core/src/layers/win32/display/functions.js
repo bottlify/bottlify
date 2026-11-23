@@ -85,11 +85,11 @@ export function createShcoreFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([value])=>{
-                if ((value >>> 0) > PROCESS_PER_MONITOR_DPI_AWARE)
+                if (wholeAddress(value) > PROCESS_PER_MONITOR_DPI_AWARE)
                 {
                     return E_INVALIDARG;
                 }
-                return setProcessAwareness(host.dpi, value >>> 0) ? S_OK : E_ACCESSDENIED;
+                return setProcessAwareness(host.dpi, wholeAddress(value)) ? S_OK : E_ACCESSDENIED;
             },
         },
 
@@ -98,7 +98,7 @@ export function createShcoreFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -115,7 +115,7 @@ export function createShcoreFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, type, x, y])=>{
-                if ((type >>> 0) > 2 || (x >>> 0) === 0 || (y >>> 0) === 0)
+                if ((type >>> 0) > 2 || wholeAddress(x) === 0 || wholeAddress(y) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -130,7 +130,7 @@ export function createShcoreFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -159,7 +159,7 @@ export function createDwmapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -180,7 +180,7 @@ export function createDwmapiFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, attribute, out, size])=>{
                 const which = wholeAddress(attribute);
-                if ((out >>> 0) === 0 || which === 0 || which > DWMWA_LAST)
+                if (wholeAddress(out) === 0 || which === 0 || which > DWMWA_LAST)
                 {
                     return E_INVALIDARG;
                 }
@@ -190,7 +190,7 @@ export function createDwmapiFunctions(host){
                     {
                         return E_INVALIDARG;
                     }
-                    return host.windowRect(hwnd >>> 0, out >>> 0) ? S_OK : E_INVALIDARG;
+                    return host.windowRect(hwnd >>> 0, wholeAddress(out)) ? S_OK : E_INVALIDARG;
                 }
                 const kept = set.get(`${hwnd >>> 0}:${which}`)
                     ?? (which === DWMWA_CLOAKED ? dword(0) : null);
@@ -208,7 +208,7 @@ export function createDwmapiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hwnd, attribute, value, size])=>{
-                if ((value >>> 0) === 0 || (attribute >>> 0) === 0
+                if (wholeAddress(value) === 0 || (attribute >>> 0) === 0
                     || (attribute >>> 0) > DWMWA_LAST)
                 {
                     return E_INVALIDARG;
@@ -223,7 +223,7 @@ export function createDwmapiFunctions(host){
         DwmExtendFrameIntoClientArea: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, margins])=>((margins >>> 0) === 0 ? E_INVALIDARG : S_OK),
+            handler: ([, margins])=>(wholeAddress(margins) === 0 ? E_INVALIDARG : S_OK),
         },
 
         /** BOOL DwmDefWindowProc(HWND, UINT, WPARAM, LPARAM, LRESULT *): nothing is its to handle. */
@@ -246,7 +246,7 @@ export function createDwmapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, info])=>{
-                if ((hwnd >>> 0) !== 0 || (info >>> 0) === 0
+                if ((hwnd >>> 0) !== 0 || wholeAddress(info) === 0
                     || new DataView(host.readMemory(wholeAddress(info), 4).slice().buffer)
                         .getUint32(0, true) !== DWM_TIMING_INFO_SIZE)
                 {
@@ -439,7 +439,7 @@ export function createSessionInformationFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([session, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -449,7 +449,7 @@ export function createSessionInformationFunctions(host){
                     host.setLastError(ERROR_NO_TOKEN);
                     return 0;
                 }
-                return host.userToken(out >>> 0) ? 1 : 0;
+                return host.userToken(wholeAddress(out)) ? 1 : 0;
             },
         },
 
@@ -458,9 +458,9 @@ export function createSessionInformationFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>{
-                if ((address >>> 0) !== 0)
+                if (wholeAddress(address) !== 0)
                 {
-                    host.free(address >>> 0);
+                    host.free(wholeAddress(address));
                 }
                 return 0;
             },

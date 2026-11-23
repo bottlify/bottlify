@@ -351,7 +351,7 @@ export function createProcessMemory(host){
             handler: args=>{
                 // Told 0 before anything is tried: a refused handle leaves it
                 // so (Wine's process.c test_process_security_attributes).
-                writeCount(args[4] >>> 0, 0);
+                writeCount(wholeAddress(args[4]), 0);
                 return asBool(nativeRead(args));
             },
         },

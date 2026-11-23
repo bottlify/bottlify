@@ -199,7 +199,8 @@ export function createImageFunctions(host){
                 try
                 {
                     return directoryData((address & ~1) >>> 0,
-                        !asData && (mappedAsImage & 0xff) !== 0, entry & 0xffff, size >>> 0);
+                        !asData && (mappedAsImage & 0xff) !== 0, entry & 0xffff,
+                        wholeAddress(size));
                 }
                 catch {
                     return 0;

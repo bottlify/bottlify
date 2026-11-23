@@ -190,7 +190,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
                     days += daysIn(year, m);
                 }
                 const milliseconds = ((hour * 60 + minute) * 60 + second) * 1000 + millisecond;
-                writeTime(time >>> 0, BigInt(days) * DAY + BigInt(milliseconds) * 10_000n);
+                writeTime(wholeAddress(time), BigInt(days) * DAY + BigInt(milliseconds) * 10_000n);
                 return 1;
             },
         },
@@ -209,7 +209,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([system, local])=>{
-                writeTime(local >>> 0,
+                writeTime(wholeAddress(local),
                     readTime(wholeAddress(system)) - BigInt(bias()) * 60n * SECOND);
                 return STATUS.SUCCESS;
             },
@@ -219,7 +219,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([local, system])=>{
-                writeTime(system >>> 0,
+                writeTime(wholeAddress(system),
                     readTime(wholeAddress(local)) + BigInt(bias()) * 60n * SECOND);
                 return STATUS.SUCCESS;
             },
@@ -235,7 +235,8 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([minimum, maximum, current])=>{
-                if ((minimum >>> 0) === 0 || (maximum >>> 0) === 0 || (current >>> 0) === 0)
+                if (wholeAddress(minimum) === 0 || wholeAddress(maximum) === 0
+                    || wholeAddress(current) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -258,7 +259,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([desired, set, current])=>{
-                if ((current >>> 0) === 0)
+                if (wholeAddress(current) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }

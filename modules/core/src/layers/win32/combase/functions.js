@@ -111,7 +111,7 @@ export function createCombaseFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, , out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     setDword(out, 0);
                 }
@@ -145,12 +145,12 @@ export function createCombaseFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, length, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const count = length >>> 0;
-                if ((source >>> 0) === 0 && count !== 0)
+                if (wholeAddress(source) === 0 && count !== 0)
                 {
                     return E_POINTER;
                 }
@@ -190,7 +190,7 @@ export function createCombaseFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([source, length, header, out])=>{
-                if ((out >>> 0) === 0 || (header >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(header) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -200,7 +200,7 @@ export function createCombaseFunctions(host){
                     setDword(out, 0);
                     return S_OK;
                 }
-                if ((source >>> 0) === 0)
+                if (wholeAddress(source) === 0)
                 {
                     return E_POINTER;
                 }
@@ -213,9 +213,9 @@ export function createCombaseFunctions(host){
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, REFERENCE, true);
                 view.setUint32(4, count, true);
-                view.setUint32(16, source >>> 0, true);
+                view.setUint32(16, wholeAddress(source), true);
                 host.writeMemory(wholeAddress(header), bytes);
-                setDword(out, header >>> 0);
+                setDword(out, wholeAddress(header));
                 return S_OK;
             },
         },
@@ -241,7 +241,7 @@ export function createCombaseFunctions(host){
             /** @param {number[]} args */
             handler: ([string, length])=>{
                 const at = headerOf(string);
-                if ((length >>> 0) !== 0)
+                if (wholeAddress(length) !== 0)
                 {
                     setDword(length, at === null ? 0 : dword(at + 4));
                 }

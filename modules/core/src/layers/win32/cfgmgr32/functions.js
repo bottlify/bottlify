@@ -123,7 +123,7 @@ export function createCfgmgrFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, id, flags])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return CR.INVALID_POINTER;
                 }
@@ -153,7 +153,7 @@ export function createCfgmgrFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, devnode, flags])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writeDword(out, 0);
                 }
@@ -176,7 +176,7 @@ export function createCfgmgrFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return CR.INVALID_POINTER;
                 }
@@ -190,7 +190,7 @@ export function createCfgmgrFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return CR.INVALID_POINTER;
                 }
@@ -206,7 +206,8 @@ export function createCfgmgrFunctions(host){
         CM_Get_Res_Des_Data: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, buffer])=>((buffer >>> 0) === 0 ? CR.INVALID_POINTER : CR.INVALID_RES_DES),
+            handler: ([,
+                buffer])=>(wholeAddress(buffer) === 0 ? CR.INVALID_POINTER : CR.INVALID_RES_DES),
         },
 
         /**
@@ -219,7 +220,7 @@ export function createCfgmgrFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([status, problem, devnode, flags])=>{
-                if ((status >>> 0) === 0 || (problem >>> 0) === 0)
+                if (wholeAddress(status) === 0 || wholeAddress(problem) === 0)
                 {
                     return CR.INVALID_POINTER;
                 }

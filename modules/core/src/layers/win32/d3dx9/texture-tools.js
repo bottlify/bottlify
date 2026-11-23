@@ -10,6 +10,7 @@ import { D3DX_DEFAULT } from './texture.js';
 import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layoutOf, resample }
     from './pixels.js';
 import { D3DXFloat32To16Array } from './inguest-vector.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * D3DX's textures made empty: D3DXCheckTextureRequirements's corrections of a
@@ -871,13 +872,14 @@ export function createTextureTools(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([device, widthAt, heightAt, levelsAt, usage, formatAt])=>{
-                if ((device >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(device) === 0 || !host.callGuest || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const asked = { width: given(widthAt), height: given(heightAt),
                     levels: given(levelsAt), usage: usage >>> 0, format: given(formatAt) };
-                return requirements(device >>> 0, asked, host.currentThread?.()).then(found=>
+                return requirements(wholeAddress(device), asked,
+                    host.currentThread?.()).then(found=>
                     answered(found, [[widthAt, 'width'], [heightAt, 'height'],
                         [levelsAt, 'levels'], [formatAt, 'format']]));
             },
@@ -891,11 +893,11 @@ export function createTextureTools(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([device, sizeAt, levelsAt, usage, formatAt])=>{
-                if ((device >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(device) === 0 || !host.callGuest || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return cubeRequirements(device >>> 0, given(sizeAt), given(levelsAt),
+                return cubeRequirements(wholeAddress(device), given(sizeAt), given(levelsAt),
                     usage >>> 0, given(formatAt), host.currentThread?.()).then(found=>
                     answered(found, [[sizeAt, 'width'], [levelsAt, 'levels'],
                         [formatAt, 'format']]));
@@ -911,11 +913,11 @@ export function createTextureTools(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([device, widthAt, heightAt, depthAt, levelsAt, usage, formatAt])=>{
-                if ((device >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(device) === 0 || !host.callGuest || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return volumeRequirements(device >>> 0, { width: given(widthAt),
+                return volumeRequirements(wholeAddress(device), { width: given(widthAt),
                     height: given(heightAt), depth: given(depthAt), levels: given(levelsAt),
                     usage: usage >>> 0, format: given(formatAt) }, host.currentThread?.())
                     .then(found=>answered(found, [[widthAt, 'width'], [heightAt, 'height'],
@@ -935,21 +937,23 @@ export function createTextureTools(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([device, width, height, levels, usage, format, pool, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putPointer(out, 0);
                 }
-                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.callGuest
+                    || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const thread = host.currentThread?.();
-                return requirements(device >>> 0, { width: width >>> 0, height: height >>> 0,
+                return requirements(wholeAddress(device), { width: width >>> 0,
+                    height: height >>> 0,
                     levels: levels >>> 0, usage: usage >>> 0, format: format >>> 0 }, thread)
                     .then(found=>(typeof found === 'number' ? found
                         : method(thread, device, DEVICE.CreateTexture, [found.width,
                             found.height, found.levels, found.usage, found.format, pool >>> 0,
-                            out >>> 0, 0])));
+                            wholeAddress(out), 0])));
             },
         },
 
@@ -964,19 +968,21 @@ export function createTextureTools(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([device, size, levels, usage, format, pool, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putPointer(out, 0);
                 }
-                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.callGuest
+                    || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const thread = host.currentThread?.();
-                return cubeRequirements(device >>> 0, size >>> 0, levels >>> 0, usage >>> 0,
+                return cubeRequirements(wholeAddress(device), size >>> 0, levels >>> 0, usage >>> 0,
                     format >>> 0, thread).then(found=>(typeof found === 'number' ? found
                     : method(thread, device, DEVICE.CreateCubeTexture, [found.width,
-                        found.levels, found.usage, found.format, pool >>> 0, out >>> 0, 0])));
+                        found.levels, found.usage, found.format, pool >>> 0, wholeAddress(out),
+                        0])));
             },
         },
 
@@ -991,22 +997,23 @@ export function createTextureTools(host){
             argBytes: 36,
             /** @param {number[]} args */
             handler: ([device, width, height, depth, levels, usage, format, pool, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putPointer(out, 0);
                 }
-                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.callGuest
+                    || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const thread = host.currentThread?.();
-                return volumeRequirements(device >>> 0, { width: width >>> 0,
+                return volumeRequirements(wholeAddress(device), { width: width >>> 0,
                     height: height >>> 0, depth: depth >>> 0, levels: levels >>> 0,
                     usage: usage >>> 0, format: format >>> 0 }, thread)
                     .then(found=>(typeof found === 'number' ? found
                         : method(thread, device, DEVICE.CreateVolumeTexture, [found.width,
                             found.height, found.depth, found.levels, found.usage, found.format,
-                            pool >>> 0, out >>> 0, 0])));
+                            pool >>> 0, wholeAddress(out), 0])));
             },
         },
 
@@ -1022,12 +1029,13 @@ export function createTextureTools(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([texture, fill, data])=>{
-                if ((texture >>> 0) === 0 || (fill >>> 0) === 0 || !host.callGuest
+                if (wholeAddress(texture) === 0 || wholeAddress(fill) === 0 || !host.callGuest
                     || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return fillVolume(texture >>> 0, fill >>> 0, data, host.currentThread?.());
+                return fillVolume(wholeAddress(texture), wholeAddress(fill), data,
+                    host.currentThread?.());
             },
         },
 
@@ -1043,12 +1051,13 @@ export function createTextureTools(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([texture, fill, data])=>{
-                if ((texture >>> 0) === 0 || (fill >>> 0) === 0 || !host.callGuest
+                if (wholeAddress(texture) === 0 || wholeAddress(fill) === 0 || !host.callGuest
                     || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return fillTexture(texture >>> 0, fill >>> 0, data, host.currentThread?.());
+                return fillTexture(wholeAddress(texture), wholeAddress(fill), data,
+                    host.currentThread?.());
             },
         },
 
@@ -1065,13 +1074,13 @@ export function createTextureTools(host){
             /** @param {number[]} args */
             handler: ([texture, , source, filter])=>{
                 const kind = filter & 0xff;
-                if ((texture >>> 0) === 0 || !host.callGuest || !host.heap
+                if (wholeAddress(texture) === 0 || !host.callGuest || !host.heap
                     || ((filter >>> 0) !== D3DX_DEFAULT
                         && (kind < D3DX_FILTER_NONE || kind > D3DX_FILTER_BOX)))
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return filterTexture(texture >>> 0, source >>> 0, filter >>> 0,
+                return filterTexture(wholeAddress(texture), source >>> 0, filter >>> 0,
                     host.currentThread?.());
             },
         },

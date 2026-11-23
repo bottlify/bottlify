@@ -1425,8 +1425,8 @@ export function createProcessFunctions(host){
                 /** @param {number} at @param {bigint} value */
                 const write = (at, value)=>(long ? writeU64(at, value)
                     : memory.writeU32(at, Number(value)));
-                write(low >>> 0, read(teb + blocks.teb.DEALLOCATION_STACK));
-                write(high >>> 0, read(teb + blocks.teb.STACK_BASE));
+                write(wholeAddress(low), read(teb + blocks.teb.DEALLOCATION_STACK));
+                write(wholeAddress(high), read(teb + blocks.teb.STACK_BASE));
                 return 0;
             },
         },
@@ -1487,7 +1487,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>moduleHandleOf(pointer === 0
                 ? null
-                : host.readWideString?.(pointer >>> 0, WHOLE_NAME * 2) ?? ''),
+                : host.readWideString?.(wholeAddress(pointer), WHOLE_NAME * 2) ?? ''),
         },
 
         /** BOOL GetModuleHandleExA(DWORD dwFlags, LPCSTR lpModuleName, HMODULE *phModule) */
@@ -1507,7 +1507,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([status])=>{
-                if ((status >>> 0) === 0)
+                if (wholeAddress(status) === 0)
                 {
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1545,7 +1545,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([major, , , , out])=>{
                 const PRODUCT_UNDEFINED = 0;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
@@ -1560,14 +1560,14 @@ export function createProcessFunctions(host){
         GetVersionExA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>versionEx(pointer >>> 0, false),
+            handler: ([pointer])=>versionEx(wholeAddress(pointer), false),
         },
 
         /** BOOL GetVersionExW(LPOSVERSIONINFOW lpVersionInformation) */
         GetVersionExW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>versionEx(pointer >>> 0, true),
+            handler: ([pointer])=>versionEx(wholeAddress(pointer), true),
         },
 
         /**
@@ -1725,7 +1725,7 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1839,7 +1839,7 @@ export function createProcessFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     setError(ERROR_NOACCESS);
                     return 0;
@@ -1862,12 +1862,12 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([, processMask, systemMask])=>{
                 // DWORD_PTRs: a quadword each in a 64-bit process.
-                if ((processMask >>> 0) !== 0)
+                if (wholeAddress(processMask) !== 0)
                 {
                     host.writeMemory(wholeAddress(processMask),
                         width.bytes(processors.processMask()));
                 }
-                if ((systemMask >>> 0) !== 0)
+                if (wholeAddress(systemMask) !== 0)
                 {
                     host.writeMemory(wholeAddress(systemMask),
                         width.bytes(processors.systemMask()));
@@ -1982,7 +1982,7 @@ export function createProcessFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([level, flags])=>{
-                if ((level >>> 0) === 0 || (flags >>> 0) === 0)
+                if (wholeAddress(level) === 0 || wholeAddress(flags) === 0)
                 {
                     setError(ERROR_NOACCESS);
                     return 0;
@@ -2004,11 +2004,11 @@ export function createProcessFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, minimum, maximum])=>{
-                if ((minimum >>> 0) !== 0)
+                if (wholeAddress(minimum) !== 0)
                 {
                     memory.writeU32(wholeAddress(minimum), 50 * 4096);
                 }
-                if ((maximum >>> 0) !== 0)
+                if (wholeAddress(maximum) !== 0)
                 {
                     memory.writeU32(wholeAddress(maximum), 345 * 4096);
                 }
@@ -2110,7 +2110,7 @@ export function createProcessFunctions(host){
                 }
                 stateOf().tls.set(slot, {
                     generation: /** @type {number} */ (slots[slot]),
-                    value: value >>> 0,
+                    value: wholeAddress(value),
                 });
                 return 1;
             },
@@ -2137,7 +2137,7 @@ export function createProcessFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>pointer >>> 0,
+            handler: ([pointer])=>wholeAddress(pointer),
             code: ()=>Uint8Array.from(POINTER_AS_IS),
         },
         DecodePointer: {

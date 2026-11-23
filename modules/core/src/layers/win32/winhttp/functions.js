@@ -189,7 +189,7 @@ export function createWinhttpFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([config])=>{
-                if ((config >>> 0) === 0)
+                if (wholeAddress(config) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -207,7 +207,7 @@ export function createWinhttpFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -324,7 +324,7 @@ export function createWinhttpFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flags, out])=>{
-                if ((flags >>> 0) === 0 || (out >>> 0) === 0)
+                if ((flags >>> 0) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -343,7 +343,7 @@ export function createWinhttpFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([time, out])=>{
-                if ((time >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(time) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -399,7 +399,7 @@ export function createWinhttpFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([url, length, , components])=>{
-                if ((url >>> 0) === 0 || (components >>> 0) === 0
+                if (wholeAddress(url) === 0 || wholeAddress(components) === 0
                     || dword(components) !== URL.SIZE)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -433,7 +433,7 @@ export function createWinhttpFunctions(host){
                         if (room !== 0)
                         {
                             setDword(base + pointerAt,
-                                value.text === '' ? 0 : (url >>> 0) + value.at * 2);
+                                value.text === '' ? 0 : wholeAddress(url) + value.at * 2);
                             setDword(base + lengthAt, value.text.length);
                         }
                         continue;
@@ -463,7 +463,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(error);
                 }
-                if ((server >>> 0) === 0)
+                if (wholeAddress(server) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -498,7 +498,7 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(error);
                 }
-                return (headers >>> 0) === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
+                return wholeAddress(headers) === 0 ? fail(ERROR_INVALID_PARAMETER) : 1;
             },
         },
 
@@ -558,7 +558,8 @@ export function createWinhttpFunctions(host){
                 {
                     return fail(error);
                 }
-                if ((url >>> 0) === 0 || (options >>> 0) === 0 || (info >>> 0) === 0)
+                if (wholeAddress(url) === 0 || wholeAddress(options) === 0
+                    || wholeAddress(info) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -582,7 +583,7 @@ export function createWinhttpFunctions(host){
                 {
                     return error;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -607,7 +608,7 @@ export function createWinhttpFunctions(host){
                 {
                     return error;
                 }
-                if ((url >>> 0) === 0 || (options >>> 0) === 0)
+                if (wholeAddress(url) === 0 || wholeAddress(options) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -647,7 +648,7 @@ export function createDhcpFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([version])=>{
-                if ((version >>> 0) !== 0)
+                if (wholeAddress(version) !== 0)
                 {
                     host.writeMemory(wholeAddress(version), Uint8Array.of(2, 0, 0, 0));
                 }

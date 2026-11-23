@@ -313,7 +313,7 @@ export function createCredFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([credential])=>{
-                if ((credential >>> 0) === 0)
+                if (wholeAddress(credential) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -361,7 +361,8 @@ export function createCredFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([targetName, type, flags, out])=>{
-                if (!validType(type >>> 0) || (targetName >>> 0) === 0 || (out >>> 0) === 0)
+                if (!validType(type >>> 0) || wholeAddress(targetName) === 0
+                    || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -384,7 +385,7 @@ export function createCredFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([targetName, type, flags])=>{
-                if (!validType(type >>> 0) || (targetName >>> 0) === 0)
+                if (!validType(type >>> 0) || wholeAddress(targetName) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -413,7 +414,7 @@ export function createCredFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([filterName, flags, count, out])=>{
-                if ((count >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(count) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -444,7 +445,8 @@ export function createCredFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([info, flags, count, out])=>{
-                if ((info >>> 0) === 0 || (count >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(info) === 0 || wholeAddress(count) === 0
+                    || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -475,9 +477,9 @@ export function createCredFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                if ((buffer >>> 0) !== 0)
+                if (wholeAddress(buffer) !== 0)
                 {
-                    host.release?.(buffer >>> 0);
+                    host.release?.(wholeAddress(buffer));
                 }
                 return 0;
             },
@@ -493,7 +495,7 @@ export function createCredFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([count, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -517,7 +519,7 @@ export function createCredFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([kind, credential, out])=>{
-                if ((credential >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(credential) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -566,7 +568,8 @@ export function createCredFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([marshaled, kindOut, out])=>{
-                if ((marshaled >>> 0) === 0 || (kindOut >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(marshaled) === 0 || wholeAddress(kindOut) === 0
+                    || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }

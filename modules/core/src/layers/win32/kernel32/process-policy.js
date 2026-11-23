@@ -772,12 +772,12 @@ export function createProcessPolicyFunctions(host){
                 {
                     return STATUS.INVALID_HANDLE;
                 }
-                if ((block >>> 0) === 0)
+                if (wholeAddress(block) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
                 writeDword(wholeAddress(block), 0);
-                const status = (host.cancelSynchronous?.(thread, request >>> 0) ?? 0) > 0
+                const status = (host.cancelSynchronous?.(thread, wholeAddress(request)) ?? 0) > 0
                     ? STATUS.SUCCESS : STATUS.NOT_FOUND;
                 // Status and Information, each a pointer wide.
                 writeDword(wholeAddress(block), status);
@@ -801,7 +801,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, , attributes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -840,7 +840,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, , attributes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -969,7 +969,7 @@ export function createProcessPolicyFunctions(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([out])=>{
-                    captureContext(out >>> 0);
+                    captureContext(wholeAddress(out));
                     return 0;
                 },
                 // ntdll's, which goes on from what this captured.
@@ -987,7 +987,7 @@ export function createProcessPolicyFunctions(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([skip, wanted, out, hash])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return 0;
                     }
@@ -997,7 +997,7 @@ export function createProcessPolicyFunctions(host){
                         writeDword(wholeAddress(out) + index * 4, address);
                         sum = (sum + address) >>> 0;
                     });
-                    if ((hash >>> 0) !== 0)
+                    if (wholeAddress(hash) !== 0)
                     {
                         writeDword(wholeAddress(hash), sum);
                     }
@@ -1069,7 +1069,7 @@ export function createProcessPolicyFunctions(host){
             /** @param {number[]} args */
             handler: ([processHandle, handle, out])=>{
                 const process = processOf(processHandle);
-                if (!process || (out >>> 0) === 0)
+                if (!process || wholeAddress(out) === 0)
                 {
                     return fail(!process ? ERROR_INVALID_HANDLE : ERROR_INVALID_PARAMETER);
                 }
@@ -1190,7 +1190,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_BAD_LENGTH);
                 }
                 host.writeMemory(wholeAddress(to), answer);
-                if ((returned >>> 0) !== 0)
+                if (wholeAddress(returned) !== 0)
                 {
                     writeDword(wholeAddress(returned), answer.length);
                 }
@@ -1249,7 +1249,8 @@ export function createProcessPolicyFunctions(host){
                 }
                 const which = wholeAddress(policy);
                 const size = which === DEP_POLICY ? 8 : 4;
-                if (which >= MITIGATION_POLICIES || (length >>> 0) !== size || (to >>> 0) === 0)
+                if (which >= MITIGATION_POLICIES || (length >>> 0) !== size
+                    || wholeAddress(to) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1279,7 +1280,7 @@ export function createProcessPolicyFunctions(host){
                 const which = wholeAddress(policy);
                 const size = which === DEP_POLICY ? 8 : 4;
                 if (which >= MITIGATION_POLICIES || which === ASLR_POLICY
-                    || (length >>> 0) !== size || (from >>> 0) === 0)
+                    || (length >>> 0) !== size || wholeAddress(from) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1342,11 +1343,11 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((flags >>> 0) !== 0)
+                if (wholeAddress(flags) !== 0)
                 {
                     writeDword(wholeAddress(flags), depFlags);
                 }
-                if ((permanent >>> 0) !== 0)
+                if (wholeAddress(permanent) !== 0)
                 {
                     writeDword(wholeAddress(permanent), depPermanent ? 1 : 0);
                 }
@@ -1370,12 +1371,12 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const size = PROCESS_INFORMATION_SIZES.get(type >>> 0);
-                if (size === undefined || (length >>> 0) !== size || (from >>> 0) === 0)
+                const size = PROCESS_INFORMATION_SIZES.get(wholeAddress(type));
+                if (size === undefined || (length >>> 0) !== size || wholeAddress(from) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                processInformation.set(type >>> 0, host.readMemory(wholeAddress(from),
+                processInformation.set(wholeAddress(type), host.readMemory(wholeAddress(from),
                     size).slice());
                 return 1;
             },
@@ -1398,20 +1399,20 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const size = PROCESS_INFORMATION_SIZES.get(type >>> 0);
-                if (size === undefined || (length >>> 0) !== size || (into >>> 0) === 0)
+                const size = PROCESS_INFORMATION_SIZES.get(wholeAddress(type));
+                if (size === undefined || (length >>> 0) !== size || wholeAddress(into) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                let bytes = processInformation.get(type >>> 0);
+                let bytes = processInformation.get(wholeAddress(type));
                 if (!bytes)
                 {
                     bytes = new Uint8Array(size);
-                    if ((type >>> 0) === 0)
+                    if (wholeAddress(type) === 0)
                     {
                         bytes[0] = MEMORY_PRIORITY_NORMAL;
                     }
-                    else if ((type >>> 0) === 4)
+                    else if (wholeAddress(type) === 4)
                     {
                         bytes[0] = 1;
                     }
@@ -1431,7 +1432,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 const size = THREAD_INFORMATION_SIZES.get(type >>> 0);
-                return size === undefined || (length >>> 0) !== size || (from >>> 0) === 0
+                return size === undefined || (length >>> 0) !== size || wholeAddress(from) === 0
                     ? fail(ERROR_INVALID_PARAMETER) : 1;
             },
         },
@@ -1451,7 +1452,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeQword(out >>> 0, cyclesOf(thread));
+                writeQword(wholeAddress(out), cyclesOf(thread));
                 return 1;
             },
         },
@@ -1472,7 +1473,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_HANDLE);
                 }
                 const ms = process === SELF ? kernel.processCpuMs?.() ?? 0 : 0;
-                writeQword(out >>> 0, BigInt(Math.round(ms * PROCESSOR.mhz * 1000)));
+                writeQword(wholeAddress(out), BigInt(Math.round(ms * PROCESSOR.mhz * 1000)));
                 return 1;
             },
         },
@@ -1486,7 +1487,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(processOf(handle) ? ERROR_ACCESS_DENIED : ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1532,7 +1533,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if ((handle >>> 0) === 0 || (out >>> 0) === 0)
+                if ((handle >>> 0) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1551,7 +1552,7 @@ export function createProcessPolicyFunctions(host){
         PowerCreateRequest: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([context])=>((context >>> 0) === 0 ? fail(ERROR_INVALID_PARAMETER)
+            handler: ([context])=>(wholeAddress(context) === 0 ? fail(ERROR_INVALID_PARAMETER)
                 : kernel.handles.open('power-request', { kind: 'power-request', types: 0 })),
         },
 
@@ -1570,11 +1571,11 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((type >>> 0) >= POWER_REQUEST_TYPES)
+                if (wholeAddress(type) >= POWER_REQUEST_TYPES)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                request.types |= 1 << (type >>> 0);
+                request.types |= 1 << wholeAddress(type);
                 return 1;
             },
         },
@@ -1587,11 +1588,11 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((type >>> 0) >= POWER_REQUEST_TYPES)
+                if (wholeAddress(type) >= POWER_REQUEST_TYPES)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                request.types &= ~(1 << (type >>> 0));
+                request.types &= ~(1 << wholeAddress(type));
                 return 1;
             },
         },
@@ -1630,7 +1631,7 @@ export function createProcessPolicyFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1648,11 +1649,11 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([node, out])=>{
-                if ((node & 0xff) !== 0 || (out >>> 0) === 0)
+                if ((node & 0xff) !== 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeQword(out >>> 0, BigInt(nodeMask() >>> 0));
+                writeQword(wholeAddress(out), BigInt(nodeMask() >>> 0));
                 return 1;
             },
         },
@@ -1665,7 +1666,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([node, out])=>{
-                if ((node & 0xffff) !== 0 || (out >>> 0) === 0)
+                if ((node & 0xffff) !== 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1685,7 +1686,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([processor, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1704,7 +1705,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([processor, out])=>{
-                if ((processor >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(processor) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1725,7 +1726,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1739,7 +1740,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1812,7 +1813,7 @@ export function createProcessPolicyFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([process, out])=>{
-                if (processOf(process) !== SELF || (out >>> 0) === 0)
+                if (processOf(process) !== SELF || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }

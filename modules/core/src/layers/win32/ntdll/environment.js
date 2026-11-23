@@ -235,7 +235,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([block, name, value])=>{
-                const found = lookup(block >>> 0, counted(name >>> 0));
+                const found = lookup(wholeAddress(block), counted(wholeAddress(name)));
                 if (found === undefined)
                 {
                     return STATUS_VARIABLE_NOT_FOUND;
@@ -259,7 +259,8 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, name, nameLength, value, valueLength, returned])=>{
-                const found = lookup(block >>> 0, readUnits(name >>> 0, nameLength >>> 0));
+                const found = lookup(wholeAddress(block), readUnits(wholeAddress(name),
+                    nameLength >>> 0));
                 if (found === undefined)
                 {
                     return STATUS_VARIABLE_NOT_FOUND;
@@ -273,7 +274,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
                     return STATUS.BUFFER_TOO_SMALL;
                 }
                 setU32(wholeAddress(returned), found.length);
-                return put(found, value >>> 0, (valueLength >>> 0) * 2);
+                return put(found, wholeAddress(value), (valueLength >>> 0) * 2);
             },
         },
 
@@ -288,11 +289,11 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([block, source, destination, returned])=>{
-                const pieces = expand(block >>> 0, counted(source >>> 0));
+                const pieces = expand(wholeAddress(block), counted(wholeAddress(source)));
                 const head = readMemory(wholeAddress(destination), 4);
                 const room = (head[2] | head[3] << 8) >>> 1;
                 const total = writeExpanded(pieces, u32(wholeAddress(destination) + 4), room);
-                if ((returned >>> 0) !== 0)
+                if (wholeAddress(returned) !== 0)
                 {
                     setU32(wholeAddress(returned), total * 2);
                 }
@@ -319,9 +320,11 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             sizes: [2, 4],
             /** @param {number[]} args */
             handler: ([block, source, sourceLength, destination, destinationLength, returned])=>{
-                const pieces = expand(block >>> 0, readUnits(source >>> 0, sourceLength >>> 0));
-                const total = writeExpanded(pieces, destination >>> 0, destinationLength >>> 0);
-                if ((returned >>> 0) !== 0)
+                const pieces = expand(wholeAddress(block), readUnits(wholeAddress(source),
+                    sourceLength >>> 0));
+                const total = writeExpanded(pieces, wholeAddress(destination),
+                    destinationLength >>> 0);
+                if (wholeAddress(returned) !== 0)
                 {
                     setU32(wholeAddress(returned), total);
                 }
@@ -343,13 +346,13 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([where, name, value])=>{
-                const key = counted(name >>> 0);
+                const key = counted(wholeAddress(name));
                 if (key === '' || key.indexOf('=', 1) >= 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const text = (value >>> 0) === 0 ? null : counted(value >>> 0);
-                if ((where >>> 0) === 0)
+                const text = wholeAddress(value) === 0 ? null : counted(wholeAddress(value));
+                if (wholeAddress(where) === 0)
                 {
                     set(key, text);
                     return STATUS.SUCCESS;
@@ -399,7 +402,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                free(block >>> 0);
+                free(wholeAddress(block));
                 return STATUS.SUCCESS;
             },
         },
@@ -416,12 +419,12 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             /** @param {number[]} args */
             handler: ([block, old])=>{
                 const before = processEntries();
-                if ((old >>> 0) !== 0)
+                if (wholeAddress(old) !== 0)
                 {
                     setU32(wholeAddress(old), blockOf(before));
                 }
                 // No block is no variables at all.
-                const after = (block >>> 0) === 0 ? [] : entries(block >>> 0);
+                const after = wholeAddress(block) === 0 ? [] : entries(wholeAddress(block));
                 const kept = new Set(after.map(([key])=>key.toUpperCase()));
                 for (const [key] of before)
                 {

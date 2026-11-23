@@ -972,8 +972,8 @@ export function createCxxExceptions64(host){
                 /** @param {number[]} args */
                 handler: ([object, throwInfo])=>{
                     const thread = host.currentThread();
-                    let thrown = { object: object >>> 0, throwInfo: throwInfo >>> 0,
-                        throwBase: host.imageBaseOf(throwInfo >>> 0) };
+                    let thrown = { object: wholeAddress(object), throwInfo: wholeAddress(throwInfo),
+                        throwBase: host.imageBaseOf(wholeAddress(throwInfo)) };
                     if (thrown.throwInfo === 0)
                     {
                         const current = caught(thread).at(-1);

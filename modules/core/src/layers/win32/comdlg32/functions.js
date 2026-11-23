@@ -364,7 +364,7 @@ export function createCommonDialogFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([file, title, size])=>getFileTitle(
-                !host.readCString || (file >>> 0) === 0 ? null
+                !host.readCString || wholeAddress(file) === 0 ? null
                     : host.readCString(wholeAddress(file), WHOLE_NAME), title, size, false),
         },
 
@@ -373,7 +373,7 @@ export function createCommonDialogFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([file, title, size])=>getFileTitle(
-                (file >>> 0) === 0 ? null : readWidePath(file), title, size, true),
+                wholeAddress(file) === 0 ? null : readWidePath(file), title, size, true),
         },
 
         /**

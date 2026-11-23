@@ -29,6 +29,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL, ERANGE } from './globals.js';
 import { wideStringAt } from './widetext.js';
+import { wholeAddress } from '../common/pointers.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -1214,7 +1215,7 @@ export function createTimeFunctions(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: (/** @type {number[]} */ [destination])=>{
-                    if ((destination >>> 0) !== 0)
+                    if (wholeAddress(destination) !== 0)
                     {
                         const bytes = new Uint8Array(8);
                         new DataView(bytes.buffer).setBigInt64(0, BigInt(seconds()), true);
@@ -1324,7 +1325,7 @@ export function createTimeFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                const text = (block >>> 0) === 0 ? null : asctime(readTm(block));
+                const text = wholeAddress(block) === 0 ? null : asctime(readTm(block));
                 if (text === null)
                 {
                     fail(EINVAL);

@@ -1225,7 +1225,7 @@ export function createMmioFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
+                wholeAddress(name) === 0 ? null : host.readCString(wholeAddress(name), WHOLE_NAME),
                 info, flags >>> 0, false),
         },
 
@@ -1234,7 +1234,8 @@ export function createMmioFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, info, flags])=>openFile(
-                (name >>> 0) === 0 ? null : wideAt(wholeAddress(name), MAX_PATH), info, flags >>> 0,
+                wholeAddress(name) === 0 ? null : wideAt(wholeAddress(name),
+                    MAX_PATH), info, flags >>> 0,
                 true),
         },
 
@@ -1415,7 +1416,7 @@ export function createMmioFunctions(host){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                adopt(file, record >>> 0);
+                adopt(file, wholeAddress(record));
                 return MMSYSERR_NOERROR;
             },
         },
@@ -1443,13 +1444,13 @@ export function createMmioFunctions(host){
                 {
                     return MMIOERR_UNBUFFERED;
                 }
-                if ((record >>> 0) !== 0)
+                if (wholeAddress(record) !== 0)
                 {
-                    adopt(file, record >>> 0);
+                    adopt(file, wholeAddress(record));
                 }
                 /** @param {number} result */
                 const answer = result=>{
-                    if ((record >>> 0) !== 0)
+                    if (wholeAddress(record) !== 0)
                     {
                         host.writeMemory(wholeAddress(record), describe(file));
                     }
@@ -1499,7 +1500,8 @@ export function createMmioFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 return then(flush(file), written=>(written
-                    ? replaceBuffer(file, pointer >>> 0, count >>> 0) : MMIOERR_CANNOTWRITE));
+                    ? replaceBuffer(file, wholeAddress(pointer),
+                        count >>> 0) : MMIOERR_CANNOTWRITE));
             },
         },
 
@@ -1557,14 +1559,14 @@ export function createMmioFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 const find = (flags >>> 0) & (MMIO_FINDCHUNK | MMIO_FINDRIFF | MMIO_FINDLIST);
-                const wanted = find === 0 ? 0 : field(info >>> 0,
+                const wanted = find === 0 ? 0 : field(wholeAddress(info),
                     find === MMIO_FINDCHUNK ? MMCKINFO_CKID : MMCKINFO_FCCTYPE);
                 // Nothing lies past the parent's data: a search that ran on
                 // would read the next sibling's chunks as the parent's.
-                const limit = (parent >>> 0) === 0
+                const limit = wholeAddress(parent) === 0
                     ? Number.MAX_SAFE_INTEGER
-                    : field(parent >>> 0, MMCKINFO_DWDATAOFFSET)
-                        + field(parent >>> 0, MMCKINFO_CKSIZE);
+                    : field(wholeAddress(parent), MMCKINFO_DWDATAOFFSET)
+                        + field(wholeAddress(parent), MMCKINFO_CKSIZE);
 
                 /** @param {number} value */
                 const is = value=>wanted === 0 || value === wanted;
@@ -1577,7 +1579,7 @@ export function createMmioFunctions(host){
                     const notFound = seen=>{
                         if (seen)
                         {
-                            writeChunk(info >>> 0, seen, 0);
+                            writeChunk(wholeAddress(info), seen, 0);
                         }
                         return MMIOERR_CHUNKNOTFOUND;
                     };
@@ -1600,7 +1602,7 @@ export function createMmioFunctions(host){
                         {
                             return walk(header.data + header.size + (header.size & 1), header);
                         }
-                        writeChunk(info >>> 0, header, 0);
+                        writeChunk(wholeAddress(info), header, 0);
                         return then(moveTo(file, header.after), ()=>MMSYSERR_NOERROR);
                     });
                 };
@@ -1736,16 +1738,16 @@ export function createMmioFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([from, to, info])=>renameFile(
-                (from >>> 0) === 0 ? '' : host.readCString(wholeAddress(from), WHOLE_NAME),
-                (to >>> 0) === 0 ? '' : host.readCString(wholeAddress(to),
+                wholeAddress(from) === 0 ? '' : host.readCString(wholeAddress(from), WHOLE_NAME),
+                wholeAddress(to) === 0 ? '' : host.readCString(wholeAddress(to),
                     WHOLE_NAME), info, false),
         },
         mmioRenameW: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([from, to, info])=>renameFile(
-                (from >>> 0) === 0 ? '' : wideAt(wholeAddress(from), MAX_PATH),
-                (to >>> 0) === 0 ? '' : wideAt(wholeAddress(to), MAX_PATH), info, true),
+                wholeAddress(from) === 0 ? '' : wideAt(wholeAddress(from), MAX_PATH),
+                wholeAddress(to) === 0 ? '' : wideAt(wholeAddress(to), MAX_PATH), info, true),
         },
 
         /**
@@ -1757,7 +1759,7 @@ export function createMmioFunctions(host){
         mmioStringToFOURCCA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, flags])=>fourccOf((text >>> 0) === 0 ? ''
+            handler: ([text, flags])=>fourccOf(wholeAddress(text) === 0 ? ''
                 : host.readCString(wholeAddress(text), 4), ((flags >>> 0) & MMIO_TOUPPER) !== 0),
         },
 
@@ -1771,7 +1773,7 @@ export function createMmioFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([text,
-                flags])=>fourccOf((text >>> 0) === 0 ? '' : wideAt(wholeAddress(text), 4),
+                flags])=>fourccOf(wholeAddress(text) === 0 ? '' : wideAt(wholeAddress(text), 4),
                 ((flags >>> 0) & MMIO_TOUPPER) !== 0),
         },
 

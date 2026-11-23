@@ -309,16 +309,16 @@ export function createLoaderFunctions({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([path, , name, out])=>{
-                if ((out >>> 0) === 0 || (name >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(name) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const counted = terminated(name >>> 0, 2);
+                const counted = terminated(wholeAddress(name), 2);
                 const asked = wideAt(counted);
                 free(counted);
                 const fixed = /^([A-Za-z]:|[\\/]|\.\.?[\\/])/.test(asked);
                 /** Where it is looked for: as asked, or under each directory of the path. */
-                const places = (path & 1) !== 0 || (path >>> 0) === 0 || fixed ? [asked]
+                const places = (path & 1) !== 0 || wholeAddress(path) === 0 || fixed ? [asked]
                     : wideAt(wholeAddress(path)).split(';').filter(directory=>directory !== '')
                         .map(directory=>`${directory.replace(/[\\/]+$/, '')}\\${asked}`);
                 /**
@@ -356,7 +356,7 @@ export function createLoaderFunctions({
                         return STATUS.SUCCESS;
                     };
                     const base = (path & 1) !== 0
-                        ? kernel32.LoadLibraryExW.handler([text, 0, (path >>> 0) & ~1])
+                        ? kernel32.LoadLibraryExW.handler([text, 0, wholeAddress(path) & ~1])
                         : kernel32.LoadLibraryW.handler([text]);
                     return typeof base?.then === 'function' ? base.then(settle) : settle(base);
                 };
@@ -378,11 +378,11 @@ export function createLoaderFunctions({
             /** @param {number[]} args */
             handler: ([module, flags, out, unknown])=>{
                 const search = /** @type {any} */ (kernel32)[DLL_SEARCH_PATH];
-                if ((out >>> 0) === 0 || (unknown >>> 0) === 0 || !search)
+                if (wholeAddress(out) === 0 || wholeAddress(unknown) === 0 || !search)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const named = (module >>> 0) === 0 ? '' : wideAt(wholeAddress(module));
+                const named = wholeAddress(module) === 0 ? '' : wideAt(wholeAddress(module));
                 setU32(wholeAddress(out), heapWide(search(named, flags >>> 0).join(';')));
                 setU32(wholeAddress(unknown), 0);
                 return STATUS.SUCCESS;
@@ -403,7 +403,7 @@ export function createLoaderFunctions({
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: ([flags, callback, context, cookie])=>{
-                    if (flags !== 0 || (callback >>> 0) === 0 || (cookie >>> 0) === 0)
+                    if (flags !== 0 || wholeAddress(callback) === 0 || wholeAddress(cookie) === 0)
                     {
                         return STATUS.INVALID_PARAMETER;
                     }
@@ -428,9 +428,9 @@ export function createLoaderFunctions({
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>{
-                if ((path >>> 0) !== 0)
+                if (wholeAddress(path) !== 0)
                 {
-                    free(path >>> 0);
+                    free(wholeAddress(path));
                 }
                 return 0;
             },
@@ -446,11 +446,11 @@ export function createLoaderFunctions({
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([base, name, ordinal, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const text = (name >>> 0) === 0 ? 0 : terminated(name >>> 0, 1);
+                const text = wholeAddress(name) === 0 ? 0 : terminated(wholeAddress(name), 1);
                 /** @param {number} found */
                 const answer = found=>{
                     if (text !== 0)
@@ -492,11 +492,11 @@ export function createLoaderFunctions({
             handler: ([flags, disposition, cookie])=>{
                 // Both answers are cleared before anything is judged, a
                 // refusal's included.
-                if ((disposition >>> 0) !== 0)
+                if (wholeAddress(disposition) !== 0)
                 {
                     setU32(wholeAddress(disposition), 0);
                 }
-                if ((cookie >>> 0) !== 0)
+                if (wholeAddress(cookie) !== 0)
                 {
                     setU32(wholeAddress(cookie), 0);
                 }
@@ -504,15 +504,15 @@ export function createLoaderFunctions({
                 {
                     return STATUS_INVALID_PARAMETER_1;
                 }
-                if ((flags & LDR_LOCK_TRY_ONLY) !== 0 && (disposition >>> 0) === 0)
+                if ((flags & LDR_LOCK_TRY_ONLY) !== 0 && wholeAddress(disposition) === 0)
                 {
                     return STATUS_INVALID_PARAMETER_2;
                 }
-                if ((cookie >>> 0) === 0)
+                if (wholeAddress(cookie) === 0)
                 {
                     return STATUS_INVALID_PARAMETER_3;
                 }
-                if ((disposition >>> 0) !== 0)
+                if (wholeAddress(disposition) !== 0)
                 {
                     setU32(wholeAddress(disposition), LDR_LOCK_ACQUIRED);
                 }
@@ -539,7 +539,7 @@ export function createLoaderFunctions({
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([directory])=>{
-                const text = terminated(directory >>> 0, 2);
+                const text = terminated(wholeAddress(directory), 2);
                 try
                 {
                     kernel32.SetDllDirectoryW.handler([text]);

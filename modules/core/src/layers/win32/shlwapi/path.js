@@ -784,7 +784,7 @@ export function createPathFunctions(host, { A, W }){
         PathCreateFromUrlAlloc: { argBytes: 12, handler: (/** @type {number[]} */ [url, out])=>{
             const text = W.read(url);
             const path = text === null ? null : pathFromFileUrl(text, W.char);
-            if (path === null || (out >>> 0) === 0)
+            if (path === null || wholeAddress(out) === 0)
             {
                 return E_INVALIDARG;
             }
@@ -1180,8 +1180,8 @@ export function createPathFunctions(host, { A, W }){
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const path = A.read(pointer);
-                return path !== null && path.startsWith('//') ? (pointer >>> 0) + 2
-                    : pointer >>> 0;
+                return path !== null && path.startsWith('//') ? wholeAddress(pointer) + 2
+                    : wholeAddress(pointer);
             },
         },
 

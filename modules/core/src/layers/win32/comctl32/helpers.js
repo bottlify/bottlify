@@ -156,7 +156,7 @@ export function createHelperFunctions(host){
                         const send = (message, wParam, lParam)=>()=>api('user32', 'SendMessageA',
                             [hwnd, message, wParam, lParam]);
                         const table = new Uint8Array(8);
-                        new DataView(table.buffer).setUint32(0, instance >>> 0, true);
+                        new DataView(table.buffer).setUint32(0, wholeAddress(instance), true);
                         new DataView(table.buffer).setUint32(4, bitmapId >>> 0, true);
                         host.writeMemory(block + name.length, table);
                         const steps = [send(TB_BUTTONSTRUCTSIZE, structSize >>> 0, 0)];
@@ -177,9 +177,9 @@ export function createHelperFunctions(host){
                         {
                             steps.push(send(TB_ADDBITMAP, bitmaps | 0, block + name.length));
                         }
-                        if ((count | 0) > 0 && (buttons >>> 0) !== 0)
+                        if ((count | 0) > 0 && wholeAddress(buttons) !== 0)
                         {
-                            steps.push(send(TB_ADDBUTTONSA, count | 0, buttons >>> 0));
+                            steps.push(send(TB_ADDBUTTONSA, count | 0, wholeAddress(buttons)));
                         }
                         return after(steps.reduce((done, step)=>after(done, step),
                             /** @type {any} */ (0)), ()=>hwnd >>> 0);
@@ -209,7 +209,7 @@ export function createHelperFunctions(host){
                     return 0;
                 }
                 /** @type {[number, number][]} */
-                const pairs = (map >>> 0) !== 0 && (entries | 0) > 0
+                const pairs = wholeAddress(map) !== 0 && (entries | 0) > 0
                     ? Array.from({ length: Math.min(entries | 0, MAX_MAP) }, (_, at)=>{
                         const pair = host.readMemory(wholeAddress(map) + at * 8, 8);
                         return [i32(pair, 0) & 0xffffff, i32(pair, 4) & 0xffffff];

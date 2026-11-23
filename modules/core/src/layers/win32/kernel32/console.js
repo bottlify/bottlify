@@ -3,6 +3,7 @@
  * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * The kernel32 surface a console program needs to say something and exit.
@@ -135,7 +136,7 @@ export function createConsoleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, text])=>{
-                const shown = host.messageBox?.(text >>> 0);
+                const shown = host.messageBox?.(wholeAddress(text));
                 const end = ()=>table.ExitProcess.handler([0]);
                 return typeof shown?.then === 'function' ? shown.then(end) : end();
             },

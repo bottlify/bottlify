@@ -840,11 +840,11 @@ export function createD3dxFunctions(host, options = {}){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([device, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putPointer(out, 0);
                 }
-                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.vtables)
+                if (wholeAddress(device) === 0 || wholeAddress(out) === 0 || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -895,7 +895,7 @@ export function createD3dxFunctions(host, options = {}){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([bytes, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -950,11 +950,12 @@ export function createD3dxFunctions(host, options = {}){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([shader, , comments, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     host.writeMemory(wholeAddress(out), new Uint8Array(4));
                 }
-                if ((shader >>> 0) === 0 || (out >>> 0) === 0 || !host.heap || !host.vtables)
+                if (wholeAddress(shader) === 0 || wholeAddress(out) === 0 || !host.heap
+                    || !host.vtables)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -972,15 +973,17 @@ export function createD3dxFunctions(host, options = {}){
                 if (length === 0)
                 {
                     host.divergence?.('D3DXDisassembleShader', 'refused: no shader function'
-                        + ` ends within ${MOST_TOKENS} tokens at 0x${(shader >>> 0).toString(16)}`);
+                        + ` ends within ${MOST_TOKENS} tokens`
+                        + ` at 0x${wholeAddress(shader).toString(16)}`);
                     return D3DERR_INVALIDCALL;
                 }
                 words.length = length;
                 let listing;
                 try
                 {
-                    listing = disassembleShader(Uint32Array.from(words), (comments >>> 0) === 0
-                        ? undefined : { comments: latin1(cString(comments)) });
+                    listing = disassembleShader(Uint32Array.from(words),
+                        wholeAddress(comments) === 0
+                            ? undefined : { comments: latin1(cString(comments)) });
                 }
                 catch (e){
                     host.divergence?.('D3DXDisassembleShader', `refused: ${

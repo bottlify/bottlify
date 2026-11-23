@@ -528,7 +528,7 @@ export function createPropsysFunctions(host){
 
         /** HRESULT PropVariantToDouble(REFPROPVARIANT, DOUBLE *) */
         PropVariantToDouble: { argBytes: 8, handler: (/** @type {number[]} */ [pv, out])=>{
-            if ((pv >>> 0) === 0 || (out >>> 0) === 0)
+            if ((pv >>> 0) === 0 || wholeAddress(out) === 0)
             {
                 return E_INVALIDARG;
             }
@@ -560,7 +560,7 @@ export function createPropsysFunctions(host){
 
         /** HRESULT PropVariantToBoolean(REFPROPVARIANT, BOOL *): FALSE on any failure. */
         PropVariantToBoolean: { argBytes: 8, handler: (/** @type {number[]} */ [pv, out])=>{
-            if ((pv >>> 0) === 0 || (out >>> 0) === 0)
+            if ((pv >>> 0) === 0 || wholeAddress(out) === 0)
             {
                 return E_INVALIDARG;
             }
@@ -585,7 +585,7 @@ export function createPropsysFunctions(host){
          * answered STRSAFE_E_INSUFFICIENT_BUFFER.
          */
         PropVariantToString: { argBytes: 12, handler: (/** @type {number[]} */ [pv, buffer, cch])=>{
-            if ((pv >>> 0) === 0 || (buffer >>> 0) === 0 || (cch >>> 0) === 0)
+            if ((pv >>> 0) === 0 || wholeAddress(buffer) === 0 || (cch >>> 0) === 0)
             {
                 return E_INVALIDARG;
             }
@@ -601,7 +601,7 @@ export function createPropsysFunctions(host){
         } },
         /** HRESULT PropVariantToStringAlloc(REFPROPVARIANT, PWSTR *) */
         PropVariantToStringAlloc: { argBytes: 8, handler: (/** @type {number[]} */ [pv, out])=>{
-            if ((pv >>> 0) === 0 || (out >>> 0) === 0)
+            if ((pv >>> 0) === 0 || wholeAddress(out) === 0)
             {
                 return E_INVALIDARG;
             }
@@ -703,7 +703,7 @@ export function createPropsysFunctions(host){
                 put(out, bytes);
                 return S_OK;
             };
-            const date = host.fileTimeToDate?.(time >>> 0) ?? null;
+            const date = host.fileTimeToDate?.(wholeAddress(time)) ?? null;
             return date !== null && typeof date === 'object' ? date.then(write) : write(date);
         } },
     };

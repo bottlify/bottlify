@@ -809,7 +809,8 @@ export function createMidl(host){
                 const uuid = guidAt(spec + INTERFACE.ID);
                 const major = u16(spec + INTERFACE.ID + GUID_SIZE);
                 const minor = u16(spec + INTERFACE.ID + GUID_SIZE + 2);
-                const type = (managerType >>> 0) === 0 ? null : guidAt(managerType >>> 0);
+                const type =
+                    wholeAddress(managerType) === 0 ? null : guidAt(wholeAddress(managerType));
                 const kept = served.filter(one=>!(one.uuid === uuid && one.major === major
                     && one.minor === minor && (type === null || one.managerType === type)));
                 const found = kept.length !== served.length;
@@ -902,8 +903,9 @@ export function createMidl(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor])=>{
-                initialize(rpc >>> 0, message >>> 0, descriptor >>> 0, false);
-                takeBuffer(message >>> 0);
+                initialize(wholeAddress(rpc), wholeAddress(message), wholeAddress(descriptor),
+                    false);
+                takeBuffer(wholeAddress(message));
                 return 0;
             },
         },
@@ -924,7 +926,7 @@ export function createMidl(host){
                 {
                     return RPC_S_OUT_OF_MEMORY;
                 }
-                w32((message >>> 0) + RPC_MESSAGE.BUFFER, buffer);
+                w32(wholeAddress(message) + RPC_MESSAGE.BUFFER, buffer);
                 return RPC_S_OK;
             },
         },
@@ -935,7 +937,7 @@ export function createMidl(host){
             /** @param {number[]} args */
             handler: ([message])=>{
                 freeBuffer(u32(wholeAddress(message) + RPC_MESSAGE.BUFFER));
-                w32((message >>> 0) + RPC_MESSAGE.BUFFER, 0);
+                w32(wholeAddress(message) + RPC_MESSAGE.BUFFER, 0);
                 return RPC_S_OK;
             },
         },
@@ -960,7 +962,7 @@ export function createMidl(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([slot])=>{
-                if ((slot >>> 0) === 0)
+                if (wholeAddress(slot) === 0)
                 {
                     return RPC_S_INVALID_BINDING;
                 }
@@ -969,7 +971,7 @@ export function createMidl(host){
                 {
                     return RPC_S_INVALID_BINDING;
                 }
-                w32(slot >>> 0, 0);
+                w32(wholeAddress(slot), 0);
                 return RPC_S_OK;
             },
         },
@@ -983,11 +985,13 @@ export function createMidl(host){
             /** @param {number[]} args */
             handler: ([rpc, message, descriptor, procedure])=>{
                 host.writeMemory(wholeAddress(rpc), new Uint8Array(RPC_MESSAGE.SIZE));
-                w32((rpc >>> 0) + RPC_MESSAGE.DATA_REPRESENTATION, NDR_LOCAL_DATA_REPRESENTATION);
-                w32((rpc >>> 0) + RPC_MESSAGE.PROC_NUM, procedure);
-                w32((rpc >>> 0) + RPC_MESSAGE.INTERFACE_INFORMATION,
+                w32(wholeAddress(rpc) + RPC_MESSAGE.DATA_REPRESENTATION,
+                    NDR_LOCAL_DATA_REPRESENTATION);
+                w32(wholeAddress(rpc) + RPC_MESSAGE.PROC_NUM, procedure);
+                w32(wholeAddress(rpc) + RPC_MESSAGE.INTERFACE_INFORMATION,
                     u32(wholeAddress(descriptor) + STUB_DESC.INTERFACE_INFORMATION));
-                initialize(rpc >>> 0, message >>> 0, descriptor >>> 0, true);
+                initialize(wholeAddress(rpc), wholeAddress(message), wholeAddress(descriptor),
+                    true);
                 return 0;
             },
         },
@@ -1010,7 +1014,7 @@ export function createMidl(host){
                 w32(rpc + RPC_MESSAGE.HANDLE, handle);
                 w32(rpc + RPC_MESSAGE.BUFFER, buffer);
                 w32(rpc + RPC_MESSAGE.BUFFER_LENGTH, length);
-                return takeBuffer(message >>> 0);
+                return takeBuffer(wholeAddress(message));
             },
         },
 
@@ -1027,7 +1031,8 @@ export function createMidl(host){
             handler: ([message, end])=>{
                 const thread = host.callerThread();
                 const rpc = u32(wholeAddress(message) + STUB_MESSAGE.RPC_MESSAGE);
-                w32(rpc + RPC_MESSAGE.BUFFER_LENGTH, ((end >>> 0) - u32(rpc + RPC_MESSAGE.BUFFER))
+                w32(rpc + RPC_MESSAGE.BUFFER_LENGTH,
+                    (wholeAddress(end) - u32(rpc + RPC_MESSAGE.BUFFER))
                     >>> 0);
                 return sendReceive(rpc).then(status=>{
                     if (status !== RPC_S_OK)
@@ -1035,7 +1040,7 @@ export function createMidl(host){
                         report(`a call failed with RPC status ${status}`);
                         return host.raiseLater(status, thread);
                     }
-                    return takeBuffer(message >>> 0);
+                    return takeBuffer(wholeAddress(message));
                 });
             },
         },

@@ -1288,7 +1288,7 @@ export function createSeh64(host){
                 /** @param {number[]} args */
                 handler: ([out])=>{
                     // The stub has not moved the non-volatiles the unwinder reads.
-                    writeContext(out >>> 0, callerContext());
+                    writeContext(wholeAddress(out), callerContext());
                     return 0;
                 },
             },
@@ -1306,7 +1306,7 @@ export function createSeh64(host){
                 argBytes: 16,
                 /** @param {number[]} args */
                 handler: async([skip, wanted, out, hash])=>{
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return 0;
                     }
@@ -1343,7 +1343,7 @@ export function createSeh64(host){
                         sum = (sum + address) >>> 0;
                     });
                     host.writeMemory(wholeAddress(out), bytes);
-                    if ((hash >>> 0) !== 0)
+                    if (wholeAddress(hash) !== 0)
                     {
                         host.writeMemory(wholeAddress(hash),
                             new Uint8Array(Uint32Array.of(sum).buffer));
@@ -1364,10 +1364,10 @@ export function createSeh64(host){
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([pc, baseOut])=>{
-                    const base = unwinder.imageBase(pc >>> 0);
-                    if ((baseOut >>> 0) !== 0)
+                    const base = unwinder.imageBase(wholeAddress(pc));
+                    if (wholeAddress(baseOut) !== 0)
                     {
-                        writeQuad(baseOut >>> 0, base);
+                        writeQuad(wholeAddress(baseOut), base);
                     }
                     return BigInt(base >>> 0);
                 },
@@ -1416,13 +1416,13 @@ export function createSeh64(host){
                     const unwound = unwinder.virtualUnwind(type >>> 0, fn, controlPc >>> 0,
                         context);
                     writeContext(contextRecord >>> 0, context);
-                    if ((handlerDataOut >>> 0) !== 0)
+                    if (wholeAddress(handlerDataOut) !== 0)
                     {
-                        writeQuad(handlerDataOut >>> 0, unwound.handlerData);
+                        writeQuad(wholeAddress(handlerDataOut), unwound.handlerData);
                     }
-                    if ((establisherOut >>> 0) !== 0)
+                    if (wholeAddress(establisherOut) !== 0)
                     {
-                        writeQuad(establisherOut >>> 0, unwound.establisher);
+                        writeQuad(wholeAddress(establisherOut), unwound.establisher);
                     }
                     return BigInt(unwound.handler >>> 0);
                 },
@@ -1507,7 +1507,7 @@ export function createSeh64(host){
                 argBytes: 12,
                 /** @param {number[]} args */
                 handler: ([table, count, base])=>
-                    (unwinder.add(table >>> 0, count >>> 0, base >>> 0) ? 1 : 0),
+                    (unwinder.add(wholeAddress(table), count >>> 0, base >>> 0) ? 1 : 0),
             },
 
             /**
@@ -1519,7 +1519,7 @@ export function createSeh64(host){
             RtlDeleteFunctionTable: {
                 argBytes: 4,
                 /** @param {number[]} args */
-                handler: ([table])=>(unwinder.remove(table >>> 0) ? 1 : 0),
+                handler: ([table])=>(unwinder.remove(wholeAddress(table)) ? 1 : 0),
             },
 
             /**
@@ -1538,7 +1538,8 @@ export function createSeh64(host){
                 quadwords: [0, 2],
                 /** @param {number[]} args */
                 handler: ([id, , base, , length, callback, context])=>(unwinder.install(
-                    id >>> 0, base >>> 0, length >>> 0, callback >>> 0, context >>> 0) ? 1 : 0),
+                    id >>> 0, base >>> 0, length >>> 0, wholeAddress(callback),
+                    wholeAddress(context)) ? 1 : 0),
             },
 
             /**
@@ -1552,11 +1553,13 @@ export function createSeh64(host){
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: ([out, table, count, max, base, end])=>{
-                    if ((out >>> 0) === 0 || (table >>> 0) === 0 || (count >>> 0) > (max >>> 0))
+                    if (wholeAddress(out) === 0 || wholeAddress(table) === 0
+                        || (count >>> 0) > (max >>> 0))
                     {
                         return STATUS_INVALID_PARAMETER;
                     }
-                    writeQuad(out >>> 0, unwinder.addGrowable(table >>> 0, count >>> 0,
+                    writeQuad(wholeAddress(out), unwinder.addGrowable(wholeAddress(table),
+                        count >>> 0,
                         max >>> 0, base >>> 0, end >>> 0));
                     return 0;
                 },
@@ -1567,7 +1570,7 @@ export function createSeh64(host){
                 argBytes: 8,
                 /** @param {number[]} args */
                 handler: ([handle, count])=>{
-                    unwinder.grow(handle >>> 0, count >>> 0);
+                    unwinder.grow(wholeAddress(handle), count >>> 0);
                     return 0;
                 },
             },
@@ -1577,7 +1580,7 @@ export function createSeh64(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([handle])=>{
-                    unwinder.deleteGrowable(handle >>> 0);
+                    unwinder.deleteGrowable(wholeAddress(handle));
                     return 0;
                 },
             },
@@ -1592,7 +1595,7 @@ export function createSeh64(host){
                 /** @param {number[]} args */
                 handler: ([filter])=>{
                     const previous = topLevelFilter;
-                    topLevelFilter = filter >>> 0;
+                    topLevelFilter = wholeAddress(filter);
                     return BigInt(previous >>> 0);
                 },
             },

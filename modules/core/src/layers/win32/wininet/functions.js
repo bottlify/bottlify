@@ -2008,8 +2008,8 @@ export function createWininetFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const taken = readBody(request, buffer >>> 0, wanted >>> 0);
-                writeDwordIf(readPointer >>> 0, taken);
+                const taken = readBody(request, wholeAddress(buffer), wanted >>> 0);
+                writeDwordIf(wholeAddress(readPointer), taken);
                 return TRUE;
             },
         },
@@ -2070,7 +2070,7 @@ export function createWininetFunctions(host){
                 {
                     return fail(ERROR_INTERNET_INCORRECT_HANDLE_STATE);
                 }
-                if ((available >>> 0) === 0)
+                if (wholeAddress(available) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2155,7 +2155,7 @@ export function createWininetFunctions(host){
                     request.state.pending.chunks.push(host.readMemory(wholeAddress(buffer),
                         length));
                 }
-                writeDwordIf(written >>> 0, length);
+                writeDwordIf(wholeAddress(written), length);
                 return TRUE;
             },
         },
@@ -2201,7 +2201,7 @@ export function createWininetFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flagsPointer])=>{
-                writeDwordIf(flagsPointer >>> 0, connectedFlags());
+                writeDwordIf(wholeAddress(flagsPointer), connectedFlags());
                 host.setLastError(ERROR_SUCCESS);
                 return online() ? TRUE : FALSE;
             },
@@ -2281,7 +2281,7 @@ export function createWininetFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([site, decision])=>{
-                if ((site >>> 0) === 0 || (decision >>> 0) > COOKIE_STATE_REJECT)
+                if (wholeAddress(site) === 0 || (decision >>> 0) > COOKIE_STATE_REJECT)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2308,7 +2308,7 @@ export function createWininetFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([site, result])=>{
-                if ((site >>> 0) === 0 || (result >>> 0) === 0)
+                if (wholeAddress(site) === 0 || wholeAddress(result) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2333,7 +2333,7 @@ export function createWininetFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, sizePointer, decision, index])=>{
-                if ((sizePointer >>> 0) === 0 || (decision >>> 0) === 0)
+                if (wholeAddress(sizePointer) === 0 || wholeAddress(decision) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2343,7 +2343,7 @@ export function createWininetFunctions(host){
                     return fail(ERROR_NO_MORE_ITEMS);
                 }
                 const needed = entry[0].length + 1;
-                if ((name >>> 0) === 0 || readDword(wholeAddress(sizePointer)) < needed)
+                if (wholeAddress(name) === 0 || readDword(wholeAddress(sizePointer)) < needed)
                 {
                     writeDword(wholeAddress(sizePointer), needed);
                     return fail(ERROR_INSUFFICIENT_BUFFER);

@@ -364,7 +364,7 @@ export function createLsaFunctions(host){
                 {
                     return RPC_NT_SERVER_UNAVAILABLE;
                 }
-                if ((attributes >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(attributes) === 0 || wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -410,7 +410,7 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return secrets.remove(name) ? STATUS_SUCCESS : STATUS_OBJECT_NAME_NOT_FOUND;
                 }
@@ -439,7 +439,7 @@ export function createLsaFunctions(host){
                     return STATUS_INVALID_HANDLE;
                 }
                 const name = unicodeAt(key);
-                if (name === null || (out >>> 0) === 0)
+                if (name === null || wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -478,9 +478,9 @@ export function createLsaFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([buffer])=>{
-                if ((buffer >>> 0) !== 0)
+                if (wholeAddress(buffer) !== 0)
                 {
-                    host.release?.(buffer >>> 0);
+                    host.release?.(wholeAddress(buffer));
                 }
                 return STATUS_SUCCESS;
             },
@@ -502,13 +502,13 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
                 /** @type {Block} */
                 let block;
-                switch (kind >>> 0)
+                switch (wholeAddress(kind))
                 {
                     case PolicyAuditEventsInformation:
                         // POLICY_AUDIT_EVENTS_INFO: off, no options, no events.
@@ -558,7 +558,7 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if (sidAt(sid) === null || (rights >>> 0) === 0 || (count >>> 0) === 0)
+                if (sidAt(sid) === null || wholeAddress(rights) === 0 || wholeAddress(count) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -586,7 +586,8 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((sids >>> 0) === 0 || (domainsOut >>> 0) === 0 || (namesOut >>> 0) === 0)
+                if (wholeAddress(sids) === 0 || wholeAddress(domainsOut) === 0
+                    || wholeAddress(namesOut) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -629,7 +630,7 @@ export function createLsaFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((luid >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(luid) === 0 || wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -658,7 +659,7 @@ export function createLsaFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([user, domain])=>{
-                if ((user >>> 0) === 0)
+                if (wholeAddress(user) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }

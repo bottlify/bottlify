@@ -214,7 +214,7 @@ export function createShaderSemantics(host){
         D3DXGetShaderVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([code])=>((code >>> 0) === 0 ? 0 : readU32(wholeAddress(code))),
+            handler: ([code])=>(wholeAddress(code) === 0 ? 0 : readU32(wholeAddress(code))),
         },
     };
 }

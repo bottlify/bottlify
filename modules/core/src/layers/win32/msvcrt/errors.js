@@ -13,6 +13,7 @@
  */
 
 import { EINVAL } from './globals.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} ErrorHost
@@ -145,7 +146,7 @@ export function createErrorFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, size, code])=>{
                 const room = size >>> 0;
-                if ((buffer >>> 0) === 0 || room === 0)
+                if (wholeAddress(buffer) === 0 || room === 0)
                 {
                     host.setErrno(EINVAL);
                     return EINVAL;

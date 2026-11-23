@@ -1849,7 +1849,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 {
                     return refuse(ERROR_INVALID_HANDLE);
                 }
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
@@ -1896,7 +1896,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([size, data])=>{
-                if ((data >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(data) === 0 || (size >>> 0) === 0)
                 {
                     return refuse(ERROR_INVALID_DATA);
                 }
@@ -1950,7 +1950,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                     return GDI_ERROR;
                 }
                 const entries = emfPalette(bits);
-                if ((out >>> 0) === 0 || entries.length === 0)
+                if (wholeAddress(out) === 0 || entries.length === 0)
                 {
                     return entries.length;
                 }
@@ -1984,7 +1984,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 // The window is laid out on the reference device: the display
                 // every DC here answers for.
                 const wmf = emfToWmf(bits, mapMode | 0, encodeAnsi, reference());
-                if ((out >>> 0) !== 0 && (size >>> 0) < wmf.length)
+                if (wholeAddress(out) !== 0 && (size >>> 0) < wmf.length)
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
@@ -2005,7 +2005,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([size, data, referenceDc, picture])=>{
-                if ((data >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(data) === 0 || (size >>> 0) === 0)
                 {
                     return refuse(ERROR_INVALID_DATA);
                 }
@@ -2019,7 +2019,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
                 {
                     return objects.create('enhmetafile', { bits: inner });
                 }
-                const pict = (picture >>> 0) === 0 ? null : (()=>{
+                const pict = wholeAddress(picture) === 0 ? null : (()=>{
                     const fields = viewOf(host.readMemory(wholeAddress(picture), 12));
                     return { mm: fields.getInt32(0, true), xExt: fields.getInt32(4, true),
                         yExt: fields.getInt32(8, true) };
@@ -2062,7 +2062,7 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
             handler: ([size, data])=>{
                 const MEMORY_METAFILE = 1;
                 const VERSION_3 = 0x300;
-                if ((data >>> 0) === 0 || (size >>> 0) < 18 || (size & 1) !== 0)
+                if (wholeAddress(data) === 0 || (size >>> 0) < 18 || (size & 1) !== 0)
                 {
                     return refuse(ERROR_INVALID_DATA);
                 }

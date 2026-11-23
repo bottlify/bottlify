@@ -30,6 +30,7 @@
 
 import { threadIdOf } from './messages.js';
 import { afterWait } from './after-wait.js';
+import { wholeAddress } from '../common/pointers.js';
 
 export const WINEVENT_OUTOFCONTEXT = 0x0000;
 export const WINEVENT_SKIPOWNTHREAD = 0x0001;
@@ -180,12 +181,12 @@ export function createWinEventHooks(host, { windowThread, later }){
                     host.setLastError?.(ERROR_INVALID_HOOK_FILTER);
                     return 0;
                 }
-                if ((proc >>> 0) === 0)
+                if (wholeAddress(proc) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_FILTER_PROC);
                     return 0;
                 }
-                if ((flags & WINEVENT_INCONTEXT) !== 0 && (module >>> 0) === 0)
+                if ((flags & WINEVENT_INCONTEXT) !== 0 && wholeAddress(module) === 0)
                 {
                     host.setLastError?.(ERROR_HOOK_NEEDS_HMOD);
                     return 0;
@@ -197,7 +198,7 @@ export function createWinEventHooks(host, { windowThread, later }){
                 }
                 /** @type {WinEventHook} */
                 const hook = {
-                    handle: 0, min: min >>> 0, max: max >>> 0, proc: proc >>> 0,
+                    handle: 0, min: min >>> 0, max: max >>> 0, proc: wholeAddress(proc),
                     process: process >>> 0, thread: thread >>> 0, flags: flags >>> 0,
                     owner: threadIdOf(host.callerThread?.()),
                 };

@@ -991,11 +991,11 @@ export function createImageLists(host){
                 {
                     return E_NOINTERFACE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
-                if ((outer >>> 0) !== 0)
+                if (wholeAddress(outer) !== 0)
                 {
                     return CLASS_E_NOAGGREGATION;
                 }
@@ -1180,7 +1180,7 @@ export function createImageLists(host){
             /** @param {number[]} args */
             handler: ([handle, cx, cy])=>{
                 const list = listOf(handle);
-                if (!list || (cx >>> 0) === 0 || (cy >>> 0) === 0)
+                if (!list || wholeAddress(cx) === 0 || wholeAddress(cy) === 0)
                 {
                     return 0;
                 }
@@ -1369,11 +1369,11 @@ export function createImageLists(host){
                 {
                     return 0;
                 }
-                if ((point >>> 0) !== 0)
+                if (wholeAddress(point) !== 0)
                 {
                     host.writeMemory(wholeAddress(point), point32(drag.x, drag.y));
                 }
-                if ((hotspot >>> 0) !== 0)
+                if (wholeAddress(hotspot) !== 0)
                 {
                     host.writeMemory(wholeAddress(hotspot), point32(drag.dx, drag.dy));
                 }
@@ -1412,7 +1412,7 @@ export function createImageLists(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([params])=>{
-                if ((params >>> 0) === 0 || !host.readMemory)
+                if (wholeAddress(params) === 0 || !host.readMemory)
                 {
                     return 0;
                 }

@@ -1555,7 +1555,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 invalidate(record,
-                    (rect >>> 0) === 0 ? clientArea(record) : ordered(readRect(host, rect)),
+                    wholeAddress(rect) === 0 ? clientArea(record) : ordered(readRect(host, rect)),
                     (erase >>> 0) !== 0);
                 return 1;
             },
@@ -1602,7 +1602,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                const whole = (region >>> 0) === 0 && (rect >>> 0) === 0;
+                const whole = (region >>> 0) === 0 && wholeAddress(rect) === 0;
                 const area = (region >>> 0) !== 0 || whole
                     ? regionArea(record, region) : [ordered(readRect(host, rect))];
                 const children = (flags & RDW_NOCHILDREN) !== 0 ? 'none'
@@ -1701,7 +1701,7 @@ export function createPaintFunctions(options){
                     return 0;
                 }
                 const answer = ()=>{
-                    if ((rect >>> 0) !== 0)
+                    if (wholeAddress(rect) !== 0)
                     {
                         writeRect(host, rect,
                             record.updateRect ?? { left: 0, top: 0, right: 0, bottom: 0 });
@@ -1934,7 +1934,7 @@ export function createPaintFunctions(options){
             /** @param {number[]} args */
             handler: ([hdc, rect, edge, flags])=>{
                 const draw = host.draw;
-                if (!draw || (rect >>> 0) === 0)
+                if (!draw || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
@@ -1983,7 +1983,7 @@ export function createPaintFunctions(options){
                 const DFCS_ADJUSTRECT = 0x2000;
                 const DFCS_FLAT = 0x4000;
                 const draw = host.draw;
-                if (!draw || (rect >>> 0) === 0 || type < DFC_CAPTION || type > DFC_POPUPMENU)
+                if (!draw || wholeAddress(rect) === 0 || type < DFC_CAPTION || type > DFC_POPUPMENU)
                 {
                     return 0;
                 }
@@ -2177,7 +2177,7 @@ export function createPaintFunctions(options){
                 {
                     return 0;
                 }
-                validate(record, (rect >>> 0) === 0 ? null : [ordered(readRect(host, rect))]);
+                validate(record, wholeAddress(rect) === 0 ? null : [ordered(readRect(host, rect))]);
                 return 1;
             },
         },

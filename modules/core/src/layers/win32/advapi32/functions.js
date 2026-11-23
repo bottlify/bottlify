@@ -2126,18 +2126,18 @@ export function createRegistryFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([buffer, size])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return 0;
                 }
                 const needed = USER_NAME.length + 1;
-                if ((buffer >>> 0) === 0 || readDword(wholeAddress(size)) < needed)
+                if (wholeAddress(buffer) === 0 || readDword(wholeAddress(size)) < needed)
                 {
                     writeDword(wholeAddress(size), needed);
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
-                writeText(buffer >>> 0, USER_NAME);
+                writeText(wholeAddress(buffer), USER_NAME);
                 writeDword(wholeAddress(size), needed);
                 return 1;
             },
@@ -2148,12 +2148,12 @@ export function createRegistryFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([buffer, size])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return 0;
                 }
                 const needed = USER_NAME.length + 1;
-                if ((buffer >>> 0) === 0 || readDword(wholeAddress(size)) < needed)
+                if (wholeAddress(buffer) === 0 || readDword(wholeAddress(size)) < needed)
                 {
                     writeDword(wholeAddress(size), needed);
                     host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
@@ -2180,13 +2180,13 @@ export function createRegistryFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, size, result])=>{
                 const length = Math.max(size | 0, 0);
-                const asked = (result >>> 0) === 0 ? undefined
+                const asked = wholeAddress(result) === 0 ? undefined
                     : new DataView(host.readMemory(wholeAddress(result), 4).slice().buffer)
                         .getUint32(0, true);
-                const answer = (buffer >>> 0) === 0
+                const answer = wholeAddress(buffer) === 0
                     ? { unicode: false, passed: 0 }
                     : isTextUnicode(host.readMemory(wholeAddress(buffer), length).slice(), asked);
-                if ((result >>> 0) !== 0)
+                if (wholeAddress(result) !== 0)
                 {
                     const out = new Uint8Array(4);
                     new DataView(out.buffer).setUint32(0, answer.passed, true);
@@ -2480,7 +2480,7 @@ export function createRegistryFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, result])=>{
-                if ((result >>> 0) === 0)
+                if (wholeAddress(result) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -2500,13 +2500,15 @@ export function createRegistryFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([machine, handle, result])=>
-                connectRegistry(ANSI.read(machine >>> 0), handle >>> 0, result >>> 0),
+                connectRegistry(ANSI.read(wholeAddress(machine)), handle >>> 0,
+                    wholeAddress(result)),
         },
         RegConnectRegistryW: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([machine, handle, result])=>
-                connectRegistry(WIDE.read(machine >>> 0), handle >>> 0, result >>> 0),
+                connectRegistry(WIDE.read(wholeAddress(machine)), handle >>> 0,
+                    wholeAddress(result)),
         },
 
         /**
@@ -2531,25 +2533,25 @@ export function createRegistryFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, name, file])=>
-                loadKey(handle >>> 0, ANSI.read(name >>> 0), ANSI.read(file >>> 0)),
+                loadKey(handle >>> 0, ANSI.read(wholeAddress(name)), ANSI.read(wholeAddress(file))),
         },
         RegLoadKeyW: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, name, file])=>
-                loadKey(handle >>> 0, WIDE.read(name >>> 0), WIDE.read(file >>> 0)),
+                loadKey(handle >>> 0, WIDE.read(wholeAddress(name)), WIDE.read(wholeAddress(file))),
         },
 
         /** LONG RegUnLoadKeyA(HKEY, LPCSTR lpSubKey) */
         RegUnLoadKeyA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle, name])=>unloadKey(handle >>> 0, ANSI.read(name >>> 0)),
+            handler: ([handle, name])=>unloadKey(handle >>> 0, ANSI.read(wholeAddress(name))),
         },
         RegUnLoadKeyW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle, name])=>unloadKey(handle >>> 0, WIDE.read(name >>> 0)),
+            handler: ([handle, name])=>unloadKey(handle >>> 0, WIDE.read(wholeAddress(name))),
         },
 
         /**
@@ -2561,12 +2563,12 @@ export function createRegistryFunctions(host){
         RegLoadAppKeyA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([file, out])=>loadAppKey(ANSI.read(file >>> 0), out >>> 0),
+            handler: ([file, out])=>loadAppKey(ANSI.read(wholeAddress(file)), wholeAddress(out)),
         },
         RegLoadAppKeyW: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([file, out])=>loadAppKey(WIDE.read(file >>> 0), out >>> 0),
+            handler: ([file, out])=>loadAppKey(WIDE.read(wholeAddress(file)), wholeAddress(out)),
         },
 
         /**
@@ -2622,7 +2624,7 @@ export function createRegistryFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, subKey, newName])=>{
-                if ((subKey >>> 0) === 0 && (newName >>> 0) === 0)
+                if (wholeAddress(subKey) === 0 && wholeAddress(newName) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -2631,13 +2633,13 @@ export function createRegistryFunctions(host){
                 {
                     return ERROR_INVALID_HANDLE;
                 }
-                const named = (subKey >>> 0) === 0 ? key
+                const named = wholeAddress(subKey) === 0 ? key
                     : hive.open(key, readWideText(wholeAddress(subKey)) ?? '');
                 if (!named)
                 {
                     return ERROR_FILE_NOT_FOUND;
                 }
-                const to = (newName >>> 0) === 0 ? null : readWideText(wholeAddress(newName));
+                const to = wholeAddress(newName) === 0 ? null : readWideText(wholeAddress(newName));
                 if (!to || to.includes('\\'))
                 {
                     return ERROR_INVALID_PARAMETER;

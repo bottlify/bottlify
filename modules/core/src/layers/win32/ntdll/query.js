@@ -783,7 +783,7 @@ export function createQueryFunctions(host){
             /** @param {number[]} args */
             handler: ([address, out])=>{
                 const block = peb();
-                if (block === 0 || (out >>> 0) === 0)
+                if (block === 0 || wholeAddress(out) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
@@ -793,10 +793,10 @@ export function createQueryFunctions(host){
                     const base = readU32(entry + ENTRY.DLL_BASE);
                     if (wanted >= base && wanted - base < readU32(entry + ENTRY.SIZE_OF_IMAGE))
                     {
-                        writeU32If(out >>> 0, entry);
+                        writeU32If(wholeAddress(out), entry);
                         if (pointerBytes === 8)
                         {
-                            writeU32If((out >>> 0) + 4, 0);
+                            writeU32If(wholeAddress(out) + 4, 0);
                         }
                         return STATUS.SUCCESS;
                     }
@@ -929,8 +929,8 @@ export function createQueryFunctions(host){
                     // What the Toolhelp snapshot is built on. A process walker
                     // told the class is unknown concludes it is being kept from
                     // looking.
-                    const chain = systemProcessInformation(host.processes(), buffer >>> 0);
-                    writeU32If(returnLength >>> 0, chain.length);
+                    const chain = systemProcessInformation(host.processes(), wholeAddress(buffer));
+                    writeU32If(wholeAddress(returnLength), chain.length);
                     if ((length >>> 0) < chain.length || buffer === 0)
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
@@ -946,12 +946,12 @@ export function createQueryFunctions(host){
                     // fit: a caller allocates what it was told and asks again.
                     const table = systemHandleInformation(host.openHandles(),
                         host.processId ?? 0, addressOf, extended);
-                    writeU32If(returnLength >>> 0, table.length);
+                    writeU32If(wholeAddress(returnLength), table.length);
                     if ((length >>> 0) < table.length)
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    if ((buffer >>> 0) === 0)
+                    if (wholeAddress(buffer) === 0)
                     {
                         return STATUS.ACCESS_VIOLATION;
                     }
@@ -969,10 +969,10 @@ export function createQueryFunctions(host){
                         : other.exact ? given === bytes.length : given >= bytes.length;
                     if (!fits)
                     {
-                        writeU32If(returnLength >>> 0, other.partial ? 0 : bytes.length);
+                        writeU32If(wholeAddress(returnLength), other.partial ? 0 : bytes.length);
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
-                    if ((buffer >>> 0) === 0 && given !== 0)
+                    if (wholeAddress(buffer) === 0 && given !== 0)
                     {
                         return STATUS.ACCESS_VIOLATION;
                     }
@@ -981,7 +981,7 @@ export function createQueryFunctions(host){
                     {
                         host.writeMemory(wholeAddress(buffer), written);
                     }
-                    writeU32If(returnLength >>> 0, written.length);
+                    writeU32If(wholeAddress(returnLength), written.length);
                     return STATUS.SUCCESS;
                 }
                 // The emulated and the native views of the basic structure are
@@ -994,14 +994,14 @@ export function createQueryFunctions(host){
                 // right size with nowhere to go is the kernel's probe failing.
                 if ((length >>> 0) !== SYSTEM_BASIC.SIZE)
                 {
-                    writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
+                    writeU32If(wholeAddress(returnLength), SYSTEM_BASIC.SIZE);
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                writeU32If(returnLength >>> 0, SYSTEM_BASIC.SIZE);
+                writeU32If(wholeAddress(returnLength), SYSTEM_BASIC.SIZE);
 
                 const struct = new Uint8Array(SYSTEM_BASIC.SIZE);
                 const view = new DataView(struct.buffer);
@@ -1051,7 +1051,7 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.INFO_LENGTH_MISMATCH;
                 }
-                return (buffer >>> 0) === 0 ? STATUS.ACCESS_VIOLATION : STATUS.SUCCESS;
+                return wholeAddress(buffer) === 0 ? STATUS.ACCESS_VIOLATION : STATUS.SUCCESS;
             },
         },
 
@@ -1094,16 +1094,16 @@ export function createQueryFunctions(host){
                 if (DEBUG_CLASSES.has(wanted) && host.debugState)
                 {
                     return debugInformation(child && !child.current ? child : null, wanted,
-                        buffer >>> 0, length >>> 0, returnLength >>> 0);
+                        wholeAddress(buffer), length >>> 0, wholeAddress(returnLength));
                 }
                 if (child && !child.current)
                 {
-                    return childInformation(child, wanted, buffer >>> 0, length >>> 0,
-                        returnLength >>> 0);
+                    return childInformation(child, wanted, wholeAddress(buffer), length >>> 0,
+                        wholeAddress(returnLength));
                 }
                 if (wanted === PROCESS_BASIC_INFORMATION)
                 {
-                    writeU32If(returnLength >>> 0, PROCESS_BASIC.SIZE);
+                    writeU32If(wholeAddress(returnLength), PROCESS_BASIC.SIZE);
                     if ((length >>> 0) < PROCESS_BASIC.SIZE || buffer === 0)
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
@@ -1133,7 +1133,7 @@ export function createQueryFunctions(host){
                 {
                     // Without the debugger's record no debugger is known: the
                     // port is none, as it is for a process nothing debugs.
-                    writeU32If(returnLength >>> 0, 4);
+                    writeU32If(wholeAddress(returnLength), 4);
                     if ((length >>> 0) < 4 || buffer === 0)
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
@@ -1141,7 +1141,8 @@ export function createQueryFunctions(host){
                     // No debugger is attached, and that is the truth rather than
                     // an evasion: this is asked by code that means to behave
                     // differently under one, and it would find none.
-                    writeU32If(buffer >>> 0, wanted === PROCESS_EXECUTE_FLAGS ? EXECUTE_FLAGS : 0);
+                    writeU32If(wholeAddress(buffer),
+                        wanted === PROCESS_EXECUTE_FLAGS ? EXECUTE_FLAGS : 0);
                     return STATUS.SUCCESS;
                 }
                 const information = wanted === PROCESS_IMAGE_INFORMATION
@@ -1153,7 +1154,7 @@ export function createQueryFunctions(host){
                         return STATUS.INFO_LENGTH_MISMATCH;
                     }
                     host.writeMemory(wholeAddress(buffer), information);
-                    writeU32If(returnLength >>> 0, SECTION_IMAGE_INFORMATION_SIZE);
+                    writeU32If(wholeAddress(returnLength), SECTION_IMAGE_INFORMATION_SIZE);
                     return STATUS.SUCCESS;
                 }
                 if ((wanted === PROCESS_IMAGE_FILE_NAME || wanted === PROCESS_IMAGE_FILE_NAME_WIN32)
@@ -1161,7 +1162,8 @@ export function createQueryFunctions(host){
                 {
                     const paths = host.imagePath();
                     return writeName(wanted === PROCESS_IMAGE_FILE_NAME ? paths.native
-                        : paths.win32, buffer >>> 0, length >>> 0, returnLength >>> 0);
+                        : paths.win32, wholeAddress(buffer), length >>> 0,
+                    wholeAddress(returnLength));
                 }
                 return STATUS.INVALID_INFO_CLASS;
             },
@@ -1194,7 +1196,7 @@ export function createQueryFunctions(host){
                 {
                     return STATUS.UNSUCCESSFUL;
                 }
-                writeU32If(old >>> 0, readU32(teb + TEB.HARD_ERROR_MODE));
+                writeU32If(wholeAddress(old), readU32(teb + TEB.HARD_ERROR_MODE));
                 writeU32If(teb + TEB.HARD_ERROR_MODE, mode >>> 0);
                 return STATUS.SUCCESS;
             },
@@ -1214,12 +1216,12 @@ export function createQueryFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, infoClass])=>{
-                if ((infoClass >>> 0) === PROCESS_EXECUTE_FLAGS)
+                if (wholeAddress(infoClass) === PROCESS_EXECUTE_FLAGS)
                 {
                     return STATUS.ACCESS_DENIED;
                 }
                 host.divergence?.('NtSetInformationProcess',
-                    `information class ${infoClass >>> 0} is taken and ignored`);
+                    `information class ${wholeAddress(infoClass)} is taken and ignored`);
                 return STATUS.SUCCESS;
             },
         },
@@ -1242,8 +1244,8 @@ export function createQueryFunctions(host){
             handler: ([handle, infoClass, buffer, length, returnLength])=>{
                 if ((infoClass >>> 0) === OBJECT_TYPES_INFORMATION)
                 {
-                    const types = objectTypes(buffer >>> 0);
-                    writeU32If(returnLength >>> 0, types.length);
+                    const types = objectTypes(wholeAddress(buffer));
+                    writeU32If(wholeAddress(returnLength), types.length);
                     if ((length >>> 0) < types.length || buffer === 0)
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
@@ -1268,8 +1270,8 @@ export function createQueryFunctions(host){
                             `a ${kind} handle is no kernel object; its type is refused`);
                         return STATUS.INVALID_HANDLE;
                     }
-                    const struct = objectType(name, buffer >>> 0);
-                    writeU32If(returnLength >>> 0, struct.length);
+                    const struct = objectType(name, wholeAddress(buffer));
+                    writeU32If(wholeAddress(returnLength), struct.length);
                     if ((length >>> 0) < struct.length || buffer === 0)
                     {
                         return STATUS.INFO_LENGTH_MISMATCH;
@@ -1279,7 +1281,8 @@ export function createQueryFunctions(host){
                 }
                 if ((infoClass >>> 0) === OBJECT_NAME_INFORMATION && host.objectName)
                 {
-                    return objectNameOf(named, buffer >>> 0, length >>> 0, returnLength >>> 0);
+                    return objectNameOf(named, wholeAddress(buffer), length >>> 0,
+                        wholeAddress(returnLength));
                 }
                 if ((infoClass >>> 0) !== OBJECT_BASIC_INFORMATION)
                 {
@@ -1287,7 +1290,7 @@ export function createQueryFunctions(host){
                         `information class ${infoClass >>> 0} is refused`);
                     return STATUS.INVALID_INFO_CLASS;
                 }
-                writeU32If(returnLength >>> 0, OBJECT_BASIC.SIZE);
+                writeU32If(wholeAddress(returnLength), OBJECT_BASIC.SIZE);
                 if ((length >>> 0) < OBJECT_BASIC.SIZE || buffer === 0)
                 {
                     return STATUS.INFO_LENGTH_MISMATCH;

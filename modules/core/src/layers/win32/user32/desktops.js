@@ -751,14 +751,14 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((requested >>> 0) === 0 || (needed >>> 0) === 0)
+                if (wholeAddress(requested) === 0 || wholeAddress(needed) === 0)
                 {
                     return fail(ERROR_NOACCESS);
                 }
                 const bytes = userObjectSecurity(readU32(wholeAddress(requested)));
                 host.writeMemory(wholeAddress(needed),
                     new Uint8Array(new Uint32Array([bytes.length]).buffer));
-                if ((length >>> 0) < bytes.length || (into >>> 0) === 0)
+                if ((length >>> 0) < bytes.length || wholeAddress(into) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
@@ -810,7 +810,7 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, inherit])=>{
-                const found = (name >>> 0) === 0 ? null
+                const found = wholeAddress(name) === 0 ? null
                     : stationNamed(host.readCString(wholeAddress(name), MAX_NAME));
                 return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
             },
@@ -821,8 +821,8 @@ export function createDesktopFunctions({ host, topLevel, windowOf, toBottom }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, inherit])=>{
-                const found = (name >>> 0) === 0 ? null
-                    : stationNamed(readText(host, name >>> 0, true, MAX_NAME));
+                const found = wholeAddress(name) === 0 ? null
+                    : stationNamed(readText(host, wholeAddress(name), true, MAX_NAME));
                 return found ? open(found, inherit !== 0) : fail(ERROR_FILE_NOT_FOUND);
             },
         },

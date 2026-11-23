@@ -585,7 +585,7 @@ export function createStringFunctions(host, { A, W }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([strret, item, out])=>{
-                if ((out >>> 0) === 0 || !host.allocate)
+                if (wholeAddress(out) === 0 || !host.allocate)
                 {
                     return E_INVALIDARG;
                 }

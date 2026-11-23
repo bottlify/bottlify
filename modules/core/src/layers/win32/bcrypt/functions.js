@@ -247,7 +247,7 @@ export function createBcryptFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([enabled])=>{
-                if ((enabled >>> 0) === 0)
+                if (wholeAddress(enabled) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -267,7 +267,7 @@ export function createBcryptFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([out, id, , flags])=>{
-                if ((out >>> 0) === 0 || (id >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(id) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -374,7 +374,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -441,7 +441,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((length >>> 0) !== digestLength(held.algorithm) || (output >>> 0) === 0)
+                if ((length >>> 0) !== digestLength(held.algorithm) || wholeAddress(output) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -475,7 +475,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -503,7 +503,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((property >>> 0) === 0 || (input >>> 0) === 0)
+                if (wholeAddress(property) === 0 || wholeAddress(input) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -540,7 +540,7 @@ export function createBcryptFunctions(host){
                     return STATUS_INVALID_HANDLE;
                 }
                 const length = wholeAddress(secretLength);
-                if ((out >>> 0) === 0 || (secret >>> 0) === 0
+                if (wholeAddress(out) === 0 || wholeAddress(secret) === 0
                     || (length !== 16 && length !== 24 && length !== 32))
                 {
                     return STATUS_INVALID_PARAMETER;
@@ -567,7 +567,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -614,7 +614,8 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((out >>> 0) === 0 || (input >>> 0) === 0 || (type >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(input) === 0
+                    || wholeAddress(type) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -660,7 +661,7 @@ export function createBcryptFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                if ((type >>> 0) === 0 || (result >>> 0) === 0)
+                if (wholeAddress(type) === 0 || wholeAddress(result) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }
@@ -675,7 +676,7 @@ export function createBcryptFunctions(host){
                 view.setUint32(8, held.secret.length, true);
                 blob.set(held.secret, KEY_DATA_BLOB_HEADER);
                 putU32(wholeAddress(result), blob.length);
-                if ((output >>> 0) === 0)
+                if (wholeAddress(output) === 0)
                 {
                     return STATUS_SUCCESS;
                 }
@@ -744,7 +745,7 @@ export function createBcryptFunctions(host){
                 {
                     return system ? STATUS_INVALID_PARAMETER : STATUS_INVALID_HANDLE;
                 }
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     return STATUS_INVALID_PARAMETER;
                 }

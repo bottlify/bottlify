@@ -162,7 +162,7 @@ export function createDebugFunctions(host){
             argBytes: 4 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>{
-                const format = args[0] >>> 0;
+                const format = wholeAddress(args[0]);
                 if (format === 0)
                 {
                     return STATUS.SUCCESS;
@@ -217,12 +217,13 @@ export function createDebugFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([prefix, , , format, list])=>{
-                const lead = (prefix >>> 0) === 0 ? '' : host.readCString(wholeAddress(prefix),
-                    DBG_PRINT_LIMIT);
+                const lead =
+                    wholeAddress(prefix) === 0 ? '' : host.readCString(wholeAddress(prefix),
+                        DBG_PRINT_LIMIT);
                 const print = host.crt._snprintf;
                 const say = host.kernel32.OutputDebugStringA;
                 const buffer = host.allocate(DBG_PRINT_LIMIT + 1);
-                if (!print || !say || buffer === 0 || (format >>> 0) === 0)
+                if (!print || !say || buffer === 0 || wholeAddress(format) === 0)
                 {
                     return STATUS.SUCCESS;
                 }
@@ -248,11 +249,11 @@ export function createDebugFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([prompt, response, most])=>{
-                if ((prompt >>> 0) !== 0)
+                if (wholeAddress(prompt) !== 0)
                 {
                     host.kernel32.OutputDebugStringA?.handler([prompt]);
                 }
-                if ((response >>> 0) !== 0 && (most >>> 0) !== 0)
+                if (wholeAddress(response) !== 0 && (most >>> 0) !== 0)
                 {
                     host.writeMemory(wholeAddress(response), new Uint8Array(1));
                 }
