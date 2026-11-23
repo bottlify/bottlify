@@ -37,7 +37,7 @@ import { blockLayouts, createProcessBlocks } from './layers/win32/kernel32/teb.j
 import { DEBUG_EVENT } from './layers/win32/kernel32/debug-events.js';
 import { KUSER, KUSER_REGION, SHARED_USER_DATA, createSharedUserData, sharedPageAt }
     from './layers/win32/kernel32/shared-data.js';
-import { windowsVersion } from './layers/win32/kernel32/versions.js';
+import { windowsFor, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { KNOWN_ROUTINES } from './layers/win32/msvcrt/known-routines.js';
 import { graphicsChoice } from './layers/graphics/choice.js';
 
@@ -72,6 +72,7 @@ import { createSystemModules, shapeOf } from './process/system-modules.js';
 import { bindSidecar } from './process/sidecar.js';
 import { processesBeside } from './process/beside.js';
 import { processMemories } from './process/memories.js';
+import { compatibilityOf } from './process/image-resources.js';
 import { processSound } from './process/sound.js';
 import { classServers } from './process/servers.js';
 import { IDLE_LOOK_MS } from './process/run-waits.js';
@@ -3801,6 +3802,24 @@ export function wideWindowFor(image, hostMemory = 0){
 }
 
 /**
+ * The Windows `windows: 'auto'` runs a program on (`windowsFor`): read from its
+ * image, its manifest, its imports and its header; an image that is no PE (an
+ * MS-DOS or 16-bit program) names none, and runs on the default.
+ *
+ * @param {Uint8Array} executable
+ * @returns {ReturnType<typeof windowsFor>}
+ */
+function autoWindows(executable){
+    if (imageKind(executable)?.kind !== 'pe')
+    {
+        return windowsFor({ compatibility: {}, imports: [], bits: null });
+    }
+    const image = parsePe(executable, { wide: true });
+    return windowsFor({ compatibility: compatibilityOf(executable),
+        imports: readImports(executable, image).map(table=>table.dll), bits: image.bits });
+}
+
+/**
  * createApp — the consumer-facing entry point.
  *
  * One machine running at a time, and a process lifecycle over the top: when
@@ -3815,6 +3834,13 @@ export function wideWindowFor(image, hostMemory = 0){
  * @returns {Promise<any>} an AppController
  */
 export async function createApp(options){
+    // `auto`: the Windows the program was made for, chosen once for the whole
+    // run, so a process it starts runs on the same one.
+    const chosenWindows = options.windows === 'auto' ? autoWindows(options.executable) : null;
+    if (chosenWindows)
+    {
+        options = { ...options, windows: chosenWindows.windows };
+    }
     // Refused before anything is built: a machine made to the wrong Windows
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
@@ -3866,6 +3892,11 @@ export async function createApp(options){
     {
         events.emit('fallback', { ...options.fallback, mode: options.mode,
             concurrency: options.concurrency });
+    }
+    // The Windows `auto` chose, and why: what the program was made for.
+    if (chosenWindows)
+    {
+        events.emit('windows', chosenWindows);
     }
     /** @type {any[]} */
     const requested = [];

@@ -158,14 +158,18 @@
  *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
  *     storage outlives the process that made it, and is not something a caller
  *     supplies.
- * @property {'win2000' | 'winxp' | 'win7' | 'win10'} [windows]
+ * @property {'win2000' | 'winxp' | 'win7' | 'win10' | 'auto'} [windows]
  *     The Windows the machine is, a bottle's setting: 2000 SP4, XP SP3, 7 SP1
  *     or 10 (build 19045). Every place a program reads the version from agrees
  *     on it -- GetVersionEx, VerifyVersionInfo, the process block,
  *     RtlGetVersion, the registry, a system library's file version -- and so do
  *     the profile folders the registry, the shell and the environment name.
  *     Windows 10 tells a program whose manifest does not declare it 6.2, as
- *     the real one does. Default `winxp`; any other name is refused.
+ *     the real one does. `auto`: the Windows the program was made for, chosen
+ *     once for the whole run from its image (`windowsFor`): the newest its
+ *     manifest names, else its PE header's, 10 for one importing a library
+ *     only 8 and later have, at least 7 for a 64-bit one; a `windows` event
+ *     says which and why. Default `winxp`; any other name is refused.
  * @property {'x86' | 'amd64'} [machine]
  *     Whether the machine is a 32-bit or a 64-bit Windows. On a 64-bit one a
  *     32-bit process runs under WOW64 (IsWow64Process, GetNativeSystemInfo,
