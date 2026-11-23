@@ -27,6 +27,8 @@
  * to agree; the key's own characters would be a path.
  */
 
+import { frame, plain, unframe, unframeLater } from './record-frame.js';
+
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
 /**
  * A record's place in the records file: one stretch, or the stretches an `append` added to
@@ -112,7 +114,7 @@ const TOUCHES_WAIT_MS = 2000;
  * not read, so a change to the record naming or the files does not mix old
  * bytes into the new set. (The records' own version is the emitter's.)
  */
-export const STORE_VERSION = 3;
+export const STORE_VERSION = 4;
 
 /**
  * Where the records are written off the thread the store answers on -- the
@@ -1212,10 +1214,14 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         }
         try
         {
+            // A record's first piece carries its frame (`record-frame.js`), as it is:
+            // the pieces after it are read joined to it.
+            const piece = /** @type {Map<string, Place>} */ (places).has(recordName) ? bytes
+                : plain(bytes);
             const offset = end;
-            const { length } = bytes;
+            const { length } = piece;
             end += length;
-            await appendRecords([[offset, bytes]]);
+            await appendRecords([[offset, piece]]);
             const all = /** @type {Map<string, Place>} */ (places);
             const before = all.get(recordName);
             all.set(recordName, before === undefined ? { offset, length, session }
@@ -1249,11 +1255,17 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         }
         try
         {
+            // Compressed where that makes it smaller (`record-frame.js`).
+            const framed = await frame(bytes);
+            if (broken)
+            {
+                return;
+            }
             const offset = end;
             // Read first: a writer takes the bytes away.
-            const { length } = bytes;
+            const { length } = framed;
             end += length;
-            await appendRecords([[offset, bytes]]);
+            await appendRecords([[offset, framed]]);
             if (latestPut.get(recordName) !== turn)
             {
                 return;
@@ -1293,7 +1305,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             const place = use(key);
             try
             {
-                return place ? await readPlace(place) : null;
+                return place ? await unframeLater(await readPlace(place)) : null;
             }
             catch {
                 broken = true;
@@ -1323,7 +1335,8 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             const place = use(key);
             try
             {
-                return place ? readPieces(access, piecesOf(place)) : null;
+                const bytes = place ? readPieces(access, piecesOf(place)) : null;
+                return bytes === null ? null : unframe(bytes);
             }
             catch {
                 broken = true;
@@ -1530,7 +1543,15 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                     out.push([recordName, bytes]);
                 }
             }
-            return packSeed(select ? select(out) : out);
+            if (!select)
+            {
+                return packSeed(out);
+            }
+            // The choice is made by what the records say, the seed keeps them as stored.
+            const chosen = new Set(select(out.map(([recordName, bytes])=>
+                /** @type {[string, Uint8Array]} */ ([recordName,
+                    unframe(bytes) ?? new Uint8Array(0)]))).map(([recordName])=>recordName));
+            return packSeed(out.filter(([recordName])=>chosen.has(recordName)));
         },
         /**
          * Lets go of the records file's access handle, nothing else holding

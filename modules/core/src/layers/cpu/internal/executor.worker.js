@@ -20,6 +20,7 @@
 
 import { createCorkHost } from './cork-host.js';
 import { readPieces } from './translation-store.js';
+import { unframe } from './record-frame.js';
 import { startGcNudge } from './gc-nudge.js';
 import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
     from './executor-channel.js';
@@ -424,7 +425,8 @@ function bind(listen, send){
                 let bytes = null;
                 try
                 {
-                    bytes = readPieces(records, data.pieces);
+                    const framed = readPieces(records, data.pieces);
+                    bytes = framed === null ? null : unframe(framed);
                 }
                 catch {
                     // A read that fails is a miss: the region is formed here.
