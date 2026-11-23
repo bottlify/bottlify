@@ -164,6 +164,8 @@ const EMITTED = {
     // The same code: 174 is for a wide window's (its lane accesses as they are where the
     // engine reads them past 4 GiB, `wideLanes`).
     174: 'bc0029bcb0842fa4',
+    // rdtsc's import answers a double, truncated in the region: no BigInt a read.
+    175: 'e8b7c430989bf65f',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

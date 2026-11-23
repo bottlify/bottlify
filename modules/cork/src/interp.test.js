@@ -450,7 +450,7 @@ test('every machine\'s state and memory have one shape, whatever the machine', (
             const layout = ownLayout({ ramSize, hashSlots: 1 << 16 });
             const pages = pagesFor(layout, tablesSize(layout));
             const memory = new WebAssembly.Memory({ initial: pages });
-            return blockState(host ? { memory, layout, onCodeWrite: ()=>{}, rdtsc: ()=>0n }
+            return blockState(host ? { memory, layout, onCodeWrite: ()=>{}, rdtsc: ()=>0 }
                 : { memory, layout });
         });
         made[1].syncIn();

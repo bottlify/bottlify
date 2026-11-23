@@ -345,6 +345,9 @@ function join(worker, connection){
  * @param {(frame: { surface: any, frameIndex: number, source?: number }) => void}
  *     [options.presentTo]  where a frame goes, as the backend of this thread hands its
  *     own on, with the process that drew it where the worker was told
+ * @param {() => void} [options.framePlayed]  where this thread shows no frames (no
+ *     `presentTo`): told each time the worker has played one of its presents, where
+ *     its frame ends for the journal
  * @param {number} [options.source]  the process this connection's roots draw for: its
  *     frames say so, for the screen composed of every process's picture
  * @param {(address: number, bytes: Uint8Array) => void} [options.writeMemory]
@@ -368,8 +371,8 @@ function join(worker, connection){
  * @returns {GraphicsWorkerEnd}
  */
 export function connectGraphicsWorker(options){
-    const { worker, device, presentTo, writeMemory, sharedMemory, memoryGrown, adoptMemory,
-        divergence, lost,
+    const { worker, device, presentTo, framePlayed, writeMemory, sharedMemory, memoryGrown,
+        adoptMemory, divergence, lost,
         failed, lendMemory = true, source, maxFrameLatency } = options;
     /** Whether this thread may wait on the worker, which a lend's claim may have to. */
     let mayBlock = /** @type {boolean | null} */ (null);
@@ -543,6 +546,14 @@ export function connectGraphicsWorker(options){
                     adopted: (address, length)=>{
                         readBack.shared += length;
                         adoptMemory?.(address, length);
+                    },
+                    // Where this thread shows none of its frames (a process in
+                    // a worker of its own), a frame ends where it was played.
+                    presented: ()=>{
+                        if (!presentTo)
+                        {
+                            framePlayed?.();
+                        }
                     },
                     divergence, lost, failed,
                 },

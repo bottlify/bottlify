@@ -8225,3 +8225,38 @@ test('a 64-bit process\'s low-level hook structures hold dwExtraInfo on an eight
             [10, 20, 0x780000, 1, 99, 0, 0xfeed, 0]);
         assert.deepEqual(dwords(lowLevelLayout(13, keys, true)), [0x41, 0x1e, 0x10, 99, 0xfeed, 0]);
     });
+
+test('SetWindowPlacement keeps the normal place and shows the window as its showCmd says', ()=>{
+    // Windows places a window that is neither minimised nor maximised at the
+    // normal rectangle, keeps it as where a minimised one is restored to, and
+    // then shows the window with showCmd (Wine's WINPOS_SetPlacement): a game
+    // that took WS_VISIBLE out of its style and set a placement saying
+    // SW_SHOWNORMAL was left hidden, and its film unseen.
+    const SW_SHOWNORMAL = 1;
+    const SW_SHOWMINIMIZED = 2;
+    const PLACEMENT = 0x11200;
+    const { fns, memory, hwnd } = withWindow({ heap: true, style: 0x00cf0000 });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    const style = fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) >>> 0;
+    fns.SetWindowLongA.handler([hwnd, GWL_STYLE, (style & ~WS_VISIBLE) >>> 0]);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 0);
+    const place = (/** @type {number} */ show, /** @type {number[]} */ rect)=>{
+        memory.putU32s(PLACEMENT, [44, 0, show, 0, 0, 0, 0, ...rect]);
+        return fns.SetWindowPlacement.handler([hwnd, PLACEMENT]);
+    };
+    /** @returns {number[]} */
+    const rect = ()=>{
+        fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
+        return [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+    };
+    assert.equal(place(SW_SHOWNORMAL, [30, 40, 330, 240]), 1);
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1, 'shown, as SW_SHOWNORMAL says');
+    assert.deepEqual(rect(), [30, 40, 330, 240], 'at the normal place');
+
+    place(SW_SHOWMINIMIZED, [50, 60, 350, 260]);
+    assert.equal(fns.IsIconic.handler([hwnd]), 1, 'minimised, as SW_SHOWMINIMIZED says');
+    place(SW_SHOWMINIMIZED, [70, 80, 370, 280]);
+    place(SW_SHOWNORMAL, [70, 80, 370, 280]);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0);
+    assert.deepEqual(rect(), [70, 80, 370, 280], 'restored to the normal place it was given');
+});

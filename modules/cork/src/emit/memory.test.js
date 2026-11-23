@@ -771,7 +771,7 @@ function translateWith(m, entry){
     { env: { memory: m.memory } }).exports;
     const instance = new WebAssembly.Instance(new WebAssembly.Module(
         /** @type {Uint8Array<ArrayBuffer>} */ (builder.toBytes())),
-    { env: { memory: m.memory, ...mathImports(), ...helpers, rdtsc: ()=>0n } });
+    { env: { memory: m.memory, ...mathImports(), ...helpers, rdtsc: ()=>0 } });
     const fn = /** @type {Function} */ (instance.exports.region);
     return {
         translation,

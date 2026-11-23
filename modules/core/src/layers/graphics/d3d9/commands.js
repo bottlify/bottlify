@@ -78,10 +78,11 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS, ...TEXT
         { arg: 1, ranges: [[1, 0x3fffffff], [0x40000000, 0x7fffffff], [0x80000000, 0xbfffffff]] }],
     refusedWhen: { arg: 0, equals: 0, flagsOf: 1, mask: 0x80000000 },
     make: (d, c)=>d.SetStreamSourceFreq(c.arg(0), c.arg(1)) },
-    // The one target, of a surface made to be one; it resets the viewport, which the
-    // block mirrors from the surface's (`RENDER_TARGET_MIRROR`), and the scissor.
-    SetRenderTarget: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 0]] }],
-        surfaceUsage: { arg: 1, mask: D3DUSAGE_RENDERTARGET },
+    // Any of the four targets, of a surface made to be one or, past the first, none; the
+    // first resets the viewport, which the block mirrors from the surface's
+    // (`RENDER_TARGET_MIRROR`), and the scissor.
+    SetRenderTarget: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 3]] }],
+        surfaceUsage: { arg: 1, mask: D3DUSAGE_RENDERTARGET, nullable: true },
         make: (d, c)=>d.SetRenderTarget(c.arg(0), c.object()) },
     // A depth surface, or none.
     SetDepthStencilSurface: { args: 1, objects: [0],

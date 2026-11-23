@@ -863,7 +863,8 @@ export function emitInstruction(e, instruction, flagsLive){
             // The time-stamp counter, read through the host's import (the
             // host's clock): the low word to eax, the high word to edx.
             e.countMechanism(Mechanism.RDTSC);
-            b.call(e.context.rdtsc).localSet(Local.t64);
+            // i64.trunc_sat_f64_u: the host's count is a whole double.
+            b.call(e.context.rdtsc).op(0xfc, [0x07]).localSet(Local.t64);
             b.localGet(Local.t64).op(I64.wrap);
             writeReg(e, 0, 4, false);
             b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap);

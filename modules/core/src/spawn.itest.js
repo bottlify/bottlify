@@ -78,16 +78,14 @@ async function spawnOn(t){
         'child C:\\App\\spawn_child.exe', 'resumed 0',
         'box 0 spawn.exe {"code":0}',
     ], 'the game is over only when the parent is: a child ending with 0 is not it');
-    // Each child's sound is its own table, not the run's: built on the run's,
-    // a child was taken for the process in its parent's place and closed the
-    // parent's tracks, its music going silent at the first child.
+    // One device, one table: each child plays into slots of the run's, its
+    // mixer told it stands beside another (which leaves the parent's tracks
+    // open, mixer.test.js), and no table of its own reaches the speaker.
     const run = app.audio.memory();
     if (run && 'table' in run)
     {
-        assert.equal(tables.length, 2, 'a table for each child');
-        assert.ok(tables.every(one=>one.table !== run.table
-            && one.table instanceof SharedArrayBuffer));
-        assert.deepEqual(closed, tables.map(one=>one.id), 'and each given back as its child went');
+        assert.deepEqual(tables, [], 'no table of a child\'s own');
+        assert.deepEqual(closed, []);
     }
 }
 

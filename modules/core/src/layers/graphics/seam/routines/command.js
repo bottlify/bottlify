@@ -11,7 +11,7 @@
  * for the getters.
  */
 
-import { D3DFVF_RESERVED0 } from '../../d3d8/constants.js';
+import { D3DFMT_INDEX, D3DFVF_RESERVED0 } from '../../d3d8/constants.js';
 import {
     EAX, EBX, ECX, EDI, EDX, ESI, I386, argAt, blockAt, countAt, countLeft, dirtyPrologue, dword,
     highAt, letHeldGo, movePointerOf, pointerAt, prologue, restoreOf, retOf, routine, saveOf,
@@ -224,6 +224,10 @@ export const RECT_BYTES = 16;
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, of the type and count those
  *     arguments give, `stride` bytes each: at most `most` bytes
+ * @property {import('../../d3d8/commands.js').IndexedVertices} [indexedVertices]  or an
+ *     indexed draw's two copies: its indices, then from its first vertex as far as they may
+ *     reach (`indexedBytes`), both pointers made to point at their copies: at most `most`
+ *     bytes together
  * @property {boolean} [self]  the record's first argument is the object's own
  *     pointer -- a method of an object of the device's that is not the device
  * @property {boolean} [stale]  the call may change what the block mirrors
@@ -288,6 +292,82 @@ export const RECT_BYTES = 16;
  */
 
 /**
+ * EDX from a count of primitives of the type in EAX to the vertices they span
+ * (`vertexCountOf`); an unknown type goes to `out`. `tag` keeps the labels of
+ * two uses in one routine apart.
+ *
+ * @param {string} tag @param {import('./assemble.js').Width} width
+ * @returns {Part[]}
+ */
+const spannedOf = (tag, width)=>{
+    /** @type {[number, number[][]][]} */
+    const steps = [
+        [1, []],                                                 // POINTLIST: n
+        [2, [[0x01, 0xd2]]],                                     // LINELIST: add edx, edx
+        // LINESTRIP: inc edx - whose one byte is a prefix in a 64-bit process.
+        [3, [width.bits === 64 ? [0xff, 0xc2] : [0x42]]],
+        [4, [[0x8d, 0x14, 0x52]]],                               // TRIANGLELIST: lea edx, [edx*3]
+        [5, [[0x83, 0xc2, 0x02]]],                               // TRIANGLESTRIP: add edx, 2
+        [6, [[0x83, 0xc2, 0x02]]],                               // TRIANGLEFAN: add edx, 2
+    ];
+    return [
+        ...steps.flatMap(([type], index)=>[
+            [0x83, 0xf8, type],                                  // cmp eax, type
+            { jcc: 0x74, to: `${tag}type${index}` }]),           // je typeN
+        { jcc: 0xeb, to: 'out', near: true },                    // jmp out
+        ...steps.flatMap(([, step], index)=>[
+            { label: `${tag}type${index}` },
+            ...step,
+            { jcc: 0xeb, to: `${tag}spanned`, near: true }]),    // jmp spanned
+        { label: `${tag}spanned` },
+    ];
+};
+
+/**
+ * EDX: the bytes of an indexed draw's indices, of the type, count and format its
+ * arguments give - rounded up to a whole dword with `whole`, where the vertices start
+ * (`indexedBytes`). A format that is neither width goes to `out`, as an unknown type does
+ * (`spannedOf`): where the arguments were checked already, neither is ever taken.
+ *
+ * @param {import('../../d3d8/commands.js').IndexedVertices} indexed
+ * @param {(arg: number) => number} argIndex @param {number} pushed
+ * @param {string} tag @param {boolean} whole @param {import('./assemble.js').Width} width
+ * @returns {Part[]}
+ */
+const indexBytesOf = (indexed, argIndex, pushed, tag, whole, width)=>[
+    argAt([0x8b], EAX, argIndex(indexed.type), [], pushed),      // mov eax, [esp+type]
+    argAt([0x8b], EDX, argIndex(indexed.count), [], pushed),     // mov edx, [esp+count]
+    ...spannedOf(tag, width),
+    argAt([0x81], 7, argIndex(indexed.format), dword(D3DFMT_INDEX.INDEX16), pushed), // cmp
+    { jcc: 0x74, to: `${tag}narrow` },                           // je narrow
+    argAt([0x81], 7, argIndex(indexed.format), dword(D3DFMT_INDEX.INDEX32), pushed), // cmp
+    { jcc: 0x75, to: 'out', near: true },                        // jne out
+    [0xc1, 0xe2, 0x02],                                          // shl edx, 2
+    { jcc: 0xeb, to: `${tag}sized` },                            // jmp sized
+    { label: `${tag}narrow` },
+    [0x01, 0xd2],                                                // add edx, edx
+    ...(whole ? [
+        [0x83, 0xc2, 0x03],                                      // add edx, 3
+        [0x83, 0xe2, 0xfc],                                      // and edx, -4
+    ] : []),
+    { label: `${tag}sized` },
+];
+
+/**
+ * `reg` = the bytes of an indexed draw's vertices: its first vertex up to `minIndex` and
+ * `vertices` past it, `stride` bytes each - what its indices may reach.
+ *
+ * @param {import('../../d3d8/commands.js').IndexedVertices} indexed
+ * @param {number} reg @param {(arg: number) => number} argIndex @param {number} pushed
+ * @returns {Part[]}
+ */
+const vertexBytesOf = (indexed, reg, argIndex, pushed)=>[
+    argAt([0x8b], reg, argIndex(indexed.minIndex), [], pushed),  // mov reg, [esp+minIndex]
+    argAt([0x03], reg, argIndex(indexed.vertices), [], pushed),  // add reg, [esp+vertices]
+    argAt([0x0f, 0xaf], reg, argIndex(indexed.stride), [], pushed), // imul reg, [esp+stride]
+];
+
+/**
  * A call as guest code that writes it into the device's command ring for the
  * host to make at its next entry -- the arguments, and a copy of what a
  * pointer argument points at, with the pointer made to point at the copy.
@@ -344,6 +424,7 @@ export const RECT_BYTES = 16;
  */
 export function commandCode(at, trap, shape, width = I386){
     const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
+        indexedVertices: indexed,
         draws = false, thread = false, self = false, stale = false, staleDraws = false,
         nullable = false, fresh = false, rects = [] } = shape;
     if (rects.length > 0 && (pointer >= 0 || self || thread))
@@ -362,7 +443,7 @@ export function commandCode(at, trap, shape, width = I386){
     const recordLength = ragged
         ? [[0x8d, 0xb2, ...dword(header + 3)], [0x83, 0xe6, 0xfc]] // lea esi, [edx+h+3]; and -4
         : [[0x8d, 0xb2, ...dword(header)]];                    // lea esi, [edx+header]
-    if (self && (thread || count || choose || vertices || shape.fvfVertices))
+    if (self && (thread || count || choose || vertices || indexed || shape.fvfVertices))
     {
         throw new Error('shadow: a record of the object itself copies no more than a structure');
     }
@@ -500,16 +581,6 @@ export function commandCode(at, trap, shape, width = I386){
         // How many vertices the primitives span, by type (`vertexCountOf`),
         // times the stride: an unknown type, no primitives, a stride that is
         // not whole dwords or a copy past `most` bytes is the host's.
-        /** @type {[number, number[][]][]} */
-        const steps = [
-            [1, []],                                             // POINTLIST: n
-            [2, [[0x01, 0xd2]]],                                 // LINELIST: add edx, edx
-            // LINESTRIP: inc edx - whose one byte is a prefix in a 64-bit process.
-            [3, [width.bits === 64 ? [0xff, 0xc2] : [0x42]]],
-            [4, [[0x8d, 0x14, 0x52]]],                           // TRIANGLELIST: lea edx, [edx*3]
-            [5, [[0x83, 0xc2, 0x02]]],                           // TRIANGLESTRIP: add edx, 2
-            [6, [[0x83, 0xc2, 0x02]]],                           // TRIANGLEFAN: add edx, 2
-        ];
         parts.push(
             argAt([0x8b], EAX, argIndex(vertices.type)),            // mov eax, [esp+entry+4t]
             argAt([0x8b], EDX, argIndex(vertices.count)),           // mov edx, [esp+entry+4c]
@@ -517,15 +588,7 @@ export function commandCode(at, trap, shape, width = I386){
             { jcc: 0x74, to: 'out', near: true },                // jz out
             [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
             { jcc: 0x77, to: 'out', near: true },                // ja out
-            ...steps.flatMap(([type], index)=>[
-                [0x83, 0xf8, type],                              // cmp eax, type
-                { jcc: 0x74, to: `type${index}` }]),             // je typeN
-            { jcc: 0xeb, to: 'out', near: true },                // jmp out
-            ...steps.flatMap(([, step], index)=>[
-                { label: `type${index}` },
-                ...step,
-                { jcc: 0xeb, to: 'stride', near: true }]),       // jmp stride
-            { label: 'stride' },
+            ...spannedOf('', width),
             argAt([0x8b], EAX, argIndex(vertices.stride)),          // mov eax, [esp+entry+4s]
             [0xa8, 0x03],                                        // test al, 3
             { jcc: 0x75, to: 'out', near: true },                // jnz out
@@ -535,6 +598,44 @@ export function commandCode(at, trap, shape, width = I386){
             [0x85, 0xd2],                                        // test edx, edx
             { jcc: 0x74, to: 'out', near: true },                // jz out
             [0x81, 0xfa, ...dword(vertices.most)],               // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true });               // ja out
+    }
+    else if (indexed)
+    {
+        // Both pointers there; primitives, at most `most` of them, of a type there is; indices
+        // of either width; a stride of whole dwords; and the vertices the indices may reach
+        // and the indices together at most `most` bytes. Anything else is the host's.
+        const { most } = indexed;
+        parts.push(
+            pointerAt(EAX, argIndex(indexed.indices)),           // mov eax, [esp+indices]
+            testPointerOf(EAX),                                  // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            pointerAt(EAX, argIndex(indexed.data)),              // mov eax, [esp+data]
+            testPointerOf(EAX),                                  // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            argAt([0x83], 7, argIndex(indexed.count), [0x00]),   // cmp dword [esp+count], 0
+            { jcc: 0x74, to: 'out', near: true },                // je out
+            argAt([0x81], 7, argIndex(indexed.count), dword(most)), // cmp dword [esp+count], most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            ...indexBytesOf(indexed, argIndex, 0, 'indices', true, width),
+            argAt([0xf7], 0, argIndex(indexed.stride), dword(3)), // test dword [esp+stride], 3
+            { jcc: 0x75, to: 'out', near: true },                // jnz out
+            argAt([0x83], 7, argIndex(indexed.stride), [0x00]),  // cmp dword [esp+stride], 0
+            { jcc: 0x74, to: 'out', near: true },                // je out
+            argAt([0x81], 7, argIndex(indexed.stride), dword(most)), // cmp dword [esp+stride], most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            argAt([0x8b], EAX, argIndex(indexed.minIndex)),      // mov eax, [esp+minIndex]
+            argAt([0x03], EAX, argIndex(indexed.vertices)),      // add eax, [esp+vertices]
+            { jcc: 0x72, to: 'out', near: true },                // jc out
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x3d, ...dword(most)],                              // cmp eax, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            argAt([0x0f, 0xaf], EAX, argIndex(indexed.stride)),  // imul eax, [esp+stride]
+            [0x3d, ...dword(most)],                              // cmp eax, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            [0x01, 0xc2],                                        // add edx, eax
+            [0x81, 0xfa, ...dword(most)],                        // cmp edx, most
             { jcc: 0x77, to: 'out', near: true });               // ja out
     }
     else if (count)
@@ -610,6 +711,17 @@ export function commandCode(at, trap, shape, width = I386){
                 [0x8d, 0x87, ...dword(header + RECT_BYTES * rect)], // lea eax, [edi+copy]
                 { label: `noRect${rect}` });
         }
+        else if (indexed && arg === indexed.indices)
+        {
+            parts.push([0x8d, 0x87, ...dword(header)]);          // lea eax, [edi+header]
+        }
+        else if (indexed && arg === indexed.data)
+        {
+            // Past the indices, at the next whole dword.
+            parts.push(
+                ...indexBytesOf(indexed, argIndex, 3, 'at', true, width),
+                [0x8d, 0x84, 0x17, ...dword(header)]);           // lea eax, [edi+edx+header]
+        }
         else if (arg === pointer && nullable)
         {
             parts.push(
@@ -643,6 +755,28 @@ export function commandCode(at, trap, shape, width = I386){
             ] : []),
             [0x89, 0xc7],                                        // mov edi, eax
             ...recordLength);
+    }
+    if (indexed)
+    {
+        // The indices byte by byte, never read past; the vertices at the next whole dword;
+        // and the record's length again, which the copies took ESI from.
+        parts.push(
+            ...indexBytesOf(indexed, argIndex, 3, 'copy', false, width),
+            [0x89, 0xf8],                                        // mov eax, edi
+            pointerAt(ESI, argIndex(indexed.indices), 3),        // mov esi, [esp+indices]
+            [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
+            [0x89, 0xd1],                                        // mov ecx, edx
+            [0xf3, 0xa4],                                        // rep movsb
+            [0x83, 0xc2, 0x03],                                  // add edx, 3
+            [0x83, 0xe2, 0xfc],                                  // and edx, -4
+            [0x8d, 0xbc, 0x10, ...dword(header)],                // lea edi, [eax+edx+header]
+            pointerAt(ESI, argIndex(indexed.data), 3),           // mov esi, [esp+data]
+            ...vertexBytesOf(indexed, ECX, argIndex, 3),         // ecx = the vertices' bytes
+            [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
+            [0xf3, 0xa5],                                        // rep movsd
+            [0x89, 0xc7],                                        // mov edi, eax
+            ...vertexBytesOf(indexed, ESI, argIndex, 3),         // esi = the vertices' bytes
+            [0x8d, 0xb4, 0x16, ...dword(header)]);               // lea esi, [esi+edx+header]
     }
     rects.forEach((arg, rect)=>{
         parts.push(
@@ -857,7 +991,21 @@ export const renderTargetMirror = at=>Object.freeze([
     [0xc7, 0x81, ...dword(SHADOW.SCISSOR), ...dword(0)],         // left 0
     [0xc7, 0x81, ...dword(SHADOW.SCISSOR + 4), ...dword(0)],     // top 0
 ]);
-export const RENDER_TARGET_MIRROR = renderTargetMirror(2);
+/**
+ * Direct3D 9's SetRenderTarget, of any of the device's four targets: the first as
+ * `renderTargetMirror` keeps it, and only with a surface - none there is the host's to
+ * refuse; the others, with a surface or none, change nothing the block mirrors. A game that
+ * unset its second and third targets before every pass sent each to the host, which played
+ * the whole ring first.
+ */
+export const RENDER_TARGET_MIRROR = Object.freeze([
+    argAt([0x83], 7, 1, [0x00]),                                 // cmp dword [esp+8], 0: index
+    { jcc: 0x75, to: 'otherTarget', near: true },                // jne otherTarget
+    argAt([0x83], 7, 2, [0x00]),                                 // cmp dword [esp+12], 0
+    { jcc: 0x74, to: 'out', near: true },                        // je out: the first needs one
+    ...renderTargetMirror(2),
+    { label: 'otherTarget' },
+]);
 
 /** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
 const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
@@ -1179,6 +1327,8 @@ export const DRAWABLE_MIRRORS = Object.freeze({
     ]),
     /** A draw from the program's memory leaves stream zero unset; the indices stay. */
     DrawPrimitiveUP: Object.freeze([unmarkDrawable(DRAW.STREAM)]),
+    /** An indexed one leaves both unset, as the device does. */
+    DrawIndexedPrimitiveUP: Object.freeze([unmarkDrawable(DRAW.STREAM | DRAW.INDEXED)]),
 });
 
 /**

@@ -509,9 +509,12 @@ export function prepareModule(m, layout, features, memory = {},
             m.type({ params: [ValType.i32], results: [ValType.i32] }));
     // Imports come before the helpers, which are functions. The time-stamp
     // counter is the host's clock, so `rdtsc` needs no crossing and the
-    // interpreter and translated code read one counter.
+    // interpreter and translated code read one counter. Its count comes as a
+    // double, whole and below 2^53: an i64 result would be a BigInt the host
+    // makes for every rdtsc, and a program reading the counter in every frame's
+    // timing made the collector the engine thread's largest cost.
     const rdtsc = m.importFunction('env', 'rdtsc',
-        m.type({ params: [], results: [ValType.i64] }));
+        m.type({ params: [], results: [ValType.f64] }));
     // The transcendentals wasm has no operation for, as the host's Math.
     const unary = m.type({ params: [ValType.f64], results: [ValType.f64] });
     /** @type {Record<string, number>} the others' types, by name */

@@ -32,7 +32,7 @@
  * every bottle standing on the layer shares.
  *
  * @typedef {{ id: string, fetch: (offset: number, length: number) => Promise<Uint8Array>,
- *     store?: any, evictOthers?: boolean, prefetch?: boolean, preload?: boolean,
+ *     store?: any, evictOthers?: boolean, prefetch?: boolean, preload?: boolean, local?: boolean,
  *     progress?: (state: { bytes: number, total: number } | { unbacked: string }) => void,
  *     indexSha256?: string,
  *     retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number } }} BundleLayer
@@ -393,6 +393,9 @@
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
+ * @property {boolean} [bundle.local]  Whether `fetch` reads a file on this device: a
+ *           miss then costs no round trip, and a read waits for its own blocks
+ *           alone, the blocks around and ahead of them read behind it.
  * @property {any} [bundle.store]  Where fetched blocks are kept. `'local'` is
  *           the default and means this machine; a synchronous store of your own
  *           is used as given; anything falsy keeps nothing, and a block the

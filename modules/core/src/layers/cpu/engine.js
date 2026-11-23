@@ -156,7 +156,8 @@ export function engineContractProblem(engineModule, url){
  *     The trap port write. Answers 1 when the handler moved EIP, so the region goes on
  *     where it points through the entry hash, and 2 (`TRAP_END_TURN`) when the turn is to
  *     end there and the region leaves for the host.
- * @property {() => bigint} rdtsc      The time-stamp counter `rdtsc` reads: the host's clock.
+ * @property {() => number} rdtsc      The time-stamp counter `rdtsc` reads: the host's clock, a
+ *                                    whole count below 2^53.
  */
 
 /**
@@ -412,6 +413,9 @@ export function engineContractProblem(engineModule, url){
  *     whole of its buffer to the worker that writes it, and the caller's view of it is then
  *     empty. `needs` names the record this one's code is in (a region's batch module), which
  *     the store keeps as long as it keeps this one.
+ * @property {(key: string, bytes: Uint8Array) => Promise<void>} [append]  Adds the bytes to
+ *     the end of a record, or makes one of them; `get` reads it whole. A map a run adds to
+ *     (cork's blocks) is written by its additions, not whole at every flush. Optional.
  * @property {(key: string) => void} [touch]  Counts a record as used without reading it (a
  *     module whose instance the run holds already). Optional.
  * @property {() => any} [stats]  What the store holds and what its opening kept, for the
@@ -429,6 +433,11 @@ export function engineContractProblem(engineModule, url){
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
+ * @property {(key: string) => [number, number][] | null | undefined} [placeOf]  Where a record
+ *     is in the records file (`recordsFile`), its pieces, as `getNow` would read it: an
+ *     executor holding a handle of its own reads it there. Optional.
+ * @property {() => any} [recordsFile]  The records file a reader beside the store may open,
+ *     or null. Optional.
  * @property {(keys: string[]) => (Uint8Array | null)[] | undefined} [getManyNow]  Every
  *     record named, at once and in order, as `getNow` answers one: a store across a link
  *     answers a batch's names in one wait. Optional.

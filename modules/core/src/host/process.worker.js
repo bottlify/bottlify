@@ -185,6 +185,10 @@ export async function serveProcess(start){
         metrics: { error: message } }]);
     handlers.report = {
         diagnostics: ()=>(app ? plainTables() : null),
+        // The last frames its process presented, each with its phases: what a
+        // tool reads of a slow frame, from the worker that made it.
+        frames: (/** @type {number} */ count)=>(app ? plainOf(()=>app.log.frames(count),
+            ()=>null) : null),
         // Every process standing in this worker, its own first with the
         // worker's tables: a child started beside it here runs on this
         // thread, and a status of the worker alone says nothing of it.

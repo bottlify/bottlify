@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { logModule } from './module.js';
+import { createLogModule, logModule } from './module.js';
 
 /** @param {any} [config] */
 async function open(config){
@@ -190,4 +190,22 @@ test('diagnostics still answers for the live instance', async()=>{
     assert.equal(diagnostics.metrics?.journal.written, 1);
 
     await logModule.dispose();
+});
+
+test('a process given the run\'s profiler measures into it: one frame record, from the machine\'s'
+    + ' start', async()=>{
+    // A launcher's game, started beside it, presented into a profiler of its
+    // own: the run's frames read none, and each process's clock began at its
+    // own start. The output is the machine's, and so is what measures it.
+    let wall = 0;
+    const first = await createLogModule().create({ now: ()=>wall, wallClock: ()=>wall });
+    const second = await createLogModule().create({ now: ()=>wall, wallClock: ()=>wall,
+        journal: first.journal(), profiler: first.profiler() });
+    assert.equal(second.profiler(), first.profiler(), 'the run\'s, not a second one');
+    wall = 10;
+    second.beginFrame();
+    wall = 30;
+    second.endFrame();
+    assert.equal(first.frames(10).length, 1, 'the frame the second presented, read from the first');
+    assert.equal(first.frames(10)[0].startedAt, 10, 'on the run\'s clock');
 });

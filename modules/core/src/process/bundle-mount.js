@@ -885,7 +885,12 @@ export async function mountOneBundle({ spec, id, layer, events, translationStore
         const span = group.end - group.start;
         ranges.requests++;
         ranges.bytes += span;
-        const whole = await fetchRange(group.start, span, bytes=>{
+        // A file on this device is the only copy of the bottle: read again, a
+        // block is the same bytes, and nothing could bring a good one, so its
+        // blocks are taken as they are. Checked, a game whose files outgrew the
+        // block cache had the engine's thread computing the same blocks'
+        // checksums over and over while its reads waited.
+        const whole = await fetchRange(group.start, span, spec.local === true ? undefined : bytes=>{
             for (const block of group.blocks)
             {
                 const expected = bundle.block(block.index).crc;
@@ -979,14 +984,40 @@ export async function mountOneBundle({ spec, id, layer, events, translationStore
                 expected.shift();
             }
         }
-        const borrowed = [...new Set(reaching.map(block=>inFlight.get(block.index)))]
+        // A file on this device costs a miss no round trip: the read waits for its own
+        // blocks alone, read again rather than waited for inside a wider read under way,
+        // and what is around and ahead of them comes in behind it. Waited for, that was
+        // eight blocks for each one asked, and a game seeking through its films stood
+        // still for all of them at each.
+        const local = spec.local === true;
+        const asked = new Set(absent.map(block=>block.index));
+        const borrowed = local ? [] : [...new Set(reaching.map(block=>inFlight.get(block.index)))]
             .filter(promise=>promise !== undefined);
-        const own = reaching.filter(block=>!inFlight.has(block.index));
+        const own = local ? absent : reaching.filter(block=>!inFlight.has(block.index));
         waiting++;
         const request = inParallel(groupBlocks(own), MAX_CONCURRENT_REQUESTS, fetchGroup);
         for (const block of own)
         {
             inFlight.set(block.index, request);
+        }
+        const behind = local ? reaching.filter(block=>!asked.has(block.index)
+            && !inFlight.has(block.index)) : [];
+        if (behind.length > 0)
+        {
+            const filling = inParallel(groupBlocks(behind), MAX_CONCURRENT_REQUESTS, fetchGroup)
+                .catch(()=>{
+                    // Never asked for yet: a read that wants one fetches it then.
+                });
+            for (const block of behind)
+            {
+                inFlight.set(block.index, filling);
+            }
+            filling.finally(()=>{
+                for (const block of behind)
+                {
+                    inFlight.delete(block.index);
+                }
+            });
         }
         try
         {

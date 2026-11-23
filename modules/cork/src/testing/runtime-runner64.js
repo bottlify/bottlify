@@ -78,7 +78,7 @@ export function createRuntimeRunner64({ memory, ram, layout, low = undefined, co
                 current.trapped.push(value >>> 0);
                 return 0;
             },
-            rdtsc: ()=>0n,
+            rdtsc: ()=>0,
         },
     });
     const runtime = runtimeOf(layout);

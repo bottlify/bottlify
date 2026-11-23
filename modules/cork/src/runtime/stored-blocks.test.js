@@ -67,16 +67,14 @@ test('a record in the order a map put it is sorted as it is read, and an odd len
         keyOf(0x400000, 3));
 });
 
-test('blocks with more over them answer the newer owner, count only changes, and stay sorted', ()=>{
+test('a record with pieces appended to it reads as the map with the later owners over it', ()=>{
     for (const seed of [11, 12, 13])
     {
         const next = random(seed);
         const map = someBlocks(next, 1500);
-        const before = StoredBlocks.fromMap(map);
         const added = someBlocks(next, 300);
         // Some of them the same as stored, some stored blocks given another owner.
-        const kept = [...map].slice(0, 50);
-        for (const [block, owner] of kept)
+        for (const [block, owner] of [...map].slice(0, 50))
         {
             added.set(block, owner);
         }
@@ -84,15 +82,18 @@ test('blocks with more over them answer the newer owner, count only changes, and
         {
             added.set(block, keyOf(0x12345, 1));
         }
-        const { blocks, changed } = before.with(added);
+        const first = StoredBlocks.fromMap(map).bytes();
+        const piece = StoredBlocks.fromMap(added).bytes();
+        const record = new Uint8Array(first.length + piece.length);
+        record.set(first);
+        record.set(piece, first.length);
+        const blocks = StoredBlocks.fromBytes(record);
         const expected = new Map([...map, ...added]);
-        assert.equal(changed, [...added].filter(([block, owner])=>map.get(block) !== owner).length);
-        assert.equal(blocks.size, expected.size);
+        assert.equal(blocks.size, expected.size, `seed ${seed}: each block once`);
         assert.ok(blocks.sorted());
         for (const [block, owner] of expected)
         {
-            assert.equal(blocks.get(block), owner);
+            assert.equal(blocks.get(block), owner, `seed ${seed}: block ${block}`);
         }
-        assert.equal(before.with(new Map(kept)).blocks, before, 'nothing new is the same map');
     }
 });

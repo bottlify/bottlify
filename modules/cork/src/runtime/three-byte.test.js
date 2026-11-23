@@ -58,7 +58,7 @@ async function run(translate){
     const runtime = createCorkRuntime({
         memory, layout, config: { precise: true },
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
     });
     const code = Uint8Array.from(LOOP.match(/../g) ?? [], pair=>parseInt(pair, 16));
     bytes().set(code, layout.ramBase + CODE);

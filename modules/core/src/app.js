@@ -3910,6 +3910,8 @@ export async function createApp(options){
     let logSequence = 0;
     /** The journal every process of the run writes into; the first one's. @type {any} */
     let runJournal = null;
+    /** And the profiler every one measures its output with: the first one's. @type {any} */
+    let runProfiler = null;
     // The journal's own clock, one for the run. A process's guest clock is
     // not it: each machine has its own, a parent's stands still while the
     // child beside it runs, and a replacement's starts again from zero.
@@ -4066,6 +4068,7 @@ export async function createApp(options){
         system,
         log: {
             ...options.log, sequenceBase: logSequence, ...runJournal ? { journal: runJournal } : {},
+            ...runProfiler ? { profiler: runProfiler } : {},
             now: journalClock,
         },
         audio: { ...options.audio, memory: audioMemory },
@@ -4288,6 +4291,7 @@ export async function createApp(options){
     // beside it or in its place, writes there, and a reader of the facade's
     // log sees them all in one order on one clock.
     runJournal = current.log.journal?.() ?? null;
+    runProfiler = current.log.profiler?.() ?? null;
 
     // Read from the machine that made it, while it still stands, and handed to
     // every rebuild from here on.
@@ -4438,6 +4442,7 @@ export async function createApp(options){
      *
      * @type {Set<{ image: string, id: number, link: ReturnType<typeof import('./system/link.js').openLink>,
      *     diagnostics: () => Promise<any>,
+     *     frames: (count: number) => Promise<any[] | null>,
      *     standing: (journal: number) => Promise<{ image: string, diagnostics: any }[]
      *         | null> }>}
      */

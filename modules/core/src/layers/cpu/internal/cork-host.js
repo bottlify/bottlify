@@ -53,6 +53,8 @@ const REGISTERS64 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi', 'r8
  * clock's own ceiling on one credit, so the two never drift further apart.
  */
 const TSC_DRIFT_MS = 16;
+/** How many rdtscs in a row read the clocks once (`readTsc`). */
+const TSC_LOOK_EVERY = 8;
 
 /** The translator's page flag that closes a page (`PageFlag.INACCESSIBLE`). */
 const PAGE_INACCESSIBLE = 1;
@@ -217,15 +219,21 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  */
 
 /**
- * The words of the shared time-stamp counter (`CorkHostConfig.tsc`), each a BigInt64.
- * The guest's clock is in microseconds, -1 until the process publishes it.
+ * The words of the shared time-stamp counter (`CorkHostConfig.tsc`), 32 bits each, so
+ * that reading it makes no BigInt: a game reads the counter thousands of times a second.
+ * The guest's clock, in microseconds, is published by the process alone, its two words
+ * between two counts of `SEQUENCE` (odd while it writes); `GUEST_HIGH` is -1 until it
+ * is published. The last count any executor read is two words held under `LOCK`.
  */
-export const TscWord = Object.freeze({ GUEST_US: 0, LAST: 1 });
+export const TscWord = Object.freeze({ LOCK: 0, SEQUENCE: 1, GUEST_HIGH: 2, GUEST_LOW: 3,
+    LAST_HIGH: 4, LAST_LOW: 5 });
+const TSC_WORDS = 6;
+const WORD = 2 ** 32;
 
 /** @returns {SharedArrayBuffer} a shared time-stamp counter, the guest's clock not yet published */
 export function createTsc(){
-    const tsc = new SharedArrayBuffer(16);
-    new BigInt64Array(tsc)[TscWord.GUEST_US] = -1n;
+    const tsc = new SharedArrayBuffer(TSC_WORDS * 4);
+    new Int32Array(tsc)[TscWord.GUEST_HIGH] = -1;
     return tsc;
 }
 
@@ -1049,7 +1057,7 @@ export function createCorkHost(config){
     // that long.
     const tscBase = virtualClock ? 0 : now();
     const TICKS_PER_MS = CORK_TSC_MHZ * 1000;
-    const tscWords = tsc === undefined ? null : new BigInt64Array(tsc);
+    const tscWords = tsc === undefined ? null : new Int32Array(tsc);
     /** @type {(() => number) | null} milliseconds of guest time */
     let guestClock = null;
     /** @returns {number | null} milliseconds of guest time, if any is given or published */
@@ -1058,33 +1066,59 @@ export function createCorkHost(config){
         {
             return guestClock();
         }
-        const us = tscWords === null ? -1n : Atomics.load(tscWords, TscWord.GUEST_US);
-        return us < 0n ? null : Number(us) / 1000;
+        if (tscWords === null)
+        {
+            return null;
+        }
+        for (;;)
+        {
+            const before = Atomics.load(tscWords, TscWord.SEQUENCE);
+            const high = Atomics.load(tscWords, TscWord.GUEST_HIGH);
+            const low = Atomics.load(tscWords, TscWord.GUEST_LOW);
+            if ((before & 1) === 0 && Atomics.load(tscWords, TscWord.SEQUENCE) === before)
+            {
+                return high < 0 ? null : (high * WORD + (low >>> 0)) / 1000;
+            }
+        }
     };
     let guestMs = 0;
     let guestMovedAt = 0;
     let lastTsc = 0;
-    /** @param {number} ticks @returns {bigint} the count read: past every count read before */
+    /** @param {number} ticks @returns {number} the count read: past every count read before */
     const later = ticks=>{
         if (tscWords === null)
         {
             lastTsc = Math.max(lastTsc + 1, ticks);
-            return BigInt(lastTsc);
+            return lastTsc;
         }
-        const wanted = BigInt(ticks);
-        let seen = Atomics.load(tscWords, TscWord.LAST);
-        for (;;)
+        // Held for a read and a write: every executor's count goes past the last.
+        while (Atomics.compareExchange(tscWords, TscWord.LOCK, 0, 1) !== 0)
         {
-            const next = wanted > seen ? wanted : seen + 1n;
-            const was = Atomics.compareExchange(tscWords, TscWord.LAST, seen, next);
-            if (was === seen)
-            {
-                return next;
-            }
-            seen = was;
+            // Another executor is between its read and its write.
         }
+        const seen = tscWords[TscWord.LAST_HIGH] * WORD + (tscWords[TscWord.LAST_LOW] >>> 0);
+        const next = ticks > seen ? ticks : seen + 1;
+        tscWords[TscWord.LAST_HIGH] = Math.floor(next / WORD);
+        tscWords[TscWord.LAST_LOW] = next % WORD;
+        Atomics.store(tscWords, TscWord.LOCK, 0);
+        return next;
     };
+    /**
+     * The rdtscs read since the clocks were last read. A game reads the
+     * counter in every loop that waits on time, and two reads of the page's
+     * clock a time were a seventh of the engine thread; the clock moves in
+     * 5 us steps on an isolated page, so reads in a row mostly found it where
+     * it was and gave the last count and one. The clocks are read at a slice's
+     * first rdtsc and every TSC_LOOK_EVERY after; between, the count goes on by
+     * one, as it did when the clock had not moved.
+     */
+    let tscLooks = 0;
+    let tscTicks = 0;
     const readTsc = ()=>{
+        if (tscLooks++ % TSC_LOOK_EVERY !== 0)
+        {
+            return later(tscTicks);
+        }
         const at = now();
         let ticks = (at - tscBase) * TICKS_PER_MS;
         const ms = guestNow();
@@ -1097,9 +1131,10 @@ export function createCorkHost(config){
             }
             ticks = (guestMs + Math.min(at - guestMovedAt, TSC_DRIFT_MS)) * TICKS_PER_MS;
         }
-        return later(Math.floor(ticks));
+        tscTicks = Math.floor(ticks);
+        return later(tscTicks);
     };
-    const ports = createPorts(()=>Number(readTsc()) / TICKS_PER_MS);
+    const ports = createPorts(()=>readTsc() / TICKS_PER_MS);
     // A slow slice's account of itself reads the clock around every range the
     // interpreter runs -- a tenth of a crossing's cost -- so only a run that
     // asked for the translator's timings keeps one, and a production bundle
@@ -1949,6 +1984,8 @@ export function createCorkHost(config){
         let jumpedIn = false;
         // An ask the handler put off: the guest runs on to its next back edge first.
         let putOff = false;
+        // Each slice's first rdtsc reads the clocks (`readTsc`).
+        tscLooks = 0;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
             if (!putOff && interrupted())
@@ -2841,7 +2878,11 @@ export function createCorkHost(config){
     host.publishGuestClock = ()=>{
         if (tscWords !== null && guestClock !== null)
         {
-            Atomics.store(tscWords, TscWord.GUEST_US, BigInt(Math.round(guestClock() * 1000)));
+            const us = Math.round(guestClock() * 1000);
+            Atomics.add(tscWords, TscWord.SEQUENCE, 1);
+            Atomics.store(tscWords, TscWord.GUEST_HIGH, Math.floor(us / WORD));
+            Atomics.store(tscWords, TscWord.GUEST_LOW, us % WORD);
+            Atomics.add(tscWords, TscWord.SEQUENCE, 1);
         }
     };
     // The record a region left is folded into the flags word first, the same

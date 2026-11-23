@@ -73,6 +73,8 @@ export function storeHandlers(store){
             get: key=>store.get(key),
             /** @param {string} key @param {Uint8Array} bytes @param {{ needs?: string }} [options] */
             put: (key, bytes, options)=>store.put(key, bytes, options),
+            /** @param {string} key @param {Uint8Array} bytes */
+            append: (key, bytes)=>store.append?.(key, bytes),
             /** @param {string} key */
             touch: key=>store.touch?.(key),
         },
@@ -196,6 +198,10 @@ export function remoteStore(link, agent = undefined){
         put: async(key, bytes, options)=>{
             link.call('put', options === undefined ? [key, bytes] : [key, bytes, options])
                 .catch(()=>{});
+        },
+        /** @param {string} key @param {Uint8Array} bytes */
+        append: async(key, bytes)=>{
+            link.call('append', [key, bytes]).catch(()=>{});
         },
         /** @param {string} key */
         touch: key=>{

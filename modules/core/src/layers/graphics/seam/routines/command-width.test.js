@@ -26,7 +26,8 @@ import { commandCode } from './command.js';
 import { COMMANDS, commandSlot } from '../../d3d9/commands.js';
 import { DRAW, FLAG_SLOW_PATH, HELD_HOST, SHADOW } from '../block.js';
 import {
-    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR,
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, RENDER_TARGET_MIRROR, TRANSFORM_MIRROR,
+    VIEWPORT_GUARD_9, VIEWPORT_MIRROR,
 } from './command.js';
 
 const TRAP = 0x180000;
@@ -48,6 +49,8 @@ const MIRRORS = {
     SetIndices: DRAWABLE_MIRRORS.SetIndices,
     SetTransform: TRANSFORM_MIRROR,
     SetViewport: [...VIEWPORT_GUARD_9, ...VIEWPORT_MIRROR],
+    DrawIndexedPrimitiveUP: DRAWABLE_MIRRORS.DrawIndexedPrimitiveUP,
+    SetRenderTarget: RENDER_TARGET_MIRROR,
 };
 
 /** @param {string} name @param {import('./assemble.js').Width} [width] */
@@ -122,7 +125,9 @@ const both = (name, args, { state, high = -1, far = -1 } = {})=>{
     // A pointer comes whole, its upper half zero; any other argument's upper
     // half is the convention's to leave undefined, a pattern here.
     const shape = COMMANDS[name];
-    const pointers = new Set([...shape.objects ?? [], shape.pointer ?? -1]);
+    const pointers = new Set([...shape.objects ?? [], shape.pointer ?? -1,
+        ...shape.indexedVertices ? [shape.indexedVertices.indices, shape.indexedVertices.data]
+            : []]);
     const call = callLong(m64, CODE_64, { returnTo: RETURN, args: [BigInt(THIS), ...args.map(
         (word, i)=>(i + 1 === high ? BigInt(word >>> 0) | 1n << 32n
             : i + 1 === far ? BigInt(HIGH_64 + word)
@@ -179,6 +184,13 @@ const TAKEN = [
     ['SetVertexShader', [OBJECT]],
     ['SetTransform', [2, DATA]],
     ['SetViewport', [DATA]],
+    // An odd count of 16-bit indices, the vertices at the next whole dword; and 32-bit ones
+    // from a lowest index past the first vertex.
+    ['DrawIndexedPrimitiveUP', [4, 0, 3, 1, DATA, 101, DATA + 64, 16]],
+    ['DrawIndexedPrimitiveUP', [5, 2, 4, 2, DATA, 102, DATA + 64, 12]],
+    // The targets past the first unset, as a game does before every pass.
+    ['SetRenderTarget', [1, 0]],
+    ['SetRenderTarget', [3, 0]],
 ];
 
 for (const [name, args] of TAKEN)
@@ -207,6 +219,17 @@ const LEFT = [
     ['a null pointer', 'SetVertexShaderConstantF', [0, 0, 1], {}],
     ['a draw out of a scene', 'DrawIndexedPrimitive', [4, 0, 0, 3, 0, 1],
         { state: { drawable: DRAW.DECLARED | DRAW.STREAM | DRAW.INDEXED } }],
+    ['a type there is not', 'DrawIndexedPrimitiveUP', [9, 0, 3, 1, DATA, 101, DATA + 64, 16],
+        {}],
+    ['no indices', 'DrawIndexedPrimitiveUP', [4, 0, 3, 1, 0, 101, DATA + 64, 16], {}],
+    ['an index format there is not', 'DrawIndexedPrimitiveUP',
+        [4, 0, 3, 1, DATA, 21, DATA + 64, 16], {}],
+    ['a stride of no whole dwords', 'DrawIndexedPrimitiveUP',
+        [4, 0, 3, 1, DATA, 101, DATA + 64, 10], {}],
+    ['more than a record copies', 'DrawIndexedPrimitiveUP',
+        [4, 0, 3000, 1, DATA, 101, DATA + 64, 16], {}],
+    ['the first target unset', 'SetRenderTarget', [0, 0], {}],
+    ['a fifth target', 'SetRenderTarget', [4, 0], {}],
 ];
 
 for (const [why, name, args, given] of LEFT)
@@ -242,6 +265,8 @@ for (const [name, args, pointer] of /** @type {[string, number[], number][]} */ 
     ['SetPixelShaderConstantF', [0, DATA + 16, 1], 2],
     ['SetTransform', [2, DATA], 2],
     ['SetViewport', [DATA], 1],
+    ['DrawIndexedPrimitiveUP', [4, 0, 3, 1, DATA, 101, DATA + 64, 16], 5],
+    ['DrawIndexedPrimitiveUP', [4, 0, 3, 1, DATA, 101, DATA + 64, 16], 7],
 ]))
 {
     test(`${name} at 64 bits copies what a pointer past 4 GiB points at`, ifRoom(()=>{

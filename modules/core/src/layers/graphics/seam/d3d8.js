@@ -116,6 +116,7 @@ export const COMMAND_MIRRORS = {
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource8],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+    DrawIndexedPrimitiveUP: [...DRAWABLE_MIRRORS.DrawIndexedPrimitiveUP],
     // The target is the first argument, the depth surface the second.
     SetRenderTarget: [...renderTargetMirror(1), ...depthStencilMirror(2)],
     CopyRects: [...COPY_GUARD_8],

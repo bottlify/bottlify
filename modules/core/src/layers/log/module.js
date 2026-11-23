@@ -49,6 +49,9 @@ const UNBALANCED = 1;
 
 /** What `profile` answers with no profiler to ask: a closed machine, or a production bundle. */
 const noProfile = ()=>({
+    // Said, not left to the zeros below: a meter reading them took a build
+    // that records no frames for a run that drew none.
+    notMeasured: 'no frame record: the build has no diagnostics (a diagnostic build keeps one)',
     frames: 0,
     unbalanced: 0,
     imbalances: [],
@@ -168,14 +171,20 @@ export function createLogModule(){
             // whole milliseconds: a phase entered tens of thousands of times reads
             // as a column of zeroes and ones, which is a distribution rather than a
             // measurement, and the short phases are exactly the ones it ruins.
-            const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false && tables ? createProfiler({
-                now: config?.wallClock ?? (typeof performance === 'undefined'
-                    ? ()=>Date.now()
-                    : ()=>performance.now()),
-                frames: config?.frames,
-                tables,
-                intern: journal.intern,
-            }) : null;
+            //
+            // A profiler handed in is the run's, as the journal is: what is measured
+            // is the output - the frames and the sound the machine gives - and a
+            // launcher's game, started beside it, presents into the one the run
+            // began with, its clock from the machine's start, not the process's.
+            const profiler = config?.profiler
+                ?? (import.meta.BOTTLIFY_DIAGNOSTICS !== false && tables ? createProfiler({
+                    now: config?.wallClock ?? (typeof performance === 'undefined'
+                        ? ()=>Date.now()
+                        : ()=>performance.now()),
+                    frames: config?.frames,
+                    tables,
+                    intern: journal.intern,
+                }) : null);
             state.profiler = profiler;
             registry.onFrame(()=>{
                 own[REJECTED] = journal.rejected();
@@ -265,6 +274,8 @@ export function createLogModule(){
                 enabled: (category, level)=>live() && journal.enabled(category, level),
                 /** The journal itself, for a machine built beside this one to write into. */
                 journal: ()=>journal,
+                /** The profiler this log measures with: the run's, for the next process. */
+                profiler: ()=>profiler,
                 /** Moves with every level change: an `enabled` answer holds until it does. */
                 revision: ()=>(live() ? journal.revision() : -1),
                 /**

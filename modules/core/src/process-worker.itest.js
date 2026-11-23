@@ -256,6 +256,57 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
             `and the run showed what came back: ${shown.count} of ${frames.length}`);
     });
 
+test('a tool reads the frames of a program in a worker of its own from that worker',
+    { timeout: 120000 }, async t=>{
+        // A program in a worker of its own keeps its frames, and their phases,
+        // in its worker's journal: read from the run's thread, they were the
+        // system's, and a slow frame of a game said nothing.
+        const gpu = createFakeDevice();
+        Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+            createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
+        const thread = new Worker(new URL('../../../tools/fixtures/fake-graphics-worker.mjs',
+            import.meta.url));
+        t.after(()=>thread.terminate());
+        thread.postMessage({ type: 'open', frames: 'pixels' });
+        /** @type {Map<Function, (data: any) => void>} */
+        const listeners = new Map();
+        const worker = {
+            postMessage: (/** @type {any} */ message, /** @type {any} */ transfer)=>
+                thread.postMessage(message, transfer),
+            addEventListener: (/** @type {string} */ _type, /** @type {Function} */ listener)=>{
+                const relay = (/** @type {any} */ data)=>listener({ data });
+                listeners.set(listener, relay);
+                thread.on('message', relay);
+            },
+            removeEventListener: (/** @type {string} */ _type, /** @type {Function} */ listener)=>{
+                thread.off('message', /** @type {any} */ (listeners.get(listener)));
+            },
+        };
+        const app = await createApp({
+            executable: texturedFrames(400),
+            imagePath: 'C:\\a.exe',
+            concurrency: 2,
+            cork: /** @type {any} */ ({ config: { sharedMemory: true } }),
+            device: { device: gpu.device, queue: gpu.queue, screen: gpu.screen,
+                canvas: gpu.canvas, adapter: { vendor: 'fake', architecture: '',
+                    description: 'a stand-in' }, worker },
+        });
+        t.after(()=>app.dispose());
+        let most = 0;
+        const looking = setInterval(async()=>{
+            for (const one of await app.debug.processes())
+            {
+                const frames = await Promise.resolve(app.debug.framesOf(one.id, 50))
+                    .catch(()=>null);
+                most = Math.max(most, Array.isArray(frames) ? frames.length : 0);
+            }
+        }, 25);
+        t.after(()=>clearInterval(looking));
+        assert.equal(await app.run({ timeoutMs: 90_000 }), 0);
+        clearInterval(looking);
+        assert.ok(most > 0, 'its frames were read while it ran');
+    });
+
 test('a child in a worker of its own is sent the page\'s input while it stands',
     { timeout: 120000 }, async t=>{
         // A window, then GetMessageA until a WM_KEYDOWN; ExitProcess(its virtual key).

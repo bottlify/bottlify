@@ -541,11 +541,13 @@ test('an instruction the emitter leaves out ends the run at its address, state i
 });
 
 test('rdtsc reads the host\'s counter into edx:eax', ()=>{
-    const m = createTestMachine({ rdtsc: ()=>0x123456789abcdef0n });
+    // A whole count below 2^53, with both words' top bits set: the high word
+    // whole, the low word unsigned.
+    const m = createTestMachine({ rdtsc: ()=>0x1f_ffff_fedc_ba98 });
     m.write(CODE, [0x0f, 0x31, 0xf4]); // rdtsc; hlt
     assert.equal(m.runProgram(CODE).kind, 3);
-    assert.equal(m.reg('eax'), 0x9abcdef0);
-    assert.equal(m.reg('edx'), 0x12345678);
+    assert.equal(m.reg('eax'), 0xfedcba98);
+    assert.equal(m.reg('edx'), 0x1fffff);
 });
 
 test('cpuid answers the leaves cpuid.js lists and zero for the rest', ()=>{

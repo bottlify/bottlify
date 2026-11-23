@@ -2124,7 +2124,7 @@ test('with guest memory, a device\'s setters and draws run in the guest, and its
         'SetTextureStageState', 'GetTextureStageState', 'SetMaterial', 'SetSamplerState',
         'SetTexture', 'SetStreamSource', 'SetVertexDeclaration', 'SetIndices', 'SetVertexShader',
         'SetPixelShader', 'SetFVF', 'SetVertexShaderConstantF', 'DrawPrimitive',
-        'DrawIndexedPrimitive', 'DrawPrimitiveUP'])
+        'DrawIndexedPrimitive', 'DrawPrimitiveUP', 'DrawIndexedPrimitiveUP'])
     {
         assert.ok(guest(name), `${name} runs in the guest`);
     }

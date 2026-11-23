@@ -76,7 +76,7 @@ const signOf = size=>1n << BigInt(size * 8 - 1);
  * @property {X87State} [x87]  the x87 unit, where the state holds it itself
  * @property {() => X87State} [loadX87]  else the unit as the state's block holds it
  * @property {(unit: X87State) => void} [storeX87]  written back after an x87 instruction
- * @property {() => bigint} [rdtsc]
+ * @property {() => number} [rdtsc]  a whole count below 2^53
  * @property {{ processors?: number, processor?: number }} [layout]
  * @property {number} [processor]
  */
@@ -804,7 +804,7 @@ export function evaluate64(instruction, state){
         }
         case 'rdtsc':
         {
-            const value = state.rdtsc ? state.rdtsc() : 0n;
+            const value = BigInt(state.rdtsc ? state.rdtsc() : 0);
             setRegister(state, 0, 4, value & 0xffffffffn);
             setRegister(state, 2, 4, value >> 32n & 0xffffffffn);
             break;

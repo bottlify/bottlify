@@ -566,9 +566,19 @@ export function createScheduler(options){
     // Nor is a suspended one. Suspension is a count beside the state rather
     // than a state of its own: a thread suspended in the middle of a wait is
     // still in that wait, with its deadline, and has to come back to it.
-    const ready = ()=>threads.filter(thread=>
-        thread.state === ThreadState.READY && !thread.awaitingHost
-        && !(thread.suspendCount > 0));
+    /** @param {any} thread */
+    const isReady = thread=>thread.state === ThreadState.READY && !thread.awaitingHost
+        && !(thread.suspendCount > 0);
+    const ready = ()=>threads.filter(isReady);
+    /** How many are ready, counted: asked at every turn, where a list was garbage. */
+    const readyNumber = ()=>{
+        let count = 0;
+        for (const thread of threads)
+        {
+            count += isReady(thread) ? 1 : 0;
+        }
+        return count;
+    };
 
     /**
      * How many threads are ready to run with no executor running them, as last
@@ -584,7 +594,7 @@ export function createScheduler(options){
         {
             return;
         }
-        const count = ready().length;
+        const count = readyNumber();
         if (count !== readyTold)
         {
             readyTold = count;
@@ -1046,7 +1056,16 @@ export function createScheduler(options){
      */
     const placed = new Map();
     /** Whether `thread` runs on one of the other executors now. @param {any} thread */
-    const placedElsewhere = thread=>[...placed.values()].some(on=>on.thread === thread);
+    const placedElsewhere = thread=>{
+        for (const on of placed.values())
+        {
+            if (on.thread === thread)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
     /** The processor time every slice of the process has taken, in milliseconds. */
     let cpuMs = 0;
     /** Slices run on the other executors, and the most threads running at once, this one's included. */
@@ -1086,11 +1105,29 @@ export function createScheduler(options){
 
     /**
      * The last threads placed on another executor, each with its calls into the
-     * host a hundred thousand instructions when it went (`?`: not yet measured).
+     * host a hundred thousand instructions when it went (`?`: not yet measured),
+     * and the processors traded: a ring written over in turn, said when asked.
      *
-     * @type {string[]}
+     * @type {{ name: string, index: number, rate: number, seen: boolean,
+     *     trade: string | null }[]}
      */
-    const recentPlacements = [];
+    const placementRing = Array.from({ length: 16 },
+        ()=>({ name: '', index: 0, rate: 0, seen: false, trade: /** @type {string | null} */ (null) }));
+    let placementAt = 0;
+    /** @returns {string[]} the ring, oldest first */
+    const recentPlacements = ()=>{
+        /** @type {string[]} */
+        const said = [];
+        for (let back = Math.min(placementAt, placementRing.length); back > 0; back--)
+        {
+            const record = placementRing[(placementAt - back) % placementRing.length];
+            said.push(record.trade ?? `${record.name}>${record.index} x${(record.rate * 100_000)
+                .toFixed(1)}${record.seen ? '' : '?'}`);
+        }
+        return said;
+    };
+    /** `note`'s words for a placement on each executor, made once. @type {string[]} */
+    const runsOn = [];
     /**
      * The runs elsewhere this executor called back, each with what its thread
      * retired there, what this one retired meanwhile, and whether the two were
@@ -1260,11 +1297,9 @@ export function createScheduler(options){
             played[index] === index ? undefined : played[index]);
         tradeWanted = -1;
         trades++;
-        recentPlacements.push(`processor ${played[0]} here, ${here} on e${index}`);
-        if (recentPlacements.length > 16)
-        {
-            recentPlacements.shift();
-        }
+        const record = placementRing[placementAt++ % placementRing.length];
+        record.name = '';
+        record.trade = `processor ${played[0]} here, ${here} on e${index}`;
         return true;
     };
 
@@ -1449,22 +1484,51 @@ export function createScheduler(options){
      * ended -- it spins in the park loop until the slice is taken -- and must
      * not start a second time elsewhere meanwhile.
      */
-    const runnable = ()=>{
-        // Asked at every turn: the few placed walked, not copied into a set.
-        if (placed.size === 0)
+    const runnable = (/** @type {any[]} */ into = [])=>{
+        // Asked at every turn: into a list the caller keeps, the few placed
+        // walked, nothing copied.
+        into.length = 0;
+        for (const thread of threads)
         {
-            return ready();
-        }
-        return ready().filter(thread=>{
-            for (const on of placed.values())
+            if (thread.state === ThreadState.READY && !thread.awaitingHost
+                && !(thread.suspendCount > 0) && !placedElsewhere(thread))
             {
-                if (on.thread === thread)
-                {
-                    return false;
-                }
+                into.push(thread);
             }
-            return true;
-        });
+        }
+        return into;
+    };
+    /** Whether a thread runs on another executor and may run here too. */
+    const placedMayRunHere = ()=>{
+        for (const on of placed.values())
+        {
+            if (allowedOn(on.thread, 0))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+    /** `choose`'s lists, kept: it runs at every turn. @type {any[]} */
+    const chosenCandidates = [];
+    /** @type {any[]} */
+    const chosenFree = [];
+    /** @type {any[]} */
+    const chosenWaiting = [];
+    /** Threads going to their own executors this turn, and those executors. @type {any[]} */
+    const goingThreads = [];
+    /** @type {any[]} */
+    const goingRemotes = [];
+    /** The first of `free` `thread` may run on, or -1. @param {any[]} free @param {any} thread */
+    const freeFor = (free, thread)=>{
+        for (let at = 0; at < free.length; at++)
+        {
+            if (allowedOn(thread, free[at].index))
+            {
+                return at;
+            }
+        }
+        return -1;
     };
 
     /**
@@ -1525,7 +1589,7 @@ export function createScheduler(options){
             watchStack(next);
             from = cpu.eip?.() ?? 0;
         });
-        note(next, `runs on executor ${remote.index}`);
+        note(next, runsOn[remote.index] ??= `runs on executor ${remote.index}`);
         const began = wall();
         const taken = takenAt.get(remote);
         if (taken !== undefined)
@@ -1536,12 +1600,14 @@ export function createScheduler(options){
         }
         startsRunning(next);
         placed.set(remote, { thread: next, began, from, hereFrom: sharedTime.hereRetired });
-        recentPlacements.push(`${next.name}>${remote.index} x${(next.crossRate * 100_000)
-            .toFixed(1)}${next.crossSeen ? '' : '?'}`);
-        if (recentPlacements.length > 16)
-        {
-            recentPlacements.shift();
-        }
+        // Kept as it was and said only when a report asks: a placement is made
+        // thousands of times a second, and a string a time was garbage to collect.
+        const record = placementRing[placementAt++ % placementRing.length];
+        record.name = next.name;
+        record.index = remote.index;
+        record.rate = next.crossRate;
+        record.seen = next.crossSeen === true;
+        record.trade = null;
         remote.start(quantum);
         executorSlices++;
         mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
@@ -1554,6 +1620,48 @@ export function createScheduler(options){
         {
             crossingsUnclocked = 0;
             options.refreshClock?.();
+        }
+    };
+
+    /** What `answerExecutors` answers: one record, read by its caller at once. */
+    const answeredTurn = { ran: /** @type {any} */ (null), instructions: 0 };
+    /** The placement whose crossing `answerCrossing` answers. @type {any} */
+    let answeringOn = null;
+    /** The thread and slice the processor had while another's crossing is answered. */
+    const heldProcessor = { thread: /** @type {any} */ (null), inSlice: false };
+    /**
+     * A crossing of the thread on another executor (`answeringOn`), answered
+     * with it as the current thread. One function for every crossing, not a
+     * closure made for each executor at each answer.
+     *
+     * @param {() => void} reply
+     */
+    const answerCrossing = reply=>{
+        const on = answeringOn;
+        sharedTime.crossings++;
+        on.thread.crossings++;
+        clockCrossing();
+        const was = current;
+        const wasInSlice = inSlice;
+        if (wasInSlice)
+        {
+            sharedTime.crossingsInTurn++;
+        }
+        heldProcessor.thread = was;
+        heldProcessor.inSlice = wasInSlice;
+        onProcessor = heldProcessor;
+        current = on.thread;
+        inSlice = true;
+        try
+        {
+            reply();
+        }
+        finally
+        {
+            onProcessor = null;
+            heldProcessor.thread = null;
+            inSlice = wasInSlice;
+            current = was;
         }
     };
 
@@ -1570,7 +1678,9 @@ export function createScheduler(options){
     const answerExecutors = ()=>{
         if (answering || placed.size === 0)
         {
-            return { ran: null, instructions: 0 };
+            answeredTurn.ran = null;
+            answeredTurn.instructions = 0;
+            return answeredTurn;
         }
         answering = true;
         // What is said from here on is owed an answer (`awaitedBy`).
@@ -1585,30 +1695,8 @@ export function createScheduler(options){
         {
             for (const [remote, on] of placed)
             {
-                const ended = remote.step((/** @type {() => void} */ reply)=>{
-                    sharedTime.crossings++;
-                    on.thread.crossings++;
-                    clockCrossing();
-                    const was = current;
-                    const wasInSlice = inSlice;
-                    if (wasInSlice)
-                    {
-                        sharedTime.crossingsInTurn++;
-                    }
-                    onProcessor = { thread: was, inSlice: wasInSlice };
-                    current = on.thread;
-                    inSlice = true;
-                    try
-                    {
-                        reply();
-                    }
-                    finally
-                    {
-                        onProcessor = null;
-                        inSlice = wasInSlice;
-                        current = was;
-                    }
-                });
+                answeringOn = on;
+                const ended = remote.step(answerCrossing);
                 if (ended === null)
                 {
                     continue;
@@ -1685,7 +1773,9 @@ export function createScheduler(options){
                 }
             }
         }
-        return { ran, instructions };
+        answeredTurn.ran = ran;
+        answeredTurn.instructions = instructions;
+        return answeredTurn;
     };
 
     /**
@@ -1853,30 +1943,47 @@ export function createScheduler(options){
      */
     const choose = (remotes, bell)=>{
         awaitingExecutor = false;
-        let candidates = runnable();
+        const candidates = runnable(chosenCandidates);
         // One whose processor this executor is about to play takes nothing new.
-        const free = remotes.filter(remote=>!remote.busy() && remote.index !== tradeWanted);
+        const free = chosenFree;
+        free.length = 0;
+        for (const remote of remotes)
+        {
+            if (!remote.busy() && remote.index !== tradeWanted)
+            {
+                free.push(remote);
+            }
+        }
         /** @type {any} */
         let here = null;
-        /** @type {any[]} */
-        const waiting = [];
-        /** Threads going to their own executors this turn, placed once the turn is decided. @type {[any, any][]} */
-        const going = [];
+        const waiting = chosenWaiting;
+        waiting.length = 0;
+        goingThreads.length = 0;
+        goingRemotes.length = 0;
         while (candidates.length > 0 && (here === null || free.length > 0))
         {
             const next = pick(candidates);
-            // A fresh list (`runnable`): the one taken goes from it in place.
+            // A list of this turn's (`runnable`): the one taken goes from it in place.
             candidates.splice(candidates.indexOf(next), 1);
             const home = keptHere(next) ? 0 : homeOf(next, remotes);
-            const remote = free.find(one=>one.index === home);
+            let remoteAt = -1;
+            for (let at = 0; at < free.length; at++)
+            {
+                if (free[at].index === home)
+                {
+                    remoteAt = at;
+                    break;
+                }
+            }
             if (home === 0 && here === null)
             {
                 here = next;
             }
-            else if (remote !== undefined)
+            else if (remoteAt >= 0)
             {
-                free.splice(free.indexOf(remote), 1);
-                going.push([remote, next]);
+                goingRemotes.push(free[remoteAt]);
+                goingThreads.push(next);
+                free.splice(remoteAt, 1);
             }
             else
             {
@@ -1889,17 +1996,21 @@ export function createScheduler(options){
         // host crossing over, while this one waited (a tenth slower on two).
         if (here === null && waiting.length === 0)
         {
-            const at = going.findIndex(([, thread])=>allowedOn(thread, 0));
-            if (at >= 0)
+            for (let at = 0; at < goingThreads.length; at++)
             {
-                here = going[at][1];
-                free.push(going[at][0]);
-                going.splice(at, 1);
+                if (allowedOn(goingThreads[at], 0))
+                {
+                    here = goingThreads[at];
+                    free.push(goingRemotes[at]);
+                    goingThreads.splice(at, 1);
+                    goingRemotes.splice(at, 1);
+                    break;
+                }
             }
         }
-        for (const [remote, next] of going)
+        for (let at = 0; at < goingThreads.length; at++)
         {
-            place(remote, next);
+            place(goingRemotes[at], goingThreads[at]);
         }
         for (const next of waiting)
         {
@@ -1908,12 +2019,29 @@ export function createScheduler(options){
                 here = next;
                 continue;
             }
+            // One that outranks the thread taken here runs here instead, as
+            // Windows runs the highest priority thread ready: a game's sound
+            // thread, homed on an executor its renderer held, waited 40 to 900
+            // ms while this one ran a thread below it, and its buffer ran dry.
+            // The one it displaces goes where it may run, or waits its turn.
+            if (here !== null && !keptHere(here) && allowedOn(next, 0)
+                && absolutePriority(next.priority) > absolutePriority(here.priority))
+            {
+                const at = freeFor(free, here);
+                if (at >= 0)
+                {
+                    const remote = free[at];
+                    free.splice(at, 1);
+                    place(remote, here);
+                }
+                here = next;
+                continue;
+            }
             // One bound to the host takes this executor's turn from one that
             // computes, which goes where it would have, or waits for its turn here.
             if (keptHere(next))
             {
-                const at = here === null || keptHere(here) ? -1
-                    : free.findIndex(one=>allowedOn(here, one.index));
+                const at = here === null || keptHere(here) ? -1 : freeFor(free, here);
                 if (at >= 0)
                 {
                     place(free.splice(at, 1)[0], here);
@@ -1921,10 +2049,12 @@ export function createScheduler(options){
                 }
                 continue;
             }
-            const at = free.findIndex(one=>allowedOn(next, one.index));
+            const at = freeFor(free, next);
             if (at >= 0)
             {
-                place(free.splice(at, 1)[0], next);
+                const remote = free[at];
+                free.splice(at, 1);
+                place(remote, next);
                 continue;
             }
             // One that may run only here takes this executor's turn from one
@@ -1932,7 +2062,7 @@ export function createScheduler(options){
             // main thread, pinned to the first processor, waited for a thread
             // at priority 15 to end its turn here while the other executor idled.
             const there = here === null || keptHere(here) || !allowedOn(next, 0) ? -1
-                : free.findIndex(one=>allowedOn(here, one.index));
+                : freeFor(free, here);
             if (there >= 0)
             {
                 place(free.splice(there, 1)[0], here);
@@ -1946,10 +2076,24 @@ export function createScheduler(options){
         // Ready threads left without an executor: as many more opened, as the
         // process has (`wantExecutors`); until they open they take turns. One
         // bound to the host waits for this executor and wants no other.
-        const unplaced = candidates.filter(thread=>!keptHere(thread)).length
-            + waiting.filter(thread=>thread !== here && !keptHere(thread)
-                && thread.state === ThreadState.READY
-                && !placedElsewhere(thread)).length;
+        let unplaced = 0;
+        let left = false;
+        for (const thread of candidates)
+        {
+            if (!keptHere(thread))
+            {
+                unplaced++;
+                left = true;
+            }
+        }
+        for (const thread of waiting)
+        {
+            if (thread !== here && !keptHere(thread) && thread.state === ThreadState.READY)
+            {
+                left = true;
+                unplaced += placedElsewhere(thread) ? 0 : 1;
+            }
+        }
         if (unplaced > 0)
         {
             cpu.wantExecutors?.(remotes.length + unplaced);
@@ -1961,11 +2105,14 @@ export function createScheduler(options){
         // translated for the layout every other executor shares (a fifth
         // slower than this one's own) and its calls into the host crossing over.
         let recall = false;
-        if (here === null && [...placed.values()].some(on=>allowedOn(on.thread, 0)))
+        if (here === null && placedMayRunHere())
         {
             idleSince = idleSince < 0 ? wall() : idleSince;
-            const handsOff = [...placed.values()].some(on=>
-                wall() - (on.thread.wokeHereAt ?? -Infinity) < HANDOFF_MS);
+            let handsOff = false;
+            for (const on of placed.values())
+            {
+                handsOff ||= wall() - (on.thread.wokeHereAt ?? -Infinity) < HANDOFF_MS;
+            }
             recall = wall() - idleSince >= (handsOff ? RECALL_MS : IDLE_RECALL_MS);
             if (recall)
             {
@@ -1986,12 +2133,12 @@ export function createScheduler(options){
         // its thread up at its turn's end (`hold`): the one taken here is not
         // left, it runs this turn, still ready until it does; one bound to the
         // host waits for this executor, not for them.
-        const wanted = recall || tradeWanted >= 0 || [...placed.values()].some(on=>
-            on.thread.state !== ThreadState.RUNNING || on.thread.suspendCount > 0
-            || keptHere(on.thread));
-        const left = candidates.some(thread=>!keptHere(thread))
-            || waiting.some(thread=>thread !== here && !keptHere(thread)
-                && thread.state === ThreadState.READY);
+        let wanted = recall || tradeWanted >= 0;
+        for (const on of placed.values())
+        {
+            wanted ||= on.thread.state !== ThreadState.RUNNING || on.thread.suspendCount > 0
+                || keptHere(on.thread);
+        }
         if (wanted || left && bell.hold === undefined)
         {
             bell.goOn?.(false);
@@ -2380,7 +2527,7 @@ export function createScheduler(options){
         cpuMs: ()=>cpuMs,
 
         /** How many threads are ready to run with no executor running them. */
-        readyCount: ()=>ready().length,
+        readyCount: readyNumber,
 
         /**
          * The processor `thread` reads as its own: the one played by the
@@ -2988,7 +3135,7 @@ export function createScheduler(options){
                 // Slices given to the process's other executors, and the most
                 // that ran at once: zero and zero where it has one.
                 executorSlices,
-                recentPlacements: [...recentPlacements],
+                recentPlacements: recentPlacements(),
                 mostAtOnce,
                 sharedTime: JSON.stringify(sharedTime),
                 placement: JSON.stringify({ way: concentrated ? 'concentrate' : 'spread' }),

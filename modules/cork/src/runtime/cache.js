@@ -29,7 +29,7 @@
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 174;
+export const CACHE_VERSION = 175;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -230,7 +230,7 @@ export function seedRecords(records, nameOf){
  * keep translations across starts.
  *
  * @returns {import('../../../core/src/layers/cpu/engine.js').TranslationStore
- *     & { size: () => number }}
+ *     & { size: () => number, append: (key: string, bytes: Uint8Array) => Promise<void> }}
  */
 export function memoryTranslationStore(){
     /** @type {Map<string, Uint8Array>} */
@@ -239,6 +239,14 @@ export function memoryTranslationStore(){
         get: async key=>records.get(key) ?? null,
         put: async(key, bytes)=>{
             records.set(key, bytes);
+        },
+        /** @param {string} key @param {Uint8Array} bytes */
+        append: async(key, bytes)=>{
+            const before = records.get(key);
+            const whole = new Uint8Array((before?.length ?? 0) + bytes.length);
+            whole.set(before ?? new Uint8Array(0));
+            whole.set(bytes, before?.length ?? 0);
+            records.set(key, whole);
         },
         size: ()=>records.size,
     };

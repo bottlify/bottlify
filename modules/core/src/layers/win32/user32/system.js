@@ -4625,7 +4625,13 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             },
         },
 
-        /** BOOL SetWindowPlacement(HWND hWnd, const WINDOWPLACEMENT *lpwndpl) */
+        /**
+         * BOOL SetWindowPlacement(HWND hWnd, const WINDOWPLACEMENT *lpwndpl)
+         *
+         * The normal rectangle is where the window is restored to; one neither
+         * minimised nor maximised goes there at once. Then the window is shown
+         * as showCmd says (Wine's WINPOS_SetPlacement).
+         */
         SetWindowPlacement: {
             argBytes: 8,
             /** @param {number[]} args */
@@ -4636,18 +4642,19 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 const bounds = readRect(host, placement + WINDOWPLACEMENT.rcNormalPosition);
-                if ((record.style & WS_MAXIMIZE) !== 0)
+                const normal = { x: bounds.left, y: bounds.top,
+                    width: bounds.right - bounds.left, height: bounds.bottom - bounds.top };
+                if ((record.style & (WS_MAXIMIZE | WS_MINIMIZE)) !== 0)
                 {
-                    record.normalPlace = { x: bounds.left, y: bounds.top,
-                        width: bounds.right - bounds.left, height: bounds.bottom - bounds.top };
-                    return 1;
+                    record.normalPlace = normal;
                 }
-                record.x = bounds.left;
-                record.y = bounds.top;
-                record.width = bounds.right - bounds.left;
-                record.height = bounds.bottom - bounds.top;
-                host.tell?.(record);
-                return 1;
+                else
+                {
+                    Object.assign(record, normal);
+                    host.tell?.(record);
+                }
+                const showCmd = readU32(placement + WINDOWPLACEMENT.showCmd);
+                return andThen(host.showWindow(record, showCmd, host.callerThread?.()), ()=>1);
             },
         },
 

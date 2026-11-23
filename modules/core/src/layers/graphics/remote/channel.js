@@ -142,6 +142,7 @@ export function crossable(value, depth = 0){
  * @property {(api: string, detail: string, severity?: 'loss') => void} [divergence]
  * @property {() => void} [lost]
  * @property {(message: string) => void} [failed]
+ * @property {(count: number) => void} [presented]  the played side played this many presents
  */
 
 /**
@@ -460,6 +461,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     {
                         /** @type {{ release: () => void }} */ (held.shift()).release();
                     }
+                    on.presented?.(presented);
                     break;
                 case 'wrote':
                     for (const { address, bytes, length } of message.writes)

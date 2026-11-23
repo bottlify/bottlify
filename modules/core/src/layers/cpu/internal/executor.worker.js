@@ -19,6 +19,7 @@
  */
 
 import { createCorkHost } from './cork-host.js';
+import { readPieces } from './translation-store.js';
 import { startGcNudge } from './gc-nudge.js';
 import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
     from './executor-channel.js';
@@ -105,11 +106,19 @@ let waits = null;
 /** The store's answers awaited, by the ask's id. @type {Map<number, (bytes: Uint8Array | null) => void>} */
 const storeAnswers = new Map();
 let storeAsks = 0;
+/**
+ * This executor's own handle on the store's records file, beside the store's: a lookup is
+ * then answered with where the record is (`placeOf`) and read here, not on the process's
+ * thread. Null until the process hands the file, or where the browser keeps it to one handle.
+ * @type {any}
+ */
+let records = null;
 
 /**
  * The run's translation store as this executor reaches it: through the
- * process, which holds it -- a directory store's records file takes one
- * handle, the process's. A lookup is answered on the process's event loop,
+ * process, which holds it and its index. Where the executor holds a handle of
+ * its own on the records file (`records`), the process names where a record
+ * is and the executor reads it. A lookup is answered on the process's event loop,
  * a turn or a few later, and the runtime interprets meanwhile as it does
  * while any store answers late; a record goes and is not waited on.
  *
@@ -123,7 +132,7 @@ function processStore(send){
         get: key=>new Promise(resolve=>{
             const id = ++storeAsks;
             storeAnswers.set(id, resolve);
-            send({ type: 'store', id, method: 'get', key });
+            send({ type: 'store', id, method: 'get', key, place: records !== null });
         }),
         put(key, bytes, options){
             // The bytes are the store's from the call on (`TranslationStore`):
@@ -132,6 +141,10 @@ function processStore(send){
                 && bytes.buffer instanceof ArrayBuffer;
             send({ type: 'store', method: 'put', key, bytes, options },
                 whole ? [bytes.buffer] : []);
+            return Promise.resolve();
+        },
+        append(key, bytes){
+            send({ type: 'store', method: 'append', key, bytes });
             return Promise.resolve();
         },
         touch: key=>send({ type: 'store', method: 'touch', key }),
@@ -404,8 +417,32 @@ function bind(listen, send){
         }
         else if (data?.type === 'store')
         {
-            storeAnswers.get(data.id)?.(data.bytes ?? null);
+            const answer = storeAnswers.get(data.id);
             storeAnswers.delete(data.id);
+            if (Array.isArray(data.pieces) && records !== null)
+            {
+                let bytes = null;
+                try
+                {
+                    bytes = readPieces(records, data.pieces);
+                }
+                catch {
+                    // A read that fails is a miss: the region is formed here.
+                }
+                answer?.(bytes);
+            }
+            else
+            {
+                answer?.(data.pieces === null ? null : data.bytes ?? null);
+            }
+        }
+        else if (data?.type === 'records')
+        {
+            data.file.createSyncAccessHandle({ mode: 'readwrite-unsafe' }).then((/** @type {any} */ handle)=>{
+                records = handle;
+            }, ()=>{
+                // One handle a file in this browser: the process reads for it, as before.
+            });
         }
         else if (data?.type === 'translator')
         {

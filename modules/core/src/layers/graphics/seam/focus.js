@@ -539,6 +539,12 @@ export function createFocusWindows({ user32, procedure, cover, states, currentTh
                     madeOn.add(one.window);
                     const raise = how.created && (again ?? hidden);
                     return inTurn([
+                        // A window minimised has no taskbar to be restored from
+                        // here: the device taking the screen restores it, as
+                        // regaining the activation does (decision A87).
+                        ()=>(call('IsIconic', [one.window]) !== 0
+                            ? filtered(one.focus, ()=>call('ShowWindow', [one.window, SW_RESTORE]))
+                            : 0),
                         ()=>filtered(one.focus, ()=>call('SetWindowPos', [one.window,
                             raise ? HWND_TOPMOST : 0, 0, 0, how.width, how.height, SWP_NOACTIVATE
                             | (raise ? SWP_SHOWWINDOW : SWP_NOZORDER)])),

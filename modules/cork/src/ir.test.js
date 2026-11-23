@@ -413,10 +413,10 @@ test('cpuid and rdtsc answer without a crossing', ()=>{
     assert.equal(m.state.reg[0], 0); // rdtsc after cpuid, no counter given
     assert.equal(m.state.reg[2], 0);
     const clocked = run([0x0f, 0x31], state=>{
-        state.rdtsc = ()=>0x123456789abcdef0n;
+        state.rdtsc = ()=>0x1f_ffff_fedc_ba98;
     });
-    assert.equal(clocked.state.reg[0], 0x9abcdef0, 'the counter\'s low word in eax');
-    assert.equal(clocked.state.reg[2], 0x12345678, 'and its high word in edx');
+    assert.equal(clocked.state.reg[0], 0xfedcba98, 'the counter\'s low word in eax');
+    assert.equal(clocked.state.reg[2], 0x1fffff, 'and its high word in edx');
     const leaf = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2]);
     assert.equal(leaf.state.reg[0], 0x000106a5);
     assert.equal(leaf.state.reg[1], 0x00982201);

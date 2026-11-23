@@ -905,7 +905,7 @@ class BlockState {
      * @param {WebAssembly.Memory} memory
      * @param {import('../../core/src/layers/cpu/engine.js').StateLayout} layout
      * @param {((address: number, size: number) => void) | null} onCodeWrite
-     * @param {(() => bigint) | undefined} rdtsc
+     * @param {(() => number) | undefined} rdtsc
      * @param {import('./ir.js').EvalState['ports']} ports
      */
     constructor(memory, layout, onCodeWrite, rdtsc, ports){
@@ -1115,7 +1115,7 @@ class BlockState {
  * @param {{ memory: WebAssembly.Memory,
  *     layout: import('../../core/src/layers/cpu/engine.js').StateLayout,
  *     onCodeWrite?: (address: number, size: number) => void,
- *     rdtsc?: () => bigint, ports?: import('./ir.js').EvalState['ports'],
+ *     rdtsc?: () => number, ports?: import('./ir.js').EvalState['ports'],
  *     atomic?: boolean, readThrough?: [number, number][] }} what
  *     `onCodeWrite` is called after an interpreted store lands in a page
  *     holding translated code, so the caller can invalidate the region it

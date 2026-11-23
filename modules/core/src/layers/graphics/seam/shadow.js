@@ -61,6 +61,7 @@ import {
     WORLD_TYPE, ZERO_WORD, replayedFlags, transformSlot, transformType,
 } from './block.js';
 import { RECT_BYTES, usagesOf } from './routines/command.js';
+import { indexedBytes } from '../d3d8/commands.js';
 import { ANSWERED_TRANSFORMS } from './routines/getters.js';
 
 /**
@@ -2294,7 +2295,15 @@ export const HOST_MIRRORS = Object.freeze({
         return true;
     },
     /** @type {HostMirror} */
-    renderTarget: (m, block, [, surface])=>{
+    renderTarget: (m, block, [index, surface])=>{
+        if (index !== 0)
+        {
+            return true;
+        }
+        if (surface === 0)
+        {
+            return false;
+        }
         const desc = m.u32(surface + 4) + SURFACE.DESC;
         const width = m.u32(desc + 24);
         const height = m.u32(desc + 28);
@@ -2782,16 +2791,26 @@ function recordCommand(m, shape, mirror, block, a){
     const record = (m.u32(block + SHADOW.COMMANDS) + head) >>> 0;
     m.setU32(record + COMMAND.SLOT, slot);
     const rects = shape.rects ?? [];
+    const indexed = shape.indexedVertices;
+    const copied = indexed ? indexedBytes(a[indexed.type], a[indexed.count], a[indexed.format],
+        a[indexed.minIndex] + a[indexed.vertices], a[indexed.stride]) : null;
     for (let arg = 0; arg < args; arg++)
     {
         const rect = rects.indexOf(arg);
         const copy = rect >= 0 ? record + header + RECT_BYTES * rect : record + header;
-        m.setU32(record + COMMAND.ARGS + 4 * arg, arg === pointer || rect >= 0
-            ? (a[arg] === 0 ? 0 : copy) : a[arg]);
+        m.setU32(record + COMMAND.ARGS + 4 * arg, indexed && copied && arg === indexed.indices
+            ? record + header : indexed && copied && arg === indexed.data
+                ? record + header + copied.at
+                : arg === pointer || rect >= 0 ? (a[arg] === 0 ? 0 : copy) : a[arg]);
     }
     if (pointer >= 0 && size > 0)
     {
         m.write(record + header, m.read(a[pointer], size).slice());
+    }
+    if (indexed && copied)
+    {
+        m.write(record + header, m.read(a[indexed.indices], copied.indices).slice());
+        m.write(record + header + copied.at, m.read(a[indexed.data], copied.vertices).slice());
     }
     rects.forEach((arg, rect)=>{
         if (a[arg] !== 0)
@@ -2844,6 +2863,26 @@ function copiedBytes(shape, a, pointer, bytes){
     if (choose)
     {
         return choose.cases.find(([value])=>value === a[choose.arg])?.[1] ?? choose.otherwise;
+    }
+    const indexed = shape.indexedVertices;
+    if (indexed)
+    {
+        const { most } = indexed;
+        const n = a[indexed.count];
+        const type = a[indexed.type];
+        const format = a[indexed.format];
+        const stride = a[indexed.stride];
+        const reach = a[indexed.minIndex] + a[indexed.vertices];
+        if (a[indexed.indices] === 0 || a[indexed.data] === 0 || n === 0 || n > most
+            || !(type >= 1 && type <= 6) || (format !== 101 && format !== 102)
+            || (stride & 3) !== 0 || stride === 0 || stride > most
+            || reach > 0xffffffff || reach === 0 || reach > most)
+        {
+            return null;
+        }
+        const copied = indexedBytes(type, n, format, reach, stride);
+        return copied.vertices > most || copied.at + copied.vertices > most ? null
+            : copied.at + copied.vertices;
     }
     if (vertices)
     {

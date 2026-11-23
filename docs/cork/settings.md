@@ -78,7 +78,7 @@ the reference arm of a differential gate.
 | `blockProfile` | `false` | Execution counts per block, with `mechanisms` (how calls, returns and jumps went) and `forms` (each instruction form's executions and wasm bytes); a run with it keeps no translation store. |
 | `blockProfileFrom` | 0 | With `blockProfile`: seconds after the runtime is made at which the counts start over. |
 | `timings` | `false` | The translator's phases timed: forming, lookups, emitting, encoding, storing, instantiating and publishing, and the record of long holds. |
-| `traceStore` | `false` | Translation store keys put and missed, as `entry:hash:top`. |
+| `traceStore` | `false` | Translation store keys put, missed and hit, as `entry:hash:top`. |
 | `checkStale` | `false` | Regions still published whose bytes no longer form as they did (`staleRegions`). |
 | `countTransfers` | `false` | Transfers between regions through the hash; `transfers` in the diagnostics only with it. |
 <!-- /settings -->

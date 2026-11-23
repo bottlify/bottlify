@@ -35,7 +35,7 @@ function machine(config){
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
-        imports: { trap: ()=>0, rdtsc: ()=>0n },
+        imports: { trap: ()=>0, rdtsc: ()=>0 },
     });
     return {
         runtime,

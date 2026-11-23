@@ -20,10 +20,11 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, COMMAND, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, SURFACE,
+    BUFFER, COMMAND, DRAW as DRAWN, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, SURFACE,
 } from './block.js';
 import {
-    RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode,
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_MIRROR,
+    commandCode,
 } from './routines/command.js';
 import {
     getRenderStateCode, getSamplerStateCode, getSurfaceDescCode, getViewportCode,
@@ -331,6 +332,130 @@ test('a draw from the program\'s memory copies the vertices its primitives span'
     assert.equal(run([4, 0xffffffff, DATA, 32]), 'trap', 'a count past any');
     assert.equal(head(), at);
 });
+
+test('an indexed draw from the program\'s memory copies its indices and the vertices they reach',
+    ()=>{
+        const host = createCorkHost({
+            memorySize: 64 * 1024 * 1024, trapPort: 0xb077, entryVector: 0x7000,
+            initialStack: STACK, engine: cork, cork: { sliceMs: Infinity },
+        });
+        // With the seam's mirror: the draw leaves stream zero and the indices unset.
+        host.writePhysical(DRAW, commandCode(DRAW, TRAP, shape('DrawIndexedPrimitiveUP',
+            { mirror: [...DRAWABLE_MIRRORS.DrawIndexedPrimitiveUP] })));
+        host.writePhysical(TRAP, new Uint8Array([0xf4]));
+        host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+        host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+        host.writePhysical(BLOCK + SHADOW.COMMANDS,
+            new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
+        host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+        host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+        const INDICES = DATA;
+        const VERTICES = DATA + 0x400;
+        const indices = new Uint8Array(0x100).map((unused, i)=>i * 5 + 1);
+        const vertices = new Uint8Array(0x400).map((unused, i)=>i * 7);
+        host.writePhysical(INDICES, indices);
+        host.writePhysical(VERTICES, vertices);
+
+        /** @param {number} at */
+        const read = at=>{
+            const bytes = host.readPhysical(at, 4);
+            return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        };
+        const head = ()=>read(BLOCK + SHADOW.COMMAND_HEAD);
+        const drawable = ()=>read(BLOCK + SHADOW.DRAWABLE);
+        /** @param {number[]} args @returns {'ok' | 'trap'} */
+        const run = args=>{
+            const code = call(PROGRAM, DRAW, OBJECT, args);
+            host.writePhysical(PROGRAM, new Uint8Array(code));
+            host.writeReg32('eip', PROGRAM);
+            host.writeReg32('esp', STACK);
+            runToHalt(host, 1000);
+            if (host.readReg32('eip') === TRAP + 1)
+            {
+                assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
+                return 'trap';
+            }
+            assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+            assert.equal(host.readReg32('esp'), STACK);
+            assert.equal(host.readReg32('eax'), 0);
+            return 'ok';
+        };
+
+        // Each type with three primitives, both widths of index, from vertex two on six
+        // vertices of twelve bytes: the indices spanned are 3, 6, 4, 9, 5 and 5, and the
+        // vertices copied are the first eight, which the indices may reach.
+        const spans = [3, 6, 4, 9, 5, 5];
+        const header = COMMAND.ARGS + 4 * 8;
+        /** @type {any[]} */
+        const expected = [];
+        let at = 0;
+        for (const [format, width] of [[101, 2], [102, 4]])
+        {
+            for (let type = 1; type <= 6; type++)
+            {
+                host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+                assert.equal(run([type, 2, 6, 3, INDICES, format, VERTICES, 12]), 'ok',
+                    `type ${type}, ${width * 8}-bit indices`);
+                const indexBytes = spans[type - 1] * width;
+                const past = (indexBytes + 3) & ~3;
+                const vertexBytes = 8 * 12;
+                const record = RING + at;
+                assert.equal(read(record + COMMAND.BYTES), header + past + vertexBytes);
+                assert.equal(read(record + COMMAND.ARGS + 16), record + header,
+                    'the indices\' pointer names their copy');
+                assert.equal(read(record + COMMAND.ARGS + 24), record + header + past,
+                    'the vertices\' pointer names theirs, at a whole dword');
+                assert.deepEqual([...host.readPhysical(record + header, indexBytes)],
+                    [...indices.subarray(0, indexBytes)]);
+                assert.deepEqual([...host.readPhysical(record + header + past, vertexBytes)],
+                    [...vertices.subarray(0, vertexBytes)]);
+                assert.equal(drawable() & (DRAWN.STREAM | DRAWN.INDEXED), 0,
+                    'stream zero and the indices unset');
+                expected.push([type, 2, 6, 3, [...indices.subarray(0, indexBytes)], format,
+                    [...vertices.subarray(0, vertexBytes)], 12]);
+                at += header + past + vertexBytes;
+            }
+        }
+        assert.equal(head(), at);
+        assert.equal(read(BLOCK + SHADOW.DRAWS_PENDING), 1, 'a draw is waiting');
+
+        /** @type {any[]} */
+        const made = [];
+        const device = {
+            /**
+             * @param {number} type @param {number} min @param {number} count
+             * @param {number} primitives @param {Uint8Array} indexed @param {number} format
+             * @param {Uint8Array} data @param {number} stride
+             */
+            DrawIndexedPrimitiveUP: (type, min, count, primitives, indexed, format, data, stride)=>
+                made.push([type, min, count, primitives, [...indexed], format, [...data], stride])
+                && 0,
+        };
+        assert.equal(runCommands(device, host.readPhysical(RING, head()).slice(), [], ()=>{
+            assert.fail('nothing refused');
+        }), expected.length);
+        assert.deepEqual(made, expected, 'the device is given the program\'s bytes');
+
+        // The draws the routine leaves to the host, the ring as it was.
+        host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
+        const good = [4, 0, 8, 12, INDICES, 101, VERTICES, 12];
+        /** @param {number} index @param {number} value */
+        const with_ = (index, value)=>good.map((arg, i)=>(i === index ? value : arg));
+        assert.equal(run(with_(0, 7)), 'trap', 'a type there is not');
+        assert.equal(run(with_(0, 0)), 'trap', 'nor type zero');
+        assert.equal(run(with_(3, 0)), 'trap', 'no primitives');
+        assert.equal(run(with_(4, 0)), 'trap', 'no indices');
+        assert.equal(run(with_(6, 0)), 'trap', 'no vertices');
+        assert.equal(run(with_(5, 21)), 'trap', 'an index format that is no index format');
+        assert.equal(run(with_(7, 10)), 'trap', 'a stride that is not whole dwords');
+        assert.equal(run(with_(7, 0)), 'trap', 'no stride');
+        assert.equal(run([4, 0, 0, 12, INDICES, 101, VERTICES, 12]), 'trap', 'no vertex reached');
+        assert.equal(run(with_(2, 2000)), 'trap', 'more vertices than a record copies');
+        assert.equal(run(with_(3, 3000)), 'trap', 'more indices than a record copies');
+        assert.equal(run([4, 0xffffffff, 2, 12, INDICES, 101, VERTICES, 12]), 'trap',
+            'a reach past any');
+        assert.equal(head(), at);
+    });
 
 test('the viewport and the sampler states a program sets in the guest are what its getters read',
     ()=>{
