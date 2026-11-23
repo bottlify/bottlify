@@ -115,6 +115,8 @@ export const PEB = Object.freeze({
     NUMBER_OF_PROCESSORS: 0x64,
     /** CriticalSectionTimeout: how long a critical section waits before it is reported. */
     CRITICAL_SECTION_TIMEOUT: 0x70,
+    /** LoaderLock: the loader's RTL_CRITICAL_SECTION, held around a DLL's initialisation. */
+    LOADER_LOCK: 0xa0,
     OS_MAJOR_VERSION: 0xa4,
     OS_MINOR_VERSION: 0xa8,
     OS_BUILD_NUMBER: 0xac,
@@ -260,6 +262,7 @@ export const PEB64 = Object.freeze({
     PROCESS_PARAMETERS: 0x20,
     PROCESS_HEAP: 0x30,
     NUMBER_OF_PROCESSORS: 0xb8,
+    LOADER_LOCK: 0x110,
     OS_MAJOR_VERSION: 0x118,
     OS_MINOR_VERSION: 0x11c,
     OS_BUILD_NUMBER: 0x120,
@@ -376,6 +379,8 @@ export const TLS_SLOTS = 1088;
  * @param {string} [options.commandLine]
  * @param {string} [options.currentDirectory]
  * @param {{ input: number, output: number, error: number }} [options.standardHandles]
+ * @param {number} [options.loaderLock]  The loader's critical section, which PEB->LoaderLock
+ *        names; absent, the field stays zero.
  * @param {number} [options.processors]  How many processors the machine has --
  *        the process's executors, which the kernel knows once the processor
  *        layer is made; absent, one.
@@ -433,6 +438,12 @@ export function createProcessBlocks(options){
     write(peb + pebFields.NUMBER_OF_PROCESSORS, options.processors ?? 1);
     // Read straight from the block by code naming its session's objects.
     write(peb + pebFields.SESSION_ID, INTERACTIVE_SESSION);
+    // The loader's lock, which code asking whether its thread is inside a
+    // DLL's initialisation reads without a call: its owner against its own id.
+    if (options.loaderLock)
+    {
+        writePointer(peb + pebFields.LOADER_LOCK, options.loaderLock);
+    }
     // Thirty days in 100-nanosecond units, relative (negative), as the
     // session manager's default sets it; the i386 block only, the x64 one
     // keeping its field zero.

@@ -3105,6 +3105,9 @@ async function buildApp(options){
         version: windowsVersion(options.windows),
         // One for each executor, as every other road to the count says.
         processors: kernel.processors?.() ?? 1,
+        // PEB->LoaderLock: the section the loader holds around a DLL's
+        // initialisation (`init.js`), which a program reads to ask who holds it.
+        loaderLock,
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
         imagePath: options.imagePath ?? 'C:\\app.exe',
