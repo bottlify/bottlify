@@ -48,6 +48,9 @@ export function createForming(state){
         relinkStep, sampleCalls, sourcesChanged, stamp, storeHere, storedOwner, toPublish,
         translatable, translatorLoading, translatorReady, translators, unqueue, waitedFor,
         workerUrl } = rt;
+    /** A profiling run's entries batched as some region's callee, not met running: what a
+     * block profile tells apart from code that ran (`regionBytes` in the diagnostics). */
+    const calleesBatched = new Set();
     /** When `translateNow` last looked, for `behindMs`. */
     let lookedAt = 0;
     /** Set while a step that takes over running regions (`Pending.alone`) posts. */
@@ -433,6 +436,10 @@ export function createForming(state){
                     && !batch.some(([queued])=>queued === keyOf(callee, top)))
                 {
                     batch.push([keyOf(callee, top), callee]);
+                    if (profiling)
+                    {
+                        calleesBatched.add(callee);
+                    }
                 }
             }
             if (batch.length > asked && store !== null && typeof store.getManyNow === 'function')
@@ -595,5 +602,6 @@ export function createForming(state){
         get resumeWanted(){ return resumeWanted; },
         set resumeWanted(value){ resumeWanted = value; },
         translateNow,
+        calleesBatched,
     };
 }
