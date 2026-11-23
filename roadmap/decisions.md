@@ -2736,4 +2736,7 @@ its highest address, not by the pages committed, so a commit far above the rest 
 (blocks are handed out from the bottom, where the two agree); and a memory that cannot grow (no
 shared memory) is made whole, as large as the RAM, so its address space is cut to the RAM. A
 browser counts each memory a thread holds by its length against that thread's heap limit, which is
-why the memory follows what was given and not the address space. *2026-11-22.*
+why the memory follows what was given and not the address space. A 64-bit program given more
+than 4 GiB runs over a window of 8 GiB whose RAM is a memory64 memory of 7 GiB, not 8: one memory
+of 8 GiB already passes Chrome's limit for a thread and is collected after every few megabytes
+(`tools/read/wasm-memory-gc.mjs`). *2026-11-22, 2026-11-23.*

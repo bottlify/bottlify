@@ -203,10 +203,10 @@ export async function layerConfig(deps){
             bits: processBits,
             // An image past 4 GiB: the wide window, its RAM the whole of it.
             ...programLoaded.wide === undefined ? {} : { window: programLoaded.wide.window,
-                codeBase: programLoaded.wide.codeBase,
+                codeBase: programLoaded.wide.codeBase, wideRam: programLoaded.wide.ram,
                 // The image's low dword span: a handler's pointer into it lands there.
-                hostAlias: { at: programLoaded.imageBase % 2 ** 32,
-                    size: programLoaded.sizeOfImage } },
+                ...programLoaded.wide.codeBase === 0 ? {} : { hostAlias: {
+                    at: programLoaded.imageBase % 2 ** 32, size: programLoaded.sizeOfImage } } },
             // Not for a process started beside another: its executors open as its
             // threads want them (`startedBeside`), each another executor's pages
             // the memory reaches and a worker -- a launcher's every short child

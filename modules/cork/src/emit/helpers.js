@@ -73,7 +73,7 @@ export function buildHelpersModule(layout, memory = {}){
     if (layout.window !== undefined)
     {
         // A wide window's RAM, memory 1 (`ramMemory`), which the x87 helpers read and write.
-        m.importMemory('env', 'ram', { min: layout.window / 65536, max: layout.window / 65536,
+        m.importMemory('env', 'ram', { min: 1, max: layout.window / 65536,
             shared: memory.shared, index64: true });
     }
     const helpers = defineHelpers(m, layout, memory.shared === true);

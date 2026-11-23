@@ -1169,3 +1169,21 @@ test('where the browser makes no 64-bit memory, a program past 4 GiB is refused 
             window: 2 ** 33, codeBase: 2 ** 32 }),
         /linked past 4 GiB and needs a 64-bit WebAssembly memory \(memory64\) of 8 GiB, which/);
     });
+
+test('a wide window\'s RAM is made as long as the program is given, not the window', ()=>{
+    // Chrome weighs a wasm memory by its length against its thread's heap
+    // limit (about 8 GiB): an 8 GiB memory there collects without end.
+    /** @type {number[]} */
+    const asked = [];
+    const counting = { ...engine, memory64: (/** @type {number} */ bytes)=>{
+        asked.push(bytes);
+        throw new RangeError('not made');
+    } };
+    assert.throws(()=>host({ engine: counting, bits: 64, memorySize: 2 ** 33 - 4096,
+        window: 2 ** 33, codeBase: 0, wideRam: 7 * 2 ** 30 + 1 }), /memory64/);
+    assert.deepEqual(asked, [7 * 2 ** 30 + 65536], 'the program\'s bytes, to a whole page');
+    asked.length = 0;
+    assert.throws(()=>host({ engine: counting, bits: 64, memorySize: 2 ** 33 - 4096,
+        window: 2 ** 33, codeBase: 0 }), /memory64/);
+    assert.deepEqual(asked, [2 ** 33], 'the window whole where nothing less is named');
+});

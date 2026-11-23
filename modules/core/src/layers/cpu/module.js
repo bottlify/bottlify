@@ -522,6 +522,7 @@ export function createCpuModule(){
                 // An image past 4 GiB: the wide window it runs over and the block its code lies in.
                 ...(config?.bits === 64 && config?.window ? { window: config.window,
                     codeBase: config.codeBase ?? 0,
+                    ...config.wideRam ? { wideRam: config.wideRam } : {},
                     ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
             };
             state.memorySize = settings.memorySize;
@@ -820,6 +821,7 @@ export function createCpuModule(){
                         bits: settings.bits,
                         ...(settings.window ? { window: settings.window,
                             codeBase: settings.codeBase ?? 0,
+                            ...settings.wideRam ? { wideRam: settings.wideRam } : {},
                             ...settings.hostAlias ? { hostAlias: settings.hostAlias } : {} }
                             : {}),
                     };

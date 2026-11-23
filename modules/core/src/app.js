@@ -1483,12 +1483,13 @@ async function buildApp(options){
     // library a game ships can itself be twelve megabytes, and a library
     // placed inside the heap would be overwritten by the first large
     // allocation.
-    const programLoaded = programImage(options.executable, { hostMemory: options.cpu?.hostMemory });
+    const programLoaded = programImage(options.executable, { hostMemory: options.cpu?.hostMemory,
+        memorySize: options.memorySize });
     // An image past 4 GiB (`wide`) lies apart from the space below, which is laid
     // out as for an image at the 32-bit programs' base: its libraries, stacks and
     // heap where any other process has them.
-    const mainImage = programLoaded.wide === undefined ? programLoaded
-        : { ...programLoaded, imageBase: LONG_IMAGE_BASE, sizeOfImage: 0x10000 };
+    const mainImage = programLoaded.wide === undefined || programLoaded.wide.codeBase === 0
+        ? programLoaded : { ...programLoaded, imageBase: LONG_IMAGE_BASE, sizeOfImage: 0x10000 };
     // An x86-64 program (`roadmap/x64.md`): long mode on cork, one executor,
     // its image in the window below 4 GiB.
     const long = mainImage.bits === 64;
@@ -2676,7 +2677,8 @@ async function buildApp(options){
     // A wide window's image past 4 GiB: its span at the low dword kept from everything
     // else, where the host reads a pointer into the image it was handed the low half of
     // (the cpu's `hostAlias`).
-    const aliasAt = programLoaded.wide === undefined ? null : programLoaded.imageBase % 2 ** 32;
+    const aliasAt = programLoaded.wide === undefined || programLoaded.wide.codeBase === 0 ? null
+        : programLoaded.imageBase % 2 ** 32;
     if (aliasAt !== null && librarySpace.claim(aliasAt, programLoaded.sizeOfImage) !== aliasAt)
     {
         throw new Error(`image: its low dword's span 0x${aliasAt.toString(16)}+0x`
@@ -3707,6 +3709,15 @@ function volumeMemory(){
 const LONG_IMAGE_BASE = 0x00400000;
 
 /**
+ * The RAM of a 64-bit process given more than 4 GiB: a memory64 memory of this
+ * many bytes in a window of 8 GiB. Chrome counts the length of every wasm
+ * memory a thread holds against that thread's V8 heap limit, about 8 GiB, and
+ * past it collects whole every few megabytes (`tools/read/wasm-memory-gc.mjs`:
+ * one memory of 7 GiB collects as any other, one of 8 GiB some 140 times in 6 s).
+ */
+const WIDE_RAM_BYTES = 7 * 2 ** 30;
+
+/**
  * The program's image headers, a 64-bit (PE32+) one included: one whose base
  * lies above 2 GiB is placed at `LONG_IMAGE_BASE`, which its relocations (or
  * its RIP-relative code, which needs none) allow, and every address its
@@ -3719,8 +3730,9 @@ const LONG_IMAGE_BASE = 0x00400000;
  * other address the process gives out below 2 GiB as before (`wide`).
  *
  * @param {Uint8Array} executable
- * @param {{ hostMemory?: number }} [machine]  the host's memory in bytes, which a 16 GiB
- *     window needs 32 GB of
+ * @param {{ hostMemory?: number, memorySize?: number }} [machine]  the host's memory in
+ *     bytes, which a 16 GiB window needs 32 GB of; the program's RAM, past 4 GiB of which a
+ *     64-bit program runs over a wide window wherever its image lies
  * A 32-bit program linked for ASLR with its base in the heap's span (mscorsvw.exe at
  * 0x10000000) is placed where a program usually is, 0x00400000, as Windows places such a one
  * anywhere: at its own base it made the memory of every process of it as large as its base,
@@ -3728,10 +3740,19 @@ const LONG_IMAGE_BASE = 0x00400000;
  * holds. One not linked for ASLR stays at its base, as Windows keeps it.
  *
  * @returns {import('./layers/loader/internal/pe.js').PeImage
- *     & { wide?: { window: number, codeBase: number }, moved?: boolean }}
+ *     & { wide?: { window: number, codeBase: number, ram: number }, moved?: boolean }}
  */
 function programImage(executable, machine = {}){
     const image = parsePe(executable, { wide: true });
+    // A 64-bit program given more than 4 GiB of memory: a wide window, its code
+    // in the first 4 GiB block, the image where any 64-bit image goes.
+    if (image.bits === 64 && (machine.memorySize ?? 0) > 2 ** 32
+        && (image.relocatable || image.imageBase + image.sizeOfImage <= 0x80000000))
+    {
+        return { ...image, ...image.imageBase + image.sizeOfImage > 0x80000000
+            ? { imageBase: LONG_IMAGE_BASE } : {},
+        wide: { window: 2 ** 33, codeBase: 0, ram: WIDE_RAM_BYTES } };
+    }
     if (image.bits === 32 && image.relocatable && image.dynamicBase
         && image.imageBase >= HEAP_FLOOR && 0x00400000 + image.sizeOfImage <= HEAP_FLOOR)
     {
@@ -3750,7 +3771,7 @@ function programImage(executable, machine = {}){
                 + ' carries no relocations needs a window this machine cannot give it');
         }
         return { ...image, wide: { window, codeBase: Math.floor(image.imageBase / 2 ** 32)
-            * 2 ** 32 } };
+            * 2 ** 32, ram: Math.min(window - 65536, WIDE_RAM_BYTES) } };
     }
     return { ...image, imageBase: LONG_IMAGE_BASE };
 }

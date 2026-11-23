@@ -489,9 +489,9 @@ export function prepareModule(m, layout, features, memory = {},
     });
     if (layout.window !== undefined)
     {
-        // A wide window's RAM, the module's memory 1 (`ramMemory`): made whole, so its
-        // size is its import's.
-        m.importMemory('env', 'ram', { min: layout.window / 65536, max: layout.window / 65536,
+        // A wide window's RAM, the module's memory 1 (`ramMemory`): made whole, as long as
+        // its program is given, the window at most; the pages past it are closed.
+        m.importMemory('env', 'ram', { min: 1, max: layout.window / 65536,
             shared: memory.shared ?? false, index64: true });
     }
     const bases = importBases(m, layout);

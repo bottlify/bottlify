@@ -148,6 +148,8 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     its low dword, kept free below 4 GiB; a host access there is the image's (`codeBase`
  *     past it), the pointer a handler reads as `args[i] >>> 0`. The RAM is lent in place
  *     (`ramView`) to nobody then.
+ * @property {number} [wideRam]  With `window`: the bytes of its RAM memory, the rest of
+ *     the window closed; the window's whole length when absent.
  * @property {WebAssembly.Memory} [ram]  With `window`: the RAM's memory, made here when absent.
  * @property {number} trapPort
  * @property {number} entryVector  Linear address of the dword holding the entry point.
@@ -322,7 +324,7 @@ export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
-        window: wideWindow, codeBase = 0, hostAlias, memoryBudget, memoryCredit,
+        window: wideWindow, codeBase = 0, hostAlias, wideRam, memoryBudget, memoryCredit,
         memoryHolder, guestCharge, ramLimit = Infinity } = config;
     // Whether the guest's memory counts by its length, not by what it was given.
     // A wide window is 8 GiB long whatever its program takes of it, more than
@@ -544,9 +546,13 @@ export function createCorkHost(config){
     }
     const memory = given ?? taken
         ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
-    /** A wide window's RAM, a memory64 memory of the window's size made whole; none otherwise. */
+    /**
+     * A wide window's RAM, a memory64 memory made whole: as long as the program
+     * is given (`wideRam`), not the window, whose rest stays closed. None otherwise.
+     */
     const ramMemory = own.ramMemory === undefined ? undefined
-        : config.ram ?? wideMemory(engine, /** @type {number} */ (own.window), shared);
+        : config.ram ?? wideMemory(engine, Math.min(/** @type {number} */ (own.window),
+            Math.ceil((wideRam ?? Infinity) / 65536) * 65536), shared);
     /** The buffer the guest's RAM lies in. */
     const ramBuffer = ()=>(ramMemory ?? memory).buffer;
     // The memory past the guest's RAM, or a growing memory's engine range: the
@@ -674,8 +680,9 @@ export function createCorkHost(config){
     const wrapWord = growing ? /** @type {number} */ (own.wrap) >>> 2 : -1;
     let wholeWords = new Int32Array(memory.buffer);
     /** The RAM the memory holds now: a growing memory's, as its wrap word says. */
-    const heldNow = ()=>(wrapWord < 0 ? memorySize
-        : (Atomics.load(wholeWords, wrapWord) >>> 0) + 1);
+    const heldNow = ()=>(wrapWord >= 0 ? (Atomics.load(wholeWords, wrapWord) >>> 0) + 1
+        : ramMemory === undefined ? memorySize
+            : Math.min(memorySize, ramMemory.buffer.byteLength - own.ramBase));
     if (growing && executor === 0 && given === undefined)
     {
         Atomics.store(wholeWords, wrapWord, (ramFloor - 1) | 0);
