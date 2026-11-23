@@ -1403,7 +1403,7 @@ function handedDown(options){
     /** @type {any[]} */
     const all = options.inheritedHandles ?? [
         ...(options.pipeEnds ?? []).map((/** @type {any} */ end)=>({
-            handle: end.handle, type: 'pipe', object: pipeStandIn(end.handle, end) })),
+            handle: end.handle, type: 'pipe', object: pipeStandIn(end.id, end) })),
         ...options.inheritedFiles ?? []];
     if (!options.consoleHandles && !options.standardHandles)
     {

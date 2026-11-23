@@ -38,6 +38,10 @@ const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 're
     'insertAfter', 'stateOf', 'topLevel', 'fromPoint', 'foreground', 'setForeground',
     'foregroundElsewhere', 'noteCapture', 'noteFocus', 'focus'];
 
+/** What a process asks of the run's pipes (`pipes.js`'s `PipesAcross`). */
+const PIPES = ['create', 'open', 'query', 'wait', 'read', 'write', 'peek', 'connect',
+    'disconnect', 'flush', 'transact', 'state', 'setState', 'cancel', 'close'];
+
 /** What a process answers about its own windows (`directory.js`'s `WindowEndpoint`). */
 const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'lostForeground',
     'activate'];
@@ -161,22 +165,19 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
             },
         },
         objects: remoteObjects(ask),
-        // The pipe ends its parent started it with, served where the parent
-        // holds them (`pipes.js`'s `EndAcross`): a read that waits is waited
-        // on as the network is, its thread parked and the link looked at.
-        pipes: {
-            /** @param {number} id @param {number} length */
-            read: (id, length)=>(call ? call('pipes', 'read', [id, length])
-                : ask('pipes', 'read', [id, length])),
-            /** @param {number} id @param {Uint8Array} bytes */
-            write: (id, bytes)=>ask('pipes', 'write', [id, bytes]),
-            /** @param {number} id @param {number} size */
-            peek: (id, size)=>ask('pipes', 'peek', [id, size]),
-            /** @param {number} id */
-            cancel: id=>ask('pipes', 'cancel', [id]),
-            /** @param {number} id */
-            close: id=>ask('pipes', 'close', [id]),
-        },
+        // The run's pipes (`system-pipes.js`): what the run answers at once
+        // comes back at once; what waits there is a token whose answer is
+        // waited on as the network is, its thread parked and the link looked at.
+        pipes: /** @type {import('./layers/win32/kernel32/pipes.js').PipesAcross} */ (
+            Object.fromEntries(PIPES.map(name=>[name, (/** @type {any[]} */ ...args)=>{
+                const got = ask('pipes', name, args);
+                if (got?.waiting === undefined)
+                {
+                    return got;
+                }
+                return call ? call('pipes', 'waited', [got.waiting])
+                    : ask('pipes', 'waited', [got.waiting]);
+            }]))),
         // The run's class table (`com-link.js`): what the process exports
         // is delivered to it in its handlers, and what it calls in another
         // process is waited on as the network is.

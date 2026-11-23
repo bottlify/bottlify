@@ -11,6 +11,7 @@ import { STEAM_PATH, announceSteamClient } from '../layers/win32/steamclient/fun
 import { createLinkMemory, openLink } from '../system/link.js';
 import { comHandlers } from '../com-link.js';
 import { pipeHandlers } from '../system-pipes.js';
+import { dropUnclaimed } from '../layers/win32/kernel32/pipes.js';
 import { objectHandlers } from '../system-objects.js';
 import { systemHandlers } from '../system-link.js';
 import { storeHandlers } from '../layers/cpu/internal/store-link.js';
@@ -223,9 +224,12 @@ export function processesBeside(deps){
             call: (method, args)=>link.call('com', method, args),
             launch: serverAcross,
         });
-        // The pipe ends it inherits, served here, where its parent holds them.
-        const { dispose: forgetPipes, described: pipeEnds, pipes } =
-            pipeHandlers(request.inheritedHandles);
+        // The run's pipes as it reaches them: the ends it inherits and every
+        // one it makes or opens, served here among every other process's, in
+        // the run's namespace.
+        const { dispose: forgetPipes, described: pipeEnds, pipes, inherit: inheritPipe } =
+            pipeHandlers(request.inheritedHandles, system.namedObjects,
+                (api, detail)=>events.emit('divergence', { api, detail }));
         // In the run's directory of processes, where another process opens it
         // by id, unless its parent here put it there already.
         const directory = system.processDirectory;
@@ -295,7 +299,7 @@ export function processesBeside(deps){
             },
             // Its own children, which the run starts, counted with the rest.
             processes: {
-                start: (/** @type {any} */ asked)=>startAcrossFor(link, asked),
+                start: (/** @type {any} */ asked)=>startAcrossFor(link, asked, inheritPipe),
                 terminate: (/** @type {number} */ id, /** @type {number} */ code)=>
                     terminateBeside({ id }, code),
                 ask: (/** @type {number} */ id, /** @type {any} */ call)=>
@@ -712,25 +716,32 @@ export function processesBeside(deps){
      *
      * @param {ReturnType<typeof openLink>} link  the parent's
      * @param {any} asked  the child, as values
+     * @param {(handle: number, id: number) => any} inheritPipe  one more handle onto
+     *     an end the parent's link serves, held for the child (`system-pipes.js`)
      * @returns {boolean}
      */
-    const startAcrossFor = (link, asked)=>{
+    const startAcrossFor = (link, asked, inheritPipe)=>{
         if (!inWorker())
         {
             return false;
         }
         // Its open files, as its parent's worker handed them: their position
         // asked of that worker, where the parent's opens keep it. Its pipe
-        // ends are objects of that worker's and do not cross, nor do the
-        // standard handles that name them.
+        // ends are the run's already, served to the parent here: the child
+        // holds one more handle onto each.
         const files = handedFiles(asked.inheritedFiles,
             handle=>link.callWaiting('parent', 'position', [asked.id, handle]),
             (handle, at)=>link.callWaiting('parent', 'setPosition', [asked.id, handle, at]));
-        const crossed = new Set(files.map(one=>one.handle));
+        const ends = (asked.inheritedPipes ?? [])
+            .map((/** @type {{ handle: number, id: number }} */ one)=>inheritPipe(one.handle, one.id))
+            .filter(Boolean);
+        const handed = [...files, ...ends];
+        const crossed = new Set(handed.map(one=>one.handle));
         /** @param {Record<string, number> | undefined} named */
         const crossedOf = named=>named && Object.fromEntries(Object.entries(named)
             .filter(([, handle])=>crossed.has(handle)));
-        const request = { ...asked, inheritedHandles: files, inheritedFiles: undefined,
+        const request = { ...asked, inheritedHandles: handed, inheritedFiles: undefined,
+            inheritedPipes: undefined,
             standardHandles: crossedOf(asked.standardHandles),
             consoleHandles: crossedOf(asked.consoleHandles) };
         startAcross({
@@ -829,15 +840,23 @@ export function processesBeside(deps){
                 ...request.environment ? { environment: request.environment } : {},
                 id: request.id,
                 threadId: request.threadId,
-                // Its open files as values, the position kept here, and which
-                // of its handles are its standard ones.
+                // Its open files as values, the position kept here, its pipe
+                // ends by the number the run serves each by, and which of its
+                // handles are its standard ones.
                 inheritedFiles: crossingFiles(request.inheritedHandles),
+                inheritedPipes: (request.inheritedHandles ?? [])
+                    .filter((/** @type {any} */ one)=>one.type === 'pipe' && one.object?.standIn)
+                    .map((/** @type {any} */ one)=>({ handle: one.handle, id: one.object.id })),
                 standardHandles: request.standardHandles,
                 consoleHandles: request.consoleHandles,
                 arena: sound?.options.beside.arena ?? null,
             });
             if (placed)
             {
+                // The run holds the child's handles onto its pipe ends now;
+                // those this worker held for it go back.
+                dropUnclaimed((request.inheritedHandles ?? [])
+                    .filter((/** @type {any} */ one)=>one.type === 'pipe'));
                 return;
             }
             childrenAcross.delete(request.id);
