@@ -189,6 +189,9 @@ export async function serveProcess(start){
         // tool reads of a slow frame, from the worker that made it.
         frames: (/** @type {number} */ count)=>(app ? plainOf(()=>app.log.frames(count),
             ()=>null) : null),
+        // Bytes of its memory: what a tool reads of a loop a profile named.
+        read: (/** @type {number} */ address, /** @type {number} */ length)=>
+            (app ? app.debug.read(address, length) : null),
         // Every process standing in this worker, its own first with the
         // worker's tables: a child started beside it here runs on this
         // thread, and a status of the worker alone says nothing of it.

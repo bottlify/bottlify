@@ -4443,6 +4443,7 @@ export async function createApp(options){
      * @type {Set<{ image: string, id: number, link: ReturnType<typeof import('./system/link.js').openLink>,
      *     diagnostics: () => Promise<any>,
      *     frames: (count: number) => Promise<any[] | null>,
+     *     read: (address: number, length: number) => Promise<Uint8Array | null>,
      *     standing: (journal: number) => Promise<{ image: string, diagnostics: any }[]
      *         | null> }>}
      */

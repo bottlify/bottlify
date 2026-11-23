@@ -106,23 +106,24 @@ export function processesBeside(deps){
                     throw new Error(`no process ${id} stands`);
                 },
                 /**
-                 * Bytes of a process's memory by its id, the first's or one
-                 * running beside it: an OVERLAPPED a program polls, a buffer it
-                 * waits on.
+                 * Bytes of a process's memory by its id, the first's, one
+                 * running beside it or one in a worker of its own (asked across
+                 * its link): an OVERLAPPED a program polls, a buffer it waits
+                 * on, a loop a profile named.
                  *
                  * @param {number} id @param {number} address @param {number} length
                  */
                 readOf: (id, address, length)=>{
+                    const child = [...standingAcross, ...standingBeside].find(each=>each.id === id);
+                    if (child)
+                    {
+                        return child.read(address, length);
+                    }
                     if (id === (options.processId ?? FIRST_PROCESS_ID))
                     {
                         return firstProcess().debug.read(address, length);
                     }
-                    const child = [...standingBeside].find(each=>each.id === id);
-                    if (!child)
-                    {
-                        throw new Error(`no process ${id} stands beside`);
-                    }
-                    return child.read(address, length);
+                    throw new Error(`no process ${id} stands`);
                 },
                 /**
                  * A watch in front of a routine of a process by its id (`hook`):
@@ -373,6 +374,8 @@ export function processesBeside(deps){
             const asked = { image: request.imagePath, id: request.id, link,
                 diagnostics: ()=>link.call('report', 'diagnostics', []),
                 frames: (/** @type {number} */ count)=>link.call('report', 'frames', [count]),
+                read: (/** @type {number} */ address, /** @type {number} */ length)=>
+                    link.call('report', 'read', [address, length]),
                 standing: (/** @type {number} */ journal)=>
                     link.call('report', 'standing', [journal]) };
             held.asked = asked;
