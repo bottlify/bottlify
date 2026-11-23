@@ -5545,9 +5545,10 @@ export function createFileFunctions(host){
          * Leaving that last part out is invisible until something waits for it,
          * and then it is a pool parked for ever on a packet nobody posts.
          *
-         * Reading a standard handle is an immediate end of input rather than a
-         * failure -- there is no console to type at, and a program that asks
-         * gets the answer it would get from a redirected empty stream.
+         * Reading a standard handle fails as an invalid handle: no process here
+         * has a console, and Windows answers a read of console input so in one
+         * without. A standard handle redirected to a pipe is a pipe end, read
+         * as one.
          */
         ReadFile: {
             argBytes: 20,
@@ -5558,7 +5559,7 @@ export function createFileFunctions(host){
                 writeDwordIf(read >>> 0, 0);
                 if (isStandardHandle(handle >>> 0))
                 {
-                    return 1;
+                    return fail(ERROR_INVALID_HANDLE);
                 }
                 for (const stream of streams)
                 {

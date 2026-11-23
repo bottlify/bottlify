@@ -19,9 +19,10 @@
  * console with a debugger attached. Answering yes changes both of those, and it
  * would be a claim about a console nobody can type into.
  *
- * Reading is the other half of the same answer: a redirected stream at end of
- * input. ReadConsole reports zero characters and succeeds, the input queue is
- * empty, and a program polling it gets a stable no rather than a wait.
+ * Reading is the other half of the same answer: console input is read as
+ * Windows answers a process with no console, an invalid handle. A success with
+ * nothing read is what no console gives: a reader that loops until its bytes
+ * come, expecting the read to block, spun on it for ever.
  */
 
 import { decodeAnsi } from './locale.js';
@@ -113,13 +114,14 @@ export function createConsoleIoFunctions(host){
     };
 
     /**
-     * Both ReadConsole forms, and both ReadConsoleInput forms: end of input.
+     * Both ReadConsole forms, both ReadConsoleInput forms and the peek: no
+     * console's input to read, nothing said to be read.
      *
      * @param {number} read  Where the count of what was read goes.
      */
     const readNothing = read=>{
         writeDwordIf(read >>> 0, 0);
-        return 1;
+        return fail(ERROR_INVALID_HANDLE);
     };
 
     const refuse = createRefusals(host);
@@ -269,9 +271,7 @@ export function createConsoleIoFunctions(host){
         /**
          * BOOL ReadConsoleInputA(HANDLE, PINPUT_RECORD, DWORD, LPDWORD)
          *
-         * Zero records read. On Windows this blocks until something arrives;
-         * here nothing ever will, so blocking would be a hang and reporting an
-         * empty read sends the caller round its loop instead.
+         * No console's queue to read (`readNothing`).
          */
         ReadConsoleInputA: {
             argBytes: 16,
@@ -296,10 +296,9 @@ export function createConsoleIoFunctions(host){
         /**
          * BOOL FlushConsoleInputBuffer(HANDLE hConsoleInput)
          *
-         * The queue the reads above find empty is empty after a flush too,
-         * so there is nothing to discard and the call succeeds as they do.
+         * No console's queue to flush, as the reads above find none.
          */
-        FlushConsoleInputBuffer: { argBytes: 4, handler: ()=>1 },
+        FlushConsoleInputBuffer: noConsole('FlushConsoleInputBuffer', 4),
 
         /**
          * BOOL WriteConsoleInputA/W(HANDLE, const INPUT_RECORD *, DWORD, LPDWORD)
@@ -361,18 +360,10 @@ export function createConsoleIoFunctions(host){
         GenerateConsoleCtrlEvent: noConsole('GenerateConsoleCtrlEvent', 8),
         GetConsoleDisplayMode: noConsole('GetConsoleDisplayMode', 4),
 
-        /** BOOL GetNumberOfConsoleInputEvents(HANDLE, LPDWORD lpcNumberOfEvents) */
-        GetNumberOfConsoleInputEvents: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([, count])=>{
-                if (count === 0)
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                writeDwordIf(count >>> 0, 0);
-                return 1;
-            },
-        },
+        /**
+         * BOOL GetNumberOfConsoleInputEvents(HANDLE, LPDWORD lpcNumberOfEvents):
+         * no console's queue to count.
+         */
+        GetNumberOfConsoleInputEvents: noConsole('GetNumberOfConsoleInputEvents', 8),
     };
 }
