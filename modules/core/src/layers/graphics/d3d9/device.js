@@ -395,22 +395,6 @@ const copyMaterial = material=>({
     Power: material.Power,
 });
 
-/** What a clip plane never written reads as. */
-const NO_PLANE = Object.freeze([0, 0, 0, 0]);
-
-/**
- * Whether a material a program is setting is the one already there, value
- * for value: set again, it changes nothing a draw reads.
- *
- * @param {Material} held @param {Material} given
- */
-const sameMaterial = (held, given)=>Object.is(held.Power, given.Power)
-    && sameColour(held.Diffuse, given.Diffuse) && sameColour(held.Ambient, given.Ambient)
-    && sameColour(held.Specular, given.Specular) && sameColour(held.Emissive, given.Emissive);
-/** @param {{ r: number, g: number, b: number, a: number }} held @param {{ r: number, g: number, b: number, a: number }} given */
-const sameColour = (held, given)=>Object.is(held?.r, given?.r) && Object.is(held?.g, given?.g)
-    && Object.is(held?.b, given?.b) && Object.is(held?.a, given?.a);
-
 /**
  * @typedef {Object} Rect
  * @property {number} left
@@ -3267,10 +3251,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (!recording && sameMaterial(material, value))
-            {
-                return D3D_OK;
-            }
             return setState(
                 record=>{
                     record.material = copyMaterial(value);
@@ -3300,12 +3280,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             const at = clipPlaneAt(index);
-            // A plane never written reads as zeroes, and is one.
-            const held = clipPlanes.get(at) ?? NO_PLANE;
-            if (!recording && held.every((value, part)=>Object.is(value, Math.fround(plane[part]))))
-            {
-                return D3D_OK;
-            }
             return setState(
                 record=>record.clipPlanes.set(at, Float32Array.from(plane)),
                 ()=>clipPlanes.set(at, Float32Array.from(plane)));
@@ -3353,11 +3327,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (!recording && scissor.left === rect.left && scissor.top === rect.top
-                && scissor.right === rect.right && scissor.bottom === rect.bottom)
-            {
-                return D3D_OK;
-            }
             return setState(
                 record=>{
                     record.scissor = { ...rect };
@@ -3400,10 +3369,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {number} segments
          */
         SetNPatchMode(segments){
-            if (!recording && nPatchMode === segments)
-            {
-                return D3D_OK;
-            }
             return setState(
                 record=>{
                     record.nPatchMode = segments;
@@ -4106,13 +4071,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            // Set again, it changes nothing a draw reads: a program that sets
-            // each stream's frequency before every draw would otherwise move
-            // the state's version every draw, and every preparation keyed to it.
-            if (!recording && (streamFrequencies.get(index) ?? 1) === frequency >>> 0)
-            {
-                return D3D_OK;
-            }
             return setState(
                 record=>record.streamFrequencies.set(index, frequency >>> 0),
                 ()=>streamFrequencies.set(index, frequency >>> 0));
@@ -4298,10 +4256,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             if (surface && (describe(surface).Usage & D3DUSAGE.DEPTHSTENCIL) === 0)
             {
                 return D3DERR_INVALIDCALL;
-            }
-            if (depthStencil === (surface ?? null))
-            {
-                return D3D_OK;
             }
             depthStencil = rebound(depthStencil, surface ?? null);
             drawStateVersion++;
