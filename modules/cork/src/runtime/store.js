@@ -27,6 +27,7 @@ import { cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
 import { regionOfSummary, summaryOf } from './summary.js';
 import { usesX87 } from './variants.js';
 import { StoredBlocks } from './stored-blocks.js';
+import { usedAt, usedSlot } from './layout.js';
 
 /** @typedef {import('./state.js').Lookup} Lookup */
 /** @typedef {import('./state.js').Forming} Forming */
@@ -44,8 +45,14 @@ const BLOCKS_EVERY_MS = 3000;
 export function createStore(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { cacheVersion, emitLayout, entries, formHere, formOptions, found, leaveOut, profiling,
-        guestBytes, read, readBytes, settings, sharedMemory, sharesStore
+        guestBytes, layout, read, readBytes, settings, sharedMemory, sharesStore, view
     } = /** @type {import('./state.js').Base} */ (state);
+    /**
+     * The regions this run took from the store, by store key: their entries, whose byte
+     * (`Tables.USED`) says at the run's end whether any executor entered them.
+     * @type {Map<string, number>}
+     */
+    const takenHere = new Map();
     const { batchInstances, checkedAt, counts, formableFrom, inFlight, precisionAt, precisionFlags,
         precisionOf, regions, sharedModule, stamp, stubPage, trace,
         translatable } = rt;
@@ -594,6 +601,7 @@ export function createStore(state){
         }
         if (one.cached !== null)
         {
+            takenHere.set(storeKey(one), one.region.entry);
             counts.cacheHits++;
             trace('hit', one);
         }
@@ -913,6 +921,25 @@ export function createStore(state){
      * from the processes still running. */
     const flushStore = async()=>{
         const store = storeHere();
+        // The regions this run took from the store and never entered, though
+        // ready before the code was met, are kept no longer: no run needs them.
+        // One made this run and not entered stays a run - the interpreter met
+        // its code while it was being translated, and the next run, finding
+        // it ready, may enter it (a third of a game's cold run is such code,
+        // and forgotten at once it was translated again at every start).
+        if (store !== null && typeof store.forget === 'function')
+        {
+            const used = usedAt(layout);
+            for (const [key, entry] of takenHere)
+            {
+                if (view().getUint8(used + usedSlot(entry)) === 0)
+                {
+                    store.forget(key);
+                    counts.forgotten++;
+                }
+            }
+        }
+        takenHere.clear();
         if (sending !== null)
         {
             clearInterval(sending);

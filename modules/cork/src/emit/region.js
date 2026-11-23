@@ -62,7 +62,7 @@ import { importHelpers } from './helpers.js';
 import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
 import { atState, atTables, importBases, intoState, intoTables } from './bases.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
-    pageFlagsAt, transferTargetAt }
+    pageFlagsAt, transferTargetAt, usedAt, usedSlot }
     from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { ANY_TOP } from '../runtime/entries.js';
@@ -1940,6 +1940,11 @@ export class RegionEmitter {
     }
 
     prologue(){
+        // The region entered: the store keeps only the regions a run entered
+        // (`Tables.USED`). Read first, so a hot entry writes nothing.
+        const used = usedAt(this.layout) + usedSlot(this.region.entry);
+        this.b.i32const(used).load('i32_8u').op(0x45 /* i32.eqz */).if(EMPTY)
+            .i32const(used).i32const(1).store('i32_8').end();
         this.loadState(true);
         this.resetRun(true);
     }

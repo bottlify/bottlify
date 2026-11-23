@@ -183,6 +183,8 @@ export function createDiagnostics(state){
         // Modules let go past `cacheBytes`, their regions, and the regions of
         // them published again; the crossings counted by modules no longer placed.
         evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
+        // The regions taken from the store this run and forgotten at its end, never entered.
+        forgotten: 0,
         chargeRefused: 0, unchargedBytes: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
@@ -544,6 +546,7 @@ export function createDiagnostics(state){
             emitMs: counts.emitMs,
             encodeMs: counts.encodeMs,
             storeMs: counts.storeMs,
+            forgotten: counts.forgotten,
             instantiateMs: counts.instantiateMs,
             publishMs: counts.publishMs,
             workerMs: counts.workerMs,

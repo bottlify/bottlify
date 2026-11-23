@@ -99,7 +99,7 @@ const TOUCHES_WAIT_MS = 2000;
  *     placeOf: (key: string) => [number, number][] | null | undefined,
  *     recordsFile: () => any,
  *     append: (key: string, bytes: Uint8Array) => Promise<void>,
- *     touch: (key: string) => void, stats: () => StoreStats,
+ *     touch: (key: string) => void, forget: (key: string) => void, stats: () => StoreStats,
  *     seed: (source: Uint8Array | null | Promise<Uint8Array | null>, identity?: string)
  *         => Promise<{ taken: boolean, added: number, present: number }>,
  *     seededWith: () => Promise<string | null>,
@@ -925,6 +925,13 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                             last = Math.max(last, Number(offsetText) || 0);
                             continue;
                         }
+                        if (recordName === '-' && parts.length === 2)
+                        {
+                            // A record its run made and never used (`forget`): dead.
+                            places.delete(offsetText);
+                            needsOf.delete(offsetText);
+                            continue;
+                        }
                         if (recordName === '=' && parts.length === 3 && lengthText !== '')
                         {
                             // A region and the module its code is in.
@@ -1395,6 +1402,26 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             if (opened && !broken && !closing)
             {
                 use(key);
+            }
+        },
+        /**
+         * Counts a record dead from now: one this run wrote for nothing it ran
+         * (a region translated whose entry never ran again), which a later
+         * run would read only to keep. Its module goes with the last region
+         * naming it.
+         *
+         * @param {string} key
+         */
+        forget(key){
+            if (opened && !broken && !closing)
+            {
+                const recordName = fileNameOf(key);
+                if (/** @type {Map<string, Place>} */ (places).delete(recordName))
+                {
+                    needsOf.delete(recordName);
+                    pendingLines.push(`- ${recordName}\n`);
+                    touchesSoon();
+                }
             }
         },
         /** What the opening found and kept, and what the store holds now. */

@@ -168,6 +168,9 @@ const EMITTED = {
     175: 'e8b7c430989bf65f',
     // The same code: 176 is for a wide window's (its modules import the RAM, `wideRam`).
     176: 'e8b7c430989bf65f',
+    // Each region's function marks its entry entered (`Tables.USED`): a run's store keeps
+    // only the regions it made and entered.
+    177: '32b496aa781ac959',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

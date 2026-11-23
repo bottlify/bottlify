@@ -1417,3 +1417,25 @@ test('a record two runs left unused is dead, and a quarter of the file dead is w
         assert.deepEqual([opened.records, opened.kept, opened.compacted], [9, 6, true],
             'three tenths dead: copied');
     });
+
+test('a record its run forgets is gone at the next opening, its module with its last region',
+    async()=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        await first.put('module/m', new Uint8Array(40).fill(7));
+        await first.put('region/kept', new Uint8Array([1]), { needs: 'module/m' });
+        await first.put('module/n', new Uint8Array(40).fill(8));
+        await first.put('region/never', new Uint8Array([2]), { needs: 'module/n' });
+        first.forget('region/never');
+        first.forget('region/missing');
+        await first.close();
+        const second = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal((await second.get('region/kept'))?.[0], 1);
+        assert.equal((await second.get('module/m'))?.[0], 7);
+        assert.equal(await second.get('region/never'), null, 'forgotten');
+        assert.equal(second.stats().opened.kept, 2, 'its module goes with it');
+        await second.put('region/never', new Uint8Array([3]));
+        await second.close();
+        const third = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal((await third.get('region/never'))?.[0], 3, 'written again, it is back');
+    });

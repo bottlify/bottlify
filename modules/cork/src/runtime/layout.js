@@ -46,8 +46,17 @@ export const PAGE = 65536;
  * into code.
  */
 const CODE_RANGES = (1 << 20) + 16 + 4096 * 24;
+/**
+ * Past the code granules, a byte per bucket of entries (`usedSlot`) that a
+ * region's function sets the first time it is entered (`usedAt`), the
+ * process's own as the page flags are: what a run's store keeps of the regions
+ * it made. A third of what a cold run of a game translates is regions whose
+ * entry never runs again once the interpreter has met it (a block profile of
+ * Crysis's CPU benchmark), and four runs kept them on disk to 1.4 GB.
+ */
+const USED = CODE_RANGES + (1 << 21);
 /** The entry hash, last of the tables: its size is the layout's (`hashSlots`). */
-const HASH = CODE_RANGES + (1 << 21);
+const HASH = USED + (1 << 18);
 
 export const Tables = Object.freeze({
     PAGE_FLAGS: 0,
@@ -62,6 +71,8 @@ export const Tables = Object.freeze({
     UNDO_ENTRY: 24,
     CODE_RANGES,
     CODE_GRANULE_SHIFT: 5,
+    USED,
+    USED_SIZE: 1 << 18,
     HASH,
     /**
      * The entry hash's slots unless a layout says otherwise. A program of a
@@ -517,6 +528,22 @@ export const pageFlagsAt = layout=>layout.pageFlags ?? layout.tables + Tables.PA
 export const codeRangesAt = layout=>layout.codeRanges ?? layout.tables + Tables.CODE_RANGES;
 
 /**
+ * Where the regions' entered bytes lie (`Tables.USED`), as the page flags: the
+ * process's, whichever executor entered.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ */
+export const usedAt = layout=>layout.used ?? layout.tables + Tables.USED;
+
+/**
+ * The byte of `usedAt` an entry sets: buckets by a multiplicative hash of the
+ * address, two entries in one bucket each read as entered when either was.
+ *
+ * @param {number} eip
+ */
+export const usedSlot = eip=>Math.imul(eip | 0, 0x9e3779b1) >>> 14;
+
+/**
  * Bytes an executor past the first keeps of a memory for its own, past the
  * first executor's: a state page -- the state block, `nanFirst`, the wasm
  * interpreter's statics -- then tables of its own, as large as the layout's.
@@ -600,6 +627,7 @@ export function executorLayout(layout, base, index = 1){
     }
     fields.pageFlags = pageFlagsAt(layout);
     fields.codeRanges = codeRangesAt(layout);
+    fields.used = usedAt(layout);
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }
 
@@ -638,6 +666,7 @@ export function sharedLayout(layout){
     delete fields.interrupt;
     fields.pageFlags = pageFlagsAt(layout);
     fields.codeRanges = codeRangesAt(layout);
+    fields.used = usedAt(layout);
     fields.tables = 0;
     fields.shared = true;
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });

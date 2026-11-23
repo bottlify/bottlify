@@ -100,6 +100,7 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [pageFlags]  Cork's own: where the page flags lie when not in `tables` --
  *     another executor of a process reads and writes the first's (`executorLayout`).
  * @property {number} [codeRanges] Cork's own: the same for the pages' code granules.
+ * @property {number} [used] Cork's own: the same for the bytes its regions set when entered.
  * @property {number} [processors] Cork's own: how many processors `cpuid` says the machine has
  *     -- the process's executors -- where more than one; absent, one.
  * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
@@ -518,6 +519,7 @@ export function engineContractProblem(engineModule, url){
  * @property {number} translatedShare  Instructions retired in the engine / retired, 0..1.
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
+ * @property {number} [forgotten]      Regions taken from the store and never entered.
  * @property {number} cacheMisses
  * @property {number} [missNoRecord]   Misses the store had nothing for at the region's entry.
  * @property {number} [missChanged]    Misses where it had another region: other bytes, or one

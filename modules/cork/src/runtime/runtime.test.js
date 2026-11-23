@@ -4711,3 +4711,39 @@ test('a region the worker forms otherwise from bytes nobody wrote is emitted her
     assert.equal(exit.kind, 'halt');
     assert.equal(m.reg(1), 0);
 });
+
+test('a region a run took from the store and never entered is forgotten; one it made stays',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const store = memoryTranslationStore();
+        /** @type {string[]} */
+        const forgotten = [];
+        const watched = { ...store,
+            /** @param {string} key */
+            forget: key=>forgotten.push(key) };
+        const OTHER = CODE + 0x400;
+        /** One run: both regions translated, only the first entered. */
+        const run = async()=>{
+            const m = machine({ store: watched, bundleId: 'test', leafCalls: false });
+            m.write(CODE, COUNTDOWN);
+            m.write(OTHER, COUNTDOWN);
+            m.runtime.noteHot(CODE, 0, 8);
+            m.runtime.noteHot(OTHER, 0, 8);
+            while (m.runtime.entryOf(CODE) < 0 || m.runtime.entryOf(OTHER) < 0)
+            {
+                await m.runtime.translatePending();
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+            m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+            await m.runtime.flush();
+            return m.runtime.diagnostics();
+        };
+        const first = await run();
+        assert.deepEqual(forgotten, [], 'made by this run: kept a run, entered or not');
+        assert.equal(first.forgotten, 0);
+        const second = await run();
+        assert.ok(second.cacheHits >= 2, `taken from the store: ${second.cacheHits}`);
+        assert.equal(forgotten.length, 1, `forgotten: ${forgotten.join(', ')}`);
+        assert.ok(String(forgotten[0]).includes(`/${OTHER.toString(16)}/`), String(forgotten[0]));
+        assert.equal(second.forgotten, 1);
+    });
