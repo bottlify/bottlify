@@ -381,3 +381,65 @@ test('a word past 4 GiB is never taken from the shared word `>>>` wraps it onto'
     assert.equal(memory.readU32(high), 0x44);
     await memoryModule.dispose();
 });
+
+test('a swap or a worker\'s write taken as the host\'s is not written again:'
+    + ' another thread\'s store between stays', async()=>{
+    // The words the guest and the host both swap (an event's, a mutex's) live
+    // in memory the program may execute, where a write is told to the
+    // translator. The swap's bytes are in the RAM already; were they read and
+    // written back to tell it, a guest's swap on another executor between
+    // the two was undone - a SetEvent lost, two threads each waiting on the
+    // other's event for ever. Here the other thread stores between any read
+    // of the word and the end of the call.
+    const ram = new Uint8Array(new SharedArrayBuffer(0x4000));
+    const words = new Int32Array(ram.buffer);
+    /** @type {(() => void) | null} */
+    let between = null;
+    /** @type {[number, number][]} */
+    const told = [];
+    const memory = await open({}, {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>{
+            const bytes = ram.slice(address, address + length);
+            between?.();
+            between = null;
+            return bytes;
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>ram.set(data, address),
+        /** @param {number} address */
+        readU32: address=>Atomics.load(words, address / 4) >>> 0,
+        /** @param {number} address @param {number} length */
+        wrote: (address, length)=>told.push([address, length]),
+        ramView: ()=>ram,
+    });
+    memory.register({ name: 'heap', base: 0x1000, size: 0x3000, kind: 'heap', access: 'rwx' });
+    const cases = [
+        ['a dword swap', 0x1000, ()=>memory.compareExchangeU32(0x1000, 0, 0x82), 4],
+        ['a quadword swap', 0x1010, ()=>memory.compareExchangeU64(0x1010, 0n, 0x82n), 8],
+        ['a worker\'s write', 0x1020, ()=>{
+            Atomics.store(words, 0x1020 / 4, 0x82);
+            memory.adopt(0x1020, 4);
+        }, 4],
+    ];
+    for (const [name, at, call, length]
+        of /** @type {[string, number, () => void, number][]} */ (cases))
+    {
+        told.length = 0;
+        // Another executor's guest sets the word right after the call's own change.
+        let stored = false;
+        between = ()=>{
+            Atomics.store(words, at / 4, 3);
+            stored = true;
+        };
+        call();
+        if (!stored)
+        {
+            Atomics.store(words, at / 4, 3);
+        }
+        between = null;
+        assert.equal(Atomics.load(words, at / 4), 3, `${name}: the other thread's store stays`);
+        assert.deepEqual(told, [[at, length]], `${name}: the translator is told of the write`);
+    }
+    await memoryModule.dispose();
+});

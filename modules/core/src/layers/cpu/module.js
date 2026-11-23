@@ -1127,6 +1127,8 @@ export function createCpuModule(){
                 readPhysical: (address, length)=>started().readPhysical(address, length),
                 /** @param {number} address @param {Uint8Array} bytes */
                 writePhysical: (address, bytes)=>started().writePhysical(address, bytes),
+                /** @param {number} address @param {number} length  bytes in the RAM, taken as written */
+                wrote: (address, length)=>started().wrote(address, length),
                 /** @param {number} address */
                 readU32: address=>started().readU32(address),
                 /**

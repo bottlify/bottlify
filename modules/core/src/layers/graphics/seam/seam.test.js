@@ -844,3 +844,40 @@ test('D3D8.dll\'s DebugSetMute is there, a call that does nothing', ()=>{
     assert.equal(entry.argBytes, 0);
     assert.equal(entry.handler([]), 0);
 });
+
+test('a Direct3D 8 Present is paced by the device presenting, not by the device made last', ()=>{
+    // As in Direct3D 9: a probe device made after the one a program draws with,
+    // presenting unpaced, leaves the first one's vertical sync as it was.
+    const box = machine();
+    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    let clock = 0;
+    const seam = createDirect3D8Seam({
+        publisher,
+        memory: box.services,
+        screen: ()=>({ width: 640, height: 480, bitsPerPixel: 32 }),
+        now: ()=>clock,
+        waitUntil: (/** @type {number} */ deadline, /** @type {number} */ hr)=>{
+            clock = Math.max(clock, deadline);
+            return hr;
+        },
+    });
+    const root = seam.publishRoot(createDirect3D8());
+    const fields = createFields(box.services);
+    const COPY_VSYNC = 4;
+    const DISCARD = 1;
+    /** @param {number} swapEffect @param {number} out */
+    const create = (swapEffect, out)=>{
+        fields.writeStruct(0x8000, D3DPRESENT_PARAMETERS8, { BackBufferWidth: 64,
+            BackBufferHeight: 64, BackBufferFormat: 22, BackBufferCount: 1,
+            SwapEffect: swapEffect, Windowed: 1, EnableAutoDepthStencil: 0 });
+        box.call(root, 3 + IDIRECT3D8_SLOTS.length - 1, [0, 1, 0, 0x40, 0x8000, out]);
+        return box.memory.readU32(out);
+    };
+    const device = create(COPY_VSYNC, 0x8100);
+    const probe = create(DISCARD, 0x8104);
+    const present = 3 + IDIRECT3DDEVICE8_SLOTS.findIndex(([name])=>name === 'Present');
+    box.call(probe, present, [0, 0, 0, 0]);
+    assert.equal(seam.presentPacing().interval, '0x80000000', 'the probe presents unpaced');
+    box.call(device, present, [0, 0, 0, 0]);
+    assert.equal(seam.presentPacing().interval, '0x1', 'the device it draws with, at its own');
+});

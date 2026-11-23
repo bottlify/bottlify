@@ -2894,6 +2894,26 @@ test('a Present under vertical sync is held to the display\'s rate, and to a mod
     }
 });
 
+const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+
+test('a Present is paced by the interval of the device presenting, not of the one made last', ()=>{
+    // A game's first start probes its card with a second device of its own,
+    // IMMEDIATE, and lets it go: the device it draws with keeps vertical sync.
+    // Paced by the last device made, its frames ran unpaced, its cinematics
+    // and menus several times their speed, until a Reset of its own.
+    const h = seamed({ screen: { ...SCREEN, refresh: 60 }, paced: true });
+    const root = h.create();
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 1, hDeviceWindow: HWND });
+    const probe = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 1, hDeviceWindow: HWND, PresentationInterval: D3DPRESENT_INTERVAL_IMMEDIATE });
+    assert.equal(h.device(probe.device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.seam.presentPacing().interval, '0x80000000', 'the probe presents unpaced');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.seam.presentPacing().interval, '0x0',
+        'the device it draws with presents at its own interval, DEFAULT: paced');
+});
+
 test('a declaration keeps its count in the guest, as a texture does', ()=>{
     // A program that sets its declaration and shaders before every draw takes
     // and gives back a reference on each, every time: counted on the host,

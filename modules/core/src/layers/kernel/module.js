@@ -129,6 +129,30 @@ function published(cpu, log){
     };
 }
 
+/**
+ * Every event of the process as the guest and the host see it, one line each:
+ * the word the handle's table entry holds, the event's own word, whether the
+ * host keeps it, the state it holds, and who is queued on it.
+ *
+ * @param {any} instance
+ * @returns {string}
+ */
+function describeEvents(instance){
+    const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16);
+    /** @param {number | null | undefined} address */
+    const read = address=>(typeof address === 'number' ? hex(instance.readWord(address)) : 'none');
+    return instance.handles.list()
+        .filter((/** @type {{ type: string }} */ { type })=>type === 'event')
+        .map((/** @type {{ handle: number, object: any }} */ { handle, object })=>{
+            const word = typeof object.word === 'number'
+                ? `${hex(object.word)}=${read(object.word)}` : 'none';
+            const waiters = (object.waiters ?? []).map((/** @type {any} */ one)=>one.name).join(',');
+            return `#${hex(handle)} table ${read(instance.mirror?.wordOf(handle))} word ${word}`
+                + ` host ${object.hostKeeps ? 'keeps' : 'gave'} held ${object.heldSignalled ?? '-'}`
+                + ` manual ${object.manualReset === true} waiters ${waiters}`;
+        }).join('; ');
+}
+
 /** The kernel layer's module for one graph; see `defaultModules`. */
 export function createKernelModule(){
     /**
@@ -192,7 +216,8 @@ export function createKernelModule(){
              *          refreshClock: (() => void) | undefined,
              *          othersRunning: (() => boolean) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
-             *          mutexWords: any, eventWords: any, semaphoreWords: any,
+             *          mutexWords: any, eventWords: any, semaphoreWords: any, mirror: any,
+             *          readWord: ((address: number) => number) | null,
              *          unwake: (() => void) | null }}
              */
             const state = {
@@ -215,6 +240,8 @@ export function createKernelModule(){
                 mutexWords: null,
                 // The words of the process's events (`event-words.js`).
                 eventWords: null,
+                mirror: null,
+                readWord: null,
                 // The words of the process's semaphores (`semaphore-words.js`).
                 semaphoreWords: null,
                 // The last parks, holds and scheduled resumes, newest last: what a
@@ -341,6 +368,8 @@ export function createKernelModule(){
             state.unwake = config?.remoteObjects?.onWake?.((/** @type {number} */ token,
                 /** @type {number} */ result)=>state.sync?.wakeRemote(token, result)) ?? null;
             state.handles = createHandleTable({ watch: mirror });
+            state.mirror = mirror;
+            state.readWord = (/** @type {number} */ address)=>memory.readU32(address);
             state.processes = createProcessTable(config?.ids);
             /**
              * The processes of the run this one opened by id across its link,
@@ -1431,6 +1460,10 @@ export function createKernelModule(){
                     // A string: a report keeps the flat metrics only.
                     eventWords: JSON.stringify(instance.eventWords?.diagnostics() ?? {}),
                     semaphoreWords: JSON.stringify(instance.semaphoreWords?.diagnostics() ?? {}),
+                    // Each event as the guest and the host see it: the handle's word in
+                    // the table, the event's own word, and the state the host holds -
+                    // where a change the guest made and the host's state part, they show it.
+                    events: describeEvents(instance),
                     processes: instance.processes.diagnostics(),
                     time: instance.clock.diagnostics(),
                 },

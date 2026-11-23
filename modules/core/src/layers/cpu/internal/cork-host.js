@@ -2535,6 +2535,20 @@ export function createCorkHost(config){
             copyAround(address, bytes);
             invalidate(address, bytes.length);
         },
+        /**
+         * Bytes already in the RAM -- swapped there by the host, written by a
+         * worker sharing it -- taken as written: what was made of them is
+         * dropped, and nothing is copied, so a store another executor made
+         * to them meanwhile stays.
+         *
+         * @param {number} at @param {number} length
+         */
+        wrote: (at, length)=>{
+            const address = hostAt(at);
+            hostWrites++;
+            hostWrittenBytes += length;
+            invalidate(address, length);
+        },
         /** @param {number} at @param {number} value @param {number} length */
         fillData: (at, value, length)=>{
             const address = hostAt(at);

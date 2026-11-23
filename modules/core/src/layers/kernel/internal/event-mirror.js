@@ -215,6 +215,10 @@ export function createEventMirror(write, own = ()=>true){
         /** Whether the guest reads the table now. */
         attached: ()=>slots > 0,
 
+        /** @param {number} handle  @returns {number | null} where the guest reads its word */
+        wordOf: handle=>(slots > 0 && (handle >>> HANDLE_SHIFT) < slots
+            ? table + (handle >>> HANDLE_SHIFT) * 4 : null),
+
         /** @param {any} event  its signalled state just changed */
         changed(event){
             const held = words.get(event);
