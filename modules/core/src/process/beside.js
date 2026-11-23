@@ -1168,9 +1168,10 @@ const STATUS_NO_MEMORY = 0xc0000017;
  * What of a run's options never goes to a process in a worker of its own:
  * the system's -- its drives, session, bundle, devices and bus -- which the
  * process reaches across its link, and what a process is handed of its own.
+ * `win32` goes without its network (`portableOptions`).
  */
 const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
-    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
+    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'watchImport', 'hooks',
     'executable', 'inheritedFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
     'com', 'memoryCredit', 'memoryHolder']);
 
@@ -1211,11 +1212,14 @@ function portable(value, depth = 0){
 /**
  * The run's options a process in a worker of its own starts with: the
  * engine, the mode, the Windows, the display, the knobs, the decoders'
- * binaries.
+ * binaries, and win32's data - the Steam account a game's Steamworks is
+ * answered for, the trusted roots - but not its network, a transport the
+ * run holds and the process reaches across its link.
  *
  * @param {import('../app-options.js').AppOptions} options
  */
-function portableOptions(options){
-    return portable(Object.fromEntries(Object.entries(options)
-        .filter(([key])=>!SYSTEM_OPTIONS.has(key))));
+export function portableOptions(options){
+    const win32 = options.win32 && { ...options.win32, network: undefined };
+    return portable(Object.fromEntries(Object.entries({ ...options, win32 })
+        .filter(([key, value])=>value !== undefined && !SYSTEM_OPTIONS.has(key))));
 }
