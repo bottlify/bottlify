@@ -326,9 +326,13 @@ export function unpackSeed(seed){
  * module together; past `keepSessions` sessions unused, or a region whose
  * module is gone, a record is dead. A cap under what one session used cut
  * that session's own records at every start, and the next run translated
- * half of them again (a game's session used 1.9 GB against a cap of 1). The
+ * half of them again (a game's session used 1.9 GB against a cap of 1).
+ * Two sessions, not more: a third of what a cold run of a game writes is
+ * regions translated ahead whose entry never ran (a block profile of Crysis's
+ * CPU benchmark), which no later run asks for, and four sessions kept them
+ * with the rest to 1.4 GB. The
  * records file is copied, live records only, into the next generation when
- * half of it is dead and it is past `compactFloor` -- a copy at a start is
+ * a quarter of it is dead and it is past `compactFloor` -- a copy at a start is
  * seconds for a gigabyte, so not for less -- or when the index has outgrown
  * its records: a warm run touches every record it reads, a line each, so with
  * the records under the floor it grew by a run's reads every run and was read
@@ -336,7 +340,7 @@ export function unpackSeed(seed){
  * records need, it is rewritten with them. Records past the cap stay readable
  * until such a copy: one a later run reads again is young again.
  */
-const LIMITS = { keepSessions: 4, compactFloor: 64 << 20, cap: 1 << 30, indexFloor: 4 << 20 };
+const LIMITS = { keepSessions: 2, compactFloor: 64 << 20, cap: 512 << 20, indexFloor: 4 << 20 };
 
 /** @param {string} base @param {number} generation */
 const generationName = (base, generation)=>(generation === 0 ? base : `${base}.${generation}`);
@@ -799,7 +803,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         // A live record's line is some fifty bytes.
         const indexBloated = indexEnd > Math.max(limits.indexFloor ?? LIMITS.indexFloor,
             kept.size * 200);
-        if (!indexBloated && (end < limits.compactFloor || (end - keptBytes) * 2 < end))
+        if (!indexBloated && (end < limits.compactFloor || (end - keptBytes) * 4 < end))
         {
             found.ms = performance.now() - startedAt;
             return;

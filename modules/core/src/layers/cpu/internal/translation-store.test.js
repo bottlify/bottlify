@@ -1379,3 +1379,41 @@ test('clearing a bundle\'s translations removes every version of them and no oth
         assert.equal(await clearTranslations('none', fakeDirectory()), 0,
             'nothing kept, nothing gone');
     });
+
+test('a record two runs left unused is dead, and a quarter of the file dead is worth a copy',
+    async()=>{
+        // A game's store had grown to 1.4 GB: a third of it regions translated
+        // ahead whose entry never ran, which no later run asks for, kept four runs.
+        const root = fakeDirectory();
+        for (const name of ['a', 'b', 'c'])
+        {
+            const store = await createDirectoryTranslationStore(root, 'bundle');
+            await store.put(name, new Uint8Array(10));
+            await store.close();
+        }
+        const store = await createDirectoryTranslationStore(root, 'bundle');
+        await store.get('c');
+        assert.deepEqual([store.stats().opened.records, store.stats().opened.kept], [3, 2],
+            'the first run\'s record, unused by the two after it, is not kept');
+        await store.close();
+        const later = fakeDirectory();
+        const keepAll = { keepSessions: 100, compactFloor: 0, cap: 1 << 20 };
+        const old = await createDirectoryTranslationStore(later, 'bundle', keepAll);
+        for (let i = 0; i < 3; i++)
+        {
+            await old.put(`dead${i}`, new Uint8Array(10));
+        }
+        await old.close();
+        const live = await createDirectoryTranslationStore(later, 'bundle', keepAll);
+        for (let i = 0; i < 6; i++)
+        {
+            await live.put(`live${i}`, new Uint8Array(10));
+        }
+        await live.close();
+        const reopened = await createDirectoryTranslationStore(later, 'bundle', { keepSessions: 1,
+            compactFloor: 0, cap: 1 << 20 });
+        await reopened.get('live0');
+        const opened = reopened.stats().opened;
+        assert.deepEqual([opened.records, opened.kept, opened.compacted], [9, 6, true],
+            'three tenths dead: copied');
+    });
