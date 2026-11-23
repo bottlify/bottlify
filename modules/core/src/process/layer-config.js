@@ -59,6 +59,77 @@ export async function layerConfig(deps){
         mainModule, memory, moduleUnderContext, resolveImport, systemLibraries, threadBlocks,
         win32,
     } = deps;
+    // A frame runs from one present to the next: it is closed and the next
+    // opened where this process's frame is shown (`presentTo`), or, for a
+    // process in a worker of its own whose frames another thread shows, where
+    // the graphics worker says it played one (`framePlayed`). Closed nowhere,
+    // such a process's journal had no frames, and a tool reading a game's slow
+    // frames read none.
+    const closeFrame = ()=>{
+        // The first present has none to close. Closing one anyway is counted as
+        // an imbalance and was the one this engine reported on every run.
+        if (!framed.value)
+        {
+            return;
+        }
+        // What the frame retired, and how much of it the interpreter ran: a
+        // frame of ordinary slices that all ran slowly is a compiler that had
+        // thrown its code away, and nothing else in the frame says so.
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+        {
+            journal().note('instructions',
+                cpu().instructionCount() - retiredAtFrameStart.value);
+            journal().note('interpreted',
+                cpu().interpretedSteps() - interpretedAtFrameStart.value);
+            // Translating on this thread, inside the guest's slices: only where
+            // it is measured (the translator's `timings`).
+            const translated = cpu().translateMs();
+            if (translated !== null)
+            {
+                journal().note('translateMs',
+                    Math.round(translated - translateAtFrameStart.value));
+            }
+            // Translated code leaving for the runtime, each a dispatch.
+            journal().note('exits', cpu().translatedExits() - exitsAtFrameStart.value);
+            journal().note('hostWrittenBytes',
+                cpu().hostWrittenBytes() - writtenAtFrameStart.value);
+            // Only where the heap can be read: a worker has no
+            // performance.memory, and a zero there is no measurement.
+            if (heapReadable())
+            {
+                journal().note('heapDelta', heapUsed() - heapAtFrameStart.value);
+            }
+            // What the graphics worker finished while this frame ran: why a
+            // present held on its GPU waited - a frame's pipelines and replay,
+            // the GPU's own drawing, or the worker busy.
+            const worker = workerFrameTimes();
+            if (worker !== null)
+            {
+                const from = workerAtFrameStart.value
+                    ?? { frames: 0, toQueueMs: 0, gpuMs: 0, replayMs: 0 };
+                journal().note('gfxFrames', worker.frames - from.frames);
+                journal().note('gfxToQueueMs', Math.round(worker.toQueueMs - from.toQueueMs));
+                journal().note('gfxGpuMs', Math.round(worker.gpuMs - from.gpuMs));
+                journal().note('gfxReplayMs', Math.round(worker.replayMs - from.replayMs));
+            }
+        }
+        // Run in every build: the frame's samplers feed the translator.
+        journal().endFrame();
+    };
+    const openFrame = ()=>{
+        journal().beginFrame();
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+        {
+            retiredAtFrameStart.value = cpu().instructionCount();
+            interpretedAtFrameStart.value = cpu().interpretedSteps();
+            translateAtFrameStart.value = cpu().translateMs() ?? 0;
+            exitsAtFrameStart.value = cpu().translatedExits();
+            writtenAtFrameStart.value = cpu().hostWrittenBytes();
+            heapAtFrameStart.value = heapUsed();
+            workerAtFrameStart.value = workerFrameTimes();
+        }
+        framed.value = true;
+    };
     return {
         kernel: {
             // How many guest instructions a thread runs before the next one
@@ -446,6 +517,12 @@ export async function layerConfig(deps){
             // draws through it without making one of its own, so a replacement
             // does not reconfigure the canvas or clear the last frame.
             presenter: runPresenter,
+            // Where the graphics worker played a present of a process whose frames
+            // another thread shows: its frame ends there.
+            framePlayed: ()=>{
+                closeFrame();
+                openFrame();
+            },
             device: options.device
                 ? {
                     ...options.device,
@@ -455,63 +532,7 @@ export async function layerConfig(deps){
                         : options.device.adapter,
                     /** @param {any} frame */
                     presentTo: frame=>{
-                        // A frame runs from one present to the next, so the
-                        // first present has none to close. Closing one anyway
-                        // is counted as an imbalance and was the one this
-                        // engine reported on every run.
-                        if (framed.value)
-                        {
-                            // What the frame retired, and how much of it the
-                            // interpreter ran: a frame of ordinary slices that
-                            // all ran slowly is a compiler that had thrown its
-                            // code away, and nothing else in the frame says so.
-                            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                            {
-                                journal().note('instructions',
-                                    cpu().instructionCount() - retiredAtFrameStart.value);
-                                journal().note('interpreted',
-                                    cpu().interpretedSteps() - interpretedAtFrameStart.value);
-                                // Translating on this thread, inside the guest's slices:
-                                // only where it is measured (the translator's `timings`).
-                                const translated = cpu().translateMs();
-                                if (translated !== null)
-                                {
-                                    journal().note('translateMs',
-                                        Math.round(translated - translateAtFrameStart.value));
-                                }
-                                // Translated code leaving for the runtime, each a dispatch.
-                                journal().note('exits',
-                                    cpu().translatedExits() - exitsAtFrameStart.value);
-                                journal().note('hostWrittenBytes',
-                                    cpu().hostWrittenBytes() - writtenAtFrameStart.value);
-                                // Only where the heap can be read: a worker has no
-                                // performance.memory, and a zero there is no measurement.
-                                if (heapReadable())
-                                {
-                                    journal().note('heapDelta',
-                                        heapUsed() - heapAtFrameStart.value);
-                                }
-                                // What the graphics worker finished while this
-                                // frame ran: why a present held on its GPU waited
-                                // - a frame's pipelines and replay, the GPU's own
-                                // drawing, or the worker busy.
-                                const worker = workerFrameTimes();
-                                if (worker !== null)
-                                {
-                                    const from = workerAtFrameStart.value
-                                        ?? { frames: 0, toQueueMs: 0, gpuMs: 0, replayMs: 0 };
-                                    journal().note('gfxFrames', worker.frames - from.frames);
-                                    journal().note('gfxToQueueMs',
-                                        Math.round(worker.toQueueMs - from.toQueueMs));
-                                    journal().note('gfxGpuMs',
-                                        Math.round(worker.gpuMs - from.gpuMs));
-                                    journal().note('gfxReplayMs',
-                                        Math.round(worker.replayMs - from.replayMs));
-                                }
-                            }
-                            // Run in every build: the frame's samplers feed the translator.
-                            journal().endFrame();
-                        }
+                        closeFrame();
                         // The run's presenter owns the canvas copy; a build
                         // with no presenter of its own -- a direct assembly,
                         // a test -- still has whatever the caller handed in.
@@ -527,18 +548,7 @@ export async function layerConfig(deps){
                         {
                             options.device.presentTo?.(frame);
                         }
-                        journal().beginFrame();
-                        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                        {
-                            retiredAtFrameStart.value = cpu().instructionCount();
-                            interpretedAtFrameStart.value = cpu().interpretedSteps();
-                            translateAtFrameStart.value = cpu().translateMs() ?? 0;
-                            exitsAtFrameStart.value = cpu().translatedExits();
-                            writtenAtFrameStart.value = cpu().hostWrittenBytes();
-                            heapAtFrameStart.value = heapUsed();
-                            workerAtFrameStart.value = workerFrameTimes();
-                        }
-                        framed.value = true;
+                        openFrame();
                     },
                 }
                 : null,

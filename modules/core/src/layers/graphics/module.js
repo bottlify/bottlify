@@ -654,6 +654,7 @@ export function createGraphicsModule(){
                     worker: workerEnd,
                     device: device?.device,
                     presentTo: device?.presentTo,
+                    framePlayed: config?.framePlayed,
                     writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
                     // Where the memory is shared the worker writes what it reads
                     // back in place, and says only where.

@@ -87,22 +87,23 @@ export function processesBeside(deps){
                 },
                 /**
                  * The last `count` frames a process by its id presented, the
-                 * first's or one running beside it: where a launcher started
-                 * the game, the frames are the game's.
+                 * first's, one running beside it or one in a worker of its own
+                 * (asked across its link): where a launcher started the game,
+                 * the frames are the game's.
                  *
                  * @param {number} id @param {number} count
                  */
                 framesOf: (id, count)=>{
+                    const child = [...standingAcross, ...standingBeside].find(each=>each.id === id);
+                    if (child)
+                    {
+                        return child.frames(count);
+                    }
                     if (id === (options.processId ?? FIRST_PROCESS_ID))
                     {
                         return firstProcess().log.frames(count);
                     }
-                    const child = [...standingBeside].find(each=>each.id === id);
-                    if (!child)
-                    {
-                        throw new Error(`no process ${id} stands beside`);
-                    }
-                    return child.frames(count);
+                    throw new Error(`no process ${id} stands`);
                 },
                 /**
                  * Bytes of a process's memory by its id, the first's or one
@@ -371,6 +372,7 @@ export function processesBeside(deps){
             // The page's input reaches it as the run routes it (`routedInput`).
             const asked = { image: request.imagePath, id: request.id, link,
                 diagnostics: ()=>link.call('report', 'diagnostics', []),
+                frames: (/** @type {number} */ count)=>link.call('report', 'frames', [count]),
                 standing: (/** @type {number} */ journal)=>
                     link.call('report', 'standing', [journal]) };
             held.asked = asked;
