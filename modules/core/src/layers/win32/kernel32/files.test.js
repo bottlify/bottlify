@@ -619,6 +619,23 @@ test('a write whose file is still being fetched parks, then reports its count', 
     assert.equal(memory.dword(OUT_COUNT), 2);
 });
 
+test('setting the end of a file still being fetched parks, then answers', async()=>{
+    // As a write: a bundled file's end set before its blocks are here waits
+    // for them rather than ending the process.
+    const { files, fns, open } = setup();
+    files.put('C:\\GAME\\LOT.PACKAGE', 'abcdef');
+    const handle = open('C:\\GAME\\LOT.PACKAGE', OPEN_EXISTING);
+    const anyFiles = /** @type {any} */ (files);
+    anyFiles.truncateOrFetch = (/** @type {any} */ node, /** @type {number} */ size)=>
+        Promise.resolve().then(()=>files.truncate(node, size));
+
+    fns.SetFilePointer.handler([handle, 3, 0, FILE_BEGIN]);
+    const answer = /** @type {any} */ (fns.SetEndOfFile.handler([handle]));
+    assert.equal(typeof answer?.then, 'function', 'the call is parked, not answered');
+    assert.equal(await answer, 1);
+    assert.equal(files.stat('C:\\GAME\\LOT.PACKAGE')?.size, 3);
+});
+
 test('a request on a file bound to a completion port cannot also ask for an APC', ()=>{
     /** @type {Set<number>} */
     const bound = new Set();

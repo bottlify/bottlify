@@ -106,6 +106,41 @@ test('a write into a file whose blocks are not resident waits for them, as a rea
     vol.close(node);
 });
 
+test('a file whose blocks are not resident has its end set once they are, as a write', async()=>{
+    // A game sets the end of its own data file (The Sims 2 Legacy Collection,
+    // a lot template): the copy up reads the blocks under it, and absent ones
+    // stopped the process where a write waits for them.
+    const fs = await filesystemModule.create({});
+    const absent = [{ index: 3 }];
+    let resident = false;
+    /** @type {any[]} */
+    const fetched = [];
+    const bundled = Object.create(fs);
+    bundled.setEndOfFile = (/** @type {any} */ node)=>{
+        if (!resident)
+        {
+            throw Object.assign(new Error('not resident'), { code: 'BLOCK_MISS', blocks: absent });
+        }
+        return fs.setEndOfFile(node);
+    };
+    const vol = /** @type {any} */ (createVolume(bundled, async blocks=>{
+        fetched.push(...blocks);
+        resident = true;
+    }));
+    const node = vol.open('C:\\lot.package', { read: true, write: true, create: true });
+    vol.write(node, 0, new Uint8Array([1, 2, 3, 4]));
+
+    assert.throws(()=>vol.truncate(node, 2), /not resident/,
+        'the synchronous cut still reports the miss to a caller that cannot wait');
+    const pending = vol.truncateOrFetch(node, 2);
+    assert.equal(typeof pending?.then, 'function');
+    await pending;
+    assert.deepEqual(fetched, absent, 'the blocks the miss named are the ones fetched');
+    assert.deepEqual([...vol.read(node, 0, 8)], [1, 2], 'the file ends where it was asked to');
+    assert.equal(vol.truncateOrFetch(node, 1), undefined, 'resident: done at once');
+    vol.close(node);
+});
+
 test('a read larger than the blocks kept at once arrives whole, a piece at a time', async()=>{
     // Where blocks are kept in the heap only a bounded number stay: a program
     // that maps a 241 MiB archive whole needs more than that, and a read

@@ -851,6 +851,30 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             }
         },
 
+        /**
+         * truncate for a caller that can park: a file the bundle holds is
+         * copied up first, as for a write, and absent blocks under it are
+         * fetched; the answer is then a promise.
+         *
+         * @param {any} node @param {number} size
+         * @returns {void | Promise<void>}
+         */
+        truncateOrFetch(node, size){
+            try
+            {
+                return this.truncate(node, size);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                {
+                    throw miss;
+                }
+                return fetchedAgain(()=>this.truncate(node, size), miss,
+                    `the end at ${size} not set`);
+            }
+        },
+
         /** @param {any} node @param {number} size */
         truncate(node, size){
             fs.seek(node, size, SeekFrom.BEGIN);
