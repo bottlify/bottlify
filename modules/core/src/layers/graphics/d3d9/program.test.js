@@ -1177,6 +1177,56 @@ test('a material set between shader draws is no new state for their pieces', asy
     vs.shader.release();
 });
 
+test('a stream frequency set again names no new state; another frequency does', async()=>{
+    // A program that sets every stream's frequency before each draw - one, as
+    // it already was - moved the state's version at every draw, and each draw
+    // named its whole state again (Outlast's shadow faces, 2000 draws a frame).
+    // So did every other setter that took the value it already held as a change.
+    const h = harness();
+    h.device.SetTexture(0, h.texture);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    const named = h.device.diagnostics().statesNamed;
+    /** @type {{ material?: any }} */
+    const material = {};
+    assert.equal(h.device.GetMaterial(material), D3D_OK);
+    /** @type {{ rect?: any }} */
+    const scissor = {};
+    assert.equal(h.device.GetScissorRect(scissor), D3D_OK);
+    /** @type {{ plane?: Float32Array }} */
+    const plane = {};
+    assert.equal(h.device.GetClipPlane(0, plane), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const depth = {};
+    const hasDepth = h.device.GetDepthStencilSurface(depth) === D3D_OK;
+    /** @type {[string, () => number][]} */
+    const setAgain = [
+        ['the frequency', ()=>h.device.SetStreamSourceFreq(0, 1)],
+        ['the second stream frequency', ()=>h.device.SetStreamSourceFreq(1, 1)],
+        ['the material', ()=>h.device.SetMaterial(material.material)],
+        ['the scissor', ()=>h.device.SetScissorRect(scissor.rect)],
+        ['a clip plane', ()=>h.device.SetClipPlane(0, [...(plane.plane ?? [])])],
+        ['the N-patch mode', ()=>h.device.SetNPatchMode(h.device.GetNPatchMode())],
+        ...(hasDepth ? /** @type {[string, () => number][]} */ ([['the depth surface',
+            ()=>h.device.SetDepthStencilSurface(depth.surface)]]) : []),
+    ];
+    for (const [name, set] of setAgain)
+    {
+        assert.equal(set(), D3D_OK, name);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.diagnostics().statesNamed, named, `${name} in force, set again`);
+    }
+    depth.surface?.release?.();
+    assert.equal(h.device.SetStreamSourceFreq(0, 0x40000000 | 2), D3D_OK);
+    assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(h.device.diagnostics().statesNamed, named + 1, 'another is a state of its own');
+    /** @type {{ frequency?: number }} */
+    const out = {};
+    assert.equal(h.device.GetStreamSourceFreq(0, out), D3D_OK);
+    assert.equal(out.frequency, (0x40000000 | 2) >>> 0);
+    assert.equal(h.device.EndScene(), D3D_OK);
+});
+
 test('a viewport set again names no new state; another viewport does', async()=>{
     // The viewport is part of the state a draw is named by, compared as the
     // object the device holds: one made again for the same rectangle was a

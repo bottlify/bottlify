@@ -247,6 +247,19 @@ const copyMaterial = material=>({
 });
 
 /**
+ * Whether a material a program is setting is the one already there, value
+ * for value: set again, it changes nothing a draw reads.
+ *
+ * @param {Material} held @param {Material} given
+ */
+const sameMaterial = (held, given)=>Object.is(held.Power, given.Power)
+    && sameColour(held.Diffuse, given.Diffuse) && sameColour(held.Ambient, given.Ambient)
+    && sameColour(held.Specular, given.Specular) && sameColour(held.Emissive, given.Emissive);
+/** @param {{ r: number, g: number, b: number, a: number }} held @param {{ r: number, g: number, b: number, a: number }} given */
+const sameColour = (held, given)=>Object.is(held?.r, given?.r) && Object.is(held?.g, given?.g)
+    && Object.is(held?.b, given?.b) && Object.is(held?.a, given?.a);
+
+/**
  * Whether a number names a transform: the view, the projection, one of the
  * eight texture matrices, or one of the 256 world matrices.
  *
@@ -2289,6 +2302,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (recording)
             {
                 recording.material = copyMaterial(value);
+                return D3D_OK;
+            }
+            if (sameMaterial(material, value))
+            {
                 return D3D_OK;
             }
             material = copyMaterial(value);
