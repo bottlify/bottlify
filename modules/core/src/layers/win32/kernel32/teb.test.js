@@ -307,6 +307,19 @@ test('the process block counts the processors the machine has, one when it is no
     assert.equal(memory.view.getUint32(peb + PEB.NUMBER_OF_PROCESSORS, true), 4);
 });
 
+test('the process block points at the loader lock, which a program reads to ask who holds it', ()=>{
+    // PEB->LoaderLock, an RTL_CRITICAL_SECTION*: code that asks whether its
+    // thread is inside a DLL's initialisation compares the lock's owner with
+    // its own id, without a call (The Sims 2 Legacy Collection, at start).
+    const memory = guest();
+    const { peb } = build(memory, { loaderLock: 0x00a10000 });
+    assert.equal(memory.view.getUint32(peb + PEB.LOADER_LOCK, true), 0x00a10000);
+    assert.equal(PEB.LOADER_LOCK, 0xa0);
+    const wide = build(memory, { loaderLock: 0x00a20000, pointerSize: 8 });
+    assert.equal(memory.view.getUint32(wide.peb + PEB64.LOADER_LOCK, true), 0x00a20000);
+    assert.equal(PEB64.LOADER_LOCK, 0x110);
+});
+
 test('the process block names the session the process runs in', ()=>{
     // PEB->SessionId, read with no call by code naming its session's objects
     // (\Sessions\1\BaseNamedObjects); ProcessIdToSessionId answers the same.

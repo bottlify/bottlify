@@ -166,6 +166,8 @@ const EMITTED = {
     174: 'bc0029bcb0842fa4',
     // rdtsc's import answers a double, truncated in the region: no BigInt a read.
     175: 'e8b7c430989bf65f',
+    // The same code: 176 is for a wide window's (its modules import the RAM, `wideRam`).
+    176: 'e8b7c430989bf65f',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     DEFAULT_WINDOWS, VER, WINDOWS_VERSIONS, reportedVersion, setCondition, supportedOsOf,
-    verifyVersion, windowsVersion,
+    verifyVersion, windowsFor, windowsVersion,
 } from './versions.js';
 
 const VER_EQUAL = 1;
@@ -223,4 +223,39 @@ test('a Windows older than 8.1 answers every program the truth', ()=>{
         assert.equal(reportedVersion(version, { supportedOS: [WINDOWS_10],
             imageVersion: { major: 10, minor: 0 } }), version, name);
     }
+});
+
+test('a program is run on the Windows it was made for: its manifest, its imports, its header', ()=>{
+    const WIN7 = '35138b9a-5d96-4fbd-8e2d-a2440225f93a';
+    const WIN10 = '8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a';
+    const VISTA = 'e2011457-1546-43c5-a5fe-008deee3d3f0';
+    /** @param {Partial<Parameters<typeof windowsFor>[0]>} program */
+    const pick = program=>windowsFor({ compatibility: {}, imports: [], bits: 32, ...program });
+    // The newest Windows its manifest says it knows; 8 and 8.1 are 10 here.
+    assert.deepEqual(pick({ compatibility: { supportedOS: [VISTA, WIN7, WIN10] } }),
+        { windows: 'win10', because: 'its manifest names Windows 10' });
+    assert.equal(pick({ compatibility: { supportedOS: [VISTA, WIN7] } }).windows, 'win7');
+    assert.equal(pick({ compatibility: { supportedOS: ['4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38'] } })
+        .windows, 'win10', 'Windows 8 is not one of the choices: the next one');
+    // A library no Windows before 8 has: the Windows Runtime's (a Unity player
+    // imports it), Direct3D 12.
+    assert.deepEqual(pick({ imports: ['KERNEL32.dll', 'api-ms-win-core-winrt-l1-1-0.dll'],
+        compatibility: { imageVersion: { major: 6, minor: 0 } } }),
+    { windows: 'win10', because: 'it imports api-ms-win-core-winrt-l1-1-0.dll' });
+    assert.equal(pick({ imports: ['D3D12.dll'] }).windows, 'win10');
+    // The operating system version its header names.
+    assert.deepEqual(pick({ compatibility: { imageVersion: { major: 6, minor: 0 } } }),
+        { windows: 'win7', because: 'its header names Windows 6.0' });
+    assert.equal(pick({ compatibility: { imageVersion: { major: 6, minor: 2 } } }).windows,
+        'win10');
+    assert.equal(pick({ compatibility: { imageVersion: { major: 5, minor: 1 } } }).windows,
+        'winxp');
+    assert.equal(pick({ compatibility: { imageVersion: { major: 4, minor: 0 } } }).windows, 'winxp',
+        'a Windows 95 or NT 4 program on the oldest that runs it as well');
+    // A 64-bit program on no less than 7: none of the XP choices is 64-bit.
+    assert.deepEqual(pick({ bits: 64, compatibility: { imageVersion: { major: 5, minor: 2 } } }),
+        { windows: 'win7', because: 'its header names Windows 5.2, and it is 64-bit' });
+    // The manifest over the header, which a newer toolset leaves at 6.0.
+    assert.equal(pick({ compatibility: { supportedOS: [WIN7],
+        imageVersion: { major: 10, minor: 0 } } }).windows, 'win7');
 });

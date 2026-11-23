@@ -92,7 +92,7 @@ at a time. `quantum` (Debugging) fixes every turn at the number given.
 
 | Option | Default | What it does |
 | --- | --- | --- |
-| `windows` | `'winxp'` | The Windows version the program sees ([api.md](api.md)). |
+| `windows` | `'winxp'` | The Windows version the program sees, or `'auto'` for the one it was made for ([api.md](api.md)). |
 | `machine` | the first program's width | A 32- or 64-bit Windows ([api.md](api.md)). |
 | `layout` | `machine` | The machine the volume was laid out for: a 32-bit machine over a 64-bit layout ([api.md](api.md)). |
 | `win32.trustedRoots` | the roots a Windows 7 machine whose roots are kept up to date carries for code signing: Microsoft's (Root Authority, Root Certificate Authority, its 2010 and 2011), Thawte Timestamping CA, DigiCert Assured ID Root CA and VeriSign Universal Root (`wintrust/roots.js`) | The machine's trusted roots, as DER bytes or base64: what `WinVerifyTrust` accepts and what crypt32's ROOT store holds, which `CertGetCertificateChain` ends a chain at. An empty list trusts nothing. |

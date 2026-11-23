@@ -577,6 +577,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *           write, or a promise when the file must be copied up from blocks
  *           not resident yet -- see WriteFile.
  * @property {(node: any, size: number) => void} truncate
+ * @property {(node: any, size: number) => void | Promise<void>} [truncateOrFetch]
+ *           truncate, or a promise when the file must be copied up from blocks
+ *           not resident yet -- as writeOrFetch.
  * @property {(node: any) => void} close
  * @property {(node: any) => void} [retain]  one more hold, which a close gives back
  * @property {(node: any, kind: any) => any} [section]  a node of its own for a section
@@ -2058,19 +2061,31 @@ export function createFileFunctions(host){
     });
 
     /**
-     * Moves a file's end to `at`: 0, or the error that refuses it. A file a
-     * section or a view maps can grow and cannot be cut shorter, which would
+     * Moves a file's end to `at`: 0, or the error that refuses it, or a
+     * promise of either while the blocks a copy up needs are fetched. A file
+     * a section or a view maps can grow and cannot be cut shorter, which would
      * take pages from under the mapping (ERROR_USER_MAPPED_FILE).
      *
      * @param {{ node: any, path: string }} file @param {number} at
+     * @returns {number | Promise<number>}
      */
     const endAt = (file, at)=>{
         if (files.mappedAs?.(file.path) && at < (files.stat(file.path)?.size ?? 0))
         {
             return ERROR_USER_MAPPED_FILE;
         }
-        files.truncate(file.node, at);
-        return 0;
+        const done = (files.truncateOrFetch ?? files.truncate).call(files, file.node, at);
+        if (typeof (/** @type {any} */ (done))?.then !== 'function')
+        {
+            return 0;
+        }
+        // Parked on the blocks a copy up needs, as a write is: a fetch that
+        // fails is a loss, said, and the device's error.
+        return /** @type {Promise<void>} */ (done).then(()=>0, (/** @type {any} */ e)=>{
+            host.divergence?.('SetEndOfFile', `${file.path} not ended at ${at}: ${e?.message ?? e}`,
+                'loss');
+            return ERROR_IO_DEVICE;
+        });
     };
 
     /**
@@ -6020,6 +6035,18 @@ export function createFileFunctions(host){
                 // The current position is the new end -- that is the whole
                 // function; it takes no size of its own.
                 const refused = endAt(file, file.position);
+                if (typeof refused !== 'number')
+                {
+                    const owner = host.currentThread?.() ?? null;
+                    return refused.then(code=>{
+                        if (code === 0)
+                        {
+                            return 1;
+                        }
+                        host.setLastErrorFor?.(owner, code);
+                        return 0;
+                    });
+                }
                 return refused === 0 ? 1 : fail(refused);
             },
         },
