@@ -78,7 +78,9 @@ if (isMain(import.meta.url))
         catch {
             current = '';
         }
-        if (current !== wanted)
+        // Compared by its text, not its line ends: a Windows checkout with
+        // autocrlf holds the same table with CRLF.
+        if (current.replace(/\r\n/g, '\n') !== wanted)
         {
             console.error('pointer arguments: modules/core/src/layers/win32/common/'
                 + 'pointer-arguments.js is not what the signature comments say:'
