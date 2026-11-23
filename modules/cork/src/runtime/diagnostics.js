@@ -485,6 +485,11 @@ export function createDiagnostics(state){
         return {
             ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
                 ? { blockCounts: blocks, topBlocks: topBlocks(blocks, rt.regions),
+                    // Each region's guest bytes, so the counts above say how much of the
+                    // translated code ran how often (what a store keeps for what use).
+                    regionBytes: [...rt.regions.values()].map(record=>[record.entry,
+                        record.spans.reduce((sum, [start, end])=>sum + end - start, 0),
+                        record.spans.map(([start])=>start)]),
                     mechanisms: mechanismCounts(view(), layout), forms: hotForms(blocks),
                     transferTargets: transferTargets(view(), layout) }
                 : {}),

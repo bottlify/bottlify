@@ -895,6 +895,7 @@ async function main(){
         // sites the prediction sampled, the mechanisms, and what the hottest
         // regions' instruction forms emit, weighted by how often each ran.
         writeFileSync(corkOut, JSON.stringify({ blockCounts: cork.blockCounts ?? [],
+            regionBytes: cork.regionBytes ?? [],
             sites: cork.prediction?.sites ?? [], mechanisms: cork.mechanisms ?? {},
             forms: cork.forms ?? null }));
         console.log(`  cork profile written to ${corkOut}`);
