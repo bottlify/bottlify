@@ -522,6 +522,26 @@ test('an instruction the processor refused is traced with its bytes', async()=>{
         said.join('\n'));
 });
 
+test('an access the program\'s own code was refused is traced with its registers, bytes and stack',
+    async()=>{
+        // A process that ends on it leaves nothing else to read, and code a
+        // protection decrypts at run time is not in the file to disassemble.
+        const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+        /** @type {string[]} */
+        const said = [];
+        const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+        m.registerFrames([0x51000]);
+        m.host.writeMemory(0x41000,
+            new Uint8Array([0x8b, 0x46, 0x0c, 0x90, 0x90, 0x90, 0x90, 0x90]));
+        m.host.writeMemory(0x60000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
+        await seh.onFault({ vector: 14, eip: 0x41000, errorCode: 0, address: 0xc },
+            { ...m.registers(), eip: 0x41000, esi: 0, eax: 1, esp: 0x60000 });
+        const line = said.find(one=>one.includes('reading 0xc')) ?? '';
+        assert.match(line, /eax=0x1 .*esi=0x0 .*esp=0x60000/, said.join('\n'));
+        assert.ok(line.includes('code 8b 46 0c 90 90 90 90 90'), line);
+        assert.ok(line.includes('stack 0x12345678'), line);
+    });
+
 test('a refused access met in a host function is traced with that function\'s name', async()=>{
     // The address it was raised at is the function's trap, which names
     // nothing: the function and the pointer it was handed are the lead.

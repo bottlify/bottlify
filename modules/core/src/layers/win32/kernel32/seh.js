@@ -836,8 +836,26 @@ export function createSeh(host){
         // is its HRESULT, a C++ one's its object and its type's throw info.
         const told = what.raisedFrom !== undefined && (what.parameters?.length ?? 0) > 0
             ? ` [${(what.parameters ?? []).slice(0, 4).map(hex).join(' ')}]` : '';
+        // A refused access in the program's own code, with what the processor
+        // held: a process that ends on it leaves nothing else to read, and
+        // code a protection decrypts as it runs is not in the file to read.
+        /** @param {number} where @param {number} length */
+        const bytesAt = (where, length)=>(host.isMapped(where >>> 0)
+            ? [...host.readMemory(wholeAddress(where), length)]
+                .map(byte=>byte.toString(16).padStart(2, '0')).join(' ') : 'unmapped');
+        /** @param {number} index */
+        const stackWord = index=>{
+            const slot = (registers.esp + index * 4) >>> 0;
+            return host.isMapped(slot) ? hex(readU32(wholeAddress(slot))) : '?';
+        };
+        const state = reached && what.raisedFrom === undefined
+            ? ` (${['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp']
+                .map(name=>`${name}=${hex(registers[name])}`).join(' ')}`
+                + `, code ${bytesAt(what.address, 8)}`
+                + `, stack ${Array.from({ length: 12 }, (_, index)=>stackWord(index)).join(' ')})`
+            : '';
         host.trace?.(`exception ${hex(what.code)}${told} at ${hex(what.address)}${reached}`
-            + `${refused}${caller}, `
+            + `${state}${refused}${caller}, `
             + `${frames.length} frame(s)`
             + `${damaged ? `, chain damaged${damagedAt(asked, frames, broken)}` : ''}`
             + ` on ${asked?.name ?? 'the thread'}`);
