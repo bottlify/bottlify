@@ -415,17 +415,29 @@ export function createGraphicsLibraries(
         ? createFocusWindows({ user32, procedure, cover, states: DEVICE_STATE, currentThread,
             answering })
         : null;
+    /**
+     * The window the last GPU picture was shown in, whichever API presented
+     * it, and whether full screen (`present-window.js`); null before any.
+     *
+     * @type {{ window: number, fullscreen: boolean } | null}
+     */
+    let shownLast = null;
+    /** @param {number} window @param {boolean} fullscreen */
+    const shownIn = (window, fullscreen)=>{
+        shownLast = { window: window >>> 0, fullscreen };
+    };
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, placeCursor, cursorAt, resolution,
         ringBytes,
-        windowClientSize, windowShown, now, waitUntil, presented, refresh, phases, focus,
-        callGuest,
+        windowClientSize, windowShown, shownIn, now, waitUntil, presented, refresh, phases,
+        focus, callGuest,
         currentThread, identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, placeCursor, cursorAt, resolution,
-        windowClientSize, windowShown, gdi, now, devicePublished: pointer=>vtableDecoy(pointer),
+        windowClientSize, windowShown, shownIn, gdi, now,
+        devicePublished: pointer=>vtableDecoy(pointer),
         focus, callGuest, currentThread,
         waitUntil, presented, refresh, phases, allocate: guestCode9 ? allocate : undefined,
         allocateCode: guestCode9 ? allocateCode : undefined,
@@ -444,6 +456,7 @@ export function createGraphicsLibraries(
         videoMemory: ()=>graphics.videoMemory?.() ?? null,
         events,
         sharedHandles,
+        shownIn,
         root: (/** @type {any} */ factoryOptions)=>graphics.create('d3d10', { factoryOptions }),
         divergence,
         // A back buffer asked for at zero takes the window's client area; the
@@ -1032,7 +1045,10 @@ export function createGraphicsLibraries(
 
         /** The window a full-screen Direct3D 8 or 9 device holds the screen with, or 0. */
         screenHeld: ()=>focus?.screen() ?? 0,
-        /** The window the last DXGI swap chain presented into, full screen or not. */
-        presentedWindow: ()=>d3d10.made()?.presentedWindow?.() ?? null,
+        /**
+         * The window the last picture a device showed went into, full screen
+         * or not: a DXGI swap chain's, or a Direct3D 8 or 9 device's or chain's.
+         */
+        presentedWindow: ()=>shownLast,
     };
 }

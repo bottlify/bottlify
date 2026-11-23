@@ -2568,6 +2568,8 @@ test('a present is shown in the window it goes into, wherever the device\'s wind
     assert.deepEqual(presents, [['chain', true], ['chain', false], ['device', false],
         ['device', true]]);
     assert.deepEqual(h.divergences.filter(line=>/shown window|not shown/.test(line)), []);
+    assert.deepEqual(h.libraries.presentedWindow(), { window: GAME, fullscreen: false },
+        'the window the last picture shown went into, which the screen keeps it in');
 
     shownWindows.add(HWND);
     presents.length = 0;

@@ -762,6 +762,8 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]   Into the program, for the ID3DInclude a compile is given.
  * @property {() => any} [currentThread]  The thread a compile's include calls run on.
+ * @property {(window: number, fullscreen: boolean) => void} [shownIn]  Hears each frame a
+ *     swap chain shows, with its window: the seam's one record across the APIs.
  * @property {{ create: (options: { manualReset: boolean, signalled: boolean }) => number,
  *     set: (handle: number) => void }} [events]  Kernel events by handle: a swap chain's
  *     frame latency object, and the event IDXGIDevice2::EnqueueSetEvent sets.
@@ -791,7 +793,7 @@ export function updateSpan(packed, depth, rowPitch, depthPitch){
 export function createDirect3D10Seam({ publisher, memory, allocate, free, root: makeRoot,
     divergence, factoryOptions: given, screen, identity, videoMemory, resolution, gdi,
     ringAllocate, allocateCode, traps = new Set(), ringBytes, floatResult, events,
-    sharedHandles, callGuest, currentThread, pointerSize = 4 })
+    sharedHandles, callGuest, currentThread, shownIn, pointerSize = 4 })
 {
     const setEvent = events?.set;
     const fields = createFields(memory);
@@ -2134,6 +2136,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
             {
                 presentedInto = { window: held.desc.outputWindow >>> 0,
                     fullscreen: !held.desc.windowed };
+                shownIn?.(presentedInto.window, presentedInto.fullscreen);
             }
         };
         if (answer instanceof Promise)

@@ -1755,6 +1755,30 @@ test('a present is shown in the window it goes into, wherever the device\'s wind
     h.release(root);
 });
 
+test('the window a present shows a picture in is remembered: what the screen shows there is'
+    + ' that picture, not the window\'s own surface', ()=>{
+    // A windowed device's frames never reach the window's GDI surface; a
+    // paint pass that composed the desktop again put that surface, black,
+    // between them (a game's films and menus flickered). The screen keeps
+    // the picture in the window it was shown in (graphics/module.js).
+    const GAME = 0x00020050;
+    const shownWindows = new Set([GAME]);
+    const h = seamed({ windowShown: window=>shownWindows.has(window) });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.equal(h.seam.presentedWindow(), null, 'nothing shown yet');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.seam.presentedWindow(), null, 'the hidden device window shows nothing');
+    assert.equal(h.device(device, 'Present', [0, 0, GAME, 0]), D3D_OK);
+    assert.deepEqual(h.seam.presentedWindow(), { window: GAME, fullscreen: false });
+    shownWindows.add(HWND);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.seam.presentedWindow(), { window: HWND, fullscreen: false },
+        'the last picture shown');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a full-screen device\'s present is shown whatever its window says', ()=>{
     const h = seamed({ windowShown: ()=>false });
     const root = h.create();
