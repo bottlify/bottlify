@@ -13,8 +13,13 @@
  * and mutexes are found in), so a pipe one process makes is one its children
  * open: a browser's IPC and a crash reporter's connection are pipes between
  * processes. The pipe and its ends are objects every process of the run on
- * this thread holds directly; a process in a worker of its own has no way to
- * the table's objects and is refused, as before, with a divergence.
+ * this thread holds directly. A process in a worker of its own holds
+ * stand-ins (`pipeStandIn`) and asks the run for each operation across its
+ * link (`PipesAcross`, served by `system-pipes.js` over this same code):
+ * what the run answers at once is answered at once here, and what waits there
+ * waits here - a synchronous call's thread parked, an overlapped one pending -
+ * until the run's answer comes. The memory, events, routines and ports an
+ * operation finishes through stay the asking process's own.
  *
  * Every operation that cannot finish at once belongs to the process that
  * asked: it is kept with that process's own memory, kernel and completion
@@ -57,7 +62,6 @@ const ERROR_INVALID_NAME = 123;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 /** A pipe whose client is on this machine has no client computer name. */
 const ERROR_PIPE_LOCAL = 229;
-const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_BAD_PIPE = 230;
 const ERROR_PIPE_BUSY = 231;
 const ERROR_NO_DATA = 232;
@@ -265,7 +269,8 @@ const DEVICE_CONTROLS = new Map([
  *     a kernel32 export made on `thread`, its answer awaited: what CallNamedPipe is made of
  * @property {Map<string, any> | null} [table]  the run's named objects; absent, this
  *           process's own
- * @property {boolean} [remote]  a process in a worker of its own: no pipes
+ * @property {boolean} [remote]  a process in a worker of its own: the run's pipes are
+ *     reached across its link (`across`), the table here is not
  * @property {number} [processId]
  * @property {(file: number, transferred: number, overlapped: number, status?: number,
  *     skip?: { port?: boolean, event?: boolean }) => boolean} [completed]
@@ -280,25 +285,63 @@ const DEVICE_CONTROLS = new Map([
  * @property {(alertable: boolean, wait: () => any, answer: () => number) => any} [alertably]
  *     a wait made alertable: routines queued to the thread run first and end it at
  *     once, one queued while it waits ends it; `answer` is then the call's answer
- * @property {PipesAcross | null} [across]  where the ends a process in a worker of
- *     its own was started with are served (`EndAcross`), by their numbers
+ * @property {PipesAcross | null} [across]  where a process in a worker of its own
+ *     makes, opens and uses its pipe ends (`EndAcross`)
  */
 
 /**
- * The run's side of the ends a process across a link holds, asked by the
- * number the process has each by.
+ * The run's pipes as a process across a link reaches them (`system-pipes.js`):
+ * its ends by the numbers the run gave them, and the namespace. An answer that
+ * had to wait is a promise; every other comes at once.
  *
  * @typedef {Object} PipesAcross
- * @property {(id: number, length: number) => AcrossAnswer | Promise<AcrossAnswer>} read
- * @property {(id: number, bytes: Uint8Array) => AcrossAnswer} write
+ * @property {(name: string, asked: Record<string, any>, processId: number) =>
+ *     ({ id: number, access: number | null } & EndState) | { error: number }} create
+ *     a server instance, as `makeInstance` is asked for one
+ * @property {(name: string, access: number, flags: number, processId: number) =>
+ *     ({ id: number, access: number | null } & EndState) | { error: number }} open
+ *     a client end of an instance that listens
+ * @property {(name: string, processId: number) => number} query  as `query`
+ * @property {(name: string, timeout: number) => Answered} wait  WaitNamedPipe's, as a status
+ * @property {(id: number, length: number) => Answered} read
+ * @property {(id: number, bytes: Uint8Array, whole?: boolean) => Answered} write
  * @property {(id: number, size: number) => AcrossAnswer} peek
+ * @property {(id: number) => Answered} connect
+ * @property {(id: number) => AcrossAnswer} disconnect
+ * @property {(id: number) => Answered} flush
+ * @property {(id: number, bytes: Uint8Array, room: number) => Answered} transact
+ * @property {(id: number) => EndState} state
+ * @property {(id: number, readMessages: boolean, nowait: boolean) => void} setState
  * @property {(id: number) => number} cancel
  * @property {(id: number) => void} close
  */
 
+/** @typedef {AcrossAnswer | Promise<AcrossAnswer>} Answered */
+
+/**
+ * What a query of an end reads (`stateOf`).
+ *
+ * @typedef {Object} EndState
+ * @property {'server' | 'client'} side
+ * @property {boolean} canRead
+ * @property {boolean} canWrite
+ * @property {boolean} messages  the pipe's type
+ * @property {boolean} readMessages
+ * @property {boolean} nowait
+ * @property {boolean} overlapped  the end was opened for overlapped I/O
+ * @property {string} name  the pipe's, empty for one made with no name
+ * @property {number} instances
+ * @property {number} maxInstances
+ * @property {number} outSize
+ * @property {number} inSize
+ * @property {number} clientProcess
+ * @property {number} serverProcess
+ * @property {boolean} heard  the server has read what its client wrote
+ */
+
 /**
  * A pipe end this process holds and another thread serves: its number there,
- * what it can do, and the handles onto it here.
+ * what it was opened for, and the handles onto it here.
  *
  * @typedef {Object} StandIn
  * @property {true} standIn
@@ -307,6 +350,8 @@ const DEVICE_CONTROLS = new Map([
  * @property {boolean} canRead
  * @property {boolean} canWrite
  * @property {boolean} messages
+ * @property {boolean} overlapped
+ * @property {string} name
  * @property {number} refs
  * @property {() => void} retain
  */
@@ -355,18 +400,19 @@ export function dropUnclaimed(entries){
 }
 
 /**
- * The stand-in of an end served across a link, as `EndAcross.describe`
- * described it; no handle holds it until one is adopted onto it.
+ * The stand-in of an end served across a link, as the run described it; no
+ * handle holds it until one is opened or adopted onto it.
  *
  * @param {number} id
  * @param {{ side: 'server' | 'client', canRead: boolean, canWrite: boolean,
- *     messages: boolean }} described
+ *     messages: boolean, overlapped?: boolean, name?: string }} described
  * @returns {StandIn}
  */
 export function pipeStandIn(id, described){
     /** @type {StandIn} */
     const standIn = { standIn: true, id, side: described.side, canRead: described.canRead,
-        canWrite: described.canWrite, messages: described.messages, refs: 0,
+        canWrite: described.canWrite, messages: described.messages,
+        overlapped: described.overlapped === true, name: described.name ?? '', refs: 0,
         retain(){
             standIn.refs++;
         } };
@@ -443,24 +489,32 @@ export function pipeStandIn(id, described){
  * @typedef {Object} AcrossAnswer
  * @property {number} status
  * @property {Uint8Array} [bytes]
- * @property {number} [count]  what a write wrote
+ * @property {number} [count]  what a read or a write moved
  * @property {number} [total]  a peek's bytes waiting
  * @property {number} [left]  a peek's rest of the message at the front
+ * @property {boolean} [refused]  a transaction refused before it wrote anything
  */
 
 /**
  * An end held by a process in a worker of its own, served where the end is:
- * that process holds a stand-in under the same number (`standIn`) and asks
- * here for each read, write and peek. A read that must wait is queued among
- * the end's readers like any process's, and its answer is the promise.
+ * that process holds a stand-in (`pipeStandIn`) and asks here for each
+ * operation on it. One that must wait is queued on the end like any
+ * process's, and its answer is the promise.
  *
  * @typedef {Object} EndAcross
- * @property {(length: number) => AcrossAnswer | Promise<AcrossAnswer>} read
- * @property {(bytes: Uint8Array) => AcrossAnswer} write
+ * @property {(length: number) => Answered} read
+ * @property {(bytes: Uint8Array, whole?: boolean) => Answered} write
+ *     `whole`: a write that never waits for room (TransactNamedPipe's)
  * @property {(size: number) => AcrossAnswer} peek
- * @property {() => { side: 'server' | 'client', canRead: boolean, canWrite: boolean,
- *     messages: boolean, readMessages: boolean }} describe
- * @property {() => number} cancel  ends its waiting reads, cancelled: how many
+ * @property {() => Answered} connect  ConnectNamedPipe's, as a status
+ * @property {() => AcrossAnswer} disconnect  DisconnectNamedPipe's
+ * @property {() => Answered} flush  FlushFileBuffers'
+ * @property {(bytes: Uint8Array, room: number) => Answered} transact
+ *     TransactNamedPipe's: the message written, then the answer read
+ * @property {() => EndState} state
+ * @property {(readMessages: boolean, nowait: boolean) => void} setState
+ *     SetNamedPipeHandleState's, checked by the process that asked
+ * @property {() => number} cancel  ends what of it waits, cancelled: how many
  * @property {() => void} release  its handle closed: cancels, then lets the end go
  */
 
@@ -651,6 +705,22 @@ export function createNamedPipes(host){
         catch {
             return null;
         }
+    };
+    /**
+     * What a query of a handle's pipe reads: an end's here, or the run's
+     * answer for one served across a link; null for a handle that is neither.
+     *
+     * @param {number} handle
+     * @returns {EndState | null}
+     */
+    const queried = handle=>{
+        const end = endOf(handle);
+        if (end)
+        {
+            return stateOf(end);
+        }
+        const standIn = standInOf(handle);
+        return standIn ? /** @type {PipesAcross} */ (host.across).state(standIn.id) : null;
     };
     /** @param {number} pointer @param {boolean} wide */
     const nameAt = (pointer, wide)=>((pointer >>> 0) === 0 ? null
@@ -1249,18 +1319,13 @@ export function createNamedPipes(host){
     };
 
     /**
-     * A server end listens for its client, as ConnectNamedPipe and
-     * FSCTL_PIPE_LISTEN ask: a client already there is STATUS_PIPE_CONNECTED
-     * (a good connection), one that came and went STATUS_PIPE_CLOSING, an end
-     * that does not wait STATUS_PIPE_LISTENING; a disconnected instance
-     * listens again. Otherwise the connect waits: pending through its
-     * OVERLAPPED or its native block, or parked - the answer then the park's.
+     * What a listen answers without waiting (`listen`): a status, or null
+     * when the server end must wait for its client.
      *
-     * @param {End} end @param {number} handle
-     * @param {{ overlapped?: number, block?: number, io?: NativeAsync }} how
-     * @returns {number | any}  a status, or the park
+     * @param {End} end
+     * @returns {number | null}
      */
-    const listen = (end, handle, { overlapped = 0, block = 0, io })=>{
+    const listenNow = end=>{
         const { instance } = end;
         if (instance.state === 'connected')
         {
@@ -1275,10 +1340,28 @@ export function createNamedPipes(host){
             instance.state = 'listening';
             listening(instance.pipe);
         }
-        if (end.nowait)
+        return end.nowait ? STATUS_PIPE_LISTENING : null;
+    };
+
+    /**
+     * A server end listens for its client, as ConnectNamedPipe and
+     * FSCTL_PIPE_LISTEN ask: a client already there is STATUS_PIPE_CONNECTED
+     * (a good connection), one that came and went STATUS_PIPE_CLOSING, an end
+     * that does not wait STATUS_PIPE_LISTENING; a disconnected instance
+     * listens again. Otherwise the connect waits: pending through its
+     * OVERLAPPED or its native block, or parked - the answer then the park's.
+     *
+     * @param {End} end @param {number} handle
+     * @param {{ overlapped?: number, block?: number, io?: NativeAsync }} how
+     * @returns {number | any}  a status, or the park
+     */
+    const listen = (end, handle, { overlapped = 0, block = 0, io })=>{
+        const now = listenNow(end);
+        if (now !== null)
         {
-            return STATUS_PIPE_LISTENING;
+            return now;
         }
+        const { instance } = end;
         const native = block !== 0;
         const async = native && io !== undefined && /** @type {any} */ (end).overlapped === true
             ? io : undefined;
@@ -1364,9 +1447,30 @@ export function createNamedPipes(host){
     };
 
     /**
-     * An end served across a link (`EndAcross`). Its reads that wait are ops
-     * whose process is the promise: what `serve` writes for them is kept, and
-     * what wakes them answers it. The end's own event is the kernel's here.
+     * What a query of an end reads, whichever process asks and wherever it
+     * runs: its side and modes, its pipe's kind, sizes and instances, and the
+     * processes at either end.
+     *
+     * @param {End} end
+     * @returns {EndState}
+     */
+    const stateOf = end=>{
+        const { instance } = end;
+        const { pipe } = instance;
+        return { side: end.side, canRead: end.canRead, canWrite: end.canWrite,
+            messages: pipe.messages, readMessages: end.readMessages, nowait: end.nowait,
+            overlapped: /** @type {any} */ (end).overlapped === true, name: pipe.name,
+            instances: pipe.instances.size, maxInstances: pipe.maxInstances,
+            outSize: pipe.outSize, inSize: pipe.inSize, clientProcess: instance.clientProcess,
+            serverProcess: /** @type {any} */ (instance.server).serverProcess ?? 0,
+            heard: instance.heard === true };
+    };
+
+    /**
+     * An end served across a link (`EndAcross`). What waits there is an op
+     * like any process's whose process is a promise: what `serve` writes for
+     * it is kept, the count with its status, and what wakes it answers it.
+     * The end's own event is the kernel's here.
      *
      * @param {End} end
      * @returns {EndAcross}
@@ -1374,7 +1478,50 @@ export function createNamedPipes(host){
     const acrossOf = end=>{
         /** @type {Set<Op>} */
         const waiting = new Set();
-        return {
+        /**
+         * An operation that waits, finished as NtReadFile's is - its bytes at
+         * `buffer`, its status and count at `out` - and answered as it is
+         * woken. `place` puts the op where whatever finishes it finds it.
+         *
+         * @param {Op['kind']} kind @param {number} length @param {(op: Op) => void} place
+         * @returns {Promise<AcrossAnswer>}
+         */
+        const pending = (kind, length, place)=>new Promise(resolve=>{
+            let bytes = new Uint8Array(0);
+            let count = 0;
+            /** @type {Op} */
+            const op = { kind, thread: null, handle: 0, overlapped: 0, buffer: ACROSS_BUFFER,
+                length, out: ACROSS_STATUS, native: true, end, ctx: { modes: new Map(),
+                    host: /** @type {any} */ ({
+                        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
+                            if (at === ACROSS_BUFFER)
+                            {
+                                bytes = data.slice();
+                            }
+                            else if (at === ACROSS_STATUS + overlappedLayout().internalHigh)
+                            {
+                                count = (data[0] | data[1] << 8 | data[2] << 16 | data[3] << 24)
+                                    >>> 0;
+                            }
+                        },
+                        kernel: {
+                            setEvent: (/** @type {any} */ event)=>kernel.setEvent?.(event),
+                            wake: (/** @type {any} */ thread, /** @type {number} */ status)=>{
+                                void thread;
+                                waiting.delete(op);
+                                resolve({ status: status >>> 0, bytes, count });
+                            },
+                        },
+                    }) } };
+            waiting.add(op);
+            place(op);
+            if (end.signal)
+            {
+                kernel.resetEvent?.(end.signal);
+            }
+        });
+        /** @type {EndAcross} */
+        const across = {
             read(length){
                 if (!end.canRead)
                 {
@@ -1383,7 +1530,7 @@ export function createNamedPipes(host){
                 const got = end.readers.length === 0 ? take(end, length >>> 0) : null;
                 if (got)
                 {
-                    return { status: got.status, bytes: got.bytes };
+                    return { status: got.status, bytes: got.bytes, count: got.bytes.length };
                 }
                 const why = blocked(end, false);
                 if (why !== null)
@@ -1394,38 +1541,9 @@ export function createNamedPipes(host){
                 {
                     return { status: STATUS_PIPE_LISTENING };
                 }
-                return new Promise(resolve=>{
-                    let bytes = new Uint8Array(0);
-                    // Finished as NtReadFile's is: the bytes at `buffer`, the
-                    // status and count at `out`, the status as the wake's.
-                    /** @type {Op} */
-                    const op = { kind: 'read', thread: null, handle: 0, overlapped: 0,
-                        buffer: ACROSS_BUFFER, length: length >>> 0, out: ACROSS_STATUS,
-                        native: true, end, ctx: { modes: new Map(), host: /** @type {any} */ ({
-                            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>{
-                                if (at === ACROSS_BUFFER)
-                                {
-                                    bytes = data.slice();
-                                }
-                            },
-                            kernel: {
-                                setEvent: (/** @type {any} */ event)=>kernel.setEvent?.(event),
-                                wake: (/** @type {any} */ thread, /** @type {number} */ status)=>{
-                                    void thread;
-                                    waiting.delete(op);
-                                    resolve({ status: status >>> 0, bytes });
-                                },
-                            },
-                        }) } };
-                    waiting.add(op);
-                    end.readers.push(op);
-                    if (end.signal)
-                    {
-                        kernel.resetEvent?.(end.signal);
-                    }
-                });
+                return pending('read', length >>> 0, op=>void end.readers.push(op));
             },
-            write(bytes){
+            write(bytes, whole = false){
                 if (!end.canWrite)
                 {
                     return { status: STATUS.ACCESS_DENIED };
@@ -1435,19 +1553,15 @@ export function createNamedPipes(host){
                 {
                     return { status: why === STATUS_PIPE_BROKEN ? STATUS_PIPE_CLOSING : why };
                 }
-                const peer = /** @type {End} */ (peerOf(end));
-                if (bytes.length > 0 || end.instance.pipe.messages)
+                const { entry, written, waits } = enqueue(end, bytes.slice(), whole);
+                if (!waits)
                 {
-                    peer.inbox.push({ bytes: bytes.slice(), at: 0 });
+                    return { status: STATUS.SUCCESS, count: written };
                 }
-                serve(peer);
-                if (available(peer) > quotaOf(peer) && !unboundedSaid)
-                {
-                    unboundedSaid = true;
-                    host.divergence?.('WriteFile', 'a write from a process in a worker of its own'
-                        + ' is not held back by the pipe\'s buffer: it finishes at once');
-                }
-                return { status: STATUS.SUCCESS, count: bytes.length };
+                /** @type {End} */ (peerOf(end)).waiting++;
+                return pending('write', bytes.length, op=>{
+                    /** @type {Entry} */ (entry).op = op;
+                });
             },
             peek(size){
                 const why = blocked(end, false);
@@ -1459,8 +1573,40 @@ export function createNamedPipes(host){
                 return { status: STATUS.SUCCESS, bytes: seen.bytes, total: seen.total,
                     left: (seen.length - seen.bytes.length) >>> 0 };
             },
-            describe: ()=>({ side: end.side, canRead: end.canRead, canWrite: end.canWrite,
-                messages: end.instance.pipe.messages, readMessages: end.readMessages }),
+            connect(){
+                const now = listenNow(end);
+                return now !== null ? { status: now }
+                    : pending('connect', 0, op=>void end.instance.connects.push(op));
+            },
+            disconnect: ()=>({ status: disconnect(end) }),
+            flush(){
+                const peer = peerOf(end);
+                if (!end.canWrite || !peer || peer.inbox.length === 0)
+                {
+                    return { status: STATUS.SUCCESS };
+                }
+                const why = blocked(end, true);
+                return why !== null ? { status: why }
+                    : pending('flush', 0, op=>void peer.drains.push(op));
+            },
+            transact(bytes, room){
+                if (!end.instance.pipe.messages || !end.readMessages)
+                {
+                    return { status: STATUS.INVALID_READ_MODE, refused: true };
+                }
+                if (end.inbox.length > 0)
+                {
+                    return { status: STATUS.PIPE_BUSY, refused: true };
+                }
+                const wrote = /** @type {AcrossAnswer} */ (across.write(bytes, true));
+                return wrote.status !== STATUS.SUCCESS ? { ...wrote, refused: true }
+                    : across.read(room);
+            },
+            state: ()=>stateOf(end),
+            setState(readMessages, nowait){
+                end.readMessages = readMessages;
+                end.nowait = nowait;
+            },
             cancel: ()=>abort(end, op=>waiting.has(op)),
             release(){
                 abort(end, op=>waiting.has(op));
@@ -1470,6 +1616,7 @@ export function createNamedPipes(host){
                 }
             },
         };
+        return across;
     };
 
     /**
@@ -1491,11 +1638,10 @@ export function createNamedPipes(host){
      * @returns {{ handle: number } | { error: number }}  a Win32 error
      */
     const makeInstance = (name, asked)=>{
-        if (host.remote)
+        if (host.across)
         {
-            host.divergence?.('CreateNamedPipe', 'a process in a worker of its own has no '
-                + 'way to the run\'s pipes; refused as Windows 9x refuses it');
-            return { error: ERROR_CALL_NOT_IMPLEMENTED };
+            return standingIn(host.across.create(name, asked, host.processId ?? 0),
+                asked.inherit);
         }
         const { direction, maxInstances: max } = asked;
         if (max === 0 || max > PIPE_UNLIMITED_INSTANCES || direction === 0
@@ -1557,6 +1703,26 @@ export function createNamedPipes(host){
     };
 
     /**
+     * A handle of this process onto an end the run made for it across its
+     * link, or why the run made none.
+     *
+     * @param {({ id: number, access: number | null } & EndState) | { error: number }} made
+     * @param {boolean} inherit
+     * @returns {{ handle: number } | { error: number }}
+     */
+    const standingIn = (made, inherit)=>{
+        if ('error' in made)
+        {
+            return made;
+        }
+        const standIn = pipeStandIn(made.id, made);
+        standIn.refs = 1;
+        const handle = host.handles.open('pipe', standIn, made.access);
+        inheritable.set(handle, inherit);
+        return { handle };
+    };
+
+    /**
      * CreateNamedPipe: a server instance, in the Win32 spelling.
      *
      * @param {string | null} name
@@ -1564,7 +1730,7 @@ export function createNamedPipes(host){
      */
     const createPipe = (name, args)=>{
         const [openMode, pipeMode, maxInstances, outSize, inSize, timeout, attributes] = args;
-        if (!host.remote && (name === null || !isPipeName(name)))
+        if (name === null || !isPipeName(name))
         {
             return fail(ERROR_INVALID_NAME, INVALID_HANDLE_VALUE);
         }
@@ -1603,9 +1769,10 @@ export function createNamedPipes(host){
      * @returns {{ handle: number } | { error: number }}
      */
     const open = (name, access, flags, attributes = 0)=>{
-        if (host.remote)
+        if (host.across)
         {
-            return { error: ERROR_FILE_NOT_FOUND };
+            return standingIn(host.across.open(name, access, flags, host.processId ?? 0),
+                inheritsBy(attributes));
         }
         const pipe = pipeAt(keyOf(name));
         if (!pipe)
@@ -1661,9 +1828,9 @@ export function createNamedPipes(host){
      * @returns {number}  ERROR_SUCCESS or why not
      */
     const query = name=>{
-        if (host.remote)
+        if (host.across)
         {
-            return ERROR_FILE_NOT_FOUND;
+            return host.across.query(name, host.processId ?? 0);
         }
         const pipe = pipeAt(keyOf(name));
         if (!pipe)
@@ -1824,6 +1991,53 @@ export function createNamedPipes(host){
     };
 
     /**
+     * Queues a write's bytes at the other end of an end that may write now,
+     * for its reader: how many were written, and whether the write waits for
+     * room - its entry, then still in the reader's queue, is for its op. A
+     * zero-length write is a message of its own on a message pipe, and
+     * nothing at all on a byte one. A handle that does not wait writes what
+     * a waiting reader takes, and the rest only if all of it fits; a message
+     * goes whole or not at all.
+     *
+     * @param {End} end @param {Uint8Array} bytes
+     * @param {boolean} whole  a write that never waits (TransactNamedPipe's)
+     * @returns {{ entry: Entry | null, written: number, waits: boolean }}
+     */
+    const enqueue = (end, bytes, whole)=>{
+        const peer = /** @type {End} */ (peerOf(end));
+        const { messages } = end.instance.pipe;
+        const quota = quotaOf(peer);
+        const count = bytes.length;
+        /** @type {Entry | null} */
+        const entry = count > 0 || messages ? { bytes, at: 0 } : null;
+        if (!entry)
+        {
+            return { entry, written: 0, waits: false };
+        }
+        if (end.nowait && count > 0)
+        {
+            const reader = peer.inbox.length === 0 ? peer.readers[0] : undefined;
+            const takes = reader ? Math.min(reader.length, count) : 0;
+            if (messages && available(peer) + count - takes > quota)
+            {
+                return { entry, written: 0, waits: false };
+            }
+            peer.inbox.push(entry);
+            serve(peer);
+            if (peer.inbox.includes(entry) && available(peer) > quota)
+            {
+                peer.inbox = peer.inbox.filter(one=>one !== entry);
+                return { entry, written: entry.at, waits: false };
+            }
+            return { entry, written: count, waits: false };
+        }
+        peer.inbox.push(entry);
+        serve(peer);
+        return { entry, written: count, waits: !whole && count > 0 && peer.inbox.includes(entry)
+            && available(peer) > quota };
+    };
+
+    /**
      * Writes from an end the call has already found. The write is queued
      * whole for the reader; it finishes now if everything queued up to its
      * end fits the queue (`quotaOf`), else it waits for the reader to drain
@@ -1856,44 +2070,8 @@ export function createNamedPipes(host){
                 : toDosError(status));
         }
         const peer = /** @type {End} */ (peerOf(end));
-        const { messages } = end.instance.pipe;
-        const quota = quotaOf(peer);
-        // A zero-length write is a message of its own on a message pipe, and
-        // nothing at all on a byte one.
-        /** @type {Entry | null} */
-        const entry = count > 0 || messages ? { bytes: count === 0 ? new Uint8Array(0)
-            : host.readMemory(wholeAddress(buffer), count).slice(), at: 0 } : null;
-        let written = count;
-        let waits = false;
-        if (entry && end.nowait && count > 0)
-        {
-            // A handle that does not wait writes what a waiting reader takes,
-            // and the rest only if all of it fits; a message goes whole or not
-            // at all.
-            const reader = peer.inbox.length === 0 ? peer.readers[0] : undefined;
-            const takes = reader ? Math.min(reader.length, count) : 0;
-            if (messages && available(peer) + count - takes > quota)
-            {
-                written = 0;
-            }
-            else
-            {
-                peer.inbox.push(entry);
-                serve(peer);
-                if (peer.inbox.includes(entry) && available(peer) > quota)
-                {
-                    peer.inbox = peer.inbox.filter(one=>one !== entry);
-                    written = entry.at;
-                }
-            }
-        }
-        else if (entry)
-        {
-            peer.inbox.push(entry);
-            serve(peer);
-            waits = !whole && count > 0 && peer.inbox.includes(entry)
-                && available(peer) > quota;
-        }
+        const { entry, written, waits } = enqueue(end, count === 0 ? new Uint8Array(0)
+            : host.readMemory(wholeAddress(buffer), count).slice(), whole);
         if (waits)
         {
             const entryOf = /** @type {Entry} */ (entry);
@@ -1960,18 +2138,98 @@ export function createNamedPipes(host){
         return 1;
     };
 
+    /** Whether the run's answer is still to come. @param {any} got */
+    const waits = got=>typeof (/** @type {any} */ (got)).then === 'function';
+
     /**
-     * A read of an end served across a link: asked there, and answered here
-     * when it comes -- the bytes into the buffer, the count and the status
-     * where the call wants them, a waiting call's thread woken as the promise
-     * it was answered with settles.
+     * Finishes a read or a write on an end served across a link as one on an
+     * end here finishes (`startRead`, `startWrite`): what the run answered at
+     * once is answered at once, an error before any I/O with nothing told;
+     * what waits there waits here - pending through the OVERLAPPED of an end
+     * opened for overlapped I/O, or the routine, and finished as the answer
+     * comes, or the calling thread parked until it does.
+     *
+     * @param {StandIn} standIn @param {number} handle @param {Answered} got
+     * @param {{ out: number, overlapped: number, native: boolean, routine: number,
+     *     into: (answer: AcrossAnswer) => number }} how  `into`: what the answer moved,
+     *     its bytes put in the caller's buffer
+     */
+    const transferAcross = (standIn, handle, got, { out, overlapped, native, routine, into })=>{
+        const later = waits(got);
+        const now = /** @type {AcrossAnswer} */ (got);
+        if (!later && (now.status >>> 30) === 3)
+        {
+            return native ? now.status : fail(toDosError(now.status));
+        }
+        const thread = host.currentThread();
+        /** @param {(answer: AcrossAnswer) => void} then */
+        const whenAnswered = then=>void Promise.resolve(got).then(then);
+        if (routine !== 0)
+        {
+            if (later)
+            {
+                overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+            }
+            whenAnswered(answer=>completeRoutine(host, thread, overlapped, routine,
+                answer.status, into(answer)));
+            return 1;
+        }
+        if (overlapped !== 0 && !native && standIn.overlapped)
+        {
+            if (later)
+            {
+                overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
+                whenAnswered(answer=>host.completed?.(handle, into(answer), overlapped,
+                    answer.status));
+                return fail(ERROR_IO_PENDING);
+            }
+            const modes = ctx.modes.get(handle) ?? 0;
+            const succeeded = now.status === STATUS.SUCCESS;
+            host.completed?.(handle, into(now), overlapped, now.status, {
+                port: succeeded && (modes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0,
+                event: (modes & FILE_SKIP_SET_EVENT_ON_HANDLE) !== 0 });
+            return succeeded ? 1 : fail(toDosError(now.status));
+        }
+        /** @param {AcrossAnswer} answer */
+        const answered = answer=>{
+            const count = into(answer);
+            if (native)
+            {
+                overlappedResult(writeDword, layout, out, answer.status, count);
+                return answer.status;
+            }
+            writeDwordIf(out, count);
+            if (overlapped !== 0)
+            {
+                // A handle opened without FILE_FLAG_OVERLAPPED is told its
+                // status in the OVERLAPPED it was given, as `finish` tells it.
+                overlappedResult(writeDword, layout, overlapped, answer.status, count);
+                const event = (readDword(wholeAddress(overlapped) + layout.event) & ~1) >>> 0;
+                if (event !== 0)
+                {
+                    host.setEvent?.(event);
+                }
+            }
+            if (answer.status === STATUS.SUCCESS)
+            {
+                return 1;
+            }
+            host.setLastErrorFor(thread, toDosError(answer.status));
+            return 0;
+        };
+        return later ? /** @type {Promise<AcrossAnswer>} */ (got).then(answered)
+            : answered(now);
+    };
+
+    /**
+     * A read of an end served across a link: asked there, its bytes put in
+     * the buffer when they come.
      *
      * @param {StandIn} standIn @param {number} handle @param {number} buffer
      * @param {number} length @param {number} out @param {number} overlapped
-     * @param {boolean} native
+     * @param {boolean} native @param {number} routine
      */
-    const readAcross = (standIn, handle, buffer, length, out, overlapped, native)=>{
-        const across = /** @type {PipesAcross} */ (host.across);
+    const readAcross = (standIn, handle, buffer, length, out, overlapped, native, routine)=>{
         if (!standIn.canRead)
         {
             return native ? STATUS.ACCESS_DENIED : fail(ERROR_ACCESS_DENIED);
@@ -1980,55 +2238,27 @@ export function createNamedPipes(host){
         {
             return native ? STATUS.ACCESS_VIOLATION : fail(ERROR_NOACCESS);
         }
-        const thread = host.currentThread();
-        /** @param {AcrossAnswer} got */
-        const into = got=>{
-            const count = got.bytes?.length ?? 0;
-            if (count > 0)
-            {
-                host.writeMemory(wholeAddress(buffer), /** @type {Uint8Array} */ (got.bytes));
-            }
-            return count;
-        };
-        const asked = across.read(standIn.id, length >>> 0);
-        if (overlapped !== 0)
-        {
-            overlappedResult(writeDword, layout, overlapped, STATUS.PENDING, 0);
-            void Promise.resolve(asked).then(got=>{
-                host.completed?.(handle, into(got), overlapped, got.status);
-            });
-            return native ? STATUS.PENDING : fail(ERROR_IO_PENDING);
-        }
-        /** @param {AcrossAnswer} got */
-        const answered = got=>{
-            const count = into(got);
-            if (native)
-            {
-                overlappedResult(writeDword, layout, out, got.status, count);
-                return got.status;
-            }
-            writeDwordIf(out, count);
-            if (got.status === STATUS.SUCCESS)
-            {
-                return 1;
-            }
-            host.setLastErrorFor(thread, toDosError(got.status));
-            return 0;
-        };
-        return typeof (/** @type {any} */ (asked)).then === 'function'
-            ? /** @type {Promise<AcrossAnswer>} */ (asked).then(answered)
-            : answered(/** @type {AcrossAnswer} */ (asked));
+        const got = /** @type {PipesAcross} */ (host.across).read(standIn.id, length >>> 0);
+        return transferAcross(standIn, handle, got, { out, overlapped, native, routine,
+            into: answer=>{
+                const count = answer.bytes?.length ?? 0;
+                if (count > 0)
+                {
+                    host.writeMemory(wholeAddress(buffer), /** @type {Uint8Array} */ (answer.bytes));
+                }
+                return count;
+            } });
     };
 
     /**
-     * A write to an end served across a link: it finishes there at once, as
-     * every pipe write does.
+     * A write to an end served across a link: queued there whole, and
+     * finished when what is queued up to its end fits the pipe's buffer.
      *
      * @param {StandIn} standIn @param {number} handle @param {number} buffer
      * @param {number} length @param {number} out @param {number} overlapped
-     * @param {boolean} native
+     * @param {boolean} native @param {number} routine
      */
-    const writeAcross = (standIn, handle, buffer, length, out, overlapped, native)=>{
+    const writeAcross = (standIn, handle, buffer, length, out, overlapped, native, routine)=>{
         if (!standIn.canWrite)
         {
             return native ? STATUS.ACCESS_DENIED : fail(ERROR_ACCESS_DENIED);
@@ -2040,25 +2270,51 @@ export function createNamedPipes(host){
         }
         const got = /** @type {PipesAcross} */ (host.across).write(standIn.id,
             count === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count).slice());
-        if (got.status !== STATUS.SUCCESS)
+        if (!waits(got) && /** @type {AcrossAnswer} */ (got).status === STATUS_PIPE_CLOSING)
         {
-            return native ? got.status : fail(got.status === STATUS_PIPE_CLOSING ? ERROR_NO_DATA
-                : toDosError(got.status));
+            return native ? STATUS_PIPE_CLOSING : fail(ERROR_NO_DATA);
         }
-        if (overlapped !== 0 && host.completed)
+        return transferAcross(standIn, handle, got, { out, overlapped, native, routine,
+            into: answer=>answer.count ?? 0 });
+    };
+
+    /**
+     * ConnectNamedPipe on a server end served across a link: a client that
+     * came first is ERROR_PIPE_CONNECTED, one that came and went
+     * ERROR_NO_DATA; otherwise the connect waits there, pending or parked.
+     *
+     * @param {StandIn} standIn @param {number} handle @param {number} overlapped
+     */
+    const connectAcross = (standIn, handle, overlapped)=>{
+        if (standIn.side !== 'server')
         {
-            const modes = ctx.modes.get(handle) ?? 0;
-            host.completed(handle, count, overlapped, STATUS.SUCCESS, {
-                port: (modes & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0,
-                event: (modes & FILE_SKIP_SET_EVENT_ON_HANDLE) !== 0 });
+            return fail(ERROR_INVALID_PARAMETER);
         }
-        if (native)
+        begin(overlapped);
+        const got = /** @type {PipesAcross} */ (host.across).connect(standIn.id);
+        const thread = host.currentThread();
+        /** @param {AcrossAnswer} answer */
+        const answered = ({ status })=>{
+            if (status === STATUS.SUCCESS)
+            {
+                return 1;
+            }
+            host.setLastErrorFor(thread, status === STATUS_PIPE_CONNECTED ? ERROR_PIPE_CONNECTED
+                : status === STATUS_PIPE_CLOSING ? ERROR_NO_DATA : toDosError(status));
+            return 0;
+        };
+        if (!waits(got))
         {
-            overlappedResult(writeDword, layout, out, STATUS.SUCCESS, count);
-            return STATUS.SUCCESS;
+            return answered(/** @type {AcrossAnswer} */ (got));
         }
-        writeDwordIf(out, count);
-        return 1;
+        if (overlapped !== 0)
+        {
+            overlappedResult(writeDword, layout, wholeAddress(overlapped), STATUS.PENDING, 0);
+            void /** @type {Promise<AcrossAnswer>} */ (got).then(answer=>
+                host.completed?.(handle, 0, wholeAddress(overlapped), answer.status));
+            return fail(ERROR_IO_PENDING);
+        }
+        return /** @type {Promise<AcrossAnswer>} */ (got).then(answered);
     };
 
     /**
@@ -2092,23 +2348,8 @@ export function createNamedPipes(host){
                 handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0, native, io,
                 routine >>> 0));
         }
-        if (routine !== 0)
-        {
-            return exAcross('ReadFileEx');
-        }
         return readAcross(/** @type {StandIn} */ (standIn), handle >>> 0, buffer, length,
-            out >>> 0, overlapped >>> 0, native);
-    };
-
-    /**
-     * ReadFileEx or WriteFileEx on an end another thread serves: refused, and said.
-     *
-     * @param {string} api
-     */
-    const exAcross = api=>{
-        host.divergence?.(api, 'a completion routine on a pipe end its parent serves from '
-            + 'another thread is not delivered; the call fails with ERROR_INVALID_FUNCTION');
-        return fail(ERROR_INVALID_FUNCTION);
+            out >>> 0, overlapped >>> 0, native, routine >>> 0);
     };
 
     /**
@@ -2139,12 +2380,8 @@ export function createNamedPipes(host){
             return startWrite(end, handle >>> 0, buffer, length, out >>> 0, overlapped >>> 0,
                 native, routine >>> 0, { io });
         }
-        if (routine !== 0)
-        {
-            return exAcross('WriteFileEx');
-        }
         return writeAcross(/** @type {StandIn} */ (standIn), handle >>> 0, buffer, length,
-            out >>> 0, overlapped >>> 0, native);
+            out >>> 0, overlapped >>> 0, native, routine >>> 0);
     };
 
     /**
@@ -2230,7 +2467,24 @@ export function createNamedPipes(host){
         const end = endOf(handle);
         if (!end)
         {
-            return standInOf(handle) ? 1 : null;
+            const standIn = standInOf(handle);
+            if (!standIn)
+            {
+                return null;
+            }
+            const got = /** @type {PipesAcross} */ (host.across).flush(standIn.id);
+            const thread = host.currentThread();
+            /** @param {AcrossAnswer} answer */
+            const answered = ({ status })=>{
+                if (status === STATUS.SUCCESS)
+                {
+                    return 1;
+                }
+                host.setLastErrorFor(thread, toDosError(status));
+                return 0;
+            };
+            return waits(got) ? /** @type {Promise<AcrossAnswer>} */ (got).then(answered)
+                : answered(/** @type {AcrossAnswer} */ (got));
         }
         // Everything written read, or nothing left to read it: done, whatever
         // became of the reader since.
@@ -2303,6 +2557,16 @@ export function createNamedPipes(host){
     const closed = (handle, object)=>{
         inheritable.delete(handle >>> 0);
         ctx.modes.delete(handle >>> 0);
+        letGo(object);
+    };
+
+    /**
+     * One handle onto an end, or onto the stand-in of one, let go: the end
+     * goes with its last, and the run is told of a stand-in's last.
+     *
+     * @param {any} object
+     */
+    const letGo = object=>{
         if (object?.standIn)
         {
             if (--object.refs <= 0)
@@ -2354,7 +2618,8 @@ export function createNamedPipes(host){
                 // already waits on this call, and only a call's own thread
                 // in flight may be parked.
                 if (await step('GetLastError', []) !== ERROR_PIPE_BUSY
-                    || await settled(tell=>waitForInstance(name, timeout, wide, tell)) === 0)
+                    || await settled(tell=>/** @type {number | typeof WAITING} */ (
+                        waitForInstance(name, timeout, wide, tell))) === 0)
                 {
                     return 0;
                 }
@@ -2397,13 +2662,18 @@ export function createNamedPipes(host){
      *
      * @param {number} pointer @param {number} timeout @param {boolean} wide
      * @param {(result: number) => void} [tell]
-     * @returns {number | typeof WAITING}
+     * @returns {number | Promise<number> | typeof WAITING}  a promise only for a process
+     *     in a worker of its own asked without `tell`
      */
     const waitForInstance = (pointer, timeout, wide, tell)=>{
         const name = nameAt(pointer, wide);
         if (name === null || !isPipeName(name))
         {
             return fail(ERROR_INVALID_NAME);
+        }
+        if (host.across)
+        {
+            return waitAcross(name, timeout >>> 0, tell);
         }
         const pipe = pipeAt(keyOf(name));
         if (!pipe)
@@ -2456,6 +2726,39 @@ export function createNamedPipes(host){
     };
 
     /**
+     * WaitNamedPipe's work for a process in a worker of its own: the run
+     * waits for the instance, the time-out its own, and the thread here waits
+     * for the run's answer - TRUE at once, or once one listens; else
+     * ERROR_FILE_NOT_FOUND or ERROR_SEM_TIMEOUT, as `waitForInstance` answers.
+     *
+     * @param {string} name @param {number} timeout
+     * @param {(result: number) => void} [tell]
+     * @returns {number | Promise<number> | typeof WAITING}
+     */
+    const waitAcross = (name, timeout, tell)=>{
+        const got = /** @type {PipesAcross} */ (host.across).wait(name, timeout);
+        const thread = host.currentThread();
+        if (!waits(got))
+        {
+            const { status } = /** @type {AcrossAnswer} */ (got);
+            return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
+        }
+        /** @param {AcrossAnswer} answer */
+        const answered = ({ status })=>{
+            host.setLastErrorFor(thread, status === STATUS.SUCCESS ? ERROR_SUCCESS
+                : toDosError(status));
+            return status === STATUS.SUCCESS ? 1 : 0;
+        };
+        const later = /** @type {Promise<AcrossAnswer>} */ (got).then(answered);
+        if (!tell)
+        {
+            return later;
+        }
+        void later.then(tell);
+        return WAITING;
+    };
+
+    /**
      * TransactNamedPipe's work: a message written, then the answer read, on a
      * message pipe read as one. Its write never waits for room; an answer
      * already waiting unread refuses the transaction, ERROR_PIPE_BUSY, before
@@ -2469,6 +2772,12 @@ export function createNamedPipes(host){
         tell = undefined)=>
     {
         const end = endOf(handle);
+        const standIn = end ? null : standInOf(handle);
+        if (standIn)
+        {
+            return transactAcross(standIn, handle >>> 0, input, inputSize, output, outputSize,
+                count, overlapped, tell);
+        }
         if (!end)
         {
             return fail(ERROR_INVALID_HANDLE);
@@ -2490,6 +2799,49 @@ export function createNamedPipes(host){
         }
         return startRead(end, handle >>> 0, output, outputSize, count >>> 0,
             overlapped >>> 0, false, undefined, 0, tell);
+    };
+
+    /**
+     * TransactNamedPipe on an end served across a link: the run writes the
+     * message and reads the answer, refusing as `transact` refuses; the
+     * answer finishes here as a read's does (`transferAcross`), or - with
+     * `tell` - is told.
+     *
+     * @param {StandIn} standIn @param {number} handle @param {number} input
+     * @param {number} inputSize @param {number} output @param {number} outputSize
+     * @param {number} count @param {number} overlapped
+     * @param {(result: number) => void} [tell]
+     * @returns {any}
+     */
+    const transactAcross = (standIn, handle, input, inputSize, output, outputSize, count,
+        overlapped, tell)=>
+    {
+        const size = inputSize >>> 0;
+        const got = /** @type {PipesAcross} */ (host.across).transact(standIn.id,
+            size === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(input), size).slice(),
+            outputSize >>> 0);
+        if (!waits(got) && /** @type {AcrossAnswer} */ (got).refused)
+        {
+            const { status } = /** @type {AcrossAnswer} */ (got);
+            return fail(status === STATUS_PIPE_CLOSING ? ERROR_NO_DATA : toDosError(status));
+        }
+        begin(overlapped);
+        const answer = transferAcross(standIn, handle, got, { out: count >>> 0,
+            overlapped: tell ? 0 : overlapped >>> 0, native: false, routine: 0,
+            into: answered=>{
+                const bytes = answered.bytes ?? new Uint8Array(0);
+                if (bytes.length > 0)
+                {
+                    host.writeMemory(wholeAddress(output), bytes);
+                }
+                return bytes.length;
+            } });
+        if (!tell || !waits(answer))
+        {
+            return answer;
+        }
+        void /** @type {Promise<number>} */ (answer).then(tell);
+        return WAITING;
     };
 
     /**
@@ -2520,14 +2872,14 @@ export function createNamedPipes(host){
         argBytes: 28,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [handle, state, instances, , , user, room])=>{
-            const end = endOf(handle);
-            if (!end)
+            const pipe = queried(handle);
+            if (!pipe)
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
-            writeDwordIf(state, (end.readMessages ? PIPE_READMODE_MESSAGE : 0)
-                | (end.nowait ? PIPE_NOWAIT : 0));
-            writeDwordIf(instances, end.instance.pipe.instances.size);
+            writeDwordIf(state, (pipe.readMessages ? PIPE_READMODE_MESSAGE : 0)
+                | (pipe.nowait ? PIPE_NOWAIT : 0));
+            writeDwordIf(instances, pipe.instances);
             if ((user >>> 0) !== 0 && (room >>> 0) > 0)
             {
                 // The user the client runs as, asked of the server end: the one user.
@@ -2549,7 +2901,7 @@ export function createNamedPipes(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: ([handle, out])=>{
-            if (!endOf(handle))
+            if (!endOf(handle) && !standInOf(handle))
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
@@ -2567,7 +2919,7 @@ export function createNamedPipes(host){
         argBytes: 12,
         /** @param {number[]} args */
         handler: ([handle, , length])=>{
-            if (!endOf(handle))
+            if (!endOf(handle) && !standInOf(handle))
             {
                 return fail(ERROR_INVALID_HANDLE);
             }
@@ -2586,12 +2938,12 @@ export function createNamedPipes(host){
          * @param {number} handle @returns {'none' | 'unknown' | 'client'}
          */
         [PIPE_CLIENT]: handle=>{
-            const end = endOf(handle);
-            if (!end || end.side !== 'server')
+            const pipe = queried(handle);
+            if (!pipe || pipe.side !== 'server')
             {
                 return 'none';
             }
-            return end.instance.heard ? 'client' : 'unknown';
+            return pipe.heard ? 'client' : 'unknown';
         },
 
         /**
@@ -2622,6 +2974,11 @@ export function createNamedPipes(host){
             /** @param {number[]} args */
             handler: ([handle, overlapped])=>{
                 const end = endOf(handle);
+                const standIn = end ? null : standInOf(handle);
+                if (standIn)
+                {
+                    return connectAcross(standIn, handle >>> 0, overlapped);
+                }
                 if (!end || end.side !== 'server')
                 {
                     return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
@@ -2655,11 +3012,15 @@ export function createNamedPipes(host){
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const end = endOf(handle);
-                if (!end || end.side !== 'server')
+                const standIn = end ? null : standInOf(handle);
+                const side = end?.side ?? standIn?.side;
+                if (side !== 'server')
                 {
-                    return fail(end ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
+                    return fail(side ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
-                const status = disconnect(end);
+                const status = end ? disconnect(end)
+                    : /** @type {PipesAcross} */ (host.across).disconnect(
+                        /** @type {StandIn} */ (standIn).id).status;
                 return status === STATUS.SUCCESS ? 1 : fail(toDosError(status));
             },
         },
@@ -2699,13 +3060,12 @@ export function createNamedPipes(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, flags, outSize, inSize, max])=>{
-                const end = endOf(handle);
-                if (!end)
+                const pipe = queried(handle);
+                if (!pipe)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const { pipe } = end.instance;
-                writeDwordIf(flags, (end.side === 'server' ? PIPE_SERVER_END : 0)
+                writeDwordIf(flags, (pipe.side === 'server' ? PIPE_SERVER_END : 0)
                     | (pipe.messages ? PIPE_TYPE_MESSAGE : 0));
                 writeDwordIf(outSize, pipe.outSize);
                 writeDwordIf(inSize, pipe.inSize);
@@ -2736,7 +3096,8 @@ export function createNamedPipes(host){
             /** @param {number[]} args */
             handler: ([handle, modePointer])=>{
                 const end = endOf(handle);
-                if (!end)
+                const standIn = end ? null : standInOf(handle);
+                if (!end && !standIn)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
@@ -2749,13 +3110,25 @@ export function createNamedPipes(host){
                     return fail(ERROR_ACCESS_DENIED);
                 }
                 const mode = readDword(modePointer);
+                const messages = end ? end.instance.pipe.messages
+                    : /** @type {StandIn} */ (standIn).messages;
                 if ((mode & ~PIPE_STATE_MASK) !== 0
-                    || ((mode & PIPE_READMODE_MESSAGE) !== 0 && !end.instance.pipe.messages))
+                    || ((mode & PIPE_READMODE_MESSAGE) !== 0 && !messages))
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                end.readMessages = (mode & PIPE_READMODE_MESSAGE) !== 0;
-                end.nowait = (mode & PIPE_NOWAIT) !== 0;
+                const readMessages = (mode & PIPE_READMODE_MESSAGE) !== 0;
+                const nowait = (mode & PIPE_NOWAIT) !== 0;
+                if (end)
+                {
+                    end.readMessages = readMessages;
+                    end.nowait = nowait;
+                }
+                else
+                {
+                    /** @type {PipesAcross} */ (host.across).setState(
+                        /** @type {StandIn} */ (standIn).id, readMessages, nowait);
+                }
                 return 1;
             },
         },
@@ -2765,12 +3138,12 @@ export function createNamedPipes(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                const end = endOf(handle);
-                if (!end)
+                const pipe = queried(handle);
+                if (!pipe)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDwordIf(out, end.instance.clientProcess);
+                writeDwordIf(out, pipe.clientProcess);
                 return 1;
             },
         },
@@ -2780,12 +3153,12 @@ export function createNamedPipes(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                const end = endOf(handle);
-                if (!end)
+                const pipe = queried(handle);
+                if (!pipe)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                writeDwordIf(out, /** @type {any} */ (end.instance.server).serverProcess ?? 0);
+                writeDwordIf(out, pipe.serverProcess);
                 return 1;
             },
         },
@@ -2869,7 +3242,6 @@ export function createNamedPipes(host){
         [ERROR_ACCESS_DENIED, STATUS.ACCESS_DENIED],
         [ERROR_INVALID_PARAMETER, STATUS.INVALID_PARAMETER],
         [ERROR_FILE_NOT_FOUND, STATUS.OBJECT_NAME_NOT_FOUND],
-        [ERROR_CALL_NOT_IMPLEMENTED, STATUS.NOT_IMPLEMENTED],
     ]);
     /**
      * FSCTL_PIPE_TRANSCEIVE: TransactNamedPipe's native request - a message
@@ -3116,7 +3488,9 @@ export function createNamedPipes(host){
                 }
                 const made = makeInstance(pipeName ?? '', {
                     // Keyed outside the names' keys (`keyOf`), so no name reaches it.
-                    ...pipeName === null ? { key: `unnamed:${++unnamedCount}` } : {},
+                    // The process's id in it too: every process counts its own.
+                    ...pipeName === null
+                        ? { key: `unnamed:${host.processId ?? 0}:${++unnamedCount}` } : {},
                     direction: ((sharing & FILE_SHARE_WRITE) !== 0 ? PIPE_ACCESS_INBOUND : 0)
                         | ((sharing & FILE_SHARE_READ) !== 0 ? PIPE_ACCESS_OUTBOUND : 0),
                     messages: (type >>> 0) !== 0,
@@ -3153,11 +3527,75 @@ export function createNamedPipes(host){
     let anonymousCount = 0;
     /** Whether a wait on an end served across a link was said to fail. */
     let waitAcrossSaid = false;
-    /** Whether a write across a link past the pipe's buffer was said to finish at once. */
-    let unboundedSaid = false;
 
     return {
         functions,
+        /**
+         * What the run answers a process across a link of the namespace
+         * (`system-pipes.js`), on a host whose handles are the numbers it
+         * serves that process's ends by: a server instance, a client end, a
+         * query of a name, and WaitNamedPipe's wait.
+         */
+        namespace: {
+            /**
+             * @param {string} name
+             * @param {Parameters<typeof makeInstance>[1]} asked
+             */
+            create: (name, asked)=>makeInstance(name, asked),
+            /** @param {string} name @param {number} access @param {number} flags */
+            open: (name, access, flags)=>open(name, access, flags),
+            query,
+            /**
+             * WaitNamedPipe's wait, as a status: at once when there is no such
+             * pipe, an instance listens or the time-out is zero, else once one
+             * listens or the time-out (the pipe's own for
+             * NMPWAIT_USE_DEFAULT_WAIT) runs out on this thread's clock.
+             *
+             * @param {string} name @param {number} timeout
+             * @returns {AcrossAnswer | Promise<AcrossAnswer>}
+             */
+            wait(name, timeout){
+                const pipe = pipeAt(keyOf(name));
+                if (!pipe)
+                {
+                    return { status: STATUS.OBJECT_NAME_NOT_FOUND };
+                }
+                if ([...pipe.instances].some(one=>one.state === 'listening'))
+                {
+                    return { status: STATUS.SUCCESS };
+                }
+                const wait = (timeout >>> 0) === NMPWAIT_USE_DEFAULT_WAIT ? pipe.timeout
+                    : timeout >>> 0;
+                if (wait === 0)
+                {
+                    return { status: STATUS.IO_TIMEOUT };
+                }
+                return new Promise(resolve=>{
+                    /** @type {ReturnType<typeof setTimeout> | null} */
+                    let timer = null;
+                    /** @type {Waiter} */
+                    const waiter = { thread: null, ctx: { modes: ctx.modes,
+                        host: /** @type {any} */ ({
+                            setLastErrorFor(){},
+                            kernel: { wake: ()=>{
+                                if (timer !== null)
+                                {
+                                    clearTimeout(timer);
+                                }
+                                resolve({ status: STATUS.SUCCESS });
+                            } },
+                        }) } };
+                    pipe.waiters.push(waiter);
+                    if (wait !== NMPWAIT_WAIT_FOREVER)
+                    {
+                        timer = setTimeout(()=>{
+                            pipe.waiters = pipe.waiters.filter(one=>one !== waiter);
+                            resolve({ status: STATUS.IO_TIMEOUT });
+                        }, wait);
+                    }
+                });
+            },
+        },
         /**
          * What a wait on a pipe end's handle waits on: an event set while no
          * operation of the end is pending, as a file object is -- a program
@@ -3321,18 +3759,14 @@ export function createNamedPipes(host){
          * byte pipe under a name nobody else knows (Win32Pipes.<process>.<n>),
          * its server end the read handle and a client end opened for writing
          * the write handle. So an anonymous pipe reads, writes, breaks, is
-         * duplicated and inherited as a named one does. Null where this
-         * process cannot reach the run's pipes (a worker of its own).
+         * duplicated and inherited as a named one does. Null when either
+         * end could not be made.
          *
          * @param {number} attributes  the SECURITY_ATTRIBUTES, for inheritance
          * @param {number} size
          * @returns {{ read: number, write: number } | null}
          */
         anonymous(attributes, size){
-            if (host.remote)
-            {
-                return null;
-            }
             anonymousCount++;
             const name = `\\\\.\\pipe\\Win32Pipes.${(host.processId ?? 0).toString(16)
                 .padStart(8, '0')}.${anonymousCount.toString(16).padStart(8, '0')}`;
@@ -3524,6 +3958,12 @@ export function createNamedPipes(host){
                 return { status: STATUS.INVALID_PARAMETER };
             }
             const end = endOf(handle);
+            const standIn = end ? null : standInOf(handle);
+            if (standIn && (kind >>> 0) === FILE_NAME_INFORMATION)
+            {
+                return nameInformation(/** @type {PipesAcross} */ (host.across)
+                    .state(standIn.id).name);
+            }
             if (!end || ![FILE_STANDARD_INFORMATION, FILE_NAME_INFORMATION,
                 FILE_PIPE_INFORMATION, FILE_PIPE_LOCAL_INFORMATION].includes(kind >>> 0))
             {
@@ -3554,14 +3994,7 @@ export function createNamedPipes(host){
                 {
                     return { status: STATUS_PIPE_DISCONNECTED };
                 }
-                const prefix = PREFIXES.find(one=>pipe.name.toLowerCase().startsWith(one))
-                    ?? PREFIXES[0];
-                const name = `\\${pipe.name.slice(prefix.length)}`;
-                const bytes = new Uint8Array(4 + name.length * 2);
-                const view = new DataView(bytes.buffer);
-                view.setUint32(0, name.length * 2, true);
-                [...name].forEach((ch, at)=>view.setUint16(4 + at * 2, ch.charCodeAt(0), true));
-                return bytes;
+                return nameInformation(pipe.name);
             }
             if (!allows(host.handles.access?.(handle >>> 0) ?? null, FILE_READ_ATTRIBUTES))
             {
@@ -3683,8 +4116,10 @@ export function createNamedPipes(host){
             return [...inheritable].filter(([handle, on])=>(on || every)
                 && (only === null || only.includes(handle)))
                 .flatMap(([handle])=>{
-                    const end = endOf(handle);
-                    if (!end || end.closed)
+                    // An end the run serves this process is handed on as its
+                    // stand-in, one more handle onto it.
+                    const end = endOf(handle) ?? standInOf(handle);
+                    if (!end || ('closed' in end && end.closed))
                     {
                         return [];
                     }
@@ -3695,10 +4130,7 @@ export function createNamedPipes(host){
                             if (entry.held)
                             {
                                 entry.held = false;
-                                if (--end.refs <= 0 && !end.closed)
-                                {
-                                    closeEnd(end);
-                                }
+                                letGo(end);
                             }
                         } };
                     return [entry];
@@ -3712,7 +4144,7 @@ export function createNamedPipes(host){
          * @param {number} handle @param {boolean} on
          */
         setInheritable(handle, on){
-            if (endOf(handle))
+            if (endOf(handle) || standInOf(handle))
             {
                 inheritable.set(handle >>> 0, on);
             }
@@ -3728,12 +4160,11 @@ export function createNamedPipes(host){
          * @returns {string | null | undefined}
          */
         objectName(handle){
-            const end = endOf(handle);
-            if (!end)
+            const name = queried(handle)?.name;
+            if (name === undefined)
             {
                 return undefined;
             }
-            const { name } = end.instance.pipe;
             if (!name)
             {
                 return null;
@@ -3786,4 +4217,19 @@ const dwordBytes = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
 const readFrom = (host, address)=>{
     const bytes = host.readMemory(wholeAddress(address), 4);
     return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+};
+
+/**
+ * FileNameInformation of a pipe end: its name on the pipe device.
+ *
+ * @param {string} pipeName  a `\\.\pipe\` name
+ */
+const nameInformation = pipeName=>{
+    const prefix = PREFIXES.find(one=>pipeName.toLowerCase().startsWith(one)) ?? PREFIXES[0];
+    const name = `\\${pipeName.slice(prefix.length)}`;
+    const bytes = new Uint8Array(4 + name.length * 2);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, name.length * 2, true);
+    [...name].forEach((ch, at)=>view.setUint16(4 + at * 2, ch.charCodeAt(0), true));
+    return bytes;
 };

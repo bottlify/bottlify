@@ -147,8 +147,9 @@ export function clientUncovered(windows, handle, screen){
 }
 
 /**
- * What the screen shows for a window a DXGI swap chain presents into, which
- * DWM shows in place of what GDI drew there: `frame`, the device's last frame
+ * What the screen shows for a window a device presents into (a DXGI swap
+ * chain, a Direct3D 8 or 9 device or chain), which is shown in place of what
+ * GDI drew there: `frame`, the device's last frame
  * as it is, while the window is shown and nothing over it reaches its client
  * area; `veil`, the frame with the windows over it laid over it, while it has
  * the screen (full screen, or a window whose client area is the screen); else
@@ -1707,13 +1708,16 @@ export function createGraphicsModule(){
                         return;
                     }
                     const screen = screens.screen();
-                    // A DXGI swap chain's frames are its window's client area,
-                    // which DWM shows in place of what GDI drew there, whether
-                    // or not its application is active (`swapChainShows`). The
-                    // desktop composed again, the window's own surface black or
-                    // white, would hide every frame between two presents: a
-                    // click that repaints the window's border flashed it, and a
-                    // box over the picture stood on black.
+                    // A windowed device's frames - a DXGI swap chain's, a
+                    // Direct3D 8 or 9 device's or chain's - are its window's
+                    // client area, shown in place of what GDI drew there,
+                    // whether or not its application is active
+                    // (`swapChainShows`). The desktop composed again, the
+                    // window's own surface black or white, would hide every
+                    // frame between two presents: a click that repaints the
+                    // window's border flashed it, a box over the picture stood
+                    // on black, and a Direct3D 9 game's films and menus
+                    // flickered at every paint pass.
                     const into = state.seam?.presentedWindow?.() ?? null;
                     desktops.window = into?.window ?? 0;
                     if (screen && into)

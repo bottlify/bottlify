@@ -97,6 +97,19 @@ function processOf({ table, id, across }){
 }
 
 /**
+ * The run's pipes as a process across a link reaches them (`system-link.js`):
+ * an answer that waits there is a token, whose answer is then asked for.
+ *
+ * @param {ReturnType<typeof pipeHandlers>['pipes']} pipes
+ */
+const linked = pipes=>new Proxy(pipes, {
+    get: (target, name)=>(/** @type {any[]} */ ...args)=>{
+        const got = /** @type {any} */ (target)[name](...args);
+        return got?.waiting === undefined ? got : target.waited(got.waiting);
+    },
+});
+
+/**
  * A parent with an inbound pipe for the child's output and an outbound one
  * for its input, and the child across a link with the ends it inherits.
  */
@@ -113,10 +126,10 @@ function launched(){
         { handle: input.read, type: 'pipe', object: parent.handles.get(input.read)?.object },
     ];
     const served = pipeHandlers(inherited);
-    const child = processOf({ id: 2, across: served.pipes });
+    const child = processOf({ id: 2, across: linked(served.pipes) });
     for (const end of served.described)
     {
-        child.adopt(end.handle, pipeStandIn(end.handle, end));
+        child.adopt(end.handle, pipeStandIn(end.id, end));
     }
     // The parent lets go of the child's sides, as a launcher does once the
     // child has them.
@@ -175,8 +188,8 @@ test('a child that ends while its parent still holds the end gives up its waitin
         parent.pipes.anonymous(0, 4096));
     const end = parent.handles.get(input.read)?.object;
     const served = pipeHandlers([{ handle: input.read, type: 'pipe', object: end }]);
-    const child = processOf({ id: 2, across: served.pipes });
-    child.adopt(input.read, pipeStandIn(input.read, served.described[0]));
+    const child = processOf({ id: 2, across: linked(served.pipes) });
+    child.adopt(input.read, pipeStandIn(served.described[0].id, served.described[0]));
     const waiting = child.read(input.read, 64);
     served.dispose();
     assert.equal(await waiting, 0);

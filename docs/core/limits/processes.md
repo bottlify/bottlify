@@ -135,7 +135,7 @@
   not within one. Each turn compares the views of every section with two views or more, so its
   cost grows with the bytes shared. A view of a file, and a process in a worker of its own, keep a
   copy of their own.
-- Named pipes are the run's, between the processes on the engine's thread: byte and message
+- Named pipes are the run's, one namespace for every process wherever it runs: byte and message
   pipes, overlapped reads and connects completed through their event and completion port, and a
   pipe end a child inherits (`bInheritHandles`, or a STARTUPINFOEX handle list) under its parent's
   number. A child on the engine's thread inherits its parent's inheritable events, mutexes,
@@ -151,16 +151,16 @@
   (one it does not inherit names nothing there) and NULL when it inherits none; a console child
   that inherits nothing is handed duplicates of its parent's standard handles, a window program
   none, and a window program or a `DETACHED_PROCESS` child has no console handles. `CONIN$` and
-  `CONOUT$` open as the console's own standard handles, which duplicate as themselves. A process in a worker of its own makes and opens none (`CreateNamedPipe` is refused, as
-  Windows 9x refuses it), but the ends a parent on the engine's thread hands it (its standard
-  handles redirected to pipes, or any inherited end) it reads, writes, peeks and closes as its
-  own: they are served where the parent holds them, and a wait on such a handle itself fails
-  (`ERROR_INVALID_HANDLE`, said as a divergence); so does a `ReadFileEx` or `WriteFileEx` on one,
-  which works on a pipe of the engine's thread. A write waits, as on Windows, until what is
-  queued up to its end fits the buffer the pipe was made with (the server's output size one way,
-  its input size the other) and `FlushFileBuffers` until the reader has taken everything; a write
-  from a process in a worker of its own is the exception and finishes at once, said as a
-  divergence. `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on
+  `CONOUT$` open as the console's own standard handles, which duplicate as themselves. A process in a worker of its own makes, opens, connects, waits for, reads,
+  writes, transacts on and hands on pipes as one on the engine's thread does: the pipes live on
+  the engine's thread, the process holds stand-ins and asks there for each operation across its
+  link (`system-pipes.js`), and what waits there - a connect, a read, a write, `WaitNamedPipe` -
+  parks the asking thread or stays pending through its OVERLAPPED, routine or completion port,
+  never the whole worker. An end it hands to a child the run starts in another worker is one
+  more handle onto the same end. A wait on such a handle itself fails (`ERROR_INVALID_HANDLE`,
+  said as a divergence). A write waits, as on Windows, until what is queued up to its end fits
+  the buffer the pipe was made with (the server's output size one way, its input size the other)
+  and `FlushFileBuffers` until the reader has taken everything. `GetOverlappedResult` on a pipe operation whose OVERLAPPED has no event waits on
   nothing. The pipe device opens by its own names (`\Device\NamedPipe` and its root
   `\Device\NamedPipe\`): pipes are made under the root, one made there with no name is a pipe
   only its server's handle opens, and `FSCTL_PIPE_WAIT` through the root waits for an instance

@@ -251,6 +251,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {(window: number) => boolean} [deps.windowShown]  Whether a window and its
  *     ancestors are shown, which decides whether a present into it is (`present-window.js`);
  *     absent, every present is.
+ * @param {(window: number, fullscreen: boolean) => void} [deps.shownIn]  Hears each
+ *     picture shown, with its window (`present-window.js`).
  * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
  *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
@@ -278,7 +280,8 @@ export function createDirect3D9Seam(
     { focus: focusWindows = null, publisher, memory, screen, divergence, cursor, placeCursor,
         cursorAt, devicePublished, resolution,
         identity, callGuest, currentThread,
-        windowClientSize, windowShown, gdi, now = ()=>performance.now(), waitUntil, presented,
+        windowClientSize, windowShown, shownIn, gdi, now = ()=>performance.now(), waitUntil,
+        presented,
         refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
         traps = new Set(), phases, pointerSize = 4, floatResult },
@@ -504,7 +507,8 @@ export function createDirect3D9Seam(
      * @type {WeakMap<object, number>}
      */
     const chainWindows = new WeakMap();
-    const presentWindows = createPresentWindows({ api: 'Direct3D 9', windowShown, divergence });
+    const presentWindows = createPresentWindows({ api: 'Direct3D 9', windowShown, divergence,
+        shownIn });
     /**
      * Whether a present is shown: one into a shown window is, and every one of
      * a full-screen device.
@@ -4082,6 +4086,9 @@ export function createDirect3D9Seam(
 
         /** What that device's program set in the guest, and the calls that never crossed. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),
+
+        /** The window the last picture shown went into, and whether full screen; or null. */
+        presentedWindow: ()=>presentWindows.last(),
 
         /** For tests, which have no guest to call through. */
         interfaces: {
