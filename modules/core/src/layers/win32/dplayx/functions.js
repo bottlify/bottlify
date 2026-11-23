@@ -222,11 +222,11 @@ export function createDplayFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([guid, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writeU32(out, 0);
                 }
-                if ((guid >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(guid) === 0 || wholeAddress(out) === 0)
                 {
                     return DPERR_INVALIDPARAMS;
                 }

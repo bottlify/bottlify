@@ -557,12 +557,12 @@ export function createUrlMonikers(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([context, urlAt, out])=>{
-                if ((urlAt >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(urlAt) === 0 || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const url = canonicalUrl(host.readWideString(wholeAddress(urlAt), 0x8000),
-                    urls.get(context >>> 0) ?? null);
+                    urls.get(wholeAddress(context)) ?? null);
                 const pointer = await makeMoniker(url);
                 writeU32(out, pointer);
                 return pointer === 0 ? E_OUTOFMEMORY : S_OK;
@@ -577,13 +577,13 @@ export function createUrlMonikers(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([context, callback, previousOut])=>{
-                if ((context >>> 0) === 0 || (callback >>> 0) === 0)
+                if (wholeAddress(context) === 0 || wholeAddress(callback) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = host.callerThread();
                 const previous = await callbackOf(context, thread);
-                if ((previousOut >>> 0) !== 0)
+                if (wholeAddress(previousOut) !== 0)
                 {
                     writeU32(previousOut, previous);
                 }
@@ -609,7 +609,7 @@ export function createUrlMonikers(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: async([, callback, formats, out])=>{
-                if ((callback >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(callback) === 0 || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -624,7 +624,7 @@ export function createUrlMonikers(host){
                 {
                     return made === 0 ? E_OUTOFMEMORY : made;
                 }
-                if ((formats >>> 0) !== 0)
+                if (wholeAddress(formats) !== 0)
                 {
                     diverge('CreateAsyncBindCtx', 'the format enumerator is not kept');
                 }
@@ -650,7 +650,7 @@ export function createUrlMonikers(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: async([moniker])=>{
-                if ((moniker >>> 0) === 0)
+                if (wholeAddress(moniker) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -680,7 +680,7 @@ export function createUrlMonikers(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -751,7 +751,7 @@ export function createUrlMonikers(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([target])=>{
-                const url = urls.get(target >>> 0) ?? 'a moniker not made here';
+                const url = urls.get(wholeAddress(target)) ?? 'a moniker not made here';
                 diverge('HlinkSimpleNavigateToMoniker', `a link is not opened: ${url}`);
                 return S_OK;
             },
@@ -769,7 +769,7 @@ export function createUrlMonikers(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: async([, urlAt, target])=>{
-                if ((urlAt >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(urlAt) === 0 || wholeAddress(target) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -790,7 +790,8 @@ export function createUrlMonikers(host){
         RevokeBindStatusCallback: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([context, callback])=>((context >>> 0) === 0 || (callback >>> 0) === 0
+            handler: ([context,
+                callback])=>(wholeAddress(context) === 0 || wholeAddress(callback) === 0
                 ? E_INVALIDARG
                 : lendWide(BSCB_HOLDER, name=>callMethod(context, SLOT.REVOKE_OBJECT_PARAM,
                     [name], host.callerThread()))),

@@ -624,8 +624,8 @@ export function createStreams(host){
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([initial, size])=>publishStream(memoryBacking((initial >>> 0) === 0
-                ? new Uint8Array(0) : host.readMemory?.(initial >>> 0, size >>> 0)
+            handler: ([initial, size])=>publishStream(memoryBacking(wholeAddress(initial) === 0
+                ? new Uint8Array(0) : host.readMemory?.(wholeAddress(initial), size >>> 0)
                     ?? new Uint8Array(0)), 0x2),
         },
     };

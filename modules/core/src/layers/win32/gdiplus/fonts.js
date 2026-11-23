@@ -284,12 +284,12 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, collection, out])=>{
-                if ((name >>> 0) === 0 || (out >>> 0) === 0 || !host.readWideString)
+                if (wholeAddress(name) === 0 || wholeAddress(out) === 0 || !host.readWideString)
                 {
                     return InvalidParameter;
                 }
                 const wanted = host.readWideString(wholeAddress(name));
-                const own = collections.get(collection >>> 0);
+                const own = collections.get(wholeAddress(collection));
                 const added = own && !own.installed ? own.names.find(n=>n.toLowerCase()
                     === wanted.toLowerCase()) : undefined;
                 if (added)
@@ -314,8 +314,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([family, out])=>{
-                const face = families.get(family >>> 0);
-                return face === undefined || (out >>> 0) === 0 ? InvalidParameter
+                const face = families.get(wholeAddress(family));
+                return face === undefined || wholeAddress(out) === 0 ? InvalidParameter
                     : newFamily(face, out);
             },
         },
@@ -324,7 +324,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
         GdipDeleteFontFamily: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([family])=>(families.delete(family >>> 0) ? Ok : InvalidParameter),
+            handler: ([family])=>(families.delete(wholeAddress(family)) ? Ok : InvalidParameter),
         },
 
         /**
@@ -334,8 +334,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([family, out])=>{
-                const face = families.get(family >>> 0);
-                if (face === undefined || (out >>> 0) === 0)
+                const face = families.get(wholeAddress(family));
+                if (face === undefined || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -358,7 +358,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([family, , out])=>{
-                if (!families.has(family >>> 0) || (out >>> 0) === 0)
+                if (!families.has(wholeAddress(family)) || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -387,9 +387,9 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             floats: { 1: 'f32' },
             /** @param {number[]} args */
             handler: ([family, size, style, unit, out])=>{
-                const face = families.get(family >>> 0);
+                const face = families.get(wholeAddress(family));
                 const em = real(size);
-                if (face === undefined || (out >>> 0) === 0 || !(em > 0)
+                if (face === undefined || wholeAddress(out) === 0 || !(em > 0)
                     || (unit >>> 0) === UnitDisplay || (unit >>> 0) > UnitMillimeter)
                 {
                     return InvalidParameter;
@@ -403,7 +403,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hdc, logfont, out])=>{
-                if ((hdc >>> 0) === 0 || (logfont >>> 0) === 0 || (out >>> 0) === 0)
+                if ((hdc >>> 0) === 0 || wholeAddress(logfont) === 0 || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -417,7 +417,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([hdc, logfont, out])=>{
-                if ((hdc >>> 0) === 0 || (logfont >>> 0) === 0 || (out >>> 0) === 0)
+                if ((hdc >>> 0) === 0 || wholeAddress(logfont) === 0 || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -434,7 +434,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hdc, out])=>{
-                if ((hdc >>> 0) === 0 || (out >>> 0) === 0 || !host.gdi32)
+                if ((hdc >>> 0) === 0 || wholeAddress(out) === 0 || !host.gdi32)
                 {
                     return InvalidParameter;
                 }
@@ -467,8 +467,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([font, out])=>{
-                const held = fonts.get(font >>> 0);
-                return !held || (out >>> 0) === 0 ? InvalidParameter : newFont(held, out);
+                const held = fonts.get(wholeAddress(font));
+                return !held || wholeAddress(out) === 0 ? InvalidParameter : newFont(held, out);
             },
         },
 
@@ -476,7 +476,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
         GdipDeleteFont: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([font])=>(fonts.delete(font >>> 0) ? Ok : InvalidParameter),
+            handler: ([font])=>(fonts.delete(wholeAddress(font)) ? Ok : InvalidParameter),
         },
 
         /** Status GdipGetFamily(GpFont *font, GpFontFamily **family): a family of its own. */
@@ -484,8 +484,9 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([font, out])=>{
-                const held = fonts.get(font >>> 0);
-                return !held || (out >>> 0) === 0 ? InvalidParameter : newFamily(held.face, out);
+                const held = fonts.get(wholeAddress(font));
+                return !held || wholeAddress(out) === 0 ? InvalidParameter : newFamily(held.face,
+                    out);
             },
         },
 
@@ -494,8 +495,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([font, out])=>{
-                const held = fonts.get(font >>> 0);
-                if (!held || (out >>> 0) === 0)
+                const held = fonts.get(wholeAddress(font));
+                if (!held || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -509,8 +510,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([font, out])=>{
-                const held = fonts.get(font >>> 0);
-                if (!held || (out >>> 0) === 0)
+                const held = fonts.get(wholeAddress(font));
+                if (!held || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -524,8 +525,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([font, out])=>{
-                const held = fonts.get(font >>> 0);
-                if (!held || (out >>> 0) === 0)
+                const held = fonts.get(wholeAddress(font));
+                if (!held || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -543,8 +544,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             floats: { 1: 'f32' },
             /** @param {number[]} args */
             handler: ([font, dpi, out])=>{
-                const held = fonts.get(font >>> 0);
-                if (!held || (out >>> 0) === 0)
+                const held = fonts.get(wholeAddress(font));
+                if (!held || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -565,15 +566,15 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([font, target, out])=>{
-                const held = fonts.get(font >>> 0);
-                if (!held || (out >>> 0) === 0
-                    || ((target >>> 0) !== 0 && !isGraphics(target >>> 0)))
+                const held = fonts.get(wholeAddress(font));
+                if (!held || wholeAddress(out) === 0
+                    || (wholeAddress(target) !== 0 && !isGraphics(wholeAddress(target))))
                 {
                     return InvalidParameter;
                 }
                 const cell = /** @type {NonNullable<ReturnType<typeof designCell>>} */ (
                     designCell(held.face));
-                putFloat(out, (target >>> 0) !== 0 ? spacingPixels(held, DPI)
+                putFloat(out, wholeAddress(target) !== 0 ? spacingPixels(held, DPI)
                     : held.size * (cell.ascent + cell.descent) / cell.unitsPerEm);
                 return Ok;
             },
@@ -602,7 +603,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -621,7 +622,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -637,7 +638,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([at])=>{
-                if ((at >>> 0) === 0)
+                if (wholeAddress(at) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -659,8 +660,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([collection, out])=>{
-                const held = collections.get(collection >>> 0);
-                if (!held || (out >>> 0) === 0)
+                const held = collections.get(wholeAddress(collection));
+                if (!held || wholeAddress(out) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -679,8 +680,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([collection, sought, out, found])=>{
-                const held = collections.get(collection >>> 0);
-                if (!held || (out >>> 0) === 0 || (found >>> 0) === 0)
+                const held = collections.get(wholeAddress(collection));
+                if (!held || wholeAddress(out) === 0 || wholeAddress(found) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -689,7 +690,7 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
                 names.forEach((name, i)=>{
                     const made = handle();
                     families.set(made, name);
-                    putPointer((out >>> 0) + i * 4, made);
+                    putPointer(wholeAddress(out) + i * 4, made);
                 });
                 putU32(found, names.length);
                 return Ok;
@@ -705,8 +706,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 8,
             /** @param {number[]} args */
             handler: async([collection, name])=>{
-                const held = collections.get(collection >>> 0);
-                if (!held || held.installed || (name >>> 0) === 0 || !host.readWideString
+                const held = collections.get(wholeAddress(collection));
+                if (!held || held.installed || wholeAddress(name) === 0 || !host.readWideString
                     || !host.readFile)
                 {
                     return InvalidParameter;
@@ -736,8 +737,8 @@ export function createFontFunctions({ host, handle, putPointer, isGraphics }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([collection, memory, length])=>{
-                const held = collections.get(collection >>> 0);
-                if (!held || held.installed || (memory >>> 0) === 0 || (length | 0) <= 0)
+                const held = collections.get(wholeAddress(collection));
+                if (!held || held.installed || wholeAddress(memory) === 0 || (length | 0) <= 0)
                 {
                     return InvalidParameter;
                 }

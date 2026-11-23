@@ -455,23 +455,23 @@ export function createMeshFunctions(host, buffers){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([mesh, adjacency, out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putU32s(out, [0]);
                 }
-                if ((mesh >>> 0) === 0 || (adjacency >>> 0) === 0 || !host.callGuest
+                if (wholeAddress(mesh) === 0 || wholeAddress(adjacency) === 0 || !host.callGuest
                     || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const thread = host.currentThread?.();
-                return Promise.resolve().then(()=>meshErrors(mesh >>> 0, adjacency, thread))
+                return Promise.resolve().then(()=>meshErrors(wholeAddress(mesh), adjacency, thread))
                     .then(errors=>{
                         if (typeof errors === 'number')
                         {
                             return errors;
                         }
-                        tell(out >>> 0, errors);
+                        tell(wholeAddress(out), errors);
                         return errors.length > 0 ? D3DXERR_INVALIDMESH : D3D_OK;
                     });
             },
@@ -497,25 +497,26 @@ export function createMeshFunctions(host, buffers){
                         putU32s(at, [0]);
                     }
                 }
-                if ((mesh >>> 0) === 0 || (adjacency >>> 0) === 0 || (meshOut >>> 0) === 0
+                if (wholeAddress(mesh) === 0 || wholeAddress(adjacency) === 0
+                    || wholeAddress(meshOut) === 0
                     || !host.callGuest || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const thread = host.currentThread?.();
-                return Promise.resolve().then(()=>meshErrors(mesh >>> 0, adjacency, thread))
+                return Promise.resolve().then(()=>meshErrors(wholeAddress(mesh), adjacency, thread))
                     .then(async errors=>{
                         if (typeof errors === 'number')
                         {
                             return errors;
                         }
-                        tell(out >>> 0, errors);
+                        tell(wholeAddress(out), errors);
                         if (errors.length > 0)
                         {
                             return D3DXERR_INVALIDMESH;
                         }
                         const faces = await method(thread, mesh, MESH.GetNumFaces, []);
-                        if ((adjacencyOut >>> 0) !== 0)
+                        if (wholeAddress(adjacencyOut) !== 0)
                         {
                             host.writeMemory(wholeAddress(adjacencyOut),
                                 host.readMemory(wholeAddress(adjacency),
@@ -542,16 +543,18 @@ export function createMeshFunctions(host, buffers){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([mesh, attribute, options, out, countOut])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     putU32s(out, [0]);
                 }
-                if ((mesh >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(mesh) === 0 || wholeAddress(out) === 0 || !host.callGuest
+                    || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return convertSubset(mesh >>> 0, attribute >>> 0, options >>> 0, out >>> 0,
-                    countOut >>> 0, host.currentThread?.());
+                return convertSubset(wholeAddress(mesh), attribute >>> 0, options >>> 0,
+                    wholeAddress(out),
+                    wholeAddress(countOut), host.currentThread?.());
             },
         },
 
@@ -567,11 +570,11 @@ export function createMeshFunctions(host, buffers){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([mesh, adjacency])=>{
-                if ((mesh >>> 0) === 0 || !host.callGuest || !host.heap)
+                if (wholeAddress(mesh) === 0 || !host.callGuest || !host.heap)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                return computeNormals(mesh >>> 0, adjacency, host.currentThread?.());
+                return computeNormals(wholeAddress(mesh), adjacency, host.currentThread?.());
             },
         },
 
@@ -586,7 +589,8 @@ export function createMeshFunctions(host, buffers){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([first, count, stride, minOut, maxOut])=>{
-                if ((first >>> 0) === 0 || (minOut >>> 0) === 0 || (maxOut >>> 0) === 0)
+                if (wholeAddress(first) === 0 || wholeAddress(minOut) === 0
+                    || wholeAddress(maxOut) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
@@ -594,7 +598,7 @@ export function createMeshFunctions(host, buffers){
                 const high = low.slice();
                 for (let i = 1; i < (count >>> 0); i++)
                 {
-                    const p = position((first >>> 0) + i * (stride >>> 0));
+                    const p = position(wholeAddress(first) + i * (stride >>> 0));
                     for (let k = 0; k < 3; k++)
                     {
                         low[k] = Math.min(low[k], p[k]);
@@ -618,13 +622,14 @@ export function createMeshFunctions(host, buffers){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([first, count, stride, centerOut, radiusOut])=>{
-                if ((first >>> 0) === 0 || (centerOut >>> 0) === 0 || (radiusOut >>> 0) === 0)
+                if (wholeAddress(first) === 0 || wholeAddress(centerOut) === 0
+                    || wholeAddress(radiusOut) === 0)
                 {
                     return D3DERR_INVALIDCALL;
                 }
                 const n = count >>> 0;
                 /** @param {number} i */
-                const at = i=>(first >>> 0) + i * (stride >>> 0);
+                const at = i=>wholeAddress(first) + i * (stride >>> 0);
                 const sum = [0, 0, 0];
                 for (let i = 0; i < n; i++)
                 {

@@ -770,7 +770,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_SID);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -801,7 +801,7 @@ export function createSecurityFunctions(host){
                 {
                     return fail(ERROR_INVALID_SID);
                 }
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -812,7 +812,7 @@ export function createSecurityFunctions(host){
                 }
                 const room = readDword(size);
                 writeDword(size, domain.length);
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -838,7 +838,7 @@ export function createSecurityFunctions(host){
             /** @param {number[]} args */
             handler: ([type, domain, out, size])=>{
                 const text = WELL_KNOWN_SIDS[type >>> 0] ?? null;
-                if (text === null || (size >>> 0) === 0)
+                if (text === null || wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -853,7 +853,7 @@ export function createSecurityFunctions(host){
                     writeDword(size, sid.length);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -908,7 +908,7 @@ export function createSecurityFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_NOACCESS);
                 }
@@ -1003,7 +1003,7 @@ export function createSecurityFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([descriptor, interest, set])=>{
-                if ((descriptor >>> 0) === 0 || host.readMemory(wholeAddress(descriptor),
+                if (wholeAddress(descriptor) === 0 || host.readMemory(wholeAddress(descriptor),
                     1)[0] !== 1)
                 {
                     return fail(ERROR_INVALID_SECURITY_DESCR);
@@ -1043,11 +1043,11 @@ export function createSecurityFunctions(host){
                     return fail(ERROR_BAD_DESCRIPTOR_FORMAT);
                 }
                 const bytes = selfRelative(parts);
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if (readDword(size) < bytes.length || (out >>> 0) === 0)
+                if (readDword(size) < bytes.length || wholeAddress(out) === 0)
                 {
                     writeDword(size, bytes.length);
                     return fail(ERROR_INSUFFICIENT_BUFFER);
@@ -1092,7 +1092,7 @@ export function createSecurityFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 if (wanted.some(([size, need])=>readDword(size) < need)
-                    || (absolute >>> 0) === 0)
+                    || wholeAddress(absolute) === 0)
                 {
                     for (const [size, need] of wanted)
                     {
@@ -1140,11 +1140,11 @@ export function createSecurityFunctions(host){
                     return fail(ERROR_INVALID_SECURITY_DESCR);
                 }
                 const bytes = selfRelative(partsAskedFor(parts, wanted));
-                if ((needed >>> 0) !== 0)
+                if (wholeAddress(needed) !== 0)
                 {
                     writeDword(needed, bytes.length);
                 }
-                if ((length >>> 0) < bytes.length || (out >>> 0) === 0)
+                if ((length >>> 0) < bytes.length || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }

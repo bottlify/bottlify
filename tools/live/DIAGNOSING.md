@@ -10,7 +10,7 @@ unmeasured cause is a second bug.
 
 - **Which process answers.** `app.diagnostics()` is the first process of the run. A launcher that
   started a child (a setup's game, a benchmark's test runner) has the work in the child:
-  `app.debug.processes()` lists them, beside ones included, `app.debug.diagnosticsOf(id)` reads one and `app.debug.framesOf(id, count)` its frames, a process in a worker of its own (concurrency 2, the launcher's default) included. Numbers from the
+  `app.debug.processes()` lists them, beside ones included, `app.debug.diagnosticsOf(id)` reads one, `app.debug.framesOf(id, count)` its frames and `app.debug.readOf(id, address, length)` its memory, a process in a worker of its own (concurrency 2, the launcher's default) included. Numbers from the
   wrong process look plausible and say nothing.
 - **Which build is loaded.** A minified build names functions `a`, `Ze`; build readable for a
   profile (`BOTTLIFY_READABLE=1 BOTTLIFY_DIAGNOSTICS=1 npm run build`). `npm run

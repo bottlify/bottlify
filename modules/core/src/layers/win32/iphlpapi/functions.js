@@ -514,7 +514,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([row])=>{
-                if ((row >>> 0) === 0)
+                if (wholeAddress(row) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -539,11 +539,11 @@ export function createIphlpapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([table, size])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((table >>> 0) === 0 || readU32(wholeAddress(size)) < INTERFACE_INFO.SIZE)
+                if (wholeAddress(table) === 0 || readU32(wholeAddress(size)) < INTERFACE_INFO.SIZE)
                 {
                     writeU32(wholeAddress(size), INTERFACE_INFO.SIZE);
                     return ERROR_INSUFFICIENT_BUFFER;
@@ -572,16 +572,16 @@ export function createIphlpapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([info, size])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((info >>> 0) === 0 || readU32(wholeAddress(size)) < ADAPTER_INFO.SIZE)
+                if (wholeAddress(info) === 0 || readU32(wholeAddress(size)) < ADAPTER_INFO.SIZE)
                 {
                     writeU32(wholeAddress(size), ADAPTER_INFO.SIZE);
                     return ERROR_BUFFER_OVERFLOW;
                 }
-                host.writeMemory(wholeAddress(info), adapter(info >>> 0));
+                host.writeMemory(wholeAddress(info), adapter(wholeAddress(info)));
                 return NO_ERROR;
             },
         },
@@ -599,7 +599,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([table, size, order])=>{
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -615,7 +615,7 @@ export function createIphlpapiFunctions(host){
                     rows.sort((a, b)=>a.address - b.address);
                 }
                 const needed = 4 + rows.length * IP_ADDR_ROW;
-                if ((table >>> 0) === 0 || readU32(wholeAddress(size)) < needed)
+                if (wholeAddress(table) === 0 || readU32(wholeAddress(size)) < needed)
                 {
                     writeU32(wholeAddress(size), needed);
                     return ERROR_INSUFFICIENT_BUFFER;
@@ -647,7 +647,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([count])=>{
-                if ((count >>> 0) === 0)
+                if (wholeAddress(count) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -671,7 +671,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([family, flags, reserved, addresses, size])=>{
-                if ((size >>> 0) === 0 || (reserved >>> 0) !== 0
+                if (wholeAddress(size) === 0 || wholeAddress(reserved) !== 0
                     || ![AF_UNSPEC, AF_INET, AF_INET6].includes(family >>> 0))
                 {
                     return ERROR_INVALID_PARAMETER;
@@ -681,12 +681,12 @@ export function createIphlpapiFunctions(host){
                     return ERROR_NO_DATA;
                 }
                 const block = adapterAddresses(flags >>> 0);
-                if ((addresses >>> 0) === 0 || readU32(wholeAddress(size)) < block.size)
+                if (wholeAddress(addresses) === 0 || readU32(wholeAddress(size)) < block.size)
                 {
                     writeU32(wholeAddress(size), block.size);
                     return ERROR_BUFFER_OVERFLOW;
                 }
-                host.writeMemory(wholeAddress(addresses), block.build(addresses >>> 0));
+                host.writeMemory(wholeAddress(addresses), block.build(wholeAddress(addresses)));
                 return NO_ERROR;
             },
         },
@@ -702,7 +702,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([row])=>{
-                if ((row >>> 0) === 0)
+                if (wholeAddress(row) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -731,7 +731,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -755,9 +755,9 @@ export function createIphlpapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([memory])=>{
-                if ((memory >>> 0) !== 0)
+                if (wholeAddress(memory) !== 0)
                 {
-                    host.free?.(memory >>> 0);
+                    host.free?.(wholeAddress(memory));
                 }
                 return 0;
             },
@@ -771,7 +771,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([guid, luid])=>{
-                if ((guid >>> 0) === 0 || (luid >>> 0) === 0)
+                if (wholeAddress(guid) === 0 || wholeAddress(luid) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -800,7 +800,7 @@ export function createIphlpapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -836,13 +836,13 @@ export function createIphlpapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, overlapped])=>{
-                if ((overlapped >>> 0) === 0)
+                if (wholeAddress(overlapped) === 0)
                 {
                     return new Promise(()=>{});
                 }
                 // A change would set it; none ever comes.
                 const opened = host.openEvent?.('ip-change') ?? 0;
-                if ((handle >>> 0) !== 0)
+                if (wholeAddress(handle) !== 0)
                 {
                     writeU32(wholeAddress(handle), opened);
                     if (asynchronous.word === 8)
@@ -850,10 +850,10 @@ export function createIphlpapiFunctions(host){
                         writeU32(wholeAddress(handle) + 4, 0);
                     }
                 }
-                pendingChanges.set(overlapped >>> 0, opened);
+                pendingChanges.set(wholeAddress(overlapped), opened);
                 // Pending as an overlapped call is: STATUS_PENDING in Internal,
                 // which GetOverlappedResult reads as ERROR_IO_INCOMPLETE.
-                overlappedResult(writeU32, asynchronous, overlapped >>> 0, STATUS_PENDING);
+                overlappedResult(writeU32, asynchronous, wholeAddress(overlapped), STATUS_PENDING);
                 host.setLastError?.(ERROR_IO_PENDING);
                 return ERROR_IO_PENDING;
             },
@@ -902,7 +902,7 @@ export function createIphlpapiFunctions(host){
         IpReleaseAddress: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([map])=>((map >>> 0) === 0 || readU32(wholeAddress(map)) !== INDEX
+            handler: ([map])=>(wholeAddress(map) === 0 || readU32(wholeAddress(map)) !== INDEX
                 ? ERROR_INVALID_PARAMETER : ERROR_NOT_SUPPORTED),
         },
         IpRenewAddress: {

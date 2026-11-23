@@ -498,14 +498,14 @@ export function createUiFunctions(host, { A, W }){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, exchange, compare])=>{
-                if ((destination >>> 0) === 0 || !host.readMemory)
+                if (wholeAddress(destination) === 0 || !host.readMemory)
                 {
                     return 0;
                 }
                 const before = u32(host.readMemory(wholeAddress(destination), 4));
-                if (before === (compare >>> 0))
+                if (before === wholeAddress(compare))
                 {
-                    host.writeMemory(wholeAddress(destination), dword(exchange >>> 0));
+                    host.writeMemory(wholeAddress(destination), dword(wholeAddress(exchange)));
                 }
                 return before;
             },

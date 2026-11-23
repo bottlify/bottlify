@@ -402,7 +402,7 @@ export function createApcs(host){
                             {
                                 return STATUS_INVALID_PARAMETER;
                             }
-                            if ((out >>> 0) === 0)
+                            if (wholeAddress(out) === 0)
                             {
                                 return STATUS_ACCESS_VIOLATION;
                             }

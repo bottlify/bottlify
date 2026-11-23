@@ -627,7 +627,7 @@ export function createPropVariantFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dest, src])=>{
-                if ((dest >>> 0) === 0 || (src >>> 0) === 0)
+                if (wholeAddress(dest) === 0 || wholeAddress(src) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -636,7 +636,7 @@ export function createPropVariantFunctions(host){
                 const made = { blocks: [], strings: [], arrays: [] };
                 /** @type {Owed} */
                 const owed = { addRef: [], release: [] };
-                const copy = copyOf(src >>> 0, made, owed);
+                const copy = copyOf(wholeAddress(src), made, owed);
                 if (typeof copy === 'number')
                 {
                     made.blocks.forEach(block=>host.heap.free(block));
@@ -658,14 +658,14 @@ export function createPropVariantFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pvar])=>{
-                if ((pvar >>> 0) === 0)
+                if (wholeAddress(pvar) === 0)
                 {
                     return S_OK;
                 }
                 const thread = host.callerThread?.();
                 /** @type {Owed} */
                 const owed = { addRef: [], release: [] };
-                const known = release(pvar >>> 0, owed);
+                const known = release(wholeAddress(pvar), owed);
                 host.writeMemory(wholeAddress(pvar), new Uint8Array(PROPVARIANT_SIZE));
                 if (!known)
                 {
@@ -688,7 +688,7 @@ export function createPropVariantFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([count, rgvars])=>{
-                if ((rgvars >>> 0) === 0)
+                if (wholeAddress(rgvars) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -700,7 +700,7 @@ export function createPropVariantFunctions(host){
                     for (let index = start; index < (count >>> 0); index++)
                     {
                         const answer = table.PropVariantClear.handler(
-                            [(rgvars >>> 0) + index * PROPVARIANT_SIZE]);
+                            [wholeAddress(rgvars) + index * PROPVARIANT_SIZE]);
                         if (answer instanceof Promise)
                         {
                             return answer.then(()=>clear(index + 1));

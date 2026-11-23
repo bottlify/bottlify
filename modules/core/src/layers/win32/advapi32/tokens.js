@@ -2198,7 +2198,7 @@ export function createTokenFunctions(host){
                     {
                         return STATUS_INVALID_HANDLE;
                     }
-                    if ((needed >>> 0) !== 0)
+                    if (wholeAddress(needed) !== 0)
                     {
                         writeDword(wholeAddress(needed), bytes.length);
                     }
@@ -2226,7 +2226,7 @@ export function createTokenFunctions(host){
                 /** @param {number[]} args */
                 handler: ([descriptor, token, desired, mapping, privileges, privilegesLength,
                     granted, status])=>{
-                    if ((granted >>> 0) === 0 || (status >>> 0) === 0)
+                    if (wholeAddress(granted) === 0 || wholeAddress(status) === 0)
                     {
                         return STATUS_ACCESS_VIOLATION;
                     }
@@ -2263,14 +2263,14 @@ export function createTokenFunctions(host){
                     {
                         return STATUS_INVALID_HANDLE;
                     }
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         return STATUS_ACCESS_VIOLATION;
                     }
                     // OBJECT_ATTRIBUTES.SecurityQualityOfService is its last
                     // field (+20); the level is that structure's second (+4).
                     let level = 0;
-                    if ((attributes >>> 0) !== 0)
+                    if (wholeAddress(attributes) !== 0)
                     {
                         const qos = readDword(wholeAddress(attributes) + 20);
                         if (qos !== 0)
@@ -2302,7 +2302,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_UNKNOWN_REVISION);
                 }
-                if ((descriptor >>> 0) === 0)
+                if (wholeAddress(descriptor) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2332,10 +2332,10 @@ export function createTokenFunctions(host){
                 const held = anyDescriptor(descriptor);
                 if (held === null)
                 {
-                    return fail((descriptor >>> 0) === 0 ? ERROR_INVALID_SECURITY_DESCR
+                    return fail(wholeAddress(descriptor) === 0 ? ERROR_INVALID_SECURITY_DESCR
                         : ERROR_UNKNOWN_REVISION);
                 }
-                if ((control >>> 0) === 0 || (revision >>> 0) === 0)
+                if (wholeAddress(control) === 0 || wholeAddress(revision) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2386,7 +2386,7 @@ export function createTokenFunctions(host){
         IsValidAcl: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([acl])=>((acl >>> 0) !== 0 && acesOf(acl) !== null ? 1 : 0),
+            handler: ([acl])=>(wholeAddress(acl) !== 0 && acesOf(acl) !== null ? 1 : 0),
         },
 
         /** BOOL SetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR, PSID, BOOL bOwnerDefaulted) */
@@ -2417,7 +2417,7 @@ export function createTokenFunctions(host){
                     control |= SE_DACL_PRESENT | (defaulted ? SE_DACL_DEFAULTED : 0);
                 }
                 writeWord(at + SD.CONTROL, control);
-                writeDword(at + SD.DACL, present ? acl >>> 0 : 0);
+                writeDword(at + SD.DACL, present ? wholeAddress(acl) : 0);
                 return 1;
             },
         },
@@ -2433,7 +2433,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([acl, length, revision])=>{
                 const size = length >>> 0;
-                if ((acl >>> 0) === 0 || size < ACL.HEADER || size > 0xffff || size % 4 !== 0)
+                if (wholeAddress(acl) === 0 || size < ACL.HEADER || size > 0xffff || size % 4 !== 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2537,13 +2537,13 @@ export function createTokenFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([acl, revision, index, list, length])=>{
-                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
+                const aces = wholeAddress(acl) === 0 ? null : acesOf(acl);
                 if (aces === null)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const size = length >>> 0;
-                if ((list >>> 0) === 0 || size === 0)
+                if (wholeAddress(list) === 0 || size === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -2596,12 +2596,12 @@ export function createTokenFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([acl, index, out])=>{
-                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
-                if (aces === null || (index >>> 0) >= aces.length || (out >>> 0) === 0)
+                const aces = wholeAddress(acl) === 0 ? null : acesOf(acl);
+                if (aces === null || (index >>> 0) >= aces.length || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeDword(wholeAddress(out), (acl >>> 0) + aces[index >>> 0].at);
+                writeDword(wholeAddress(out), wholeAddress(acl) + aces[index >>> 0].at);
                 return 1;
             },
         },
@@ -2617,7 +2617,7 @@ export function createTokenFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([acl, index])=>{
-                const aces = (acl >>> 0) === 0 ? null : acesOf(acl);
+                const aces = wholeAddress(acl) === 0 ? null : acesOf(acl);
                 if (aces === null || (index >>> 0) >= aces.length)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -2680,7 +2680,7 @@ export function createTokenFunctions(host){
                             writeDword(wholeAddress(out), offset === 0 ? 0 : block + offset);
                         }
                     });
-                if ((descriptor >>> 0) !== 0)
+                if (wholeAddress(descriptor) !== 0)
                 {
                     writeDword(wholeAddress(descriptor), block);
                 }
@@ -2714,7 +2714,7 @@ export function createTokenFunctions(host){
                     : host.readMemory(acl, aclLength(acl)).slice());
                 const parts = { control: SE_DACL_PRESENT | SE_SACL_PRESENT,
                     owner: sidAt(owner) ?? undefined, group: sidAt(group) ?? undefined,
-                    dacl: aclOf(dacl >>> 0), sacl: aclOf(sacl >>> 0) };
+                    dacl: aclOf(wholeAddress(dacl)), sacl: aclOf(wholeAddress(sacl)) };
                 storeParts(object, parts, wanted >>> 0);
                 return ERROR_SUCCESS;
             },
@@ -2742,11 +2742,11 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((needed >>> 0) !== 0)
+                if (wholeAddress(needed) !== 0)
                 {
                     writeDword(wholeAddress(needed), bytes.length);
                 }
-                if ((length >>> 0) < bytes.length || (descriptor >>> 0) === 0)
+                if ((length >>> 0) < bytes.length || wholeAddress(descriptor) === 0)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
@@ -2850,7 +2850,7 @@ export function createTokenFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([threadPointer, tokenHandle])=>{
-                const thread = (threadPointer >>> 0) === 0 ? callingThread()
+                const thread = wholeAddress(threadPointer) === 0 ? callingThread()
                     : threadNamed(readDword(threadPointer));
                 if (thread === null)
                 {
@@ -2975,7 +2975,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -3004,7 +3004,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0 || ((type >>> 0) !== TOKEN_PRIMARY
+                if (wholeAddress(out) === 0 || ((type >>> 0) !== TOKEN_PRIMARY
                     && (type >>> 0) !== TOKEN_IMPERSONATION) || (level >>> 0) > 3)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -3038,7 +3038,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -3074,7 +3074,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([scope, level, , out])=>{
                 if (!SAFER_SCOPES.has(scope >>> 0) || !SAFER_LEVELS.has(level >>> 0)
-                    || (out >>> 0) === 0)
+                    || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -3112,7 +3112,7 @@ export function createTokenFunctions(host){
                 }
                 const token = (given >>> 0) === 0 ? { process: CURRENT_PROCESS }
                     : tokenNamed(given);
-                if (!token || (out >>> 0) === 0)
+                if (!token || wholeAddress(out) === 0)
                 {
                     return fail(token ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
@@ -3167,7 +3167,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_BAD_LENGTH);
                 }
-                if ((given >>> 0) === 0)
+                if (wholeAddress(given) === 0)
                 {
                     return fail(ERROR_NOACCESS);
                 }
@@ -3251,11 +3251,11 @@ export function createTokenFunctions(host){
                 }
                 const needed = answer.fixed.length
                     + answer.sids.reduce((sum, sid)=>sum + sid.length, 0);
-                if ((returnLength >>> 0) !== 0)
+                if (wholeAddress(returnLength) !== 0)
                 {
                     writeDword(wholeAddress(returnLength), needed);
                 }
-                if ((buffer >>> 0) === 0 || (length >>> 0) < needed)
+                if (wholeAddress(buffer) === 0 || (length >>> 0) < needed)
                 {
                     return fail(ERROR_INSUFFICIENT_BUFFER);
                 }
@@ -3286,7 +3286,7 @@ export function createTokenFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
-                if ((first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(first) === 0 || wholeAddress(second) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -3366,7 +3366,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((set >>> 0) === 0 || (result >>> 0) === 0)
+                if (wholeAddress(set) === 0 || wholeAddress(result) === 0)
                 {
                     return fail(ERROR_NOACCESS);
                 }
@@ -3374,7 +3374,7 @@ export function createTokenFunctions(host){
                 const count = view.getUint32(0, true);
                 for (let at = 0; at < count; at++)
                 {
-                    const attributes = (set >>> 0) + 8 + 12 * at + 8;
+                    const attributes = wholeAddress(set) + 8 + 12 * at + 8;
                     const old = new DataView(host.readMemory(attributes, 4).slice().buffer)
                         .getUint32(0, true);
                     writeDword(attributes, old | SE_PRIVILEGE_USED_FOR_ACCESS);
@@ -3429,7 +3429,7 @@ export function createTokenFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([room, destination, source])=>{
-                if ((destination >>> 0) === 0 || (source >>> 0) === 0)
+                if (wholeAddress(destination) === 0 || wholeAddress(source) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -3461,7 +3461,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([sid])=>{
                 host.setLastError(ERROR_SUCCESS);
-                return ((sid >>> 0) + 2) >>> 0;
+                return (wholeAddress(sid) + 2) >>> 0;
             },
         },
         GetSidSubAuthority: {
@@ -3470,7 +3470,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([sid, index])=>{
                 host.setLastError(ERROR_SUCCESS);
-                return ((sid >>> 0) + 8 + 4 * (index >>> 0)) >>> 0;
+                return (wholeAddress(sid) + 8 + 4 * (index >>> 0)) >>> 0;
             },
         },
         GetSidSubAuthorityCount: {
@@ -3479,7 +3479,7 @@ export function createTokenFunctions(host){
             /** @param {number[]} args */
             handler: ([sid])=>{
                 host.setLastError(ERROR_SUCCESS);
-                return ((sid >>> 0) + 1) >>> 0;
+                return (wholeAddress(sid) + 1) >>> 0;
             },
         },
 
@@ -3502,7 +3502,7 @@ export function createTokenFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([sid])=>{
-                if ((sid >>> 0) === 0)
+                if (wholeAddress(sid) === 0)
                 {
                     return 0;
                 }
@@ -3526,7 +3526,7 @@ export function createTokenFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((sid >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(sid) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }

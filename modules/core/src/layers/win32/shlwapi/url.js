@@ -1101,7 +1101,7 @@ export function createUrlFunctions(host, { A, W }){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([input, length, out, size])=>{
-                if ((input >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(input) === 0 || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1213,7 +1213,7 @@ export function createUrlFunctions(host, { A, W }){
             /** @param {number[]} args */
             handler: ([pointer, out, room])=>{
                 const url = W.read(pointer);
-                if (url === null || (out >>> 0) === 0 || (room >>> 0) === 0)
+                if (url === null || wholeAddress(out) === 0 || (room >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }

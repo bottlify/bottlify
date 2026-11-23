@@ -193,7 +193,7 @@ export function createPerfFunctions(host){
         PerfStartProviderEx: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([guid, context, out])=>((context >>> 0) === 0
+            handler: ([guid, context, out])=>(wholeAddress(context) === 0
                 || readDword(context) < PROVIDER_CONTEXT_SIZE ? ERROR_INVALID_PARAMETER
                 : startProvider(guid, out)),
         },
@@ -224,7 +224,7 @@ export function createPerfFunctions(host){
             /** @param {number[]} args */
             handler: ([provider, template, size])=>{
                 const sets = providers.get(provider >>> 0);
-                if (!sets || (template >>> 0) === 0)
+                if (!sets || wholeAddress(template) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -241,7 +241,8 @@ export function createPerfFunctions(host){
                 const counters = [];
                 for (let index = 0; index < count; index++)
                 {
-                    const at = (template >>> 0) + COUNTERSET_INFO_SIZE + index * COUNTER_INFO_SIZE;
+                    const at =
+                        wholeAddress(template) + COUNTERSET_INFO_SIZE + index * COUNTER_INFO_SIZE;
                     counters.push({ id: readDword(at), type: readDword(at + 4),
                         byReference: (readDword(at + 8) & PERF_ATTRIB_BY_REFERENCE) !== 0 });
                 }
@@ -264,7 +265,7 @@ export function createPerfFunctions(host){
             handler: ([provider, guid, namePointer, id])=>{
                 const sets = providers.get(provider >>> 0);
                 const name = wideAt(namePointer);
-                if (!sets || (guid >>> 0) === 0 || name === null)
+                if (!sets || wholeAddress(guid) === 0 || name === null)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -299,11 +300,11 @@ export function createPerfFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([provider, instance])=>{
-                if (!providers.has(provider >>> 0) || !instances.delete(instance >>> 0))
+                if (!providers.has(provider >>> 0) || !instances.delete(wholeAddress(instance)))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                host.release?.(instance >>> 0);
+                host.release?.(wholeAddress(instance));
                 return ERROR_SUCCESS;
             },
         },
@@ -341,7 +342,7 @@ export function createPerfFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -377,7 +378,7 @@ export function createPerfFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([query, counters, size])=>{
-                if (!queries.has(query >>> 0) || (counters >>> 0) === 0
+                if (!queries.has(query >>> 0) || wholeAddress(counters) === 0
                     || (size >>> 0) < COUNTER_IDENTIFIER_SIZE)
                 {
                     return ERROR_INVALID_PARAMETER;
@@ -408,12 +409,12 @@ export function createPerfFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([query, block, size, actual])=>{
-                if (!queries.has(query >>> 0) || (actual >>> 0) === 0)
+                if (!queries.has(query >>> 0) || wholeAddress(actual) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
                 writeDword(actual, DATA_HEADER_SIZE);
-                if ((block >>> 0) === 0 || (size >>> 0) < DATA_HEADER_SIZE)
+                if (wholeAddress(block) === 0 || (size >>> 0) < DATA_HEADER_SIZE)
                 {
                     return ERROR_NOT_ENOUGH_MEMORY;
                 }

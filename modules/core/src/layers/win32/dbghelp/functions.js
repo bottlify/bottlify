@@ -316,7 +316,7 @@ export function createDbghelpFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0 || !host.readCString || !host.files)
+                if (wholeAddress(pointer) === 0 || !host.readCString || !host.files)
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
@@ -367,7 +367,8 @@ export function createDbghelpFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, path])=>{
-                searchPath = (path >>> 0) === 0 ? '' : host.readWide?.(path >>> 0) ?? '';
+                searchPath =
+                    wholeAddress(path) === 0 ? '' : host.readWide?.(wholeAddress(path)) ?? '';
                 return 1;
             },
         },
@@ -376,7 +377,7 @@ export function createDbghelpFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, out, room])=>{
-                if ((out >>> 0) === 0 || (room >>> 0) < searchPath.length + 1)
+                if (wholeAddress(out) === 0 || (room >>> 0) < searchPath.length + 1)
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
@@ -543,7 +544,7 @@ export function createDbghelpFunctions(host){
                 const at = wholeAddress(address);
                 const module = (high >>> 0) === 0 ? host.modules().find(each=>
                     at >= each.base >>> 0 && at < (each.base >>> 0) + (each.size >>> 0)) : null;
-                if (!module || (info >>> 0) === 0)
+                if (!module || wholeAddress(info) === 0)
                 {
                     return fail(0, module ? ERROR_INVALID_PARAMETER : ERROR_MOD_NOT_FOUND);
                 }
@@ -586,7 +587,7 @@ export function createDbghelpFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([base, mapped, entry, size])=>
-                directoryEntry(base, mapped, entry, size >>> 0, 0),
+                directoryEntry(base, mapped, entry, wholeAddress(size), 0),
         },
 
         /**
@@ -598,7 +599,7 @@ export function createDbghelpFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([base, mapped, entry, size, found])=>
-                directoryEntry(base, mapped, entry, size >>> 0, found >>> 0),
+                directoryEntry(base, mapped, entry, wholeAddress(size), wholeAddress(found)),
         },
 
         /**
@@ -613,8 +614,8 @@ export function createDbghelpFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([name, output, size])=>{
-                const text = host.readCString?.(name >>> 0) ?? '';
-                if (text.startsWith('?') || (output >>> 0) === 0 || (size >>> 0) === 0)
+                const text = host.readCString?.(wholeAddress(name)) ?? '';
+                if (text.startsWith('?') || wholeAddress(output) === 0 || (size >>> 0) === 0)
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }

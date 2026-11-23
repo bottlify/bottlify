@@ -3,6 +3,7 @@
  * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * Runtime type information, as the compiler laid it out: the object's vtable is
@@ -99,7 +100,7 @@ export function createCxxFunctions(host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([object])=>((object >>> 0) === 0
+            handler: ([object])=>(wholeAddress(object) === 0
                 ? 0
                 : object - readI32(locatorOf(object) + LOCATOR.OFFSET)),
         },
@@ -110,7 +111,7 @@ export function createCxxFunctions(host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([object])=>((object >>> 0) === 0
+            handler: ([object])=>(wholeAddress(object) === 0
                 ? 0
                 : readU32(locatorOf(object) + LOCATOR.TYPE)),
         },

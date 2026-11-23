@@ -652,7 +652,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(to >>> 0, readFileTime(wholeAddress(from)));
+                writeFileTime(wholeAddress(to), readFileTime(wholeAddress(from)));
                 return 1;
             },
         },
@@ -674,7 +674,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(out >>> 0, BigInt(ms) * FILETIME_PER_MS + FILETIME_EPOCH);
+                writeFileTime(wholeAddress(out), BigInt(ms) * FILETIME_PER_MS + FILETIME_EPOCH);
                 return 1;
             },
         },
@@ -713,7 +713,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeFileTime(to >>> 0, readFileTime(wholeAddress(from)));
+                writeFileTime(wholeAddress(to), readFileTime(wholeAddress(from)));
                 return 1;
             },
         },
@@ -736,9 +736,9 @@ export function createFileTimeFunctions(host){
                 }
                 const times = timesOf(file);
                 for (const [address, value] of /** @type {[number, bigint][]} */ ([
-                    [created >>> 0, times.created],
-                    [accessed >>> 0, times.accessed],
-                    [written >>> 0, times.written],
+                    [wholeAddress(created), times.created],
+                    [wholeAddress(accessed), times.accessed],
+                    [wholeAddress(written), times.written],
                 ]))
                 {
                     if (address !== 0)
@@ -776,7 +776,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if ((written >>> 0) !== 0)
+                if (wholeAddress(written) !== 0)
                 {
                     const ms = fileTimeToMs(readFileTime(wholeAddress(written)));
                     if (ms !== null)
@@ -865,14 +865,14 @@ export function createFileTimeFunctions(host){
                 if (!file)
                 {
                     const end = object(handle, 'pipe');
-                    return end ? pipeInformation(end, kind >>> 0, buffer >>> 0, size >>> 0)
+                    return end ? pipeInformation(end, kind >>> 0, wholeAddress(buffer), size >>> 0)
                         : fail(ERROR_INVALID_HANDLE);
                 }
                 if ((kind >>> 0) === FILE_ID_BOTH_DIRECTORY_INFO
                     || (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO)
                 {
                     return listDirectory(file, (kind >>> 0) === FILE_ID_BOTH_DIRECTORY_RESTART_INFO,
-                        buffer >>> 0, size >>> 0);
+                        wholeAddress(buffer), size >>> 0);
                 }
                 const entry = host.stat(file.path);
                 const room = size >>> 0;
@@ -981,7 +981,7 @@ export function createFileTimeFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0xffffffff);
                 }
-                writeDynamic(information >>> 0, currentZone(), MACHINE_ZONE_KEY);
+                writeDynamic(wholeAddress(information), currentZone(), MACHINE_ZONE_KEY);
                 return TIME_ZONE_ID_UNKNOWN;
             },
         },
@@ -1003,7 +1003,7 @@ export function createFileTimeFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const zone = dynamic === 0 ? currentZone()
-                    : zoneByKey(zoneKeyOf(dynamic >>> 0), year & 0xffff);
+                    : zoneByKey(zoneKeyOf(wholeAddress(dynamic)), year & 0xffff);
                 if (zone === null)
                 {
                     return fail(ERROR_FILE_NOT_FOUND);
@@ -1034,7 +1034,7 @@ export function createFileTimeFunctions(host){
                 {
                     return ERROR_NO_MORE_ITEMS;
                 }
-                writeDynamic(information >>> 0, zone, key);
+                writeDynamic(wholeAddress(information), zone, key);
                 return 0;
             },
         },
@@ -1062,7 +1062,8 @@ export function createFileTimeFunctions(host){
                 }
                 /** @param {number} year */
                 const localBy = year=>{
-                    const data = zone === 0 ? currentZone() : dynamicRules(zone >>> 0, year);
+                    const data = zone === 0 ? currentZone() : dynamicRules(wholeAddress(zone),
+                        year);
                     const rules = new DataView(data.buffer, data.byteOffset);
                     return utc - biasAt(rules, utc, year) * 60_000;
                 };
@@ -1099,7 +1100,7 @@ export function createFileTimeFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const data = zone === 0 ? currentZone()
-                    : dynamicRules(zone >>> 0, new Date(wall).getUTCFullYear());
+                    : dynamicRules(wholeAddress(zone), new Date(wall).getUTCFullYear());
                 const bias = biasOnLocalClock(new DataView(data.buffer, data.byteOffset), wall);
                 host.writeMemory(wholeAddress(universal), msToSystemTime(wall + bias * 60_000));
                 return 1;

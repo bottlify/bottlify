@@ -188,18 +188,18 @@ export function createImageCertificateFunctions(host){
             argBytes: 20,
             handler: (/** @type {number[]} */ [handle, filter, countAt, indices, room])=>
                 withImage(handle, (_file, _bytes, table)=>{
-                    if ((countAt >>> 0) === 0)
+                    if (wholeAddress(countAt) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
                     const wanted = filter & 0xffff;
                     const matching = table.certificates.flatMap((one, index)=>
                         (wanted === CERT_SECTION_TYPE_ANY || one.type === wanted ? [index] : []));
-                    setDword(countAt >>> 0, matching.length);
-                    if ((indices >>> 0) !== 0)
+                    setDword(wholeAddress(countAt), matching.length);
+                    if (wholeAddress(indices) !== 0)
                     {
                         matching.slice(0, room >>> 0).forEach((index, at)=>
-                            setDword((indices >>> 0) + at * 4, index));
+                            setDword(wholeAddress(indices) + at * 4, index));
                     }
                     return 1;
                 }),
@@ -214,13 +214,13 @@ export function createImageCertificateFunctions(host){
             handler: (/** @type {number[]} */ [handle, index, out, lengthAt])=>
                 withImage(handle, (_file, _bytes, table)=>{
                     const certificate = table.certificates[index >>> 0];
-                    if (!certificate || (lengthAt >>> 0) === 0)
+                    if (!certificate || wholeAddress(lengthAt) === 0)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    const room = dword(lengthAt >>> 0);
-                    setDword(lengthAt >>> 0, certificate.bytes.length);
-                    if ((out >>> 0) === 0 || room < certificate.bytes.length)
+                    const room = dword(wholeAddress(lengthAt));
+                    setDword(wholeAddress(lengthAt), certificate.bytes.length);
+                    if (wholeAddress(out) === 0 || room < certificate.bytes.length)
                     {
                         return fail(ERROR_INSUFFICIENT_BUFFER);
                     }
@@ -241,7 +241,8 @@ export function createImageCertificateFunctions(host){
                     {
                         return fail(ERROR_ACCESS_DENIED);
                     }
-                    const length = (certificate >>> 0) === 0 ? 0 : dword(certificate >>> 0);
+                    const length =
+                        wholeAddress(certificate) === 0 ? 0 : dword(wholeAddress(certificate));
                     if (length < WIN_CERTIFICATE_HEADER)
                     {
                         return fail(ERROR_INVALID_PARAMETER);
@@ -249,9 +250,9 @@ export function createImageCertificateFunctions(host){
                     const added = host.readMemory(wholeAddress(certificate), length).slice();
                     rewrite(file, bytes, table,
                         [...table.certificates.map(one=>one.bytes), added]);
-                    if ((indexAt >>> 0) !== 0)
+                    if (wholeAddress(indexAt) !== 0)
                     {
-                        setDword(indexAt >>> 0, table.certificates.length);
+                        setDword(wholeAddress(indexAt), table.certificates.length);
                     }
                     return 1;
                 }),

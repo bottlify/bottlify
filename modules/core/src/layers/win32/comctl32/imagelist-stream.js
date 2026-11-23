@@ -272,7 +272,7 @@ export function createImageListStreams(host, lists){
                 // Named before anything is awaited: past the first call into
                 // the stream the thread on the processor is somebody else.
                 const thread = host.callerThread?.();
-                if ((stream >>> 0) === 0 || !ready('ImageList_Write'))
+                if (wholeAddress(stream) === 0 || !ready('ImageList_Write'))
                 {
                     return 0;
                 }
@@ -288,7 +288,7 @@ export function createImageListStreams(host, lists){
                 }
                 for (const piece of pieces)
                 {
-                    if (!(await writeStream(stream >>> 0, piece, thread)))
+                    if (!(await writeStream(wholeAddress(stream), piece, thread)))
                     {
                         return 0;
                     }
@@ -307,7 +307,7 @@ export function createImageListStreams(host, lists){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([handle, , stream])=>{
-                if ((stream >>> 0) === 0)
+                if (wholeAddress(stream) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -329,11 +329,11 @@ export function createImageListStreams(host, lists){
             /** @param {number[]} args */
             handler: async([stream])=>{
                 const thread = host.callerThread?.();
-                if ((stream >>> 0) === 0 || !ready('ImageList_Read'))
+                if (wholeAddress(stream) === 0 || !ready('ImageList_Read'))
                 {
                     return 0;
                 }
-                const head = await readStream(stream >>> 0, ILHEAD.SIZE, thread);
+                const head = await readStream(wholeAddress(stream), ILHEAD.SIZE, thread);
                 if (!head)
                 {
                     return 0;

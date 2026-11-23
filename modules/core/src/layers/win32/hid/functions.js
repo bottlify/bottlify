@@ -44,7 +44,7 @@ export function createHidFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([guid])=>{
-                if ((guid >>> 0) !== 0)
+                if (wholeAddress(guid) !== 0)
                 {
                     host.writeMemory(wholeAddress(guid), HID_GUID);
                 }

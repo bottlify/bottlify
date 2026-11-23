@@ -275,8 +275,8 @@ export function createAtomTableFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                tables.delete(table >>> 0);
-                host.free(table >>> 0);
+                tables.delete(wholeAddress(table));
+                host.free(wholeAddress(table));
                 return STATUS.SUCCESS;
             },
         },

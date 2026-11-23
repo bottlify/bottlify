@@ -4231,7 +4231,8 @@ export function createFileFunctions(host){
             argBytes: 40,
             /** @param {number[]} args */
             handler: ([handle, , , , block, offset, length, , , exclusive])=>{
-                if ((block >>> 0) === 0 || (offset >>> 0) === 0 || (length >>> 0) === 0)
+                if (wholeAddress(block) === 0 || wholeAddress(offset) === 0
+                    || wholeAddress(length) === 0)
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
@@ -4239,7 +4240,7 @@ export function createFileFunctions(host){
                     qword(readDword(wholeAddress(offset)), readDword(wholeAddress(offset) + 4)),
                     qword(readDword(wholeAddress(length)), readDword(wholeAddress(length) + 4)),
                     (exclusive & 0xff) !== 0);
-                return report(block >>> 0, answer === ERROR_SUCCESS ? STATUS_SUCCESS
+                return report(wholeAddress(block), answer === ERROR_SUCCESS ? STATUS_SUCCESS
                     : answer === ERROR_LOCK_VIOLATION ? STATUS_LOCK_NOT_GRANTED
                         : answer === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
                             : STATUS_INVALID_PARAMETER, 0);
@@ -4257,14 +4258,15 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, block, offset, length])=>{
-                if ((block >>> 0) === 0 || (offset >>> 0) === 0 || (length >>> 0) === 0)
+                if (wholeAddress(block) === 0 || wholeAddress(offset) === 0
+                    || wholeAddress(length) === 0)
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
                 const answer = unlockRange(handle >>> 0,
                     qword(readDword(wholeAddress(offset)), readDword(wholeAddress(offset) + 4)),
                     qword(readDword(wholeAddress(length)), readDword(wholeAddress(length) + 4)));
-                return report(block >>> 0, answer === ERROR_SUCCESS ? STATUS_SUCCESS
+                return report(wholeAddress(block), answer === ERROR_SUCCESS ? STATUS_SUCCESS
                     : answer === ERROR_INVALID_HANDLE ? STATUS_INVALID_HANDLE
                         : STATUS_RANGE_NOT_LOCKED, 0);
             },
@@ -4289,7 +4291,7 @@ export function createFileFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                return report(block >>> 0, STATUS_SUCCESS, 0);
+                return report(wholeAddress(block), STATUS_SUCCESS, 0);
             },
         },
 
@@ -4306,12 +4308,13 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, request, block])=>{
                 const count = host.pipes?.cancel(handle,
-                    (request >>> 0) === 0 ? {} : { block: request >>> 0 });
+                    wholeAddress(request) === 0 ? {} : { block: wholeAddress(request) });
                 if (count == null && !FILE_OBJECTS.has(host.handles.typeOf?.(handle >>> 0) ?? ''))
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                return report(block >>> 0, (count ?? 0) > 0 ? STATUS_SUCCESS : STATUS_NOT_FOUND, 0);
+                return report(wholeAddress(block),
+                    (count ?? 0) > 0 ? STATUS_SUCCESS : STATUS_NOT_FOUND, 0);
             },
         },
 
@@ -4334,8 +4337,8 @@ export function createFileFunctions(host){
                     host.resetEvent?.(event >>> 0);
                 }
                 const piped = host.pipes?.control(handle, code, output, room, block,
-                    { event: event >>> 0, apc: apc >>> 0, context: context >>> 0 },
-                    input >>> 0, inLength >>> 0);
+                    { event: event >>> 0, apc: wholeAddress(apc), context: wholeAddress(context) },
+                    wholeAddress(input), inLength >>> 0);
                 if (piped)
                 {
                     if ('parked' in piped)
@@ -4354,29 +4357,30 @@ export function createFileFunctions(host){
                         {
                             host.setEvent?.(event >>> 0);
                         }
-                        if ((apc >>> 0) !== 0)
+                        if (wholeAddress(apc) !== 0)
                         {
-                            host.queueApc?.(host.currentThread?.() ?? null, apc >>> 0,
-                                [context >>> 0, block >>> 0, 0]);
+                            host.queueApc?.(host.currentThread?.() ?? null, wholeAddress(apc),
+                                [wholeAddress(context), wholeAddress(block), 0]);
                         }
                     }
-                    return settled(block >>> 0, piped.status, piped.information);
+                    return settled(wholeAddress(block), piped.status, piped.information);
                 }
                 const held = object(handle, 'file') ?? object(handle, 'directory');
                 if (!held)
                 {
-                    return report(block >>> 0, STATUS_INVALID_HANDLE, 0);
+                    return report(wholeAddress(block), STATUS_INVALID_HANDLE, 0);
                 }
                 if (REPARSE_CONTROLS.has(code >>> 0) && files.setReparse)
                 {
                     const { status, information } = reparseControl(held.path, code >>> 0,
-                        input >>> 0, inLength >>> 0, output >>> 0, room >>> 0);
-                    return (status >>> 0) < 0xc0000000 ? settled(block >>> 0, status, information)
+                        wholeAddress(input), inLength >>> 0, wholeAddress(output), room >>> 0);
+                    return (status >>> 0) < 0xc0000000 ? settled(wholeAddress(block), status,
+                        information)
                         : status;
                 }
                 host.divergence?.('NtFsControlFile',
                     `control code 0x${(code >>> 0).toString(16)} is not one this volume answers`);
-                return report(block >>> 0, STATUS_INVALID_DEVICE_REQUEST, 0);
+                return report(wholeAddress(block), STATUS_INVALID_DEVICE_REQUEST, 0);
             },
         },
 
@@ -4395,7 +4399,8 @@ export function createFileFunctions(host){
             handler: ([handle, , , , block, code, input, inLength, output, outLength])=>{
                 const { status, information } = deviceControl(handle, code, input, inLength,
                     output, outLength);
-                return (status >>> 0) < 0xc0000000 ? report(block >>> 0, status, information)
+                return (status >>> 0) < 0xc0000000 ? report(wholeAddress(block), status,
+                    information)
                     : status;
             },
         },
@@ -4416,22 +4421,22 @@ export function createFileFunctions(host){
                 {
                     if ((length >>> 0) < 4)
                     {
-                        return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                        return report(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     writeDword(wholeAddress(out), host.pipes.completionModes.of(handle));
-                    return report(block >>> 0, STATUS_SUCCESS, 4);
+                    return report(wholeAddress(block), STATUS_SUCCESS, 4);
                 }
                 const held = heldKind(handle);
                 const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held ?? '');
                 if (fileObject && (length >>> 0) < (QUERY_LENGTHS.get(kind >>> 0) ?? 0))
                 {
-                    return report(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    return report(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                 }
                 // A pipe end answers its own classes, then what any file object does.
                 const piped = host.pipes?.information?.(handle >>> 0, kind >>> 0) ?? null;
                 if (piped !== null && !(piped instanceof Uint8Array))
                 {
-                    return report(block >>> 0, piped.status, 0);
+                    return report(wholeAddress(block), piped.status, 0);
                 }
                 // A device opened as itself answers the mode it was opened in.
                 const device = deviceObject(handle >>> 0);
@@ -4446,7 +4451,7 @@ export function createFileFunctions(host){
                     ?? (folder && { ...folder, directory: true, position: 0 }) : null;
                 if (slot === null && !file)
                 {
-                    return report(block >>> 0, held !== null && !fileObject
+                    return report(wholeAddress(block), held !== null && !fileObject
                         ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_INVALID_HANDLE, 0);
                 }
                 const known = slot ?? informationOf(file, kind >>> 0, handle >>> 0);
@@ -4455,7 +4460,7 @@ export function createFileFunctions(host){
                 {
                     host.divergence?.('NtQueryInformationFile',
                         `information class ${kind >>> 0} is not kept`);
-                    return report(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                    return report(wholeAddress(block), STATUS_INVALID_INFO_CLASS, 0);
                 }
                 if ((length >>> 0) < data.length)
                 {
@@ -4468,11 +4473,11 @@ export function createFileFunctions(host){
                     {
                         host.writeMemory(wholeAddress(out), data.subarray(0, length >>> 0));
                     }
-                    return report(block >>> 0, fits ? STATUS_BUFFER_OVERFLOW
+                    return report(wholeAddress(block), fits ? STATUS_BUFFER_OVERFLOW
                         : STATUS_INFO_LENGTH_MISMATCH, fits ? length >>> 0 : 0);
                 }
                 host.writeMemory(wholeAddress(out), data);
-                return report(block >>> 0, STATUS_SUCCESS, data.length);
+                return report(wholeAddress(block), STATUS_SUCCESS, data.length);
             },
         },
 
@@ -4484,7 +4489,8 @@ export function createFileFunctions(host){
         NtQueryAttributesFile: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([attributes, out])=>attributesOfName(attributes >>> 0, out >>> 0,
+            handler: ([attributes, out])=>attributesOfName(wholeAddress(attributes),
+                wholeAddress(out),
                 FILE_BASIC_INFORMATION),
         },
 
@@ -4495,7 +4501,8 @@ export function createFileFunctions(host){
         NtQueryFullAttributesFile: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([attributes, out])=>attributesOfName(attributes >>> 0, out >>> 0,
+            handler: ([attributes, out])=>attributesOfName(wholeAddress(attributes),
+                wholeAddress(out),
                 FILE_NETWORK_OPEN_INFORMATION),
         },
 
@@ -4510,11 +4517,11 @@ export function createFileFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([attributes])=>{
-                if ((attributes >>> 0) === 0)
+                if (wholeAddress(attributes) === 0)
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
-                const named = nativeName(attributes >>> 0);
+                const named = nativeName(wholeAddress(attributes));
                 if (named.status !== undefined)
                 {
                     return named.status;
@@ -4557,7 +4564,7 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, block])=>{
                 // A pipe end waits until its reader has taken what it wrote.
-                const piped = host.pipes?.flushNative?.(handle >>> 0, block >>> 0) ?? null;
+                const piped = host.pipes?.flushNative?.(handle >>> 0, wholeAddress(block)) ?? null;
                 if (piped !== null)
                 {
                     return typeof piped === 'number' ? piped : piped.parked;
@@ -4567,7 +4574,7 @@ export function createFileFunctions(host){
                 {
                     return STATUS_INVALID_HANDLE;
                 }
-                return report(block >>> 0, writes(handle, file) ? STATUS_SUCCESS
+                return report(wholeAddress(block), writes(handle, file) ? STATUS_SUCCESS
                     : STATUS_ACCESS_DENIED, 0);
             },
         },
@@ -4586,7 +4593,7 @@ export function createFileFunctions(host){
                     return STATUS_INVALID_HANDLE;
                 }
                 host.divergence?.('NtSetEaFile', 'the volume keeps no extended attributes');
-                return report(block >>> 0, STATUS_EAS_NOT_SUPPORTED, 0);
+                return report(wholeAddress(block), STATUS_EAS_NOT_SUPPORTED, 0);
             },
         },
 
@@ -4610,7 +4617,7 @@ export function createFileFunctions(host){
                     return held !== null && held !== 'pipe' && !FILE_OBJECT_KINDS.has(held)
                         ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_INVALID_HANDLE;
                 }
-                if ((buffer >>> 0) !== 0 && (length >>> 0) !== 0)
+                if (wholeAddress(buffer) !== 0 && (length >>> 0) !== 0)
                 {
                     host.writeMemory(wholeAddress(buffer), new Uint8Array(length >>> 0));
                 }
@@ -4633,8 +4640,9 @@ export function createFileFunctions(host){
             argBytes: 44,
             /** @param {number[]} args */
             handler: ([handle, event, , , block, out, length, kind, single, mask, restart])=>{
-                const listed = directoryRecords(handle >>> 0, block >>> 0, out >>> 0, length >>> 0,
-                    kind >>> 0, (single & 0xff) !== 0, mask >>> 0, (restart & 0xff) !== 0);
+                const listed = directoryRecords(handle >>> 0, wholeAddress(block),
+                    wholeAddress(out), length >>> 0,
+                    kind >>> 0, (single & 0xff) !== 0, wholeAddress(mask), (restart & 0xff) !== 0);
                 if ((event >>> 0) !== 0 && listed.reported)
                 {
                     host.setEvent?.(event >>> 0);
@@ -4661,11 +4669,13 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, block, from, length, kind])=>{
                 const slot = host.pipes?.setInformation?.(handle >>> 0, kind >>> 0,
-                    from >>> 0, length >>> 0) ?? host.mailslots?.setInformation?.(handle >>> 0,
-                    kind >>> 0, from >>> 0, length >>> 0) ?? null;
+                    wholeAddress(from), length >>> 0)
+                    ?? host.mailslots?.setInformation?.(handle >>> 0, kind >>> 0,
+                        wholeAddress(from), length >>> 0)
+                    ?? null;
                 if (slot !== null)
                 {
-                    return settled(block >>> 0, slot, 0);
+                    return settled(wholeAddress(block), slot, 0);
                 }
                 // The completion modes are any handle's, kept with the pipes as
                 // SetFileCompletionNotificationModes keeps them.
@@ -4673,7 +4683,7 @@ export function createFileFunctions(host){
                 {
                     if ((length >>> 0) < 4)
                     {
-                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                        return settled(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     // The native call keeps the flags it knows and passes over
                     // the rest; skipping the port is for a handle whose I/O
@@ -4683,10 +4693,10 @@ export function createFileFunctions(host){
                     if (opened && (flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS) !== 0
                         && (modeOf(opened) & SYNCHRONOUS_MODES) !== 0)
                     {
-                        return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                        return settled(wholeAddress(block), STATUS_INVALID_PARAMETER, 0);
                     }
                     const error = host.pipes.completionModes.set(handle >>> 0, flags);
-                    return settled(block >>> 0, error === 0 ? STATUS_SUCCESS
+                    return settled(wholeAddress(block), error === 0 ? STATUS_SUCCESS
                         : error === ERROR_INVALID_PARAMETER ? STATUS_INVALID_PARAMETER
                             : STATUS_INVALID_HANDLE, 0);
                 }
@@ -4698,7 +4708,7 @@ export function createFileFunctions(host){
                     // pointer wide.
                     if ((length >>> 0) < 2 * layout.word)
                     {
-                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                        return settled(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     const held = host.handles.typeOf?.(handle >>> 0) ?? '';
                     const fileObject = held === 'pipe' || FILE_OBJECT_KINDS.has(held);
@@ -4707,13 +4717,14 @@ export function createFileFunctions(host){
                     // A handle no port takes is refused before any I/O: the
                     // status block is left as it was.
                     return bound === 'synchronous' ? STATUS_INVALID_PARAMETER
-                        : settled(block >>> 0, bound ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
+                        : settled(wholeAddress(block),
+                            bound ? STATUS_SUCCESS : STATUS_INVALID_HANDLE, 0);
                 }
                 const open = fileOrDirectory(handle);
                 if (!open)
                 {
                     const held = heldKind(handle);
-                    return settled(block >>> 0, held !== null && held !== 'pipe'
+                    return settled(wholeAddress(block), held !== null && held !== 'pipe'
                         && !FILE_OBJECT_KINDS.has(held) ? STATUS_OBJECT_TYPE_MISMATCH
                         : STATUS_INVALID_HANDLE, 0);
                 }
@@ -4722,10 +4733,10 @@ export function createFileFunctions(host){
                 {
                     if ((length >>> 0) < renameLayout.size)
                     {
-                        return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                        return settled(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
                     const record = host.readMemory(wholeAddress(from), length >>> 0).slice();
-                    return settled(block >>> 0, linkError(open, record,
+                    return settled(wholeAddress(block), linkError(open, record,
                         (kind >>> 0) === FILE_LINK_INFORMATION_EX), 0);
                 }
                 const type = NATIVE_SET_CLASSES.get(kind >>> 0);
@@ -4736,15 +4747,15 @@ export function createFileFunctions(host){
                 {
                     host.divergence?.('NtSetInformationFile',
                         `information class ${kind >>> 0} is not kept`);
-                    return settled(block >>> 0, STATUS_INVALID_INFO_CLASS, 0);
+                    return settled(wholeAddress(block), STATUS_INVALID_INFO_CLASS, 0);
                 }
                 const size = type !== undefined ? /** @type {number} */ (leastSize(type))
                     : (kind >>> 0) === FILE_MODE_SET ? 4 : 8;
                 if ((length >>> 0) < size)
                 {
-                    return settled(block >>> 0, STATUS_INFO_LENGTH_MISMATCH, 0);
+                    return settled(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                 }
-                if ((from >>> 0) === 0)
+                if (wholeAddress(from) === 0)
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
@@ -4757,10 +4768,10 @@ export function createFileFunctions(host){
                         const at = view.getBigInt64(0, true);
                         if (at < 0n)
                         {
-                            return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                            return settled(wholeAddress(block), STATUS_INVALID_PARAMETER, 0);
                         }
                         file.position = Number(at);
-                        return settled(block >>> 0, STATUS_SUCCESS, 0);
+                        return settled(wholeAddress(block), STATUS_SUCCESS, 0);
                     }
                     case FILE_MODE_SET: {
                         // Only the write-through and sequential hints change;
@@ -4775,15 +4786,15 @@ export function createFileFunctions(host){
                                 | FILE_SYNCHRONOUS_IO_NONALERT)
                             || (synchronous !== 0) !== (modeOf(file) & SYNCHRONOUS_MODES) > 0)
                         {
-                            return settled(block >>> 0, STATUS_INVALID_PARAMETER, 0);
+                            return settled(wholeAddress(block), STATUS_INVALID_PARAMETER, 0);
                         }
                         file.mode = mode;
-                        return settled(block >>> 0, STATUS_SUCCESS, 0);
+                        return settled(wholeAddress(block), STATUS_SUCCESS, 0);
                     }
                     case FILE_VALID_DATA_LENGTH_INFORMATION:
                         // Every byte of a file here is data written: there is
                         // no tail of unwritten allocation to declare valid.
-                        return settled(block >>> 0, what === 'file' && file.write
+                        return settled(wholeAddress(block), what === 'file' && file.write
                             ? STATUS_SUCCESS : STATUS_ACCESS_DENIED, 0);
                     default:
                         break;
@@ -4798,7 +4809,8 @@ export function createFileFunctions(host){
                     },
                     handle >>> 0);
                 /** @param {InformationError} code */
-                const answer = code=>settled(block >>> 0, typeof code !== 'number' ? code.status
+                const answer = code=>settled(wholeAddress(block), typeof code !== 'number'
+                    ? code.status
                     : code === 0 ? STATUS_SUCCESS : NATIVE_FAILURES[code] ?? STATUS_UNSUCCESSFUL,
                 0);
                 return error instanceof Promise ? error.then(answer) : answer(error);
@@ -5523,7 +5535,7 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([name, access, share, disposition, parameters])=>{
                 let flags = 0;
-                if ((parameters >>> 0) !== 0)
+                if (wholeAddress(parameters) !== 0)
                 {
                     const bytes = host.readMemory(wholeAddress(parameters), 16);
                     const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
@@ -5545,9 +5557,10 @@ export function createFileFunctions(host){
          * Leaving that last part out is invisible until something waits for it,
          * and then it is a pool parked for ever on a packet nobody posts.
          *
-         * Reading a standard handle is an immediate end of input rather than a
-         * failure -- there is no console to type at, and a program that asks
-         * gets the answer it would get from a redirected empty stream.
+         * Reading a standard handle fails as an invalid handle: no process here
+         * has a console, and Windows answers a read of console input so in one
+         * without. A standard handle redirected to a pipe is a pipe end, read
+         * as one.
          */
         ReadFile: {
             argBytes: 20,
@@ -5555,10 +5568,10 @@ export function createFileFunctions(host){
             handler: ([handle, buffer, length, read, overlapped])=>{
                 // Zeroed before anything is checked, as Windows documents: a
                 // caller that reads the count after a failure reads 0.
-                writeDwordIf(read >>> 0, 0);
+                writeDwordIf(wholeAddress(read), 0);
                 if (isStandardHandle(handle >>> 0))
                 {
-                    return 1;
+                    return fail(ERROR_INVALID_HANDLE);
                 }
                 for (const stream of streams)
                 {
@@ -5577,9 +5590,9 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if ((buffer >>> 0) === 0 && (length >>> 0) !== 0)
+                if (wholeAddress(buffer) === 0 && (length >>> 0) !== 0)
                 {
-                    writeDwordIf(read >>> 0, 0);
+                    writeDwordIf(wholeAddress(read), 0);
                     return fail(ERROR_NOACCESS);
                 }
                 const pointer = wholeAddress(overlapped);
@@ -5601,7 +5614,7 @@ export function createFileFunctions(host){
                     }
                     // Written even when nothing was read: a program that checks
                     // it is exactly the one that has reached the end of a file.
-                    writeDwordIf(read >>> 0, bytes.length);
+                    writeDwordIf(wholeAddress(read), bytes.length);
                     return pointer !== 0 ? finishOverlapped(handle, file, bytes.length, pointer,
                         bytes.length === 0 && (length >>> 0) !== 0) : 1;
                 };
@@ -5644,12 +5657,12 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, buffer, length, written, overlapped])=>{
                 const count = length >>> 0;
-                writeDwordIf(written >>> 0, 0);
+                writeDwordIf(wholeAddress(written), 0);
                 if (isStandardHandle(handle >>> 0))
                 {
                     const bytes = host.readMemory(wholeAddress(buffer), count);
                     host.writeConsole(handle >>> 0, decodeAnsi(bytes));
-                    writeDwordIf(written >>> 0, count);
+                    writeDwordIf(wholeAddress(written), count);
                     return 1;
                 }
                 for (const stream of streams)
@@ -5670,9 +5683,9 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
-                if ((buffer >>> 0) === 0 && count !== 0)
+                if (wholeAddress(buffer) === 0 && count !== 0)
                 {
-                    writeDwordIf(written >>> 0, 0);
+                    writeDwordIf(wholeAddress(written), 0);
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
                 // The guest's own bytes where the memory layer lends them: a
@@ -5681,7 +5694,7 @@ export function createFileFunctions(host){
                 // a copy, then copied again, then stored.
                 const bytes = count === 0
                     ? new Uint8Array(0)
-                    : host.windowMemory?.(buffer >>> 0, count)
+                    : host.windowMemory?.(wholeAddress(buffer), count)
                         ?? host.readMemory(wholeAddress(buffer), count);
                 const pointer = wholeAddress(overlapped);
                 const at = appendsOnly(handle) ? sizeOf(file)
@@ -5697,7 +5710,7 @@ export function createFileFunctions(host){
                     }
                     // Written even for a zero-length write, which is how a program
                     // asks whether the handle still works.
-                    writeDwordIf(written >>> 0, stored);
+                    writeDwordIf(wholeAddress(written), stored);
                     // The same debt an overlapped read owes: a save written through
                     // a pool hangs if the packet its worker waits on never arrives.
                     return pointer !== 0 ? finishOverlapped(handle, file, stored, pointer) : 1;
@@ -5729,7 +5742,7 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, segments, length, , overlapped])=>{
                 const file = object(handle, 'file');
-                if (!file || (overlapped >>> 0) === 0 || !host.ports)
+                if (!file || wholeAddress(overlapped) === 0 || !host.ports)
                 {
                     return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
@@ -5743,8 +5756,9 @@ export function createFileFunctions(host){
                     const page = readDword(wholeAddress(segments) + at / PAGE_SIZE * 8);
                     bytes.set(host.readMemory(page, Math.min(PAGE_SIZE, bytes.length - at)), at);
                 }
-                const stored = files.write(file.node, host.ports.offsetOf(overlapped >>> 0), bytes);
-                host.ports.completed(handle >>> 0, stored, overlapped >>> 0);
+                const stored = files.write(file.node,
+                    host.ports.offsetOf(wholeAddress(overlapped)), bytes);
+                host.ports.completed(handle >>> 0, stored, wholeAddress(overlapped));
                 return 1;
             },
         },
@@ -5761,7 +5775,7 @@ export function createFileFunctions(host){
             handler: ([handle, segments, length, , overlapped])=>{
                 const file = object(handle, 'file');
                 const ports = host.ports;
-                if (!file || (overlapped >>> 0) === 0 || !ports)
+                if (!file || wholeAddress(overlapped) === 0 || !ports)
                 {
                     return fail(file ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE);
                 }
@@ -5776,10 +5790,11 @@ export function createFileFunctions(host){
                         const page = readDword(wholeAddress(segments) + at / PAGE_SIZE * 8);
                         host.writeMemory(page, bytes.subarray(at, at + PAGE_SIZE));
                     }
-                    ports.completed(handle >>> 0, bytes.length, overlapped >>> 0);
+                    ports.completed(handle >>> 0, bytes.length, wholeAddress(overlapped));
                     return 1;
                 };
-                const bytes = files.read(file.node, ports.offsetOf(overlapped >>> 0), length >>> 0);
+                const bytes = files.read(file.node, ports.offsetOf(wholeAddress(overlapped)),
+                    length >>> 0);
                 return typeof (/** @type {any} */ (bytes))?.then === 'function'
                     ? /** @type {Promise<Uint8Array>} */ (bytes).then(deliver)
                     : deliver(/** @type {Uint8Array} */ (bytes));
@@ -5809,7 +5824,8 @@ export function createFileFunctions(host){
                 for (const stream of streams)
                 {
                     const answer = pointer === 0 || !host.queueApc ? null
-                        : stream.readEx?.(handle, buffer, length, pointer, routine >>> 0) ?? null;
+                        : stream.readEx?.(handle, buffer, length, pointer,
+                            wholeAddress(routine)) ?? null;
                     if (answer !== null)
                     {
                         return answer;
@@ -5879,7 +5895,8 @@ export function createFileFunctions(host){
                 for (const stream of streams)
                 {
                     const answer = pointer === 0 || !host.queueApc ? null
-                        : stream.writeEx?.(handle, buffer, length, pointer, routine >>> 0) ?? null;
+                        : stream.writeEx?.(handle, buffer, length, pointer,
+                            wholeAddress(routine)) ?? null;
                     if (answer !== null)
                     {
                         return answer;
@@ -5980,7 +5997,7 @@ export function createFileFunctions(host){
                 file.position = position;
                 if (newPointer !== 0)
                 {
-                    writeQword(newPointer >>> 0, position);
+                    writeQword(wholeAddress(newPointer), position);
                 }
                 return 1;
             },
@@ -6059,7 +6076,7 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                writeQword(pointer >>> 0, sizeOf(file));
+                writeQword(wholeAddress(pointer), sizeOf(file));
                 return 1;
             },
         },
@@ -6146,7 +6163,7 @@ export function createFileFunctions(host){
         GetTempPathA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([size, buffer])=>writeStringTo(buffer >>> 0, size, tempPath()),
+            handler: ([size, buffer])=>writeStringTo(wholeAddress(buffer), size, tempPath()),
         },
 
         /**
@@ -6162,11 +6179,11 @@ export function createFileFunctions(host){
             /** @param {number[]} args */
             handler: ([size, buffer])=>{
                 const count = Math.min(size >>> 0, MAX_WIDE_PATH);
-                if ((buffer >>> 0) !== 0 && count > 0)
+                if (wholeAddress(buffer) !== 0 && count > 0)
                 {
                     host.writeMemory(wholeAddress(buffer), new Uint8Array(count * 2));
                 }
-                return writeWideStringTo(buffer >>> 0, size, tempPath());
+                return writeWideStringTo(wholeAddress(buffer), size, tempPath());
             },
         },
 
@@ -6314,7 +6331,7 @@ export function createFileFunctions(host){
                 // the rest left as the caller had it.
                 /** @param {number} code */
                 const tell = code=>{
-                    if ((reopen >>> 0) === 0)
+                    if (wholeAddress(reopen) === 0)
                     {
                         return;
                     }
@@ -6635,8 +6652,8 @@ export function createFileFunctions(host){
                 if (holder && REPARSE_CONTROLS.has(code >>> 0))
                 {
                     const { status, information } = reparseControl(holder.path, code >>> 0,
-                        input >>> 0, inLength >>> 0, output >>> 0, outLength >>> 0);
-                    if (returned >>> 0 !== 0 && (status >>> 0) < 0xc0000000)
+                        wholeAddress(input), inLength >>> 0, wholeAddress(output), outLength >>> 0);
+                    if (wholeAddress(returned) !== 0 && (status >>> 0) < 0xc0000000)
                     {
                         writeDword(wholeAddress(returned), information);
                     }
@@ -6649,7 +6666,7 @@ export function createFileFunctions(host){
                 }
                 const { status, information } = deviceControl(handle, code, input, inLength,
                     output, outLength);
-                if (returned >>> 0 !== 0 && (status >>> 0) < 0xc0000000)
+                if (wholeAddress(returned) !== 0 && (status >>> 0) < 0xc0000000)
                 {
                     writeDword(wholeAddress(returned), information);
                 }
@@ -6702,8 +6719,8 @@ export function createFileFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, overlapped])=>{
-                const cancelled = host.pipes?.cancel(handle, (overlapped >>> 0) === 0 ? {}
-                    : { overlapped: overlapped >>> 0 });
+                const cancelled = host.pipes?.cancel(handle, wholeAddress(overlapped) === 0 ? {}
+                    : { overlapped: wholeAddress(overlapped) });
                 if (cancelled != null)
                 {
                     return cancelled > 0 ? 1 : fail(ERROR_NOT_FOUND);
@@ -6733,7 +6750,7 @@ export function createFileFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([handle, type, from, length])=>
-                setInformationByHandle(handle >>> 0, type >>> 0, from >>> 0, length >>> 0),
+                setInformationByHandle(handle >>> 0, type >>> 0, wholeAddress(from), length >>> 0),
         },
 
         /** BOOL GetBinaryTypeA/W(LPCTSTR lpApplicationName, LPDWORD lpBinaryType) */

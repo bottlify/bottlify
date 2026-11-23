@@ -1203,7 +1203,7 @@ export function createSystemFunctions(host){
         QueryIdleProcessorCycleTime: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([length, buffer])=>idleCycleTime(length >>> 0, buffer >>> 0),
+            handler: ([length, buffer])=>idleCycleTime(wholeAddress(length), wholeAddress(buffer)),
         },
 
         /** BOOL QueryIdleProcessorCycleTimeEx(USHORT Group, PULONG, PULONG64): group 0 is all. */
@@ -1212,7 +1212,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: ([group, length, buffer])=>((group & 0xffff) !== 0
                 ? (host.setLastError(ERROR_INVALID_PARAMETER), 0)
-                : idleCycleTime(length >>> 0, buffer >>> 0)),
+                : idleCycleTime(wholeAddress(length), wholeAddress(buffer))),
         },
 
         /**
@@ -1230,7 +1230,7 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([buffer, returned])=>{
-                if ((returned >>> 0) === 0)
+                if (wholeAddress(returned) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1241,7 +1241,7 @@ export function createSystemFunctions(host){
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
                 host.writeMemory(wholeAddress(returned), length);
-                if (room < bytes.length || (buffer >>> 0) === 0)
+                if (room < bytes.length || wholeAddress(buffer) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
@@ -1263,7 +1263,7 @@ export function createSystemFunctions(host){
             /** @param {number[]} args */
             handler: ([relation, buffer, returned])=>{
                 const bytes = logicalProcessorsEx(relation >>> 0);
-                if ((returned >>> 0) === 0 || bytes === null)
+                if (wholeAddress(returned) === 0 || bytes === null)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1273,7 +1273,7 @@ export function createSystemFunctions(host){
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
                 host.writeMemory(wholeAddress(returned), length);
-                if (room < bytes.length || (buffer >>> 0) === 0)
+                if (room < bytes.length || wholeAddress(buffer) === 0)
                 {
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
@@ -1379,7 +1379,7 @@ export function createSystemFunctions(host){
                 /** @param {boolean} under */
                 const say = under=>{
                     half(machine, under ? IMAGE_FILE_MACHINE_I386 : 0);
-                    if ((native >>> 0) !== 0)
+                    if (wholeAddress(native) !== 0)
                     {
                         half(native, host.machine64 === true ? IMAGE_FILE_MACHINE_AMD64
                             : IMAGE_FILE_MACHINE_I386);
@@ -1432,7 +1432,7 @@ export function createSystemFunctions(host){
                         {
                             return STATUS_NOT_IMPLEMENTED;
                         }
-                        if ((old >>> 0) === 0)
+                        if (wholeAddress(old) === 0)
                         {
                             return STATUS_ACCESS_VIOLATION;
                         }
@@ -1504,13 +1504,13 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([systemTime, fileTime])=>{
-                const value = filetimeFrom(systemTime >>> 0);
+                const value = filetimeFrom(wholeAddress(systemTime));
                 if (value === null)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                writeFileTime(fileTime >>> 0, value);
+                writeFileTime(wholeAddress(fileTime), value);
                 return 1;
             },
         },
@@ -1629,7 +1629,8 @@ export function createSystemFunctions(host){
         IsBadReadPtr: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, length])=>(accessible(pointer >>> 0, length >>> 0, false) ? 0 : 1),
+            handler: ([pointer, length])=>(accessible(wholeAddress(pointer), length >>> 0,
+                false) ? 0 : 1),
         },
 
         /**
@@ -1645,14 +1646,16 @@ export function createSystemFunctions(host){
         IsBadWritePtr: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, length])=>(accessible(pointer >>> 0, length >>> 0, true) ? 0 : 1),
+            handler: ([pointer, length])=>(accessible(wholeAddress(pointer), length >>> 0,
+                true) ? 0 : 1),
         },
 
         /** BOOL IsBadCodePtr(FARPROC lpfn) */
         IsBadCodePtr: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([pointer])=>(pointer >>> 0) === 0 || !readable(pointer >>> 0, 1) ? 1 : 0,
+            handler: ([pointer])=>wholeAddress(pointer) === 0 || !readable(wholeAddress(pointer),
+                1) ? 1 : 0,
         },
 
         /**
@@ -1664,14 +1667,16 @@ export function createSystemFunctions(host){
         IsBadStringPtrA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, count])=>stringReadable(pointer >>> 0, count >>> 0, 1) ? 0 : 1,
+            handler: ([pointer, count])=>stringReadable(wholeAddress(pointer), count >>> 0,
+                1) ? 0 : 1,
         },
 
         /** BOOL IsBadStringPtrW(LPCWSTR lpsz, UINT_PTR ucchMax) */
         IsBadStringPtrW: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, count])=>stringReadable(pointer >>> 0, count >>> 0, 2) ? 0 : 1,
+            handler: ([pointer, count])=>stringReadable(wholeAddress(pointer), count >>> 0,
+                2) ? 0 : 1,
         },
 
         /**
@@ -1727,7 +1732,7 @@ export function createSystemFunctions(host){
                         writeMemory: host.writeMemory, currentThread: host.currentThread,
                         setLastErrorFor: host.setLastErrorFor }, remote.process,
                     { call: 'GetExitCodeThread', args: [threadArg(remote), { out: 4 }] },
-                    [null, code >>> 0]);
+                    [null, wholeAddress(code)]);
                     if (asked !== null)
                     {
                         return asked;
@@ -1867,7 +1872,7 @@ export function createSystemFunctions(host){
                 }
                 const previous = fromRtlMode(threadErrorMode());
                 setThreadErrorMode(toRtlMode(mode >>> 0));
-                if ((old >>> 0) !== 0)
+                if (wholeAddress(old) !== 0)
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, previous, true);
@@ -1959,7 +1964,7 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     host.setLastError(ERROR_NOACCESS);
                     return 0;

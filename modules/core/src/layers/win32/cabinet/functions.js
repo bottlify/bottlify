@@ -188,7 +188,7 @@ export function createCabinetFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -268,7 +268,7 @@ export function createCabinetFunctions(host){
                 try
                 {
                     const cabinet = await readCabinetHead(source);
-                    if ((info >>> 0) !== 0)
+                    if (wholeAddress(info) !== 0)
                     {
                         const block = new Uint8Array(CABINET_INFO_SIZE);
                         const view = new DataView(block.buffer);
@@ -328,7 +328,7 @@ export function createCabinetFunctions(host){
                     host.writeMemory(address, block);
                     try
                     {
-                        return (await host.call(notify >>> 0, [kind, address], thread)) | 0;
+                        return (await host.call(wholeAddress(notify), [kind, address], thread)) | 0;
                     }
                     finally
                     {
@@ -369,7 +369,7 @@ export function createCabinetFunctions(host){
                         view.setUint32(4, string(cabinet.next ?? ''), true);
                         view.setUint32(8, string(''), true);
                         view.setUint32(12, string(directory), true);
-                        view.setUint32(16, user >>> 0, true);
+                        view.setUint32(16, wholeAddress(user), true);
                         view.setUint16(28, cabinet.setId, true);
                         view.setUint16(30, cabinet.index, true);
                     });
@@ -390,7 +390,7 @@ export function createCabinetFunctions(host){
                             const view = new DataView(block.buffer);
                             view.setInt32(0, entry.size, true);
                             view.setUint32(4, string(text), true);
-                            view.setUint32(16, user >>> 0, true);
+                            view.setUint32(16, wholeAddress(user), true);
                             view.setUint16(24, entry.date, true);
                             view.setUint16(26, entry.time, true);
                             view.setUint16(28, entry.attributes & ~A_NAME_IS_UTF, true);
@@ -428,7 +428,7 @@ export function createCabinetFunctions(host){
                                 const answer = await tell(fdintCLOSE_FILE_INFO, block=>{
                                     const view = new DataView(block.buffer);
                                     view.setUint32(4, string(text), true);
-                                    view.setUint32(16, user >>> 0, true);
+                                    view.setUint32(16, wholeAddress(user), true);
                                     view.setInt32(20, destination, true);
                                     view.setUint16(24, entry.date, true);
                                     view.setUint16(26, entry.time, true);

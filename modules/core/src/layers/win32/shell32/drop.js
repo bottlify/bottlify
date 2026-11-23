@@ -171,7 +171,7 @@ export function createDropFunctions(host, decode, encode){
                 {
                     return 0;
                 }
-                if ((point >>> 0) !== 0)
+                if (wholeAddress(point) !== 0)
                 {
                     const bytes = new Uint8Array(8);
                     const view = new DataView(bytes.buffer);

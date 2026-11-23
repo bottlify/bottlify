@@ -5,6 +5,7 @@
  */
 
 import { after } from '../user32/controls.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * uxtheme — the visual-styles engine, on a desktop drawn in the classic style.
@@ -322,7 +323,8 @@ export function createThemeFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, classList])=>{
-                host.setLastError?.((classList >>> 0) === 0 ? E_POINTER : E_PROP_ID_UNSUPPORTED);
+                host.setLastError?.(wholeAddress(classList) === 0 ? E_POINTER
+                    : E_PROP_ID_UNSUPPORTED);
                 return 0;
             },
         },
@@ -839,7 +841,7 @@ function win7Functions(host, gdi32, isWindow){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([target, rect, format, params, dcOut])=>{
-                if ((target >>> 0) === 0 || (rect >>> 0) === 0
+                if ((target >>> 0) === 0 || wholeAddress(rect) === 0
                     || (format >>> 0) > BPBF_TOPDOWNMONODIB)
                 {
                     return 0;
@@ -851,7 +853,8 @@ function win7Functions(host, gdi32, isWindow){
                     return 0;
                 }
                 // BP_PAINTPARAMS: cbSize, dwFlags, prcExclude, pBlendFunction.
-                const [, , exclude = 0, blend = 0] = (params >>> 0) === 0 ? [] : read(params, 4);
+                const [, , exclude = 0, blend = 0] = wholeAddress(params) === 0 ? [] : read(params,
+                    4);
                 if (exclude !== 0)
                 {
                     host.divergence?.('BeginBufferedPaint',
@@ -887,7 +890,7 @@ function win7Functions(host, gdi32, isWindow){
                     buffers.set(handle, { target: target >>> 0, rect: box, dc, bitmap, previous,
                         bits: read(info + 48, 1)[0] >>> 0, format: format >>> 0,
                         blend: blend >>> 0 });
-                    if ((dcOut >>> 0) !== 0)
+                    if (wholeAddress(dcOut) !== 0)
                     {
                         write(dcOut, [dc]);
                     }
@@ -957,7 +960,7 @@ function win7Functions(host, gdi32, isWindow){
             /** @param {number[]} args */
             handler: ([handle, out])=>{
                 const buffer = bufferOf(handle);
-                if (!buffer || (out >>> 0) === 0)
+                if (!buffer || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -978,7 +981,7 @@ function win7Functions(host, gdi32, isWindow){
             /** @param {number[]} args */
             handler: ([handle, bitsOut, rowOut])=>{
                 const buffer = bufferOf(handle);
-                if (!buffer || (bitsOut >>> 0) === 0 || (rowOut >>> 0) === 0)
+                if (!buffer || wholeAddress(bitsOut) === 0 || wholeAddress(rowOut) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1029,12 +1032,12 @@ function win7Functions(host, gdi32, isWindow){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([hwnd, target, rect, format, params, animation, fromOut, toOut])=>{
-                if (!isWindow(hwnd) || (toOut >>> 0) === 0)
+                if (!isWindow(hwnd) || wholeAddress(toOut) === 0)
                 {
                     return 0;
                 }
                 // BP_ANIMATIONPARAMS: cbSize, dwFlags, style, dwDuration.
-                const [, , style = 0, duration = 0] = (animation >>> 0) === 0 ? []
+                const [, , style = 0, duration = 0] = wholeAddress(animation) === 0 ? []
                     : read(animation, 4);
                 if (style !== BPAS_NONE && duration !== 0)
                 {
@@ -1043,7 +1046,7 @@ function win7Functions(host, gdi32, isWindow){
                 }
                 const handle = paint.BeginBufferedPaint.handler([target, rect, format, params,
                     toOut]);
-                if ((fromOut >>> 0) !== 0)
+                if (wholeAddress(fromOut) !== 0)
                 {
                     write(fromOut, [0]);
                 }

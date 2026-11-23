@@ -920,7 +920,7 @@ export function createMeshObjects(host, buffers){
                 argBytes: 24,
                 /** @param {number[]} args */
                 handler: args=>{
-                    const elements = (args[3] >>> 0) === 0 ? null
+                    const elements = wholeAddress(args[3]) === 0 ? null
                         : readDeclaration(host.readMemory, args[3]);
                     return createMesh(args, elements, elements ? fvfFromDeclarator(elements) ?? 0
                         : 0);

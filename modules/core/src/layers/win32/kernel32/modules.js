@@ -675,7 +675,7 @@ export function createModuleFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? noName()
+            handler: ([name])=>(wholeAddress(name) === 0 ? noName()
                 : load(host.readCString(wholeAddress(name), WHOLE_NAME))),
         },
 
@@ -692,7 +692,7 @@ export function createModuleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
-                if ((file >>> 0) !== 0 || (name >>> 0) === 0)
+                if ((file >>> 0) !== 0 || wholeAddress(name) === 0)
                 {
                     return noName();
                 }
@@ -704,7 +704,7 @@ export function createModuleFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, file, flags])=>{
-                if ((file >>> 0) !== 0 || (name >>> 0) === 0)
+                if ((file >>> 0) !== 0 || wholeAddress(name) === 0)
                 {
                     return noName();
                 }
@@ -764,7 +764,7 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([path])=>{
-                const directory = (path >>> 0) === 0 ? ''
+                const directory = wholeAddress(path) === 0 ? ''
                     : host.readWideString(wholeAddress(path), MAX_NAME * 2);
                 if (!/^([a-z]:\\|\\\\)/i.test(directory))
                 {
@@ -866,13 +866,13 @@ export function createModuleFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const module = host.byBase(handle >>> 0);
+                const module = host.byBase(wholeAddress(handle));
                 if (!module)
                 {
                     host.setLastError(ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
-                host.disableThreadCalls?.(handle >>> 0);
+                host.disableThreadCalls?.(wholeAddress(handle));
                 return 1;
             },
         },
@@ -901,15 +901,16 @@ export function createModuleFunctions(host){
             handler: ([handle, name])=>{
                 // No module is the program's own, as GetModuleHandle(NULL)
                 // answers it: what it does not export is a procedure not found.
-                const module = (handle >>> 0) === 0 ? host.find(null) : host.byBase(handle >>> 0);
+                const module = wholeAddress(handle) === 0 ? host.find(null)
+                    : host.byBase(wholeAddress(handle));
                 if (!module)
                 {
-                    host.setLastError((handle >>> 0) === 0 ? ERROR_PROC_NOT_FOUND
+                    host.setLastError(wholeAddress(handle) === 0 ? ERROR_PROC_NOT_FOUND
                         : ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
 
-                const ordinal = isOrdinal(name >>> 0) ? name >>> 0 : null;
+                const ordinal = isOrdinal(wholeAddress(name)) ? wholeAddress(name) : null;
                 const wanted = ordinal !== null ? `#${ordinal}`
                     : host.readCString(wholeAddress(name), WHOLE_NAME);
                 /** @param {{ address: number } | { error: number }} found */
@@ -937,7 +938,7 @@ export function createModuleFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? noName()
+            handler: ([name])=>(wholeAddress(name) === 0 ? noName()
                 : load(host.readWideString(wholeAddress(name), MAX_NAME * 2))),
         },
 
@@ -966,7 +967,7 @@ export function createModuleFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, handle, info, size])=>{
-                const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
+                const module = handle === 0 ? host.find(null) : host.byBase(wholeAddress(handle));
                 if (!module || !host.readMemory)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);

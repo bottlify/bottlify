@@ -104,14 +104,14 @@ export function createCrypt32Functions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([dataIn, description, entropy, , , , dataOut])=>{
-                if ((dataIn >>> 0) === 0 || (dataOut >>> 0) === 0)
+                if (wholeAddress(dataIn) === 0 || wholeAddress(dataOut) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const data = readBlob(wholeAddress(dataIn));
-                const text = (description >>> 0) === 0
+                const text = wholeAddress(description) === 0
                     ? '' : host.readWideString(wholeAddress(description), 0x10000);
-                const mixed = (entropy >>> 0) === 0 ? new Uint8Array(0)
+                const mixed = wholeAddress(entropy) === 0 ? new Uint8Array(0)
                     : readBlob(wholeAddress(entropy));
                 const blob = new Uint8Array(HEADER + text.length * 2 + mixed.length + data.length);
                 const view = new DataView(blob.buffer);
@@ -125,7 +125,7 @@ export function createCrypt32Functions(host){
                 }
                 blob.set(mixed, HEADER + text.length * 2);
                 blob.set(data, HEADER + text.length * 2 + mixed.length);
-                return writeBlob(dataOut >>> 0, blob) ? 1 : 0;
+                return writeBlob(wholeAddress(dataOut), blob) ? 1 : 0;
             },
         },
 
@@ -141,7 +141,7 @@ export function createCrypt32Functions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([dataIn, descriptionOut, entropy, , , , dataOut])=>{
-                if ((dataIn >>> 0) === 0 || (dataOut >>> 0) === 0)
+                if (wholeAddress(dataIn) === 0 || wholeAddress(dataOut) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -160,17 +160,17 @@ export function createCrypt32Functions(host){
                     return fail(NTE_BAD_DATA);
                 }
                 const mixed = blob.subarray(HEADER + textBytes, HEADER + textBytes + mixedBytes);
-                const given = (entropy >>> 0) === 0 ? new Uint8Array(0)
+                const given = wholeAddress(entropy) === 0 ? new Uint8Array(0)
                     : readBlob(wholeAddress(entropy));
                 if (given.length !== mixed.length || given.some((byte, i)=>byte !== mixed[i]))
                 {
                     return fail(NTE_BAD_DATA);
                 }
-                if (!writeBlob(dataOut >>> 0, blob.slice(HEADER + textBytes + mixedBytes)))
+                if (!writeBlob(wholeAddress(dataOut), blob.slice(HEADER + textBytes + mixedBytes)))
                 {
                     return 0;
                 }
-                if ((descriptionOut >>> 0) !== 0)
+                if (wholeAddress(descriptionOut) !== 0)
                 {
                     const text = new Uint8Array(textBytes + 2);
                     text.set(blob.subarray(HEADER, HEADER + textBytes));

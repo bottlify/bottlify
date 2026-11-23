@@ -480,8 +480,8 @@ export function createStartupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, end])=>{
-                const first = start >>> 0;
-                const last = end >>> 0;
+                const first = wholeAddress(start);
+                const last = wholeAddress(end);
                 if (first === 0 || last <= first)
                 {
                     return 0;
@@ -510,8 +510,8 @@ export function createStartupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([start, end])=>{
-                const first = start >>> 0;
-                const last = end >>> 0;
+                const first = wholeAddress(start);
+                const last = wholeAddress(end);
                 if (first === 0 || last <= first)
                 {
                     return 0;
@@ -740,7 +740,7 @@ export function createStartupFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([fn])=>{
-                onExit.push(fn >>> 0);
+                onExit.push(wholeAddress(fn));
                 return 0;
             },
         },

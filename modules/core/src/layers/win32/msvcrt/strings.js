@@ -23,6 +23,7 @@ import { EINVAL } from './globals.js';
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * @typedef {Object} StringHost
@@ -159,9 +160,9 @@ export function createStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, delimiters])=>{
-                if ((string >>> 0) !== 0)
+                if (wholeAddress(string) !== 0)
                 {
-                    tokenAt = string >>> 0;
+                    tokenAt = wholeAddress(string);
                 }
                 if (tokenAt === 0)
                 {
@@ -216,7 +217,7 @@ export function createStringFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([string])=>{
-                if ((string >>> 0) === 0)
+                if (wholeAddress(string) === 0)
                 {
                     return 0;
                 }
@@ -272,7 +273,7 @@ export function createStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([left, right])=>{
-                if ((left >>> 0) === 0 || (right >>> 0) === 0)
+                if (wholeAddress(left) === 0 || wholeAddress(right) === 0)
                 {
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
@@ -280,8 +281,8 @@ export function createStringFunctions(host){
                 /** @param {number} at */
                 const bytesOf = at=>host.readMemory(at,
                     host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1).slice();
-                const a = bytesOf(left >>> 0);
-                const b = bytesOf(right >>> 0);
+                const a = bytesOf(wholeAddress(left));
+                const b = bytesOf(wholeAddress(right));
                 for (let at = 0; ; at++)
                 {
                     if (a[at] !== b[at])
@@ -311,7 +312,7 @@ export function createStringFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, source, count])=>{
                 const room = count >>> 0;
-                if ((source >>> 0) === 0 || ((destination >>> 0) === 0 && room !== 0))
+                if (wholeAddress(source) === 0 || (wholeAddress(destination) === 0 && room !== 0))
                 {
                     host.errno?.(EINVAL);
                     return INT_MAX;

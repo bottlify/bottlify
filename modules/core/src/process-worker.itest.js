@@ -256,11 +256,13 @@ test('a child in a worker of its own draws on the run\'s graphics worker, and th
             `and the run showed what came back: ${shown.count} of ${frames.length}`);
     });
 
-test('a tool reads the frames of a program in a worker of its own from that worker',
+test('a tool reads the frames and the memory of a program in a worker of its own from that worker',
     { timeout: 120000 }, async t=>{
         // A program in a worker of its own keeps its frames, and their phases,
         // in its worker's journal: read from the run's thread, they were the
-        // system's, and a slow frame of a game said nothing.
+        // system's, and a slow frame of a game said nothing. Its memory is its
+        // worker's too: a loop a profile named could not be read to see what
+        // it waits for.
         const gpu = createFakeDevice();
         Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
             createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
@@ -293,18 +295,26 @@ test('a tool reads the frames of a program in a worker of its own from that work
         });
         t.after(()=>app.dispose());
         let most = 0;
+        let header = '';
         const looking = setInterval(async()=>{
             for (const one of await app.debug.processes())
             {
                 const frames = await Promise.resolve(app.debug.framesOf(one.id, 50))
                     .catch(()=>null);
                 most = Math.max(most, Array.isArray(frames) ? frames.length : 0);
+                const bytes = await Promise.resolve(app.debug.readOf(one.id, 0x400000, 2))
+                    .catch(()=>null);
+                if (bytes)
+                {
+                    header = String.fromCharCode(...bytes);
+                }
             }
         }, 25);
         t.after(()=>clearInterval(looking));
         assert.equal(await app.run({ timeoutMs: 90_000 }), 0);
         clearInterval(looking);
         assert.ok(most > 0, 'its frames were read while it ran');
+        assert.equal(header, 'MZ', 'its image was read while it ran');
     });
 
 test('a child in a worker of its own is sent the page\'s input while it stands',

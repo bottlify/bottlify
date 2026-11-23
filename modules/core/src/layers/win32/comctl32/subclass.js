@@ -177,7 +177,7 @@ export function createSubclassFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hwnd, proc, id, ref])=>{
-                if ((proc >>> 0) === 0 || (hwnd >>> 0) === 0 || !user32('IsWindow', [hwnd])
+                if (wholeAddress(proc) === 0 || (hwnd >>> 0) === 0 || !user32('IsWindow', [hwnd])
                     || !host.procedure)
                 {
                     return 0;
@@ -193,7 +193,7 @@ export function createSubclassFunctions(host){
                     windows.set(hwnd >>> 0, held);
                     property('SetPropA', hwnd, [1]);
                 }
-                const same = held.chain.find(each=>each.proc === (proc >>> 0)
+                const same = held.chain.find(each=>each.proc === wholeAddress(proc)
                     && each.id === (id >>> 0));
                 if (same)
                 {
@@ -201,7 +201,7 @@ export function createSubclassFunctions(host){
                 }
                 else
                 {
-                    held.chain.push({ proc: proc >>> 0, id: id >>> 0, ref: ref >>> 0,
+                    held.chain.push({ proc: wholeAddress(proc), id: id >>> 0, ref: ref >>> 0,
                         order: ++installed });
                 }
                 return 1;
@@ -219,9 +219,10 @@ export function createSubclassFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hwnd, proc, id, out])=>{
-                const found = windows.get(hwnd >>> 0)?.chain.find(each=>each.proc === (proc >>> 0)
+                const found =
+                    windows.get(hwnd >>> 0)?.chain.find(each=>each.proc === wholeAddress(proc)
                     && each.id === (id >>> 0));
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     const bytes = new Uint8Array(4);
                     new DataView(bytes.buffer).setUint32(0, found?.ref ?? 0, true);
@@ -237,7 +238,7 @@ export function createSubclassFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, proc, id])=>{
                 const held = windows.get(hwnd >>> 0);
-                const at = held?.chain.findIndex(each=>each.proc === (proc >>> 0)
+                const at = held?.chain.findIndex(each=>each.proc === wholeAddress(proc)
                     && each.id === (id >>> 0)) ?? -1;
                 if (!held || at < 0)
                 {

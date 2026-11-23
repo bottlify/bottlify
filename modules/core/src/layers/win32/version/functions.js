@@ -836,7 +836,7 @@ export function createVersionFunctions(host){
 
                 // No name, or a drive that is not there, is a source that
                 // cannot be read.
-                const stat = (srcName >>> 0) === 0 || (destName >>> 0) === 0 ? null
+                const stat = wholeAddress(srcName) === 0 || wholeAddress(destName) === 0 ? null
                     : statOrNull(source);
                 if (!stat || !stat.exists || stat.isDirectory)
                 {
@@ -873,11 +873,11 @@ export function createVersionFunctions(host){
                     // The temp-file out-parameters name no temp file, because
                     // none was left: an empty string and a length of zero, which
                     // is what a caller reads when the install completed on its own.
-                    if ((tmpFile >>> 0) !== 0)
+                    if (wholeAddress(tmpFile) !== 0)
                     {
                         host.writeMemory(wholeAddress(tmpFile), new Uint8Array([0]));
                     }
-                    if ((tmpLen >>> 0) !== 0)
+                    if (wholeAddress(tmpLen) !== 0)
                     {
                         host.writeMemory(wholeAddress(tmpLen), dword(0));
                     }

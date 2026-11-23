@@ -143,7 +143,7 @@ export function createHttpapiFunctions(host){
                 const major = version & 0xffff;
                 if ((major !== 1 && major !== 2) || (version >>> 16) !== 0
                     || (flags & ~HTTP_INITIALIZE_ALL) !== 0 || flags === 0
-                    || (spare >>> 0) !== 0)
+                    || wholeAddress(spare) !== 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -156,7 +156,7 @@ export function createHttpapiFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([flags, spare])=>((flags & ~HTTP_INITIALIZE_ALL) !== 0 || flags === 0
-                || (spare >>> 0) !== 0 ? ERROR_INVALID_PARAMETER : NO_ERROR),
+                || wholeAddress(spare) !== 0 ? ERROR_INVALID_PARAMETER : NO_ERROR),
         },
 
         /**
@@ -170,7 +170,7 @@ export function createHttpapiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([, id, record, length])=>{
-                if ((id >>> 0) >= CONFIG_IDS || (record >>> 0) === 0 || (length >>> 0) === 0)
+                if ((id >>> 0) >= CONFIG_IDS || wholeAddress(record) === 0 || (length >>> 0) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -204,7 +204,7 @@ export function createHttpapiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([, id, record, length])=>{
-                if ((id >>> 0) >= CONFIG_IDS || (record >>> 0) === 0 || (length >>> 0) === 0)
+                if ((id >>> 0) >= CONFIG_IDS || wholeAddress(record) === 0 || (length >>> 0) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -243,7 +243,8 @@ export function createHttpapiFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([, id, input, inputLength, output, outputLength, returned])=>{
-                if ((id >>> 0) >= CONFIG_IDS || (input >>> 0) === 0 || (inputLength >>> 0) < 4)
+                if ((id >>> 0) >= CONFIG_IDS || wholeAddress(input) === 0
+                    || (inputLength >>> 0) < 4)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -282,11 +283,11 @@ export function createHttpapiFunctions(host){
                 const url = utf16z(found.url);
                 const sddl = utf16z(found.sddl);
                 const size = 8 + url.length + sddl.length;
-                if ((returned >>> 0) !== 0)
+                if (wholeAddress(returned) !== 0)
                 {
                     writeDword(returned, size);
                 }
-                if ((output >>> 0) === 0 || (outputLength >>> 0) < size)
+                if (wholeAddress(output) === 0 || (outputLength >>> 0) < size)
                 {
                     return ERROR_INSUFFICIENT_BUFFER;
                 }

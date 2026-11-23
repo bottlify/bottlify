@@ -219,7 +219,7 @@ export function createDirectoryNatives(host){
                 {
                     return STATUS.OBJECT_TYPE_MISMATCH;
                 }
-                if ((context >>> 0) === 0)
+                if (wholeAddress(context) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -230,7 +230,7 @@ export function createDirectoryNatives(host){
                 const room = length >>> 0;
                 /** @param {number} needed */
                 const answer = needed=>{
-                    if ((returned >>> 0) !== 0)
+                    if (wholeAddress(returned) !== 0)
                     {
                         writeDword(returned, needed);
                     }
@@ -267,7 +267,7 @@ export function createDirectoryNatives(host){
                 const string = (at, value)=>{
                     view.setUint16(at, value.length * 2, true);
                     view.setUint16(at + 2, value.length * 2 + 2, true);
-                    view.setUint32(at + 4, (buffer >>> 0) + text, true);
+                    view.setUint32(at + 4, wholeAddress(buffer) + text, true);
                     for (let unit = 0; unit < value.length; unit++)
                     {
                         view.setUint16(text + unit * 2, value.charCodeAt(unit), true);
@@ -299,11 +299,11 @@ export function createDirectoryNatives(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([out, access, attributes, target])=>{
-                if ((out >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(target) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                const text = unicodeAt(target >>> 0);
+                const text = unicodeAt(wholeAddress(target));
                 if (text === '')
                 {
                     return STATUS.INVALID_PARAMETER;
@@ -345,7 +345,7 @@ export function createDirectoryNatives(host){
                 }
                 const { target } = kernel.handles.resolve(handle >>> 0);
                 const needed = target.length * 2 + 2;
-                if ((returned >>> 0) !== 0)
+                if (wholeAddress(returned) !== 0)
                 {
                     writeDword(returned, needed);
                 }

@@ -2050,12 +2050,12 @@ export function createStorageFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([plkbyt, grfMode, , out])=>{
-                const lockBytes = lockBytesAt(plkbyt >>> 0);
-                if (!lockBytes && ((plkbyt >>> 0) === 0 || !host.call))
+                const lockBytes = lockBytesAt(wholeAddress(plkbyt));
+                if (!lockBytes && (wholeAddress(plkbyt) === 0 || !host.call))
                 {
-                    return refuse('StgCreateDocfileOnILockBytes', out >>> 0);
+                    return refuse('StgCreateDocfileOnILockBytes', wholeAddress(out));
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STG_E_INVALIDPOINTER;
                 }
@@ -2066,20 +2066,20 @@ export function createStorageFunctions(host){
                     return refused;
                 }
                 return lockBytes
-                    ? publishDocfileOn(lockBytes, createRoot(), grfMode >>> 0, out >>> 0)
-                    : docfileOnGuest(plkbyt >>> 0, true, grfMode >>> 0, out >>> 0);
+                    ? publishDocfileOn(lockBytes, createRoot(), grfMode >>> 0, wholeAddress(out))
+                    : docfileOnGuest(wholeAddress(plkbyt), true, grfMode >>> 0, wholeAddress(out));
             },
         },
         StgOpenStorageOnILockBytes: {
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([plkbyt, , grfMode, , , out])=>{
-                const lockBytes = lockBytesAt(plkbyt >>> 0);
-                if (!lockBytes && ((plkbyt >>> 0) === 0 || !host.call))
+                const lockBytes = lockBytesAt(wholeAddress(plkbyt));
+                if (!lockBytes && (wholeAddress(plkbyt) === 0 || !host.call))
                 {
-                    return refuse('StgOpenStorageOnILockBytes', out >>> 0);
+                    return refuse('StgOpenStorageOnILockBytes', wholeAddress(out));
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STG_E_INVALIDPOINTER;
                 }
@@ -2091,10 +2091,11 @@ export function createStorageFunctions(host){
                 }
                 if (!lockBytes)
                 {
-                    return docfileOnGuest(plkbyt >>> 0, false, grfMode >>> 0, out >>> 0);
+                    return docfileOnGuest(wholeAddress(plkbyt), false, grfMode >>> 0,
+                        wholeAddress(out));
                 }
                 const root = parseCompoundFile(lockBytes.read(0, lockBytes.size()));
-                return root ? publishDocfileOn(lockBytes, root, grfMode >>> 0, out >>> 0)
+                return root ? publishDocfileOn(lockBytes, root, grfMode >>> 0, wholeAddress(out))
                     : STG_E_FILEALREADYEXISTS;
             },
         },
@@ -2104,7 +2105,7 @@ export function createStorageFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([plkbyt])=>{
-                const lockBytes = lockBytesAt(plkbyt >>> 0);
+                const lockBytes = lockBytesAt(wholeAddress(plkbyt));
                 if (!lockBytes)
                 {
                     diverge('StgIsStorageILockBytes',
@@ -2133,7 +2134,8 @@ export function createStorageFunctions(host){
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const backing = memoryBacking(hGlobal >>> 0, (fDeleteOnRelease >>> 0) !== 0);
+                const backing = memoryBacking(wholeAddress(hGlobal),
+                    (fDeleteOnRelease >>> 0) !== 0);
                 if (typeof backing === 'number')
                 {
                     return backing;
@@ -2152,8 +2154,8 @@ export function createStorageFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([plkbyt, phglobal])=>{
-                const lockBytes = lockBytesAt(plkbyt >>> 0);
-                if ((phglobal >>> 0) === 0)
+                const lockBytes = lockBytesAt(wholeAddress(plkbyt));
+                if (wholeAddress(phglobal) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -2181,7 +2183,8 @@ export function createStorageFunctions(host){
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                return publishMemoryStream(hGlobal >>> 0, (fDeleteOnRelease >>> 0) !== 0, out);
+                return publishMemoryStream(wholeAddress(hGlobal), (fDeleteOnRelease >>> 0) !== 0,
+                    out);
             },
         },
 
@@ -2196,7 +2199,7 @@ export function createStorageFunctions(host){
                     return E_INVALIDARG;
                 }
                 /** @type {StreamState | null} */
-                const state = stateAt(pstm >>> 0, CLSID_STREAM);
+                const state = stateAt(wholeAddress(pstm), CLSID_STREAM);
                 if (!state?.backing.handle)
                 {
                     writeU32(out, 0);
@@ -2218,12 +2221,13 @@ export function createStorageFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pStm, rclsid])=>{
-                if ((pStm >>> 0) === 0 || (rclsid >>> 0) === 0)
+                if (wholeAddress(pStm) === 0 || (rclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const written = writeToStream(pStm >>> 0, host.readMemory(wholeAddress(rclsid),
-                    GUID_SIZE));
+                const written = writeToStream(wholeAddress(pStm),
+                    host.readMemory(wholeAddress(rclsid),
+                        GUID_SIZE));
                 /** @param {number} count */
                 const check = count=>(count === GUID_SIZE ? S_OK : STG_E_ACCESSDENIED);
                 return typeof written === 'number' ? check(written) : written.then(check);
@@ -2233,11 +2237,11 @@ export function createStorageFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pStm, pclsid])=>{
-                if ((pStm >>> 0) === 0 || (pclsid >>> 0) === 0)
+                if (wholeAddress(pStm) === 0 || wholeAddress(pclsid) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const bytes = readFromStream(pStm >>> 0, GUID_SIZE);
+                const bytes = readFromStream(wholeAddress(pStm), GUID_SIZE);
                 /** @param {Uint8Array} read */
                 const store = read=>{
                     if (read.length !== GUID_SIZE)
@@ -2262,7 +2266,7 @@ export function createStorageFunctions(host){
             /** @param {number[]} args */
             handler: ([pStg, rclsid])=>{
                 /** @type {StorageState | null} */
-                const state = stateAt(pStg >>> 0, CLSID_STORAGE);
+                const state = stateAt(wholeAddress(pStg), CLSID_STORAGE);
                 if (!state || (rclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
@@ -2280,12 +2284,12 @@ export function createStorageFunctions(host){
             /** @param {number[]} args */
             handler: ([pStg, pclsid])=>{
                 /** @type {StorageState | null} */
-                const state = stateAt(pStg >>> 0, CLSID_STORAGE);
-                if (!state || (pclsid >>> 0) === 0)
+                const state = stateAt(wholeAddress(pStg), CLSID_STORAGE);
+                if (!state || wholeAddress(pclsid) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeGuid(host, pclsid >>> 0, state.entry.clsid);
+                writeGuid(host, wholeAddress(pclsid), state.entry.clsid);
                 return S_OK;
             },
         },
@@ -2351,11 +2355,11 @@ export function createStorageFunctions(host){
                     return E_POINTER;
                 }
                 writeU32(out, 0);
-                if ((pStm >>> 0) === 0 || (iidInterface >>> 0) === 0)
+                if (wholeAddress(pStm) === 0 || (iidInterface >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const bytes = readFromStream(pStm >>> 0, GUID_SIZE);
+                const bytes = readFromStream(wholeAddress(pStm), GUID_SIZE);
                 /** @param {Uint8Array} read */
                 const load = read=>{
                     if (read.length !== GUID_SIZE)
@@ -2399,7 +2403,7 @@ export function createStorageFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([pwcsName, grfMode, stgfmt, , options, , riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STG_E_INVALIDPOINTER;
                 }
@@ -2414,7 +2418,7 @@ export function createStorageFunctions(host){
                 {
                     return E_NOINTERFACE;
                 }
-                if ((options >>> 0) !== 0 && readU32(wholeAddress(options) + 4) > 512)
+                if (wholeAddress(options) !== 0 && readU32(wholeAddress(options) + 4) > 512)
                 {
                     diverge('StgCreateStorageEx', 'a larger sector is asked for and 512 is used');
                 }
@@ -2437,7 +2441,7 @@ export function createStorageFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([pwcsName, grfMode, stgfmt, , , , riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STG_E_INVALIDPOINTER;
                 }

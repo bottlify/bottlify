@@ -180,7 +180,7 @@ export function createAdviseFunctions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -264,7 +264,7 @@ export function createAdviseFunctions(env){
                     }],
                     lastRelease: ()=>sinks.clear(),
                     destroy: ()=>void sinks.clear(),
-                }, out >>> 0);
+                }, wholeAddress(out));
             },
         },
 
@@ -278,7 +278,7 @@ export function createAdviseFunctions(env){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -342,7 +342,7 @@ export function createAdviseFunctions(env){
                     }],
                     lastRelease: ()=>sinks.clear(),
                     destroy: ()=>void sinks.clear(),
-                }, out >>> 0);
+                }, wholeAddress(out));
             },
         },
     };

@@ -1838,8 +1838,8 @@ export function createWinsockFunctions(host){
                     {
                         return fail(WSAEOPNOTSUPP);
                     }
-                    if ((inputSize >>> 0) < 16 || (input >>> 0) === 0
-                        || (outputSize >>> 0) < 4 || (output >>> 0) === 0)
+                    if ((inputSize >>> 0) < 16 || wholeAddress(input) === 0
+                        || (outputSize >>> 0) < 4 || wholeAddress(output) === 0)
                     {
                         return fail(WSAEFAULT);
                     }
@@ -1856,7 +1856,7 @@ export function createWinsockFunctions(host){
                             return fail(WSAEINVAL);
                         }
                         writeDword(output, address);
-                        if ((returned >>> 0) !== 0)
+                        if (wholeAddress(returned) !== 0)
                         {
                             writeDword(returned, 4);
                         }
@@ -1872,16 +1872,16 @@ export function createWinsockFunctions(host){
                 const socket = /** @type {any} */ (socketOf(handle));
                 /** An out-buffer answer of `bytes`, its size in `returned`. @param {Uint8Array} bytes */
                 const answerWith = bytes=>{
-                    if ((output >>> 0) === 0 || (outputSize >>> 0) < bytes.length)
+                    if (wholeAddress(output) === 0 || (outputSize >>> 0) < bytes.length)
                     {
-                        if ((returned >>> 0) !== 0)
+                        if (wholeAddress(returned) !== 0)
                         {
                             writeDword(returned, bytes.length);
                         }
                         return fail(WSAEFAULT);
                     }
                     host.writeMemory(wholeAddress(output), bytes);
-                    if ((returned >>> 0) !== 0)
+                    if (wholeAddress(returned) !== 0)
                     {
                         writeDword(returned, bytes.length);
                     }
@@ -1898,7 +1898,7 @@ export function createWinsockFunctions(host){
                         {
                             return fail(WSAEINVAL);
                         }
-                        if ((inputSize >>> 0) < 4 || (input >>> 0) === 0)
+                        if ((inputSize >>> 0) < 4 || wholeAddress(input) === 0)
                         {
                             return fail(WSAEFAULT);
                         }
@@ -1912,7 +1912,7 @@ export function createWinsockFunctions(host){
                         {
                             return fail(WSAEOPNOTSUPP);
                         }
-                        if ((input >>> 0) === 0 || (inputSize >>> 0)
+                        if (wholeAddress(input) === 0 || (inputSize >>> 0)
                             < ((command >>> 0) === SIO_KEEPALIVE_VALS ? 12 : 4))
                         {
                             return fail(WSAEFAULT);
@@ -1932,7 +1932,7 @@ export function createWinsockFunctions(host){
                         const bytes = new Uint8Array(12 + SOCKADDR_IN_SIZE);
                         const view = new DataView(bytes.buffer);
                         view.setUint32(0, 1, true);
-                        view.setUint32(4, ((output >>> 0) + 12) >>> 0, true);
+                        view.setUint32(4, (wholeAddress(output) + 12) >>> 0, true);
                         view.setInt32(8, SOCKADDR_IN_SIZE, true);
                         const address = new Uint8Array(SOCKADDR_IN_SIZE);
                         writeSockaddr((/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
@@ -1944,7 +1944,7 @@ export function createWinsockFunctions(host){
                     // The local address a datagram to the destination would
                     // leave from: the machine's one address.
                     case SIO_ROUTING_INTERFACE_QUERY: {
-                        if ((input >>> 0) === 0 || (inputSize >>> 0) < SOCKADDR_IN_SIZE)
+                        if (wholeAddress(input) === 0 || (inputSize >>> 0) < SOCKADDR_IN_SIZE)
                         {
                             return fail(WSAEFAULT);
                         }
@@ -2357,7 +2357,7 @@ export function createWinsockFunctions(host){
                         deliver(WSAEFAULT);
                         return;
                     }
-                    writeHostentAt(buf >>> 0, name, address);
+                    writeHostentAt(wholeAddress(buf), name, address);
                     deliver(0);
                 };
 
@@ -2496,7 +2496,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK, 0);
                 }
-                if ((overlapped >>> 0) === 0 || (transferred >>> 0) === 0)
+                if (wholeAddress(overlapped) === 0 || wholeAddress(transferred) === 0)
                 {
                     return fail(WSAEFAULT, 0);
                 }
@@ -2504,7 +2504,7 @@ export function createWinsockFunctions(host){
                 const report = ()=>{
                     const status = readDword(at + WSAOVERLAPPED.Internal);
                     writeDword(transferred, readDword(at + WSAOVERLAPPED.InternalHigh));
-                    if ((flags >>> 0) !== 0)
+                    if (wholeAddress(flags) !== 0)
                     {
                         writeDword(flags, NO_FLAGS);
                     }
@@ -2594,7 +2594,7 @@ export function createWinsockFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([handle, name, length, , calleeData])=>{
-                if ((calleeData >>> 0) !== 0 && socketOf(handle))
+                if (wholeAddress(calleeData) !== 0 && socketOf(handle))
                 {
                     writeDword(calleeData, 0);
                 }
@@ -2613,7 +2613,7 @@ export function createWinsockFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, name, lengthPointer, condition])=>{
-                if ((condition >>> 0) !== 0)
+                if (wholeAddress(condition) !== 0)
                 {
                     host.divergence?.('WSAAccept',
                         'the condition function is not called; the connection is accepted');
@@ -2652,7 +2652,7 @@ export function createWinsockFunctions(host){
                     return fail(WSAEINVAL, INVALID_SOCKET);
                 }
                 const described = (/** @type {number} */ value, /** @type {number} */ offset)=>
-                    ((value | 0) === FROM_PROTOCOL_INFO && (info >>> 0) !== 0
+                    ((value | 0) === FROM_PROTOCOL_INFO && wholeAddress(info) !== 0
                         ? readDword(wholeAddress(info) + offset) : value);
                 return createSocket(described(family, WSAPROTOCOL_INFO.iAddressFamily),
                     described(type, WSAPROTOCOL_INFO.iSocketType));
@@ -2680,7 +2680,7 @@ export function createWinsockFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([handle, message, , sent, overlapped, routine])=>{
-                if ((message >>> 0) === 0)
+                if (wholeAddress(message) === 0)
                 {
                     return fail(WSAEFAULT);
                 }
@@ -2701,7 +2701,7 @@ export function createWinsockFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([family, text, out])=>{
-                if ((text >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(text) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(WSAEFAULT);
                 }
@@ -2738,7 +2738,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEAFNOSUPPORT, 0);
                 }
-                if ((address >>> 0) === 0 || (buffer >>> 0) === 0)
+                if (wholeAddress(address) === 0 || wholeAddress(buffer) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER, 0);
                 }
@@ -2769,7 +2769,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK);
                 }
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return fail(WSAEFAULT);
                 }
@@ -2791,7 +2791,7 @@ export function createWinsockFunctions(host){
             /** @param {number[]} args */
             handler: ([protocols, buffer, length, errno])=>enumProtocols(protocols, buffer,
                 length, true, code=>{
-                    if ((errno >>> 0) !== 0)
+                    if (wholeAddress(errno) !== 0)
                     {
                         writeDword(errno, code);
                     }
@@ -2830,13 +2830,13 @@ export function createWinsockFunctions(host){
             /** @param {number[]} args */
             handler: ([guid, path, length, errno])=>{
                 const refuseWith = (/** @type {number} */ code)=>{
-                    if ((errno >>> 0) !== 0)
+                    if (wholeAddress(errno) !== 0)
                     {
                         writeDword(errno, code);
                     }
                     return SOCKET_ERROR;
                 };
-                if ((guid >>> 0) === 0 || (length >>> 0) === 0)
+                if (wholeAddress(guid) === 0 || wholeAddress(length) === 0)
                 {
                     return refuseWith(WSAEFAULT);
                 }
@@ -2845,7 +2845,7 @@ export function createWinsockFunctions(host){
                 {
                     return refuseWith(WSAEINVAL);
                 }
-                if ((path >>> 0) === 0 || readDword(length) < MSAFD_PATH.length + 1)
+                if (wholeAddress(path) === 0 || readDword(length) < MSAFD_PATH.length + 1)
                 {
                     writeDword(length, MSAFD_PATH.length + 1);
                     return refuseWith(WSAEFAULT);
@@ -2872,7 +2872,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSANOTINITIALISED);
                 }
-                if ((length >>> 0) === 0)
+                if (wholeAddress(length) === 0)
                 {
                     return fail(WSAEFAULT);
                 }
@@ -2889,7 +2889,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSANOTINITIALISED);
                 }
-                if ((query >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(query) === 0 || wholeAddress(out) === 0)
                 {
                     return fail(WSAEFAULT);
                 }
@@ -2912,7 +2912,7 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSANOTINITIALISED);
                 }
-                return fail((query >>> 0) === 0 ? WSAEFAULT : WSASERVICE_NOT_FOUND);
+                return fail(wholeAddress(query) === 0 ? WSAEFAULT : WSASERVICE_NOT_FOUND);
             },
         },
 
@@ -2931,7 +2931,7 @@ export function createWinsockFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([nodePointer, servicePointer, hintsPointer, result])=>{
-                if ((result >>> 0) !== 0)
+                if (wholeAddress(result) !== 0)
                 {
                     writeDword(result, 0);
                 }
@@ -2939,11 +2939,11 @@ export function createWinsockFunctions(host){
                 {
                     return eai(WSANOTINITIALISED);
                 }
-                if ((result >>> 0) === 0)
+                if (wholeAddress(result) === 0)
                 {
                     return eai(WSAEINVAL);
                 }
-                if ((nodePointer >>> 0) === 0 && (servicePointer >>> 0) === 0)
+                if (wholeAddress(nodePointer) === 0 && wholeAddress(servicePointer) === 0)
                 {
                     return eai(WSAHOST_NOT_FOUND);
                 }
@@ -2951,7 +2951,7 @@ export function createWinsockFunctions(host){
                 let family = AF_UNSPEC;
                 let socktype = 0;
                 let protocol = 0;
-                if ((hintsPointer >>> 0) !== 0)
+                if (wholeAddress(hintsPointer) !== 0)
                 {
                     const hints = new DataView(
                         host.readMemory(wholeAddress(hintsPointer), ADDRINFO.SIZE).slice().buffer);
@@ -2967,7 +2967,7 @@ export function createWinsockFunctions(host){
                     }
                 }
                 if ((flags & ~(AI_PASSIVE | AI_CANONNAME | AI_NUMERICHOST)) !== 0
-                    || ((flags & AI_CANONNAME) !== 0 && (nodePointer >>> 0) === 0))
+                    || ((flags & AI_CANONNAME) !== 0 && wholeAddress(nodePointer) === 0))
                 {
                     return eai(WSAEINVAL);
                 }
@@ -2982,7 +2982,7 @@ export function createWinsockFunctions(host){
                 }
 
                 let port = 0;
-                if ((servicePointer >>> 0) !== 0)
+                if (wholeAddress(servicePointer) !== 0)
                 {
                     const service = host.readCString(wholeAddress(servicePointer), 64);
                     if (/^\d+$/.test(service))
@@ -3019,7 +3019,7 @@ export function createWinsockFunctions(host){
                     writeDword(result, list);
                     return 0;
                 };
-                if ((nodePointer >>> 0) === 0)
+                if (wholeAddress(nodePointer) === 0)
                 {
                     return reply([(flags & AI_PASSIVE) !== 0 ? INADDR_ANY : INADDR_LOOPBACK], null);
                 }
@@ -3084,12 +3084,12 @@ export function createWinsockFunctions(host){
                 {
                     return eai(WSANOTINITIALISED);
                 }
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     return eai(WSAEFAULT);
                 }
                 const address = /** @type {{ family: number, host: number, port: number }} */ (
-                    readSockaddr(host.readMemory, pointer >>> 0));
+                    readSockaddr(host.readMemory, wholeAddress(pointer)));
                 if (address.family !== AF_INET)
                 {
                     return eai(WSAEAFNOSUPPORT);
@@ -3098,8 +3098,8 @@ export function createWinsockFunctions(host){
                 {
                     return eai(WSAEFAULT);
                 }
-                const wantHost = (hostOut >>> 0) !== 0 && (hostLength >>> 0) !== 0;
-                const wantService = (servOut >>> 0) !== 0 && (servLength >>> 0) !== 0;
+                const wantHost = wholeAddress(hostOut) !== 0 && (hostLength >>> 0) !== 0;
+                const wantService = wholeAddress(servOut) !== 0 && (servLength >>> 0) !== 0;
                 if (!wantHost && !wantService)
                 {
                     return eai(WSAHOST_NOT_FOUND);
@@ -3157,7 +3157,7 @@ export function createWinsockFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     return fail(WSAEFAULT, 0);
                 }
@@ -3331,7 +3331,8 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK, 0);
                 }
-                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
+                const event =
+                    wholeAddress(overlapped) === 0 ? 0 : eventOf(wholeAddress(overlapped));
                 /** @param {number} handle  What accept produced. */
                 const fold = handle=>{
                     // The caller supplied the socket the connection is to arrive
@@ -3353,9 +3354,9 @@ export function createWinsockFunctions(host){
                     // client with its own connection hanging up at once.
                     ready.peer = null;
                     registry.close(ready);
-                    if ((buffer >>> 0) !== 0)
+                    if (wholeAddress(buffer) !== 0)
                     {
-                        const at = (buffer >>> 0) + (receiveLength >>> 0);
+                        const at = wholeAddress(buffer) + (receiveLength >>> 0);
                         writeSockaddr(host.writeMemory, at, accepting.local);
                         if (accepting.remote)
                         {
@@ -3370,32 +3371,33 @@ export function createWinsockFunctions(host){
                 if (!outcome.error)
                 {
                     fold(outcome.value);
-                    if ((received >>> 0) !== 0)
+                    if (wholeAddress(received) !== 0)
                     {
                         writeDword(wholeAddress(received), 0);
                     }
-                    if ((overlapped >>> 0) !== 0)
+                    if (wholeAddress(overlapped) !== 0)
                     {
-                        complete(overlapped >>> 0, event, { error: 0, bytes: 0 }, listener);
+                        complete(wholeAddress(overlapped), event, { error: 0, bytes: 0 }, listener);
                     }
                     return 1;
                 }
-                if (outcome.error !== WSAEWOULDBLOCK || (overlapped >>> 0) === 0)
+                if (outcome.error !== WSAEWOULDBLOCK || wholeAddress(overlapped) === 0)
                 {
                     return fail(outcome.error === WSAEWOULDBLOCK
                         ? WSA_IO_PENDING : outcome.error, 0);
                 }
-                begin(overlapped >>> 0);
-                inFlight.set(overlapped >>> 0, until(listener, ()=>registry.accept(listener))
+                begin(wholeAddress(overlapped));
+                inFlight.set(wholeAddress(overlapped), until(listener,
+                    ()=>registry.accept(listener))
                     .then(arrived=>{
                         if (arrived.error)
                         {
-                            complete(overlapped >>> 0, event,
+                            complete(wholeAddress(overlapped), event,
                                 { error: WSA_OPERATION_ABORTED, bytes: 0 }, listener, false);
                             return;
                         }
                         fold(arrived.value);
-                        complete(overlapped >>> 0, event, { error: 0, bytes: 0 }, listener,
+                        complete(wholeAddress(overlapped), event, { error: 0, bytes: 0 }, listener,
                             false);
                     }));
                 return fail(WSA_IO_PENDING, 0);
@@ -3415,7 +3417,7 @@ export function createWinsockFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, receiveLength, localLength, , localOut, localLengthOut, remoteOut,
                 remoteLengthOut])=>{
-                const at = (buffer >>> 0) + (receiveLength >>> 0);
+                const at = wholeAddress(buffer) + (receiveLength >>> 0);
                 for (const [out, lengthOut, address] of [[localOut, localLengthOut, at],
                     [remoteOut, remoteLengthOut, at + (localLength >>> 0)]])
                 {
@@ -3460,8 +3462,9 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const event = (overlapped >>> 0) === 0 ? 0 : eventOf(overlapped >>> 0);
-                const payload = (data >>> 0) === 0 || (dataLength >>> 0) === 0 ? null
+                const event =
+                    wholeAddress(overlapped) === 0 ? 0 : eventOf(wholeAddress(overlapped));
+                const payload = wholeAddress(data) === 0 || (dataLength >>> 0) === 0 ? null
                     : host.readMemory(wholeAddress(data), dataLength >>> 0).slice();
                 /** @param {any} delivery @returns {{ error: number, bytes: number }} */
                 const delivered = delivery=>({
@@ -3489,13 +3492,13 @@ export function createWinsockFunctions(host){
                     {
                         return fail(result.error, 0);
                     }
-                    if ((sent >>> 0) !== 0)
+                    if (wholeAddress(sent) !== 0)
                     {
                         writeDword(wholeAddress(sent), result.bytes);
                     }
-                    if ((overlapped >>> 0) !== 0)
+                    if (wholeAddress(overlapped) !== 0)
                     {
-                        complete(overlapped >>> 0, event, result, socket);
+                        complete(wholeAddress(overlapped), event, result, socket);
                     }
                     return 1;
                 };
@@ -3507,24 +3510,25 @@ export function createWinsockFunctions(host){
                     {
                         return answer(result);
                     }
-                    if ((overlapped >>> 0) === 0)
+                    if (wholeAddress(overlapped) === 0)
                     {
                         return result.then(answer);
                     }
-                    begin(overlapped >>> 0);
-                    inFlight.set(overlapped >>> 0, result.then(made=>{
-                        complete(overlapped >>> 0, event, made, socket, false);
+                    begin(wholeAddress(overlapped));
+                    inFlight.set(wholeAddress(overlapped), result.then(made=>{
+                        complete(wholeAddress(overlapped), event, made, socket, false);
                     }));
                     return fail(WSA_IO_PENDING, 0);
                 }
-                if ((overlapped >>> 0) === 0)
+                if (wholeAddress(overlapped) === 0)
                 {
                     return outcome.then(made=>connected(made)).then(answer);
                 }
-                begin(overlapped >>> 0);
-                inFlight.set(overlapped >>> 0, outcome.then(made=>connected(made)).then(result=>{
-                    complete(overlapped >>> 0, event, result, socket, false);
-                }));
+                begin(wholeAddress(overlapped));
+                inFlight.set(wholeAddress(overlapped),
+                    outcome.then(made=>connected(made)).then(result=>{
+                        complete(wholeAddress(overlapped), event, result, socket, false);
+                    }));
                 return fail(WSA_IO_PENDING, 0);
             },
         },

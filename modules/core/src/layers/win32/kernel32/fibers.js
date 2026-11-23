@@ -236,7 +236,8 @@ export function createFiberFunctions(host){
             argBytes: 12,
             sizes: [0],
             /** @param {number[]} args */
-            handler: ([size, start, parameter])=>create(size >>> 0, 0, start >>> 0, parameter),
+            handler: ([size, start, parameter])=>create(size >>> 0, 0, wholeAddress(start),
+                parameter),
         },
 
         /**
@@ -253,7 +254,7 @@ export function createFiberFunctions(host){
             sizes: [0, 1],
             /** @param {number[]} args */
             handler: ([commit, reserve, , start, parameter])=>
-                create(commit >>> 0, reserve >>> 0, start >>> 0, parameter),
+                create(commit >>> 0, reserve >>> 0, wholeAddress(start), parameter),
         },
 
         /**

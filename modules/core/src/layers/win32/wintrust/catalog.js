@@ -160,7 +160,7 @@ export function createCatalogFunctions(host){
         CryptCATAdminAcquireContext2: {
             argBytes: 20,
             handler: (/** @type {number[]} */ [out, , algorithm])=>{
-                const name = (algorithm >>> 0) === 0 ? 'SHA1'
+                const name = wholeAddress(algorithm) === 0 ? 'SHA1'
                     : host.readWideString(wholeAddress(algorithm), 32 * 2).toUpperCase();
                 const oid = name === 'SHA1' ? OID.SHA1 : name === 'SHA256' ? OID.SHA256 : null;
                 return oid ? acquire(out, oid) : refuse(NTE_BAD_ALGID);

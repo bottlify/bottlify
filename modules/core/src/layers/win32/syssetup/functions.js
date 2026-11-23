@@ -3,6 +3,7 @@
  * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
+import { wholeAddress } from '../common/pointers.js';
 
 /**
  * syssetup -- of Windows XP's setup library, the registry of OS components:
@@ -66,13 +67,16 @@ export function createSyssetupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([data, exception])=>{
-                const component = (data >>> 0) === 0 ? null : structure(data >>> 0, COMPONENT_HEAD);
-                const pack = (exception >>> 0) === 0 ? null : structure(exception >>> 0);
+                const component = wholeAddress(data) === 0 ? null : structure(wholeAddress(data),
+                    COMPONENT_HEAD);
+                const pack =
+                    wholeAddress(exception) === 0 ? null : structure(wholeAddress(exception));
                 if (!component || !pack)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                components.set(guidAt((data >>> 0) + 4), { data: component, exception: pack });
+                components.set(guidAt(wholeAddress(data) + 4), { data: component,
+                    exception: pack });
                 return 1;
             },
         },
@@ -82,11 +86,12 @@ export function createSyssetupFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([guid])=>{
-                if ((guid >>> 0) === 0)
+                if (wholeAddress(guid) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                return components.delete(guidAt(guid >>> 0)) ? 1 : fail(ERROR_FILE_NOT_FOUND);
+                return components.delete(guidAt(wholeAddress(guid))) ? 1
+                    : fail(ERROR_FILE_NOT_FOUND);
             },
         },
 
@@ -103,17 +108,18 @@ export function createSyssetupFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([guid, data, exception])=>{
-                if ((guid >>> 0) === 0 || (data >>> 0) === 0 || (exception >>> 0) === 0)
+                if (wholeAddress(guid) === 0 || wholeAddress(data) === 0
+                    || wholeAddress(exception) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const found = components.get(guidAt(guid >>> 0));
+                const found = components.get(guidAt(wholeAddress(guid)));
                 if (!found)
                 {
                     return fail(ERROR_FILE_NOT_FOUND);
                 }
                 for (const [at, kept] of /** @type {[number, Uint8Array][]} */ ([
-                    [data >>> 0, found.data], [exception >>> 0, found.exception]]))
+                    [wholeAddress(data), found.data], [wholeAddress(exception), found.exception]]))
                 {
                     const room = dword(at);
                     host.writeMemory(at + 4, kept.subarray(4, Math.min(kept.length, room)));

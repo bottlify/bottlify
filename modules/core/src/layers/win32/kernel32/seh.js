@@ -649,7 +649,7 @@ export function createSeh(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
-                const at = list.findIndex(one=>one.handle === (handle >>> 0));
+                const at = list.findIndex(one=>one.handle === wholeAddress(handle));
                 if (at < 0)
                 {
                     return 0;
@@ -1302,9 +1302,9 @@ export function createSeh(host){
                     const registers = host.registers();
                     const esp = registers.esp >>> 0;
                     const caller = { ...registers, eip: readU32(esp),
-                        esp: esp + 4 + 16 >>> 0, eax: returnValue >>> 0 };
-                    return unwind(targetFrame >>> 0, caller.eip,
-                        { record: record >>> 0, registers, shown: caller })
+                        esp: esp + 4 + 16 >>> 0, eax: wholeAddress(returnValue) };
+                    return unwind(wholeAddress(targetFrame), caller.eip,
+                        { record: wholeAddress(record), registers, shown: caller })
                         .then(({ context })=>readU32(context + CONTEXT.EAX));
                 },
             },
@@ -1321,7 +1321,7 @@ export function createSeh(host){
                 /** @param {number[]} args */
                 handler: ([filter])=>{
                     const previous = topLevelFilter;
-                    topLevelFilter = filter >>> 0;
+                    topLevelFilter = wholeAddress(filter);
                     return previous;
                 },
             },
@@ -1348,7 +1348,7 @@ export function createSeh(host){
                     // program's call goes on as if it had not looked.
                     try
                     {
-                        traceLastChance(pointers >>> 0);
+                        traceLastChance(wholeAddress(pointers));
                     }
                     catch (e){
                         host.trace?.(`last chance: not traced (${String(e)})`);
@@ -1363,7 +1363,7 @@ export function createSeh(host){
                     }
                     return host.callGuest({
                         entry: topLevelFilter,
-                        args: [pointers >>> 0],
+                        args: [wholeAddress(pointers)],
                     }).then(answer=>answer | 0);
                 },
             },

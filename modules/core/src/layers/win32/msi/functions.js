@@ -3079,7 +3079,7 @@ export function createMsiFunctions(host){
         DllGetVersion: {
             argBytes: 4,
             handler: ([info])=>{
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return 0x80070057 | 0;
                 }

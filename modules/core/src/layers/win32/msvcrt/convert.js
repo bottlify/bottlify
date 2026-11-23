@@ -839,7 +839,7 @@ export function createConversionFunctions(host){
             handler: ([value, end, text])=>{
                 const { bytes, end: read, status } = decimalToExtended(readString(text));
                 host.writeMemory(value, bytes);
-                if ((end >>> 0) !== 0)
+                if (wholeAddress(end) !== 0)
                 {
                     const pointer = new Uint8Array(4);
                     new DataView(pointer.buffer).setUint32(0, text + read >>> 0, true);
@@ -1070,7 +1070,7 @@ export function createConversionFunctions(host){
             floats: { 2: 'f64' },
             /** @param {number[]} args */
             handler: ([buffer, size, low, high, digits])=>{
-                if ((buffer >>> 0) === 0 || (size >>> 0) === 0 || (digits | 0) < 0)
+                if (wholeAddress(buffer) === 0 || (size >>> 0) === 0 || (digits | 0) < 0)
                 {
                     host.errno?.(EINVAL);
                     return EINVAL;

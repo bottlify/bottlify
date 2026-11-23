@@ -198,11 +198,11 @@ export function createDsetupFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([version, revision])=>{
-                if ((version >>> 0) !== 0)
+                if (wholeAddress(version) !== 0)
                 {
                     host.writeMemory(wholeAddress(version), dword(words.version));
                 }
-                if ((revision >>> 0) !== 0)
+                if (wholeAddress(revision) !== 0)
                 {
                     host.writeMemory(wholeAddress(revision), dword(words.revision));
                 }

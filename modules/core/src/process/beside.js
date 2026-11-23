@@ -106,23 +106,24 @@ export function processesBeside(deps){
                     throw new Error(`no process ${id} stands`);
                 },
                 /**
-                 * Bytes of a process's memory by its id, the first's or one
-                 * running beside it: an OVERLAPPED a program polls, a buffer it
-                 * waits on.
+                 * Bytes of a process's memory by its id, the first's, one
+                 * running beside it or one in a worker of its own (asked across
+                 * its link): an OVERLAPPED a program polls, a buffer it waits
+                 * on, a loop a profile named.
                  *
                  * @param {number} id @param {number} address @param {number} length
                  */
                 readOf: (id, address, length)=>{
+                    const child = [...standingAcross, ...standingBeside].find(each=>each.id === id);
+                    if (child)
+                    {
+                        return child.read(address, length);
+                    }
                     if (id === (options.processId ?? FIRST_PROCESS_ID))
                     {
                         return firstProcess().debug.read(address, length);
                     }
-                    const child = [...standingBeside].find(each=>each.id === id);
-                    if (!child)
-                    {
-                        throw new Error(`no process ${id} stands beside`);
-                    }
-                    return child.read(address, length);
+                    throw new Error(`no process ${id} stands`);
                 },
                 /**
                  * A watch in front of a routine of a process by its id (`hook`):
@@ -373,6 +374,8 @@ export function processesBeside(deps){
             const asked = { image: request.imagePath, id: request.id, link,
                 diagnostics: ()=>link.call('report', 'diagnostics', []),
                 frames: (/** @type {number} */ count)=>link.call('report', 'frames', [count]),
+                read: (/** @type {number} */ address, /** @type {number} */ length)=>
+                    link.call('report', 'read', [address, length]),
                 standing: (/** @type {number} */ journal)=>
                     link.call('report', 'standing', [journal]) };
             held.asked = asked;
@@ -1165,9 +1168,10 @@ const STATUS_NO_MEMORY = 0xc0000017;
  * What of a run's options never goes to a process in a worker of its own:
  * the system's -- its drives, session, bundle, devices and bus -- which the
  * process reaches across its link, and what a process is handed of its own.
+ * `win32` goes without its network (`portableOptions`).
  */
 const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
-    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'win32', 'watchImport', 'hooks',
+    'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'watchImport', 'hooks',
     'executable', 'inheritedFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
     'com', 'memoryCredit', 'memoryHolder']);
 
@@ -1208,11 +1212,14 @@ function portable(value, depth = 0){
 /**
  * The run's options a process in a worker of its own starts with: the
  * engine, the mode, the Windows, the display, the knobs, the decoders'
- * binaries.
+ * binaries, and win32's data - the Steam account a game's Steamworks is
+ * answered for, the trusted roots - but not its network, a transport the
+ * run holds and the process reaches across its link.
  *
  * @param {import('../app-options.js').AppOptions} options
  */
-function portableOptions(options){
-    return portable(Object.fromEntries(Object.entries(options)
-        .filter(([key])=>!SYSTEM_OPTIONS.has(key))));
+export function portableOptions(options){
+    const win32 = options.win32 && { ...options.win32, network: undefined };
+    return portable(Object.fromEntries(Object.entries({ ...options, win32 })
+        .filter(([key, value])=>value !== undefined && !SYSTEM_OPTIONS.has(key))));
 }

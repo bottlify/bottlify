@@ -232,7 +232,7 @@ export function createNetworkFunctions(host){
         WNetCancelConnectionA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name])=>answer((name >>> 0) === 0 ? ERROR_INVALID_ADDRESS
+            handler: ([name])=>answer(wholeAddress(name) === 0 ? ERROR_INVALID_ADDRESS
                 : ERROR_NOT_CONNECTED),
         },
 
@@ -246,7 +246,7 @@ export function createNetworkFunctions(host){
         WNetUseConnectionA: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([, resource])=>answer((resource >>> 0) === 0 ? ERROR_INVALID_ADDRESS
+            handler: ([, resource])=>answer(wholeAddress(resource) === 0 ? ERROR_INVALID_ADDRESS
                 : ERROR_NO_NETWORK),
         },
 

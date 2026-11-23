@@ -1054,8 +1054,8 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([lock])=>{
-                locks.delete(lock >>> 0);
-                clear(lock >>> 0);
+                locks.delete(wholeAddress(lock));
+                clear(wholeAddress(lock));
                 return 0;
             },
         },
@@ -1065,7 +1065,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             /** @param {any} builder */
             guest: builder=>srwPlaced(builder).acquireExclusive,
             /** @param {number[]} args */
-            handler: ([lock])=>acquire(lock >>> 0, true),
+            handler: ([lock])=>acquire(wholeAddress(lock), true),
         },
         /** VOID AcquireSRWLockShared(PSRWLOCK) */
         AcquireSRWLockShared: {
@@ -1073,7 +1073,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             /** @param {any} builder */
             guest: builder=>srwPlaced(builder).acquireShared,
             /** @param {number[]} args */
-            handler: ([lock])=>acquire(lock >>> 0, false),
+            handler: ([lock])=>acquire(wholeAddress(lock), false),
         },
         /** BOOLEAN TryAcquireSRWLockExclusive(PSRWLOCK) */
         TryAcquireSRWLockExclusive: {
@@ -1081,7 +1081,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             /** @param {any} builder */
             guest: builder=>srwPlaced(builder).tryExclusive,
             /** @param {number[]} args */
-            handler: ([lock])=>(take(lock >>> 0, true) ? 1 : 0),
+            handler: ([lock])=>(take(wholeAddress(lock), true) ? 1 : 0),
         },
         /** BOOLEAN TryAcquireSRWLockShared(PSRWLOCK) */
         TryAcquireSRWLockShared: {
@@ -1089,7 +1089,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             /** @param {any} builder */
             guest: builder=>srwPlaced(builder).tryShared,
             /** @param {number[]} args */
-            handler: ([lock])=>(take(lock >>> 0, false) ? 1 : 0),
+            handler: ([lock])=>(take(wholeAddress(lock), false) ? 1 : 0),
         },
         /** VOID ReleaseSRWLockExclusive(PSRWLOCK) */
         ReleaseSRWLockExclusive: {
@@ -1098,7 +1098,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             guest: builder=>srwPlaced(builder).releaseExclusive,
             /** @param {number[]} args */
             handler: ([lock])=>{
-                release(lock >>> 0, true);
+                release(wholeAddress(lock), true);
                 return 0;
             },
         },
@@ -1109,7 +1109,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             guest: builder=>srwPlaced(builder).releaseShared,
             /** @param {number[]} args */
             handler: ([lock])=>{
-                release(lock >>> 0, false);
+                release(wholeAddress(lock), false);
                 return 0;
             },
         },
@@ -1119,8 +1119,8 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([variable])=>{
-                conditions.delete(variable >>> 0);
-                clear(variable >>> 0);
+                conditions.delete(wholeAddress(variable));
+                clear(wholeAddress(variable));
                 return 0;
             },
         },
@@ -1129,7 +1129,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([variable])=>{
-                wakeSleepers(variable >>> 0, 1);
+                wakeSleepers(wholeAddress(variable), 1);
                 return 0;
             },
         },
@@ -1138,7 +1138,7 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([variable])=>{
-                wakeSleepers(variable >>> 0, Infinity);
+                wakeSleepers(wholeAddress(variable), Infinity);
                 return 0;
             },
         },
@@ -1171,8 +1171,8 @@ export function createSlimSync(host, enterCritical, enterSection){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                onceWaiters.delete(pointer >>> 0);
-                clear(pointer >>> 0);
+                onceWaiters.delete(wholeAddress(pointer));
+                clear(wholeAddress(pointer));
                 return 0;
             },
         },
@@ -1202,7 +1202,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                 const state = word & 3;
                 if (state === ONCE_DONE)
                 {
-                    writeBool(pending >>> 0, 0);
+                    writeBool(wholeAddress(pending), 0);
                     writeWord(wholeAddress(context), word & ~3);
                     return 1;
                 }
@@ -1213,7 +1213,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                 if (state === ONCE_FRESH)
                 {
                     writeWord(once, async ? ONCE_RUNNING_ASYNC : ONCE_RUNNING);
-                    writeBool(pending >>> 0, 1);
+                    writeBool(wholeAddress(pending), 1);
                     return 1;
                 }
                 if (async !== (state === ONCE_RUNNING_ASYNC))
@@ -1222,11 +1222,12 @@ export function createSlimSync(host, enterCritical, enterSection){
                 }
                 if (async)
                 {
-                    writeBool(pending >>> 0, 1);
+                    writeBool(wholeAddress(pending), 1);
                     return 1;
                 }
                 return awaitOnce(once,
-                    { execute: false, pending: pending >>> 0, context: context >>> 0 });
+                    { execute: false, pending: wholeAddress(pending),
+                        context: wholeAddress(context) });
             },
         },
 
@@ -1245,7 +1246,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                 const failed = (asked & INIT_ONCE_INIT_FAILED) !== 0;
                 const async = (asked & INIT_ONCE_ASYNC) !== 0;
                 if ((asked & ~(INIT_ONCE_ASYNC | INIT_ONCE_INIT_FAILED)) !== 0
-                    || (failed && async) || ((context >>> 0) & 3) !== 0
+                    || (failed && async) || (wholeAddress(context) & 3) !== 0
                     || (failed && context !== 0))
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
@@ -1259,7 +1260,7 @@ export function createSlimSync(host, enterCritical, enterSection){
                 {
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
-                settle(once, !failed, context >>> 0);
+                settle(once, !failed, wholeAddress(context));
                 return 1;
             },
         },

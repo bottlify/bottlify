@@ -357,7 +357,7 @@ export function createFciFunctions(host){
             handler: ([erf, placed, alloc, free, open, read, write, close, seek, remove,
                 temp, ccab, pv])=>{
                 if ([placed, alloc, free, open, read, write, close, seek, remove, temp, ccab]
-                    .some(entry=>(entry >>> 0) === 0) || (erf >>> 0) === 0)
+                    .some(entry=>(entry >>> 0) === 0) || wholeAddress(erf) === 0)
                 {
                     return fail(erf, FCIERR.NONE);
                 }
@@ -370,9 +370,11 @@ export function createFciFunctions(host){
                     CCAB.CAB_PATH + CCAB.NAME)
                     .slice());
                 const handle = next++;
-                contexts.set(handle, { erf: erf >>> 0, placed: placed >>> 0, open: open >>> 0,
-                    read: read >>> 0, write: write >>> 0, close: close >>> 0, ccab: copy,
-                    pv: pv >>> 0, folders: [], folder: null });
+                contexts.set(handle, { erf: wholeAddress(erf), placed: wholeAddress(placed),
+                    open: wholeAddress(open),
+                    read: wholeAddress(read), write: wholeAddress(write),
+                    close: wholeAddress(close), ccab: copy,
+                    pv: wholeAddress(pv), folders: [], folder: null });
                 fail(erf, FCIERR.NONE);
                 return handle;
             },
@@ -405,8 +407,8 @@ export function createFciFunctions(host){
                         + 'made, not LZX or Quantum');
                     return fail(context.erf, FCIERR.BAD_COMPR_TYPE);
                 }
-                if ((sourcePointer >>> 0) === 0 || (namePointer >>> 0) === 0
-                    || (openInfo >>> 0) === 0)
+                if (wholeAddress(sourcePointer) === 0 || wholeAddress(namePointer) === 0
+                    || wholeAddress(openInfo) === 0)
                 {
                     return fail(context.erf, FCIERR.OPEN_SRC);
                 }
@@ -420,8 +422,9 @@ export function createFciFunctions(host){
                         const time = memory.block(2);
                         const attribs = memory.block(2);
                         const err = memory.block(4);
-                        const file = (await host.call(openInfo >>> 0, [sourcePointer >>> 0, date,
-                            time, attribs, err, context.pv], thread)) | 0;
+                        const file = (await host.call(wholeAddress(openInfo),
+                            [wholeAddress(sourcePointer), date,
+                                time, attribs, err, context.pv], thread)) | 0;
                         if (file === -1)
                         {
                             return fail(context.erf, FCIERR.OPEN_SRC, readU32(err));
@@ -459,13 +462,14 @@ export function createFciFunctions(host){
                         context.folder.files.push({ name, data, date: readU16(date),
                             time: readU16(time),
                             attribs: readU16(attribs) | ((execute >>> 0) !== 0 ? A_EXEC : 0) });
-                        if ((progress >>> 0) !== 0 && ((await host.call(progress >>> 0,
-                            [statusFile, data.length, data.length, context.pv], thread)) | 0)
+                        if (wholeAddress(progress) !== 0
+                            && ((await host.call(wholeAddress(progress),
+                                [statusFile, data.length, data.length, context.pv], thread)) | 0)
                             === -1)
                         {
                             return fail(context.erf, FCIERR.USER_ABORT);
                         }
-                        await host.call(context.placed, [context.ccab, namePointer >>> 0,
+                        await host.call(context.placed, [context.ccab, wholeAddress(namePointer),
                             data.length, 0, context.pv], thread);
                         fail(context.erf, FCIERR.NONE);
                         return 1;
@@ -494,12 +498,12 @@ export function createFciFunctions(host){
                     return 0;
                 }
                 closeFolder(context);
-                if ((progress >>> 0) === 0)
+                if (wholeAddress(progress) === 0)
                 {
                     return 1;
                 }
                 const thread = host.callerThread();
-                return Promise.resolve(host.call(progress >>> 0, [statusFolder, 0, 0,
+                return Promise.resolve(host.call(wholeAddress(progress), [statusFolder, 0, 0,
                     context.pv], thread)).then(answer=>((answer | 0) === -1
                     ? fail(context.erf, FCIERR.USER_ABORT) : 1));
             },
@@ -523,7 +527,8 @@ export function createFciFunctions(host){
                     return 0;
                 }
                 const thread = host.callerThread();
-                return flush(context, progress >>> 0, thread).then(code=>(code === FCIERR.NONE
+                return flush(context, wholeAddress(progress),
+                    thread).then(code=>(code === FCIERR.NONE
                     ? (fail(context.erf, FCIERR.NONE), 1) : fail(context.erf, code)));
             },
         },

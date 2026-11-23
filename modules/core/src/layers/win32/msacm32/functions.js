@@ -832,7 +832,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -915,7 +915,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
         acmDriverOpen: {
             argBytes: 12,
             handler: ([out, id, flags])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -959,7 +959,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -991,7 +991,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             argBytes: 20,
             handler: ([handle, source, destination, room, flags])=>{
                 const from = readFormat(source);
-                if (!from || (destination >>> 0) === 0)
+                if (!from || wholeAddress(destination) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1070,7 +1070,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
             handler: ([out, , source, destination, filter, , , flags])=>{
                 const from = readFormat(source);
                 const to = readFormat(destination);
-                if (!from || !to || (filter >>> 0) !== 0)
+                if (!from || !to || wholeAddress(filter) !== 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1084,7 +1084,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_NOERROR;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1116,7 +1116,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1162,7 +1162,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((header >>> 0) === 0 || u32(header + HEADER.cbStruct) < HEADER.SIZE)
+                if (wholeAddress(header) === 0 || u32(header + HEADER.cbStruct) < HEADER.SIZE)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1180,7 +1180,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((header >>> 0) === 0)
+                if (wholeAddress(header) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }
@@ -1207,7 +1207,7 @@ export function createAcmFunctions(host = /** @type {any} */ ({})){
                 {
                     return MMSYSERR_INVALHANDLE;
                 }
-                if ((header >>> 0) === 0)
+                if (wholeAddress(header) === 0)
                 {
                     return MMSYSERR_INVALPARAM;
                 }

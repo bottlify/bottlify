@@ -561,14 +561,14 @@ export function createEnvironmentFunctions(host){
         FreeEnvironmentStringsA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([block])=>blocks.get('ansi') === (block >>> 0) ? 1 : 0,
+            handler: ([block])=>blocks.get('ansi') === wholeAddress(block) ? 1 : 0,
         },
 
         /** BOOL FreeEnvironmentStringsW(LPWCH penv) */
         FreeEnvironmentStringsW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([block])=>blocks.get('wide') === (block >>> 0) ? 1 : 0,
+            handler: ([block])=>blocks.get('wide') === wholeAddress(block) ? 1 : 0,
         },
 
         /**
@@ -579,7 +579,7 @@ export function createEnvironmentFunctions(host){
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
                 // A NULL name names no variable.
-                const value = (name >>> 0) === 0 ? undefined
+                const value = wholeAddress(name) === 0 ? undefined
                     : variables.get(host.readCString(wholeAddress(name), 0x400));
                 if (value === undefined)
                 {
@@ -595,7 +595,7 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([name, buffer, size])=>{
-                const value = (name >>> 0) === 0 ? undefined
+                const value = wholeAddress(name) === 0 ? undefined
                     : variables.get(host.readWideString(wholeAddress(name), 0x400 * 2));
                 if (value === undefined)
                 {
@@ -611,13 +611,13 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, value])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const wanted = host.readCString(wholeAddress(name), 0x400);
-                if ((value >>> 0) === 0)
+                if (wholeAddress(value) === 0)
                 {
                     variables.delete(wanted);
                 }
@@ -649,16 +649,16 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const expanded = encodeAnsi((source >>> 0) === 0 ? ''
+                const expanded = encodeAnsi(wholeAddress(source) === 0 ? ''
                     : expand(host.readCString(wholeAddress(source), 0x8000)));
-                if ((size >>> 0) >= expanded.length + 2 && (destination >>> 0) !== 0)
+                if ((size >>> 0) >= expanded.length + 2 && wholeAddress(destination) !== 0)
                 {
                     const bytes = new Uint8Array(expanded.length + 1);
                     bytes.set(expanded);
                     host.writeMemory(wholeAddress(destination), bytes);
                     return expanded.length + 1;
                 }
-                if ((destination >>> 0) !== 0)
+                if (wholeAddress(destination) !== 0)
                 {
                     host.writeMemory(wholeAddress(destination), Uint8Array.of(0));
                 }
@@ -679,10 +679,10 @@ export function createEnvironmentFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, destination, size])=>{
-                const pieces = (source >>> 0) === 0 ? []
+                const pieces = wholeAddress(source) === 0 ? []
                     : expandPieces(host.readWideString(wholeAddress(source), 0x8000));
                 const length = pieces.reduce((sum, piece)=>sum + piece.text.length, 0);
-                if ((destination >>> 0) !== 0)
+                if (wholeAddress(destination) !== 0)
                 {
                     for (const { at, units } of placeExpansion(pieces, size >>> 0))
                     {
@@ -718,13 +718,13 @@ export function createEnvironmentFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([name, value])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const wanted = host.readWideString(wholeAddress(name), 0x400 * 2);
-                if ((value >>> 0) === 0)
+                if (wholeAddress(value) === 0)
                 {
                     variables.delete(wanted);
                 }
@@ -809,7 +809,7 @@ export function createUserenvFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     host.setLastError(87);
                     return 0;
@@ -840,7 +840,7 @@ export function createUserenvFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, source, target, size])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0 || !host.expand)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0 || !host.expand)
                 {
                     host.setLastError(87);
                     return 0;

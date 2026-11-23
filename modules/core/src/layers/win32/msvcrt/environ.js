@@ -26,7 +26,7 @@
 import { EINVAL, ERANGE } from './globals.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
-import { pointerWidth } from '../common/pointers.js';
+import { pointerWidth, wholeAddress } from '../common/pointers.js';
 
 /** A string is read no further than this. */
 const MAX_STRING = 1 << 20;
@@ -357,7 +357,7 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return 0;
                 }
@@ -373,7 +373,7 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([name])=>{
-                if ((name >>> 0) === 0)
+                if (wholeAddress(name) === 0)
                 {
                     return 0;
                 }
@@ -394,7 +394,7 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                const pair = (text >>> 0) === 0 ? null : parse(readNarrow(text));
+                const pair = wholeAddress(text) === 0 ? null : parse(readNarrow(text));
                 if (!pair)
                 {
                     host.errno(EINVAL);
@@ -412,7 +412,7 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([text])=>{
                 startWide();
-                const pair = (text >>> 0) === 0 ? null : parse(readWide(text));
+                const pair = wholeAddress(text) === 0 ? null : parse(readWide(text));
                 if (!pair)
                 {
                     host.errno(EINVAL);
@@ -428,8 +428,8 @@ export function createEnvironment(host){
             convention: 'cdecl',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([name, value])=>putenvPair((name >>> 0) === 0 ? null : readNarrow(name),
-                (value >>> 0) === 0 ? null : readNarrow(value), false),
+            handler: ([name, value])=>putenvPair(wholeAddress(name) === 0 ? null : readNarrow(name),
+                wholeAddress(value) === 0 ? null : readNarrow(value), false),
         },
 
         /** errno_t _wputenv_s(const wchar_t *name, const wchar_t *value) */
@@ -439,8 +439,8 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([name, value])=>{
                 startWide();
-                return putenvPair((name >>> 0) === 0 ? null : readWide(name),
-                    (value >>> 0) === 0 ? null : readWide(value), true);
+                return putenvPair(wholeAddress(name) === 0 ? null : readWide(name),
+                    wholeAddress(value) === 0 ? null : readWide(value), true);
             },
         },
 
@@ -451,7 +451,7 @@ export function createEnvironment(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
-                (name >>> 0) === 0 ? null : readNarrow(name), 1),
+                wholeAddress(name) === 0 ? null : readNarrow(name), 1),
         },
 
         /** errno_t _wgetenv_s(size_t *length, wchar_t *buffer, size_t size, const wchar_t *name) */
@@ -461,7 +461,7 @@ export function createEnvironment(host){
             sizes: [2],
             /** @param {number[]} args */
             handler: ([length, buffer, size, name])=>getenvInto(length, buffer, size,
-                (name >>> 0) === 0 ? null : readWide(name), 2),
+                wholeAddress(name) === 0 ? null : readWide(name), 2),
         },
 
         /**
@@ -496,7 +496,7 @@ export function createEnvironment(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 start();
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writePointer(out, environ);
                 }
@@ -510,7 +510,7 @@ export function createEnvironment(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
                     writePointer(out, wenviron);
                 }

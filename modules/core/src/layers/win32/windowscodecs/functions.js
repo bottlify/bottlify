@@ -272,11 +272,11 @@ export function createWindowscodecs(host){
         /** HRESULT WICCreateImagingFactory_Proxy(UINT SDKVersion, IWICImagingFactory **) */
         WICCreateImagingFactory_Proxy: { argBytes: 8,
             handler: (/** @type {number[]} */ [, out])=>kit.hand(codecs.makeFactory(),
-                'IWICImagingFactory', out >>> 0) },
+                'IWICImagingFactory', wholeAddress(out)) },
         /** HRESULT WICConvertBitmapSource(REFWICPixelFormatGUID, IWICBitmapSource *, IWICBitmapSource **) */
         WICConvertBitmapSource: { argBytes: 12,
             handler: (/** @type {number[]} */ [format, source, out])=>
-                codecs.convertBitmapSource(format >>> 0, source >>> 0, out >>> 0) },
+                codecs.convertBitmapSource(format >>> 0, wholeAddress(source), wholeAddress(out)) },
         WICCreateBitmapFromSection: { argBytes: 28,
             handler: (/** @type {number[]} */ args)=>codecs.bitmapFromSection(args.map(a=>a >>> 0)) },
         WICCreateBitmapFromSectionEx: { argBytes: 32,
@@ -284,7 +284,7 @@ export function createWindowscodecs(host){
         /** HRESULT WICCreateColorContext_Proxy(IWICImagingFactory *, IWICColorContext **) */
         WICCreateColorContext_Proxy: { argBytes: 8,
             handler: (/** @type {number[]} */ [factory, out])=>(factory === 0 ? 0x80070057 | 0
-                : kit.hand(codecs.makeColorContext(), 'IWICColorContext', out >>> 0)) },
+                : kit.hand(codecs.makeColorContext(), 'IWICColorContext', wholeAddress(out))) },
         WICMapGuidToShortName: refused('WICMapGuidToShortName', 16),
         WICMapSchemaToName: refused('WICMapSchemaToName', 20),
         WICMapShortNameToGuid: refused('WICMapShortNameToGuid', 8),

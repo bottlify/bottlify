@@ -463,7 +463,7 @@ export function createMemoryFunctions(host){
                         {
                             return failure(error, STATUS.INVALID_PARAMETER);
                         }
-                        if ((returned >>> 0) !== 0)
+                        if (wholeAddress(returned) !== 0)
                         {
                             write32(returned, wrote >>> 0);
                         }

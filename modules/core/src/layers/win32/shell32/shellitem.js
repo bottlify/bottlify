@@ -475,23 +475,23 @@ export function createShellItems(host, namespace){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([parent, folder, child, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const own = (child >>> 0) === 0 ? null : listAt(child);
+                const own = wholeAddress(child) === 0 ? null : listAt(child);
                 if (own === null)
                 {
                     return E_INVALIDARG;
                 }
-                if ((parent >>> 0) !== 0)
+                if (wholeAddress(parent) !== 0)
                 {
                     const above = listAt(parent);
                     return above === null ? E_INVALIDARG
                         : handOut(joined(above, own), IID_ISHELLITEM, out);
                 }
-                if ((folder >>> 0) !== 0)
+                if (wholeAddress(folder) !== 0)
                 {
                     const text = namespace.folderAt(folder);
                     if (text === undefined)
@@ -511,8 +511,8 @@ export function createShellItems(host, namespace){
             /** @param {number[]} args */
             handler: ([pidl, riid, out])=>{
                 writeU32(out, 0);
-                const list = (pidl >>> 0) === 0 ? null : listAt(pidl);
-                return list === null || (out >>> 0) === 0 ? E_INVALIDARG
+                const list = wholeAddress(pidl) === 0 ? null : listAt(pidl);
+                return list === null || wholeAddress(out) === 0 ? E_INVALIDARG
                     : handOut(list, iidAt(riid), out);
             },
         },
@@ -529,9 +529,9 @@ export function createShellItems(host, namespace){
             /** @param {number[]} args */
             handler: ([name, , riid, out])=>{
                 writeU32(out, 0);
-                const text = (name >>> 0) === 0 ? null
-                    : host.readWideString?.(name >>> 0, 0x8000) ?? null;
-                if (text === null || (out >>> 0) === 0)
+                const text = wholeAddress(name) === 0 ? null
+                    : host.readWideString?.(wholeAddress(name), 0x8000) ?? null;
+                if (text === null || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -553,9 +553,9 @@ export function createShellItems(host, namespace){
             handler: ([parent, name, , riid, out])=>{
                 writeU32(out, 0);
                 const above = itemAt(parent);
-                const text = (name >>> 0) === 0 ? null
-                    : host.readWideString?.(name >>> 0, 0x8000) ?? null;
-                if (!above || text === null || (out >>> 0) === 0)
+                const text = wholeAddress(name) === 0 ? null
+                    : host.readWideString?.(wholeAddress(name), 0x8000) ?? null;
+                if (!above || text === null || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -576,12 +576,12 @@ export function createShellItems(host, namespace){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([object, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                if ((object >>> 0) === 0)
+                if (wholeAddress(object) === 0)
                 {
                     return E_NOINTERFACE;
                 }
@@ -604,7 +604,7 @@ export function createShellItems(host, namespace){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([object, riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }

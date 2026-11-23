@@ -3843,7 +3843,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 const WM_SYSCOLORCHANGE = 0x0015;
                 const MAX_ELEMENTS = 0x400;
                 const many = Math.min(count | 0, MAX_ELEMENTS);
-                if (many > 0 && ((elements >>> 0) === 0 || (values >>> 0) === 0))
+                if (many > 0 && (wholeAddress(elements) === 0 || wholeAddress(values) === 0))
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
@@ -3952,14 +3952,14 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([hdc, clipRect, callback, data])=>{
-                if ((callback >>> 0) === 0 || !host.call || !host.allocate)
+                if (wholeAddress(callback) === 0 || !host.call || !host.allocate)
                 {
                     return 0;
                 }
                 const box = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-                if ((clipRect >>> 0) !== 0)
+                if (wholeAddress(clipRect) !== 0)
                 {
-                    const limit = readRect(host, clipRect >>> 0);
+                    const limit = readRect(host, wholeAddress(clipRect));
                     box.left = Math.max(box.left, limit.left);
                     box.top = Math.max(box.top, limit.top);
                     box.right = Math.min(box.right, limit.right);
@@ -3975,7 +3975,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 writeRect(host, at, box);
-                return Promise.resolve(host.call(callback >>> 0,
+                return Promise.resolve(host.call(wholeAddress(callback),
                     [PRIMARY_MONITOR, hdc >>> 0, at, data >>> 0], host.callerThread?.()))
                     .then(()=>1, ()=>0)
                     .finally(()=>host.release?.(at));
@@ -3993,7 +3993,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([rect, flags])=>{
-                const box = readRect(host, rect >>> 0);
+                const box = readRect(host, wholeAddress(rect));
                 const empty = box.right <= box.left || box.bottom <= box.top;
                 return monitorFromBox(empty ? { left: box.left, top: box.top,
                     right: box.left + 1, bottom: box.top + 1 } : box, flags);
@@ -4094,8 +4094,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([device, index, out])=>enumDisplayDevices(
-                (device >>> 0) === 0 ? null : host.readCString(wholeAddress(device), 32),
-                index >>> 0, out >>> 0, false),
+                wholeAddress(device) === 0 ? null : host.readCString(wholeAddress(device), 32),
+                index >>> 0, wholeAddress(out), false),
         },
 
         /**
@@ -4110,8 +4110,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([device, index, out])=>enumDisplayDevices(
-                (device >>> 0) === 0 ? null : readWideString(wholeAddress(device)),
-                index >>> 0, out >>> 0, true),
+                wholeAddress(device) === 0 ? null : readWideString(wholeAddress(device)),
+                index >>> 0, wholeAddress(out), true),
         },
 
         /**
@@ -4125,7 +4125,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         ChangeDisplaySettingsExA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([, devMode, , flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
+            handler: ([, devMode, , flags])=>changeDisplaySettings(wholeAddress(devMode),
+                flags >>> 0),
         },
 
         /**
@@ -4141,7 +4142,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         ChangeDisplaySettingsA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([devMode, flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
+            handler: ([devMode, flags])=>changeDisplaySettings(wholeAddress(devMode), flags >>> 0),
         },
 
         /** LONG ChangeDisplaySettingsW(DEVMODEW *lpDevMode, DWORD dwFlags) */
@@ -4149,7 +4150,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([devMode, flags])=>
-                changeDisplaySettings(devMode >>> 0, flags >>> 0, DEVMODEW),
+                changeDisplaySettings(wholeAddress(devMode), flags >>> 0, DEVMODEW),
         },
 
         /**
@@ -4160,7 +4161,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([, devMode, , flags])=>
-                changeDisplaySettings(devMode >>> 0, flags >>> 0, DEVMODEW),
+                changeDisplaySettings(wholeAddress(devMode), flags >>> 0, DEVMODEW),
         },
 
         /**
@@ -4195,7 +4196,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([hwnd, point])=>{
                 const record = live(hwnd);
-                if (!record || (point >>> 0) === 0)
+                if (!record || wholeAddress(point) === 0)
                 {
                     return 0;
                 }
@@ -4214,7 +4215,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([hwnd, point])=>{
                 const record = live(hwnd);
-                if (!record || (point >>> 0) === 0)
+                if (!record || wholeAddress(point) === 0)
                 {
                     return 0;
                 }
@@ -4460,7 +4461,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                if ((info >>> 0) === 0)
+                if (wholeAddress(info) === 0)
                 {
                     return 0;
                 }
@@ -4498,7 +4499,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                     return 0;
                 }
-                if ((info >>> 0) === 0 || readU32(info) !== TITLEBARINFO_SIZE)
+                if (wholeAddress(info) === 0 || readU32(info) !== TITLEBARINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -4578,7 +4579,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 const pointer = host.pointerSize === 8 ? 8 : 4;
-                if ((info >>> 0) === 0 || readU32(info) !== COMBOBOXINFO_SIZE[pointer])
+                if (wholeAddress(info) === 0 || readU32(info) !== COMBOBOXINFO_SIZE[pointer])
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -4602,7 +4603,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([hwnd, placement])=>{
                 const record = live(hwnd);
-                if (!record || (placement >>> 0) === 0)
+                if (!record || wholeAddress(placement) === 0)
                 {
                     return 0;
                 }
@@ -4637,7 +4638,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([hwnd, placement])=>{
                 const record = live(hwnd);
-                if (!record || (placement >>> 0) === 0)
+                if (!record || wholeAddress(placement) === 0)
                 {
                     return 0;
                 }
@@ -4935,7 +4936,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
                 // Null on either side is refused, as for the uncounted form.
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -4951,7 +4952,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
                 // Null on either side is refused, as for the uncounted form.
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -4971,7 +4972,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -4991,7 +4992,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -5012,7 +5013,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -5028,7 +5029,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -5049,7 +5050,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -5069,7 +5070,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([source, target])=>{
-                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                if (wholeAddress(source) === 0 || wholeAddress(target) === 0)
                 {
                     return 0;
                 }
@@ -5142,7 +5143,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([start, current])=>previousCharacter(0, start >>> 0, current >>> 0),
+            handler: ([start, current])=>previousCharacter(0, wholeAddress(start),
+                wholeAddress(current)),
         },
 
         /**
@@ -5158,7 +5160,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([codePage, start, current])=>
-                previousCharacter(codePage & 0xffff, start >>> 0, current >>> 0),
+                previousCharacter(codePage & 0xffff, wholeAddress(start), wholeAddress(current)),
         },
 
         /**
@@ -5171,8 +5173,8 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([start, current])=>(
-                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 2 : current >>> 0),
+            handler: ([start, current])=>(wholeAddress(current) > wholeAddress(start)
+                ? wholeAddress(current) - 2 : wholeAddress(current)),
         },
 
         /**
@@ -5429,11 +5431,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([hwnd, rect])=>{
                 const box = live(hwnd)?.regionBox ?? null;
-                if (!box || (rect >>> 0) === 0)
+                if (!box || wholeAddress(rect) === 0)
                 {
                     return REGION_ERROR;
                 }
-                writeRect(host, rect >>> 0, box);
+                writeRect(host, wholeAddress(rect), box);
                 return SIMPLEREGION;
             },
         },
@@ -5556,10 +5558,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
                 // The id is a 16-bit resource id: what lies above it is not read.
-                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
-                if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
+                const text = host.loadString?.(wholeAddress(instance), id & 0xffff) ?? null;
+                if (text === null || wholeAddress(buffer) === 0 || (size | 0) <= 0)
                 {
-                    if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+                    if (wholeAddress(buffer) !== 0 && (size | 0) > 0)
                     {
                         host.writeMemory(buffer, new Uint8Array(1));
                     }
@@ -5589,10 +5591,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             /** @param {number[]} args */
             handler: ([instance, id, buffer, size])=>{
                 // The id is a 16-bit resource id: what lies above it is not read.
-                const text = host.loadString?.(instance >>> 0, id & 0xffff) ?? null;
-                if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
+                const text = host.loadString?.(wholeAddress(instance), id & 0xffff) ?? null;
+                if (text === null || wholeAddress(buffer) === 0 || (size | 0) <= 0)
                 {
-                    if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+                    if (wholeAddress(buffer) !== 0 && (size | 0) > 0)
                     {
                         host.writeMemory(buffer, new Uint8Array(2));
                     }
@@ -5841,14 +5843,14 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
         LoadCursorFromFileA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, false, MAX_PATH)),
+            handler: ([name])=>loadCursorFile(readText(host, wholeAddress(name), false, MAX_PATH)),
         },
 
         /** HCURSOR LoadCursorFromFileW(LPCWSTR lpFileName) */
         LoadCursorFromFileW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>loadCursorFile(readText(host, name >>> 0, true, MAX_PATH)),
+            handler: ([name])=>loadCursorFile(readText(host, wholeAddress(name), true, MAX_PATH)),
         },
 
         /**
@@ -5919,13 +5921,13 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             handler: ([info])=>{
                 const CURSORINFO_SIZE = 20;
                 const CURSOR_SHOWING = 0x1;
-                if ((info >>> 0) === 0 || readU32(wholeAddress(info)) !== CURSORINFO_SIZE)
+                if (wholeAddress(info) === 0 || readU32(wholeAddress(info)) !== CURSORINFO_SIZE)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
                 const at = host.cursor?.() ?? { x: 0, y: 0 };
-                writeU32s(host, (info >>> 0) + 4, [cursorShowCount >= 0 ? CURSOR_SHOWING : 0,
+                writeU32s(host, wholeAddress(info) + 4, [cursorShowCount >= 0 ? CURSOR_SHOWING : 0,
                     currentCursor, at.x, at.y]);
                 return 1;
             },
@@ -5954,7 +5956,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([point])=>{
-                if ((point >>> 0) === 0)
+                if (wholeAddress(point) === 0)
                 {
                     return 0;
                 }
@@ -6010,7 +6012,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                if ((inputs >>> 0) === 0)
+                if (wholeAddress(inputs) === 0)
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
@@ -6093,7 +6095,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                clip = (rect >>> 0) === 0 ? null : readRect(host, rect >>> 0);
+                clip = wholeAddress(rect) === 0 ? null : readRect(host, wholeAddress(rect));
                 host.clipCursor?.(clip);
                 return 1;
             },
@@ -6109,12 +6111,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
                 const whole = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-                writeRect(host, rect >>> 0, clip === null ? whole : {
+                writeRect(host, wholeAddress(rect), clip === null ? whole : {
                     left: Math.max(clip.left, 0),
                     top: Math.max(clip.top, 0),
                     right: Math.min(clip.right, screen.width),
@@ -6172,14 +6174,14 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if ((info >>> 0) === 0
+                if (wholeAddress(info) === 0
                     || new DataView(host.readMemory(wholeAddress(info), 4).slice().buffer)
                         .getUint32(0, true) !== 8)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                writeU32s(host, (info >>> 0) + 4, [0]);
+                writeU32s(host, wholeAddress(info) + 4, [0]);
                 return 1;
             },
         },
@@ -6194,12 +6196,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([count])=>{
-                if ((count >>> 0) === 0)
+                if (wholeAddress(count) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                writeU32s(host, count >>> 0, [0]);
+                writeU32s(host, wholeAddress(count), [0]);
                 return 1;
             },
         },
@@ -6237,7 +6239,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([recipient, setting])=>{
-                if ((recipient >>> 0) === 0 || (setting >>> 0) === 0)
+                if ((recipient >>> 0) === 0 || wholeAddress(setting) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -6316,7 +6318,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([state])=>{
-                if ((state >>> 0) === 0)
+                if (wholeAddress(state) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -6338,7 +6340,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([state])=>{
-                if ((state >>> 0) === 0)
+                if (wholeAddress(state) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -6557,11 +6559,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 {
                     return 1;
                 }
-                if ((room | 0) < 0 || (list >>> 0) === 0)
+                if ((room | 0) < 0 || wholeAddress(list) === 0)
                 {
                     return 0;
                 }
-                writeU32s(host, list >>> 0, [HKL_EN_US]);
+                writeU32s(host, wholeAddress(list), [HKL_EN_US]);
                 return 1;
             },
         },
@@ -6962,7 +6964,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             handler: ([, out])=>{
                 const pointer = host.pointerSize ?? 4;
                 const size = 8 + 6 * pointer + 16;
-                if ((out >>> 0) === 0 || readU32(wholeAddress(out)) !== size)
+                if (wholeAddress(out) === 0 || readU32(wholeAddress(out)) !== size)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -7453,10 +7455,10 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([parent, after, className, windowName])=>{
-                const wanted = (className >>> 0) === 0
+                const wanted = wholeAddress(className) === 0
                     ? null
                     : host.readCString(wholeAddress(className), MAX_NAME);
-                const title = (windowName >>> 0) === 0
+                const title = wholeAddress(windowName) === 0
                     ? null
                     : host.readCString(wholeAddress(windowName), MAX_NAME);
                 const siblings = ordered().filter(record=>record.parent === (parent >>> 0));
@@ -7538,15 +7540,15 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                         host.setLastError?.(ERROR_INVALID_WINDOW_HANDLE);
                         return 0;
                     }
-                    if ((out >>> 0) !== 0)
+                    if (wholeAddress(out) !== 0)
                     {
-                        writeU32s(host, out >>> 0, [other.processId]);
+                        writeU32s(host, wholeAddress(out), [other.processId]);
                     }
                     return other.threadId;
                 }
-                if ((out >>> 0) !== 0)
+                if (wholeAddress(out) !== 0)
                 {
-                    writeU32s(host, out >>> 0, [host.processId ?? 0x1000]);
+                    writeU32s(host, wholeAddress(out), [host.processId ?? 0x1000]);
                 }
                 return threadIdOf(record.thread) ?? threadIdOf(host.callerThread?.()) ?? 1;
             },
@@ -7568,11 +7570,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([out, left, top, right, bottom])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
-                writeRect(host, out >>> 0, {
+                writeRect(host, wholeAddress(out), {
                     left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
                 });
                 return 1;
@@ -7583,11 +7585,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return 0;
                 }
-                writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                writeRect(host, wholeAddress(out), { left: 0, top: 0, right: 0, bottom: 0 });
                 return 1;
             },
         },
@@ -7596,11 +7598,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([out, source])=>{
-                if ((out >>> 0) === 0 || (source >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(source) === 0)
                 {
                     return 0;
                 }
-                writeRect(host, out >>> 0, readRect(host, source >>> 0));
+                writeRect(host, wholeAddress(out), readRect(host, wholeAddress(source)));
                 return 1;
             },
         },
@@ -7609,12 +7611,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
-                if ((first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(first) === 0 || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 return a.left === b.left && a.top === b.top
                     && a.right === b.right && a.bottom === b.bottom ? 1 : 0;
             },
@@ -7624,12 +7626,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rect, dx, dy])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const r = readRect(host, rect >>> 0);
-                writeRect(host, rect >>> 0, {
+                const r = readRect(host, wholeAddress(rect));
+                writeRect(host, wholeAddress(rect), {
                     left: r.left + (dx | 0), top: r.top + (dy | 0),
                     right: r.right + (dx | 0), bottom: r.bottom + (dy | 0),
                 });
@@ -7641,12 +7643,12 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rect, dx, dy])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const r = readRect(host, rect >>> 0);
-                writeRect(host, rect >>> 0, {
+                const r = readRect(host, wholeAddress(rect));
+                writeRect(host, wholeAddress(rect), {
                     left: r.left - (dx | 0), top: r.top - (dy | 0),
                     right: r.right + (dx | 0), bottom: r.bottom + (dy | 0),
                 });
@@ -7659,11 +7661,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([rect, x, y])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
-                const r = readRect(host, rect >>> 0);
+                const r = readRect(host, wholeAddress(rect));
                 const px = x | 0;
                 const py = y | 0;
                 return px >= r.left && px < r.right && py >= r.top && py < r.bottom ? 1 : 0;
@@ -7724,12 +7726,13 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, first, second])=>{
-                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(first) === 0
+                    || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 const meet = {
                     left: Math.max(a.left, b.left),
                     top: Math.max(a.top, b.top),
@@ -7737,7 +7740,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     bottom: Math.min(a.bottom, b.bottom),
                 };
                 const empty = meet.right <= meet.left || meet.bottom <= meet.top;
-                writeRect(host, out >>> 0,
+                writeRect(host, wholeAddress(out),
                     empty ? { left: 0, top: 0, right: 0, bottom: 0 } : meet);
                 return empty ? 0 : 1;
             },
@@ -7748,11 +7751,11 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([rect])=>{
-                if ((rect >>> 0) === 0)
+                if (wholeAddress(rect) === 0)
                 {
                     return 1;
                 }
-                const r = readRect(host, rect >>> 0);
+                const r = readRect(host, wholeAddress(rect));
                 return r.right <= r.left || r.bottom <= r.top ? 1 : 0;
             },
         },
@@ -7776,17 +7779,18 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, first, second])=>{
-                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(first) === 0
+                    || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 /** @param {{ left: number, top: number, right: number, bottom: number }} r */
                 const empty = r=>r.right <= r.left || r.bottom <= r.top;
                 if (empty(a))
                 {
-                    writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                    writeRect(host, wholeAddress(out), { left: 0, top: 0, right: 0, bottom: 0 });
                     return 0;
                 }
                 const left = { ...a };
@@ -7819,7 +7823,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                         }
                     }
                 }
-                writeRect(host, out >>> 0, left);
+                writeRect(host, wholeAddress(out), left);
                 return empty(left) ? 0 : 1;
             },
         },
@@ -7828,20 +7832,21 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, first, second])=>{
-                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(first) === 0
+                    || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
-                const a = readRect(host, first >>> 0);
-                const b = readRect(host, second >>> 0);
+                const a = readRect(host, wholeAddress(first));
+                const b = readRect(host, wholeAddress(second));
                 /** @param {{ left: number, top: number, right: number, bottom: number }} r */
                 const empty = r=>r.right <= r.left || r.bottom <= r.top;
                 if (empty(a) && empty(b))
                 {
-                    writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                    writeRect(host, wholeAddress(out), { left: 0, top: 0, right: 0, bottom: 0 });
                     return 0;
                 }
-                writeRect(host, out >>> 0, empty(a) ? b : empty(b) ? a : {
+                writeRect(host, wholeAddress(out), empty(a) ? b : empty(b) ? a : {
                     left: Math.min(a.left, b.left),
                     top: Math.min(a.top, b.top),
                     right: Math.max(a.right, b.right),

@@ -219,7 +219,7 @@ export function createCharacterFunctions(host, { A, W }){
             /** @param {number[]} args */
             handler: ([source, destination, room])=>{
                 const text = A.read(source) ?? '';
-                if ((destination >>> 0) !== 0 && (room | 0) > 0)
+                if (wholeAddress(destination) !== 0 && (room | 0) > 0)
                 {
                     host.writeMemory(wholeAddress(destination), A.sz(text.slice(0,
                         (room | 0) - 1)));
@@ -240,7 +240,7 @@ export function createCharacterFunctions(host, { A, W }){
             handler: ([source, destination, room])=>{
                 const text = W.read(source) ?? '';
                 const narrow = A.bytes(text);
-                if ((destination >>> 0) !== 0 && (room | 0) > 0)
+                if (wholeAddress(destination) !== 0 && (room | 0) > 0)
                 {
                     const kept = narrow.subarray(0, (room | 0) - 1);
                     host.writeMemory(wholeAddress(destination), Uint8Array.from([...kept, 0]));
@@ -261,7 +261,7 @@ export function createCharacterFunctions(host, { A, W }){
         SHTruncateString: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, size])=>((text >>> 0) !== 0 && (size >>> 0) > 0
+            handler: ([text, size])=>(wholeAddress(text) !== 0 && (size >>> 0) > 0
                 ? (size >>> 0) - 1 : 0),
         },
 

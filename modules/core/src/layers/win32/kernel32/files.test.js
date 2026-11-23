@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { volumeName } from './drives.js';
 import { createFileFunctions, withSystemLibraries, WIN32_FIND_DATAA } from './files.js';
-import { HANDLE_STDOUT } from './console.js';
+import { HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 import { decodeAnsi } from './locale.js';
 import { systemProgramAt, systemProgramImage } from '../programs/table.js';
 
@@ -518,6 +518,21 @@ test('reading past the end of the file succeeds and reports nothing read', ()=>{
     assert.equal(result, 1, 'the end of a file is not a failure');
     assert.equal(memory.dword(OUT_COUNT), 0,
         'and the count is written anyway -- it is how the caller knows');
+});
+
+test('reading the standard input of a process with no console fails as an invalid handle', ()=>{
+    // No process here has a console (GetConsoleMode, AttachConsole), and on
+    // Windows a read of console input without one fails at once. A success
+    // with nothing read is neither that nor a console's blocking read: a
+    // reader that loops until its bytes come (Unity's crash handler, which
+    // cancels the read it expects to block with CancelSynchronousIo) spun on
+    // it for ever.
+    const { memory, fns, error } = setup();
+    memory.putDword(OUT_COUNT, 0xdeadbeef);
+
+    assert.equal(fns.ReadFile.handler([HANDLE_STDIN, BUFFER, 8, OUT_COUNT, 0]), 0);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+    assert.equal(memory.dword(OUT_COUNT), 0, 'and nothing is said to be read');
 });
 
 test('a read stops at the end of the file and advances by what it got', ()=>{

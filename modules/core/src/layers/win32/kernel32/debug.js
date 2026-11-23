@@ -58,13 +58,13 @@ export function createDebugFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                if ((text >>> 0) === 0)
+                if (wholeAddress(text) === 0)
                 {
                     return 0;
                 }
                 const said = host.readCString(wholeAddress(text), MAX_TRACE);
                 host.say(said);
-                return tell(text >>> 0, said.length + 1, false);
+                return tell(wholeAddress(text), said.length + 1, false);
             },
         },
 
@@ -73,13 +73,13 @@ export function createDebugFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                if ((text >>> 0) === 0)
+                if (wholeAddress(text) === 0)
                 {
                     return 0;
                 }
                 const said = host.readWideString(wholeAddress(text), MAX_TRACE * 2);
                 host.say(said);
-                return tell(text >>> 0, said.length + 1, true);
+                return tell(wholeAddress(text), said.length + 1, true);
             },
         },
 

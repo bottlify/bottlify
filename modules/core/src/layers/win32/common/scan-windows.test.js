@@ -141,3 +141,26 @@ test('characters come out of bytes as Latin-1 or UTF-16, however many there are'
     assert.equal(charactersOf(new TextEncoder().encode(long)), long);
     assert.equal(charactersOf(wide(long), 2), long);
 });
+
+test('a string past 4 GiB is read on through its next windows there, not 4 GiB below', ()=>{
+    // A 64-bit program's string past 4 GiB was read in its first window and
+    // then from its address less 4 GiB: other memory, or none.
+    const base = 2 ** 32 + 0x5000;
+    const text = 'x'.repeat(SCAN_WINDOW * 2 + 5);
+    /** @type {number[]} */
+    const asked = [];
+    const memory = {
+        /** @param {number} address @param {number} length */
+        readMemory(address, length){
+            asked.push(address);
+            const from = address - base;
+            assert.ok(from >= 0, `read at 0x${address.toString(16)}, below the string`);
+            return Uint8Array.from(text.slice(from, from + length) + (from + length > text.length
+                ? '\0'.repeat(from + length - text.length) : ''), c=>c.charCodeAt(0));
+        },
+    };
+    const read = readToTerminator(memory, base);
+    assert.equal(read.bytes.length, text.length);
+    assert.ok(read.terminated);
+    assert.ok(asked.every(at=>at >= base), 'every window read where the string is');
+});

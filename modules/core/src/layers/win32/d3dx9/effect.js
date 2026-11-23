@@ -4554,7 +4554,7 @@ export function createEffects(host, helpers, options = {}){
         })),
         /** HRESULT D3DXCreateEffectPool(LPD3DXEFFECTPOOL *ppPool) */
         D3DXCreateEffectPool: { argBytes: 4, handler: (/** @type {number[]} */ [out])=>{
-            if ((out >>> 0) === 0 || !host.vtables)
+            if (wholeAddress(out) === 0 || !host.vtables)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -4582,7 +4582,7 @@ export function createEffects(host, helpers, options = {}){
             bytes: bytesAt(data, size), defines, include, flags, out, errors }) },
         /** HRESULT D3DXDisassembleEffect(LPD3DXEFFECT, BOOL EnableColorCode, LPD3DXBUFFER *) */
         D3DXDisassembleEffect: { argBytes: 12, handler: (/** @type {number[]} */ [, , out])=>{
-            if ((out >>> 0) !== 0)
+            if (wholeAddress(out) !== 0)
             {
                 putU32(out, 0);
             }

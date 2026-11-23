@@ -3231,7 +3231,7 @@ export function createSetupapiFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([context, index, buffer, size, required])=>{
-                if ((context >>> 0) === 0)
+                if (wholeAddress(context) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -3248,11 +3248,11 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_DATA);
                 }
-                if ((required >>> 0) !== 0)
+                if (wholeAddress(required) !== 0)
                 {
                     writeU32(required, fields.length);
                 }
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     return fail(ERROR_SUCCESS, 1);
                 }
@@ -3650,9 +3650,9 @@ export function createSetupapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                if ((block >>> 0) !== 0)
+                if (wholeAddress(block) !== 0)
                 {
-                    host.free(block >>> 0);
+                    host.free(wholeAddress(block));
                 }
                 return 0;
             },
@@ -3953,7 +3953,7 @@ export function createSetupapiFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([lengthOut, devnode, flags])=>{
-                if ((lengthOut >>> 0) === 0)
+                if (wholeAddress(lengthOut) === 0)
                 {
                     return CR_INVALID_POINTER;
                 }
@@ -3981,7 +3981,7 @@ export function createSetupapiFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([parentOut, devnode, flags])=>{
-                if ((parentOut >>> 0) === 0)
+                if (wholeAddress(parentOut) === 0)
                 {
                     return CR_INVALID_POINTER;
                 }
@@ -4092,7 +4092,7 @@ export function createSetupapiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([statusOut, problemOut, devnode, flags])=>{
-                if ((statusOut >>> 0) === 0 || (problemOut >>> 0) === 0)
+                if (wholeAddress(statusOut) === 0 || wholeAddress(problemOut) === 0)
                 {
                     return CR_INVALID_POINTER;
                 }
@@ -4462,9 +4462,9 @@ export function createSetupapiFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([context])=>{
-                if (callbackContexts.delete(context >>> 0))
+                if (callbackContexts.delete(wholeAddress(context)))
                 {
-                    host.free(context >>> 0);
+                    host.free(wholeAddress(context));
                 }
                 return 0;
             },
@@ -5058,11 +5058,11 @@ export function createSetupapiFunctions(host){
                         }
                     }
                     const written = ansi(target);
-                    if ((required >>> 0) !== 0)
+                    if (wholeAddress(required) !== 0)
                     {
                         writeU32(required, written.length);
                     }
-                    if ((dest >>> 0) !== 0)
+                    if (wholeAddress(dest) !== 0)
                     {
                         if ((destSize >>> 0) < written.length)
                         {
@@ -5070,9 +5070,9 @@ export function createSetupapiFunctions(host){
                             return 0;
                         }
                         host.writeMemory(wholeAddress(dest), written);
-                        if ((component >>> 0) !== 0)
+                        if (wholeAddress(component) !== 0)
                         {
-                            writeU32(component, (dest >>> 0) + target.lastIndexOf('\\') + 1);
+                            writeU32(component, wholeAddress(dest) + target.lastIndexOf('\\') + 1);
                         }
                     }
                     host.setLastErrorFor(thread, code);
@@ -5600,7 +5600,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -5763,7 +5763,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((out >>> 0) === 0 || (interfaceClass >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(interfaceClass) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -5771,8 +5771,8 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_USER_BUFFER);
                 }
-                const only = (data >>> 0) === 0 ? null : deviceIn(set, data);
-                if ((data >>> 0) !== 0 && !only)
+                const only = wholeAddress(data) === 0 ? null : deviceIn(set, data);
+                if (wholeAddress(data) !== 0 && !only)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -6476,13 +6476,14 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                const device = (data >>> 0) === 0 ? null : deviceIn(set, data);
-                if ((data >>> 0) !== 0 && !device)
+                const device = wholeAddress(data) === 0 ? null : deviceIn(set, data);
+                if (wholeAddress(data) !== 0 && !device)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const thread = host.callerThread();
-                return callInstallers(request >>> 0, handle >>> 0, set, device, data >>> 0, thread)
+                return callInstallers(request >>> 0, handle >>> 0, set, device, wholeAddress(data),
+                    thread)
                     .then(code=>{
                         host.setLastErrorFor(thread, code);
                         return code === ERROR_SUCCESS ? 1 : 0;
@@ -6672,8 +6673,8 @@ export function createSetupapiFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([guidPointer, dataPointer, exceptionPointer])=>{
-                if ((guidPointer >>> 0) === 0 || (dataPointer >>> 0) === 0
-                    || (exceptionPointer >>> 0) === 0)
+                if (wholeAddress(guidPointer) === 0 || wholeAddress(dataPointer) === 0
+                    || wholeAddress(exceptionPointer) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -6713,7 +6714,8 @@ export function createSetupapiFunctions(host){
             /** @param {number[]} args */
             handler: ([dataPointer, exceptionPointer])=>{
                 const hive = host.registry;
-                if ((dataPointer >>> 0) === 0 || (exceptionPointer >>> 0) === 0 || !hive)
+                if (wholeAddress(dataPointer) === 0 || wholeAddress(exceptionPointer) === 0
+                    || !hive)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -6740,7 +6742,7 @@ export function createSetupapiFunctions(host){
             /** @param {number[]} args */
             handler: ([guidPointer])=>{
                 const hive = host.registry;
-                if ((guidPointer >>> 0) === 0 || !hive)
+                if (wholeAddress(guidPointer) === 0 || !hive)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }

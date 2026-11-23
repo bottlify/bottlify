@@ -217,16 +217,17 @@ export function createUrlmonFunctions(host){
             argBytes: 32,
             /** @param {number[]} args */
             handler: ([, url, buffer, size, proposed, , out])=>{
-                if ((out >>> 0) === 0 || ((url >>> 0) === 0 && (buffer >>> 0) === 0))
+                if (wholeAddress(out) === 0 || (wholeAddress(url) === 0
+                    && wholeAddress(buffer) === 0))
                 {
                     return E_INVALIDARG;
                 }
                 writeU32(out, 0);
-                const data = (buffer >>> 0) !== 0 && (size >>> 0) !== 0 && readMemory
+                const data = wholeAddress(buffer) !== 0 && (size >>> 0) !== 0 && readMemory
                     ? readMemory(wholeAddress(buffer), Math.min(size >>> 0, SNIFFED)) : null;
-                const offered = (proposed >>> 0) !== 0 && readWideString
+                const offered = wholeAddress(proposed) !== 0 && readWideString
                     ? readWideString(wholeAddress(proposed)) : '';
-                const extension = (url >>> 0) !== 0 && readWideString
+                const extension = wholeAddress(url) !== 0 && readWideString
                     ? urlExtension(readWideString(wholeAddress(url))) : '';
                 const registered = extension ? contentType?.(extension) ?? null : null;
                 const found = (data && sniffMime(data)) || offered || registered
@@ -255,7 +256,7 @@ export function createUrlmonFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, out, size])=>{
-                if ((out >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(size) === 0)
                 {
                     return E_INVALIDARG;
                 }

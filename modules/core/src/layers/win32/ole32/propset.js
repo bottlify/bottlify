@@ -1586,17 +1586,17 @@ export function createPropertySetFunctions(env){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([storage, , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
                 writeU32(wholeAddress(out), 0);
-                if ((storage >>> 0) === 0)
+                if (wholeAddress(storage) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 const thread = env.callerThread();
-                const held = await env.queryPointer(storage >>> 0, IID_ISTORAGE, thread);
+                const held = await env.queryPointer(wholeAddress(storage), IID_ISTORAGE, thread);
                 if (held === 0)
                 {
                     return E_NOINTERFACE;
@@ -1642,12 +1642,12 @@ export function createPropertySetFunctions(env){
             argBytes: 24,
             /** @param {number[]} args */
             handler: async([unknown, fmtid, clsid, flags, , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
                 writeU32(wholeAddress(out), 0);
-                if ((unknown >>> 0) === 0 || (fmtid >>> 0) === 0)
+                if (wholeAddress(unknown) === 0 || (fmtid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1658,18 +1658,18 @@ export function createPropertySetFunctions(env){
                     return STG_E_INVALIDFLAG;
                 }
                 const thread = env.callerThread();
-                const stream = await streamOf(unknown >>> 0, thread);
+                const stream = await streamOf(wholeAddress(unknown), thread);
                 if (stream === 0)
                 {
                     return E_NOINTERFACE;
                 }
                 const format = formatGuid(env.readMemory(wholeAddress(fmtid), 16));
-                const klass = (clsid >>> 0) === 0 ? GUID_NULL
+                const klass = wholeAddress(clsid) === 0 ? GUID_NULL
                     : formatGuid(env.readMemory(wholeAddress(clsid), 16));
                 const { set, index } = newSet(format, klass, flags >>> 0, null);
                 return publishStorage({ stream, clsid: klass, flags: flags >>> 0, writable: true,
                     index, set, section: cloneSection(set.sections[index]), dirty: false,
-                    times: new Uint8Array(24) }, true, out >>> 0, thread);
+                    times: new Uint8Array(24) }, true, wholeAddress(out), thread);
             },
         },
 
@@ -1681,12 +1681,12 @@ export function createPropertySetFunctions(env){
             argBytes: 20,
             /** @param {number[]} args */
             handler: async([unknown, fmtid, flags, , out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_POINTER;
                 }
                 writeU32(wholeAddress(out), 0);
-                if ((unknown >>> 0) === 0 || (fmtid >>> 0) === 0)
+                if (wholeAddress(unknown) === 0 || (fmtid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1695,13 +1695,13 @@ export function createPropertySetFunctions(env){
                     return STG_E_INVALIDFLAG;
                 }
                 const thread = env.callerThread();
-                const stream = await streamOf(unknown >>> 0, thread);
+                const stream = await streamOf(wholeAddress(unknown), thread);
                 if (stream === 0)
                 {
                     return E_NOINTERFACE;
                 }
                 return openSet(stream, formatGuid(env.readMemory(wholeAddress(fmtid), 16)), true,
-                    out >>> 0, thread);
+                    wholeAddress(out), thread);
             },
         },
 
@@ -1715,12 +1715,13 @@ export function createPropertySetFunctions(env){
              * @param {number[]} args
              */
             handler: ([fmtid, out])=>{
-                if ((fmtid >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(fmtid) === 0 || wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                writeWideAt(out >>> 0, nameOfFormat(formatGuid(env.readMemory(wholeAddress(fmtid),
-                    16))));
+                writeWideAt(wholeAddress(out),
+                    nameOfFormat(formatGuid(env.readMemory(wholeAddress(fmtid),
+                        16))));
                 return S_OK;
             },
         },
@@ -1736,11 +1737,11 @@ export function createPropertySetFunctions(env){
              * @param {number[]} args
              */
             handler: ([name, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                const text = (name >>> 0) === 0 ? null : readWideAt(name >>> 0);
+                const text = wholeAddress(name) === 0 ? null : readWideAt(wholeAddress(name));
                 const fmtid = text === null || text.length > MAX_NAME_LENGTH ? null
                     : formatOfName(text);
                 if (fmtid === null)

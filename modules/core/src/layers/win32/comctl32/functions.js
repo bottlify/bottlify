@@ -201,7 +201,7 @@ export function createComctlFunctions(host){
             handler: ([track])=>{
                 if (host.trackMouseEvent)
                 {
-                    return host.trackMouseEvent(track >>> 0);
+                    return host.trackMouseEvent(wholeAddress(track));
                 }
                 const size = u32(host.readMemory(wholeAddress(track), 4), 0);
                 return size === 16 ? 1 : 0;

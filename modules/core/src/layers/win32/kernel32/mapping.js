@@ -814,7 +814,7 @@ export function createMappingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([out, , attributes])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -880,7 +880,7 @@ export function createMappingFunctions(host){
                 {
                     return STATUS.SECTION_NOT_IMAGE;
                 }
-                if ((buffer >>> 0) === 0)
+                if (wholeAddress(buffer) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -897,7 +897,7 @@ export function createMappingFunctions(host){
                     info.set(sectionImageInformation(section.image));
                 }
                 host.writeMemory(wholeAddress(buffer), info);
-                writeDwordIf(returned >>> 0, size);
+                writeDwordIf(wholeAddress(returned), size);
                 return STATUS.SUCCESS;
             },
         },
@@ -932,7 +932,7 @@ export function createMappingFunctions(host){
                         'a view maps into this process only, not a child\'s');
                     return STATUS.NOT_SUPPORTED;
                 }
-                if ((base >>> 0) === 0 || (sizeAt >>> 0) === 0)
+                if (wholeAddress(base) === 0 || wholeAddress(sizeAt) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -941,7 +941,7 @@ export function createMappingFunctions(host){
                     host.divergence?.('NtMapViewOfSection',
                         'a view goes where there is room, not at the address asked for');
                 }
-                const offset = (offsetAt >>> 0) === 0 ? 0 : readDword(wholeAddress(offsetAt));
+                const offset = wholeAddress(offsetAt) === 0 ? 0 : readDword(wholeAddress(offsetAt));
                 const length = readDword(wholeAddress(sizeAt)) || section.size - offset;
                 if (length <= 0 || offset + length > section.size)
                 {
@@ -984,7 +984,7 @@ export function createMappingFunctions(host){
                         currentThread: host.currentThread ?? (()=>null),
                         setLastErrorFor: host.setLastErrorFor ?? (()=>{}) },
                     target.child, { call: 'NtUnmapViewOfSection',
-                        args: [CURRENT_PROCESS, address >>> 0] }, []);
+                        args: [CURRENT_PROCESS, wholeAddress(address)] }, []);
                     if (asked === null)
                     {
                         host.divergence?.('NtUnmapViewOfSection', 'a child the run cannot reach');
@@ -992,7 +992,7 @@ export function createMappingFunctions(host){
                     }
                     return asked;
                 }
-                const base = viewHolding(address >>> 0);
+                const base = viewHolding(wholeAddress(address));
                 if (base === null)
                 {
                     return STATUS.NOT_MAPPED_VIEW;
@@ -1225,7 +1225,7 @@ export function createMappingFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>{
-                const view = views.get(address >>> 0);
+                const view = views.get(wholeAddress(address));
                 if (!view)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
@@ -1244,9 +1244,9 @@ export function createMappingFunctions(host){
                     host.sharedViews?.shared.detach(view.shared);
                 }
                 view.unwatch?.();
-                views.delete(address >>> 0);
-                host.viewRegions?.delete(address >>> 0);
-                host.release(address >>> 0);
+                views.delete(wholeAddress(address));
+                host.viewRegions?.delete(wholeAddress(address));
+                host.release(wholeAddress(address));
                 return 1;
             },
         },
@@ -1304,7 +1304,8 @@ export function createMappingFunctions(host){
                 }
                 // A named pipe nobody can name, as Windows makes one: it reads,
                 // writes and breaks as the run's named pipes do.
-                const made = host.pipes?.anonymous?.(attributes >>> 0, (size >>> 0) || 4096);
+                const made = host.pipes?.anonymous?.(wholeAddress(attributes),
+                    (size >>> 0) || 4096);
                 if (made)
                 {
                     writeDword(wholeAddress(readHandle), made.read);
@@ -1349,11 +1350,11 @@ export function createMappingFunctions(host){
                     host.writeMemory(wholeAddress(buffer),
                         new Uint8Array(pipe.buffered.slice(0, copied)));
                 }
-                writeDwordIf(read >>> 0, copied);
-                writeDwordIf(available >>> 0, total);
+                writeDwordIf(wholeAddress(read), copied);
+                writeDwordIf(wholeAddress(available), total);
                 // An anonymous pipe is a byte stream with no messages in it, so
                 // there is never anything left of one.
-                writeDwordIf(left >>> 0, 0);
+                writeDwordIf(wholeAddress(left), 0);
                 return 1;
             },
         },

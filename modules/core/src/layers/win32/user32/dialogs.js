@@ -1561,7 +1561,7 @@ export function createDialogFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, rect])=>{
                 const dialog = live(hwnd);
-                if (!dialog || (rect >>> 0) === 0)
+                if (!dialog || wholeAddress(rect) === 0)
                 {
                     return 0;
                 }
@@ -1569,8 +1569,8 @@ export function createDialogFunctions(options){
                 // by: a program placing a control by hand lands where the
                 // template would have put it.
                 const cell = unitsFor(dialog.dialogFont ?? 0);
-                const units = readRect(host, rect >>> 0);
-                writeRect(host, rect >>> 0, {
+                const units = readRect(host, wholeAddress(rect));
+                writeRect(host, wholeAddress(rect), {
                     left: acrossFor(units.left, cell),
                     top: downFor(units.top, cell),
                     right: acrossFor(units.right, cell),
@@ -1597,7 +1597,7 @@ export function createDialogFunctions(options){
                 {
                     return 0;
                 }
-                return after(programSend(control.hwnd, WM_SETTEXT, 0, text >>> 0), ()=>1);
+                return after(programSend(control.hwnd, WM_SETTEXT, 0, wholeAddress(text)), ()=>1);
             },
         },
 
@@ -1614,7 +1614,7 @@ export function createDialogFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, id, out, max])=>{
                 const room = max | 0;
-                if ((out >>> 0) === 0 || room <= 0)
+                if (wholeAddress(out) === 0 || room <= 0)
                 {
                     return 0;
                 }
@@ -1629,11 +1629,12 @@ export function createDialogFunctions(options){
             /** @param {number[]} args */
             handler: ([hwnd, id, out, max])=>{
                 const room = max | 0;
-                if ((out >>> 0) === 0 || room <= 0)
+                if (wholeAddress(out) === 0 || room <= 0)
                 {
                     return 0;
                 }
-                return writeText(host, out >>> 0, controlOf(hwnd, id)?.title ?? '', room, true);
+                return writeText(host, wholeAddress(out), controlOf(hwnd, id)?.title ?? '', room,
+                    true);
             },
         },
 
@@ -1655,7 +1656,7 @@ export function createDialogFunctions(options){
                 const control = controlOf(hwnd, id);
                 const value = control ? dialogInteger(String(control.title ?? ''), signed !== 0)
                     : null;
-                if ((translatedOut >>> 0) !== 0)
+                if (wholeAddress(translatedOut) !== 0)
                 {
                     host.writeMemory(wholeAddress(translatedOut),
                         Uint8Array.of(value === null ? 0 : 1,
@@ -1789,7 +1790,8 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                readMessage(host, msg >>> 0, userLayouts(host.pointerSize)), msg >>> 0),
+                readMessage(host, wholeAddress(msg),
+                    userLayouts(host.pointerSize)), wholeAddress(msg)),
         },
 
         /** BOOL IsDialogMessageW(HWND hDlg, LPMSG lpMsg), a wide caller's message. */
@@ -1797,8 +1799,9 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([dialog, msg])=>isDialogMessage(dialog >>> 0,
-                { ...readMessage(host, msg >>> 0, userLayouts(host.pointerSize)), unicode: true },
-                msg >>> 0),
+                { ...readMessage(host, wholeAddress(msg), userLayouts(host.pointerSize)),
+                    unicode: true },
+                wholeAddress(msg)),
         },
     };
 }

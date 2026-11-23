@@ -140,7 +140,8 @@ export function createIdListFunctions(host){
         ILGetSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([list])=>((list >>> 0) === 0 ? 0 : walk(list).end - (list >>> 0) + 2),
+            handler: ([list])=>(wholeAddress(list) === 0 ? 0 : walk(list).end - wholeAddress(list)
+                + 2),
         },
 
         /** PUIDLIST_RELATIVE ILGetNext(PCUIDLIST_RELATIVE pidl): NULL past the last item. */
@@ -149,11 +150,11 @@ export function createIdListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                if ((list >>> 0) === 0 || cbAt(list) === 0)
+                if (wholeAddress(list) === 0 || cbAt(list) === 0)
                 {
                     return 0;
                 }
-                const next = (list >>> 0) + cbAt(list);
+                const next = wholeAddress(list) + cbAt(list);
                 return cbAt(next) === 0 ? 0 : next;
             },
         },
@@ -167,7 +168,8 @@ export function createIdListFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([list])=>((list >>> 0) === 0 ? 0 : walk(list).items.at(-1) ?? list >>> 0),
+            handler: ([list])=>(wholeAddress(list) === 0 ? 0 : walk(list).items.at(-1)
+                ?? wholeAddress(list)),
         },
 
         /** BOOL ILRemoveLastID(PUIDLIST_RELATIVE pidl): FALSE for an empty list. */
@@ -175,7 +177,7 @@ export function createIdListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                const last = (list >>> 0) === 0 ? undefined : walk(list).items.at(-1);
+                const last = wholeAddress(list) === 0 ? undefined : walk(list).items.at(-1);
                 if (last === undefined)
                 {
                     return 0;
@@ -190,7 +192,7 @@ export function createIdListFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([list])=>((list >>> 0) === 0 ? 0 : allocated(bytesOf(list))),
+            handler: ([list])=>(wholeAddress(list) === 0 ? 0 : allocated(bytesOf(list))),
         },
 
         /** PITEMID_CHILD ILCloneFirst(PCUIDLIST_RELATIVE pidl): the first item, ended. */
@@ -199,7 +201,7 @@ export function createIdListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                if ((list >>> 0) === 0)
+                if (wholeAddress(list) === 0)
                 {
                     return 0;
                 }
@@ -216,7 +218,7 @@ export function createIdListFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
-                if ((first >>> 0) === 0 || (second >>> 0) === 0)
+                if (wholeAddress(first) === 0 || wholeAddress(second) === 0)
                 {
                     return 0;
                 }
@@ -237,7 +239,7 @@ export function createIdListFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([parent, child, immediate])=>{
-                if ((parent >>> 0) === 0 || (child >>> 0) === 0)
+                if (wholeAddress(parent) === 0 || wholeAddress(child) === 0)
                 {
                     return 0;
                 }
@@ -262,7 +264,7 @@ export function createIdListFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([parent, child])=>{
-                if ((parent >>> 0) === 0 || (child >>> 0) === 0)
+                if (wholeAddress(parent) === 0 || wholeAddress(child) === 0)
                 {
                     return 0;
                 }
@@ -282,7 +284,7 @@ export function createIdListFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([first, second])=>{
-                if ((first >>> 0) === 0 && (second >>> 0) === 0)
+                if (wholeAddress(first) === 0 && wholeAddress(second) === 0)
                 {
                     return 0;
                 }
@@ -302,13 +304,13 @@ export function createIdListFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([list, item, append])=>{
-                const old = (list >>> 0) === 0 ? new Uint8Array(0) : itemsBytes(list);
-                const added = (item >>> 0) === 0 ? new Uint8Array(0) : itemBytes(item);
+                const old = wholeAddress(list) === 0 ? new Uint8Array(0) : itemsBytes(list);
+                const added = wholeAddress(item) === 0 ? new Uint8Array(0) : itemBytes(item);
                 const made = allocated((append | 0) !== 0 ? joined(old, added)
                     : joined(added, old));
-                if (made !== 0 && (list >>> 0) !== 0)
+                if (made !== 0 && wholeAddress(list) !== 0)
                 {
-                    host.free?.(list >>> 0);
+                    host.free?.(wholeAddress(list));
                 }
                 return made;
             },
@@ -319,9 +321,9 @@ export function createIdListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([list])=>{
-                if ((list >>> 0) !== 0)
+                if (wholeAddress(list) !== 0)
                 {
-                    host.free?.(list >>> 0);
+                    host.free?.(wholeAddress(list));
                 }
                 return 0;
             },
@@ -332,9 +334,9 @@ export function createIdListFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                if ((block >>> 0) !== 0)
+                if (wholeAddress(block) !== 0)
                 {
-                    host.free?.(block >>> 0);
+                    host.free?.(wholeAddress(block));
                 }
                 return 0;
             },

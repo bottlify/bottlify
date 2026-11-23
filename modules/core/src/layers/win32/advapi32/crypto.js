@@ -777,7 +777,7 @@ export function createCryptoFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, reserved, flags])=>{
                 const prov = asProvider(handle);
-                if (!prov || (reserved >>> 0) !== 0)
+                if (!prov || wholeAddress(reserved) !== 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -810,7 +810,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -866,7 +866,7 @@ export function createCryptoFunctions(host){
                             out.set(text(name), 12);
                         }
                         const done = copyOut(buffer, size, out);
-                        if (done && (buffer >>> 0) !== 0)
+                        if (done && wholeAddress(buffer) !== 0)
                         {
                             prov.enumAt = at + 1;
                         }
@@ -884,7 +884,7 @@ export function createCryptoFunctions(host){
                             return fail(ERROR_NO_MORE_ITEMS);
                         }
                         const done = copyOut(buffer, size, text(names[at]));
-                        if (done && (buffer >>> 0) !== 0)
+                        if (done && wholeAddress(buffer) !== 0)
                         {
                             prov.containerAt = at + 1;
                         }
@@ -893,7 +893,7 @@ export function createCryptoFunctions(host){
                     case PP_KEYSET_SEC_DESCR:
                     {
                         const descriptor = containerDescriptor(flags >>> 0);
-                        if ((buffer >>> 0) === 0)
+                        if (wholeAddress(buffer) === 0)
                         {
                             writeDword(size, descriptor.length);
                             host.setLastError?.(ERROR_INSUFFICIENT_BUFFER);
@@ -923,7 +923,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -952,7 +952,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(NTE_BAD_FLAGS);
                 }
-                if ((size >>> 0) === 0)
+                if (wholeAddress(size) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -998,7 +998,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1039,7 +1039,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((reserved >>> 0) !== 0 || (out >>> 0) === 0)
+                if (wholeAddress(reserved) !== 0 || wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1110,7 +1110,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1260,7 +1260,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((flags >>> 0) !== 0 || (out >>> 0) === 0)
+                if ((flags >>> 0) !== 0 || wholeAddress(out) === 0)
                 {
                     return fail((flags >>> 0) !== 0 ? NTE_BAD_FLAGS : ERROR_INVALID_PARAMETER);
                 }
@@ -1289,7 +1289,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1329,7 +1329,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1371,7 +1371,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1537,7 +1537,8 @@ export function createCryptoFunctions(host){
                 // The whole range is checked before a byte is drawn: a length
                 // the buffer does not have fails at once, rather than after
                 // drawing gigabytes for nowhere.
-                if ((buffer >>> 0) === 0 || host.canWrite?.(buffer >>> 0, len) === false)
+                if (wholeAddress(buffer) === 0 || host.canWrite?.(wholeAddress(buffer),
+                    len) === false)
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;
@@ -1557,7 +1558,7 @@ export function createCryptoFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const len = length >>> 0;
-                if (len === 0 || (buffer >>> 0) === 0)
+                if (len === 0 || wholeAddress(buffer) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1584,7 +1585,7 @@ export function createCryptoFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                if ((out >>> 0) === 0 || (data >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(data) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }

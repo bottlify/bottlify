@@ -3324,7 +3324,7 @@ export function createHeapFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([handle, , pointer])=>{
-                const block = blockOf(handle >>> 0, pointer >>> 0);
+                const block = blockOf(handle >>> 0, wholeAddress(pointer));
                 // The requested size, not the rounded one: a program that copies
                 // HeapSize bytes out of a block would otherwise read whatever
                 // padding follows it.
@@ -3502,13 +3502,13 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0xffffffff;
                 }
-                const room = (count >>> 0) === 0 ? -1 : readDword(wholeAddress(count));
+                const room = wholeAddress(count) === 0 ? -1 : readDword(wholeAddress(count));
                 if (room === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0xffffffff;
                 }
-                if (room < 0 || (granularity >>> 0) === 0 || (addresses >>> 0) === 0)
+                if (room < 0 || wholeAddress(granularity) === 0 || wholeAddress(addresses) === 0)
                 {
                     host.setLastError(ERROR_NOACCESS);
                     return 0xffffffff;
@@ -3610,14 +3610,14 @@ export function createHeapFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
-                globals.global.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
+                globals.global.reallocate(wholeAddress(handle), bytes >>> 0, flags >>> 0),
         },
 
         /** UINT GlobalFlags(HGLOBAL hMem) */
         GlobalFlags: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.flags(handle >>> 0),
+            handler: ([handle])=>globals.global.flags(wholeAddress(handle)),
         },
 
         /** HGLOBAL GlobalFree(HGLOBAL hMem): NULL on success, the handle back on failure. */
@@ -3625,7 +3625,7 @@ export function createHeapFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.free(handle >>> 0),
+            handler: ([handle])=>globals.global.free(wholeAddress(handle)),
             ...routine('globalFree'),
         },
 
@@ -3634,14 +3634,14 @@ export function createHeapFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.lock(handle >>> 0),
+            handler: ([handle])=>globals.global.lock(wholeAddress(handle)),
         },
 
         /** BOOL GlobalUnlock(HGLOBAL hMem): TRUE while the block stays locked. */
         GlobalUnlock: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.unlock(handle >>> 0),
+            handler: ([handle])=>globals.global.unlock(wholeAddress(handle)),
         },
 
         /**
@@ -3656,7 +3656,7 @@ export function createHeapFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.lock(handle >>> 0),
+            handler: ([handle])=>globals.global.lock(wholeAddress(handle)),
         },
         GlobalFix: {
             argBytes: 4,
@@ -3669,7 +3669,7 @@ export function createHeapFunctions(host){
         GlobalUnWire: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.unlock(handle >>> 0),
+            handler: ([handle])=>globals.global.unlock(wholeAddress(handle)),
         },
         GlobalUnfix: {
             argBytes: 4,
@@ -3684,7 +3684,7 @@ export function createHeapFunctions(host){
         GlobalSize: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.global.size(handle >>> 0),
+            handler: ([handle])=>globals.global.size(wholeAddress(handle)),
         },
 
         /** HGLOBAL GlobalHandle(LPCVOID pMem) */
@@ -3692,7 +3692,7 @@ export function createHeapFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([address])=>globals.global.handleOf(address >>> 0),
+            handler: ([address])=>globals.global.handleOf(wholeAddress(address)),
         },
 
         /**
@@ -3713,7 +3713,7 @@ export function createHeapFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.local.free(handle >>> 0),
+            handler: ([handle])=>globals.local.free(wholeAddress(handle)),
         },
 
         /**
@@ -3780,7 +3780,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                return address === 0 ? 1 : (blockOf(heap, address >>> 0) ? 1 : 0);
+                return address === 0 ? 1 : (blockOf(heap, wholeAddress(address)) ? 1 : 0);
             },
         },
 
@@ -3977,8 +3977,8 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_NOACCESS);
                     return 0;
                 }
-                const block = allocator.blockContaining(address >>> 0);
-                const first = ((address >>> 0) & ~(PAGE_SIZE - 1)) >>> 0;
+                const block = allocator.blockContaining(wholeAddress(address));
+                const first = (wholeAddress(address) & ~(PAGE_SIZE - 1)) >>> 0;
                 if (block?.owner === VIRTUAL && !privateProtection(protect >>> 0))
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -3988,7 +3988,7 @@ export function createHeapFunctions(host){
                 // that reaches a reserved one is refused whole.
                 if (block?.owner === VIRTUAL)
                 {
-                    const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                    const end = roundUp(wholeAddress(address) + (size >>> 0), PAGE_SIZE);
                     const covered = (committed.get(block.address) ?? [])
                         .some(range=>range.from <= first && range.to >= end);
                     if (!covered)
@@ -4000,8 +4000,8 @@ export function createHeapFunctions(host){
                 const view = block?.owner === VIRTUAL ? null : host.viewAt?.(first) ?? null;
                 if (view)
                 {
-                    return protectView(view, first, (address >>> 0) + (size >>> 0),
-                        protect >>> 0, oldProtect >>> 0) ? 1 : 0;
+                    return protectView(view, first, wholeAddress(address) + (size >>> 0),
+                        protect >>> 0, wholeAddress(oldProtect)) ? 1 : 0;
                 }
                 const image = block?.owner === VIRTUAL ? null : imageAt(first);
                 if (image)
@@ -4011,7 +4011,7 @@ export function createHeapFunctions(host){
                     // image's are (`imageWriteCopy`), read back and handed
                     // back as the old protection; the range stays inside the
                     // image.
-                    const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                    const end = roundUp(wholeAddress(address) + (size >>> 0), PAGE_SIZE);
                     if (end > image.base + image.layout.size || !imageProtection(protect >>> 0))
                     {
                         host.setLastError(end > image.base + image.layout.size
@@ -4044,7 +4044,7 @@ export function createHeapFunctions(host){
                         : block?.owner === TABLES ? PAGE_READWRITE : PAGE_EXECUTE_READWRITE));
                 if (block && block.owner === VIRTUAL)
                 {
-                    const end = Math.min(roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE),
+                    const end = Math.min(roundUp(wholeAddress(address) + (size >>> 0), PAGE_SIZE),
                         block.address + block.capacity);
                     noteProtection(block.address, first, end, protect >>> 0);
                     settleAccess(block.address, first, end);
@@ -4150,7 +4150,7 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 const count = Math.floor((length >>> 0) / 8);
-                if ((entries >>> 0) === 0 || count === 0)
+                if (wholeAddress(entries) === 0 || count === 0)
                 {
                     host.setLastError(ERROR_BAD_LENGTH);
                     return 0;
@@ -4214,7 +4214,7 @@ export function createHeapFunctions(host){
                 {
                     return 0;
                 }
-                const end = roundUp((address >>> 0) + (size >>> 0), PAGE_SIZE);
+                const end = roundUp(wholeAddress(address) + (size >>> 0), PAGE_SIZE);
                 let guarded = false;
                 for (let page = (address & ~(PAGE_SIZE - 1)) >>> 0; page < end;
                     page += PAGE_SIZE)
@@ -4538,7 +4538,7 @@ export function createHeapFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([handle, bytes, flags])=>
-                globals.local.reallocate(handle >>> 0, bytes >>> 0, flags >>> 0),
+                globals.local.reallocate(wholeAddress(handle), bytes >>> 0, flags >>> 0),
         },
         LocalLock: table.GlobalLock,
         LocalUnlock: table.GlobalUnlock,
@@ -4548,7 +4548,7 @@ export function createHeapFunctions(host){
         LocalFlags: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>globals.local.flags(handle >>> 0),
+            handler: ([handle])=>globals.local.flags(wholeAddress(handle)),
         },
 
         /**

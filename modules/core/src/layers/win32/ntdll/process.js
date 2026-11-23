@@ -671,7 +671,7 @@ export function createProcessFunctions(host){
                     {
                         return STATUS.INVALID_HANDLE;
                     }
-                    if ((count >>> 0) !== 0)
+                    if (wholeAddress(count) !== 0)
                     {
                         writeU32(count, previous);
                     }
@@ -697,7 +697,7 @@ export function createProcessFunctions(host){
                     {
                         return STATUS.INVALID_HANDLE;
                     }
-                    if ((count >>> 0) !== 0)
+                    if (wholeAddress(count) !== 0)
                     {
                         writeU32(count, previous);
                     }
@@ -779,7 +779,7 @@ export function createProcessFunctions(host){
             sizes: [7, 8, 9],
             /** @param {number[]} args */
             handler: ([out, , , process, start, argument, flags, , commit, reserve])=>{
-                if ((out >>> 0) === 0 || (start >>> 0) === 0)
+                if (wholeAddress(out) === 0 || wholeAddress(start) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
@@ -836,7 +836,7 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([process, , suspended, , reserve, commit, start, argument, out,
                 client])=>{
-                if ((start >>> 0) === 0)
+                if (wholeAddress(start) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
@@ -848,7 +848,7 @@ export function createProcessFunctions(host){
                     {
                         return thread.status;
                     }
-                    if ((out >>> 0) !== 0)
+                    if (wholeAddress(out) !== 0)
                     {
                         writeU32(out, thread.handle);
                     }
@@ -856,7 +856,7 @@ export function createProcessFunctions(host){
                     {
                         quietly('CloseHandle', [thread.handle]);
                     }
-                    if ((client >>> 0) !== 0)
+                    if (wholeAddress(client) !== 0)
                     {
                         writeU32(client, quietly('GetProcessIdOfThread', [thread.handle]).result);
                         writeU32(client + 4, thread.id);
@@ -922,11 +922,11 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([out, access, attributes, client])=>{
                 void attributes;
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
-                if ((client >>> 0) === 0)
+                if (wholeAddress(client) === 0)
                 {
                     return STATUS.INVALID_PARAMETER_MIX;
                 }
@@ -968,7 +968,7 @@ export function createProcessFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([process, thread, access, attributes, flags, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return STATUS.ACCESS_VIOLATION;
                 }
@@ -1031,7 +1031,7 @@ export function createProcessFunctions(host){
                         }
                         entry += length;
                     }
-                    if ((out >>> 0) !== 0)
+                    if (wholeAddress(out) !== 0)
                     {
                         writeU32(out, entry);
                     }
@@ -1085,9 +1085,9 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([block])=>{
-                if ((block >>> 0) !== 0)
+                if (wholeAddress(block) !== 0)
                 {
-                    host.free(block >>> 0);
+                    host.free(wholeAddress(block));
                 }
                 return STATUS.SUCCESS;
             },
@@ -1112,7 +1112,8 @@ export function createProcessFunctions(host){
             argBytes: 40,
             /** @param {number[]} args */
             handler: ([image, , parameters, , , , inherit, , , information])=>{
-                if ((image >>> 0) === 0 || (parameters >>> 0) === 0 || (information >>> 0) === 0)
+                if (wholeAddress(image) === 0 || wholeAddress(parameters) === 0
+                    || wholeAddress(information) === 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
@@ -1160,13 +1161,13 @@ export function createProcessFunctions(host){
             /** @param {number[]} args */
             handler: ([processOut, threadOut, , , , , processFlags, threadFlags, parameters,
                 createInfo, attributes])=>{
-                if ((processOut >>> 0) === 0 || (threadOut >>> 0) === 0
-                    || (parameters >>> 0) === 0 || (attributes >>> 0) === 0
+                if (wholeAddress(processOut) === 0 || wholeAddress(threadOut) === 0
+                    || wholeAddress(parameters) === 0 || wholeAddress(attributes) === 0
                     || ((threadFlags >>> 0) & THREAD_CREATE_FLAGS_HIDE_FROM_DEBUGGER) !== 0)
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const list = attributeList(attributes >>> 0);
+                const list = attributeList(wholeAddress(attributes));
                 const imageName = list.get(PS_ATTRIBUTE_IMAGE_NAME);
                 if (!imageName)
                 {
@@ -1175,7 +1176,7 @@ export function createProcessFunctions(host){
                 const units = host.readMemory(imageName.value, imageName.size & ~1).slice();
                 const image = String.fromCharCode(
                     ...new Uint16Array(units.buffer, 0, units.length >> 1));
-                const made = spawn(image, parameters >>> 0,
+                const made = spawn(image, wholeAddress(parameters),
                     ((processFlags >>> 0) & PROCESS_CREATE_FLAGS_INHERIT_HANDLES) !== 0);
                 /** @param {Spawned} child */
                 const settle = child=>{
@@ -1191,7 +1192,7 @@ export function createProcessFunctions(host){
                         writeU32(client.value, child.processId);
                         writeU32(client.value + 4, child.threadId);
                     }
-                    if ((createInfo >>> 0) !== 0)
+                    if (wholeAddress(createInfo) !== 0)
                     {
                         writeU32(createInfo + CREATE_INFO_STATE, PS_CREATE_SUCCESS);
                     }

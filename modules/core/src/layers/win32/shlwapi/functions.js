@@ -897,7 +897,7 @@ export function createShlwapiFunctions(host){
         DllGetVersion: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([info])=>answerDllVersion(host, info >>> 0, SHLWAPI_VERSION),
+            handler: ([info])=>answerDllVersion(host, wholeAddress(info), SHLWAPI_VERSION),
         },
 
         /**

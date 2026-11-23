@@ -485,7 +485,7 @@ export function createClassFunctions(host){
             /** @param {number[]} args */
             handler: async([buffer, mangled, length, allocate, , flags])=>{
                 const thread = host.currentThread?.();
-                if ((mangled >>> 0) === 0)
+                if (wholeAddress(mangled) === 0)
                 {
                     return 0;
                 }
@@ -494,7 +494,7 @@ export function createClassFunctions(host){
                     ?? undecorateName(text, flags & 0xffff);
                 const bytes = new Uint8Array(undecorated.length + 1);
                 bytes.set([...undecorated].map(character=>character.charCodeAt(0) & 0xff));
-                if ((buffer >>> 0) !== 0)
+                if (wholeAddress(buffer) !== 0)
                 {
                     const room = Math.max(0, length | 0);
                     if (room === 0)
@@ -506,11 +506,12 @@ export function createClassFunctions(host){
                     host.writeMemory(wholeAddress(buffer), kept);
                     return wholeAddress(buffer);
                 }
-                if ((allocate >>> 0) === 0)
+                if (wholeAddress(allocate) === 0)
                 {
                     return 0;
                 }
-                const at = await host.callGuest(allocate >>> 0, [bytes.length], thread) >>> 0;
+                const at = await host.callGuest(wholeAddress(allocate), [bytes.length],
+                    thread) >>> 0;
                 if (at !== 0)
                 {
                     host.writeMemory(at, bytes);
@@ -586,7 +587,7 @@ export function createClassFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([left, right])=>{
-                if ((left >>> 0) === (right >>> 0))
+                if (wholeAddress(left) === wholeAddress(right))
                 {
                     return 0;
                 }
@@ -660,10 +661,10 @@ export function createClassFunctions(host){
                 const name = entry + pointer;
                 host.writeMemory(name, bytes);
                 // Pushed on the caller's list, which owns it from then on.
-                const head = (root >>> 0) + listHead;
+                const head = wholeAddress(root) + listHead;
                 writeU32(entry, readU32(head));
                 writeU32(head, entry);
-                const depth = (root >>> 0) + (pointer === 8 ? 0 : 4);
+                const depth = wholeAddress(root) + (pointer === 8 ? 0 : 4);
                 const count = host.readMemory(depth, 2);
                 host.writeMemory(depth, Uint8Array.of((count[0] + 1) & 0xff,
                     (count[1] + ((count[0] + 1) >> 8)) & 0xff));
@@ -678,7 +679,7 @@ export function createClassFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([root])=>{
-                const head = (root >>> 0) + listHead;
+                const head = wholeAddress(root) + listHead;
                 let entry = readU32(head);
                 // A list damaged past this many names is not walked further.
                 for (let walked = 0; entry !== 0 && walked < 0x100000; walked++)

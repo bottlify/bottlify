@@ -1702,7 +1702,7 @@ export function createShellFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if ((info >>> 0) === 0 || !host.readMemory)
+                if (wholeAddress(info) === 0 || !host.readMemory)
                 {
                     return E_INVALIDARG;
                 }
@@ -1806,7 +1806,7 @@ export function createShellFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -1986,13 +1986,13 @@ export function createShellFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 if (namespace)
                 {
-                    return namespace.desktop(out >>> 0);
+                    return namespace.desktop(wholeAddress(out));
                 }
                 host.writeMemory(wholeAddress(out), dword(0));
                 host.divergence?.('SHGetDesktopFolder',
@@ -2046,7 +2046,7 @@ export function createShellFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([file, index, , large, small])=>{
-                if ((large >>> 0) === 0 && (small >>> 0) === 0)
+                if (wholeAddress(large) === 0 && wholeAddress(small) === 0)
                 {
                     return S_OK;
                 }
@@ -2058,7 +2058,7 @@ export function createShellFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([file, index, , large, small])=>{
-                if ((large >>> 0) === 0 && (small >>> 0) === 0)
+                if (wholeAddress(large) === 0 && wholeAddress(small) === 0)
                 {
                     return S_OK;
                 }
@@ -2078,11 +2078,11 @@ export function createShellFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([folder, list, , riid, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }
-                if ((folder >>> 0) === 0)
+                if (wholeAddress(folder) === 0)
                 {
                     return namespace ? namespace.bind(list, riid, out) : E_FAIL;
                 }
@@ -2099,7 +2099,8 @@ export function createShellFunctions(host){
                 const entry = u32(u32(folder) + 5 * 4);
                 return host.drive((function* (){
                     return yield { entry,
-                        args: [folder >>> 0, list >>> 0, 0, riid >>> 0, out >>> 0] };
+                        args: [wholeAddress(folder), wholeAddress(list), 0, riid >>> 0,
+                            wholeAddress(out)] };
                 })());
             },
         },
@@ -2119,16 +2120,16 @@ export function createShellFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([list, riid, out, last])=>{
-                if ((last >>> 0) !== 0)
+                if (wholeAddress(last) !== 0)
                 {
                     host.writeMemory(wholeAddress(last), dword(0));
                 }
-                if ((out >>> 0) === 0 || (riid >>> 0) === 0)
+                if (wholeAddress(out) === 0 || (riid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
                 }
                 host.writeMemory(wholeAddress(out), dword(0));
-                if ((list >>> 0) === 0)
+                if (wholeAddress(list) === 0)
                 {
                     return E_INVALIDARG;
                 }
@@ -2137,8 +2138,8 @@ export function createShellFunctions(host){
                     host.divergence?.('SHBindToParent', 'no shell namespace: E_FAIL');
                     return E_FAIL;
                 }
-                const bound = namespace.parent(list >>> 0, riid >>> 0, out >>> 0);
-                if (bound.hr === S_OK && (last >>> 0) !== 0)
+                const bound = namespace.parent(wholeAddress(list), riid >>> 0, wholeAddress(out));
+                if (bound.hr === S_OK && wholeAddress(last) !== 0)
                 {
                     host.writeMemory(wholeAddress(last), dword(bound.last));
                 }
@@ -2169,7 +2170,7 @@ export function createShellFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([window, csidl, , reserved, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return E_INVALIDARG;
                 }

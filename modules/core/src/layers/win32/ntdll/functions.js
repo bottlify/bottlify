@@ -320,16 +320,16 @@ function createUserInfoFunctions(kernel32, writeMemory){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([heap, , block, value, flags])=>{
-                const info = infoOf(heap >>> 0, block >>> 0);
+                const info = infoOf(heap >>> 0, wholeAddress(block));
                 if (!info)
                 {
                     return 0;
                 }
-                if ((value >>> 0) !== 0 && info.value !== undefined)
+                if (wholeAddress(value) !== 0 && info.value !== undefined)
                 {
                     writeU32(wholeAddress(value), info.value);
                 }
-                if ((flags >>> 0) !== 0)
+                if (wholeAddress(flags) !== 0)
                 {
                     writeU32(wholeAddress(flags), info.flags);
                 }
@@ -341,12 +341,12 @@ function createUserInfoFunctions(kernel32, writeMemory){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([heap, , block, value])=>{
-                const info = infoOf(heap >>> 0, block >>> 0, true);
+                const info = infoOf(heap >>> 0, wholeAddress(block), true);
                 if (!info)
                 {
                     return 0;
                 }
-                info.value = value >>> 0;
+                info.value = wholeAddress(value);
                 return 1;
             },
         },
@@ -360,7 +360,7 @@ function createUserInfoFunctions(kernel32, writeMemory){
                     kernel32.SetLastError?.handler([ERROR_INVALID_PARAMETER]);
                     return 0;
                 }
-                const info = infoOf(heap >>> 0, block >>> 0, true);
+                const info = infoOf(heap >>> 0, wholeAddress(block), true);
                 if (!info)
                 {
                     return 0;
@@ -496,7 +496,7 @@ export function createNtdllFunctions(host){
                 sizes: [2, 3],
                 /** @param {number[]} args */
                 handler: ([flags, base, reserve, commit])=>{
-                    if ((base >>> 0) !== 0)
+                    if (wholeAddress(base) !== 0)
                     {
                         host.divergence?.('RtlCreateHeap', 'a heap over memory the caller'
                             + ' gives is not made');
@@ -515,7 +515,8 @@ export function createNtdllFunctions(host){
                 returns: 'pointer',
                 argBytes: 4,
                 /** @param {number[]} args */
-                handler: ([heap])=>(kernel32.HeapDestroy.handler([heap]) !== 0 ? 0 : heap >>> 0),
+                handler: ([heap])=>(kernel32.HeapDestroy.handler([heap]) !== 0 ? 0
+                    : wholeAddress(heap)),
             },
         } : {},
         ...natives,
@@ -813,11 +814,11 @@ export function createNtdllFunctions(host){
                     argBytes: 4,
                     /** @param {number[]} args */
                     handler: ([out])=>{
-                        if ((out >>> 0) === 0)
+                        if (wholeAddress(out) === 0)
                         {
                             return STATUS.ACCESS_VIOLATION;
                         }
-                        kernel32.GetSystemTimeAsFileTime.handler([out >>> 0]);
+                        kernel32.GetSystemTimeAsFileTime.handler([wholeAddress(out)]);
                         return STATUS.SUCCESS;
                     },
                 },
@@ -881,7 +882,7 @@ export function createNtdllFunctions(host){
                     argBytes: 4,
                     /** @param {number[]} args */
                     handler: ([attributes])=>{
-                        const name = (attributes >>> 0) === 0 ? 0
+                        const name = wholeAddress(attributes) === 0 ? 0
                             : readU32(host.readMemory(wholeAddress(attributes) + 8, 4));
                         if (name === 0)
                         {

@@ -332,7 +332,7 @@ export function createCaret(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([point])=>{
-                if ((point >>> 0) === 0)
+                if (wholeAddress(point) === 0)
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;

@@ -522,12 +522,12 @@ export function createWintrustFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([data, index, counter, counterIndex])=>{
-                if ((data >>> 0) === 0)
+                if (wholeAddress(data) === 0)
                 {
                     return 0;
                 }
-                const signer = element((data >>> 0) + PROVIDER_DATA.SIGNERS,
-                    (data >>> 0) + PROVIDER_DATA.SIGNER_ARRAY, index, PROVIDER_SIGNER.SIZE);
+                const signer = element(wholeAddress(data) + PROVIDER_DATA.SIGNERS,
+                    wholeAddress(data) + PROVIDER_DATA.SIGNER_ARRAY, index, PROVIDER_SIGNER.SIZE);
                 if (signer === 0 || counter === 0)
                 {
                     return signer;
@@ -549,9 +549,9 @@ export function createWintrustFunctions(host){
             returns: 'pointer',
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([signer, index])=>((signer >>> 0) === 0 ? 0
-                : element((signer >>> 0) + PROVIDER_SIGNER.CERTS,
-                    (signer >>> 0) + PROVIDER_SIGNER.CERT_ARRAY, index, PROVIDER_CERT_SIZE)),
+            handler: ([signer, index])=>(wholeAddress(signer) === 0 ? 0
+                : element(wholeAddress(signer) + PROVIDER_SIGNER.CERTS,
+                    wholeAddress(signer) + PROVIDER_SIGNER.CERT_ARRAY, index, PROVIDER_CERT_SIZE)),
         },
 
         /** BOOL CryptCATClose(HANDLE hCatalog) */

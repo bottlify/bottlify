@@ -312,7 +312,7 @@ export function createCountedStringFunctions(host){
             handler: ([destination, source])=>{
                 const at = wholeAddress(source);
                 const text = at === 0 ? '' : host.readWideString(at, MAX_WIDE_BYTES);
-                writeDescriptor(destination >>> 0, {
+                writeDescriptor(wholeAddress(destination), {
                     length: text.length * 2,
                     maximumLength: at === 0 ? 0 : text.length * 2 + 2,
                     buffer: at,
@@ -378,7 +378,7 @@ export function createCountedStringFunctions(host){
                     return 0;
                 }
                 writeWide(buffer, text);
-                writeDescriptor(destination >>> 0,
+                writeDescriptor(wholeAddress(destination),
                     { length: total - 2, maximumLength: total, buffer });
                 return 1;
             },
@@ -407,7 +407,7 @@ export function createCountedStringFunctions(host){
                     return 0;
                 }
                 writeWide(buffer, text);
-                writeDescriptor(destination >>> 0,
+                writeDescriptor(wholeAddress(destination),
                     { length: total - 2, maximumLength: total, buffer });
                 return 1;
             },

@@ -767,7 +767,7 @@ export function createDebuggerFunctions(host){
                         host.setLastError?.(ERROR_INVALID_HANDLE);
                         return 0;
                     }
-                    if ((out >>> 0) === 0)
+                    if (wholeAddress(out) === 0)
                     {
                         host.setLastError?.(ERROR_SEM_TIMEOUT);
                         return 0;
@@ -951,7 +951,7 @@ export function createDebuggerFunctions(host){
                             {
                                 return STATUS_INVALID_PARAMETER;
                             }
-                            if ((out >>> 0) === 0)
+                            if (wholeAddress(out) === 0)
                             {
                                 return STATUS_ACCESS_VIOLATION;
                             }
@@ -978,7 +978,7 @@ export function createDebuggerFunctions(host){
                             }
                             if ((length >>> 0) !== 4)
                             {
-                                if ((returned >>> 0) !== 0)
+                                if (wholeAddress(returned) !== 0)
                                 {
                                     writeU32(returned, 4);
                                 }
@@ -989,7 +989,8 @@ export function createDebuggerFunctions(host){
                             {
                                 return STATUS_INVALID_HANDLE;
                             }
-                            const bytes = host.readMemory?.(info >>> 0, 4) ?? new Uint8Array(4);
+                            const bytes = host.readMemory?.(wholeAddress(info),
+                                4) ?? new Uint8Array(4);
                             const value = new DataView(bytes.slice().buffer).getUint32(0, true);
                             if ((value & ~DEBUG_KILL_ON_CLOSE) !== 0)
                             {

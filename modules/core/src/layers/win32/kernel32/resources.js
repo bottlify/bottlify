@@ -21,7 +21,7 @@
  */
 
 /** Codes this surface reports. */
-import { forwarded } from '../common/pointers.js';
+import { forwarded, wholeAddress } from '../common/pointers.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
@@ -499,7 +499,7 @@ export function createResourceFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, resource])=>{
-                const entry = found.get(resource >>> 0);
+                const entry = found.get(wholeAddress(resource));
                 return entry ? entry.size : fail(ERROR_RESOURCE_DATA_NOT_FOUND);
             },
         },
@@ -516,11 +516,11 @@ export function createResourceFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, resource])=>{
-                if ((resource >>> 0) === 0)
+                if (wholeAddress(resource) === 0)
                 {
                     return 0;
                 }
-                const entry = found.get(resource >>> 0);
+                const entry = found.get(wholeAddress(resource));
                 return entry ? (entry.base + entry.rva) >>> 0 : fail(ERROR_RESOURCE_DATA_NOT_FOUND);
             },
         },
@@ -534,7 +534,7 @@ export function createResourceFunctions(host){
             returns: 'pointer',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>handle >>> 0,
+            handler: ([handle])=>wholeAddress(handle),
         },
 
         /**

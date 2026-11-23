@@ -119,7 +119,7 @@ export function createGdiplusFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: async([token, input, output])=>{
-                if ((token >>> 0) === 0 || (input >>> 0) === 0)
+                if (wholeAddress(token) === 0 || wholeAddress(input) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -134,7 +134,7 @@ export function createGdiplusFunctions(host){
                     return UnsupportedGdiplusVersion;
                 }
                 putPointer(token, handle());
-                if ((output >>> 0) !== 0)
+                if (wholeAddress(output) !== 0)
                 {
                     const suppressed = fields.getUint32(pointer.size * 2, true) !== 0;
                     const hook = suppressed
@@ -142,7 +142,7 @@ export function createGdiplusFunctions(host){
                     const unhook = suppressed
                         ? await host.procAddress?.('GdiplusNotificationUnhook') ?? 0 : 0;
                     putPointer(output, hook);
-                    putPointer((output >>> 0) + pointer.size, unhook);
+                    putPointer(wholeAddress(output) + pointer.size, unhook);
                 }
                 return Ok;
             },
@@ -157,7 +157,7 @@ export function createGdiplusFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([token])=>{
-                if ((token >>> 0) === 0)
+                if (wholeAddress(token) === 0)
                 {
                     return InvalidParameter;
                 }
@@ -192,9 +192,9 @@ export function createGdiplusFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([address])=>{
-                if ((address >>> 0) !== 0)
+                if (wholeAddress(address) !== 0)
                 {
-                    host.free(address >>> 0);
+                    host.free(wholeAddress(address));
                 }
                 return 0;
             },

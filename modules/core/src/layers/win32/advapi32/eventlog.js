@@ -941,7 +941,7 @@ export function createEventLogFunctions(host){
             argBytes: 12,
             quadwords: [0],
             /** @param {number[]} args */
-            handler: ([, , header])=>((header >>> 0) === 0
+            handler: ([, , header])=>(wholeAddress(header) === 0
                 ? ERROR_INVALID_PARAMETER : ERROR_INVALID_HANDLE),
         },
         /**
@@ -967,7 +967,8 @@ export function createEventLogFunctions(host){
                 {
                     return ERROR_INVALID_HANDLE;
                 }
-                return (descriptor >>> 0) === 0 || ((count >>> 0) !== 0 && (data >>> 0) === 0)
+                return wholeAddress(descriptor) === 0 || ((count >>> 0) !== 0
+                    && wholeAddress(data) === 0)
                     ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
             },
         },
@@ -984,7 +985,8 @@ export function createEventLogFunctions(host){
                 {
                     return ERROR_INVALID_HANDLE;
                 }
-                return (descriptor >>> 0) === 0 || ((count >>> 0) !== 0 && (data >>> 0) === 0)
+                return wholeAddress(descriptor) === 0 || ((count >>> 0) !== 0
+                    && wholeAddress(data) === 0)
                     ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
             },
         },
@@ -1012,7 +1014,7 @@ export function createEventLogFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([code, pointer])=>{
-                if ((pointer >>> 0) === 0 || (code >>> 0) < 1 || (code >>> 0) > 5)
+                if (wholeAddress(pointer) === 0 || (code >>> 0) < 1 || (code >>> 0) > 5)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1026,27 +1028,27 @@ export function createEventLogFunctions(host){
                     id[8] = (id[8] & 0x3f) | 0x80;
                     return id;
                 };
-                const given = ()=>host.readMemory?.(pointer >>> 0, 16).slice()
+                const given = ()=>host.readMemory?.(wholeAddress(pointer), 16).slice()
                     ?? new Uint8Array(16);
                 switch (code >>> 0)
                 {
                     case 1:
-                        host.writeMemory?.(pointer >>> 0, current);
+                        host.writeMemory?.(wholeAddress(pointer), current);
                         break;
                     case 2:
                         activities.set(thread, given());
                         break;
                     case 3:
-                        host.writeMemory?.(pointer >>> 0, fresh());
+                        host.writeMemory?.(wholeAddress(pointer), fresh());
                         break;
                     case 4: {
                         const incoming = given();
-                        host.writeMemory?.(pointer >>> 0, current);
+                        host.writeMemory?.(wholeAddress(pointer), current);
                         activities.set(thread, incoming);
                         break;
                     }
                     default:
-                        host.writeMemory?.(pointer >>> 0, current);
+                        host.writeMemory?.(wholeAddress(pointer), current);
                         activities.set(thread, fresh());
                 }
                 return ERROR_SUCCESS;
@@ -1104,7 +1106,7 @@ export function createEventLogFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1123,7 +1125,7 @@ export function createEventLogFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
@@ -1155,7 +1157,7 @@ export function createEventLogFunctions(host){
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
-                if ((buffer >>> 0) === 0 || (needed >>> 0) === 0)
+                if (wholeAddress(buffer) === 0 || wholeAddress(needed) === 0)
                 {
                     return fail(RPC_X_NULL_REF_POINTER);
                 }
@@ -1198,7 +1200,7 @@ export function createEventLogFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, , count])=>{
-                if ((count >>> 0) === 0)
+                if (wholeAddress(count) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1215,7 +1217,7 @@ export function createEventLogFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([guid, , , out])=>{
-                if ((guid >>> 0) === 0 || (out >>> 0) === 0)
+                if (wholeAddress(guid) === 0 || wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -1250,7 +1252,7 @@ export function createEventLogFunctions(host){
                 {
                     return ERROR_INVALID_HANDLE;
                 }
-                return (text >>> 0) === 0 ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
+                return wholeAddress(text) === 0 ? ERROR_INVALID_PARAMETER : ERROR_SUCCESS;
             },
         },
     };

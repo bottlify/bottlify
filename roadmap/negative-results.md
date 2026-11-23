@@ -192,6 +192,7 @@ vcall 0.9995).
 | 2026-10-31 | a Direct3D 10 dynamic buffer given 32 MiB of storages instead of 4 MiB | 3.59 / 6.18 vs 4.10 / 4.97 fps, 1 run | holds | the 32-storage count cap raised |
 | 2026-11-06 | less garbage a draw in the graphics worker (Direct3D 8/9 `render.js`) | 185.6 vs 196.6 fps, 1 run | holds | - |
 | 2026-11-06 | a batch's buffer sent back and written on again | 259.0 vs 251.1 fps median, 5 runs, p 0.15 | holds (kept for memory) | - |
+| 2026-11-23 | a draw's constants picked by `instance_index` from one storage binding a pass, not a dynamic offset a draw | 3000 draws: 10.1-10.2 vs 9.4-9.6 ms GPU a frame (6000: 18.7-19.1 vs 18.5-18.9), synthetic pass, 40 frames each, Parallels D3D12 adapter; neither 20-48 passes nor 3 MB of constants a frame moved it | holds: ~2.5 us a draw is the adapter's floor | a real GPU shows a per-draw bind cost |
 
 ## Storage and memory
 

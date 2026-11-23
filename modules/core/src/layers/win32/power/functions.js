@@ -118,7 +118,7 @@ export function createPowrprofFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -157,12 +157,12 @@ export function createPowrprofFunctions(host){
             argBytes: 28,
             /** @param {number[]} args */
             handler: ([, , , access, index, buffer, size])=>{
-                if ((size >>> 0) === 0 || ![ACCESS_SCHEME, ACCESS_SUBGROUP,
-                    ACCESS_INDIVIDUAL_SETTING].includes(access >>> 0))
+                if (wholeAddress(size) === 0 || ![ACCESS_SCHEME, ACCESS_SUBGROUP,
+                    ACCESS_INDIVIDUAL_SETTING].includes(wholeAddress(access)))
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                if ((access >>> 0) !== ACCESS_SCHEME || (index >>> 0) !== 0)
+                if (wholeAddress(access) !== ACCESS_SCHEME || (index >>> 0) !== 0)
                 {
                     return ERROR_NO_MORE_ITEMS;
                 }
@@ -182,12 +182,12 @@ export function createPowrprofFunctions(host){
             argBytes: 24,
             /** @param {number[]} args */
             handler: ([, scheme, subgroup, setting, buffer, size])=>{
-                if ((size >>> 0) === 0 || (scheme >>> 0) === 0)
+                if (wholeAddress(size) === 0 || wholeAddress(scheme) === 0)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const named = host.readMemory?.(scheme >>> 0, 16);
-                if ((subgroup >>> 0) !== 0 || (setting >>> 0) !== 0 || !named
+                const named = host.readMemory?.(wholeAddress(scheme), 16);
+                if (wholeAddress(subgroup) !== 0 || wholeAddress(setting) !== 0 || !named
                     || !named.every((byte, at)=>byte === BALANCED[at]))
                 {
                     return ERROR_FILE_NOT_FOUND;
@@ -206,7 +206,7 @@ export function createPowrprofFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([id])=>{
-                if ((id >>> 0) !== 0)
+                if (wholeAddress(id) !== 0)
                 {
                     host.writeMemory(wholeAddress(id), dword(0));
                 }
@@ -256,7 +256,7 @@ export function createPowrprofFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([, scheme])=>{
-                if ((scheme >>> 0) === 0 || !host.readMemory)
+                if (wholeAddress(scheme) === 0 || !host.readMemory)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
@@ -278,12 +278,12 @@ export function createPowrprofFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([level, , , output, outputLength])=>{
-                if ((level >>> 0) !== PROCESSOR_INFORMATION)
+                if (wholeAddress(level) !== PROCESSOR_INFORMATION)
                 {
                     return STATUS_NOT_IMPLEMENTED;
                 }
                 const size = host.processors * PROCESSOR_POWER_INFORMATION_SIZE;
-                if ((output >>> 0) === 0 || (outputLength >>> 0) < size)
+                if (wholeAddress(output) === 0 || (outputLength >>> 0) < size)
                 {
                     return STATUS_BUFFER_TOO_SMALL;
                 }
@@ -354,7 +354,8 @@ export function createPdhFunctions(host){
         PdhCollectQueryData: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([query])=>(queries.has(query >>> 0) ? PDH_NO_DATA : PDH_INVALID_HANDLE),
+            handler: ([query])=>(queries.has(wholeAddress(query)) ? PDH_NO_DATA
+                : PDH_INVALID_HANDLE),
         },
 
         /**
@@ -369,7 +370,8 @@ export function createPdhFunctions(host){
         PdhCloseQuery: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([query])=>(queries.delete(query >>> 0) ? ERROR_SUCCESS : PDH_INVALID_HANDLE),
+            handler: ([query])=>(queries.delete(wholeAddress(query)) ? ERROR_SUCCESS
+                : PDH_INVALID_HANDLE),
         },
     };
 }

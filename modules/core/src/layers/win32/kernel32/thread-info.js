@@ -515,7 +515,7 @@ export function createThreadInfoFunctions(host){
                     return 0;
                 }
                 const before = /** @type {Uint8Array} */ (answer(thread, THREAD_INFO.GROUP, handle, 0));
-                if ((previous >>> 0) !== 0 && !write(previous, before))
+                if (wholeAddress(previous) !== 0 && !write(previous, before))
                 {
                     host.setLastError?.(ERROR_NOACCESS);
                     return 0;

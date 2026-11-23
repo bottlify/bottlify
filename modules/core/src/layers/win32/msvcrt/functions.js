@@ -1027,7 +1027,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, size, count, format, list])=>{
                 const room = size >>> 0;
-                if ((buffer >>> 0) === 0 || room === 0 || (format >>> 0) === 0)
+                if (wholeAddress(buffer) === 0 || room === 0 || wholeAddress(format) === 0)
                 {
                     errno(EINVAL);
                     return -1;
@@ -1058,7 +1058,7 @@ export function createMsvcrtFunctions(host){
             sizes: [1],
             /** @param {number[]} args */
             handler: ([buffer, size, format, list])=>{
-                if ((buffer >>> 0) === 0 || (format >>> 0) === 0 || (size >>> 0) === 0)
+                if (wholeAddress(buffer) === 0 || wholeAddress(format) === 0 || (size >>> 0) === 0)
                 {
                     errno(EINVAL);
                     return -1;
@@ -1348,7 +1348,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     errno(EINVAL);
                     return EINVAL;
@@ -1407,7 +1407,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                if ((pointer >>> 0) === 0)
+                if (wholeAddress(pointer) === 0)
                 {
                     errno(EINVAL);
                     return EINVAL;
@@ -1617,8 +1617,9 @@ export function createMsvcrtFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([message])=>{
-                const lead = (message >>> 0) === 0 ? '' : host.readCString(wholeAddress(message),
-                    4096);
+                const lead =
+                    wholeAddress(message) === 0 ? '' : host.readCString(wholeAddress(message),
+                        4096);
                 const line = `${lead ? `${lead}: ` : ''}${messageOf(globals.get(errnoName()))}\n`;
                 const stderr = descriptors?.get(2);
                 if (stderr)
@@ -1649,7 +1650,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([text])=>{
-                if ((text >>> 0) === 0)
+                if (wholeAddress(text) === 0)
                 {
                     errno(EINVAL);
                     return -1;
@@ -1743,7 +1744,7 @@ export function createMsvcrtFunctions(host){
                 /** @param {number[]} args */
                 handler: ([, type, source, count, types])=>
                     /** @type {NonNullable<typeof host.stringTypes>} */ (host.stringTypes)(
-                        type >>> 0, source >>> 0, count | 0, types >>> 0),
+                        type >>> 0, wholeAddress(source), count | 0, wholeAddress(types)),
             },
         } : {},
         ...(host.fpu

@@ -1627,7 +1627,7 @@ export function createThreadingFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if (pseudo(handle) || !flagged(handle >>> 0) || (out >>> 0) === 0)
+                if (pseudo(handle) || !flagged(handle >>> 0) || wholeAddress(out) === 0)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
@@ -1920,7 +1920,7 @@ export function createThreadingFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([ids, size, needed])=>{
-                if ((needed >>> 0) === 0)
+                if (wholeAddress(needed) === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1930,7 +1930,7 @@ export function createThreadingFunctions(host){
                         .filter((/** @type {any} */ child)=>!child.completed
                             && child.exitCode === kernel.processes.STILL_ACTIVE)
                         .map((/** @type {any} */ child)=>child.id >>> 0)];
-                const count = (ids >>> 0) === 0
+                const count = wholeAddress(ids) === 0
                     ? 0 : Math.min(all.length, Math.floor((size >>> 0) / 4));
                 const bytes = new Uint8Array(count * 4);
                 const view = new DataView(bytes.buffer);

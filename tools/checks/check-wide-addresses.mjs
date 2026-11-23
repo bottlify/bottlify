@@ -558,6 +558,15 @@ export async function compare(low, high, only = null, rebuild = null){
     let last = '';
     /** @type {Difference[]} */
     const differences = [];
+    // What a handler left to fail after its call answered - a chain it started
+    // and did not await - is said of the call it came after, by the layer whose
+    // module threw it (`?at=` its base), rather than ending the run.
+    /** @type {unknown[]} */
+    const late = [];
+    const hearLate = (/** @type {unknown} */ e)=>{
+        late.push(e);
+    };
+    process.on('unhandledRejection', hearLate);
     /** @type {Set<Function>} */
     const seen = new Set();
     /** @type {Set<string>} */
@@ -627,6 +636,19 @@ export async function compare(low, high, only = null, rebuild = null){
                 const b = await outcome((theirs?.[ORIGINAL_EXPORT] ?? theirs).handler,
                     bridged(argumentsAt(shape, hi.base)));
                 const key = `${library}!${name}`;
+                const lateBy = (/** @type {number} */ base)=>late.find(e=>String(
+                    /** @type {{ stack?: unknown }} */ (e)?.stack).includes(`?at=${base}:`));
+                const lateLow = lateBy(lo.base);
+                const lateHigh = lateBy(hi.base);
+                late.length = 0;
+                if ((lateLow === undefined) !== (lateHigh === undefined))
+                {
+                    const said = (/** @type {any} */ e)=>(e === undefined ? 'nothing'
+                        : String(e?.code ?? e?.message ?? e));
+                    differences.push({ key, label, detail: `threw ${said(lateLow)} low,`
+                        + ` ${said(lateHigh)} high, after it answered` });
+                    continue;
+                }
                 if (a.threw === STAND_IN || b.threw === STAND_IN)
                 {
                     unmeasured.add(key);
@@ -660,6 +682,7 @@ export async function compare(low, high, only = null, rebuild = null){
             }
         }
     }
+    process.off('unhandledRejection', hearLate);
     return { handlers, calls, differences, unmeasured, parted, low: lo, high: hi };
 }
 

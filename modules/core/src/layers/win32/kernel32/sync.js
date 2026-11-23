@@ -861,7 +861,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                initialise(pointer >>> 0, 0);
+                initialise(wholeAddress(pointer), 0);
                 return 0;
             },
         },
@@ -875,7 +875,7 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                initialise(pointer >>> 0, 0);
+                initialise(wholeAddress(pointer), 0);
                 return 0;
             },
         },
@@ -892,7 +892,7 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, spinCount])=>{
-                initialise(pointer >>> 0, spinCount | 0);
+                initialise(wholeAddress(pointer), spinCount | 0);
                 return 1;
             },
         },
@@ -915,7 +915,7 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                initialise(pointer >>> 0, spinCount & 0x00ffffff);
+                initialise(wholeAddress(pointer), spinCount & 0x00ffffff);
                 if (((flags >>> 0) & CS_FORCE_DEBUG_INFO) !== 0)
                 {
                     // RTL_CRITICAL_SECTION_DEBUG: 0x20 bytes, 0x30 with 64-bit pointers.
@@ -947,7 +947,7 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([pointer, spinCount])=>{
-                const at = (pointer >>> 0) + cs.SPIN_COUNT;
+                const at = wholeAddress(pointer) + cs.SPIN_COUNT;
                 const bytes = host.readMemory(at, 4);
                 const previous = (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
                 writeI32(at, spinCount | 0);
@@ -1299,7 +1299,7 @@ export function createSyncFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, out])=>{
-                if ((out >>> 0) === 0)
+                if (wholeAddress(out) === 0)
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
@@ -1367,7 +1367,7 @@ export function createSyncFunctions(host){
                 // The flags it asks for travel in the structure, and the rest comes back.
                 const child = onChildThread(handle, 'GetThreadContext',
                     [{ inout: host.readMemory(wholeAddress(out),
-                        CONTEXT_BYTES).slice() }], [out >>> 0]);
+                        CONTEXT_BYTES).slice() }], [wholeAddress(out)]);
                 if (child !== null)
                 {
                     return child;
@@ -1399,10 +1399,10 @@ export function createSyncFunctions(host){
                 const answer = ()=>{
                     if (handleSize === 8 && !own)
                     {
-                        writeLongContext(out >>> 0, thread);
+                        writeLongContext(wholeAddress(out), thread);
                         return 1;
                     }
-                    writeThreadContext(out >>> 0,
+                    writeThreadContext(wholeAddress(out),
                         own ? host.registers?.() ?? {} : stoppedRegisters(thread), thread,
                         own ? undefined : thread.context);
                     return 1;
