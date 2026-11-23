@@ -39,6 +39,8 @@ import { guestFault, unterminated } from './faults.js';
  *     The RAM in place, byte 0 at address 0; stale once empty or detached.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  * @property {(address: number, length: number) => void} [markWritten]
+ * @property {(address: number, length: number) => void} [wrote]  bytes already in the
+ *     RAM taken as written here: the translator drops what it made of them, nothing is copied
  *     Bytes another thread wrote in place: a watch of their pages finds them
  *     written. Absent where the engine watches no writes.
  * @property {(address: number, length: number) =>
@@ -485,7 +487,14 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             {
                 charge(length);
             }
-            if (!raw.writeData || regions.executable(address))
+            // Told, never written again: a copy read and written back would
+            // undo another thread's store between the two, a guest's swap of
+            // the same word on another executor among them.
+            if (raw.wrote && regions.executable(address))
+            {
+                raw.wrote(address, length);
+            }
+            else if (!raw.writeData || regions.executable(address))
             {
                 raw.writePhysical(address, raw.readPhysical(address, length).slice());
             }

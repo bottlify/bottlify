@@ -617,6 +617,22 @@ test('a host write into a translated page invalidates the region', async()=>{
     assert.equal(runtime.holdsPage(0x11000 >>> 12), false, 'the host write dropped it');
 });
 
+test('bytes taken as written drop the region over them and are not written again', async()=>{
+    // A host swap, or a worker's write into the shared RAM, is in the memory
+    // already: told, the region goes; the bytes, which another executor may
+    // have stored to since, are left as they are.
+    const h = host();
+    const runtime = h.cork();
+    h.writePhysical(0x11000, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xf4]));
+    runtime.noteHot(0x11000);
+    assert.equal(await runtime.translatePending(), 1, 'the region was formed');
+    const ram = /** @type {Uint8Array} */ (h.ramView());
+    ram[0x11001] = 2;
+    h.wrote(0x11000, 4);
+    assert.equal(runtime.holdsPage(0x11000 >>> 12), false, 'the write it was told of dropped it');
+    assert.deepEqual([...h.readPhysical(0x11000, 6)], [0xb8, 2, 0, 0, 0, 0xf4], 'nothing copied');
+});
+
 test('code the host rewrites between two calls of it runs as written; a host write beside it'
     + ' leaves it translated', async()=>{
     const h = host();
