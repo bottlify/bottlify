@@ -1523,6 +1523,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
          */
         async exportSeed({ select } = {}){
             await ready();
+            // A put still under way is a record of the run the seed is of: a
+            // runtime's last module, put as it was published, went missing
+            // from a seed taken at once, its regions then found no module.
+            await Promise.all([...puts]);
             await appending;
             await flushRecords();
             const whole = access === null

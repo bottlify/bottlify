@@ -4850,11 +4850,13 @@ export async function createApp(options){
                     system.volume.pageFile?.close();
                 }
                 // The run's store outlives each machine it was handed to, and
-                // goes with the last of them.
+                // goes with the last of them; the run is gone once its last
+                // records are written and the file let go of.
                 if (runStoreSpec === 'local')
                 {
-                    translationStore?.close?.();
+                    return translationStore?.close?.();
                 }
+                return undefined;
             })
             .finally(()=>{
                 if (!options.spareMemories)

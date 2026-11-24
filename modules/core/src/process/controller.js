@@ -1462,10 +1462,12 @@ export function processController(deps){
             }
             breathe.close();
             jsSampler?.stop();
-            return core.dispose().then(()=>{
+            return core.dispose().then(async()=>{
+                // The machine is gone once its store's last records are
+                // written and the file let go of.
                 if (ownsTranslationStore)
                 {
-                    translationStore?.close?.();
+                    await translationStore?.close?.();
                 }
                 spare.value = memoryLeft && typeof guestEnd === 'number'
                     ? { memory: memoryLeft, guestEnd, heapFrom: HEAP_BASE,
