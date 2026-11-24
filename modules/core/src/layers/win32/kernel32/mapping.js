@@ -255,6 +255,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  *              close: (handle: number) => any }} handles
  * @property {{ read: (node: any, offset: number, length: number) =>
  *                  Uint8Array | Promise<Uint8Array>,
+ *              readInto: (node: any, offset: number, length: number,
+ *                  put: (bytes: Uint8Array, at: number) => void) => number | Promise<number>,
  *              write: (node: any, offset: number, bytes: Uint8Array) => number,
  *              size?: (node: any) => number,
  *              retain: (node: any) => void,
@@ -1080,19 +1082,22 @@ export function createMappingFunctions(host){
                 const writable = (mapping.node ? mapping.writesFile === true : mapping.writable)
                     && ((access >>> 0) & (FILE_MAP_WRITE | FILE_MAP_ALL_ACCESS)) !== 0;
                 const metrics = host.metrics;
-                /** @param {Uint8Array} bytes */
-                const deliver = bytes=>{
+                /** What the view starts as, `at` bytes into it. @param {Uint8Array} bytes @param {number} at */
+                const put = (bytes, at)=>{
+                    if (bytes.length > 0)
+                    {
+                        host.writeMemory(address + at, bytes);
+                    }
+                };
+                /** The view made, its first `filled` bytes put. @param {number} filled */
+                const deliver = filled=>{
                     // Memory freed by an earlier view or block is handed out
                     // again as it was left: a page-file section's fresh view
                     // read an unmapped image's bytes, and the CLR took them for
                     // a code-page table another process had already filled.
-                    if (bytes.length < wanted)
+                    if (filled < wanted)
                     {
-                        host.zero?.(address + bytes.length, wanted - bytes.length);
-                    }
-                    if (bytes.length > 0)
-                    {
-                        host.writeMemory(address, bytes);
+                        host.zero?.(address + filled, wanted - filled);
                     }
                     /** @type {any} */
                     const view = { mapping, offset, length: wanted, writable };
@@ -1141,8 +1146,10 @@ export function createMappingFunctions(host){
                 // owner says it stands.
                 if (!mapping.node)
                 {
-                    return deliver(mapping.contents?.().subarray(offset, offset + wanted)
-                        ?? new Uint8Array(0));
+                    const bytes = mapping.contents?.().subarray(offset, offset + wanted)
+                        ?? new Uint8Array(0);
+                    put(bytes, 0);
+                    return deliver(bytes.length);
                 }
                 if (mapping.image)
                 {
@@ -1150,25 +1157,29 @@ export function createMappingFunctions(host){
                     // The image moved to where its view starts.
                     const image = imageViewAt(mapping.image, address - offset);
                     host.files.retain(mapping.node);
-                    return deliver(image.subarray(offset, offset + wanted));
+                    const bytes = image.subarray(offset, offset + wanted);
+                    put(bytes, 0);
+                    return deliver(bytes.length);
                 }
                 // The view holds the file from here to its unmap, so closing the
                 // mapping and the file handle first leaves it a file to be
                 // written back to.
                 host.files.retain(mapping.node);
-                let bytes;
+                let reading;
                 try
                 {
-                    bytes = host.files.read(mapping.node, offset, wanted);
+                    // Into the view where the bytes lie: a range the run's
+                    // cache keeps is copied once, from the cache.
+                    reading = host.files.readInto(mapping.node, offset, wanted, put);
                 }
                 catch (e){
                     host.files.close(mapping.node);
                     host.release(address);
                     throw e;
                 }
-                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                if (typeof (/** @type {any} */ (reading))?.then !== 'function')
                 {
-                    return deliver(/** @type {Uint8Array} */ (bytes));
+                    return deliver(/** @type {number} */ (reading));
                 }
                 // The bytes are not here yet. The caller is parked until they
                 // are, the way a read parks it: a program that maps an archive
@@ -1179,7 +1190,7 @@ export function createMappingFunctions(host){
                 {
                     metrics.waited++;
                 }
-                const arriving = /** @type {Promise<Uint8Array>} */ (bytes);
+                const arriving = /** @type {Promise<number>} */ (reading);
                 return /** @type {any} */ (arriving.then(deliver, reason=>{
                     const why = /** @type {any} */ (reason)?.message ?? String(reason);
                     host.divergence?.('MapViewOfFile',

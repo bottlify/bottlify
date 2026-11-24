@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createIoCompletionPorts } from './iocp.js';
+import { readIntoBy } from './vfs.js';
 import { createFileFunctions } from './files.js';
 import { createNamedObjects } from './named-objects.js';
 
@@ -499,6 +500,11 @@ function fileSetup(behaviour = {}){
     /** @type {Map<string, Uint8Array>} */
     const contents = new Map([['C:\\GAME\\DATA', Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8])]]);
 
+    /** @param {{ path: string }} node @param {number} offset @param {number} length */
+    const readData = (node, offset, length)=>/** @type {Uint8Array | Promise<Uint8Array>} */ (
+        behaviour.read
+            ? behaviour.read(offset, length)
+            : /** @type {any} */ (contents.get(node.path)).slice(offset, offset + length));
     const files = {
         /** @param {string} path */
         stat: path=>contents.has(path)
@@ -516,10 +522,18 @@ function fileSetup(behaviour = {}){
             }
             return { path };
         },
-        /** @param {{ path: string }} node @param {number} offset @param {number} length */
-        read: (node, offset, length)=>behaviour.read
-            ? behaviour.read(offset, length)
-            : /** @type {any} */ (contents.get(node.path)).slice(offset, offset + length),
+        /** @type {(node: { path: string }, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} */
+        read: readData,
+        /**
+         * Through `read` as it is when called: a test may put another in its place.
+         *
+         * @param {{ path: string }} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        readInto(node, offset, length, put){
+            return readIntoBy(this.read)(node, offset, length, put);
+        },
         /** @param {{ path: string }} node @param {number} offset @param {Uint8Array} bytes */
         write(node, offset, bytes){
             const held = /** @type {any} */ (contents.get(node.path));

@@ -4439,6 +4439,12 @@ export function createWin32Module(){
                              * @param {any} node @param {number} offset @param {number} length
                              */
                             read: (node, offset, length)=>volume.read(node, offset, length),
+                            /**
+                             * @param {any} node @param {number} offset @param {number} length
+                             * @param {(bytes: Uint8Array, at: number) => void} put
+                             */
+                            readInto: (node, offset, length, put)=>
+                                volume.readInto(node, offset, length, put),
                             /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                             write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                             /** @param {any} node */

@@ -11,6 +11,7 @@ import { imageKind } from '../../loader/internal/pe.js';
 import { imageWriteCopy, protectionWithin, sectionRights, viewProtection }
     from './view-rights.js';
 import { createNamedObjects } from './named-objects.js';
+import { readIntoBy } from './vfs.js';
 import { buildExe } from '../../../../../../tools/fixtures/make-pe.mjs';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -94,7 +95,17 @@ function setup(names = {}, extra = {}){
             errorsFor.push([thread, code]);
         },
         files: {
-            /** @param {any} node @param {number} offset @param {number} length */
+            /**
+             * Through `read` as it is when called: a test may put another in its place.
+             *
+             * @param {any} node @param {number} offset @param {number} length
+             * @param {(bytes: Uint8Array, at: number) => void} put
+             * @returns {number | Promise<number>}
+             */
+            readInto(node, offset, length, put){
+                return readIntoBy(this.read)(node, offset, length, put);
+            },
+            /** @type {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} */
             read: (node, offset, length)=>{
                 const block = node.data.slice(offset, offset + length);
                 if (node.arrives)

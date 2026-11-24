@@ -95,6 +95,32 @@ export const FILE_ACTION_RENAMED_NEW_NAME = 5;
  */
 
 /**
+ * `then` on a value that may be a promise: a read that had its blocks
+ * answers at once, one that fetches answers later.
+ *
+ * @template T, U
+ * @param {T | Promise<T>} value @param {(arrived: T) => U} then
+ * @returns {U | Promise<U>}
+ */
+const settled = (value, then)=>(typeof (/** @type {any} */ (value))?.then === 'function'
+    ? /** @type {Promise<T>} */ (value).then(then)
+    : then(/** @type {T} */ (value)));
+
+/**
+ * `readInto` for a volume that keeps nothing of its own: its `read`, the
+ * bytes handed on whole.
+ *
+ * @param {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
+ * @returns {(node: any, offset: number, length: number,
+ *     put: (bytes: Uint8Array, at: number) => void) => number | Promise<number>}
+ */
+export const readIntoBy = read=>(node, offset, length, put)=>
+    settled(read(node, offset, length), bytes=>{
+        put(bytes, 0);
+        return bytes.length;
+    });
+
+/**
  * @param {any} fs  The filesystem layer's API.
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
@@ -368,17 +394,19 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
     /** @param {string} key @param {number} part */
     const partOf = (key, part)=>`${key}#${part}`;
     /**
-     * A range kept by any process of the run, read out of the cache into bytes
-     * of the caller's own; null where any part of it is not there.
+     * A range kept by any process of the run, handed to `put` part by part as
+     * the cache holds it, read in place: true where every part was there. A
+     * part missing after others were handed leaves those handed; the caller
+     * reads the range afresh and hands the same bytes again.
      *
      * @param {string} key @param {number} length
+     * @param {(bytes: Uint8Array, at: number) => void} put
      */
-    const keptRead = (key, length)=>{
+    const keptInto = (key, length, put)=>{
         if (kept.look(partOf(key, 0)) === null)
         {
-            return null;
+            return false;
         }
-        const out = new Uint8Array(length);
         for (let at = 0, part = 0; at < length; at += KEPT_PART_BYTES, part++)
         {
             const want = Math.min(KEPT_PART_BYTES, length - at);
@@ -387,15 +415,15 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
                 {
                     return false;
                 }
-                out.set(body, at);
+                put(body, at);
                 return true;
             });
             if (whole !== true)
             {
-                return null;
+                return false;
             }
         }
-        return out;
+        return true;
     };
     /**
      * Keeps a read when its range was read before: a copy of it, in parts, in
@@ -757,28 +785,51 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
          * fetches them, and the guest thread is parked in the meantime by the
          * same machinery that parks it on any other call that cannot answer yet.
          *
-         * The bytes are the caller's own, kept ones a copy of what the run's
-         * cache holds: whoever reads may write into them or keep them.
+         * The bytes are the caller's own: whoever reads may write into them or
+         * keep them. A caller that only copies them on, into guest memory
+         * above all, reads with `readInto` and is handed what the run's cache
+         * holds where it lies.
          *
          * @param {any} node @param {number} offset @param {number} length
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
         read(node, offset, length){
             const key = keptKey(node, offset, length);
-            const held = key === null ? null : keptRead(key, length);
-            if (held !== null)
+            if (key !== null)
             {
-                return held;
+                const out = new Uint8Array(length);
+                if (keptInto(key, length, (bytes, at)=>out.set(bytes, at)))
+                {
+                    return out;
+                }
             }
-            const bytes = this.readFresh(node, offset, length);
-            /** @param {Uint8Array} arrived */
-            const keeping = arrived=>{
+            return settled(this.readFresh(node, offset, length), arrived=>{
                 keep(key, arrived);
                 return arrived;
-            };
-            return typeof (/** @type {any} */ (bytes))?.then === 'function'
-                ? /** @type {Promise<Uint8Array>} */ (bytes).then(keeping)
-                : keeping(/** @type {Uint8Array} */ (bytes));
+            });
+        },
+
+        /**
+         * read, the bytes handed to `put` (with where in the range they go)
+         * rather than answered: what the run's cache keeps is read in place,
+         * valid only inside `put`, so its one copy is the caller's own (into
+         * guest memory). Answers how many bytes the range had.
+         *
+         * @param {any} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        readInto(node, offset, length, put){
+            const key = keptKey(node, offset, length);
+            if (key !== null && keptInto(key, length, put))
+            {
+                return length;
+            }
+            return settled(this.readFresh(node, offset, length), arrived=>{
+                keep(key, arrived);
+                put(arrived, 0);
+                return arrived.length;
+            });
         },
 
         /**

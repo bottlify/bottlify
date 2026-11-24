@@ -571,6 +571,11 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  *     Uint8Array | Promise<Uint8Array>} read
  *           Short at the end of the file; empty past it, which is not an error.
  *           A promise when the bytes are not resident yet -- see ReadFile.
+ * @property {(node: any, offset: number, length: number,
+ *     put: (bytes: Uint8Array, at: number) => void) => number | Promise<number>} readInto
+ *           read, the bytes handed to `put` with where in the range they go, valid
+ *           only inside it: what a caller copies on (into guest memory) is read
+ *           where it lies. The count the range had, or a promise of it.
  * @property {(node: any, offset: number, bytes: Uint8Array) => number} write
  * @property {(node: any, offset: number, bytes: Uint8Array)
  *     => number | Promise<number>} [writeOrFetch]
@@ -878,6 +883,20 @@ export function withSystemLibraries(real, libraries, where = {}){
             const image = opened.get(node)?.image;
             return image ? image.slice(offset, offset + length)
                 : real.read(node, offset, length);
+        },
+        /**
+         * @param {any} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         */
+        readInto: (node, offset, length, put)=>{
+            const image = opened.get(node)?.image;
+            if (!image)
+            {
+                return real.readInto(node, offset, length, put);
+            }
+            const bytes = image.subarray(offset, offset + length);
+            put(bytes, 0);
+            return bytes.length;
         },
         /** @param {any} node */
         retain: node=>{
@@ -4201,21 +4220,16 @@ export function createFileFunctions(host){
                         (/** @type {number} */ done)=>finish(done, STATUS_SUCCESS),
                         ()=>STATUS_IO_DEVICE_ERROR);
             }
-            /** @param {Uint8Array} bytes */
-            const delivered = bytes=>{
-                if (bytes.length > 0)
-                {
-                    host.writeMemory(wholeAddress(buffer), bytes);
-                }
+            /** @param {number} read */
+            const delivered = read=>
                 // Nothing left to read is an answer of its own here, where
                 // ReadFile answers TRUE with nothing read.
-                return finish(bytes.length,
-                    bytes.length === 0 && count > 0 ? STATUS_END_OF_FILE : STATUS_SUCCESS);
-            };
-            const bytes = files.read(file.node, at, count);
-            return typeof (/** @type {any} */ (bytes))?.then !== 'function'
-                ? delivered(/** @type {any} */ (bytes))
-                : /** @type {any} */ (bytes).then(delivered, ()=>STATUS_IO_DEVICE_ERROR);
+                finish(read, read === 0 && count > 0 ? STATUS_END_OF_FILE : STATUS_SUCCESS);
+            const reading = files.readInto(file.node, at, count,
+                (piece, into)=>host.writeMemory(wholeAddress(buffer) + into, piece));
+            return typeof (/** @type {any} */ (reading))?.then !== 'function'
+                ? delivered(/** @type {any} */ (reading))
+                : /** @type {any} */ (reading).then(delivered, ()=>STATUS_IO_DEVICE_ERROR);
         },
     });
 
@@ -5611,37 +5625,34 @@ export function createFileFunctions(host){
                 const at = pointer !== 0 && host.ports
                     ? host.ports.offsetOf(pointer)
                     : file.position;
-                /** @param {Uint8Array} bytes */
-                const deliver = bytes=>{
-                    if (bytes.length > 0)
-                    {
-                        host.writeMemory(wholeAddress(buffer), bytes);
-                    }
+                /** @param {number} count */
+                const deliver = count=>{
                     // A synchronous handle's pointer moves past what was read,
                     // even when an OVERLAPPED said where; an overlapped one's
                     // does not.
                     if (pointer === 0 || !file.overlapped)
                     {
-                        file.position = at + bytes.length;
+                        file.position = at + count;
                     }
                     // Written even when nothing was read: a program that checks
                     // it is exactly the one that has reached the end of a file.
-                    writeDwordIf(wholeAddress(read), bytes.length);
-                    return pointer !== 0 ? finishOverlapped(handle, file, bytes.length, pointer,
-                        bytes.length === 0 && (length >>> 0) !== 0) : 1;
+                    writeDwordIf(wholeAddress(read), count);
+                    return pointer !== 0 ? finishOverlapped(handle, file, count, pointer,
+                        count === 0 && (length >>> 0) !== 0) : 1;
                 };
 
-                const bytes = files.read(file.node, at, length >>> 0);
+                const reading = files.readInto(file.node, at, length >>> 0,
+                    (piece, offset)=>host.writeMemory(wholeAddress(buffer) + offset, piece));
                 // A volume backed by a bundle answers with a promise when the
                 // bytes are not here yet. The guest cannot wait, so the bridge
                 // parks it -- the same way it does for any call that has no
                 // answer at the moment it is asked.
-                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                if (typeof (/** @type {any} */ (reading))?.then !== 'function')
                 {
-                    return deliver(/** @type {any} */ (bytes));
+                    return deliver(/** @type {any} */ (reading));
                 }
                 const owner = host.currentThread?.() ?? null;
-                return /** @type {any} */ (bytes).then(deliver, (/** @type {any} */ e)=>{
+                return /** @type {any} */ (reading).then(deliver, (/** @type {any} */ e)=>{
                     // The program gets no bytes and goes on: a loss, said.
                     host.divergence?.('ReadFile', `${length >>> 0} bytes of ${file.path} at ${at}`
                         + ` not read: ${e?.message ?? e}`, 'loss');
@@ -5857,9 +5868,9 @@ export function createFileFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const thread = host.currentThread?.() ?? null;
-                /** @param {Uint8Array} bytes */
-                const deliver = bytes=>{
-                    if (bytes.length === 0 && (length >>> 0) > 0)
+                /** @param {number} read */
+                const deliver = read=>{
+                    if (read === 0 && (length >>> 0) > 0)
                     {
                         // On the thread that asked, which after a wait for
                         // the bytes is no longer the one running.
@@ -5873,19 +5884,16 @@ export function createFileFunctions(host){
                         }
                         return 0;
                     }
-                    if (bytes.length > 0)
-                    {
-                        host.writeMemory(wholeAddress(buffer), bytes);
-                    }
-                    return completeWith(thread, pointer, routine, bytes.length);
+                    return completeWith(thread, pointer, routine, read);
                 };
-                const bytes = files.read(file.node, overlappedPosition(readDword, layout, pointer),
-                    length >>> 0);
-                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                const reading = files.readInto(file.node,
+                    overlappedPosition(readDword, layout, pointer), length >>> 0,
+                    (piece, offset)=>host.writeMemory(wholeAddress(buffer) + offset, piece));
+                if (typeof (/** @type {any} */ (reading))?.then !== 'function')
                 {
-                    return deliver(/** @type {any} */ (bytes));
+                    return deliver(/** @type {any} */ (reading));
                 }
-                return /** @type {any} */ (bytes).then(deliver, ()=>{
+                return /** @type {any} */ (reading).then(deliver, ()=>{
                     host.setLastErrorFor?.(thread, ERROR_IO_DEVICE);
                     return 0;
                 });
@@ -6479,19 +6487,19 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
                 }
-                const bytes = files.read(file.node, file.position, count >>> 0);
+                const reading = files.readInto(file.node, file.position, count >>> 0,
+                    (piece, offset)=>host.writeMemory(wholeAddress(buffer) + offset, piece));
                 // A bundle-backed volume can answer with a promise. This family
                 // has no overlapped form and no way to say "later", so the
                 // caller is parked exactly as the modern spelling parks it.
-                const deliver = (/** @type {Uint8Array} */ data)=>{
-                    host.writeMemory(wholeAddress(buffer), data);
-                    file.position += data.length;
+                const deliver = (/** @type {number} */ read)=>{
+                    file.position += read;
                     host.setLastError(ERROR_SUCCESS);
-                    return data.length;
+                    return read;
                 };
-                return typeof (/** @type {any} */ (bytes))?.then === 'function'
-                    ? /** @type {any} */ (bytes).then(deliver)
-                    : deliver(/** @type {any} */ (bytes));
+                return typeof (/** @type {any} */ (reading))?.then === 'function'
+                    ? /** @type {any} */ (reading).then(deliver)
+                    : deliver(/** @type {any} */ (reading));
             },
         },
 

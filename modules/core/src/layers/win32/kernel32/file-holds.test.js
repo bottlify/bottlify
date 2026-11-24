@@ -127,6 +127,11 @@ async function setup(){
         files: {
             /** @param {any} node @param {number} offset @param {number} length */
             read: (node, offset, length)=>volume.read(node, offset, length),
+            /**
+             * @param {any} node @param {number} offset @param {number} length
+             * @param {(bytes: Uint8Array, at: number) => void} put
+             */
+            readInto: (node, offset, length, put)=>volume.readInto(node, offset, length, put),
             /** @param {any} node @param {number} offset @param {Uint8Array} data */
             write: (node, offset, data)=>volume.write(node, offset, data),
             /** @param {any} node */

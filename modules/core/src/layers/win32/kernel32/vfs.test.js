@@ -765,6 +765,36 @@ test('a range larger than a part is kept in parts and read back whole', async()=
     vol.close(node);
 });
 
+test('readInto hands a kept range where the cache holds it, no copy between', async()=>{
+    // ReadFile copies a read into guest memory: a kept range read into bytes
+    // of its own first was a second copy of every body, made and let go.
+    const size = KEPT_PART_BYTES + 4097;
+    const cache = await runCache();
+    const byte = (/** @type {number} */ at)=>(at * 7 + 3) & 255;
+    const { vol, node, counted } = await countedVolume(size, cache.space(), byte);
+    const into = ()=>{
+        const out = new Uint8Array(size);
+        /** @type {boolean[]} */
+        const shared = [];
+        /** @param {Uint8Array} bytes @param {number} at */
+        const put = (bytes, at)=>{
+            shared.push(bytes.buffer instanceof SharedArrayBuffer);
+            out.set(bytes, at);
+        };
+        const count = vol.readInto(node, 0, size, put);
+        return { count, out, shared };
+    };
+    const fresh = into();
+    assert.deepEqual(fresh.shared, [false], 'read fresh: the volume\'s bytes, whole');
+    into();
+    const kept = into();
+    assert.equal(counted.reads, 2, 'the third read was the kept one');
+    assert.equal(kept.count, size);
+    assert.deepEqual(kept.shared, [true, true], 'each part where the cache holds it');
+    assert.ok(kept.out.every((value, at)=>value === byte(at)), 'every byte where it was');
+    vol.close(node);
+});
+
 test('a process of the run reads at once the range another process kept', async()=>{
     // Each process has a volume of its own; the cache is the run's. An engine's
     // child mapping the executable its parent mapped twice reads no block.

@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProfileFunctions } from './profile.js';
 import { decodeAnsi } from './locale.js';
+import { readIntoBy } from './vfs.js';
 
 /** Addresses the fixtures use; nothing about them matters but that they differ. */
 const SECTION = 0x100;
@@ -107,6 +108,9 @@ function fakeFiles(){
         read(node, offset, length){
             return /** @type {Uint8Array} */ (nodes.get(node.path)).slice(offset, offset + length);
         },
+        /** @param {{ path: string }} node @param {number} offset @param {number} length */
+        readInto: readIntoBy((node, offset, length)=>
+            /** @type {Uint8Array} */ (nodes.get(node.path)).slice(offset, offset + length)),
         /** @param {{ path: string }} node @param {number} offset @param {Uint8Array} bytes */
         write(node, offset, bytes){
             const grown = new Uint8Array(offset + bytes.length);

@@ -11,6 +11,7 @@ import { createFileFunctions, withSystemLibraries, WIN32_FIND_DATAA } from './fi
 import { HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 import { decodeAnsi } from './locale.js';
 import { systemProgramAt, systemProgramImage } from '../programs/table.js';
+import { readIntoBy } from './vfs.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -164,6 +165,12 @@ function fakeFiles(){
         return new RegExp(`^${expression}$`, 'i');
     };
 
+    /** @param {{ path: string }} node @param {number} offset @param {number} length */
+    const readData = (node, offset, length)=>{
+        const data = /** @type {any} */ (nodes.get(node.path)).data;
+        return /** @type {Uint8Array} */ (data.slice(Math.min(offset, data.length),
+            Math.min(offset + length, data.length)));
+    };
     const files = {
         nodes,
         put,
@@ -217,11 +224,17 @@ function fakeFiles(){
             live.add(node);
             return node;
         },
-        /** @param {{ path: string }} node @param {number} offset @param {number} length */
-        read(node, offset, length){
-            const data = /** @type {any} */ (nodes.get(node.path)).data;
-            return data.slice(Math.min(offset, data.length),
-                Math.min(offset + length, data.length));
+        /** @type {(node: { path: string }, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} */
+        read: readData,
+        /**
+         * Through `read` as it is when called: a test may put another in its place.
+         *
+         * @param {{ path: string }} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} into
+         * @returns {number | Promise<number>}
+         */
+        readInto(node, offset, length, into){
+            return readIntoBy(this.read)(node, offset, length, into);
         },
         /** @param {{ path: string }} node @param {number} offset @param {Uint8Array} bytes */
         write(node, offset, bytes){
