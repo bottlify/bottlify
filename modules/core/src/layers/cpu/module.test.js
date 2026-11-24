@@ -12,7 +12,7 @@ import { readTable } from '../log/internal/table.js';
 
 test('the cpu registers its counters with the log layer and samples them once a frame',
     async()=>{
-        const metrics = createMetrics({ shared: false });
+        const metrics = createMetrics();
         await cpuModule.create({}, /** @type {any} */ ({
             requireApi: ()=>({ metrics, intern: ()=>-1 }),
             provide: ()=>{},

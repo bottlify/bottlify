@@ -112,10 +112,6 @@ event, an error. Neither stops the program.
 
 ## Sound
 
-- Without `SharedArrayBuffer` (the `compatible` mode) sound is mixed on the engine's thread and
-  posted to the worklet. A DirectSound buffer is then read out on the guest's clock rather than by
-  the device, and what piles up while the device runs short stays queued: the sound can lag the
-  picture by up to the ring's depth, a third of a second.
 - 64 voices play at once.
 - DirectSound 3D keeps every parameter but does not position the sound: a 3D buffer plays as with
   3D processing off.

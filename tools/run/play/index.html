@@ -109,11 +109,9 @@ async function play(){
     const manifest = await (await fetch(`${base}/manifest.json`)).json();
     const executable = new Uint8Array(await (await fetch(`${base}/entry`)).arrayBuffer());
 
-    // Sound: the worklet mixes from shared memory on an isolated page, and
-    // from what the engine posts down a channel on any other.
+    // Sound: the worklet mixes from the engine's shared track table.
     const audio = new AudioContext();
     await audio.audioWorklet.addModule('/bottlify/worklet.js');
-    const sound = crossOriginIsolated ? null : new MessageChannel();
 
     // Where the bottle is mounted on C: -- where its installation put it
     // (`root`), or C:\App for a bottle packed from a directory -- and the
@@ -134,18 +132,13 @@ async function play(){
         ...cores ? { cpu: { cores } } : {},
         ...corkConfig ? { cork: { config: corkConfig } } : {},
         ...drive ? {} : { driveGuestCalls: false },
-        audio: { drained: true, sampleRate: audio.sampleRate,
-            ...(sound ? { port: sound.port2 } : {}) },
+        audio: { drained: true, sampleRate: audio.sampleRate },
     });
     const { channels } = app.audio.format();
     const node = new AudioWorkletNode(audio, 'bottlify-output', {
         outputChannelCount: [channels],
-        processorOptions: sound ? { channels } : { table: app.audio.memory().table, channels },
+        processorOptions: { table: app.audio.memory().table, channels },
     });
-    if (sound)
-    {
-        node.port.postMessage({ type: 'feed', port: sound.port1 }, [sound.port1]);
-    }
     node.connect(audio.destination);
 
     app.input.attach(canvas);

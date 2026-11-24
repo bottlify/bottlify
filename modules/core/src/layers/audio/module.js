@@ -144,34 +144,19 @@ export function createAudioModule(){
             // DirectSound buffers are read out. Whoever drives the machine reaches
             // the mixer directly, so hooking this anywhere else in this module
             // would leave it never called.
-            // A process beside another on an output with no arena to lend
-            // mixes onto that one's (`borrow`), its buffers read out there.
-            const borrowed = config?.borrow?.({ fill: ()=>feedBuffers() }) ?? null;
-            const mixer = borrowed ?? createMixer({
+            const mixer = createMixer({
                 sampleRate: config?.sampleRate,
                 fill: ()=>feedBuffers(),
                 // The output a machine that replaced this program's predecessor
                 // already handed whoever reads its far end. Absent on the first
                 // process, which makes its own.
                 memory: config?.memory,
-                // Told from outside because only the assembling caller knows
-                // whether shared memory reaches a worklet on the other end: a
-                // reader without it -- the test-page harness, any page that is
-                // not cross-origin isolated -- can only read on this thread, and
-                // the engine mixer is the only backend that thread can drive.
-                shared: config?.shared ?? false,
                 // A process beside another on the same output, not in its place.
                 beside: config?.beside,
             });
             // What this process held on an output another stands on too goes
-            // with it; one that lent its output to another leaves it sounding.
-            closeOnDispose = config?.beside || borrowed ? ()=>mixer.close?.()
-                : ()=>{
-                    if (/** @type {any} */ (mixer).lent?.())
-                    {
-                        /** @type {any} */ (mixer).retire();
-                    }
-                };
+            // with it.
+            closeOnDispose = config?.beside ? ()=>mixer.close?.() : ()=>{};
             /** The sound device, when there is one: the shared backend opens voices. @type {any} */
             const output = mixer;
 
@@ -655,13 +640,11 @@ export function createAudioModule(){
                 }),
 
                 /**
-                 * Mixes ahead into the ring. Called once a scheduler turn by
-                 * whoever is driving the machine, which is the only place that
-                 * knows a turn has happened.
-                 *
-                 * @param {number} [frames]
+                 * Reads the program's buffers out into the table. Called once a
+                 * scheduler turn by whoever is driving the machine, which is the
+                 * only place that knows a turn has happened.
                  */
-                pump: frames=>mixer.pump(frames),
+                pump: ()=>mixer.pump(),
 
                 /** Whether anything is draining the ring. */
                 available: ()=>drained,

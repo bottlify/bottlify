@@ -28,7 +28,7 @@ forwards network traffic.
 | An x86 processor | cork, translating x86 to wasm | WebAssembly |
 | System DLLs | the `win32` layer: functions in JS that the program sees as real PE images | |
 | DirectDraw, Direct3D 7–11, OpenGL, Vulkan, GDI | the `graphics` layer | WebGPU |
-| DirectSound, waveOut, DirectMusic | the `audio` layer | AudioWorklet, SharedArrayBuffer where the page has it |
+| DirectSound, waveOut, DirectMusic | the `audio` layer | AudioWorklet, SharedArrayBuffer |
 | Several processors | the `cpu` layer's executors, each a worker over the program's memory | Web Workers, SharedArrayBuffer |
 | DirectInput, XInput, window messages | the `input` layer | keyboard and mouse events, Gamepad API |
 | DirectShow cinematics | the `media` layer, FFmpeg in wasm | WebAssembly |

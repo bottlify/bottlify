@@ -142,13 +142,12 @@ export function createLogModule(){
                 capacity: config?.capacity,
                 bytes: config?.bytes,
                 dictionary: config?.dictionary,
-                shared: config?.shared,
                 level: config?.level === undefined ? undefined : toLevel(config.level),
                 categories,
                 sequenceBase: config?.sequenceBase,
             });
             state.journal = journal;
-            const registry = createMetrics({ shared: config?.shared });
+            const registry = createMetrics();
             const own = registry.counters('log', ['rejected', 'unbalancedPhases']);
             // The profiler and its tables are a measurement nothing the machine
             // does reads, so a production bundle leaves them out of itself

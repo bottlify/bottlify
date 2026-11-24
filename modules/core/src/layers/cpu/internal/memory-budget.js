@@ -88,16 +88,14 @@ const KIND_INDEX = Object.freeze({ guest: 1, engine: 2, translation: 3, heaps: 4
  * A fresh budget of `bytes`, rounded down to whole pages.
  *
  * @param {number} bytes
- * @returns {SharedArrayBuffer | ArrayBuffer}
+ * @returns {SharedArrayBuffer}
  */
 export function createMemoryBudget(bytes){
     if (!(bytes > 0))
     {
         throw new Error(`cpu: a machine's memory of ${bytes} bytes`);
     }
-    const buffer = typeof SharedArrayBuffer === 'function'
-        ? new SharedArrayBuffer(WORDS * 4)
-        : new ArrayBuffer(WORDS * 4);
+    const buffer = new SharedArrayBuffer(WORDS * 4);
     const words = new Int32Array(buffer);
     words[BudgetWord.LIMIT] = Math.min(0x7fffffff, Math.floor(bytes / PAGE));
     words[BudgetWord.HOLDERS_AT] = 1;
@@ -137,29 +135,17 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
     const words = new Int32Array(buffer, 0, WORDS);
     const holderWord = (/** @type {number} */ index, /** @type {MemoryKind} */ kind)=>
         BudgetWord.HOLDERS_AT + index * BudgetWord.HOLDER_WORDS + KIND_INDEX[kind];
-    const shared = typeof SharedArrayBuffer === 'function' && buffer instanceof SharedArrayBuffer;
-    const load = (/** @type {number} */ at)=>(shared ? Atomics.load(words, at) : words[at]);
+    const load = (/** @type {number} */ at)=>Atomics.load(words, at);
     const add = (/** @type {number} */ at, /** @type {number} */ by)=>{
-        if (shared)
-        {
-            Atomics.add(words, at, by);
-        }
-        else
-        {
-            words[at] += by;
-        }
+        Atomics.add(words, at, by);
     };
     const pagesOf = (/** @type {number} */ bytes)=>Math.ceil(Math.max(0, bytes) / PAGE);
     const notePeak = (/** @type {number} */ used)=>{
         for (;;)
         {
             const peak = load(BudgetWord.PEAK);
-            if (used <= peak || !shared)
+            if (used <= peak)
             {
-                if (!shared && used > peak)
-                {
-                    words[BudgetWord.PEAK] = used;
-                }
                 return;
             }
             if (Atomics.compareExchange(words, BudgetWord.PEAK, peak, used) === peak)
@@ -187,14 +173,6 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
                     add(BudgetWord.REFUSED, 1);
                     return false;
                 }
-                if (!shared)
-                {
-                    words[BudgetWord.USED] = used + pages;
-                    add(KIND_WORDS[kind], pages);
-                    add(holderWord(holder, kind), pages);
-                    notePeak(used + pages);
-                    return true;
-                }
                 if (Atomics.compareExchange(words, BudgetWord.USED, used, used + pages) === used)
                 {
                     add(KIND_WORDS[kind], pages);
@@ -217,12 +195,6 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
                 if (given <= 0)
                 {
                     return;
-                }
-                if (!shared)
-                {
-                    words[at] = has - given;
-                    pages = given;
-                    break;
                 }
                 if (Atomics.compareExchange(words, at, has, has - given) === has)
                 {
@@ -249,12 +221,6 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
                 {
                     return;
                 }
-                if (!shared)
-                {
-                    words[at] = has - moved;
-                    add(holderWord(to, kind), moved);
-                    return;
-                }
                 if (Atomics.compareExchange(words, at, has, has - moved) === has)
                 {
                     add(holderWord(to, kind), moved);
@@ -266,8 +232,7 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
             for (let index = 1; index < BudgetWord.HOLDERS; index++)
             {
                 const at = BudgetWord.HOLDERS_AT + index * BudgetWord.HOLDER_WORDS;
-                if (shared ? Atomics.compareExchange(words, at, 0, 1) === 0
-                    : words[at] === 0 && (words[at] = 1) === 1)
+                if (Atomics.compareExchange(words, at, 0, 1) === 0)
                 {
                     return index;
                 }
@@ -283,11 +248,7 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
             for (const kind of /** @type {MemoryKind[]} */ (Object.keys(KIND_INDEX)))
             {
                 const at = holderWord(index, kind);
-                const pages = shared ? Atomics.exchange(words, at, 0) : words[at];
-                if (!shared)
-                {
-                    words[at] = 0;
-                }
+                const pages = Atomics.exchange(words, at, 0);
                 if (pages !== 0)
                 {
                     add(BudgetWord.USED, -pages);
@@ -296,14 +257,7 @@ export function openMemoryBudget(buffer, holder = RUN_HOLDER){
                 }
             }
             const inUse = BudgetWord.HOLDERS_AT + index * BudgetWord.HOLDER_WORDS;
-            if (shared)
-            {
-                Atomics.store(words, inUse, 0);
-            }
-            else
-            {
-                words[inUse] = 0;
-            }
+            Atomics.store(words, inUse, 0);
             return given;
         },
         holder,

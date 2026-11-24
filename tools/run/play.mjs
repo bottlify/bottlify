@@ -9,10 +9,10 @@
  * serves the player page (`tools/run/play/index.html`), the engine's build
  * (`modules/core/dist`, `npm run build` first) at /bottlify/, and the bottles
  * at /bundles/ -- every file answering HTTP Range, every response
- * cross-origin isolated unless `--compatible`. A bottle without its
+ * cross-origin isolated (the engine needs shared memory). A bottle without its
  * program's image beside it has it extracted first (`make-btl.mjs extract`).
  *
- *   node tools/run/play.mjs <bundle-id> [--bundles bundles] [--port 8080] [--compatible]
+ *   node tools/run/play.mjs <bundle-id> [--bundles bundles] [--port 8080]
  *
  * then open the address it prints. What it serves is what a page on any static
  * host needs: the same three paths.
@@ -60,11 +60,11 @@ export async function ensureEntry(directory){
 }
 
 /**
- * @param {{ bundles: string, port?: number, coi?: boolean }} options
+ * @param {{ bundles: string, port?: number }} options
  */
-export function servePlayer({ bundles, port = 0, coi = true }){
+export function servePlayer({ bundles, port = 0 }){
     return serveStatic({
-        sandboxDir: PAGE, srcDir: PAGE, coi, port,
+        sandboxDir: PAGE, srcDir: PAGE, coi: true, port,
         extra: [
             { prefix: '/bottlify/', root: DIST },
             { prefix: '/bundles/', root: bundles },
@@ -85,8 +85,7 @@ if (isMain(import.meta.url))
         && !['--bundles', '--port'].includes(args[at - 1]));
     if (!id)
     {
-        console.error('usage: node tools/run/play.mjs <bundle-id> [--bundles bundles] [--port 8080]'
-            + ' [--compatible]');
+        console.error('usage: node tools/run/play.mjs <bundle-id> [--bundles bundles] [--port 8080]');
         process.exit(2);
     }
     if (!existsSync(join(DIST, 'core.js')))
@@ -96,7 +95,6 @@ if (isMain(import.meta.url))
     }
     const bundles = resolve(option('bundles', join(ROOT, 'bundles')));
     await ensureEntry(join(bundles, id));
-    const server = await servePlayer({ bundles, port: Number(option('port', '8080')),
-        coi: !args.includes('--compatible') });
+    const server = await servePlayer({ bundles, port: Number(option('port', '8080')) });
     console.log(`http://127.0.0.1:${server.port}/?bottle=${encodeURIComponent(id)}`);
 }

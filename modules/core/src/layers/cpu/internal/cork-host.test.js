@@ -381,10 +381,10 @@ test('the host boots a real runtime over cork\'s own memory', ()=>{
     assert.equal(h.readReg32('eflags'), 0x2, 'the boot eflags word');
 });
 
-test('guest memory is shared where the host can share it, and regions translate over it',
+test('guest memory is shared, and regions translate over it',
     async()=>{
         const h = host();
-        assert.ok(h.wasmMemory().buffer instanceof SharedArrayBuffer, 'node can share it');
+        assert.ok(h.wasmMemory().buffer instanceof SharedArrayBuffer);
         // mov ecx, 1000; L: add eax, ecx; dec ecx; jnz L; hlt
         load(h, 0x11000, [0xb9, 0xe8, 0x03, 0, 0, 0x01, 0xc8, 0x49, 0x75, 0xfb, 0xf4]);
         h.cork().noteHot(0x11000, 0);
@@ -397,10 +397,6 @@ test('guest memory is shared where the host can share it, and regions translate 
         assert.equal(h.readReg32('eax'), 500500);
         assert.deepEqual(/** @type {any} */ (h.cork().diagnostics()).refused?.batch, undefined,
             'and no batch refused');
-
-        const plain = host({ cork: { sharedMemory: false } });
-        assert.ok(!(plain.wasmMemory().buffer instanceof SharedArrayBuffer),
-            'unless it is told not');
     });
 
 test('an ask of another executor the handler puts off is asked again at the guest\'s next back'

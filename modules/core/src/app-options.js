@@ -146,18 +146,14 @@
  *     late to see any of it. `sequenceBase` is set by `createApp` on a rebuilt
  *     machine, `journal` and `now` on every process of the run; none is
  *     something a caller supplies.
- * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
- *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
- *         | { table: ArrayBufferLike },
+ * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean,
+ *     memory?: { table: ArrayBufferLike },
  *     beside?: { arena: [number, number] | null } }} [audio]
- *     Sound leaves through a shared track table a worklet reads, or -- with no
- *     shared memory to hand one -- a ring the engine thread mixes into itself.
- *     `drained` says that something on the other side is really reading, which
- *     is what decides whether a program's play cursor follows the sound or a
- *     clock. `shared` picks the backend; default `typeof SharedArrayBuffer ===
- *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
- *     storage outlives the process that made it, and is not something a caller
- *     supplies.
+ *     Sound leaves through a shared track table a worklet reads. `drained` says
+ *     that something on the other side is really reading, which is what decides
+ *     whether a program's play cursor follows the sound or a clock. `memory` is
+ *     set by `createApp` on a rebuilt machine so the storage outlives the
+ *     process that made it, and is not something a caller supplies.
  * @property {'win2000' | 'winxp' | 'win7' | 'win10' | 'auto'} [windows]
  *     The Windows the machine is, a bottle's setting: 2000 SP4, XP SP3, 7 SP1
  *     or 10 (build 19045). Every place a program reads the version from agrees
@@ -185,23 +181,12 @@
  *     while IsWow64Process, GetNativeSystemInfo and the environment say a
  *     32-bit Windows - so a launcher that picks its build by the system's width
  *     picks the 32-bit one (`roadmap/decisions.md`).
- * @property {import('./mode.js').RunMode} [mode]
- *     How much rides on shared memory: `isolated` shares the guest's memory with the
- *     graphics worker, `compatible` keeps it the engine thread's own and copies what
- *     crosses, `auto` (the default) is `isolated` on a cross-origin isolated page and
- *     `compatible` elsewhere. `isolated` where memory cannot be shared is refused.
- * @property {import('./mode.js').Concurrency} [concurrency]
+ * @property {import('./concurrency.js').Concurrency} [concurrency]
  *     How many processes run at once: 1 (the default) runs a child in its parent's
  *     place until it exits; 2 or 4 runs it beside its parent from CreateProcess on,
  *     each child in a worker of its own (`host/process.worker.js`) with the run's
  *     system half reached across a link, up to that many at once and the next
- *     beside its parent on the engine's thread. More than one needs shared memory:
- *     asked for in `compatible` mode or on a page that is not cross-origin isolated,
- *     the run falls back to `compatible`, one process at a time, and says so with a
- *     `fallback` event.
- * @property {{ asked: any, detail: string } | null} [fallback]
- *     What a run asked for and fell back from (`mode.js`): set by `createApp`, not
- *     something a caller supplies.
+ *     beside its parent on the engine's thread.
  * @property {'directx7' | 'directx8' | 'directx9' | 'directx10' | 'directx11' | 'opengl'}
  *     [graphicsApi]
  *     The graphics a bottle prefers: every DirectX up to the one named --
@@ -356,7 +341,7 @@
  *           nonzero code is the page's error report instead.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
- *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any,
+ *     guestCode?: boolean, guestTraps?: string[], worker?: any,
  *     driverRules?: 'legacy' | 'current', display?: (frame: any) => void }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,

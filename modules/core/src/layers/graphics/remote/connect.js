@@ -246,18 +246,13 @@ const showing = connections=>{
 
 /**
  * The word a graphics worker reads to know that a frame it sent was shown,
- * given to it over memory this thread shares with it; none where this thread
- * shares none, and the worker waits for each answer.
+ * given to it over memory this thread shares with it; none where the worker
+ * cannot be told (it then waits for each answer).
  *
  * @param {{ postMessage: (message: any) => void }} worker
  * @returns {Int32Array | null}
  */
 const shownWordFor = worker=>{
-    if (typeof SharedArrayBuffer !== 'function'
-        || /** @type {any} */ (globalThis).crossOriginIsolated === false)
-    {
-        return null;
-    }
     const word = new Int32Array(new SharedArrayBuffer(4));
     try
     {
@@ -360,9 +355,6 @@ function join(worker, connection){
  *     sent the longer view, ahead of any batch that may lend from what it gained
  * @param {(address: number, length: number) => void} [options.adoptMemory]
  *     told where the worker wrote the shared RAM, which this thread takes as its own write
- * @param {boolean} [options.lendMemory]  where the RAM is shared, whether what a Direct3D 8
- *     or 9 program unlocks is lent to the worker to read in place (`lending.js`) rather
- *     than copied to it; on unless false
  * @param {number} [options.maxFrameLatency]  the frames a root's presents may leave the
  *     worker's GPU drawing (`graphics.maxFrameLatency`); absent, Direct3D's three, 0 no bound
  * @param {(api: string, detail: string, severity?: 'loss') => void} [options.divergence]
@@ -373,7 +365,7 @@ function join(worker, connection){
 export function connectGraphicsWorker(options){
     const { worker, device, presentTo, framePlayed, writeMemory, sharedMemory, memoryGrown,
         adoptMemory, divergence, lost,
-        failed, lendMemory = true, source, maxFrameLatency } = options;
+        failed, source, maxFrameLatency } = options;
     /** Whether this thread may wait on the worker, which a lend's claim may have to. */
     let mayBlock = /** @type {boolean | null} */ (null);
     /** @type {{ texture: any, view: any, width: number, height: number, format: string } | null} */
@@ -515,7 +507,7 @@ export function connectGraphicsWorker(options){
             const { port1, port2 } = new MessageChannel();
             ports.push(port1);
             const memory = sharedMemory?.() ?? null;
-            const lending = memory && lendMemory && (api === 'd3d8' || api === 'd3d9')
+            const lending = memory && (api === 'd3d8' || api === 'd3d9')
                 && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
             // The RAM goes only to a root that lends from it. JavaScriptCore counts
             // every buffer a thread holds as part of that thread's heap and lets

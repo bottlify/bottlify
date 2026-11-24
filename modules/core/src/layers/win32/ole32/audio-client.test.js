@@ -107,7 +107,7 @@ function fakeTrack(){
  *     audio layer's shared table gives, the audio adapter's, not fakes.
  */
 function setup(options = {}){
-    const table = options.output === 'table' ? createMixer({ shared: true }) : null;
+    const table = options.output === 'table' ? createMixer() : null;
     const bytes = new Uint8Array(0x100000);
     const view = new DataView(bytes.buffer);
     let time = 1000;

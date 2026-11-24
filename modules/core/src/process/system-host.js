@@ -262,8 +262,7 @@ export async function buildSystemHost(deps){
         processorName: processorName(SETTINGS, await engineVersion(options.cork)),
         // The keys a process in a worker reads are these: they name as many
         // processors as its cpu layer will say it has.
-        processors: processorsFor({
-            executors: options.cpu?.cores, sharedMemory: options.cork?.config?.sharedMemory }),
+        processors: processorsFor({ executors: options.cpu?.cores }),
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
@@ -276,7 +275,7 @@ export async function buildSystemHost(deps){
     // The output every process plays into, each in a span of its arena lent
     // it; the page's worklet reads the table.
     const given = options.audio?.memory;
-    const output = createMixer({ shared: true, sampleRate: options.audio?.sampleRate,
+    const output = createMixer({ sampleRate: options.audio?.sampleRate,
         memory: given && 'table' in given ? given : undefined });
 
     /** The run's own program: the first process standing. */

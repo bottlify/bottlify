@@ -13,7 +13,6 @@ import {
 import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
 import { createEvents } from '../events.js';
-import { createRing } from '../layers/audio/output/ring.js';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
 import { createMetrics } from '../layers/log/internal/metrics.js';
 import {
@@ -82,23 +81,18 @@ const made = [];
  * The log is the real thing rather than a stand-in: the whole point of the
  * wire's log half is that one side writes a journal and a table and the other
  * reads them out of the same memory, and a fake in the middle would prove
- * nothing about that. `shared: false` builds the same layout in an
- * `ArrayBuffer`, which is what an origin without cross-origin isolation gets
- * and what puts the page back on the request path.
+ * nothing about that.
  *
- * @param {{ capacity?: number, shared?: boolean, audioShared?: boolean }} [how]
+ * @param {{ capacity?: number }} [how]
  */
-function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
+function fakeApp({ capacity = 4096 } = {}){
     // The real registry, not a hand-rolled stand-in: the whole point of the
     // events tests below is that a late `on()` still catches what an early
     // `emit()` fired, and that is `events.js`'s contract to keep, not this
     // fake's to reimplement.
     const events = createEvents();
-    // The engine mixer's own ring, with a little already mixed into it.
-    const ring = createRing({ channels: 2, capacityFrames: 8 });
-    ring.write(Float32Array.of(1, -1, 2, -2, 3, -3));
-    const journal = createJournal({ now: ()=>0, capacity, shared });
-    const registry = createMetrics({ shared });
+    const journal = createJournal({ now: ()=>0, capacity });
+    const registry = createMetrics();
     const own = registry.counters('log', ['rejected']);
     const profiler = createProfiler({
         now: ()=>0,
@@ -110,7 +104,6 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
         intern: journal.intern,
     });
     const app = {
-        ring,
         options: /** @type {any} */ (null),
         sent: /** @type {any[]} */ ([]),
         attached: /** @type {any[]} */ ([]),
@@ -158,7 +151,7 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             },
         },
         audio: {
-            memory: ()=>(audioShared ? { table: new ArrayBuffer(64) } : ring.memory),
+            memory: ()=>({ table: new SharedArrayBuffer(64) }),
             format: ()=>({ sampleRate: 48000, channels: 2 }),
         },
         /** How many times the log's memory has been asked for. */
@@ -352,12 +345,12 @@ function openTestKeeper(){
 /**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
  * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
- *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean,
+ *     journal?: { capacity?: number },
  *     duringBuild?: (app: any) => void, on?: Record<string, (event: any) => void> }} [deps]
  */
-async function connect(options = {}, { journal, audioShared, duringBuild, on, ...deps } = {}){
+async function connect(options = {}, { journal, duringBuild, on, ...deps } = {}){
     const channel = new MessageChannel();
-    const app = fakeApp({ ...journal, audioShared });
+    const app = fakeApp({ ...journal });
     const keeper = openTestKeeper();
     const { gpu, canvas, screen, fail, lose, requested } = fakeGpu();
     /** @type {any} */
@@ -456,50 +449,23 @@ test('the device is asked for the features the engine draws with that the adapte
 test('the sound output\'s storage crosses once, at start', async()=>{
     const { remote, app } = await connect();
     const memory = remote.audio.memory();
-    assert.equal(memory.samples.byteLength, 64);
+    assert.equal(memory.table.byteLength, 64);
     assert.deepEqual(remote.audio.format(), { sampleRate: 48000, channels: 2 });
     assert.equal(app.attached.length, 1);
     assert.deepEqual(app.attached[0].options, { listen: false });
     await remote.dispose();
 });
 
-test('the sound output\'s shape follows the engine\'s own backend, not a fixed contract', async()=>{
+test('the sound output\'s shape is its track table, and nothing to fall back to', async()=>{
     // The whole surface a page has for its worklet is `memory()`/`format()`;
     // there is no `ring()` here for a caller to fall back to (docs/core/api.md's
-    // `audio.memory()` row) -- a caller written against the engine backend's
-    // `{ control, samples }` shape breaks outright on a page that turns out
-    // to have shared memory, rather than reading something merely wrong.
-    const shared = await connect({}, { audioShared: true });
-    assert.deepEqual(Object.keys(shared.remote.audio.memory()), ['table']);
-    assert.equal(typeof (/** @type {any} */ (shared.remote.audio)).ring, 'undefined',
+    // `audio.memory()` row).
+    const { remote } = await connect();
+    assert.deepEqual(Object.keys(remote.audio.memory()), ['table']);
+    assert.equal(typeof (/** @type {any} */ (remote.audio)).ring, 'undefined',
         'no ring() to fall back to -- a stale caller must be updated, not silently degraded');
-    await shared.remote.dispose();
-
-    const unshared = await connect({}, { audioShared: false });
-    assert.deepEqual(Object.keys(unshared.remote.audio.memory()).sort(), ['control', 'samples']);
-    await unshared.remote.dispose();
+    await remote.dispose();
 });
-
-test('without shared memory the mix is posted to the worklet, which says what it played',
-    async()=>{
-        const worklet = new MessageChannel();
-        opened.push(()=>worklet.port2.close());
-        const { remote, app, built } = await connect(
-            { audio: { drained: true, sampleRate: 48000, port: worklet.port1 } },
-            { audioShared: false });
-        assert.equal(built().audio.port, undefined, 'the port is the worker\'s, not the engine\'s');
-        assert.equal(built().audio.drained, true);
-        /** @type {any} */
-        const chunk = await new Promise(done=>{
-            worklet.port2.onmessage = event=>done(event.data);
-        });
-        assert.equal(chunk.at, 0);
-        assert.deepEqual([...chunk.frames], [1, -1, 2, -2, 3, -3]);
-        worklet.port2.postMessage({ played: 2, blocks: 1, starvedBlocks: 0, starvedFrames: 0 });
-        await until(()=>app.ring.consumed() === 2);
-        await remote.dispose();
-    });
-
 test('an input event arrives at the router as it left the page', async()=>{
     const { remote, app } = await connect();
     remote.input.send({ kind: 'key', code: 'KeyA', down: true });
@@ -759,7 +725,6 @@ test('the page reads the journal, the frames and the phases through the keeper',
     await until(async()=>(await remote.log.recent(1)).length === 1);
     const crossed = remote.traffic().request;
 
-    assert.equal(remote.log.reading(), 'shared');
     // A read is a request to a worker now, not a decode on this thread: that
     // is the whole point, and it is why every one of them is a promise.
     const recent = remote.log.recent(1);
@@ -823,7 +788,7 @@ test('a rebuilt process hands the keeper the next block', async()=>{
     const { remote, worker, keeper } = await connect();
     // A second machine's journal, as the engine publishes it after a swap: a
     // fresh block whose sequences continue the one the parent left behind.
-    const child = createJournal({ now: ()=>0, shared: true, capacity: 64, sequenceBase: 5 });
+    const child = createJournal({ now: ()=>0, capacity: 64, sequenceBase: 5 });
     child.write(Level.INFO, 'child', 'after the swap');
     worker.onmessage?.({ data: { type: 'log-memory',
         memory: { journal: child.memory() }, sequenceBase: 5 } });
@@ -836,34 +801,6 @@ test('a rebuilt process hands the keeper the next block', async()=>{
     const records = await remote.log.drain(5, 10);
     assert.deepEqual(records.records.map((/** @type {any} */ r)=>r.text), ['after the swap'],
         'and the keeper reads the new block from there');
-    await remote.dispose();
-});
-
-test('without shared memory the keeper is fed by relay, and a table does not cross', async()=>{
-    const { remote, app } = await connect({ log: { capacity: 8 } },
-        { journal: { shared: false, capacity: 6 } });
-    assert.equal(remote.log.reading(), 'requests');
-    assert.equal(remote.log.memory(), null);
-    for (let at = 0; at < 4; at++)
-    {
-        app.write(`${at}`);
-    }
-    await remote.run();
-    const first = await remote.log.drain(0, 100);
-    assert.equal(first.lost, 0);
-    assert.equal(first.next, 4);
-    assert.deepEqual(first.records.map((/** @type {any} */ r)=>r.text),
-        ['0', '1', '2', '3']);
-    app.frame();
-    assert.equal((await remote.log.frames(8)).length, 1, 'a frame still answers, by request');
-    assert.equal((await remote.log.profile(1)).frames, 1);
-    assert.deepEqual(await remote.log.counters('log'), { rejected: 0 });
-    assert.equal(await remote.log.table('log', 'frames'), null, 'a table cannot cross as a copy');
-    assert.equal(await remote.log.word(3), '#3');
-
-    const stats = await remote.log.stats();
-    assert.equal(stats.written, 4, 'everything the keeper was relayed');
-    assert.equal(stats.capacity, 8);
     await remote.dispose();
 });
 

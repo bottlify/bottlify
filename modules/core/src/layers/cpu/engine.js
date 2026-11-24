@@ -252,9 +252,6 @@ export function engineContractProblem(engineModule, url){
  *     at once, each a region's frames on the worker's stack; a deeper call leaves for the
  *     runtime's loop and its callers return through the entry hash. Default 256; `createApp`
  *     gives an iPhone fewer (HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671).
- * @property {boolean} [sharedMemory]  Under cork, guest memory a `SharedArrayBuffer` where
- *     the host can share one (node, a cross-origin isolated page) -- what lets another
- *     worker read and write it in place. `false` keeps it the engine's alone.
  * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer, x87
  *     and SSE instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking
  *     the rest; false runs the JavaScript interpreter alone. Default true.

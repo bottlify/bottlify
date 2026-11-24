@@ -97,8 +97,6 @@
   enforced, and this
   process's own exit is told to no port. Not exported, as on Windows 7: the
   synchronization barrier, `GetProcessInformation` and job objects.
-- In `compatible` mode a child's sound is mixed into its parent's output (the engine's mixer has
-  no arena to lend it a table on), and goes on after a parent that exits first.
 - With `concurrency` 2 or 4 a process's own journal (its calls, phase profile and frames) stays in
   its worker: the run's log holds the events every process reports and what the engine's thread
   writes. Where the run traces calls (a `trace` level in `log.categories`), a process in a worker

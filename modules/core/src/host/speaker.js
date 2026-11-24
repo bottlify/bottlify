@@ -41,10 +41,8 @@ const READY_MS = 1000;
  *     test can hand it stand-ins.
  * @property {new (options: any) => any} AudioContext
  * @property {new (context: any, name: string, options: any) => any} AudioWorkletNode
- * @property {new () => { port1: any, port2: any }} [MessageChannel]
  * @property {any} [navigator]
  * @property {any} [document]
- * @property {boolean} [crossOriginIsolated]
  * @property {(callback: () => void, ms: number) => any} setTimeout
  * @property {(timer: any) => void} clearTimeout
  */
@@ -60,12 +58,11 @@ const READY_MS = 1000;
  * @property {() => void} resume  Starts it again; call inside a gesture.
  * @property {() => void} suspend  Stops it on purpose (a paused run): nothing but
  *     `resume` starts it again.
- * @property {() => { drained: boolean, sampleRate: number, port?: any }} audioOptions
+ * @property {() => { drained: boolean, sampleRate: number }} audioOptions
  *     The `audio` options `createApp` takes for this speaker: something drains
- *     the ring, at the device's own rate, and -- with no shared memory -- the
- *     port the engine posts its mix down.
+ *     the ring, at the device's own rate.
  * @property {(app: any) => void} connect  Plays the built app: the worklet node, fed
- *     from the app's track table (and every process's beside it) or its port.
+ *     from the app's track table (and every process's beside it).
  * @property {(level: number) => void} volume  0 is silent; the program is not told.
  * @property {() => Promise<void>} close
  */
@@ -129,8 +126,6 @@ export function openSpeaker(options = {}){
 
     /** @type {Promise<{ running: boolean, reason?: string }> | null} */
     let loading = null;
-    /** @type {{ port1: any, port2: any } | null} */
-    let channel = null;
     /** @type {any} */
     let node = null;
     /** @type {any} */
@@ -182,14 +177,7 @@ export function openSpeaker(options = {}){
             Promise.resolve(context.suspend?.()).catch(()=>{});
         },
         audioOptions(){
-            if (!scope.crossOriginIsolated && !channel && scope.MessageChannel)
-            {
-                // Without shared memory the engine posts its mix to the worklet:
-                // one end goes to the engine, the other to the worklet.
-                channel = new scope.MessageChannel();
-            }
-            return { drained: true, sampleRate: context.sampleRate,
-                ...(channel ? { port: channel.port2 } : {}) };
+            return { drained: true, sampleRate: context.sampleRate };
         },
         connect(app){
             if (node)
@@ -197,27 +185,18 @@ export function openSpeaker(options = {}){
                 throw new Error('this speaker already plays a run');
             }
             const { channels } = app.audio.format();
-            const feed = channel;
             node = new scope.AudioWorkletNode(context, 'bottlify-output', {
                 outputChannelCount: [channels],
-                processorOptions: feed ? { channels }
-                    : { table: app.audio.memory().table, channels },
+                processorOptions: { table: app.audio.memory().table, channels },
             });
-            if (feed)
-            {
-                node.port.postMessage({ type: 'feed', port: feed.port1 }, [feed.port1]);
-            }
-            else
-            {
-                // Each process started beside another plays into a table of its
-                // own; the worklet mixes every one with the run's and drops it
-                // when the process is gone.
-                const playing = node;
-                unsubscribe.push(app.on('sound-table', (/** @type {any} */ event)=>
-                    playing.port.postMessage({ type: 'table', id: event.id, table: event.table })));
-                unsubscribe.push(app.on('sound-table-closed', (/** @type {any} */ event)=>
-                    playing.port.postMessage({ type: 'untable', id: event.id })));
-            }
+            // Each process started beside another plays into a table of its
+            // own; the worklet mixes every one with the run's and drops it
+            // when the process is gone.
+            const playing = node;
+            unsubscribe.push(app.on('sound-table', (/** @type {any} */ event)=>
+                playing.port.postMessage({ type: 'table', id: event.id, table: event.table })));
+            unsubscribe.push(app.on('sound-table-closed', (/** @type {any} */ event)=>
+                playing.port.postMessage({ type: 'untable', id: event.id })));
             // A gain on the way out, so the page can silence or turn down what
             // is heard while the guest's cursors keep advancing as they would.
             gain = context.createGain();

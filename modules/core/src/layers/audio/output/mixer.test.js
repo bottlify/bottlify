@@ -8,7 +8,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createMixer } from './mixer.js';
-import { createRing } from './ring.js';
 import {
     WRITTEN, DROP_TO, READ, STATE, STATE_FREE, SLOTS, MIXED_FRAMES, slotHeaderOffset, slotPcmOffset,
     SLOT_HEADER_INT32, SLOT_BYTES, RATE, createSeam, resampleInto, FRESH, STREAMING, BASE,
@@ -26,343 +25,6 @@ const pcm16 = samples=>{
     return bytes;
 };
 
-/** @param {any} mixer @param {number} frames */
-const drain = (mixer, frames)=>{
-    const out = new Float32Array(frames * mixer.channels);
-    mixer.ring.read(out);
-    return [...out];
-};
-
-test('a track carries its samples through to the ring', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-
-    track.write(pcm16([32767, -32768, 16384, -16384]));
-    assert.equal(mixer.pump(), 2, 'two stereo frames');
-
-    const heard = drain(mixer, 2);
-    assert.ok(Math.abs(heard[0] - 1) < 0.001);
-    assert.ok(Math.abs(heard[1] + 1) < 0.001);
-    assert.ok(Math.abs(heard[2] - 0.5) < 0.001);
-});
-
-test('a mixer over the ring of one it replaced continues the stream', ()=>{
-    // A process replacement is not a device replacement. The reader on the
-    // other side -- a worklet, a person's sound card -- was handed the ring
-    // once and holds it across the change, so the rebuilt machine must mix
-    // into that same storage, leaving the reader's place untouched.
-    const first = createMixer({ capacityFrames: 32 });
-    const music = first.open(DIRECT);
-    music.write(pcm16([1000, 1000, 2000, 2000]));
-    assert.equal(first.pump(), 2);
-
-    // The reader takes those two frames and keeps its cursor.
-    const reader = createRing({ channels: 2, capacityFrames: 32, memory: first.ring.memory });
-    assert.equal(reader.read(new Float32Array(4)), 2);
-
-    const second = createMixer({ memory: first.ring.memory });
-    assert.equal(second.ring.memory, first.ring.memory, 'the output that already exists');
-    assert.equal(second.diagnostics().produced, 2,
-        "the frames already in the ring are the device's, not one mixer's");
-
-    const child = second.open(DIRECT);
-    child.write(pcm16([3000, 3000, 4000, 4000]));
-    assert.equal(second.pump(), 2);
-
-    // The same reader, continuing: the child's frames, in order, where the
-    // parent's left off -- no gap and no restart from the beginning.
-    const rest = new Float32Array(4);
-    assert.equal(reader.read(rest), 2);
-    const heard = [...rest];
-    assert.ok(Math.abs(heard[0] - 3000 / 32768) < 0.001, 'the first frame after the parent');
-    assert.ok(Math.abs(heard[2] - 4000 / 32768) < 0.001, 'and the next, in order');
-});
-
-test('two tracks are added together rather than played in turn', ()=>{
-    const mixer = createMixer();
-    const music = mixer.open(DIRECT);
-    const effect = mixer.open(DIRECT);
-
-    music.write(pcm16([8192, 8192]));
-    effect.write(pcm16([8192, 8192]));
-    assert.equal(mixer.pump(), 1);
-
-    const heard = drain(mixer, 1);
-    assert.ok(Math.abs(heard[0] - 0.5) < 0.001, 'a quarter plus a quarter');
-});
-
-test('a paused track contributes nothing and keeps what it had', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-    track.write(pcm16([16384, 16384]));
-
-    track.paused = true;
-    assert.equal(mixer.pump(), 0);
-
-    track.paused = false;
-    assert.equal(mixer.pump(), 1, 'the samples were kept, not dropped');
-});
-
-test('eight-bit audio is unsigned and silence in it is 128', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 8 });
-
-    track.write(new Uint8Array([128, 255, 0]));
-    mixer.pump();
-
-    const heard = drain(mixer, 3);
-    // Read as signed this would be a loud constant offset rather than silence.
-    assert.equal(heard[0], 0, 'silence');
-    assert.ok(heard[2] > 0.9, 'and full scale up');
-    assert.ok(heard[4] < -0.9, 'and full scale down');
-});
-
-test('a mono source is heard from both sides', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
-
-    track.write(pcm16([16384]));
-    mixer.pump();
-
-    const heard = drain(mixer, 1);
-    assert.equal(heard[0], heard[1]);
-    assert.ok(heard[0] > 0.49);
-});
-
-test('a track\'s balance scales each side on its own, on top of its gain', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
-    track.gain = 0.5;
-    track.balance = [1, 0.25];
-
-    track.write(pcm16([16384]));
-    mixer.pump();
-
-    const heard = drain(mixer, 1);
-    assert.ok(Math.abs(heard[0] - 0.25) < 1e-6, `left ${heard[0]}`);
-    assert.ok(Math.abs(heard[1] - 0.0625) < 1e-6, `right ${heard[1]}`);
-});
-
-test('a retuned track resamples what follows at its new rate', ()=>{
-    // A sound buffer's frequency can change while it plays, and the bytes it
-    // hands over from then on are read at that rate.
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
-    const tone = pcm16(new Array(480).fill(8192));
-    assert.equal(track.write(tone), 480, 'at the output\'s rate a frame is a frame');
-
-    track.retune(24000);
-    assert.equal(track.format.sampleRate, 24000);
-    const slower = track.write(tone);
-    assert.ok(Math.abs(slower - 960) <= 2, `half the rate is twice the frames, got ${slower}`);
-    track.retune(96000);
-    const faster = track.write(tone);
-    assert.ok(Math.abs(faster - 240) <= 2, `twice the rate is half, got ${faster}`);
-
-    mixer.pump();
-    const heard = drain(mixer, 480 + slower + faster);
-    assert.ok(heard.every(sample=>Math.abs(sample - 0.25) < 1e-6),
-        'the same level all the way through: no seam from the rate before');
-});
-
-test('a slower source is resampled to the output rate', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });
-
-    // Half the rate, so about twice as many output frames come out. A single
-    // buffer holds its last fractional frame back to join the next one, so a
-    // four-frame buffer yields six now rather than the naive eight.
-    track.write(pcm16([1000, 1000, 2000, 2000, 3000, 3000, 4000, 4000]));
-    assert.equal(mixer.pump(), 6);
-});
-
-test('a stream resampled across two buffers has no discontinuity at the seam', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });
-
-    // One continuous ramp of step 1000, delivered as two buffers. At double the
-    // rate the output is the same ramp at step 500, and the seam between the
-    // buffers must carry that step -- a resampler that restarted each buffer
-    // would put a flat or a jump there, which is the click this fixes.
-    track.write(pcm16([1000, 1000, 2000, 2000, 3000, 3000, 4000, 4000]));
-    track.write(pcm16([5000, 5000, 6000, 6000, 7000, 7000, 8000, 8000]));
-    const frames = mixer.pump();
-    const out = drain(mixer, frames);
-
-    const scale = 32768;
-    // Left channel only; both channels carry the same ramp here.
-    const left = out.filter((_, index)=>index % 2 === 0).map(value=>Math.round(value * scale));
-    for (let index = 1; index < left.length; index++)
-    {
-        assert.equal(left[index] - left[index - 1], 500,
-            `step ${index} is ${left[index] - left[index - 1]}, not 500 -- a seam discontinuity`);
-    }
-    assert.equal(left[0], 1000, 'the ramp starts where the stream did');
-});
-
-test('the play position is what the device took, not what was written', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-
-    track.write(pcm16(new Array(200).fill(1000)));
-    mixer.pump();
-    assert.equal(track.played(), 0, 'nothing has been read out of the ring yet');
-
-    drain(mixer, 40);
-    assert.equal(track.played(), 40);
-
-    drain(mixer, 60);
-    assert.equal(track.played(), 100);
-});
-
-test('the position never goes backwards', ()=>{
-    // A program reads this as a cursor and would take a decrease for the
-    // buffer having wrapped.
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-
-    track.write(pcm16(new Array(100).fill(1000)));
-    mixer.pump();
-    drain(mixer, 50);
-    const reached = track.played();
-
-    track.write(pcm16(new Array(100).fill(1000)));
-    mixer.pump();
-    assert.ok(track.played() >= reached);
-});
-
-test('a closed track stops being mixed', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-    track.write(pcm16([16384, 16384]));
-    track.close();
-
-    assert.equal(mixer.pump(), 0);
-    assert.equal(mixer.diagnostics().tracks, 0);
-});
-
-test('a full ring refuses the rest instead of holding a guest thread', ()=>{
-    const mixer = createMixer({ capacityFrames: 16 });
-    const track = mixer.open(DIRECT);
-
-    track.write(pcm16(new Array(200).fill(1000)));
-    assert.equal(mixer.pump(), 16, 'only what fits');
-    assert.equal(mixer.pump(), 0, 'and the rest waits rather than blocking');
-
-    drain(mixer, 16);
-    assert.equal(mixer.pump(), 16, 'which it then gets');
-});
-
-test('a buffer that has been played reports back every byte the guest wrote', ()=>{
-    // The figure a waveOut cursor is built on. Converting frames back to bytes
-    // by the rate ratio floors, so a buffer played in full reports a fraction
-    // short and never retires -- which is how a sound library's one-buffer
-    // probe of a device waits for ever.
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-
-    const written = pcm16([1000, -1000, 2000, -2000]);
-    track.write(written);
-    mixer.pump();
-    mixer.ring.read(new Float32Array(2 * mixer.channels));
-
-    assert.equal(track.playedBytes(), written.length);
-});
-
-test('the ledger does not grow with everything the program has ever played', ()=>{
-    // It is walked from `settle`, which every winmm entry point reaches, so a
-    // ledger that only grew made a game that streams sound get steadily slower
-    // for as long as it played -- with the cost falling on the guest thread.
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-
-    let expected = 0;
-    for (let buffer = 0; buffer < 200; buffer++)
-    {
-        const written = pcm16([100, -100, 200, -200]);
-        track.write(written);
-        expected += written.length;
-        mixer.pump();
-        mixer.ring.read(new Float32Array(2 * mixer.channels));
-        assert.equal(track.playedBytes(), expected, `after buffer ${buffer}`);
-    }
-
-    assert.ok(track.ledger.length <= 1,
-        `nothing behind the cursor is kept, held ${track.ledger.length}`);
-});
-
-test('a stopped device starts counting from nothing again', ()=>{
-    const mixer = createMixer();
-    const track = mixer.open(DIRECT);
-
-    track.write(pcm16([500, -500]));
-    mixer.pump();
-    mixer.ring.read(new Float32Array(mixer.channels));
-    assert.ok(track.playedBytes() > 0);
-
-    track.reset();
-    assert.equal(track.playedBytes(), 0,
-        'what a stopped device played is not owed to the next one');
-});
-
-test('a one-frame probe at a resampled rate comes back to the program', ()=>{
-    // How a sound library brings a device up: open it, hand it a single frame,
-    // and wait for that frame before writing anything else. A frame is one
-    // sample per channel, and at a rate the resampler has to convert it emits
-    // no output at all -- there is no next input frame to interpolate towards,
-    // so it is carried into the seam instead. Crediting the ledger with what
-    // came out rather than with what went in left the probe uncredited, the
-    // library waiting on it for ever, and the game silent behind that wait.
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 44100, channels: 2, bitsPerSample: 16 });
-
-    const probe = pcm16([1000, -1000]);
-    assert.equal(track.write(probe), 0, 'the assumption under this test');
-    mixer.pump();
-
-    assert.equal(track.playedBytes(), probe.length,
-        'a frame the resampler absorbed is a frame the program is finished with');
-});
-
-test('a frame held back for the seam is heard in the buffer after it', ()=>{
-    // The frame the probe above was credited for is not thrown away: it lives
-    // in the resampler's seam and is the first thing the next buffer emits.
-    // Retiring a buffer early would be worth nothing if it cost the sound.
-    const mixer = createMixer();
-    const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });
-
-    // Loud on its own, against a silent buffer after it: if the carried frame
-    // were dropped the stream would open at silence instead.
-    track.write(pcm16([32767, 32767]));
-    track.write(pcm16([0, 0, 0, 0]));
-    mixer.pump();
-
-    const heard = drain(mixer, 2);
-    assert.ok(heard[0] > 0.9,
-        `the carried frame opens the next buffer, heard ${heard[0]}`);
-});
-
-test('silence written for an idle track is counted against that track', ()=>{
-    // A block is as long as the longest track has to give, so every other track
-    // has silence written into its own stream for the rest of it. Whether that
-    // matters depends entirely on which track it fell on -- a stream somebody
-    // is listening to, or one that had stopped -- and a single total cannot
-    // tell those apart. It is attributed here so a measurement can.
-    const mixer = createMixer();
-    const playing = mixer.open(DIRECT);
-    const idle = mixer.open(DIRECT);
-
-    playing.write(pcm16([1000, -1000, 2000, -2000, 3000, -3000]));
-    mixer.pump();
-
-    assert.equal(playing.short, 0, 'the track carrying the block is never short');
-    assert.equal(idle.short, 3, 'the idle track was short the whole block');
-});
-
-// The shared-table backend below. `createMixer()` with no options is every
-// test above, unchanged -- `shared: true` is what reaches this backend at
-// all.
-
 /** @param {any} mixer @param {number} slot */
 const slotView = (mixer, slot)=>({
     header: new Int32Array(mixer.table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
@@ -374,7 +36,7 @@ test('with a shared table, write puts the guest\'s own bytes into the slot', ()=
     // its absence is the point -- so the assertion is on the observable
     // instead: the bytes that land in the slot are the bytes that went in,
     // unrounded, and `WRITTEN` moved by exactly that many.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const track = mixer.open(DIRECT);
     const written = pcm16([1234, -1234, 5678, -5678]);
 
@@ -391,7 +53,7 @@ test('with a shared table, write puts the guest\'s own bytes into the slot', ()=
 });
 
 test('with a shared table, a retuned track tells the reader its new rate', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     const track = mixer.open({ sampleRate: 22050, channels: 2, bitsPerSample: 16 });
     track.retune(44100);
     const { header } = slotView(mixer, track.slot);
@@ -415,7 +77,7 @@ test('with a shared table, pump() allocates no Float32Array', ()=>{
     globalThis.Float32Array = /** @type {any} */ (CountingFloat32Array);
     try
     {
-        const mixer = createMixer({ shared: true });
+        const mixer = createMixer();
         const track = mixer.open(DIRECT);
         track.write(pcm16([1000, 1000]));
         seen.count = 0;
@@ -430,7 +92,7 @@ test('with a shared table, pump() allocates no Float32Array', ()=>{
 
 test('with a shared table, playedBytes() credits a one-frame probe whole: held, once the '
     + 'reader\'s READ passes it; playing, at once, within the adapter\'s lead', ()=>{
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const track = mixer.open(DIRECT); // the output's own rate: no resampling in the way
     const probe = pcm16([1000, -1000]);
     track.paused = true;
@@ -451,7 +113,7 @@ test('with a shared table, playedBytes() credits a one-frame probe whole: held, 
 test('the audio adapter: a track tells what it took DEVICE_LEAD_MS ahead of the audio thread,'
     + ' never past what was written, never back, and not while it is held', ()=>{
     const lead = 48000 * DEVICE_LEAD_MS / 1000 * 4;
-    const shared = createMixer({ shared: true });
+    const shared = createMixer();
     const table = shared.open(DIRECT);
     const { header } = slotView(shared, table.slot);
     table.paused = true;
@@ -468,19 +130,10 @@ test('the audio adapter: a track tells what it took DEVICE_LEAD_MS ahead of the 
     assert.equal(table.playedBytes(), lead * 2, 'never back');
     table.reset();
     assert.equal(table.playedBytes(), 0, 'from zero after a reset');
-
-    // The engine's own ring, where there is no shared memory: the same rule.
-    const engine = createMixer({ sampleRate: 48000 });
-    const ring = engine.open(DIRECT);
-    ring.paused = true;
-    ring.write(new Uint8Array(lead * 2));
-    assert.equal(ring.playedBytes(), 0, 'not while held');
-    ring.paused = false;
-    assert.equal(ring.playedBytes(), lead, 'the lead ahead of a device that played nothing');
 });
 
 test('with a shared table, a backlog past the depth sets DROP_TO', ()=>{
-    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const mixer = createMixer({ sampleRate: 48000 });
     const track = mixer.open(DIRECT);
     // 12,000 frames (48,000 samples, stereo) -- past capacityFrames (9,600, 200
     // ms at 48 kHz) and still under one slot's 65,536-byte ring.
@@ -500,7 +153,7 @@ test('with a shared table, a closed slot is freed by the reader and reused', ()=
     // open() must reuse it -- otherwise a game that opens and closes many
     // short-lived buffers over a session exhausts every slot and falls back
     // permanently.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const tracks = [];
     for (let i = 0; i < SLOTS; i++)
     {
@@ -527,34 +180,20 @@ test('with a shared table, a closed slot is freed by the reader and reused', ()=
     assert.equal(reused.slot, closedSlot, 'the next open() reuses the freed slot');
 });
 
-test('with a shared table, write() returns output frames, the same unit the engine backend uses',
-    ()=>{
-    // Confirmed by running both backends on the same bytes: engine `write()`
-    // answered 4798 (frames) and shared answered 8820 (bytes) for 100 ms of
-    // 22,050 Hz stereo 16-bit -- a caller that carries the figure into an
-    // arithmetic built on frames (the DirectShow film sync, `PlaySound`'s
-    // loop) gets a number nearly double what it means.
-        const format = { sampleRate: 22050, channels: 2, bitsPerSample: 16 };
-        const pcm = pcm16(new Array(2205 * 2).fill(1000)); // 100 ms, stereo
-
-        const engineTrack = createMixer().open(format);
-        const engineFrames = engineTrack.write(pcm);
-
-        const sharedTrack = createMixer({ shared: true }).open(format);
-        const sharedFrames = sharedTrack.write(pcm);
-
-        // A flat ratio, not the real resampler: it does not hold a fractional
-        // frame back at the tail for a seam the way `convert()`/`resampleInto` do,
-        // so a single one-shot buffer comes out a handful of frames higher. Before
-        // this fix the two units differed by nearly a factor of `bytesPerFrame`
-        // (4798 frames vs 8820 bytes here) -- what matters is that they now agree
-        // to within a fraction of a percent, not bytes read as frames.
-        assert.ok(Math.abs(sharedFrames - engineFrames) <= 5,
-            `engine backend said ${engineFrames} frames, shared said ${sharedFrames}`);
-    });
-
+test('with a shared table, write() returns output frames, not bytes', ()=>{
+    // 100 ms of 22,050 Hz stereo 16-bit is 8820 bytes and 4800 frames at the
+    // output's 48 kHz: a caller that carries the figure into an arithmetic built
+    // on frames (the DirectShow film sync, `PlaySound`'s loop) got a number
+    // nearly double what it means when the answer was bytes.
+    const format = { sampleRate: 22050, channels: 2, bitsPerSample: 16 };
+    const pcm = pcm16(new Array(2205 * 2).fill(1000)); // 100 ms, stereo
+    const frames = createMixer().open(format).write(pcm);
+    // A flat ratio, not the real resampler, which holds a fractional frame
+    // back at the tail for the seam.
+    assert.ok(Math.abs(frames - 4800) <= 5, `${frames} frames for 100 ms`);
+});
 test('with a shared table, a fallback track\'s write() also answers in output frames', ()=>{
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     for (let i = 0; i < SLOTS; i++)
     {
         mixer.open(DIRECT);
@@ -576,13 +215,13 @@ test('a mixer that attaches to a table it did not open sweeps every inherited sl
     // CLOSING. Without the sweep, every slot the parent had open is
     // permanently lost -- the child can never reuse it, however many
     // buffers the program that survives the replacement opens and closes.
-    const parent = createMixer({ shared: true });
+    const parent = createMixer();
     for (let i = 0; i < SLOTS; i++)
     {
         parent.open(DIRECT);
     }
 
-    const child = createMixer({ shared: true, memory: parent.memory });
+    const child = createMixer({ memory: parent.memory });
     assert.equal(child.open(DIRECT).slot, -1,
         'the sweep marks the inherited slots CLOSING, not FREE yet');
 
@@ -609,7 +248,7 @@ test('with a shared table, a backlog drop does not let write() overrun what the 
     // next block, so sizing room against it (as if the ring were already
     // empty) lets a write land on bytes the reader may still be mid-block
     // on -- a torn block, heard as a click, once per drop.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const track = mixer.open(DIRECT); // the direct-copy path: 4 bytes/frame
 
     const quarter = SLOT_BYTES / 4;
@@ -635,7 +274,7 @@ test('with a shared table, a film\'s owed-ms arithmetic does not inflate: write(
     // `bytesPerFrame * filmRate / outputRate` per real second (about 837 ms/s)
     // and the picture crawled at a fraction of real speed for the whole
     // cinematic. One second of sound, fully played, must leave `owed` near 0.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const track = mixer.open({ sampleRate: 22050, channels: 2, bitsPerSample: 16 });
 
     let written = 0;
@@ -659,7 +298,7 @@ test('with a shared table, a film\'s owed-ms arithmetic does not inflate: write(
 
 test('with a shared table, reset() restarts playedBytes() at zero, the way waveOutReset expects',
     ()=>{
-        const mixer = createMixer({ shared: true });
+        const mixer = createMixer();
         const track = mixer.open(DIRECT);
         track.write(pcm16([1000, 1000, 2000, 2000]));
 
@@ -680,7 +319,7 @@ test('with a shared table, a short write drops what does not fit rather than que
     // the past by the time it is offered, so there is nothing later to offer
     // it again to. SLOT_BYTES is a second, harder cap behind the 200 ms
     // backlog policy, and what does not fit past it is dropped, not queued.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const track = mixer.open(DIRECT);
 
     const almostFull = pcm16(new Array((SLOT_BYTES - 8) / 2).fill(1000));
@@ -696,7 +335,7 @@ test('with a shared table, a short write drops what does not fit rather than que
 });
 
 test('a voice written in sequence while it plays is a stream, and a jump moves it on', ()=>{
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
     assert.ok(voice);
     const header = new Int32Array(mixer.table, slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
@@ -718,7 +357,7 @@ test('a voice written whole again and again while it plays is no stream', ()=>{
     // Locked whole every few tens of milliseconds, to mix into part of it:
     // counted as a stream written to the end of the lap, the device waited
     // silent at every turn of the circle -- a tick a lap.
-    const mixer = createMixer({ shared: true });
+    const mixer = createMixer();
     const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
     assert.ok(voice);
     const header = new Int32Array(mixer.table, slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
@@ -740,7 +379,7 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
     // Two processes at once on one thread: a child started beside its parent
     // is not the parent's replacement, and the parent goes on playing.
     const voice = { ...DIRECT, bytes: 4096 };
-    const parent = createMixer({ shared: true });
+    const parent = createMixer();
     const theirs = /** @type {any} */ (parent.openVoice(voice));
     const base = (/** @type {any} */ mixer, /** @type {number} */ slot)=>
         Atomics.load(slotView(mixer, slot).header, BASE);
@@ -748,7 +387,7 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
     const span = parent.lend(lent);
     assert.ok(span >= 0, 'the parent had room to lend');
 
-    const child = createMixer({ shared: true, memory: parent.memory,
+    const child = createMixer({ memory: parent.memory,
         beside: { arena: [span, lent] } });
     const state = (/** @type {number} */ slot)=>Atomics.load(slotView(parent, slot).header, STATE);
     assert.equal(state(theirs.slot), STATE_OPEN, 'the parent\'s voice still plays');
@@ -770,47 +409,11 @@ test('a mixer beside another on one table leaves the other\'s slots open, plays 
     assert.equal(parent.diagnostics().arenaFree, free + lent, 'the span is the parent\'s again');
 });
 
-test('a process beside another borrows its engine output: both heard, each closing its own', ()=>{
-    // In compatible mode a child's own ring reached no speaker: it borrows
-    // its parent's, and its tracks are mixed with the parent's.
-    /** @type {string[]} */
-    const fills = [];
-    const parent = createMixer({ fill: ()=>fills.push('parent') });
-    const child = parent.borrow({ fill: ()=>fills.push('child') });
-    assert.equal(parent.lent(), true);
-    const music = parent.open(DIRECT);
-    const voice = child.open(DIRECT);
-    music.write(pcm16([8192, 8192]));
-    voice.write(pcm16([4096, 4096]));
-    assert.equal(child.pump(1), 1, 'either may pump');
-    assert.deepEqual(fills, ['parent', 'child'], 'each reads its buffers out before the mix');
-    assert.deepEqual(drain(parent, 1), [0.375, 0.375], 'both are heard');
-
-    child.close();
-    assert.equal(parent.diagnostics().tracks, 1, 'the child\'s exit leaves the parent\'s track');
-    assert.equal(parent.lent(), false);
-    music.write(pcm16([8192, 8192]));
-    parent.pump(1);
-    assert.deepEqual(drain(parent, 1), [0.25, 0.25]);
-
-    // A launcher that goes leaves its game sounding.
-    const game = parent.borrow({ fill: ()=>fills.push('game') });
-    const theme = game.open(DIRECT);
-    parent.retire();
-    fills.length = 0;
-    theme.write(pcm16([4096, 4096]));
-    assert.equal(game.pump(1), 1);
-    assert.deepEqual(fills, ['game'], 'the launcher\'s buffers are read no more');
-    assert.deepEqual(drain(parent, 1), [0.125, 0.125]);
-    assert.equal(parent.diagnostics().tracks, 1, 'and only the game\'s track is open');
-});
-
-test('a mixer nobody borrows pumps as before: its own fill, once a mix', ()=>{
+test('a mixer pumps its own fill, once a mix', ()=>{
     let fills = 0;
     const mixer = createMixer({ fill: ()=>{
         fills++;
     } });
-    assert.equal(mixer.lent(), false);
     mixer.open(DIRECT).write(pcm16([1, 2]));
     mixer.pump();
     mixer.pump();

@@ -150,33 +150,6 @@ test('a frame shown is written into the word the worker reads, before its answer
     }
 });
 
-test('where this thread shares no memory, the worker is given no word and waits for answers',
-    ()=>{
-        const isolated = Object.getOwnPropertyDescriptor(globalThis, 'crossOriginIsolated');
-        Object.defineProperty(globalThis, 'crossOriginIsolated', { value: false,
-            configurable: true });
-        const worker = fakeWorker();
-        const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{} });
-        try
-        {
-            worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2), bytesPerRow: 256,
-                width: 2, height: 2, frameIndex: 4, format: 'bgra8unorm', serial: 1 });
-            assert.deepEqual(worker.posted.map(message=>message.type), ['shown']);
-        }
-        finally
-        {
-            end.dispose();
-            if (isolated)
-            {
-                Object.defineProperty(globalThis, 'crossOriginIsolated', isolated);
-            }
-            else
-            {
-                delete (/** @type {any} */ (globalThis)).crossOriginIsolated;
-            }
-        }
-    });
-
 test('a frame the worker counted is presented with no picture, and nothing is drawn', ()=>{
     const worker = fakeWorker();
     const device = fakeDevice();

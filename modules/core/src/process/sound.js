@@ -62,20 +62,6 @@ export function processSound(deps){
         };
     };
 
-    /**
-         * The sound of a process beside another whose output has no arena to
-         * lend: the parent's output, borrowed, the child's tracks mixed with its
-         * own; the child's audio closes them as it goes.
-         *
-         * @param {any} parent
-         */
-    const borrowSound = parent=>({
-        options: { ...options.audio, memory: undefined, beside: undefined,
-            borrow: (/** @type {{ fill?: () => void }} */ asked)=>parent.audio.borrow(asked) },
-        announce(){},
-        giveBack(){},
-    });
-
     /** The tables `ownSound` has named to the page so far. */
     let soundTables = 0;
     /**
@@ -114,7 +100,7 @@ export function processSound(deps){
     };
 
     return {
-        borrowSound, lendSound, ownSound,
+        lendSound, ownSound,
 
     };
 }

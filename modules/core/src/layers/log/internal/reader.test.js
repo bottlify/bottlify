@@ -173,7 +173,7 @@ test('a reader on another thread drains the journal without the engine answering
 test('the reader names where the guest ran from the kernel\'s pages and the memory\'s regions',
     ()=>{
         const journal = createJournal({ now: ()=>0 });
-        const metrics = createMetrics({ shared: false });
+        const metrics = createMetrics();
         const pages = metrics.table('kernel', 'pages', { rows: 0x100, columns: ['instructions'] });
         const regions = metrics.table('memory', 'regions',
             { rows: 8, columns: ['name', 'base', 'size', 'access'] });
@@ -202,7 +202,7 @@ test('the reader names where the guest ran from the kernel\'s pages and the memo
 
 test('frames and the profile are read from the tables the profiler publishes into', async()=>{
     let time = 0;
-    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
+    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time });
     const reader = createLogReader({ memory: api.memory() });
 
     api.beginFrame();
@@ -237,7 +237,7 @@ test('frames and the profile are read from the tables the profiler publishes int
 
 test('a frame says what the program did and what it cost us, without a second run', async()=>{
     let time = 0;
-    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
+    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time });
     const cpu = mirroredBy(api, 'cpu');
     const kernel = mirroredBy(api, 'kernel');
     const memory = mirroredBy(api, 'memory');
@@ -309,7 +309,7 @@ test('a frame says what the program did and what it cost us, without a second ru
 });
 
 test('the writers table reads back as names, heaviest first', async()=>{
-    const api = await logModule.create({ now: ()=>0, wallClock: ()=>0, shared: false });
+    const api = await logModule.create({ now: ()=>0, wallClock: ()=>0 });
     const table = api.metrics.table('memory', 'writers',
         { rows: 4, columns: ['name', 'bytes', 'writes'] });
     /**
@@ -336,7 +336,7 @@ test('the writers table reads back as names, heaviest first', async()=>{
 });
 
 test('a build whose memory layer publishes nothing has no writers rather than a throw', async()=>{
-    const api = await logModule.create({ now: ()=>0, wallClock: ()=>0, shared: false });
+    const api = await logModule.create({ now: ()=>0, wallClock: ()=>0 });
     assert.deepEqual(createLogReader({ memory: api.memory() }).writers(), []);
     await logModule.dispose();
 });

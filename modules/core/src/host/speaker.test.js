@@ -36,9 +36,9 @@ function target(){
  * A page with a phone's audio: a context that starts only when `resume` is
  * called inside a gesture (`gesture` true), as WebKit on a phone does.
  *
- * @param {{ isolated?: boolean, module?: Promise<void> }} [options]
+ * @param {{ module?: Promise<void> }} [options]
  */
-function phone({ isolated = true, module = Promise.resolve() } = {}){
+function phone({ module = Promise.resolve() } = {}){
     const page = target();
     /** @type {any[]} */
     const contexts = [];
@@ -122,13 +122,8 @@ function phone({ isolated = true, module = Promise.resolve() } = {}){
     const scope = {
         AudioContext: FakeContext,
         AudioWorkletNode: FakeNode,
-        MessageChannel: class {
-            port1 = { name: 'port1' };
-            port2 = { name: 'port2' };
-        },
         navigator: { audioSession: world.session },
         document: page,
-        crossOriginIsolated: isolated,
         setTimeout: (/** @type {() => void} */ callback, /** @type {number} */ ms)=>
             setTimeout(callback, ms),
         clearTimeout: (/** @type {any} */ timer)=>clearTimeout(timer),
@@ -191,7 +186,7 @@ test('a worklet that does not load is the reason there is no sound', async()=>{
     await speaker.close();
 });
 
-test('shared, the worklet reads the track tables; unshared, the engine posts its mix', async()=>{
+test('the worklet reads the track tables, the run\'s and each process\'s', async()=>{
     const app = {
         audio: { format: ()=>({ channels: 2 }), memory: ()=>({ table: 'table' }) },
         /** @type {Map<string, (event: any) => void>} */
@@ -215,15 +210,6 @@ test('shared, the worklet reads the track tables; unshared, the engine posts its
     assert.equal(app.handlers.size, 0, 'nothing left listening');
     assert.equal(node.disconnected, 1);
     assert.equal(shared.world.page.count(), 0, 'nor on the page');
-
-    const apart = phone({ isolated: false });
-    const posted = openSpeaker({ scope: /** @type {any} */ (apart.scope) });
-    assert.deepEqual(posted.audioOptions(), { drained: true, sampleRate: 48000,
-        port: { name: 'port2' } });
-    posted.connect(app);
-    assert.deepEqual(apart.world.nodes[0].options.processorOptions, { channels: 2 });
-    assert.deepEqual(apart.world.nodes[0].posted, [{ type: 'feed', port: { name: 'port1' } }]);
-    await posted.close();
 });
 
 test('the volume is the output\'s, before and after it plays', async()=>{

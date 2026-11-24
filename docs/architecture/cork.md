@@ -18,16 +18,14 @@ kernel, and where a system call would be, a trap into the bridge fires instead (
 | OPFS | The translation store, `cork/<id>.v3/` |
 | Server | The code of cork and its worker (`/engine/cork/`). A bundle may bring translations ready-made |
 
-**Memory.** All of the program's memory is one `WebAssembly.Memory`, shared in the `isolated`
-mode. Its window is the program's address space (2 GiB, 4 GiB for a large-address-aware program);
+**Memory.** All of the program's memory is one shared `WebAssembly.Memory`. Its window is the program's address space (2 GiB, 4 GiB for a large-address-aware program);
 `memorySize` (1 GiB by default) is a limit on what the program is given of it, refused past it at
-the commit limit. In a 32-bit process over shared memory it holds only the RAM the program has been
+the commit limit. In a 32-bit process it holds only the RAM the program has been
 given and grows as it is given more, by powers of two (256 MiB at the start); cork's tables and the other executors' pages then lie in a range of the program's own
 space the process keeps from it (at the top of the libraries' space under the thread stacks, or at
 the heap's start). With four executors or more the first executor's tables stay there and the
 other executors' pages are cut out of the heap at 0x14000000, which the memory reaches only when
-one of them opens: a process whose threads open none holds what it would on one executor. A run without shared memory and one
-with `cpu.grow: false` hold the whole of it from the start, cork's tables past it. Nothing in a
+one of them opens: a process whose threads open none holds what it would on one executor. A run with `cpu.grow: false` holds the whole of it from the start, cork's tables past it. Nothing in a
 memory just made is cleared: its pages are zero until touched. A process that takes the memory of
 one gone before it zeroes the first executor's tables at once and another executor's pages as that
 executor opens, and only those the gone process opened; of the program's own, the thunk table and

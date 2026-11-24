@@ -436,28 +436,3 @@ for (const delay of [0, 1000])
             'the child woke on its parent\'s SetEvent and exited with 7');
     });
 }
-
-test('concurrency asked for where memory cannot be shared falls back to one process at a time,'
-    + ' and says so', { timeout: 120_000 }, async t=>{
-    const { parent, child } = buildEventPair();
-    const app = await createApp({
-        executable: parent,
-        imagePath: 'C:\\App\\parent.exe',
-        mode: 'compatible',
-        concurrency: 4,
-        storage: { load: async()=>({ files: [{ path: 'C:\\App\\child.exe', bytes: child }] }) },
-    });
-    t.after(()=>app.dispose());
-    /** @type {any[]} */
-    const fallbacks = [];
-    app.on('fallback', (/** @type {any} */ said)=>fallbacks.push(said));
-    assert.equal((await app.run({ timeoutMs: 120_000 })) >>> 0, 0x105,
-        'the child ran beside its parent, on one thread');
-    assert.equal(fallbacks.length, 1);
-    assert.deepEqual([fallbacks[0].mode, fallbacks[0].concurrency, fallbacks[0].asked],
-        ['compatible', 1, { mode: 'compatible', concurrency: 4 }]);
-    assert.match(fallbacks[0].detail, /concurrency 4 is not allowed here/);
-    const metrics = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'app')
-        ?.metrics;
-    assert.deepEqual([metrics.mode, metrics.concurrency], ['compatible', 1]);
-});

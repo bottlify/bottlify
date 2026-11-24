@@ -50,8 +50,7 @@ test('the memory is laid out from what it was made with', ()=>{
     assert.equal(memory.records, 8);
     assert.equal(memory.ringBytes, 8192);
     assert.equal(memory.dictBytes, 1024);
-    assert.ok(memory.buffer instanceof SharedArrayBuffer, 'shared where the platform has it');
-    assert.ok(open({ shared: false }).memory.buffer instanceof ArrayBuffer);
+    assert.ok(memory.buffer instanceof SharedArrayBuffer, 'shared');
 });
 
 test('a template the dictionary cannot hold travels inline and still reads', ()=>{

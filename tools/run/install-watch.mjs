@@ -108,9 +108,7 @@
  * program's width when not named), a 32-bit setup on a 64-bit one under WOW64.
  *
  * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
- * as a page does; `--unshared` keeps guest memory out of a SharedArrayBuffer,
- * as on a page that is not cross-origin isolated; `--cork JSON` sets cork's
- * own settings (`EngineConfig`), and `--graphics JSON` the graphics layer's
+ * as a page does; `--cork JSON` sets cork's own settings (`EngineConfig`), and `--graphics JSON` the graphics layer's
  * (`{"guestCode":false}` traps every Direct3D call).
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -452,12 +450,9 @@ const runOptions = {
     // `--executors N`: the program's threads on N executors at once, as the
     // player's multi modes run them.
     ...argv.includes('--executors') ? { cpu: { cores: number('--executors', 1) } } : {},
-    // `--unshared`: guest memory not a SharedArrayBuffer, as on a page that is
-    // not cross-origin isolated.
-    // `--cork JSON`: cork's settings (`EngineConfig`), beside `--unshared`.
+    // `--cork JSON`: cork's settings (`EngineConfig`).
     cork: { config: {
         ...argv.includes('--cork') ? JSON.parse(argv[argv.indexOf('--cork') + 1]) : {},
-        ...argv.includes('--unshared') ? { sharedMemory: false } : {},
         // `--store memory`: the translations kept for the whole run in memory, in
         // the store's own format, as the origin's file system keeps them for a
         // page, so ngen's next worker finds what the last translated.

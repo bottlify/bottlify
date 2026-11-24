@@ -49,15 +49,12 @@ const HEADER_BYTES = 8;
  * @param {Object} options
  * @param {number} options.rows
  * @param {string[]} options.columns
- * @param {boolean} [options.shared]
  * @returns {TableWriter}
  */
-export function createTable({ rows, columns, shared = true }){
+export function createTable({ rows, columns }){
     const width = columns.length;
     const bytes = HEADER_BYTES + rows * width * 8;
-    const buffer = shared && typeof SharedArrayBuffer === 'function'
-        ? new SharedArrayBuffer(bytes)
-        : new ArrayBuffer(bytes);
+    const buffer = new SharedArrayBuffer(bytes);
     const control = new Int32Array(buffer, 0, CONTROL_WORDS);
     const values = new Float64Array(buffer, HEADER_BYTES, rows * width);
     let written = 0;

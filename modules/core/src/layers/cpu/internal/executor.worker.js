@@ -36,7 +36,7 @@ import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
  * @property {WebAssembly.Memory} memory
  * @property {SharedArrayBuffer} channel
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
- * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
+ * @property {SharedArrayBuffer} [unbroken]  the routines no slice ends inside
  * @property {boolean} [store]  the process answers for the run's translation store
  * @property {SharedArrayBuffer} [emittedHere]  where it writes the milliseconds its
  *     translator emitted on its own thread, read by a pool that lends it workers

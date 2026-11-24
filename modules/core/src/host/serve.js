@@ -27,9 +27,7 @@ import { createFrameClock } from './frame-clock.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { gcNudgeOf } from '../layers/cpu/internal/gc-nudge.js';
 import { DEFAULT_MEMORY_SIZE } from '../layers/cpu/module.js';
-import { createLogReader } from '../layers/log/reader.js';
 import { PIECE_SIZE } from '../layers/filesystem/internal/memory-store.js';
-import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../layers/graphics/webgpu/features.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
@@ -392,8 +390,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     const breathe = createMacrotask();
     // The page counts what it posts in a shared word, so a loop between
     // turns can tell that a message is waiting without giving up the thread
-    // to find out. Absent -- no shared memory on this origin -- the loop
-    // yields on a short clock instead.
+    // to find out. Absent -- a starter that sends none, as a test's does --
+    // the loop yields on a short clock instead.
     /** @type {Int32Array | null} */
     let signal = null;
     let signalSeen = 0;
@@ -457,8 +455,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     };
     /** The relay transport opened for the run, closed with it. @type {any} */
     let transport = null;
-    /** The sound posted to a worklet that cannot share memory. @type {any} */
-    let feeder = null;
     let hidden = false;
     /** @type {import('./messages.js').Presented[]} */
     const presented = [];
@@ -488,16 +484,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * @type {{ worker: any, frames: string } | null}
      */
     let graphics = null;
-    /**
-     * A reader on *this* thread, and only where the page could not have one:
-     * without shared memory the log's block cannot cross, so the answers a
-     * reader would have given here are computed here and posted. With shared
-     * memory this stays null and nothing a reader wants ever reaches this
-     * thread again.
-     *
-     * @type {ReturnType<typeof createLogReader> | null}
-     */
-    let reading = null;
 
     /**
      * Each distinct refusal of the device and how often it has been made. A
@@ -675,7 +661,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     transport = null;
                 }
             }
-            const { port: soundPort, ...soundOptions } = rest.audio ?? {};
+            const soundOptions = rest.audio ?? {};
             /**
              * With concurrency, ring pacing where the page wrote a ring;
              * otherwise the page's pacing, with the signal word in both: a
@@ -782,18 +768,11 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             // A machine rebuilt on a child's image publishes a fresh block.
             // The page's keeper is reading the parent's, so it is handed the
             // next one the moment it exists -- the journal's sequence is
-            // continuous, so the cursors it already holds still resolve. Only a
-            // shared block is worth sending; a copy would never move again.
+            // continuous, so the cursors it already holds still resolve.
             app.on('process-started',
                 (/** @type {{ image: string, sequenceBase: number }} */ payload)=>{
-                    const memory = app.log.memory();
-                    // A page that is not cross-origin isolated has no
-                    // SharedArrayBuffer at all: naming it there throws.
-                    if (typeof SharedArrayBuffer === 'function'
-                        && memory.journal instanceof SharedArrayBuffer)
-                    {
-                        post({ type: 'log-memory', memory, sequenceBase: payload.sequenceBase });
-                    }
+                    post({ type: 'log-memory', memory: app.log.memory(),
+                        sequenceBase: payload.sequenceBase });
                 });
             if (hooks && hooks.length > 0)
             {
@@ -816,33 +795,12 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             catch {
                 // No mixer in this build: a run without sound is a run.
             }
-            // A port to the worklet comes only from a page without shared
-            // memory, where the mix stays in the engine's own ring and is
-            // posted to the worklet from here.
-            feeder?.close();
-            feeder = null;
-            if (soundPort && audio && 'control' in audio.memory)
-            {
-                feeder = createFeeder({
-                    memory: audio.memory, channels: audio.channels, port: soundPort,
-                    aheadFrames: Math.round(audio.sampleRate * FEED_AHEAD_MS / 1000),
-                });
-            }
-            else
-            {
-                soundPort?.close();
-            }
 
             // The log's memory crosses here, once, in the answer that starts
             // the program -- it is shared memory, so crossing is sharing, and
             // from now on the page reads records, frames, counters and tables
-            // itself. A block that is not shared would cross as a copy that
-            // never moves again, so it is kept here and read here instead.
-            const log = app.log.memory();
-            const shared = typeof SharedArrayBuffer === 'function'
-                && log.journal instanceof SharedArrayBuffer;
-            reading = shared ? null : createLogReader({ memory: log });
-            return { audio, adapter, log: shared ? log : null };
+            // itself.
+            return { audio, adapter, log: app.log.memory() };
         },
 
         /**
@@ -894,10 +852,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const ending = app;
             app = null;
             started = null;
-            reading = null;
             await ending?.dispose();
-            feeder?.close();
-            feeder = null;
             transport?.dispose?.();
             transport = null;
             device?.destroy?.();
@@ -921,8 +876,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         report: async()=>plain({
             ...await app.report(),
             presented: { count: frames(), history: presented.slice() },
-            threads: reading?.threads() ?? [],
-            guestByModule: reading?.guestByModule() ?? {},
         }),
         'files.list': (/** @type {string} */ path)=>volume().list(path),
         'files.read': (/** @type {string} */ path)=>volume().read(path),
@@ -956,20 +909,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             app.guestProfile.start(how),
         'guestProfile.read': ()=>app.guestProfile.read(),
         'guestProfile.stop': ()=>app.guestProfile.stop(),
-        /*
-         * The reading half of the log, for a page that has no shared memory
-         * to read it in. Every one of these is a request the page does not
-         * make when the block crossed at start: there it reads the same
-         * numbers out of the same memory, on its own thread.
-         */
-        'log.recent': (/** @type {number} */ count)=>app.log.recent(count),
-        'log.drain': (/** @type {number} */ since, /** @type {number} */ limit)=>
-            app.log.drain(since, limit),
-        'log.profile': (/** @type {number} */ worst)=>app.log.profile(worst),
-        'log.frames': (/** @type {number} */ count)=>app.log.frames(count),
-        'log.counters': (/** @type {string} */ layer)=>reading?.counters(layer) ?? {},
-        'log.threads': ()=>reading?.threads() ?? [],
-        'log.guestByModule': ()=>reading?.guestByModule() ?? {},
         // The writer's gate, which is the engine's to change: a level says
         // what is kept, and only the thread doing the keeping can be told.
         'log.setLevel': (/** @type {string} */ category, /** @type {string | number} */ level)=>
