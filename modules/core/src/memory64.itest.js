@@ -93,14 +93,23 @@ test('a 64-bit process with a memorySize of 4 GiB is given its 4 GiB layout',
         assert.ok(pages * STEP >= 3 * GiB && pages * STEP < 4 * GiB, `${pages} blocks`);
     });
 
-test('a relocatable 64-bit process given more than 4 GiB runs over a wide window whose RAM is'
-    + ' 7 GiB, not the window', { timeout: 300000 }, async()=>{
-    const { code, lines, guest } = await run({ memorySize: 8 * GiB });
+test('a relocatable 64-bit process given more than 4 GiB keeps its 4 GiB layout: a memory64'
+    + ' window past 4 GiB would be collected without end', { timeout: 300000 }, async()=>{
+    const { code, pages, lines, guest } = await run({ memorySize: 8 * GiB });
     right(lines);
     assert.equal(code, 0);
-    assert.equal(guest.ceiling, 8 * GiB - 4096, 'the window');
-    assert.equal(guest.held, 7 * GiB, 'Chrome collects without end past ~8 GiB a thread');
+    assert.equal(guest.ceiling, 4 * GiB);
+    assert.ok(pages * STEP >= 3 * GiB && pages * STEP < 4 * GiB, `${pages} blocks`);
 });
+
+test('an image linked past 4 GiB has a RAM reaching its end and no further', { timeout: 300000 },
+    async()=>{
+        const { code, lines, guest } = await run({ memorySize: 8 * GiB }, true);
+        right(lines);
+        assert.equal(code, 0);
+        // The image at 0x140000000: 5 GiB and the image's few pages, where it was 7 GiB.
+        assert.ok(guest.held > 5 * GiB && guest.held < 5 * GiB + 2 ** 24, `${guest.held} held`);
+    });
 
 test('a 64-bit process over a wide window is given the space below 4 GiB nearly whole',
     { timeout: 300000 }, async()=>{

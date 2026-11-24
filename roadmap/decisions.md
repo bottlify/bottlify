@@ -2736,10 +2736,12 @@ its highest address, not by the pages committed, so a commit far above the rest 
 (blocks are handed out from the bottom, where the two agree); and a memory that cannot grow (no
 shared memory) is made whole, as large as the RAM, so its address space is cut to the RAM. A
 browser counts each memory a thread holds by its length against that thread's heap limit, which is
-why the memory follows what was given and not the address space. A 64-bit program given more
-than 4 GiB runs over a window of 8 GiB whose RAM is a memory64 memory of 7 GiB, not 8: one memory
-of 8 GiB already passes Chrome's limit for a thread and is collected after every few megabytes
-(`tools/read/wasm-memory-gc.mjs`). *2026-11-22, 2026-11-23.*
+why the memory follows what was given and not the address space. A 64-bit program keeps the
+4 GiB layout whatever its RAM: Chrome 157 collects without end once a thread holds a memory longer
+than 4 GiB (Chrome 153: 8 GiB; `tools/read/wasm-memory-gc.mjs`), so a memory64 window bought no
+room, and reservations past 4 GiB are far chunks (A288). Only an image linked past 4 GiB with no
+relocations runs over a wide window, its RAM reaching the image's end and no further.
+*2026-11-22, 2026-11-23, 2026-11-24.*
 
 **A288. A 64-bit process may reserve past its 4 GiB window, in far chunks (`cpu.far`).** Off by
 default, for the launcher to turn on for a title that reserves wide: a 64-bit Unity player

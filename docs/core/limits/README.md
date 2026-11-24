@@ -20,10 +20,10 @@ event, an error. Neither stops the program.
   naming that. Such a process is given about 3.7 GiB, all of it below 4 GiB, and only its
   image's code is translated: the system libraries' own code and pages it makes executable
   itself are interpreted, some twenty times dearer an instruction.
-  A relocatable 64-bit image given a `memorySize` past 4 GiB is moved below 4 GiB and runs over
-  a window of 8 GiB too, its RAM a memory64 memory of 7 GiB (a browser weighs a thread's memories
-  by their length, and past about 8 GiB collects without end); its addresses stay below 4 GiB so
-  far. Given 4 GiB or less it runs in the 4 GiB layout.
+  Its RAM reaches the image's end and no further (5 GiB and the image for one at 0x140000000):
+  a browser weighs a thread's memories by their length and, past 4 GiB in Chrome 157, collects
+  without end, so such a program runs slowly there. A relocatable 64-bit image runs in the
+  4 GiB layout whatever its `memorySize`; past 4 GiB it reserves only with `cpu.far`.
   A structured exception there passes no `_set_se_translator` translator. The exports that are
   i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
   `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is
