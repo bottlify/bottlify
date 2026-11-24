@@ -524,6 +524,8 @@ export function createCpuModule(){
                     codeBase: config.codeBase ?? 0,
                     ...config.wideRam ? { wideRam: config.wideRam } : {},
                     ...config.hostAlias ? { hostAlias: config.hostAlias } : {} } : {}),
+                // Far reservations past long mode's 4 GiB (`CorkHostConfig.far`).
+                ...(config?.bits === 64 && config?.far === true ? { far: true } : {}),
             };
             state.memorySize = settings.memorySize;
             state.store = settings.cork?.store ?? null;
@@ -824,6 +826,7 @@ export function createCpuModule(){
                             ...settings.wideRam ? { wideRam: settings.wideRam } : {},
                             ...settings.hostAlias ? { hostAlias: settings.hostAlias } : {} }
                             : {}),
+                        ...settings.far ? { far: true } : {},
                     };
                     state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                         reused: settings.reused,
@@ -1125,6 +1128,19 @@ export function createCpuModule(){
                     }
                 },
 
+                /**
+                 * Where the process may reserve past 4 GiB (`far`), and the chunk a
+                 * frame stands for; null where it has no table of far chunks.
+                 *
+                 * @returns {{ base: number, top: number, chunk: number } | null}
+                 */
+                farSpace: ()=>state.host?.farSpace?.() ?? null,
+                /**
+                 * Gives a far chunk a frame of the window, or takes it (-1).
+                 *
+                 * @param {number} address @param {number} frame
+                 */
+                mapFar: (address, frame)=>started().mapFar(address, frame),
                 /** @param {number} address @param {number} length */
                 readPhysical: (address, length)=>started().readPhysical(address, length),
                 /** @param {number} address @param {Uint8Array} bytes */

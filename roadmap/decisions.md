@@ -2740,3 +2740,17 @@ why the memory follows what was given and not the address space. A 64-bit progra
 than 4 GiB runs over a window of 8 GiB whose RAM is a memory64 memory of 7 GiB, not 8: one memory
 of 8 GiB already passes Chrome's limit for a thread and is collected after every few megabytes
 (`tools/read/wasm-memory-gc.mjs`). *2026-11-22, 2026-11-23.*
+
+**A288. A 64-bit process may reserve past its 4 GiB window, in far chunks (`cpu.far`).** Off by
+default, for the launcher to turn on for a title that reserves wide: a 64-bit Unity player
+reserves 512 MiB at a time, PAGE_NOACCESS, and commits a megabyte of each, 8 GiB and more of space
+that a memory64 window would make the memory's length, which a browser counts against a thread's
+limit (4 GiB in Chrome 157, 8 GiB in Chrome 153) and collects without end past it. With it a
+reservation of 256 MiB or more, or one the window has no room left for, is placed from 4 GiB up
+to 64 GiB, lowest place first, though Windows would place a small one bottom-up in the window
+too: the window's arena is what every heap, stack and frame comes out of. Each 64 KiB chunk with
+a page committed is given 64 KiB of the window's arena, so a commit of one page holds 64 KiB.
+Code is not run from past 4 GiB (a fetch there faults), and a reservation larger than 4 GiB is
+refused as before. In such a process every access through the stack is tested
+(`looseStacks` off), since a stack a program places in a far reservation is reached only through
+its frames. *2026-11-24.*

@@ -36,6 +36,7 @@ import {
     heapReAllocLongCode, heapSizeLongCode,
 } from './guest-heap-long.js';
 import { createPageRuns } from './page-runs.js';
+import { createFarSpace } from './far-space.js';
 import { copyOnWrite, imageWriteCopy, protectionWithin, writtenCopy } from './view-rights.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
@@ -375,6 +376,14 @@ export const RELEASE_PART = Symbol('release part');
 
 /** @param {number} value @param {number} to */
 const roundUp = (value, to)=>Math.ceil(value / to) * to;
+
+/**
+ * A new reservation this large goes past 4 GiB where the process has far space
+ * (`far-space.js`), whether or not the window has room for it: the window's
+ * arena is what every heap, stack and frame comes out of, and a 64-bit Unity
+ * player's dozen reservations of 512 MiB filled it with space it never used.
+ */
+const FAR_FIRST = 256 * 2 ** 20;
 
 /**
  * Where `value` is in an ascending list, or where it would go.
@@ -1286,6 +1295,11 @@ const viewPageProtection = (view, page)=>{
  *           a reservation's pages not committed, and those protected
  *           PAGE_NOACCESS, fault on any access, as on Windows. False where the
  *           processor does not fault a read, and then every page reads.
+ * @property {() => ({ base: number, top: number, chunk: number } | null)} [farSpace]
+ *           Where the process may reserve past 4 GiB (the memory layer's `farSpace`),
+ *           null where it may not.
+ * @property {(address: number, frame: number) => void} [mapFar]  Gives a far chunk a
+ *           frame of the window, or takes it (-1): the memory layer's `mapFar`.
  * @property {(address: number, length: number) => ({ take: (address: number,
  *     length: number) => number[] } | null)} [watchWrites]  The engine's watch over a
  *     range's writes (the memory layer's `watchWrites`): `take` answers the pages, by
@@ -1316,7 +1330,27 @@ export function createHeapFunctions(host){
     const MEMORY_BASIC_INFORMATION = memoryBasicInformation(host.pointerSize);
     /** This process's user address space's end, read when asked (`userSpaceTop`). */
     const spaceTop = ()=>Math.max(userSpaceTop(host.arena),
-        host.pointerSize === 8 && host.mappedTop ? host.mappedTop() + 0x10000 : 0);
+        host.pointerSize === 8 && host.mappedTop ? host.mappedTop() + 0x10000 : 0,
+        far()?.space.top ?? 0);
+    /**
+     * The process's reservations past 4 GiB (`far-space.js`), made at the first
+     * call that asks, once the processor says where they may lie; null where
+     * they may not.
+     *
+     * @type {ReturnType<typeof createFarSpace> | null | undefined}
+     */
+    let farMade;
+    const far = ()=>{
+        if (farMade === undefined)
+        {
+            const space = host.farSpace?.() ?? null;
+            farMade = space === null || host.mapFar === undefined ? null
+                : createFarSpace({ space, allocator, mapFar: host.mapFar,
+                    room: end=>host.reach?.(end) !== false,
+                    fill: host.fillMemory, pageAccess: host.pageAccess });
+        }
+        return farMade;
+    };
     // One allocator for the whole arena, whoever asks. The caller may bring its
     // own so that everything guest memory is handed out from -- the heap, a DIB
     // section, COM task memory -- comes from the same free list rather than from
@@ -2031,6 +2065,11 @@ export function createHeapFunctions(host){
      * @returns {[number, number, number, number, number, number, number]}
      */
     const regionAnswer = at=>{
+        const farSpace = far();
+        if (farSpace !== null && at >= farSpace.space.base)
+        {
+            return farSpace.query(at);
+        }
         // Not masked: a 64-bit process's address runs past 32 bits.
         const page = at - at % PAGE_SIZE;
         const arenaEnd = host.arena.base + host.arena.size;
@@ -2109,7 +2148,7 @@ export function createHeapFunctions(host){
                 MEM_PRIVATE];
         }
         const next = host.nextRegionAfter ? host.nextRegionAfter(at) : null;
-        let limit = next ? next.base : spaceTop();
+        let limit = Math.min(next ? next.base : spaceTop(), far()?.space.base ?? Infinity);
         if (host.arena.base > at && host.arena.base < limit)
         {
             limit = host.arena.base;
@@ -2501,6 +2540,112 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * A new reservation past 4 GiB, committed whole where `kind` says so: its
+     * base, or 0 where the far space or the window's frames have no room.
+     *
+     * @param {NonNullable<ReturnType<typeof far>>} farSpace @param {number} span
+     * @param {number} kind @param {number} protection
+     */
+    const farReserve = (farSpace, span, kind, protection)=>{
+        const base = farSpace.reserve(span, protection);
+        if (base === 0)
+        {
+            return 0;
+        }
+        const made = /** @type {import('./far-space.js').FarReservation} */ (farSpace.find(base));
+        if ((kind & MEM_COMMIT) !== 0 && !farSpace.commit(made, base, base + span, protection))
+        {
+            farSpace.release(made);
+            return 0;
+        }
+        return base;
+    };
+
+    /**
+     * VirtualAlloc at an address past 4 GiB (`far-space.js`): a reservation
+     * placed there, or a commit or a reset of pages of one, as in the window.
+     *
+     * @param {NonNullable<ReturnType<typeof far>>} farSpace @param {number} requested
+     * @param {number} size @param {number} kind @param {number} protection
+     */
+    const farAlloc = (farSpace, requested, size, kind, protection)=>{
+        if ((kind & MEM_RESERVE) !== 0)
+        {
+            const start = Math.floor(requested / ALLOCATION_GRANULARITY) * ALLOCATION_GRANULARITY;
+            const span = roundUp(requested + size - start, PAGE_SIZE);
+            if (!farSpace.reserveAt(start, span, protection))
+            {
+                host.setLastError(ERROR_INVALID_ADDRESS);
+                return 0;
+            }
+            const made = /** @type {import('./far-space.js').FarReservation} */ (
+                farSpace.find(start));
+            if ((kind & MEM_COMMIT) !== 0
+                && !farSpace.commit(made, start, start + span, protection))
+            {
+                farSpace.release(made);
+                return noRoom(span);
+            }
+            return start;
+        }
+        const page = Math.floor(requested / PAGE_SIZE) * PAGE_SIZE;
+        const end = roundUp(requested + size, PAGE_SIZE);
+        const reservation = farSpace.find(page);
+        if (reservation === null || end > reservation.base + reservation.span)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        if ((kind & MEM_RESET) !== 0)
+        {
+            return page;
+        }
+        return farSpace.commit(reservation, page, end, protection) ? page : noRoom(end - page);
+    };
+
+    /**
+     * VirtualFree past 4 GiB: a release names the reservation by its base and
+     * takes no size; a decommit names pages inside one, a size of 0 the rest of
+     * it from the address.
+     *
+     * @param {NonNullable<ReturnType<typeof far>>} farSpace @param {number} address
+     * @param {number} size @param {number} kind
+     */
+    const farFree = (farSpace, address, size, kind)=>{
+        const reservation = farSpace.find(address);
+        if (reservation === null)
+        {
+            host.setLastError(ERROR_INVALID_ADDRESS);
+            return 0;
+        }
+        if (kind === MEM_RELEASE)
+        {
+            if (size !== 0)
+            {
+                host.setLastError(ERROR_INVALID_PARAMETER);
+                return 0;
+            }
+            if (address !== reservation.base)
+            {
+                host.setLastError(ERROR_INVALID_ADDRESS);
+                return 0;
+            }
+            farSpace.release(reservation);
+            return 1;
+        }
+        const page = Math.floor(address / PAGE_SIZE) * PAGE_SIZE;
+        const end = size === 0 ? reservation.base + reservation.span
+            : roundUp(address + size, PAGE_SIZE);
+        if (end > reservation.base + reservation.span)
+        {
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        farSpace.decommit(reservation, page, end);
+        return 1;
+    };
+
+    /**
      * VirtualAlloc's body, and VirtualAlloc2's: `where` is the address
      * requirements of a new reservation -- an alignment past the allocation
      * granularity, and the lowest and highest address it may take -- or null.
@@ -2541,6 +2686,12 @@ export function createHeapFunctions(host){
             return 0;
         }
         const rounded = roundUp(size, PAGE_SIZE);
+
+        const farSpace = far();
+        if (farSpace !== null && requested >= farSpace.space.base)
+        {
+            return farAlloc(farSpace, requested, size, kind, protection);
+        }
 
         if (requested !== 0 && (kind & MEM_RESERVE) !== 0)
         {
@@ -2668,6 +2819,14 @@ export function createHeapFunctions(host){
         // pages up to the granule's end is within its rights, and was
         // refused here as if it had left its reservation.
         const span = roundUp(size, ALLOCATION_GRANULARITY);
+        if (farSpace !== null && where === null && span >= FAR_FIRST)
+        {
+            const placedFar = farReserve(farSpace, span, kind, protection);
+            if (placedFar !== 0)
+            {
+                return placedFar;
+            }
+        }
         const placed = allocator.allocate(span, { owner: VIRTUAL, reserving: true,
             alignment: Math.max(ALLOCATION_GRANULARITY, where?.alignment ?? 0) });
             // Where the span asked for has no room, as there is none above
@@ -2679,6 +2838,15 @@ export function createHeapFunctions(host){
             allocator.free(placed);
         }
         const address = outside ? 0 : placed;
+        if (address === 0 && farSpace !== null && where === null)
+        {
+            // The window has no room left for it: past 4 GiB, where it fits.
+            const placedFar = farReserve(farSpace, span, kind, protection);
+            if (placedFar !== 0)
+            {
+                return placedFar;
+            }
+        }
         if (address !== 0 && (kind & MEM_COMMIT) !== 0 && !roomTo(address + rounded))
         {
             allocator.free(address);
@@ -3423,6 +3591,11 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
+                const farSpace = far();
+                if (farSpace !== null && address >= farSpace.space.base)
+                {
+                    return farFree(farSpace, address, size, kind);
+                }
                 const block = allocator.blockContaining(address);
                 if (!block || block.owner !== VIRTUAL)
                 {
@@ -3976,6 +4149,26 @@ export function createHeapFunctions(host){
                 {
                     host.setLastError(ERROR_NOACCESS);
                     return 0;
+                }
+                const farSpace = far();
+                if (farSpace !== null && wholeAddress(address) >= farSpace.space.base)
+                {
+                    const from = Math.floor(wholeAddress(address) / PAGE_SIZE) * PAGE_SIZE;
+                    const to = roundUp(wholeAddress(address) + wholeAddress(size), PAGE_SIZE);
+                    const reservation = farSpace.find(from);
+                    const old = reservation === null || to > reservation.base + reservation.span
+                        || !privateProtection(protect >>> 0) ? -1
+                        : farSpace.protect(reservation, from, to, protect >>> 0);
+                    if (old < 0)
+                    {
+                        host.setLastError(reservation === null ? ERROR_INVALID_ADDRESS
+                            : ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                    const word = new Uint8Array(4);
+                    new DataView(word.buffer).setUint32(0, old, true);
+                    host.writeMemory(wholeAddress(oldProtect), word);
+                    return 1;
                 }
                 const block = allocator.blockContaining(wholeAddress(address));
                 const first = (wholeAddress(address) & ~(PAGE_SIZE - 1)) >>> 0;

@@ -201,6 +201,9 @@ export async function layerConfig(deps){
             noExecuteBelow: 0x10000,
             executors: options.cpu?.cores ?? 1,
             bits: processBits,
+            // Reservations past 4 GiB in a 64-bit process's 4 GiB layout (`AppOptions.cpu.far`).
+            ...processBits === 64 && options.cpu?.far === true && programLoaded.wide === undefined
+                ? { far: true } : {},
             // An image past 4 GiB: the wide window, its RAM the whole of it.
             ...programLoaded.wide === undefined ? {} : { window: programLoaded.wide.window,
                 codeBase: programLoaded.wide.codeBase, wideRam: programLoaded.wide.ram,

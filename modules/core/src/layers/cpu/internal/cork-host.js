@@ -151,6 +151,9 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} [wideRam]  With `window`: the bytes of its RAM memory, the rest of
  *     the window closed; the window's whole length when absent.
  * @property {WebAssembly.Memory} [ram]  With `window`: the RAM's memory, made here when absent.
+ * @property {boolean} [far]  Long mode's 4 GiB layout in a memory that grows: a table of far
+ *     chunks in the engine's range (cork's `FAR`), so reservations may lie past 4 GiB, their
+ *     committed chunks given frames of the window.
  * @property {number} trapPort
  * @property {number} entryVector  Linear address of the dword holding the entry point.
  * @property {number} [thunkBase]  Where the thunk table and its park loop begin.
@@ -325,7 +328,7 @@ export function createCorkHost(config){
         closedBelow = 0, readThrough = [], noExecuteBelow = 0, executors = 1,
         executor = 0, memory: given, reused, tsc, features, translationZone, bits = 32,
         window: wideWindow, codeBase = 0, hostAlias, wideRam, memoryBudget, memoryCredit,
-        memoryHolder, guestCharge, ramLimit = Infinity } = config;
+        memoryHolder, guestCharge, ramLimit = Infinity, far: farAsked = false } = config;
     // Whether the guest's memory counts by its length, not by what it was given.
     // A wide window is 8 GiB long whatever its program takes of it, more than
     // any machine's memory here: counted by what was given wherever it runs.
@@ -451,8 +454,11 @@ export function createCorkHost(config){
     // of them, the record last.
     const apart = area?.others;
     const othersBytes = (executors - 1) * executorPages * 65536;
-    const areaBytes = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
+    // The table of far chunks (`far`), last in the first executor's range.
+    const farBytes = farAsked && long && wideWindow === undefined ? engine.FAR.BYTES : 0;
+    const farOffset = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
         + (apart ? 0 : othersBytes);
+    const areaBytes = farOffset + farBytes;
     const growing = area !== undefined && shared && wideWindow === undefined
         && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
         && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
@@ -468,7 +474,8 @@ export function createCorkHost(config){
         ? Math.max(0x100000, 2 ** Math.ceil(Math.log2(area.at + areaBytes))) : memorySize;
     if (growing)
     {
-        own = ownLayout({ ...layoutOptions, tablesAt: area.at, ramFloor });
+        own = ownLayout({ ...layoutOptions, tablesAt: area.at, ramFloor,
+            ...(farBytes > 0 ? { far: area.at + farOffset } : {}) });
     }
     else if (wholeWindow)
     {
@@ -660,6 +667,11 @@ export function createCorkHost(config){
         {
             bytes.fill(0, range.from, range.to);
         }
+        // The table of far chunks: none mapped.
+        if (own.far !== undefined)
+        {
+            bytes.fill(0, own.far, own.far + engine.FAR.BYTES);
+        }
     }
 
     // A fixed memory (initial === maximum) never detaches its buffer, and a
@@ -769,6 +781,50 @@ export function createCorkHost(config){
      */
     const holds = (address, length)=>address + length <= held
         || (fitRam() && address + length <= held);
+    // Far reservations (`far`): the process's table of far chunks, -1 for none.
+    const farTable = layout.far ?? -1;
+    const FAR = engine.FAR;
+    /**
+     * The pieces of a far span the host reads or writes, each in one chunk:
+     * its offset in the span, its length and where it lies in the window -- -1
+     * for a chunk with no frame, which reads as zeros and takes no write.
+     *
+     * @param {number} at @param {number} length
+     * @returns {[number, number, number][]}
+     */
+    const farPieces = (at, length)=>{
+        /** @type {[number, number, number][]} */
+        const pieces = [];
+        for (let offset = 0; offset < length;)
+        {
+            const address = at + offset;
+            const chunkEnd = (Math.floor(address / FAR.CHUNK) + 1) * FAR.CHUNK;
+            const piece = Math.min(length - offset, chunkEnd - address);
+            const entry = address >= FAR.TOP ? 0 : wholeWords[(farTable
+                + Math.floor((address - FAR.BASE) / FAR.CHUNK) * 4) >>> 2] >>> 0;
+            pieces.push([offset, piece, entry === 0 ? -1 : (address + entry - 1) % 2 ** 32]);
+            offset += piece;
+        }
+        return pieces;
+    };
+    /** Whether the host's access is past 4 GiB in a process with far reservations. @param {number} at */
+    const isFar = at=>farTable >= 0 && at >= FAR.BASE;
+    /**
+     * A far span's bytes, a copy: zeros where a chunk has no frame.
+     *
+     * @param {number} at @param {number} length
+     */
+    const farRead = (at, length)=>{
+        const bytes = new Uint8Array(length);
+        for (const [offset, piece, address] of farPieces(at, length))
+        {
+            if (address >= 0 && holds(address, piece))
+            {
+                bytes.set(ram.subarray(address, address + piece), offset);
+            }
+        }
+        return bytes;
+    };
     const reach = (/** @type {number} */ end)=>{
         if (end > held && !fitRam() && executor === 0)
         {
@@ -1468,12 +1524,15 @@ export function createCorkHost(config){
             edx: regLow(2),
             // A page fault's error code and the address it could not reach (CR2):
             // not present, and whether the access wrote.
-            ...page === null ? {} : { errorCode: page.write ? 2 : 0, address: page.address >>> 0 },
+            // Whole: a far reservation's (`far`) lies past 4 GiB.
+            ...page === null ? {} : { errorCode: page.write ? 2 : 0,
+                address: page.address < 0 ? page.address >>> 0 : page.address },
         };
         // A closed page inside RAM, the null range's or one the program closed
         // itself: translated reads that wrap into RAM would read it as zeros,
         // so they test from now on.
-        if (page !== null && page.address >>> 0 < held && !engineHolds(page.address >>> 0))
+        if (page !== null && page.address >= 0 && page.address < held
+            && !engineHolds(page.address))
         {
             runtime.readsFaulted?.();
         }
@@ -2339,6 +2398,10 @@ export function createCorkHost(config){
 
         /** One byte of guest memory, for the runtime's decoder. @param {number} at */
         readByte: at=>{
+            if (isFar(at))
+            {
+                return farRead(at, 1)[0];
+            }
             const address = hostAt(at);
             return holds(address, 1) ? ram[address] : 0;
         },
@@ -2459,6 +2522,27 @@ export function createCorkHost(config){
         /** Cork's own layout; the reserve is not carved from the guest's RAM. */
         stateLayout: ()=>layout,
         /**
+         * The far space (`far`): where reservations past 4 GiB may lie and the
+         * chunk each frame stands for; null for a process with no table.
+         */
+        farSpace: ()=>(farTable < 0 ? null
+            : { base: FAR.BASE, top: FAR.TOP, chunk: FAR.CHUNK }),
+        /**
+         * Gives the far chunk `address` lies in the frame `frame` of the window,
+         * or none (-1): every executor's code finds it at its next access.
+         *
+         * @param {number} address @param {number} frame
+         */
+        mapFar(address, frame){
+            if (farTable < 0 || address < FAR.BASE || address >= FAR.TOP)
+            {
+                throw new Error(`cpu: no far chunk at 0x${address.toString(16)}`);
+            }
+            const chunk = Math.floor(address / FAR.CHUNK) * FAR.CHUNK;
+            Atomics.store(wholeWords, (farTable + (chunk - FAR.BASE) / FAR.CHUNK * 4) >>> 2,
+                frame < 0 ? 0 : engine.farEntry(frame, chunk) | 0);
+        },
+        /**
          * The processor this executor plays from its next instruction (the
          * kernel's trade), the one `cpuid` names; undefined, its own.
          *
@@ -2488,6 +2572,10 @@ export function createCorkHost(config){
 
         /** @param {number} at @param {number} length @returns {Uint8Array} */
         readPhysical: (at, length)=>{
+            if (isFar(at))
+            {
+                return farRead(at, length);
+            }
             const address = hostAt(at);
             if (holds(address, length))
             {
@@ -2500,6 +2588,10 @@ export function createCorkHost(config){
         },
         /** @param {number} at */
         readU32: at=>{
+            if (isFar(at))
+            {
+                return new DataView(farRead(at, 4).buffer).getUint32(0, true);
+            }
             const address = hostAt(at);
             return !holds(address, 4) ? 0
                 : (address & 3) === 0 ? ramWords[ramOffset(address) / 4] >>> 0
@@ -2511,6 +2603,15 @@ export function createCorkHost(config){
          * @param {number} to @param {number} count @param {number[]} into @param {number} at
          */
         readU32sInto: (to, count, into, at)=>{
+            if (isFar(to))
+            {
+                const words = new DataView(farRead(to, count * 4).buffer);
+                for (let word = 0; word < count; word++)
+                {
+                    into[at + word] = words.getInt32(word * 4, true);
+                }
+                return;
+            }
             const address = hostAt(to);
             const from = ramOffset(address);
             const inside = holds(address, count * 4);
@@ -2522,12 +2623,30 @@ export function createCorkHost(config){
         },
         /** @param {number} at */
         readF32: at=>{
+            if (isFar(at))
+            {
+                return new DataView(farRead(at, 4).buffer).getFloat32(0, true);
+            }
             const address = hostAt(at);
             return holds(address, 4) ? ramData.getFloat32(ramOffset(address), true) : 0;
         },
 
         /** @param {number} at @param {Uint8Array} bytes */
         writePhysical: (at, bytes)=>{
+            if (isFar(at))
+            {
+                hostWrites++;
+                hostWrittenBytes += bytes.length;
+                for (const [offset, piece, address] of farPieces(at, bytes.length))
+                {
+                    if (address >= 0)
+                    {
+                        copyAround(address, bytes.subarray(offset, offset + piece));
+                        invalidate(address, piece);
+                    }
+                }
+                return;
+            }
             const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += bytes.length;
@@ -2536,6 +2655,20 @@ export function createCorkHost(config){
         },
         /** @param {number} at @param {Uint8Array} bytes */
         writeData: (at, bytes)=>{
+            if (isFar(at))
+            {
+                hostWrites++;
+                hostWrittenBytes += bytes.length;
+                for (const [offset, piece, address] of farPieces(at, bytes.length))
+                {
+                    if (address >= 0)
+                    {
+                        copyAround(address, bytes.subarray(offset, offset + piece));
+                        invalidate(address, piece);
+                    }
+                }
+                return;
+            }
             const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += bytes.length;
@@ -2551,6 +2684,17 @@ export function createCorkHost(config){
          * @param {number} at @param {number} length
          */
         wrote: (at, length)=>{
+            if (isFar(at))
+            {
+                for (const [, piece, address] of farPieces(at, length))
+                {
+                    if (address >= 0)
+                    {
+                        invalidate(address, piece);
+                    }
+                }
+                return;
+            }
             const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += length;
@@ -2558,6 +2702,20 @@ export function createCorkHost(config){
         },
         /** @param {number} at @param {number} value @param {number} length */
         fillData: (at, value, length)=>{
+            if (isFar(at))
+            {
+                hostWrites++;
+                hostWrittenBytes += length;
+                for (const [, piece, address] of farPieces(at, length))
+                {
+                    if (address >= 0)
+                    {
+                        fillAround(address, value, piece);
+                        invalidate(address, piece);
+                    }
+                }
+                return;
+            }
             const address = hostAt(at);
             hostWrites++;
             hostWrittenBytes += length;

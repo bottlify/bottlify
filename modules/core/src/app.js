@@ -454,6 +454,9 @@ export const ENGINE_CUT_AT = 0x14000000;
  */
 const ENGINE_FIRST_MIB = 28;
 
+/** The table of far chunks in MiB, rounded up (cork's `FAR.BYTES`, 3.75 MiB). */
+const FAR_TABLE_MIB = 4;
+
 /**
  * Where a large-address-aware 32-bit process's space ends on a 64-bit Windows:
  * the last 64 KiB below 4 GiB are never the program's.
@@ -492,16 +495,17 @@ const INCREASED_USER_VA_TOP = 0xbfff0000;
  * the range would.
  *
  * @param {{ wide: boolean, memorySize: number, moduleBase: number, stackPoolStart: number,
- *     heapStart: number, executors: number,
+ *     heapStart: number, executors: number, far?: boolean,
  *     image: { imageBase: number, sizeOfImage: number } }} what
  * @returns {{ at: number, span: number, inHeap: boolean, cut?: true,
  *     others?: { at: number, span: number } } | undefined}
  */
 export function engineAreaFor({ wide, memorySize, moduleBase, stackPoolStart, heapStart,
-    executors, image })
+    executors, image, far = false })
 {
     const MIB = 0x100000;
-    const span = (20 * Math.max(1, executors) + 8) * MIB;
+    // And the table of far chunks where a 64-bit process reserves past 4 GiB (`cpu.far`).
+    const span = (20 * Math.max(1, executors) + 8 + (far ? FAR_TABLE_MIB : 0)) * MIB;
     if (wide || memorySize < 2 ** 28 || 2 ** Math.round(Math.log2(memorySize)) !== memorySize)
     {
         return undefined;
@@ -523,7 +527,7 @@ export function engineAreaFor({ wide, memorySize, moduleBase, stackPoolStart, he
     }
     // The first executor's part where one executor's whole range goes, the
     // others' cut out of the heap.
-    const first = ENGINE_FIRST_MIB * MIB;
+    const first = (ENGINE_FIRST_MIB + (far ? FAR_TABLE_MIB : 0)) * MIB;
     const othersSpan = span - first;
     const firstTop = Math.floor((stackPoolStart - first) / MIB) * MIB;
     /** @param {number} at @param {number} bytes */
@@ -1509,7 +1513,8 @@ async function buildApp(options){
     const areaFor = size=>(mayGrow ? engineAreaFor({ wide: programLoaded.wide !== undefined,
         memorySize: size,
         moduleBase: MODULE_BASE, stackPoolStart: STACK_POOL_START, heapStart: HEAP_START,
-        executors: options.cpu?.cores ?? 1, image: mainImage }) : undefined);
+        executors: options.cpu?.cores ?? 1, image: mainImage,
+        far: long && options.cpu?.far === true }) : undefined);
     // `memorySize` is the program's RAM: a limit on what it is given in all, not
     // its address space. The address space is Windows's: 2 GiB, and for a program
     // linked /LARGEADDRESSAWARE 4 GiB under WOW64 or 3 GiB on a 32-bit Windows
@@ -2409,6 +2414,14 @@ async function buildApp(options){
             name, base, size: end - base,
             kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
         });
+    }
+    // The space past 4 GiB a 64-bit process reserves in (`cpu.far`): the program's
+    // to read and write where kernel32 has given its chunks frames.
+    const farSpace = memory.farSpace?.() ?? null;
+    if (farSpace !== null)
+    {
+        memory.register({ name: 'far', base: farSpace.base, size: farSpace.top - farSpace.base,
+            kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE });
     }
     if (cutArea)
     {

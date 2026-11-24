@@ -290,6 +290,27 @@ export function createMemoryModule(){
                 pageAccess: (address, length, open)=>live()
                     && /** @type {any} */ (cpu).pageAccess?.(address, length, open) === true,
                 /**
+                 * Where the process may reserve past 4 GiB (the cpu layer's far
+                 * chunks), and the chunk a frame stands for: each chunk there the
+                 * program commits is given a frame of the window (`mapFar`). Null
+                 * where it may not.
+                 *
+                 * @returns {{ base: number, top: number, chunk: number } | null}
+                 */
+                farSpace: ()=>(live() ? /** @type {any} */ (cpu).farSpace?.() ?? null : null),
+                /**
+                 * Gives the far chunk `address` lies in the window's frame `frame`,
+                 * or takes its frame (-1).
+                 *
+                 * @param {number} address @param {number} frame
+                 */
+                mapFar: (address, frame)=>{
+                    if (live())
+                    {
+                        /** @type {any} */ (cpu).mapFar(address, frame);
+                    }
+                },
+                /**
                  * Grows the guest's memory to hold `end` bytes of RAM, where it grows
                  * as the guest is given more (the cpu layer's `growTo`): what gives the
                  * guest memory -- an allocator placing a block, a mapping -- asks for

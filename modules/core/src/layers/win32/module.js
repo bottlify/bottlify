@@ -4141,6 +4141,9 @@ export function createWin32Module(){
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,
+                        farSpace: ()=>memory.farSpace?.() ?? null,
+                        /** @param {number} address @param {number} frame */
+                        mapFar: (address, frame)=>memory.mapFar(address, frame),
                         /** @param {number} address @param {number} length */
                         watchWrites: (address, length)=>
                             memory.watchWrites?.(address, length) ?? null,
