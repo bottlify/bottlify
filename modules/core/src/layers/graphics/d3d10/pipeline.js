@@ -305,7 +305,8 @@ export function createPipelineState(services){
     /**
      * @param {any[]} slots
      * @param {number} startSlot
-     * @param {readonly any[]} values
+     * @param {ArrayLike<any>} values  read here and not kept: a command ring's
+     *     words may be handed over as they lie
      * @param {any} [absent]  What an unsupplied entry means: no object, or zero.
      */
     const writeSlots = (slots, startSlot, values, absent = null)=>{
@@ -418,8 +419,8 @@ export function createPipelineState(services){
         /**
          * @param {number} startSlot
          * @param {readonly any[]} buffers
-         * @param {readonly number[]} strides
-         * @param {readonly number[]} offsets
+         * @param {ArrayLike<number>} strides
+         * @param {ArrayLike<number>} offsets
          */
         IASetVertexBuffers(startSlot, buffers, strides, offsets){
             writeSlots(pipeline.vertexBuffers, startSlot, buffers);
@@ -572,13 +573,14 @@ export function createPipelineState(services){
          * sees ones.
          *
          * @param {any} state
-         * @param {readonly number[] | null} blendFactor
+         * @param {ArrayLike<number> | null} blendFactor  copied, so it may be a
+         *     command ring's floats as they lie
          * @param {number} sampleMask
          */
         OMSetBlendState(state, blendFactor, sampleMask){
             pipeline.blendState = swap(pipeline.blendState, state ?? null);
             pipeline.blendFactor = blendFactor
-                ? [...blendFactor]
+                ? Array.from(blendFactor)
                 : [...D3D10_DEFAULTS.BLEND_FACTOR];
             pipeline.sampleMask = sampleMask >>> 0;
         },

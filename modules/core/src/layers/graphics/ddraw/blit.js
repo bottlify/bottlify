@@ -582,8 +582,9 @@ const DECODED_AT = 2 ** 32;
 function bltIntoBlocks(request){
     const { memory, dest } = request;
     const kind = /** @type {import('../webgpu/internal/s3tc.js').S3tcKind} */ (dest.compressed);
+    // readMemory answers bytes of their own, and decoding them keeps none.
     const blocks = memory.readMemory(dest.buffer,
-        compressedBytes(kind, dest.width, dest.height)).slice();
+        compressedBytes(kind, dest.width, dest.height));
     const texels = decodeS3tc(blocks, kind, dest.width, dest.height);
     if (!texels)
     {

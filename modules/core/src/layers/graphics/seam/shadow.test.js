@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createCommandReader, createShadow } from './shadow.js';
+import { HOST_MIRRORS, createCommandReader, createShadow } from './shadow.js';
 import {
     BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
     LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE, transformSlot, transformType,
@@ -1271,4 +1271,34 @@ test('a mirror the host writes from the device comes after the calls the ring ho
     assert.deepEqual(m.taken, [[7, 16, 1, 2]], 'the ring made first');
     m.shadow.remirror({ renderStates: [] });
     assert.equal(m.taken.length, 1, 'and only once');
+});
+
+test('a host mirror writes what it read as it was read, with no second copy', ()=>{
+    // A guest word reader whose `read` answers bytes of their own, as the
+    // memory layer's readBytes does: a mirror that copied them again would
+    // hand `write` another array, and every matrix, viewport and scissor
+    // mirrored would cost two copies.
+    /** @type {Uint8Array[]} */
+    const reads = [];
+    /** @type {Uint8Array[]} */
+    const writes = [];
+    /** @type {import('./shadow.js').GuestWords} */
+    const m = {
+        // Every word 1: a viewport of some size at the origin.
+        u32: ()=>1,
+        setU32: ()=>{},
+        read: (_at, length)=>{
+            const bytes = new Uint8Array(length).fill(7);
+            reads.push(bytes);
+            return bytes;
+        },
+        write: (_at, bytes)=>{
+            writes.push(bytes);
+        },
+    };
+    assert.equal(HOST_MIRRORS.transform(m, 0x1000, [256, 0x2000]), true, 'the world matrix');
+    assert.equal(HOST_MIRRORS.viewport9(m, 0x1000, [0x3000]), true, 'a viewport');
+    assert.equal(reads.length, 2);
+    assert.deepEqual(writes.map(bytes=>bytes.length), [64, 24]);
+    writes.forEach((bytes, i)=>assert.equal(bytes, reads[i], 'written as read'));
 });

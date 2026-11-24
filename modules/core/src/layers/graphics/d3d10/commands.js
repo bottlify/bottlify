@@ -63,9 +63,10 @@ const TABLE = {
     // The buffers, then the strides and the offsets, `count` words each.
     IASetVertexBuffers: { args: 2, copiedObjects: arg=>arg(1), make: (d, c)=>{
         const count = c.arg(1);
+        // The strides and offsets as they lie in the ring: the device copies
+        // them into its slots at once.
         d.IASetVertexBuffers(c.arg(0), objectsOf(c, count),
-            Array.from(c.words.subarray(count, count * 2)),
-            Array.from(c.words.subarray(count * 2, count * 3)));
+            c.words.subarray(count, count * 2), c.words.subarray(count * 2, count * 3));
     } },
     IASetIndexBuffer: { args: 3, objects: [0], make: (d, c)=>{
         d.IASetIndexBuffer(c.object(), c.arg(1), c.arg(2));
@@ -77,8 +78,7 @@ const TABLE = {
     } },
     // The state, the mask, whether there is a factor, and its four floats.
     OMSetBlendState: { args: 3, objects: [0], make: (d, c)=>{
-        d.OMSetBlendState(c.object(), c.arg(2) === 0 ? null : Array.from(c.floats.subarray(0, 4)),
-            c.arg(1));
+        d.OMSetBlendState(c.object(), c.arg(2) === 0 ? null : c.floats.subarray(0, 4), c.arg(1));
     } },
     OMSetDepthStencilState: { args: 2, objects: [0], make: (d, c)=>{
         d.OMSetDepthStencilState(c.object(), c.arg(1));
@@ -110,7 +110,8 @@ const TABLE = {
         d.DrawIndexedInstanced(c.arg(0), c.arg(1), c.arg(2), c.arg(3) | 0, c.arg(4));
     } },
     ClearRenderTargetView: { args: 1, objects: [0], make: (d, c)=>{
-        d.ClearRenderTargetView(c.object(), Array.from(c.floats.subarray(0, 4)));
+        // The device copies the colour at once.
+        d.ClearRenderTargetView(c.object(), c.floats.subarray(0, 4));
     } },
     ClearDepthStencilView: { args: 4, objects: [0], make: (d, c)=>{
         d.ClearDepthStencilView(c.object(), c.arg(1), floatOf(c.arg(2)), c.arg(3) & 0xff);
