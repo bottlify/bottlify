@@ -19,7 +19,7 @@
  */
 
 import {
-    COLD, HOT, R_LENGTH, R_OFFSET, R_SEGMENT, R_STATE, stateWord, viewIndex,
+    COLD, HOT, R_LENGTH, R_OFFSET, R_SEGMENT, R_STATE, WRITING, stateWord, viewIndex,
 } from './shared.js';
 
 /**
@@ -194,7 +194,13 @@ export function createReader({ shared, segments = [], keeper }){
             }
             writing.delete(name);
             index.stamp(id);
-            Atomics.store(index.words, index.at(id) + R_STATE, stateWord(HOT));
+            // Hot, the writer out; or, where the name was written anew meanwhile,
+            // only the writer out of a record retired under it.
+            if (Atomics.compareExchange(index.words, index.at(id) + R_STATE,
+                stateWord(WRITING, 1), stateWord(HOT)) !== stateWord(WRITING, 1))
+            {
+                index.leave(id);
+            }
         },
 
         /**

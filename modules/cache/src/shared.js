@@ -71,6 +71,14 @@ export const HOT = 2;
 export const COLD = 3;
 /** The keeper is taking it out of its segment. */
 export const MOVING = 4;
+/**
+ * A body whose name was written anew while it was read: the name leads to a
+ * new record now, the readers inside this one finish, no one enters, and its
+ * room goes once they are out. A writer counts as a reader of its record from
+ * `reserve` to `commit`, so a record retired under a writer keeps its room
+ * until the writer is out too.
+ */
+export const RETIRED = 5;
 
 const READERS = 0xffffff;
 

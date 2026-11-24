@@ -123,6 +123,38 @@ test('a body being read is not taken: its drop waits for the reader to leave', a
     assert.equal(reader.look('a'), null);
 });
 
+test('a name written anew while read: the reader finishes the old body, the next one reads the new',
+    async()=>{
+        const { reader, keeper, step } = await cacheOf();
+        reader.put('a', bodyOf(5000, 1));
+        const seen = reader.with('a', body=>{
+            assert.equal(reader.put('a', bodyOf(6000, 2)), true, 'written while read');
+            return Array.from(body);
+        });
+        assert.deepEqual(seen, Array.from(bodyOf(5000, 1)), 'the old body, whole, to its reader');
+        assert.deepEqual(reader.with('a', body=>Array.from(body)), Array.from(bodyOf(6000, 2)));
+        const before = keeper.figures();
+        assert.equal(before.replaced, 1);
+        step(1);
+        assert.equal(keeper.figures().hotBytes, 6000, 'the old body\'s room went once read');
+    });
+
+test('a name written anew while written: the later write wins, the earlier one is let go',
+    async()=>{
+        const { reader, step, keeper } = await cacheOf();
+        const first = reader.reserve('a', 100);
+        assert.ok(first);
+        first.set(bodyOf(100, 1));
+        // A second writer of the same name, before the first commits.
+        assert.equal(reader.put('b', bodyOf(10, 0)), true);
+        const second = keeper.reserve('a', 200);
+        assert.ok(second);
+        reader.commit('a');
+        assert.equal(reader.with('a', ()=>1), undefined, 'the second is not written yet');
+        step(1);
+        assert.equal(keeper.figures().hotBytes, 10 + 200, 'the first write\'s room went');
+    });
+
 test('idle bodies go cold, then away; an emptied segment past the spare is let go', async()=>{
     const { reader, keeper, step, said } = await cacheOf({ disk: memoryDisk() });
     for (let i = 0; i < 6; i++)

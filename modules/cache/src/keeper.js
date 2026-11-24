@@ -32,7 +32,7 @@
 import { createBuddy } from './buddy.js';
 import {
     COLD, F_DROP, F_ONLY_COPY, F_ON_DISK, GONE, HEADER_WORDS, HOT, H_COUNT, H_NAMES, H_TICK,
-    MOVING, RECORD_WORDS, R_FLAGS, R_HASH_A, R_HASH_B, R_LENGTH, R_NAME, R_NAME_LENGTH,
+    MOVING, RECORD_WORDS, RETIRED, R_FLAGS, R_HASH_A, R_HASH_B, R_LENGTH, R_NAME, R_NAME_LENGTH,
     R_OFFSET, R_PACK, R_PACK_OFFSET, R_SEGMENT, R_STATE, R_TICK, WRITING, growableShared,
     hashName, readersOf, stateOf, stateWord, viewIndex,
 } from './shared.js';
@@ -111,7 +111,7 @@ export async function openKeeper(options){
 
     const counts = {
         reserved: 0, refusedBusy: 0, refusedRoom: 0, refusedLarge: 0, refusedUnseen: 0,
-        raised: 0, raiseFailed: 0, cooled: 0, written: 0, writtenBytes: 0, gone: 0,
+        replaced: 0, raised: 0, raiseFailed: 0, cooled: 0, written: 0, writtenBytes: 0, gone: 0,
         segmentsMade: 0, segmentsLetGo: 0, letGoBytes: 0, deadDiskBytes: 0, diskFailures: 0,
     };
 
@@ -151,6 +151,28 @@ export async function openKeeper(options){
         {
             return known;
         }
+        const from = words[H_NAMES];
+        growNames(from + name.length);
+        for (let i = 0; i < name.length; i++)
+        {
+            index.names[from + i] = name.charCodeAt(i);
+        }
+        words[H_NAMES] = from + name.length;
+        const id = newRecord(hash[0], hash[1], from, name.length);
+        if (id >= 0)
+        {
+            insert(id, hash[0]);
+        }
+        return id;
+    };
+
+    /**
+     * A record of no body yet, at the end of the records, not in the table:
+     * its id, or -1 where the records are full.
+     *
+     * @param {number} a @param {number} b @param {number} nameAt @param {number} nameLength
+     */
+    const newRecord = (a, b, nameAt, nameLength)=>{
         const id = words[H_COUNT];
         if (id >= MAX_RECORDS)
         {
@@ -162,22 +184,52 @@ export async function openKeeper(options){
             shared.records.grow(Math.min(shared.records.maxByteLength,
                 Math.max(bytesNeeded, shared.records.byteLength * 2)));
         }
-        const from = words[H_NAMES];
-        growNames(from + name.length);
-        for (let i = 0; i < name.length; i++)
-        {
-            index.names[from + i] = name.charCodeAt(i);
-        }
-        words[H_NAMES] = from + name.length;
-        set(id, R_HASH_A, hash[0]);
-        set(id, R_HASH_B, hash[1]);
-        set(id, R_NAME, from);
-        set(id, R_NAME_LENGTH, name.length);
+        set(id, R_HASH_A, a);
+        set(id, R_HASH_B, b);
+        set(id, R_NAME, nameAt);
+        set(id, R_NAME_LENGTH, nameLength);
         set(id, R_SEGMENT, -1);
         set(id, R_PACK, -1);
+        set(id, R_FLAGS, 0);
         store(id, GONE);
         Atomics.store(words, H_COUNT, id + 1);
-        insert(id, hash[0]);
+        return id;
+    };
+
+    /**
+     * The name of record `old` led to a new record from now on, its name
+     * shared; `old` retired, its readers left to finish. The new one's id, or
+     * -1 where the records are full.
+     *
+     * @param {number} old
+     */
+    const replaceRecord = old=>{
+        const id = newRecord(get(old, R_HASH_A), get(old, R_HASH_B), get(old, R_NAME),
+            get(old, R_NAME_LENGTH));
+        if (id < 0)
+        {
+            return -1;
+        }
+        const table = index.table();
+        const mask = table.length - 1;
+        for (let slot = get(old, R_HASH_A) & mask; ; slot = (slot + 1) & mask)
+        {
+            if (table[slot] === old + 1)
+            {
+                Atomics.store(table, slot, id + 1);
+                break;
+            }
+        }
+        for (;;)
+        {
+            const word = stateWordOf(old);
+            const retired = stateWord(RETIRED, readersOf(word));
+            if (Atomics.compareExchange(words, index.at(old) + R_STATE, word, retired) === word)
+            {
+                break;
+            }
+        }
+        counts.replaced++;
         return id;
     };
 
@@ -489,26 +541,22 @@ export async function openKeeper(options){
                 counts.refusedLarge++;
                 return null;
             }
-            const id = recordOf(name);
+            let id = recordOf(name);
+            const state = id < 0 ? GONE : stateOf(stateWordOf(id));
+            // A body no one is in is written over in place; one being read or
+            // written is left to those inside, the name led to a new record.
+            if (state === HOT && Atomics.compareExchange(words, index.at(id) + R_STATE,
+                stateWord(HOT), stateWord(MOVING)) === stateWord(HOT))
+            {
+                giveBack(id);
+            }
+            else if (state === HOT || state === WRITING)
+            {
+                id = replaceRecord(id);
+            }
             if (id < 0)
             {
                 counts.refusedRoom++;
-                return null;
-            }
-            const state = stateOf(stateWordOf(id));
-            if (state === HOT)
-            {
-                if (Atomics.compareExchange(words, index.at(id) + R_STATE, stateWord(HOT),
-                    stateWord(MOVING)) !== stateWord(HOT))
-                {
-                    counts.refusedBusy++;
-                    return null;
-                }
-                giveBack(id);
-            }
-            else if (state === WRITING || state === MOVING)
-            {
-                counts.refusedBusy++;
                 return null;
             }
             forgetDisk(id);
@@ -525,7 +573,8 @@ export async function openKeeper(options){
             set(id, R_OFFSET, found.offset);
             set(id, R_LENGTH, length);
             set(id, R_TICK, Atomics.load(words, H_TICK));
-            store(id, WRITING);
+            // The writer counts as one inside until it commits.
+            Atomics.store(words, index.at(id) + R_STATE, stateWord(WRITING, 1));
             counts.reserved++;
             keepSpare();
             return { id, segment: found.segment, offset: found.offset };
@@ -602,6 +651,18 @@ export async function openKeeper(options){
                     drop(id);
                     continue;
                 }
+                if (state === RETIRED && readersOf(word) === 0
+                    && Atomics.compareExchange(words, index.at(id) + R_STATE, word,
+                        stateWord(MOVING)) === word)
+                {
+                    if (get(id, R_SEGMENT) >= 0)
+                    {
+                        giveBack(id);
+                    }
+                    forgetDisk(id);
+                    store(id, GONE);
+                    continue;
+                }
                 if (state === HOT && readersOf(word) === 0 && at - get(id, R_TICK) >= coldAfterMs)
                 {
                     cool(id);
@@ -648,7 +709,7 @@ export async function openKeeper(options){
             for (let id = 0; id < words[H_COUNT]; id++)
             {
                 const state = stateOf(stateWordOf(id));
-                if (state === HOT || state === WRITING)
+                if (state === HOT || state === WRITING || state === RETIRED)
                 {
                     hot++;
                     hotBytes += get(id, R_LENGTH);
