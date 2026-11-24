@@ -45,7 +45,8 @@ export class Pipe {
  * The volume with pipes in it: a node that is a Pipe is read, written,
  * held and closed here, everything else is the volume's.
  *
- * @template {{ read: Function, write: Function, close: Function, retain?: Function }} T
+ * @template {{ read: Function, readInto: Function, write: Function, close: Function,
+ *     retain?: Function }} T
  * @param {T} files
  * @returns {T}
  */
@@ -65,6 +66,21 @@ export function withPipes(files){
                 node.base += start;
             }
             return taken;
+        },
+
+        /**
+         * @param {any} node @param {number} offset @param {number} length
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        readInto(node, offset, length, put){
+            if (!(node instanceof Pipe))
+            {
+                return files.readInto(node, offset, length, put);
+            }
+            const taken = own.read(node, offset, length);
+            put(taken, 0);
+            return taken.length;
         },
 
         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */

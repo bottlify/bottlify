@@ -1151,6 +1151,50 @@ test('a ring started over keeps the record a routine on another executor took sp
         assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0);
     });
 
+test('a ring started over many times zeroes it from one buffer, made once', ()=>{
+    // A buffer the length of what was read, made at every turn of the ring,
+    // was the most garbage a frame of Direct3D made (767 MiB in a run).
+    const memory = new Uint8Array(0x20000);
+    const words = new DataView(memory.buffer);
+    const block = 0x1000;
+    const ring = 0x2000;
+    /** @type {Set<ArrayBufferLike>} */
+    const zeroedFrom = new Set();
+    let taken = 0;
+    const reader = createCommandReader({
+        block, ring,
+        readWord: address=>words.getUint32(address, true),
+        readWords: (address, count)=>new Uint32Array(memory.buffer, address, count),
+        writeMemory: (address, bytes)=>{
+            if (address === ring)
+            {
+                zeroedFrom.add(bytes.buffer);
+            }
+            memory.set(bytes, address);
+        },
+        take: records=>{
+            taken += records.byteLength / 8;
+            return records.byteLength / 8;
+        },
+        refuse: detail=>assert.fail(detail),
+    });
+    const head = COMMAND_RING_BYTES - 1024;
+    for (let turn = 0; turn < 5; turn++)
+    {
+        for (let at = 0; at < head; at += 8)
+        {
+            words.setUint32(ring + at + COMMAND.SLOT, 1, true);
+            words.setUint32(ring + at + COMMAND.BYTES, 8, true);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        reader.take();
+        assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0, `turn ${turn}: over`);
+        assert.ok(memory.subarray(ring, ring + head).every(byte=>byte === 0), 'zeroed');
+    }
+    assert.equal(taken, 5 * head / 8, 'every record');
+    assert.equal(zeroedFrom.size, 1, 'one buffer of zeroes for every turn');
+});
+
 test('the host holds the device while it replays what a routine left, and lets it go after', ()=>{
     // A routine on another executor that finds it held leaves for the host
     // rather than merge a range, or write the unlock ring, under the replay.

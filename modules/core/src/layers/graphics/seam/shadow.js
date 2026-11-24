@@ -107,6 +107,14 @@ export function createCommandReader(deps){
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
+    /**
+     * Zeroes to start the ring over with, made once: a buffer the length of
+     * what was read, made at every turn of the ring, was the most garbage a
+     * frame of Direct3D made.
+     *
+     * @type {Uint8Array | null}
+     */
+    let zeroes = null;
     return {
         /**
          * @param {() => void} [before]  run once the ring is found to hold calls,
@@ -165,7 +173,8 @@ export function createCommandReader(deps){
                 // another executor may have taken space since the head was read
                 // here: the head goes back only from where it was read, as one
                 // compare-and-swap, and otherwise the next take starts it over.
-                writeMemory(ring, new Uint8Array(head));
+                zeroes ??= new Uint8Array(bytes);
+                writeMemory(ring, zeroes.subarray(0, head));
                 if (compareExchangeU32 === undefined)
                 {
                     writeMemory(block + SHADOW.COMMAND_HEAD, zero);

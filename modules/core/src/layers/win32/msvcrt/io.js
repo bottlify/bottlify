@@ -324,7 +324,7 @@ const onConsole = (handle, settings)=>{
 
 /**
  * @typedef {Object} DescriptorHost
- * @property {any} files  The volume: open, read, write, close, stat, remove.
+ * @property {any} files  The volume: open, read, readInto, write, close, stat, remove.
  * @property {(handle: number, text: string) => void} [write]  The console.
  * @property {(code: number) => void} [errno]
  * @property {() => number} [fmode]  The runtime's `_fmode`.
@@ -563,6 +563,38 @@ export function createDescriptors(host){
             descriptor.ahead = { offset, bytes, whole: bytes.length < size };
             return bytes.subarray(0, length);
         });
+    };
+
+    /**
+     * readAhead, the bytes handed to `put` where they lie rather than
+     * answered: what the stream read last, when it holds the start, and the
+     * rest from the volume into `put` itself (`files.readInto`), a read of a
+     * stretch the window would not hold whole taking no window of its own.
+     * Answers how many bytes there were.
+     *
+     * @param {Descriptor} descriptor @param {number} offset @param {number} length
+     * @param {(bytes: Uint8Array, at: number) => void} put
+     * @returns {number | Promise<number>}
+     */
+    const readAheadInto = (descriptor, offset, length, put)=>{
+        const ahead = descriptor.ahead;
+        const end = ahead ? ahead.offset + ahead.bytes.length : 0;
+        if (ahead && offset >= ahead.offset
+            && (offset + length <= end || (ahead.whole && offset < end)))
+        {
+            const held = ahead.bytes.subarray(offset - ahead.offset,
+                offset - ahead.offset + length);
+            put(held, 0);
+            return held.length;
+        }
+        if (length < READ_AHEAD)
+        {
+            return settle(readAhead(descriptor, offset, length), bytes=>{
+                put(bytes, 0);
+                return bytes.length;
+            });
+        }
+        return host.files.readInto(descriptor.node, offset, length, put);
     };
 
     return {
@@ -852,6 +884,35 @@ export function createDescriptors(host){
             descriptor.ended = false;
             descriptor.ahead = null;
         },
+
+        /**
+         * pull of a binary descriptor's bytes (no text, no Unicode
+         * translation, not up to a line), handed to `put` where they lie -- a
+         * stream's window or the volume's own -- rather than answered: what a
+         * caller copies on (into guest memory) is copied once. Answers how
+         * many bytes there were. Anything else is pull's.
+         *
+         * @param {Descriptor} descriptor @param {number} limit
+         * @param {(bytes: Uint8Array, at: number) => void} put
+         * @returns {number | Promise<number>}
+         */
+        pullInto(descriptor, limit, put){
+            if (descriptor.node === null || descriptor.ended || limit <= 0)
+            {
+                return 0;
+            }
+            return settle(readAheadInto(descriptor, descriptor.position, limit, put), count=>{
+                descriptor.position += count;
+                return count;
+            });
+        },
+
+        /**
+         * Whether pullInto reads this descriptor: binary, no Unicode translation.
+         *
+         * @param {Descriptor} descriptor
+         */
+        pullsInto: descriptor=>!descriptor.text && descriptor.unicode === 0,
 
         /**
          * Up to `limit` bytes as a stream reads them, stopping after a line

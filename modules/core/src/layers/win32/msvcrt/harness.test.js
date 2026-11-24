@@ -197,6 +197,19 @@ export function fakeVolume(files, { late = false, directories = [], modified = 0
             const bytes = files[node].slice(at, at + length);
             return late ? Promise.resolve(bytes) : bytes;
         },
+        /**
+         * @param {string} node @param {number} at @param {number} length
+         * @param {(bytes: Uint8Array, offset: number) => void} put
+         */
+        readInto(node, at, length, put){
+            volume.reads++;
+            const bytes = files[node].subarray(at, at + length);
+            const handed = ()=>{
+                put(bytes, 0);
+                return bytes.length;
+            };
+            return late ? Promise.resolve().then(handed) : handed();
+        },
         /** @param {string} node @param {number} at @param {Uint8Array} bytes */
         write(node, at, bytes){
             const grown = new Uint8Array(Math.max(files[node].length, at + bytes.length));

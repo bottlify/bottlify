@@ -116,8 +116,11 @@ export function createDeviceRing(deps){
         readWord: memory.readU32,
         readWords: (address, words)=>{
             const bytes = memory.readMemory(address, words * 4);
-            return new Uint32Array(bytes.buffer.slice(bytes.byteOffset,
-                bytes.byteOffset + words * 4));
+            // The words where readMemory put them: a second copy only to
+            // align them where they do not start on a word.
+            return bytes.byteOffset % 4 === 0
+                ? new Uint32Array(bytes.buffer, bytes.byteOffset, words)
+                : new Uint32Array(bytes.slice(0, words * 4).buffer);
         },
         writeMemory: memory.writeMemory,
         compareExchangeU32: memory.compareExchangeU32,

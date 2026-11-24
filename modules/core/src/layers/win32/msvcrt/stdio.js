@@ -1026,16 +1026,30 @@ export function createStdioFunctions(host){
                 raise(stream, IOERR);
                 return 0;
             }
+            /** @param {number} read */
+            const done = read=>{
+                if (read < wanted)
+                {
+                    raise(stream, IOEOF);
+                }
+                return Math.floor(read / (size >>> 0));
+            };
+            const descriptor = descriptorOf(stream);
+            // A binary stream with nothing pushed back reads straight into
+            // the buffer: the volume's bytes, or the stream's window, copied
+            // once, into guest memory.
+            if (stream.pushback.length === 0 && descriptor && descriptors.pullsInto(descriptor))
+            {
+                const at = wholeAddress(buffer);
+                return settle(descriptors.pullInto(descriptor, wanted,
+                    (piece, offset)=>host.writeMemory(at + offset, piece)), done);
+            }
             return settle(take(stream, wanted, false), bytes=>{
                 if (bytes.length > 0)
                 {
                     host.writeMemory(wholeAddress(buffer), bytes);
                 }
-                if (bytes.length < wanted)
-                {
-                    raise(stream, IOEOF);
-                }
-                return Math.floor(bytes.length / (size >>> 0));
+                return done(bytes.length);
             });
         }) },
 
