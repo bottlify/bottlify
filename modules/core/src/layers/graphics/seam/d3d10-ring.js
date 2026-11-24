@@ -54,6 +54,9 @@ const HELD_WAIT_MS = 200;
 /**
  * @typedef {Object} RingMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, length: number) => Uint8Array} [windowMemory]
+ *     The bytes themselves where the memory can hand them, valid until the
+ *     guest runs again: the ring's records, read and made before it does.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  *     A run of one byte value, with no buffer made for it: the command ring
@@ -118,9 +121,11 @@ export function createDeviceRing(deps){
         bytes: ringBytes,
         readWord: memory.readU32,
         readWords: (address, words)=>{
-            const bytes = memory.readMemory(address, words * 4);
-            // The words where readMemory put them: a second copy only to
-            // align them where they do not start on a word.
+            // The records where they lie: every call they hold is made before
+            // the guest runs again and before the reader zeroes the ring, and
+            // what a call keeps it copies (`kept` in the command set).
+            const bytes = (memory.windowMemory ?? memory.readMemory)(address, words * 4);
+            // A copy only to align words that do not start on one.
             return bytes.byteOffset % 4 === 0
                 ? new Uint32Array(bytes.buffer, bytes.byteOffset, words)
                 : new Uint32Array(bytes.slice(0, words * 4).buffer);

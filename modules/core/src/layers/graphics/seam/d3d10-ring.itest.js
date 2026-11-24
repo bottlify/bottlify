@@ -139,6 +139,9 @@ function machine(guestCode, worker, eleven = false){
     /** @param {number} at @param {number} value */
     const writeU32 = (at, value)=>writeBytes(at, new Uint8Array(u32(value >>> 0)));
     const memory = withPointers({ readBytes, writeBytes, readMemory: readBytes,
+        // The RAM itself, as the engine's window hands it: the ring read in place.
+        windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            host.readPhysical(at >>> 0, length),
         writeMemory: writeBytes,
         readU32, writeU32 });
     let heap = HEAP;
