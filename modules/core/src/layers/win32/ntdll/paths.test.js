@@ -62,7 +62,7 @@ function fakeHost(){
     };
     const host = {
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            bytes.subarray(address, address + length),
+            bytes.slice(address, address + length),
         writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
             bytes.set(data, address),
         readWideString,

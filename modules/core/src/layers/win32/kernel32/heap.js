@@ -2213,7 +2213,7 @@ export function createHeapFunctions(host){
             return 0;
         }
         const kept = Math.min(previous, wanted);
-        host.writeMemory(moved, host.readMemory(address, kept).slice());
+        host.writeMemory(moved, host.readMemory(address, kept));
         if (zeroTail && wanted > kept)
         {
             zero(moved + kept, wanted - kept);
@@ -3206,7 +3206,7 @@ export function createHeapFunctions(host){
         }
         const pointerSize = host.pointerSize ?? 4;
         /** @param {number} at */
-        const pointerAt = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
+        const pointerAt = at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
             .getUint32(0, true);
         for (let index = 0; index < (count >>> 0); index++)
         {
@@ -4369,7 +4369,7 @@ export function createHeapFunctions(host){
                     host.setLastError(ERROR_BAD_LENGTH);
                     return 0;
                 }
-                const records = host.readMemory(wholeAddress(entries), count * 8).slice();
+                const records = host.readMemory(wholeAddress(entries), count * 8);
                 const view = new DataView(records.buffer);
                 for (let index = 0; index < count; index++)
                 {
@@ -4808,7 +4808,7 @@ export function createHeapFunctions(host){
                     // A copy of its own: a reader that answers a view of
                     // guest memory would see the write move under it.
                     host.writeMemory(wholeAddress(destination),
-                        host.readMemory(wholeAddress(source), length >>> 0).slice());
+                        host.readMemory(wholeAddress(source), length >>> 0));
                 }
                 return 0;
             },

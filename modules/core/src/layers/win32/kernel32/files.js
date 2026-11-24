@@ -1997,7 +1997,7 @@ export function createFileFunctions(host){
             return { status: STATUS_INVALID_DEVICE_REQUEST, information: 0 };
         }
         const given = input === 0 || inLength === 0 ? null
-            : host.readMemory(input, inLength).slice();
+            : host.readMemory(input, inLength);
         const answer = reparseRequest(/** @type {any} */ (files), path, code, given,
             output !== 0, outLength, host);
         if (answer.output)
@@ -4211,7 +4211,7 @@ export function createFileFunctions(host){
             if (writing)
             {
                 const bytes = count === 0
-                    ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count).slice();
+                    ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count);
                 const stored = (files.writeOrFetch ?? files.write)
                     .call(files, file.node, at, bytes);
                 return typeof stored === 'number'
@@ -4761,7 +4761,7 @@ export function createFileFunctions(host){
                     {
                         return settled(wholeAddress(block), STATUS_INFO_LENGTH_MISMATCH, 0);
                     }
-                    const record = host.readMemory(wholeAddress(from), length >>> 0).slice();
+                    const record = host.readMemory(wholeAddress(from), length >>> 0);
                     return settled(wholeAddress(block), linkError(open, record,
                         (kind >>> 0) === FILE_LINK_INFORMATION_EX), 0);
                 }
@@ -4785,7 +4785,7 @@ export function createFileFunctions(host){
                 {
                     return STATUS_ACCESS_VIOLATION;
                 }
-                const bytes = host.readMemory(wholeAddress(from), length >>> 0).slice();
+                const bytes = host.readMemory(wholeAddress(from), length >>> 0);
                 const view = new DataView(bytes.buffer);
                 const { file, kind: what } = open;
                 switch (kind >>> 0)
@@ -5406,7 +5406,7 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_BAD_LENGTH);
         }
-        const bytes = host.readMemory(from, Math.max(length, size)).slice();
+        const bytes = host.readMemory(from, Math.max(length, size));
         const error = informationError(open.file, open.kind, type, bytes,
             asked=>renameTarget(open.file.path, asked), handle >>> 0);
         /** @param {InformationError} code */
@@ -5938,7 +5938,7 @@ export function createFileFunctions(host){
                 const count = length >>> 0;
                 const bytes = count === 0
                     ? new Uint8Array(0)
-                    : host.readMemory(wholeAddress(buffer), count).slice();
+                    : host.readMemory(wholeAddress(buffer), count);
                 const stored = files.write(file.node,
                     overlappedPosition(readDword, layout, pointer), bytes);
                 return completeWith(host.currentThread?.() ?? null, pointer, routine, stored);
@@ -6515,7 +6515,7 @@ export function createFileFunctions(host){
                 }
                 const bytes = count === 0
                     ? new Uint8Array(0)
-                    : host.readMemory(wholeAddress(buffer), count >>> 0).slice();
+                    : host.readMemory(wholeAddress(buffer), count >>> 0);
                 /** @param {number} stored */
                 const deliver = stored=>{
                     file.position += stored;

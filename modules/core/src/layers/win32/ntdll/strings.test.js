@@ -29,7 +29,7 @@ function fakeHost(){
         // A view onto the memory rather than a copy, which is what the memory
         // layer really hands back and what a descriptor read has to survive.
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
         /** @param {number} address */

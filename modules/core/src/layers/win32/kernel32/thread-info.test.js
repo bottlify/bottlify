@@ -72,7 +72,7 @@ function setup({ processors: count = 4, onChildThread } = {}){
         processors,
         readMemory: (address, length)=>{
             check(address, length);
-            return bytes.subarray(address, address + length);
+            return bytes.slice(address, address + length);
         },
         writeMemory: (address, data)=>{
             check(address, data.length);

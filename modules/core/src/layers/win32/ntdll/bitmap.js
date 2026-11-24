@@ -49,7 +49,7 @@ export function createBitmapFunctions(host){
     const open = header=>{
         const size = u32(header);
         const buffer = u32(header + 4);
-        const bytes = host.readMemory(buffer, Math.ceil(size / 8)).slice();
+        const bytes = host.readMemory(buffer, Math.ceil(size / 8));
         return {
             size, bytes,
             /** @param {number} n */

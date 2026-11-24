@@ -212,7 +212,7 @@ export function createSyncFunctions(host){
     };
 
     /** @param {number} address */
-    const readI32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
+    const readI32 = address=>new DataView(host.readMemory(address, 4).buffer)
         .getInt32(0, true);
 
     /**
@@ -522,7 +522,7 @@ export function createSyncFunctions(host){
      * @param {number} at @param {any} thread
      */
     const writeLongContext = (at, thread)=>{
-        const bytes = host.readMemory(at, CONTEXT64.SIZE).slice();
+        const bytes = host.readMemory(at, CONTEXT64.SIZE);
         const view = new DataView(bytes.buffer);
         const flags = view.getUint32(CONTEXT64.FLAGS, true);
         const long = thread.resumeRegisters?.long ?? savedLong(thread.context);
@@ -642,7 +642,7 @@ export function createSyncFunctions(host){
      * @param {any} [context]  The stopped thread's.
      */
     const writeThreadContext = (at, registers, thread, context)=>{
-        const bytes = host.readMemory(at, CONTEXT_BYTES).slice();
+        const bytes = host.readMemory(at, CONTEXT_BYTES);
         const view = new DataView(bytes.buffer);
         const flags = view.getUint32(0, true);
         /** @param {number} offset @param {number | undefined} value */
@@ -1041,7 +1041,7 @@ export function createSyncFunctions(host){
                     return WAIT_FAILED;
                 }
                 const view = new DataView(
-                    host.readMemory(wholeAddress(handles), total * handleSize).slice().buffer);
+                    host.readMemory(wholeAddress(handles), total * handleSize).buffer);
                 /** @type {any[]} */
                 const objects = [];
                 /** Where each of `objects` sits in the caller's handle array. */
@@ -1367,7 +1367,7 @@ export function createSyncFunctions(host){
                 // The flags it asks for travel in the structure, and the rest comes back.
                 const child = onChildThread(handle, 'GetThreadContext',
                     [{ inout: host.readMemory(wholeAddress(out),
-                        CONTEXT_BYTES).slice() }], [wholeAddress(out)]);
+                        CONTEXT_BYTES) }], [wholeAddress(out)]);
                 if (child !== null)
                 {
                     return child;
@@ -1388,9 +1388,9 @@ export function createSyncFunctions(host){
                 // from the context its exception carries: that is its context.
                 if (!own && handleSize === 4 && thread.debugStop)
                 {
-                    const wanted = host.readMemory(wholeAddress(out), CONTEXT_BYTES).slice();
+                    const wanted = host.readMemory(wholeAddress(out), CONTEXT_BYTES);
                     const record = host.readMemory(wholeAddress(thread.debugStop),
-                        CONTEXT_BYTES).slice();
+                        CONTEXT_BYTES);
                     record.set(wanted.subarray(0, 4), 0);
                     mergeContextGroups(wanted, record);
                     host.writeMemory(wholeAddress(out), wanted);
@@ -1443,7 +1443,7 @@ export function createSyncFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, context])=>{
                 const child = onChildThread(handle, 'SetThreadContext',
-                    [{ in: host.readMemory(wholeAddress(context), CONTEXT_BYTES).slice() }]);
+                    [{ in: host.readMemory(wholeAddress(context), CONTEXT_BYTES) }]);
                 if (child !== null)
                 {
                     return child;
@@ -1459,9 +1459,9 @@ export function createSyncFunctions(host){
                 if (thread !== host.currentThread() && handleSize === 4 && thread.debugStop)
                 {
                     const record = host.readMemory(wholeAddress(thread.debugStop),
-                        CONTEXT_BYTES).slice();
+                        CONTEXT_BYTES);
                     mergeContextGroups(record,
-                        host.readMemory(wholeAddress(context), CONTEXT_BYTES).slice());
+                        host.readMemory(wholeAddress(context), CONTEXT_BYTES));
                     host.writeMemory(wholeAddress(thread.debugStop), record);
                     return 1;
                 }

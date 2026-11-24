@@ -938,7 +938,7 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -967,7 +967,7 @@ test('a child\'s snapshot names the process that started it as its parent', ()=>
     const { fns, host, written } = setup();
     Object.assign(host, { processId: 0x2a8, parentProcessId: 0x2a4 });
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
     fns.Process32First.handler([fns.CreateToolhelp32Snapshot.handler([0x2, 0]), 0x100]);
     const entry = /** @type {Uint8Array} */ (written.get(0x100));
@@ -994,7 +994,7 @@ test('a snapshot names the image in the ANSI page', ()=>{
     const { fns, host, written } = setup();
     host.imagePath = ()=>'C:\\App\\\u20ac\u2122\u2014\u00e9.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -1016,7 +1016,7 @@ test('a snapshot taken with its modules lists them in either width, the image fi
     ];
     const bytes = new Uint8Array(0x1000);
     const memory = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     memory.setUint32(0x100, 548, true);
     memory.setUint32(0x400, 1064, true);
     const ansi = (/** @type {Uint8Array} */ entry, /** @type {number} */ at)=>
@@ -1114,7 +1114,7 @@ test('arming a timer with a waiter already parked releases it at the due time', 
     // schedules the wake -- the wait that arrived first is not a lost one.
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 1, 0]);
     assert.equal(kernel.handles.typeOf(timer), 'timer');
@@ -1139,7 +1139,7 @@ test('arming a timer with a waiter already parked releases it at the due time', 
 test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1164,7 +1164,7 @@ test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
 test('a periodic timer signals again a period on, with no thread present between', ()=>{
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     new DataView(bytes.buffer).setBigInt64(0x10, -10000n, true);
@@ -1185,7 +1185,7 @@ test('a periodic timer signals again a period on, with no thread present between
 test('cancelling a timer leaves a parked waiter parked, and its own timeout still ends it', ()=>{
     const { fns, kernel, host, current, errors } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1208,7 +1208,7 @@ test('cancelling a timer leaves a parked waiter parked, and its own timeout stil
 test('CancelWaitableTimer un-arms without signalling a parked waiter', ()=>{
     const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1329,7 +1329,7 @@ test('a timer\'s completion routine is queued to the setting thread at each expi
     const queued = [];
     host.queueApc = (thread, routine, args)=>queued.push({ thread, routine, args });
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     kernel.state.now = 1000;
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     const object = kernel.handles.resolve(timer, 'timer');
@@ -1349,7 +1349,7 @@ test('a timer\'s completion routine is queued to the setting thread at each expi
 test('a timer set without a routine queues nothing', ()=>{
     const { fns, kernel, host } = setup();
     const bytes = new Uint8Array(0x100);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.queueApc = ()=>assert.fail('nothing to queue');
     const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
     new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
@@ -1397,7 +1397,7 @@ test('SwitchToThread stands aside for a ready thread and answers nonzero when it
 function overlapped({ host }, internal, internalHigh, event = 0){
     const bytes = new Uint8Array(0x100);
     const view = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.writeMemory = (address, data)=>bytes.set(data, address);
     view.setUint32(0x20, internal, true);
     view.setUint32(0x24, internalHigh, true);
@@ -1534,7 +1534,7 @@ test('a snapshot lists the children still running and every thread, each walk to
     host.processId = 0x2a4;
     host.imagePath = ()=>'C:\\App\\Setup.exe';
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     const kernel = /** @type {any} */ (host.kernel);
     kernel.threads = ()=>[{ id: 0x10, state: 'running' }, { id: 0x14, state: 'terminated' },
         { id: 0x18, state: 'blocked' }];
@@ -1680,7 +1680,7 @@ test('a handle reads back the flags a duplicate or SetHandleInformation gave it'
     // Wine's kernel32 process.c test_DuplicateHandle: GetHandleInformation was missing.
     const { fns, host, errors } = setup();
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.writeMemory = (address, data)=>bytes.set(data, address);
     const event = fns.CreateEventA.handler([0, 1, 0, 0]);
     const read = (/** @type {number} */ handle)=>{
@@ -1708,7 +1708,7 @@ test('a socket takes handle flags as a kernel object does', ()=>{
     // and one that is told the handle is invalid gives up on its network.
     const { fns, host, errors } = setup();
     const bytes = new Uint8Array(0x1000);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     host.writeMemory = (address, data)=>bytes.set(data, address);
     /** @type {any} */ (host).isSocket = (/** @type {number} */ handle)=>handle === 3;
     assert.equal(fns.SetHandleInformation.handler([3, 1, 0]), 1);
@@ -1729,7 +1729,7 @@ test('Process32FirstW and Process32NextW walk the same processes into a PROCESSE
     host.imagePath = ()=>'C:\\App\\Setup\u20ac.exe';
     const bytes = new Uint8Array(0x1000);
     const memory = new DataView(bytes.buffer);
-    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    host.readMemory = (address, length)=>bytes.slice(address, address + length);
     memory.setUint32(0x100, 556, true);
 
     const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
@@ -1850,7 +1850,7 @@ test('an object made with SECURITY_ATTRIBUTES is inheritable as it asks, at eith
             const { fns, host } = setup(undefined, { pointerSize });
             const bytes = new Uint8Array(0x1000);
             const view = new DataView(bytes.buffer);
-            host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+            host.readMemory = (address, length)=>bytes.slice(address, address + length);
             host.writeMemory = (address, data)=>bytes.set(data, address);
             view.setUint32(0x300, 3 * word, true);
             view.setUint32(0x300 + word, descriptor, true);

@@ -82,7 +82,7 @@ function fakeHost(arena = ARENA){
             bytes.fill(0xaa, address, address + length);
         },
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         setLastError: ()=>{},
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){

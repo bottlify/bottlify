@@ -105,7 +105,7 @@ export function createSecurityFunctions(host){
      */
     const status = (entry, args)=>{
         const slot = (host.teb() + LAST_ERROR) >>> 0;
-        const kept = host.readMemory(slot, 4).slice();
+        const kept = host.readMemory(slot, 4);
         try
         {
             if (entry.handler(args) !== 0)
@@ -134,7 +134,7 @@ export function createSecurityFunctions(host){
         }
     }
     /** @param {number} at */
-    const dword = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
+    const dword = at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
         .getUint32(0, true);
     /** @param {number} at */
     const word = at=>dword(at) & 0xffff;

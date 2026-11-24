@@ -35,7 +35,7 @@ function setup({ teb = TEB } = {}){
         return text;
     };
     const fns = /** @type {Record<string, any>} */ (createDebugFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         readCString,
         kernel32: {

@@ -46,7 +46,7 @@ function machine({ imageBase = 0x40000, imageSize = 0x40000, tableRva = 0x1000 }
         host(){
             return {
                 /** @param {number} address @param {number} length */
-                readMemory: (address, length)=>memory.subarray(address, address + length),
+                readMemory: (address, length)=>memory.slice(address, address + length),
                 /** @param {number} address */
                 imageOf: address=>(address >>> 0) >= imageBase
                     && (address >>> 0) < imageBase + imageSize

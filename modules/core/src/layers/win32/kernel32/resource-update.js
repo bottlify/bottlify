@@ -569,7 +569,7 @@ export function createResourceUpdates(host){
             if ((data >>> 0) !== 0)
             {
                 kept.push({ ...wanted,
-                    data: host.readMemory(wholeAddress(data), size >>> 0).slice() });
+                    data: host.readMemory(wholeAddress(data), size >>> 0) });
             }
             state.resources = kept;
             return 1;
@@ -734,7 +734,7 @@ export function createResourceUpdates(host){
                 return fail(ERROR_INVALID_PARAMETER);
             }
             const read32 = (/** @type {number} */ address)=>new DataView(
-                host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+                host.readMemory(address, 4).buffer).getUint32(0, true);
             const write32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
                 const bytes = new Uint8Array(4);
                 new DataView(bytes.buffer).setUint32(0, value >>> 0, true);

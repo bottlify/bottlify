@@ -1288,7 +1288,7 @@ export function createProcessFunctions(host){
 
     /** @param {number} address */
     const readU32 = address=>new DataView(
-        host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+        host.readMemory(address, 4).buffer).getUint32(0, true);
 
     const told = host.version ?? DEFAULT_VERSION;
 
@@ -1349,7 +1349,7 @@ export function createProcessFunctions(host){
     const verify = ([pointer, typeMask, maskLow, maskHigh], wide)=>{
         const at = wholeAddress(pointer);
         const extended = host.readMemory(
-            at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8).slice();
+            at + (wide ? OSVERSIONINFO_W : OSVERSIONINFO_A).EXTENDED, 8);
         const fields = new DataView(extended.buffer);
         const answer = verifyVersion(told, {
             major: readU32(at + 4),
@@ -1420,7 +1420,7 @@ export function createProcessFunctions(host){
                 const long = host.pointerSize === 8;
                 /** @param {number} at */
                 const read = at=>(long
-                    ? new DataView(host.readMemory(at, 8).slice().buffer).getBigUint64(0, true)
+                    ? new DataView(host.readMemory(at, 8).buffer).getBigUint64(0, true)
                     : BigInt(memory.readU32(at)));
                 /** @param {number} at @param {bigint} value */
                 const write = (at, value)=>(long ? writeU64(at, value)

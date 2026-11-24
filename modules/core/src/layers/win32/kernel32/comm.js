@@ -125,9 +125,9 @@ export function createCommFunctions(host){
                 host.setLastError(ERROR_INVALID_PARAMETER);
                 return 0;
             }
-            const block = host.readMemory(wholeAddress(dcb), DCB_SIZE).slice();
+            const block = host.readMemory(wholeAddress(dcb), DCB_SIZE);
             const times = withTimeouts && (timeouts >>> 0) !== 0
-                ? host.readMemory(wholeAddress(timeouts), TIMEOUTS_SIZE).slice() : null;
+                ? host.readMemory(wholeAddress(timeouts), TIMEOUTS_SIZE) : null;
             applyCommSettings(settings, block, times);
             host.writeMemory(wholeAddress(dcb), block);
             if (times)

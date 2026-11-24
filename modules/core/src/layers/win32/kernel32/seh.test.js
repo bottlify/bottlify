@@ -37,7 +37,7 @@ function machine(options = {}){
 
     const host = {
         /** @param {number} at @param {number} length */
-        readMemory: (at, length)=>bytes.subarray(at, at + length),
+        readMemory: (at, length)=>bytes.slice(at, at + length),
         /** @param {number} at @param {Uint8Array} value */
         writeMemory: (at, value)=>bytes.set(value, at),
         // Everything inside the buffer is there; nothing outside is. A bounds

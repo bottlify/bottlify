@@ -141,7 +141,7 @@ export function createThreadInfoFunctions(host){
         }
         try
         {
-            return host.readMemory(wholeAddress(address), length).slice();
+            return host.readMemory(wholeAddress(address), length);
         }
         catch (e){
             void e;

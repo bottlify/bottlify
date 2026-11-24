@@ -136,7 +136,7 @@ export function createProcessMemory(host){
         const span = length === 0 ? 0 : accessibleSpan(host.pageState, address, length, false);
         try
         {
-            return span === 0 ? new Uint8Array(0) : host.readMemory(address, span).slice();
+            return span === 0 ? new Uint8Array(0) : host.readMemory(address, span);
         }
         catch (e){
             void e;
@@ -206,7 +206,7 @@ export function createProcessMemory(host){
         // Up to the first page that cannot be written, unless the first page
         // is code WriteProcessMemory makes writable for the write.
         const room = lift && !open ? count : accessibleSpan(host.pageState, base, count, true);
-        if (room > 0 && !store(base, host.readMemory(buffer, room).slice()))
+        if (room > 0 && !store(base, host.readMemory(buffer, room)))
         {
             writeCount(written, 0);
             return STATUS_PARTIAL_COPY;

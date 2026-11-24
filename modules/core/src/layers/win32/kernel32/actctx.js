@@ -630,7 +630,7 @@ export function createActivationContexts(host){
     };
     /** A pointer-sized field of the caller's. @param {number} address */
     const readPointer = address=>width.get(new DataView(host.readMemory(wholeAddress(address),
-        width.size).slice().buffer), 0);
+        width.size).buffer), 0);
     /** @param {number} code @param {number} [answer] */
     const fail = (code, answer = 0)=>{
         host.setLastError(code);

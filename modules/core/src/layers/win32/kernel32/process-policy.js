@@ -1377,7 +1377,7 @@ export function createProcessPolicyFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 processInformation.set(wholeAddress(type), host.readMemory(wholeAddress(from),
-                    size).slice());
+                    size));
                 return 1;
             },
         },

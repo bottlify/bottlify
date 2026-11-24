@@ -842,7 +842,7 @@ export function createSystemFunctions(host){
     const threadErrorMode = ()=>{
         const block = ownBlock();
         return block === 0 ? 0
-            : new DataView(host.readMemory(block + TEB.HARD_ERROR_MODE, 4).slice().buffer)
+            : new DataView(host.readMemory(block + TEB.HARD_ERROR_MODE, 4).buffer)
                 .getUint32(0, true);
     };
     /** @param {number} mode  in ntdll's bits */
@@ -1236,7 +1236,7 @@ export function createSystemFunctions(host){
                     return 0;
                 }
                 const bytes = logicalProcessors();
-                const room = new DataView(host.readMemory(wholeAddress(returned), 4).slice().buffer)
+                const room = new DataView(host.readMemory(wholeAddress(returned), 4).buffer)
                     .getUint32(0, true);
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);
@@ -1268,7 +1268,7 @@ export function createSystemFunctions(host){
                     host.setLastError(ERROR_INVALID_PARAMETER);
                     return 0;
                 }
-                const room = new DataView(host.readMemory(wholeAddress(returned), 4).slice().buffer)
+                const room = new DataView(host.readMemory(wholeAddress(returned), 4).buffer)
                     .getUint32(0, true);
                 const length = new Uint8Array(4);
                 new DataView(length.buffer).setUint32(0, bytes.length, true);

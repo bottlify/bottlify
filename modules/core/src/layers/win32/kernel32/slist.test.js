@@ -18,7 +18,7 @@ const TRAP = 0x1000;
 function setup(){
     const bytes = new Uint8Array(0x400);
     const fns = createSListFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         allocate: ()=>CODE,
     });
@@ -107,7 +107,7 @@ test('a push that another thread\'s change overtakes looks again, and loses neit
     /** @type {(() => void) | null} */
     let meanwhile = null;
     const fns = createSListFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         compareExchangeU64: (address, expected, value)=>{
             const other = meanwhile;

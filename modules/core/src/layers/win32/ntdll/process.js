@@ -288,7 +288,7 @@ export function createProcessFunctions(host){
         {
             return '';
         }
-        const units = host.readMemory((base + buffer) >>> 0, length & ~1).slice();
+        const units = host.readMemory((base + buffer) >>> 0, length & ~1);
         return String.fromCharCode(...new Uint16Array(units.buffer, 0, units.length >> 1));
     };
 
@@ -362,7 +362,7 @@ export function createProcessFunctions(host){
             }
             previous = unit;
         }
-        const bytes = host.readMemory(from, Math.max(units, 2) * 2).slice();
+        const bytes = host.readMemory(from, Math.max(units, 2) * 2);
         if (current !== 0)
         {
             kernel32.FreeEnvironmentStringsW?.handler([current]);
@@ -1173,7 +1173,7 @@ export function createProcessFunctions(host){
                 {
                     return STATUS.INVALID_PARAMETER;
                 }
-                const units = host.readMemory(imageName.value, imageName.size & ~1).slice();
+                const units = host.readMemory(imageName.value, imageName.size & ~1);
                 const image = String.fromCharCode(
                     ...new Uint16Array(units.buffer, 0, units.length >> 1));
                 const made = spawn(image, wholeAddress(parameters),

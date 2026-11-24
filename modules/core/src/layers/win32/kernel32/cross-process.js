@@ -168,7 +168,7 @@ export function serveCall(request, host){
             const place = places[index];
             if (place !== null)
             {
-                outs[index] = host.readMemory(place, size(arg)).slice();
+                outs[index] = host.readMemory(place, size(arg));
             }
         });
         return { result: result >>> 0, error, outs };

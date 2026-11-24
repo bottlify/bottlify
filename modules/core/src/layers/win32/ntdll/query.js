@@ -883,8 +883,7 @@ export function createQueryFunctions(host){
                     return STATUS.UNSUCCESSFUL;
                 }
                 const at = wholeAddress(pointer);
-                const extended = host.readMemory(at + OSVERSIONINFO.SERVICE_PACK_MAJOR, 8)
-                    .slice();
+                const extended = host.readMemory(at + OSVERSIONINFO.SERVICE_PACK_MAJOR, 8);
                 const fields = new DataView(extended.buffer);
                 const answer = verifyVersion(versionIn(block), {
                     major: readU32(at + OSVERSIONINFO.MAJOR),
