@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { PIECE_SIZE, bytesOf, createMemoryStore } from './memory-store.js';
 import { createPageFile, createPageFileStore, openPageFile } from './page-file.js';
+import { assembled } from './read-into.fixture.js';
 
 /**
  * A synchronous access handle over memory, as a worker's
@@ -233,6 +234,13 @@ function differential(seed, residentBytes, steps){
         {
             assert.equal(digest(paged[arm].read(entry.path, 0, entry.size)),
                 digest(memory[arm].read(entry.path, 0, entry.size)), `seed ${seed}: ${entry.path}`);
+            for (const store of [paged[arm], memory[arm]])
+            {
+                const from = Math.floor(entry.size / 3);
+                assert.equal(digest(assembled(store, entry.path, from, entry.size).bytes),
+                    digest(memory[arm].read(entry.path, from, entry.size)),
+                    `seed ${seed}: ${entry.path} by readInto`);
+            }
         }
     }
     return pageFile.diagnostics();

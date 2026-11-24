@@ -17,7 +17,7 @@ test('a thread\'s error mode is its own, in its block, read alike by kernel32 an
     const errors = [];
     const memory = {
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.subarray(at, at + length),
+            bytes.slice(at, at + length),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ data)=>
             bytes.set(data, at),
     };
@@ -57,7 +57,7 @@ test('GetErrorMode reads back what SetErrorMode set, and sets nothing', ()=>{
     const bytes = new Uint8Array(0x100);
     const kernel32 = createSystemFunctions(/** @type {any} */ ({
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            bytes.subarray(at, at + length),
+            bytes.slice(at, at + length),
         writeMemory: ()=>{},
         setLastError: ()=>{}, currentThread: ()=>null, resolveHandle: ()=>null,
         systemTimeMs: ()=>0 }));

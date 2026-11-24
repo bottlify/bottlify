@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMappingFunctions, imageRefusal, imageSections } from './mapping.js';
+import { createMappingFunctions, imageRefusal, imageSections, imageViewAt } from './mapping.js';
+import { mapImage } from '../../loader/internal/image.js';
 import { imageKind } from '../../loader/internal/pe.js';
 import { imageWriteCopy, protectionWithin, sectionRights, viewProtection }
     from './view-rights.js';
@@ -872,4 +873,16 @@ test('an image view\'s sections take the protection a loaded image\'s do', ()=>{
     assert.equal(of(0xc0000040), 0x08, 'written: copy-on-write');
     assert.equal(of(0xd0000040), 0x04, 'shared: written through');
     assert.equal(of(0x00000040), 0x01, 'none');
+});
+
+test('a view of an image at its base is the laid-out image itself; one moved is a copy', ()=>{
+    // A map copies the view into guest memory: a copy of the whole image made
+    // first for a view that moves nothing was a second copy, made and let go.
+    const laid = mapImage(imageAt(0x40000), undefined, { wide: true });
+    const before = laid.bytes.slice();
+    assert.equal(imageViewAt(laid, 0x40000), laid.bytes, 'at its base: the section\'s own bytes');
+    const moved = imageViewAt(laid, 0x50000);
+    assert.notEqual(moved, laid.bytes);
+    assert.equal(dword(moved, 0x1010), 0x51000, 'moved there');
+    assert.deepEqual(laid.bytes, before, 'and what the section keeps is as it was');
 });

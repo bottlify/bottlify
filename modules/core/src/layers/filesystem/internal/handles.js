@@ -278,6 +278,27 @@ export function createFileTable({ sharing = createSharing() } = {}){
         return handle;
     };
 
+    /**
+     * How many of `length` bytes a read at the handle's position finds, once
+     * the handle may be read at all.
+     *
+     * @param {FileHandle} handle @param {number} length
+     */
+    const readable = (handle, length)=>{
+        live(handle);
+        if (!handle.access.read)
+        {
+            throw fsError(ErrorCode.ACCESS_DENIED,
+                `"${handle.path}" was not opened for reading`);
+        }
+        if (length < 0)
+        {
+            throw fsError(ErrorCode.INVALID_PARAMETER, 'A read cannot be of negative length');
+        }
+        const size = handle.tree.size(handle.components);
+        return Math.max(0, Math.min(length, size - handle.position));
+    };
+
     return {
         /**
          * Opens a file, creating or emptying it as the disposition asks.
@@ -389,24 +410,33 @@ export function createFileTable({ sharing = createSharing() } = {}){
          * @returns {Uint8Array}
          */
         read(handle, length){
-            live(handle);
-            if (!handle.access.read)
-            {
-                throw fsError(ErrorCode.ACCESS_DENIED,
-                    `"${handle.path}" was not opened for reading`);
-            }
-            if (length < 0)
-            {
-                throw fsError(ErrorCode.INVALID_PARAMETER, 'A read cannot be of negative length');
-            }
-            const size = handle.tree.size(handle.components);
-            const available = Math.max(0, Math.min(length, size - handle.position));
+            const available = readable(handle, length);
             const data = available > 0
                 ? handle.tree.read(handle.components, handle.position, available)
                 : new Uint8Array(0);
             handle.position += data.length;
             track(handle.path).read += data.length;
             return data;
+        },
+
+        /**
+         * read, the bytes handed to `put(bytes, at)` where the store holds
+         * them (`at` from the read's start) rather than copied into an array
+         * of their own; how many there were. `bytes` is valid only inside the
+         * call and is never written to.
+         *
+         * @param {FileHandle} handle @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         * @returns {number}
+         */
+        readInto(handle, length, put){
+            const available = readable(handle, length);
+            const count = available > 0
+                ? handle.tree.readInto(handle.components, handle.position, available, put)
+                : 0;
+            handle.position += count;
+            track(handle.path).read += count;
+            return count;
         },
 
         /**

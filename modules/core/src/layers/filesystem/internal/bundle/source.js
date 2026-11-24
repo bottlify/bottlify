@@ -105,7 +105,8 @@ const SEPARATOR = String.fromCharCode(92);
  *        `prefix`, by their path in the bundle: what a bottle carries for
  *        `C:\WINDOWS\system32` lies in the bundle beside its registry, and is
  *        found where Windows keeps it. No separators at either end of either.
- * @returns {import('../memory-store.js').SourceStore & { unplaced: number }}
+ * @returns {import('../memory-store.js').SourceStore & { unplaced: number,
+ *     readInto: NonNullable<import('../memory-store.js').SourceStore['readInto']> }}
  */
 export function createBundleSource({
     bundle, readBlock, decode, decoded: kept = DECODED_NOWHERE, prefix = '', relocate = {},
@@ -212,7 +213,7 @@ export function createBundleSource({
         return bytes;
     };
 
-    return {
+    const source = {
         unplaced,
 
         list: ()=>entries.map(entry=>({ ...entry })),
@@ -228,40 +229,33 @@ export function createBundleSource({
         },
 
         /**
-         * Serves a read from resident blocks, or throws a miss naming the ones
-         * that would make it serviceable. Whatever could be decoded on the way
-         * stays cached, so the retry after a fetch costs only the fetched
-         * blocks.
+         * Serves a read from resident blocks, each block's part handed to
+         * `put` where it lies (a kept block inside its `with`), or throws a
+         * miss naming the blocks that would make it serviceable once every
+         * part here was handed: a retry after the fetch hands them all again.
+         * Whatever could be decoded on the way stays cached, so the retry
+         * costs only the fetched blocks.
          *
          * @param {string} path @param {number} offset @param {number} length
-         * @returns {Uint8Array}
+         * @param {import('../memory-store.js').Put} put
+         * @returns {number}
          */
-        read(path, offset, length){
+        readInto(path, offset, length, put){
             const file = byPath.get(foldName(path));
             if (!file)
             {
                 throw fsError(ErrorCode.NOT_FOUND, `No file "${path}" in this bundle`);
             }
-
-            const ranges = bundle.rangesFor(file, offset, length);
-            let total = 0;
-            for (const range of ranges)
-            {
-                total += range.to - range.from;
-            }
-            // Copied out, a kept block read where it lies: whoever gets these
-            // bytes may write to them.
-            const out = new Uint8Array(total);
             /** @type {MissingBlock[]} */
             const missing = [];
             let at = 0;
-            for (const range of ranges)
+            for (const range of bundle.rangesFor(file, offset, length))
             {
                 const { block } = range;
                 const into = at;
                 at += range.to - range.from;
                 if (kept.with(nameOf(block.index), body=>{
-                    out.set(body.subarray(range.from, range.to), into);
+                    put(body.subarray(range.from, range.to), into);
                     return true;
                 }) === true)
                 {
@@ -275,7 +269,7 @@ export function createBundleSource({
                     });
                     continue;
                 }
-                out.set(bytes.subarray(range.from, range.to), into);
+                put(bytes.subarray(range.from, range.to), into);
             }
 
             if (missing.length > 0)
@@ -286,7 +280,27 @@ export function createBundleSource({
                 miss.blocks = missing;
                 throw miss;
             }
+            return at;
+        },
+
+        /**
+         * readInto, copied out: whoever gets these bytes may keep or write
+         * them, and a kept block is valid only inside its `with`.
+         *
+         * @param {string} path @param {number} offset @param {number} length
+         * @returns {Uint8Array}
+         */
+        read(path, offset, length){
+            const file = byPath.get(foldName(path));
+            let total = 0;
+            for (const range of file ? bundle.rangesFor(file, offset, length) : [])
+            {
+                total += range.to - range.from;
+            }
+            const out = new Uint8Array(total);
+            source.readInto(path, offset, length, (bytes, into)=>out.set(bytes, into));
             return out;
         },
     };
+    return source;
 }

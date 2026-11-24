@@ -2071,7 +2071,7 @@ export function createNamedPipes(host){
         }
         const peer = /** @type {End} */ (peerOf(end));
         const { entry, written, waits } = enqueue(end, count === 0 ? new Uint8Array(0)
-            : host.readMemory(wholeAddress(buffer), count).slice(), whole);
+            : host.readMemory(wholeAddress(buffer), count), whole);
         if (waits)
         {
             const entryOf = /** @type {Entry} */ (entry);
@@ -2269,7 +2269,7 @@ export function createNamedPipes(host){
             return native ? STATUS.ACCESS_VIOLATION : fail(ERROR_NOACCESS);
         }
         const got = /** @type {PipesAcross} */ (host.across).write(standIn.id,
-            count === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count).slice());
+            count === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count));
         if (!waits(got) && /** @type {AcrossAnswer} */ (got).status === STATUS_PIPE_CLOSING)
         {
             return native ? STATUS_PIPE_CLOSING : fail(ERROR_NO_DATA);
@@ -2818,7 +2818,7 @@ export function createNamedPipes(host){
     {
         const size = inputSize >>> 0;
         const got = /** @type {PipesAcross} */ (host.across).transact(standIn.id,
-            size === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(input), size).slice(),
+            size === 0 ? new Uint8Array(0) : host.readMemory(wholeAddress(input), size),
             outputSize >>> 0);
         if (!waits(got) && /** @type {AcrossAnswer} */ (got).refused)
         {
@@ -3336,7 +3336,7 @@ export function createNamedPipes(host){
         {
             return answer(STATUS.INVALID_PARAMETER);
         }
-        const head = new DataView(host.readMemory(input, NAME_AT).slice().buffer);
+        const head = new DataView(host.readMemory(input, NAME_AT).buffer);
         const nameBytes = head.getUint32(8, true);
         if (nameBytes % 2 !== 0 || NAME_AT + nameBytes > inLength)
         {

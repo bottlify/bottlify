@@ -271,7 +271,7 @@ export function createMailslots(host){
         {
             return STATUS_ACCESS_VIOLATION;
         }
-        const dword = (/** @type {number} */ at)=>new DataView(host.readMemory(at, 4).slice()
+        const dword = (/** @type {number} */ at)=>new DataView(host.readMemory(at, 4)
             .buffer).getUint32(0, true);
         const string = dword((attributes >>> 0) + 8);
         const nameBytes = string === 0 ? 0 : dword(string) & 0xffff;
@@ -285,7 +285,7 @@ export function createMailslots(host){
         let milliseconds = MAILSLOT_WAIT_FOREVER;
         if ((timeout >>> 0) !== 0)
         {
-            const interval = new DataView(host.readMemory(wholeAddress(timeout), 8).slice().buffer)
+            const interval = new DataView(host.readMemory(wholeAddress(timeout), 8).buffer)
                 .getBigInt64(0, true);
             milliseconds = interval > 0n ? MAILSLOT_WAIT_FOREVER : Number(-interval / 10000n);
         }
@@ -535,7 +535,7 @@ export function createMailslots(host){
             return refuse(caller, ERROR_NOACCESS, STATUS_ACCESS_VIOLATION);
         }
         const message = count === 0
-            ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count).slice();
+            ? new Uint8Array(0) : host.readMemory(wholeAddress(buffer), count);
         /** @type {Slot} */
         const slot = client.slot;
         const answer = succeed(caller, count);
@@ -615,13 +615,13 @@ export function createMailslots(host){
         }
         /** @type {Slot} */
         const slot = object(handle, type);
-        const pointer = new DataView(host.readMemory(from, 4).slice().buffer).getUint32(0, true);
+        const pointer = new DataView(host.readMemory(from, 4).buffer).getUint32(0, true);
         if (pointer === 0)
         {
             slot.timeout = MAILSLOT_WAIT_FOREVER;
             return 0;
         }
-        const interval = new DataView(host.readMemory(pointer, 8).slice().buffer)
+        const interval = new DataView(host.readMemory(pointer, 8).buffer)
             .getBigInt64(0, true);
         // The largest interval is the one a slot that waits for ever reports
         // (GetMailslotInfo's MAILSLOT_WAIT_FOREVER); a relative one is

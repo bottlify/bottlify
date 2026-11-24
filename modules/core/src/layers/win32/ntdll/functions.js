@@ -420,7 +420,7 @@ export function createNtdllFunctions(host){
             try
             {
                 fill(at);
-                return host.readMemory(at, size).slice();
+                return host.readMemory(at, size);
             }
             finally
             {

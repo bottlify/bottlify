@@ -29,7 +29,7 @@ function fakeHost({ registers = true } = {}){
     const written = {};
 
     /** @param {number} address @param {number} length */
-    const readMemory = (address, length)=>bytes.subarray(address, address + length);
+    const readMemory = (address, length)=>bytes.slice(address, address + length);
     /** @param {number} address @param {Uint8Array} data */
     const writeMemory = (address, data)=>bytes.set(data, address);
 

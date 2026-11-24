@@ -532,7 +532,7 @@ export function createSlimSync(host, enterCritical, enterSection){
 
     /** @param {number} address */
     const lockWord = address=>new DataView(
-        host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+        host.readMemory(address, 4).buffer).getUint32(0, true);
     /**
      * The word replaced by `value` if it still holds `expected`, answering
      * what it held: a thread on another executor takes and lets go of the lock
@@ -759,7 +759,7 @@ export function createSlimSync(host, enterCritical, enterSection){
         let lockCount;
         for (;;)
         {
-            const was = new DataView(host.readMemory(at, 4).slice().buffer).getInt32(0, true);
+            const was = new DataView(host.readMemory(at, 4).buffer).getInt32(0, true);
             lockCount = (was - 1) | 0;
             if (host.compareExchangeU32 === undefined)
             {
@@ -905,7 +905,7 @@ export function createSlimSync(host, enterCritical, enterSection){
 
     /** @param {number} address */
     const readWord = address=>new DataView(
-        host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+        host.readMemory(address, 4).buffer).getUint32(0, true);
     /**
      * A pointer-sized word: an INIT_ONCE, or the context one hands out.
      *

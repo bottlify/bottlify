@@ -466,7 +466,7 @@ export function createFileTimeFunctions(host){
      * @param {number} address @param {number} year
      */
     const dynamicRules = (address, year)=>{
-        const carried = host.readMemory(address, DYNAMIC_TIME_ZONE.SIZE).slice();
+        const carried = host.readMemory(address, DYNAMIC_TIME_ZONE.SIZE);
         if (carried[DYNAMIC_TIME_ZONE.Disabled] !== 0)
         {
             return carried.subarray(0, TIME_ZONE_INFORMATION.SIZE);
@@ -1133,7 +1133,7 @@ export function createFileTimeFunctions(host){
                 }
                 const data = zone === 0
                     ? currentZone()
-                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE).slice();
+                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE);
                 const bias = biasAt(new DataView(data.buffer), utc);
                 host.writeMemory(wholeAddress(local), msToSystemTime(utc - bias * 60_000));
                 return 1;
@@ -1167,7 +1167,7 @@ export function createFileTimeFunctions(host){
                 }
                 const data = zone === 0
                     ? currentZone()
-                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE).slice();
+                    : host.readMemory(wholeAddress(zone), TIME_ZONE_INFORMATION.SIZE);
                 const bias = biasOnLocalClock(new DataView(data.buffer), wall);
                 host.writeMemory(wholeAddress(universal), msToSystemTime(wall + bias * 60_000));
                 return 1;

@@ -99,7 +99,7 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
         return found;
     };
 
-    return {
+    const source = {
         list: ()=>[...byPath.values()].map(({ path, file })=>({ path, directory: false,
             size: file.size,
             ...typeof file.modified === 'number' ? { modified: file.modified } : {} })),
@@ -115,16 +115,18 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
         },
 
         /**
-         * From resident pieces, or a miss naming every piece of the range not here.
+         * From resident pieces, each part handed to `put` where it lies, or a
+         * miss naming every piece of the range not here (nothing handed then).
          *
          * @param {string} path @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
          */
-        read(path, offset, length){
+        readInto(path, offset, length, put){
             const { file, number } = mustFind(path);
             const end = Math.min(file.size, offset + length);
             if (end <= offset)
             {
-                return new Uint8Array(0);
+                return 0;
             }
             const first = Math.floor(offset / PIECE_SIZE);
             const last = Math.floor((end - 1) / PIECE_SIZE);
@@ -151,7 +153,6 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
                     `${missing.length} piece(s) of "${path}" are not read from the session yet`),
                 { code: BLOCK_MISS, blocks: missing });
             }
-            const out = new Uint8Array(end - offset);
             for (let piece = first; piece <= last; piece++)
             {
                 const bytes = /** @type {Uint8Array} */ (
@@ -159,8 +160,20 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
                 const at = piece * PIECE_SIZE;
                 const from = Math.max(offset, at) - at;
                 const to = Math.min(end, at + bytes.length) - at;
-                out.set(bytes.subarray(from, to), at + from - offset);
+                put(bytes.subarray(from, to), at + from - offset);
             }
+            return end - offset;
+        },
+
+        /**
+         * readInto, copied out: whoever gets these bytes may keep or write them.
+         *
+         * @param {string} path @param {number} offset @param {number} length
+         */
+        read(path, offset, length){
+            const { file } = mustFind(path);
+            const out = new Uint8Array(Math.max(0, Math.min(file.size, offset + length) - offset));
+            source.readInto(path, offset, length, (bytes, at)=>out.set(bytes, at));
             return out;
         },
 
@@ -194,4 +207,5 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
         held: ()=>({ sessionPieces: held, sessionReads: counts.pieces,
             sessionReadBytes: counts.bytes }),
     };
+    return source;
 }

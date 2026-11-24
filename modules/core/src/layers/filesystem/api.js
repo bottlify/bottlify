@@ -47,6 +47,9 @@
  * - `open(path, { read, write, shareRead, shareWrite, disposition })`
  * - `read(handle, length)`, `write(handle, bytes)`, `seek(handle, offset, from)`,
  *   `position(handle)`, `size(handle)`, `setEndOfFile(handle)`, `close(handle)`
+ * - `readInto(handle, length, put)`: a read whose bytes go to
+ *   `put(bytes, at)` where the volume holds them, valid only inside the
+ *   call and never written to; answers how many there were
  * - the `ErrorCode`, `Disposition` and `SeekFrom` vocabularies
  *
  * A path that names a reserved device (CON, NUL, COM1 and the rest) is not a

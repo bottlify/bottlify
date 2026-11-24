@@ -116,7 +116,7 @@ export function createMemoryFunctions(host){
     };
 
     /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
+    const read32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
         .getUint32(0, true);
     /**
      * A PVOID or SIZE_T out-parameter, as wide as the process's: its high

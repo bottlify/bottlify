@@ -530,7 +530,7 @@ export function createModuleFunctions(host){
             }
             const at = wholeAddress(address);
             const read = (/** @type {number} */ where)=>new DataView(
-                host.readMemory?.(where, 4).slice().buffer ?? new ArrayBuffer(4))
+                host.readMemory?.(where, 4).buffer ?? new ArrayBuffer(4))
                 .getUint32(0, true);
             const image = (host.list?.() ?? []).find(module=>at >= module.base
                 && at < module.base + read(module.base + read(module.base + 0x3c) + 24 + 56));
@@ -979,7 +979,7 @@ export function createModuleFunctions(host){
                     return 0;
                 }
                 const read = (/** @type {number} */ address)=>new DataView(
-                    host.readMemory?.(address, 4).slice().buffer ?? new ArrayBuffer(4))
+                    host.readMemory?.(address, 4).buffer ?? new ArrayBuffer(4))
                     .getUint32(0, true);
                 const optional = module.base + read(module.base + 0x3c) + 24;
                 const entry = read(optional + 16);

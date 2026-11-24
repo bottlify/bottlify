@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PIECE_SIZE, bytesOf, createMemoryStore } from './memory-store.js';
+import { assembled } from './read-into.fixture.js';
 
 const bytes = Uint8Array.from([1, 2, 3]);
 
@@ -200,4 +201,28 @@ test('a first write into a file kept whole copies the piece it reaches, not the 
     const contents = store.contents?.('archive.pak');
     assert.equal(contents?.pieces[0]?.buffer, whole.buffer, 'the pieces not written are views');
     assert.notEqual(contents?.pieces[1]?.buffer, whole.buffer, 'the one written is a copy');
+});
+
+test('readInto hands a file\'s bytes where the store holds them, zeroes where it holds none', ()=>{
+    // ReadFile copies what it reads into guest memory: a read into bytes of
+    // its own first was a second copy of every read, made and let go.
+    const whole = Uint8Array.from({ length: 3000 }, (_, at)=>at & 255);
+    const store = createMemoryStore();
+    store.adopt?.('kept.bin', whole);
+    const flat = assembled(store, 'kept.bin', 100, 5000);
+    assert.deepEqual([...flat.bytes], [...whole.subarray(100)]);
+    assert.deepEqual(flat.buffers, [whole.buffer], 'the adopted bytes themselves');
+
+    // Pieces apart, one never written between: the hole and the tail past a
+    // small piece read as zeroes, as read answers them.
+    store.write('sparse.bin', 0, Uint8Array.of(1, 2, 3));
+    store.write('sparse.bin', 2 * PIECE_SIZE + 5, Uint8Array.of(7));
+    const size = 2 * PIECE_SIZE + 6;
+    const pieces = store.contents?.('sparse.bin').pieces ?? [];
+    const sparse = assembled(store, 'sparse.bin', 0, size);
+    assert.deepEqual(sparse.bytes, store.read('sparse.bin', 0, size));
+    assert.ok(sparse.buffers.includes(/** @type {Uint8Array} */ (pieces[0]).buffer),
+        'a written piece where it lies');
+    assert.ok(sparse.buffers.includes(/** @type {Uint8Array} */ (pieces[2]).buffer));
+    assert.equal(assembled(store, 'sparse.bin', size, 10).bytes.length, 0, 'nothing past the end');
 });

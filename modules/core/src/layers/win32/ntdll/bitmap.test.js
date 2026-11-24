@@ -22,7 +22,7 @@ function machine(){
     const memory = new Uint8Array(0x1000);
     const view = new DataView(memory.buffer);
     const fns = createBitmapFunctions({
-        readMemory: (at, length)=>memory.subarray(at, at + length),
+        readMemory: (at, length)=>memory.slice(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
     });
     /** @param {string} name @param {...number} args */

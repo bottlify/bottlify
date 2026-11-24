@@ -302,7 +302,7 @@ export function createCompressionFunctions(host){
         value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
     /** @param {number} address @param {number} length */
     const read = (address, length)=>((length >>> 0) === 0 ? new Uint8Array(0)
-        : host.readMemory(wholeAddress(address), length >>> 0).slice());
+        : host.readMemory(wholeAddress(address), length >>> 0));
 
     /**
      * Decompresses into the caller's buffer: RtlDecompressBuffer's body, and

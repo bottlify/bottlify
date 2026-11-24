@@ -153,7 +153,7 @@ function keptDrive(ask, words, index){
             keptBytes -= kept.length;
         }
     };
-    return {
+    const kept = {
         /** @param {string} operation @param {any[]} args */
         answer(operation, args){
             const asked = current();
@@ -171,13 +171,22 @@ function keptDrive(ask, words, index){
             }
             return answer;
         },
-        /** @param {string[]} components @param {number} offset @param {number} length */
-        read(components, offset, length){
+        /**
+         * A read handed to `put` from the chunks kept here, each part where it
+         * lies, or as the system's side answers a long one; how many bytes.
+         *
+         * @param {string[]} components @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         * @returns {number}
+         */
+        readInto(components, offset, length, put){
             const asked = current();
             if (length >= LONG_READ || length <= 0 || offset < 0)
             {
                 counts.misses++;
-                return ask('read', [components, offset, length]);
+                const bytes = /** @type {Uint8Array} */ (ask('read', [components, offset, length]));
+                put(bytes, 0);
+                return bytes.length;
             }
             const path = components.join('\\');
             const first = Math.floor(offset / CHUNK);
@@ -209,23 +218,46 @@ function keptDrive(ask, words, index){
                 }
             }
             const start = offset - first * CHUNK;
-            const out = new Uint8Array(Math.max(0, Math.min(length,
-                pieces.reduce((sum, piece)=>sum + piece.length, 0) - start)));
+            const count = Math.max(0, Math.min(length,
+                pieces.reduce((sum, piece)=>sum + piece.length, 0) - start));
             let at = -start;
             for (const piece of pieces)
             {
                 const from = Math.max(0, -at);
-                const to = Math.min(piece.length, out.length - at);
+                const to = Math.min(piece.length, count - at);
                 if (to > from)
                 {
-                    out.set(piece.subarray(from, to), at + from);
+                    put(piece.subarray(from, to), at + from);
                 }
                 at += piece.length;
+            }
+            return count;
+        },
+        /**
+         * readInto, copied out: a kept chunk stays here for the next read, a
+         * long read's answer is this read's own.
+         *
+         * @param {string[]} components @param {number} offset @param {number} length
+         */
+        read(components, offset, length){
+            if (length >= LONG_READ || length <= 0 || offset < 0)
+            {
+                counts.misses++;
+                return ask('read', [components, offset, length]);
+            }
+            /** @type {[Uint8Array, number][]} */
+            const parts = [];
+            const out = new Uint8Array(kept.readInto(components, offset, length,
+                (bytes, at)=>parts.push([bytes, at])));
+            for (const [bytes, at] of parts)
+            {
+                out.set(bytes, at);
             }
             return out;
         },
         diagnostics: ()=>({ ...counts, keptBytes }),
     };
+    return kept;
 }
 
 /**
@@ -280,6 +312,18 @@ export function remoteVolume(ask, memory = null, tell = null){
             drive.read = (/** @type {string[]} */ components, /** @type {number} */ offset,
                 /** @type {number} */ length)=>kept.read(components, offset, length);
         }
+        // The system's side answers a read across threads in bytes of its
+        // own, handed on as they came.
+        /**
+         * @param {string[]} components @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         */
+        const readAcross = (components, offset, length, put)=>{
+            const bytes = /** @type {Uint8Array} */ (drive.read(components, offset, length));
+            put(bytes, 0);
+            return bytes.length;
+        };
+        drive.readInto = kept ? kept.readInto : readAcross;
         drives.set(letter, drive);
         if (volume)
         {

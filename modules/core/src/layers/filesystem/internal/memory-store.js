@@ -43,6 +43,10 @@ import { ErrorCode, fsError } from './errors.js';
  * @property {() => StoredEntry[]} list
  * @property {(path: string) => StoredStat | null} stat
  * @property {(path: string, offset: number, length: number) => Uint8Array} read
+ * @property {(path: string, offset: number, length: number, put: Put) => number} [readInto]
+ *           read, the bytes handed to `put` where they lie (`Put`) rather than
+ *           answered; how many there were. A store whose bytes are already
+ *           arrays of its own offers it: the caller's one copy is from them.
  * @property {(path: string) => object | null} [kept]  A file the source keeps as
  *           its own, which an export of the volume carries while the program
  *           has not written it: a session's (`session-source.js`). A bundle keeps
@@ -102,6 +106,42 @@ import { ErrorCode, fsError } from './errors.js';
  */
 
 /** @typedef {SourceStore & WritableStoreMethods} WritableStore */
+
+/**
+ * Where a read's bytes go, part by part: a view of where they lie and where
+ * in the range it goes, valid only inside the call and never written to.
+ *
+ * @typedef {(bytes: Uint8Array, at: number) => void} Put
+ */
+
+/** Zeroes a part of a file never written is handed as; made at the first such part. @type {Uint8Array | null} */
+let zeroPiece = null;
+
+/**
+ * `length` zero bytes to hand to a `Put`, from one buffer of a piece's size.
+ * Consumers copy them; none writes them.
+ *
+ * @param {number} length
+ */
+export const zeroes = length=>(zeroPiece ??= new Uint8Array(PIECE_SIZE)).subarray(0, length);
+
+/**
+ * A source's read handed to `put`: its own `readInto` where it has one, its
+ * answer whole where it has not.
+ *
+ * @param {SourceStore} store @param {string} path @param {number} offset @param {number} length
+ * @param {Put} put
+ * @returns {number}
+ */
+export function readFromInto(store, path, offset, length, put){
+    if (store.readInto)
+    {
+        return store.readInto(path, offset, length, put);
+    }
+    const bytes = store.read(path, offset, length);
+    put(bytes, 0);
+    return bytes.length;
+}
 
 /** @param {string} path */
 function parentOf(path){
@@ -279,16 +319,18 @@ export function createMemoryStore(seed = {}){
     };
 
     /**
-     * Copies `length` bytes from `offset` into `out` at `into`; past the size,
-     * and in a piece never written, they are zeroes, which `out` already holds.
+     * Hands `length` bytes from `offset` to `put`, at `into` onward, where
+     * they lie: the whole bytes, or each piece's part. Past a piece, and in a
+     * piece never written, they are zeroes, handed too unless `zeroed` says
+     * the destination holds them already.
      *
      * @param {StoredFile} entry @param {number} offset @param {number} length
-     * @param {Uint8Array} out @param {number} into
+     * @param {Put} put @param {number} into @param {boolean} zeroed
      */
-    const copyOut = (entry, offset, length, out, into)=>{
+    const putOut = (entry, offset, length, put, into, zeroed)=>{
         if (entry.flat)
         {
-            out.set(entry.flat.subarray(offset, offset + length), into);
+            put(entry.flat.subarray(offset, offset + length), into);
             return;
         }
         for (let done = 0; done < length;)
@@ -297,13 +339,28 @@ export function createMemoryStore(seed = {}){
             const piece = entry.pieces[Math.floor(at / PIECE_SIZE)];
             const within = at % PIECE_SIZE;
             const span = Math.min(length - done, PIECE_SIZE - within);
-            if (piece && within < piece.length)
+            const here = piece ? Math.max(0, Math.min(span, piece.length - within)) : 0;
+            if (here > 0)
             {
-                out.set(piece.subarray(within, within + span), into + done);
+                put(/** @type {Uint8Array} */ (piece).subarray(within, within + here), into + done);
+            }
+            if (here < span && !zeroed)
+            {
+                put(zeroes(span - here), into + done + here);
             }
             done += span;
         }
     };
+
+    /**
+     * Copies `length` bytes from `offset` into `out` at `into`; past the size,
+     * and in a piece never written, they are zeroes, which `out` already holds.
+     *
+     * @param {StoredFile} entry @param {number} offset @param {number} length
+     * @param {Uint8Array} out @param {number} into
+     */
+    const copyOut = (entry, offset, length, out, into)=>
+        putOut(entry, offset, length, (bytes, at)=>out.set(bytes, at), into, true);
 
     /**
      * Makes a file kept whole a file kept in pieces, before its first change:
@@ -410,6 +467,20 @@ export function createMemoryStore(seed = {}){
             const out = new Uint8Array(end - start);
             copyOut(entry, start, end - start, out, 0);
             return out;
+        },
+
+        /**
+         * read, handed to `put` where the bytes lie: the caller's one copy is
+         * from the store's own arrays.
+         *
+         * @param {string} path @param {number} offset @param {number} length @param {Put} put
+         */
+        readInto(path, offset, length, put){
+            const entry = existing(path);
+            const start = Math.min(Math.max(offset, 0), entry.size);
+            const end = Math.min(start + Math.max(length, 0), entry.size);
+            putOut(entry, start, end - start, put, 0, false);
+            return end - start;
         },
 
         /** @param {string} path @param {number} offset @param {Uint8Array} bytes */

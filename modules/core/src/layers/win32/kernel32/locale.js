@@ -1240,7 +1240,7 @@ export function createLocaleFunctions(host){
             };
         }
         const view = new DataView(host.readMemory(address,
-            currency ? CURRENCYFMTA_SIZE : NUMBERFMTA_SIZE).slice().buffer);
+            currency ? CURRENCYFMTA_SIZE : NUMBERFMTA_SIZE).buffer);
         const strings = (currency ? [12, 16, 28] : [12, 16]).map(at=>view.getUint32(at, true));
         const negativeOrder = view.getUint32(20, true);
         const positiveOrder = currency ? view.getUint32(24, true) : 0;
@@ -1522,7 +1522,7 @@ export function createLocaleFunctions(host){
 
     /** @param {number} address */
     const readLong = address=>
-        new DataView(host.readMemory(address, 4).slice().buffer).getUint32(0, true);
+        new DataView(host.readMemory(address, 4).buffer).getUint32(0, true);
 
     /** @param {number} address @param {number} value */
     const writeLong = (address, value)=>{

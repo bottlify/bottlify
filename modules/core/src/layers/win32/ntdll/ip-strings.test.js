@@ -81,7 +81,7 @@ test('the Ex forms write a port, and say the length a short buffer needs', ()=>{
     const memory = new Uint8Array(0x1000);
     const view = new DataView(memory.buffer);
     const fns = createIpStringFunctions({
-        readMemory: (at, length)=>memory.subarray(at, at + length),
+        readMemory: (at, length)=>memory.slice(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
     });
     memory.set([127, 0, 0, 1], 0x100);

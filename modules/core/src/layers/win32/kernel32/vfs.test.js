@@ -812,3 +812,31 @@ test('a kept range not read again for a while is let go', async()=>{
     assert.equal(counted.reads, 3);
     vol.close(node);
 });
+
+test('readInto of a file the program wrote hands the volume\'s bytes where they lie', async()=>{
+    // ReadFile copies a read into guest memory: the volume's answer in bytes
+    // of its own first was a second copy of every read, made and let go.
+    const { volume: vol } = await volume();
+    const node = vol.open('C:\\save.dat', { read: true, write: true, create: true });
+    vol.write(node, 0, Uint8Array.from({ length: 300 }, (_, at)=>at & 255));
+    const into = ()=>{
+        /** @type {ArrayBufferLike[]} */
+        const buffers = [];
+        const out = new Uint8Array(200);
+        /** @param {Uint8Array} bytes @param {number} at */
+        const put = (bytes, at)=>{
+            buffers.push(bytes.buffer);
+            out.set(bytes, at);
+        };
+        const count = vol.readInto(node, 50, 200, put);
+        return { count, out, buffers };
+    };
+    const first = into();
+    const second = into();
+    assert.equal(first.count, 200);
+    assert.ok(first.out.every((value, at)=>value === ((at + 50) & 255)));
+    assert.equal(first.buffers.length, 1);
+    assert.equal(second.buffers[0], first.buffers[0],
+        'both reads handed the file\'s own bytes, not a copy each');
+    vol.close(node);
+});

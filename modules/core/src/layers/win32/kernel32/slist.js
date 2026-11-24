@@ -57,12 +57,12 @@ const FAST_PUSH_LENGTH = 9;
  */
 export function createSListFunctions(host){
     /** @param {number} address */
-    const read32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
+    const read32 = address=>new DataView(host.readMemory(address, 4).buffer)
         .getUint32(0, true);
 
     /** @param {number} header */
     const readHeader = header=>{
-        const view = new DataView(host.readMemory(header, HEADER.SIZE).slice().buffer);
+        const view = new DataView(host.readMemory(header, HEADER.SIZE).buffer);
         return {
             next: view.getUint32(HEADER.NEXT, true),
             depth: view.getUint16(HEADER.DEPTH, true),
@@ -103,7 +103,7 @@ export function createSListFunctions(host){
     const change = (header, step)=>{
         for (;;)
         {
-            const view = new DataView(host.readMemory(header, HEADER.SIZE).slice().buffer);
+            const view = new DataView(host.readMemory(header, HEADER.SIZE).buffer);
             const was = view.getBigUint64(0, true);
             const { header: next, answer } = step({
                 next: view.getUint32(HEADER.NEXT, true),

@@ -432,7 +432,7 @@ function portAt(text, from){
  */
 export function createIpStringFunctions(host){
     /** @param {number} at */
-    const dword = at=>new DataView(host.readMemory(at, 4).slice().buffer).getUint32(0, true);
+    const dword = at=>new DataView(host.readMemory(at, 4).buffer).getUint32(0, true);
     /** @param {number} at @param {number} value */
     const putDword = (at, value)=>host.writeMemory(at, Uint8Array.of(value & 0xff,
         value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24));
@@ -564,7 +564,7 @@ export function createIpStringFunctions(host){
                 return STATUS_ACCESS_VIOLATION;
             }
             const text = width(wide).read(string >>> 0);
-            const read = parseIpv6(text, host.readMemory(wholeAddress(address), 16).slice());
+            const read = parseIpv6(text, host.readMemory(wholeAddress(address), 16));
             if (read.end !== null)
             {
                 putDword(terminator >>> 0, (string >>> 0) + read.end * width(wide).unit);
@@ -621,7 +621,7 @@ export function createIpStringFunctions(host){
             const bracketed = text.startsWith('[');
             const inner = bracketed ? text.slice(1) : text;
             // The address is stored as it is read, whatever comes after it.
-            const read = parseIpv6(inner, host.readMemory(wholeAddress(address), 16).slice());
+            const read = parseIpv6(inner, host.readMemory(wholeAddress(address), 16));
             host.writeMemory(wholeAddress(address), read.bytes);
             if (read.error || read.prefixed || read.end === null)
             {

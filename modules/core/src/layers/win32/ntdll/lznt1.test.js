@@ -47,7 +47,7 @@ test('the Rtl calls: formats, room, fragments', ()=>{
     const memory = new Uint8Array(0x10000);
     const view = new DataView(memory.buffer);
     const fns = createCompressionFunctions({
-        readMemory: (at, length)=>memory.subarray(at, at + length),
+        readMemory: (at, length)=>memory.slice(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
     });
     const IN = 0x1000;

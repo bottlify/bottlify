@@ -114,7 +114,7 @@ export function createTimeFunctions({ readMemory, writeMemory, kernel32, allocat
         try
         {
             kernel32[name].handler([scratch]);
-            return readMemory(scratch, size).slice();
+            return readMemory(scratch, size);
         }
         finally
         {

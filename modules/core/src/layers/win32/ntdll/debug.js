@@ -132,7 +132,7 @@ export function createDebugFunctions(host){
             return [];
         }
         const view = new DataView(host.readMemory(wholeAddress(list),
-            VARIADIC_SLOTS * 4).slice().buffer);
+            VARIADIC_SLOTS * 4).buffer);
         return Array.from({ length: VARIADIC_SLOTS }, (_, at)=>view.getUint32(at * 4, true));
     };
 

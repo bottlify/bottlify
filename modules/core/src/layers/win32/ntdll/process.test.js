@@ -122,7 +122,7 @@ function setup(){
         } },
     };
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         kernel32,
         teb: ()=>TEB,
@@ -485,7 +485,7 @@ test('NtCreateThreadEx and RtlCreateUserThread are CreateRemoteThreadEx, their f
     /** @type {string[]} */
     const said = [];
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         kernel32,
         teb: ()=>0,
@@ -598,7 +598,7 @@ test('NtGetNextProcess and NtGetNextThread walk the system\'s list, opening what
         } },
     };
     const fns = /** @type {Record<string, any>} */ (createProcessFunctions({
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
         kernel32,
         teb: ()=>0,
