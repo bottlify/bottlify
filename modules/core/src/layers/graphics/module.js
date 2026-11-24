@@ -1048,6 +1048,7 @@ export function createGraphicsModule(){
                         allocate: config.allocate,
                         free: config.free,
                         readMemory: services.readMemory,
+                        windowMemory: services.windowMemory,
                         writeMemory: services.writeMemory,
                         watchWrites: services.watchWrites,
                     } : undefined,

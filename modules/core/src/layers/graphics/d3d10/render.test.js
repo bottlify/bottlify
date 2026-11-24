@@ -782,6 +782,43 @@ test('a buffer whose bytes live in guest memory maps to its address, and an unma
     assert.deepEqual(h.divergences, []);
 });
 
+test('an unmap takes the pages the program wrote from where it wrote them, copied once', async()=>{
+    const guest = guestMemory();
+    let copies = 0;
+    const storage = {
+        ...guest.storage,
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            copies++;
+            return guest.storage.readMemory(address, length);
+        },
+        windowMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            guest.memory.subarray(address, address + length),
+    };
+    const h = harness({ guest: storage });
+    /** @type {{ resource?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateBuffer({
+        ByteWidth: 0x10000,
+        Usage: D3D10_USAGE.DYNAMIC,
+        BindFlags: D3D10_BIND.VERTEX_BUFFER,
+        CPUAccessFlags: D3D10_CPU_ACCESS.WRITE,
+        MiscFlags: 0,
+    }, null, made), S_OK);
+    /** @type {{ pData?: number }} */
+    const mapped = {};
+    assert.equal(made.resource.Map(0, D3D10_MAP.WRITE_NO_OVERWRITE, 0, mapped), S_OK);
+    const before = h.gpu.of('writeBuffer').length;
+    guest.store(/** @type {number} */ (mapped.pData) + 0x5020, Uint8Array.of(9, 8, 7, 6));
+    copies = 0;
+    made.resource.Unmap(0);
+    await h.present();
+    const writes = h.gpu.of('writeBuffer').slice(before);
+    assert.deepEqual(writes.map((/** @type {any} */ call)=>[call.bufferOffset, call.size]),
+        [[0x5000, 0x1000]], 'the page written');
+    assert.deepEqual([...writes[0].bytes.subarray(0x20, 0x24)], [9, 8, 7, 6]);
+    assert.equal(copies, 0, 'nothing read through a copy');
+});
+
 // --- textures ---
 
 const TEXTURE_2X2 = Object.freeze({

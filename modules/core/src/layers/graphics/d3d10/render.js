@@ -112,6 +112,9 @@ const DEPTH_DIMENSIONS = new Set([RESOURCE_DIMENSION.TEXTURE2D, RESOURCE_DIMENSI
  * @property {(bytes: number) => number} allocate  an address, 0 when there is no room
  * @property {(address: number) => void} [free]
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, length: number) => Uint8Array} [windowMemory]
+ *     the bytes themselves where the memory can hand them, valid until the
+ *     guest runs again: what an unmap takes in, copied into the host's at once
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => ({ take: (address: number,
  *     length: number) => number[] } | null)} [watchWrites]
@@ -1044,10 +1047,12 @@ export function createRenderer(services){
         {
             return null;
         }
+        // Each span copied once, from where the program wrote it.
+        const read = guest.windowMemory ?? guest.readMemory;
         for (let index = 0; index < spans.length; index += 2)
         {
             const span = spans[index + 1] - spans[index];
-            backing.bytes.set(guest.readMemory(base + spans[index], span), spans[index]);
+            backing.bytes.set(read(base + spans[index], span), spans[index]);
         }
         return { start: spans[0], end: spans[spans.length - 1] };
     };
