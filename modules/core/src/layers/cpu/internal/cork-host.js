@@ -566,6 +566,10 @@ export function createCorkHost(config){
     const ramMemory = own.ramMemory === undefined ? undefined
         : config.ram ?? wideMemory(engine, Math.min(/** @type {number} */ (own.window),
             Math.ceil((wideRam ?? Infinity) / 65536) * 65536), shared);
+    /** Where a wide window's RAM ends, in whole far chunks; 0 without one. */
+    const wideRamTop = ramMemory === undefined ? 0
+        : Math.floor(Math.min(/** @type {number} */ (own.window), wideRam ?? Infinity)
+            / 65536) * 65536;
     /** The buffer the guest's RAM lies in. */
     const ramBuffer = ()=>(ramMemory ?? memory).buffer;
     // The memory past the guest's RAM, or a growing memory's engine range: the
@@ -2528,11 +2532,16 @@ export function createCorkHost(config){
         /** Cork's own layout; the reserve is not carved from the guest's RAM. */
         stateLayout: ()=>layout,
         /**
-         * The far space (`far`): where reservations past 4 GiB may lie and the
-         * chunk each frame stands for; null for a process with no table.
+         * The far space: where reservations past 4 GiB may lie and the chunk each
+         * frame stands for - through the table of far chunks (`far`), or below
+         * `direct`, a wide window's RAM, each chunk its own frame; null for a
+         * process with neither.
          */
-        farSpace: ()=>(farTable < 0 ? null
-            : { base: FAR.BASE, top: FAR.TOP, chunk: FAR.CHUNK }),
+        farSpace: ()=>(farTable >= 0 ? { base: FAR.BASE, top: FAR.TOP, chunk: FAR.CHUNK }
+            // A wide window's RAM past 4 GiB: each chunk its own frame.
+            : long && wideWindow !== undefined && wideRamTop > FAR.BASE
+                ? { base: FAR.BASE, top: wideRamTop, chunk: FAR.CHUNK, direct: wideRamTop }
+                : null),
         /**
          * Gives the far chunk `address` lies in the frame `frame` of the window,
          * or none (-1): every executor's code finds it at its next access.
@@ -2847,7 +2856,9 @@ export function createCorkHost(config){
          * @param {number} address @param {number} length @param {boolean} open
          */
         pageAccess: (address, length, open)=>{
-            if (corkConfig?.checkReads === false || !runtime.pages)
+            // The page flags hold the 4 GiB block: a wide window's RAM past it is
+            // never closed, not another page wrapped onto.
+            if (corkConfig?.checkReads === false || !runtime.pages || address + length > 2 ** 32)
             {
                 return false;
             }

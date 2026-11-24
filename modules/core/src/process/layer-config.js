@@ -240,6 +240,8 @@ export async function layerConfig(deps){
             // Where the reader above finds it for a thread with a block,
             // read there directly.
             lastErrorOffset: (long ? TEB64 : TEB).LAST_ERROR,
+            // An address past 4 GiB a handler took as its low dword (`watchCut`).
+            divergence: reportDivergence,
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
             callPhases: options.profileCalls ?? false,

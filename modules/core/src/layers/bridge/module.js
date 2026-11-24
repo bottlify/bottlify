@@ -397,6 +397,7 @@ export function createBridgeModule(){
                     return answered;
                 },
                 lastErrorOffset: config?.lastErrorOffset,
+                divergence: config?.divergence,
                 traceStrings: config?.traceStrings ?? false,
                 callPhases: config?.callPhases ?? false,
                 onCall: config?.onCall,

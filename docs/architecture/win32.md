@@ -99,7 +99,9 @@ comment the layers carry, is declared on each function when the layer is built
 (`declareAddresses`), a C++ member's `this` among them. So a handler keeps an address with
 `wholeAddress`, never `>>> 0`, and memory takes it whole. An answer typed an address is written
 into RAX whole as well, past 4 GiB too. The same check holds each declared dword to an address
-of the signature.
+of the signature. An undeclared argument whose high half names an address past 4 GiB is watched
+while its handler runs: a high half the handler never read (`pointerArg` reads it) is a loss,
+said once a function - its bytes would be read or written 4 GiB below.
 
 ## One call, from the program to JS and back
 

@@ -17,13 +17,16 @@ event, an error. Neither stops the program.
   the file system's and the registry's redirection.
   A 64-bit image linked past 4 GiB with no relocations needs a 64-bit WebAssembly memory
   (memory64) of 8 GiB: a browser without one (Safari, iOS) refuses the program at its start,
-  naming that. Such a process is given about 3.7 GiB, all of it below 4 GiB, and only its
-  image's code is translated: the system libraries' own code and pages it makes executable
+  naming that. Such a process is given the space below 4 GiB first and then its window's RAM
+  past it, around its image, as much as its `memorySize` says; only its image's code is
+  translated: the system libraries' own code and pages it makes executable
   itself are interpreted, some twenty times dearer an instruction.
   A relocatable 64-bit image given a `memorySize` past 4 GiB is moved below 4 GiB and runs over
   a window of 8 GiB too, its RAM a memory64 memory of the window (a browser weighs a thread's
-  memories by their length and collects without end past 4 GiB in Chrome 157, 8 GiB in 153); its
-  addresses stay below 4 GiB so far. Given 4 GiB or less it runs in the 4 GiB layout.
+  memories by their length and collects without end past 4 GiB in Chrome 157, 8 GiB in 153),
+  given addresses past 4 GiB once the space below has no room: a reservation there, its pages
+  not committed yet, does not fault (the page flags hold 4 GiB). Given 4 GiB or less it runs in
+  the 4 GiB layout.
   A structured exception there passes no `_set_se_translator` translator. The exports that are
   i386 code alone (`_chkesp`, the __fastcall `Rtl*` calls) are not in a 64-bit process's modules,
   `RtlActivateActivationContextUnsafeFast` among them. A 16-bit (NE) image is

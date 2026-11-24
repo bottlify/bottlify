@@ -2757,3 +2757,12 @@ refused as before. Every read such a process makes tests whether it lies past 4 
 counts on the x64 PE bench, far on against off: vm +23 %, entities +13-19 %, spread +2 %), and
 accesses through rsp go untested only while its stack is in the window: a stack moved past it
 tests them from then on. *2026-11-24.*
+
+**A289. Over a wide window the RAM past 4 GiB is handed out once the space below has no room.**
+A program that needs more than 4 GiB places itself: VirtualAlloc places a reservation past 4 GiB
+(the far space's direct part, `far-space.js`, each 64 KiB its own frame) only when the space below
+is full, where every address the system is handed has always lain. A handler that takes a pointer
+past 4 GiB as its low dword would read and write 4 GiB below; the bridge watches such a call's
+high halves and says one it was never read whole as a loss, once a function (`watchCut`). A page
+past 4 GiB reserved and not committed does not fault there (the page flags hold 4 GiB).
+*2026-11-24.*

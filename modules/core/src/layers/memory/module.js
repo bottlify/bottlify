@@ -295,7 +295,7 @@ export function createMemoryModule(){
                  * program commits is given a frame of the window (`mapFar`). Null
                  * where it may not.
                  *
-                 * @returns {{ base: number, top: number, chunk: number } | null}
+                 * @returns {{ base: number, top: number, chunk: number, direct?: number } | null}
                  */
                 farSpace: ()=>(live() ? /** @type {any} */ (cpu).farSpace?.() ?? null : null),
                 /**

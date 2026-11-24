@@ -1964,6 +1964,32 @@ test('a size past a dword reaches its handler as the largest dword, never as its
         addresses: [1], sizes: [1], handler: ()=>0 }), /sizes/, 'an address is no size');
 });
 
+test('an undeclared address past 4 GiB a handler takes as its low dword is a loss, said once',
+    ()=>{
+        // ReadFile into a block a wide window gave out past 4 GiB, its handler
+        // reading the buffer's low dword: the bytes would land 4 GiB below.
+        /** @type {string[][]} */
+        const said = [];
+        const { dispatcher } = machine64({
+            registers: { rcx: 0x44n, r11: 0x1_2000_0000n, r8: 0x0000_0001_0000_0010n,
+                r9: 0xffffffff_fffffff0n },
+            divergence: (api, detail, kind)=>said.push([api, detail, kind ?? '']) });
+        dispatcher.register(1, { name: 'X!Read', ...STDCALL, argBytes: 16, handler: ()=>0 });
+        dispatcher.register(2, { name: 'X!Whole', ...STDCALL, argBytes: 16,
+            // As win32's `pointerArg` reads one.
+            /** @param {any} args */
+            handler: args=>args.high[1] + args.high[2] });
+        dispatcher.register(3, { name: 'X!Declared', ...STDCALL, argBytes: 16,
+            addresses: [1], sizes: [2], handler: ()=>0 });
+        dispatcher.dispatch(1);
+        dispatcher.dispatch(1);
+        dispatcher.dispatch(2);
+        dispatcher.dispatch(3);
+        assert.deepEqual(said, [['X!Read', 'argument 1, 0x120000000, an address past 4 GiB'
+            + ' taken as its low dword', 'loss']], 'once, the first one cut; a handle, a sign\'s'
+            + ' ones, a half read whole and one declared are none');
+    });
+
 test('a call that waits says whether its answer is an address, for the resume to widen it', ()=>{
     // An allocation that waits (a file mapped once its blocks are fetched):
     // the answer comes after the dispatcher has gone on, and RAX must take it

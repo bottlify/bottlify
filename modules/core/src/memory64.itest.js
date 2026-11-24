@@ -8,14 +8,14 @@
  * How much memory a 64-bit process is given, through `createApp`
  * (`test/fixtures/src/big64.c` commits 64 MiB at a time until it is refused and
  * says how many it had): a `memorySize` of 4 GiB gives a program its 4 GiB
- * layout nearly whole, one of 8 GiB a wide window whose RAM memory is 7 GiB, and under a
- * machine's memory (`machineMemory`, `memory-budget.js`) a commit past it is
- * refused, a null and not a fault, the run never holding more than the machine
- * has - in the 4 GiB layout and over a wide window alike. Over a wide window
- * too the program's blocks lie below 4 GiB, and that space is its nearly whole.
- * A wide window is
- * 8 GiB long whatever the program takes of it: it is counted by what the
- * program was given even where a guest's memory counts by its length.
+ * layout nearly whole, every block below 4 GiB; one of 8 GiB a wide window whose RAM is
+ * the window, its space below 4 GiB given first and then its RAM past it, nearly
+ * the whole window, around an image linked there. Under a machine's memory
+ * (`machineMemory`, `memory-budget.js`) a commit past it is refused, a null and
+ * not a fault, the run never holding more than the machine has - in the 4 GiB
+ * layout and over a wide window alike. A wide window is 8 GiB long whatever the
+ * program takes of it: it is counted by what the program was given even where a
+ * guest's memory counts by its length.
  */
 
 import { test } from 'node:test';
@@ -48,7 +48,7 @@ function stripRelocations(bytes){
 /**
  * @param {Record<string, unknown>} options  createApp's, past the program
  * @param {boolean} [wide]  the image at its own base past 4 GiB
- * @returns {Promise<{ code: number, pages: number, heap: number, lines: string[],
+ * @returns {Promise<{ code: number, pages: number, heap: number, high: number, lines: string[],
  *     machine: any, guest: any }>}
  */
 async function run(options, wide = false){
@@ -69,7 +69,7 @@ async function run(options, wide = false){
         const count = what=>Number(lines.find(line=>line.startsWith(`${what} `))
             ?.slice(what.length + 1) ?? NaN);
         const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
-        return { code, pages: count('pages'), heap: count('heap'), lines,
+        return { code, pages: count('pages'), heap: count('heap'), high: count('high'), lines,
             machine: cpu?.metrics?.machineMemory, guest: cpu?.metrics?.guestMemory };
     }
     finally
@@ -78,15 +78,18 @@ async function run(options, wide = false){
     }
 }
 
-/** @param {string[]} lines */
-const right = lines=>assert.deepEqual(lines.filter(line=>/^(ok|FAIL)/.test(line)),
-    ['ok   every block below 4 GiB', 'ok   every byte read back'], lines.join('\n'));
+/** @param {string[]} lines @param {boolean} [high]  a block lay past 4 GiB */
+const right = (lines, high = false)=>assert.deepEqual(
+    lines.filter(line=>/^(ok|FAIL)/.test(line)),
+    [...high ? ['ok   a line written from past 4 GiB'] : [], 'ok   every byte read back'],
+    lines.join('\n'));
 
 test('a 64-bit process with a memorySize of 4 GiB is given its 4 GiB layout',
     { timeout: 300000 }, async()=>{
-        const { code, pages, lines, guest } = await run({ memorySize: 4 * GiB });
+        const { code, pages, high, lines, guest } = await run({ memorySize: 4 * GiB });
         right(lines);
         assert.equal(code, 0);
+        assert.equal(high, 0, 'every block below 4 GiB');
         assert.equal(guest.ceiling, 4 * GiB);
         // All but the images, the stacks, the engine's range and the top the
         // system keeps: past 3 GiB of the 4.
@@ -95,23 +98,26 @@ test('a 64-bit process with a memorySize of 4 GiB is given its 4 GiB layout',
 
 test('a relocatable 64-bit process given more than 4 GiB runs over a wide window whose RAM is'
     + ' the window, its last 64 KiB apart', { timeout: 300000 }, async()=>{
-    const { code, lines, guest } = await run({ memorySize: 8 * GiB });
-    right(lines);
+    const { code, pages, high, lines, guest } = await run({ memorySize: 8 * GiB });
+    right(lines, true);
     assert.equal(code, 0);
     assert.equal(guest.ceiling, 8 * GiB - 4096, 'the window');
     assert.equal(guest.held, 8 * GiB - 65536);
+    // Below 4 GiB first, then the window's RAM past it: nearly the whole window.
+    assert.ok(high > 0 && pages - high >= 3.5 * GiB / STEP, `${pages} blocks, ${high} high`);
+    assert.ok(pages * STEP >= 7.5 * GiB, `${pages} blocks`);
 });
 
-test('a 64-bit process over a wide window is given the space below 4 GiB nearly whole',
-    { timeout: 300000 }, async()=>{
-        const { code, pages, lines } = await run({ memorySize: 8 * GiB }, true);
-        // Every block below 4 GiB still: what the system's calls are handed lies there.
-        right(lines);
-        assert.equal(code, 0);
-        // All but the libraries, the stacks, the image's low dword span and the
-        // top the system keeps.
-        assert.ok(pages * STEP >= 3.5 * GiB && pages * STEP < 4 * GiB, `${pages} blocks`);
-    });
+test('a 64-bit process whose image lies past 4 GiB is given its wide window nearly whole,'
+    + ' around its image', { timeout: 300000 }, async()=>{
+    const { code, pages, high, lines } = await run({ memorySize: 8 * GiB }, true);
+    right(lines, true);
+    assert.equal(code, 0);
+    // All but the libraries, the stacks, the image's low dword span, the
+    // image and the top the system keeps.
+    assert.ok(high > 0 && pages - high >= 3.5 * GiB / STEP, `${pages} blocks, ${high} high`);
+    assert.ok(pages * STEP >= 7.25 * GiB, `${pages} blocks`);
+});
 
 /** A machine with room for less than the program asks: 1.5 GiB. */
 const MACHINE = 1536 * MiB;

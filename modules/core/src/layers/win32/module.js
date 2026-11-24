@@ -4144,6 +4144,21 @@ export function createWin32Module(){
                         farSpace: ()=>memory.farSpace?.() ?? null,
                         /** @param {number} address @param {number} frame */
                         mapFar: (address, frame)=>memory.mapFar(address, frame),
+                        /** @param {number} bytes */
+                        charge: bytes=>memory.charge?.(bytes) !== false,
+                        /** @param {number} base @param {number} size @param {boolean} made */
+                        held: (base, size, made)=>{
+                            const name = `far 0x${base.toString(16)}`;
+                            if (made)
+                            {
+                                memory.register({ name, base, size, kind: memory.RegionKind
+                                    .THUNK_DATA, access: memory.Access.READ_WRITE });
+                            }
+                            else
+                            {
+                                memory.unregister(name);
+                            }
+                        },
                         /** @param {number} address @param {number} length */
                         watchWrites: (address, length)=>
                             memory.watchWrites?.(address, length) ?? null,

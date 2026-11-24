@@ -25,9 +25,10 @@ export const LONG_RSP = 0x8000;
  * @param {Map<number, number>} [options.words]  Guest memory, by dword address.
  * @param {(answer: any, frame: any) => void} [options.suspend]  Told of a call whose handler
  *     has not finished, as the bridge is.
+ * @param {(api: string, detail: string, kind?: string) => void} [options.divergence]
  */
 export function longMachine({ registers = {}, xmm = new Map(), words = new Map(),
-    suspend = ()=>{} } = {})
+    suspend = ()=>{}, divergence } = {})
 {
     /** @type {Map<string, bigint>} */
     const r = new Map(Object.entries({ rsp: BigInt(LONG_RSP), rax: 0n, ...registers }));
@@ -54,7 +55,7 @@ export function longMachine({ registers = {}, xmm = new Map(), words = new Map()
     };
     const kernel = { currentThread: ()=>({ name: 'main' }), parkThread: ()=>{} };
     const dispatcher = createDispatcher({ cpu, memory, parking: createParking({ kernel }),
-        suspend });
+        suspend, divergence });
     return { dispatcher, r };
 }
 

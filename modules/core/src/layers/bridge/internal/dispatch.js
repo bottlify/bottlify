@@ -150,6 +150,10 @@ import { isDriven } from './drive.js';
  * @property {LongSlot[] | null} longSlots  Where each x64 slot's argument goes
  *     in `args`, for a function with quadwords or floating-point arguments;
  *     null when every slot is one dword.
+ * @property {number[] | null} highs  A 64-bit call's high halves, by dword (`args.high`).
+ * @property {Set<number> | null} cutSkip  Its dwords that are no address of their own
+ *     (`skippedWords`), made at its first watched call.
+ * @property {boolean} cutSaid  An address past 4 GiB it took as its low dword was said.
  * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
  * @property {number} [windowMs]     `sampledMs` when it began.
  * @property {number} [windowSampled]  `sampledCalls` when it began.
@@ -379,6 +383,18 @@ export const wholeAddresses = (addresses, args, high)=>{
 };
 
 /**
+ * The dwords of a 64-bit call that are not an address in their own slot: the
+ * declared addresses and sizes, and a quadword's, a float's or a structure's
+ * slot, which hold their high half or their bits as their own.
+ *
+ * @param {Entry} entry
+ * @returns {Set<number>}
+ */
+const skippedWords = entry=>new Set([...entry.addresses ?? [], ...entry.sizes ?? [],
+    ...(entry.longSlots ?? []).filter(slot=>slot.words !== 1 || slot.xmm || slot.ref)
+        .flatMap(slot=>[slot.word, slot.word + 1])]);
+
+/**
  * Makes each declared size argument the largest dword where a 64-bit caller's
  * is past one (`HostFunction.sizes`).
  *
@@ -559,6 +575,9 @@ export const unsignedAddress = result=>(result >= 2 ** 32 && result < 2 ** 53 ? 
  *        of guest memory per pointer argument on every recorded call. On, it
  *        is the only way to see a string a program built on its own stack,
  *        which by the end of a run is somebody else's stack.
+ * @param {(api: string, detail: string, kind?: string) => void} [deps.divergence]
+ *        Where a call that lost part of what it was handed is said: an address
+ *        past 4 GiB a handler took as its low dword (`watchCut`).
  * @param {(name: string) => boolean} [deps.wantsCall]
  *        Whether `onCall` wants the calls of a function, asked once for each
  *        and again only when the journal's revision moves (`revisionCell`):
@@ -633,6 +652,15 @@ class Dispatcher {
 
         /** @type {Parameters<typeof createDispatcher>[0]['journal'] | null} */
         this.journal = deps.journal ?? null;
+        /** Where a lost argument is said (`watchCut`). */
+        this.divergence = deps.divergence ?? null;
+        /**
+         * The call whose arguments past 4 GiB are watched while its handler runs:
+         * those it was handed, by index, and the ones it read whole.
+         *
+         * @type {{ entry: Entry, at: number[], read: Set<number>, high: number[] } | null}
+         */
+        this.cutWatch = null;
 
         /** The clock the call rates are measured by (`chatty`). */
         this.now = deps.now ?? (()=>performance.now());
@@ -1192,7 +1220,8 @@ class Dispatcher {
         const count = entry.registerArgs + entry.stackWords;
         const registers = LONG_ARGUMENT_REGISTERS;
         const slots = entry.longSlots;
-        const high = /** @type {any} */ (args).high ??= argumentArray(count);
+        const high = entry.highs ??= argumentArray(count);
+        /** @type {any} */ (args).high = high;
         if (slots === null)
         {
             for (let i = 0; i < count; i++)
@@ -1212,6 +1241,7 @@ class Dispatcher {
             }
             wholeAddresses(entry.addresses, args, high);
             largestSizes(entry.sizes, args, high);
+            this.watchCut(entry, args, high, count);
             return this.longReturn(rsp);
         }
         // An argument the signature counts as two dwords is one slot here,
@@ -1266,7 +1296,69 @@ class Dispatcher {
         }
         wholeAddresses(entry.addresses, args, high);
         largestSizes(entry.sizes, args, high);
+        this.watchCut(entry, args, high, count);
         return this.longReturn(rsp);
+    }
+
+    /**
+     * An argument whose high half names an address past 4 GiB that the function
+     * does not declare whole (`addresses`, `sizes`, a quadword's slot): its
+     * handler reads it whole through `args.high` (`pointerArg`), or takes the
+     * low dword, which is other memory - a block a wide window gave out past
+     * 4 GiB read or written 4 GiB below. Such a call's `args.high` is watched
+     * while the handler runs, and a high half it never read is a loss said once
+     * a function (`settleCut`). A call with none costs a look at its halves.
+     *
+     * @param {Entry} entry @param {any} args @param {number[]} high @param {number} count
+     */
+    watchCut(entry, args, high, count){
+        if (this.divergence === null || entry.cutSaid)
+        {
+            return;
+        }
+        /** @type {number[] | null} */
+        let at = null;
+        for (let i = 0; i < count; i++)
+        {
+            const upper = high[i];
+            if (upper !== 0 && upper < ADDRESS_HIGH && args[i] !== -1 && args[i] < 2 ** 32
+                && !(entry.cutSkip ??= skippedWords(entry)).has(i))
+            {
+                (at ??= []).push(i);
+            }
+        }
+        if (at === null)
+        {
+            return;
+        }
+        /** @type {Set<number>} */
+        const read = new Set();
+        this.cutWatch = { entry, at, read, high };
+        args.high = new Proxy(high, {
+            get: (target, key)=>{
+                if (typeof key === 'string')
+                {
+                    read.add(Number(key));
+                }
+                return target[/** @type {any} */ (key)];
+            },
+        });
+    }
+
+    /** The watched call's handler is done: a high half it did not read is said. */
+    settleCut(){
+        const watch = /** @type {NonNullable<Dispatcher['cutWatch']>} */ (this.cutWatch);
+        this.cutWatch = null;
+        /** @type {any} */ (watch.entry.args).high = watch.high;
+        const lost = watch.at.filter(i=>!watch.read.has(i));
+        if (lost.length > 0)
+        {
+            watch.entry.cutSaid = true;
+            const i = lost[0];
+            /** @type {NonNullable<Dispatcher['divergence']>} */ (this.divergence)(watch.entry.name,
+                `argument ${i}, 0x${(watch.high[i] * 2 ** 32 + (watch.entry.args[i] >>> 0))
+                    .toString(16)}, an address past 4 GiB taken as its low dword`, 'loss');
+        }
     }
 
     /**
@@ -1647,6 +1739,10 @@ class Dispatcher {
             // the mutable object built above, not `args` (which stays the
             // pristine reading a fallthrough restores from).
             result = entry.handler(entry.site ? entry.registers : args, frame);
+            if (this.cutWatch !== null)
+            {
+                this.settleCut();
+            }
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && entry.hookStats !== null)
             {
                 entry.hookStats.ms += hookClock() - hookStart;
@@ -1914,6 +2010,9 @@ class Dispatcher {
             args: argumentArray(site ? 8 : stackWords + registerArgs),
             kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
             chainCount: 0,
+            highs: null,
+            cutSkip: null,
+            cutSaid: false,
             writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
             sinkRevision: -1,
             sinkOn: true,

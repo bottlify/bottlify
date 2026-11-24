@@ -66,7 +66,7 @@ test('an arm with far chunks runs its 64-bit workloads with the table of far chu
     // The stand's memory is its RAM whole: the table lies past everything.
     const host = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0xb077,
         entryVector: 0x7000, initialStack: 0x800000, bits: 64, far: true,
-        cork: { clock: 'virtual', worker: false } });
+        sliceMs: Infinity, cork: { clock: 'virtual', worker: false } });
     assert.deepEqual(host.farSpace(), { base: 2 ** 32, top: 2 ** 36, chunk: 2 ** 16 });
     host.dispose?.();
 });

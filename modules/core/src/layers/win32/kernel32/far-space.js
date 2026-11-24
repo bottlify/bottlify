@@ -19,6 +19,11 @@
  * Everything else about a reservation - which pages are committed, their
  * protections - is kept here by page, and the pages of a frame are opened and
  * closed as the far pages they stand for are.
+ *
+ * A wide window's RAM past 4 GiB is a far space too, whose chunks below its
+ * `direct` line are their own frames: no table, the memory holds them where
+ * they are. What a 64-bit program needs past what 4 GiB holds is placed there,
+ * found, committed, protected and queried by the same code.
  */
 
 /** Allocation states and types, as MEMORY_BASIC_INFORMATION has them. */
@@ -42,19 +47,33 @@ export const FAR_FRAME = 'far frame';
  */
 
 /**
- * @param {{ space: { base: number, top: number, chunk: number },
+ * @param {{ space: { base: number, top: number, chunk: number, direct?: number },
  *     allocator: { allocate: (bytes: number, options?: { alignment?: number, owner?: any })
  *         => number, free: (address: number) => void },
  *     mapFar: (address: number, frame: number) => void,
  *     room: (end: number) => boolean,
+ *     charge?: (bytes: number) => boolean,
+ *     inTheWay?: (from: number, to: number) => number,
+ *     held?: (base: number, span: number, held: boolean) => void,
  *     fill: (address: number, value: number, length: number) => void,
  *     pageAccess?: (address: number, length: number, open: boolean) => boolean }} host
  *     `room` grows the guest's memory to hold a frame's end and charges it, false where
- *     the machine has no room
+ *     the machine has no room; `charge` takes a chunk of its own frame (below `direct`)
+ *     from the machine's memory, false where it has no room; `inTheWay` is the end of
+ *     what else the process has in [from, to) (an image), or 0; `held` says a
+ *     reservation of the direct part made or released, for the process's map of its space
  */
 export function createFarSpace(host){
     const { space, allocator } = host;
     const { chunk } = space;
+    const direct = space.direct ?? space.base;
+    /** Chunks of their own frames ever charged: given once, the tab's for good. @type {Set<number>} */
+    const charged = new Set();
+    // Nothing of the direct part reads as committed before it is.
+    if (direct > space.base)
+    {
+        host.pageAccess?.(space.base, direct - space.base, false);
+    }
     /** Reservations by base, and their bases in order for placing and finding. @type {Map<number, FarReservation>} */
     const reservations = new Map();
     /** @type {number[]} */
@@ -87,6 +106,7 @@ export function createFarSpace(host){
 
     /** Whether [from, to) is free of reservations and inside the space. @param {number} from @param {number} to */
     const free = (from, to)=>from >= space.base && to <= space.top
+        && (host.inTheWay?.(from, to) ?? 0) === 0
         && !bases.some(base=>{
             const other = /** @type {FarReservation} */ (reservations.get(base));
             return other.base < to && other.base + other.span > from;
@@ -98,6 +118,10 @@ export function createFarSpace(host){
         const made = { base, span, protect, pages: new Uint16Array(span / PAGE),
             frames: new Map() };
         reservations.set(base, made);
+        if (base < direct)
+        {
+            host.held?.(base, span, true);
+        }
         bases.push(base);
         bases.sort((a, b)=>a - b);
         return made;
@@ -149,6 +173,22 @@ export function createFarSpace(host){
                 const other = /** @type {FarReservation} */ (reservations.get(base));
                 at = Math.max(at, Math.ceil((other.base + other.span) / GRANULE) * GRANULE);
             }
+            // Past what the process has there of its own (a wide window's image),
+            // and past any reservation that then lies in the way.
+            for (let end = host.inTheWay?.(at, at + span) ?? 0; end > 0;
+                end = host.inTheWay?.(at, at + span) ?? 0)
+            {
+                at = Math.ceil(end / GRANULE) * GRANULE;
+                const after = bases.find(base=>{
+                    const other = /** @type {FarReservation} */ (reservations.get(base));
+                    return other.base < at + span && other.base + other.span > at;
+                });
+                if (after !== undefined)
+                {
+                    const other = /** @type {FarReservation} */ (reservations.get(after));
+                    at = Math.ceil((other.base + other.span) / GRANULE) * GRANULE;
+                }
+            }
             if (at + span > space.top)
             {
                 return 0;
@@ -189,6 +229,23 @@ export function createFarSpace(host){
                 {
                     continue;
                 }
+                const address = reservation.base + index * chunk;
+                if (address < direct)
+                {
+                    if (!charged.has(address) && host.charge?.(chunk) === false)
+                    {
+                        return false;
+                    }
+                    // Fresh RAM reads as zero already; one given before is zeroed.
+                    if (charged.has(address))
+                    {
+                        host.fill(address, 0, chunk);
+                    }
+                    charged.add(address);
+                    reservation.frames.set(index, address);
+                    frames++;
+                    continue;
+                }
                 const frame = allocator.allocate(chunk, { alignment: chunk, owner: FAR_FRAME });
                 if (frame === 0 || !host.room(frame + chunk))
                 {
@@ -201,7 +258,7 @@ export function createFarSpace(host){
                 host.fill(frame, 0, chunk);
                 host.pageAccess?.(frame, chunk, false);
                 reservation.frames.set(index, frame);
-                host.mapFar(reservation.base + index * chunk, frame);
+                host.mapFar(address, frame);
                 frames++;
             }
             for (let page = from; page < to; page += PAGE)
@@ -236,9 +293,13 @@ export function createFarSpace(host){
                     Math.min(reservation.pages.length, (index + 1) * chunk / PAGE));
                 if (frame !== undefined && pages.every(page=>page === 0))
                 {
-                    host.mapFar(reservation.base + index * chunk, -1);
-                    host.pageAccess?.(frame, chunk, true);
-                    allocator.free(frame);
+                    // A chunk of its own frame stays closed where it is.
+                    if (frame >= direct || frame !== reservation.base + index * chunk)
+                    {
+                        host.mapFar(reservation.base + index * chunk, -1);
+                        host.pageAccess?.(frame, chunk, true);
+                        allocator.free(frame);
+                    }
                     reservation.frames.delete(index);
                     frames--;
                 }
@@ -253,6 +314,10 @@ export function createFarSpace(host){
         release(reservation){
             this.decommit(reservation, reservation.base, reservation.base + reservation.span);
             reservations.delete(reservation.base);
+            if (reservation.base < direct)
+            {
+                host.held?.(reservation.base, reservation.span, false);
+            }
             bases.splice(bases.indexOf(reservation.base), 1);
         },
 

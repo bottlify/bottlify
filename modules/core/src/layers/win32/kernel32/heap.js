@@ -1295,9 +1295,16 @@ const viewPageProtection = (view, page)=>{
  *           a reservation's pages not committed, and those protected
  *           PAGE_NOACCESS, fault on any access, as on Windows. False where the
  *           processor does not fault a read, and then every page reads.
- * @property {() => ({ base: number, top: number, chunk: number } | null)} [farSpace]
- *           Where the process may reserve past 4 GiB (the memory layer's `farSpace`),
- *           null where it may not.
+ * @property {() => ({ base: number, top: number, chunk: number, direct?: number } | null)}
+ *           [farSpace]  Where the process may reserve past 4 GiB (the memory layer's
+ *           `farSpace`), null where it may not; below `direct` (a wide window's RAM) each
+ *           chunk is its own frame.
+ * @property {(base: number, size: number, held: boolean) => void} [held]  A reservation
+ *           of a wide window's RAM past 4 GiB made or released, for the memory layer's map
+ *           of the process's space.
+ * @property {(bytes: number) => boolean} [charge]  Bytes the guest is given past its
+ *           arena taken from the machine's memory (the memory layer's `charge`), false
+ *           where it has no room.
  * @property {(address: number, frame: number) => void} [mapFar]  Gives a far chunk a
  *           frame of the window, or takes it (-1): the memory layer's `mapFar`.
  * @property {(address: number, length: number) => ({ take: (address: number,
@@ -1347,7 +1354,14 @@ export function createHeapFunctions(host){
             farMade = space === null || host.mapFar === undefined ? null
                 : createFarSpace({ space, allocator, mapFar: host.mapFar,
                     room: end=>host.reach?.(end) !== false,
-                    fill: host.fillMemory, pageAccess: host.pageAccess });
+                    charge: host.charge, held: host.held, fill: host.fillMemory,
+                    pageAccess: host.pageAccess,
+                    // A wide window's image lies past 4 GiB too; past the window
+                    // the far space is all its own.
+                    inTheWay: space.direct === undefined ? undefined : (from, to)=>{
+                        const region = host.regionAt?.(from) ?? host.nextRegionAfter?.(from);
+                        return region && region.base < to ? region.base + region.size : 0;
+                    } });
         }
         return farMade;
     };
@@ -2819,7 +2833,11 @@ export function createHeapFunctions(host){
         // pages up to the granule's end is within its rights, and was
         // refused here as if it had left its reservation.
         const span = roundUp(size, ALLOCATION_GRANULARITY);
-        if (farSpace !== null && where === null && span >= FAR_FIRST)
+        // A large one past 4 GiB first through the table of far chunks, where the
+        // window is kept for frames; a wide window's RAM past 4 GiB only once the
+        // space below has no room, where every address the system is handed lies.
+        if (farSpace !== null && where === null && span >= FAR_FIRST
+            && farSpace.space.direct === undefined)
         {
             const placedFar = farReserve(farSpace, span, kind, protection);
             if (placedFar !== 0)

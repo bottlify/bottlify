@@ -1525,9 +1525,11 @@ async function buildApp(options){
     // guest's space, not past it -- and only a memory that grows holds it.
     // A wide window's space below is laid out as a 2 GiB one - its libraries and stacks
     // where any process has them - and its heap reaches on to 4 GiB (`HEAP_SIZE`): its
-    // RAM is the window, and the image's low dword span is cut from that heap. Nothing
-    // is handed out past 4 GiB (`roadmap/x64.md`).
-    const ramLimit = Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE, 2 ** 32);
+    // RAM is the window, and the image's low dword span is cut from that heap. Past
+    // 4 GiB its RAM is handed out by reservation once the space below has no room
+    // (`far-space.js`), as much as the program's memory says.
+    const ramLimit = Math.min(options.memorySize ?? DEFAULT_MEMORY_SIZE,
+        programLoaded.wide?.ram ?? 2 ** 32);
     const largeSpace = mainImage.largeAddressAware && options.heapSize === undefined;
     const askedMemory = programLoaded.wide !== undefined ? 2 ** 31
         : !mayGrow ? ramLimit
@@ -2417,8 +2419,10 @@ async function buildApp(options){
     }
     // The space past 4 GiB a 64-bit process reserves in (`cpu.far`): the program's
     // to read and write where kernel32 has given its chunks frames.
+    // A wide window's RAM past 4 GiB is registered by reservation, as kernel32 makes
+    // them (`far-space.js`): an image may lie there too.
     const farSpace = memory.farSpace?.() ?? null;
-    if (farSpace !== null)
+    if (farSpace !== null && farSpace.direct === undefined)
     {
         memory.register({ name: 'far', base: farSpace.base, size: farSpace.top - farSpace.base,
             kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE });

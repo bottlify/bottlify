@@ -255,6 +255,8 @@ table in the engine's range holds each chunk's frame, and an access past 4 GiB, 
 there, adds its chunk's entry to its address's low half instead (`farTranslate`). One that finds
 no frame, or spans two chunks whose frames are apart, runs on the interpreter, which takes it the
 same way, a byte at a time where it must, and raises the access violation at the far address.
+Over a wide window the same kernel32 code hands out the window's RAM past 4 GiB, each chunk its
+own frame and no table, once the space below has no room (the far space's direct part, A289).
 A region whose windows of accesses (tested once for a block) were found past 4 GiB is formed again
 with each access tested on its own; a read the translator leaves untested elsewhere tests here
 whether it lies past 4 GiB, and accesses through rsp stay untested only while the stack is in the

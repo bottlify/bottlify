@@ -9,8 +9,8 @@
  * VirtualAlloc until one is refused, the first and the last byte of each
  * written and read back, then the same from the heap in blocks of 16 MiB.
  * It says how many of each it had, in whole 64 MiB steps (`pages 12`,
- * `heap 3`: the test knows the machine and what that should be), whether
- * every block lay below 4 GiB and whether every byte read back. The exit code
+ * `heap 3`: the test knows the machine and what that should be), how many
+ * blocks lay past 4 GiB (`high 40`) and whether every byte read back. The exit code
  * is 0 where the refusals were plain (a null, no fault) and the bytes right.
  */
 
@@ -63,7 +63,7 @@ static void count(const char *what, unsigned value)
 
 static int high = 0, wrong = 0;
 
-/* A block the process was given: below 4 GiB, and its ends its own. */
+/* A block the process was given, counted where it lies past 4 GiB, its ends its own. */
 static void taken(unsigned char *block, QWORD bytes, unsigned index)
 {
     high += (QWORD)block >> 32 != 0;
@@ -111,7 +111,24 @@ void mainCRTStartup(void)
     }
     count("pages", had);
     count("heap", heap / 4);
-    say(high ? "FAIL a block past 4 GiB\r\n" : "ok   every block below 4 GiB\r\n");
+    count("high", high);
+    // A line written from a block past 4 GiB, where there is one: the system
+    // takes its buffer whole.
+    for (unsigned index = 0; index < had; index++)
+    {
+        if ((QWORD)pages[index] >> 32 != 0)
+        {
+            const char *line = "ok   a line written from past 4 GiB\r\n";
+            DWORD length = 0, written;
+            while (line[length])
+            {
+                pages[index][length] = line[length];
+                length++;
+            }
+            WriteFile(GetStdHandle((DWORD)-11), pages[index], length, &written, 0);
+            break;
+        }
+    }
     say(wrong ? "FAIL a byte read back otherwise\r\n" : "ok   every byte read back\r\n");
-    ExitProcess(high + wrong);
+    ExitProcess(wrong);
 }
