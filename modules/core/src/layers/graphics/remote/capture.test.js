@@ -254,7 +254,8 @@ test('a capture keeps every argument whole and zeroes the guest memory a batch c
         writer.u8(OP.WROTE);
         writer.u32(1);
         writer.memory(0x30000, written);
-        capture.calls(id, writer.take());
+        const given = writer.give();
+        capture.calls(id, given.buffer, given.length);
         assert.equal(capture.counts().zeroed, large.length + written.length);
         const records = [];
         for await (const record of captureRecords([gunzipSync(await capture.finish())]))

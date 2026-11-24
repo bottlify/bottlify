@@ -437,19 +437,8 @@ export function createWriter(){
             u32(address);
             typed(data);
         },
-        /** Whether anything has been written since the last `take`. */
+        /** Whether anything has been written since the last `give`. */
         empty: ()=>at === 0,
-        /**
-         * What has been written, as a buffer of its own, and a fresh one to
-         * write on.
-         *
-         * @returns {ArrayBuffer}
-         */
-        take(){
-            const taken = buffer.slice(0, at);
-            at = 0;
-            return taken;
-        },
         /**
          * The buffer written on itself, and how much of it is written: what
          * is sent away and comes back (`reuse`), where a buffer of its own

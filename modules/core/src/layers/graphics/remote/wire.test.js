@@ -29,10 +29,11 @@ function roundTrip(values, refOf = ()=>undefined){
     }
     /** @type {any[]} */
     const read = [];
+    const { buffer, length } = writer.give();
     createReader({ ref: number=>({ ref: number }), service: ()=>'service' })
-        .read(writer.take(), call=>{
+        .read(buffer, call=>{
             read.push(/** @type {any[]} */ (call.a)[0]);
-        });
+        }, length);
     return { read, services };
 }
 
@@ -99,9 +100,10 @@ test('a call\'s sections and its wait come back with it', ()=>{
     writer.u32(42);
     /** @type {any[]} */
     const calls = [];
-    createReader({ ref: number=>number, service: ()=>null }).read(writer.take(), call=>{
+    const { buffer, length } = writer.give();
+    createReader({ ref: number=>number, service: ()=>null }).read(buffer, call=>{
         calls.push(call);
-    });
+    }, length);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].t, 3);
     assert.equal(calls[0].m, 'UnlockRect');
@@ -142,9 +144,10 @@ test('a structure from one place goes by its shape, flat while it holds numbers 
     }
     /** @type {any[]} */
     const read = [];
-    createReader({ ref: number=>number, service: ()=>null }).read(writer.take(), call=>{
+    const { buffer, length } = writer.give();
+    createReader({ ref: number=>number, service: ()=>null }).read(buffer, call=>{
         read.push(/** @type {any[]} */ (call.a)[0]);
-    });
+    }, length);
     assert.equal(read.length, values.length);
     for (const [index, value] of values.entries())
     {
