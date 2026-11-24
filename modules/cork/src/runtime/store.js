@@ -28,6 +28,12 @@ import { usesX87 } from './variants.js';
 import { StoredBlocks } from './stored-blocks.js';
 import { usedAt, usedSlot } from './layout.js';
 
+/**
+ * How a batch module's record is asked for: its key names its bytes (`moduleKey`), so
+ * a store that hands it on may keep it under that key for any reader (`TranslationStore`).
+ */
+const FIXED = Object.freeze({ fixed: true });
+
 /** @typedef {import('./state.js').Lookup} Lookup */
 /** @typedef {import('./state.js').Forming} Forming */
 
@@ -903,7 +909,7 @@ export function createStore(state){
             {
                 const compiled = sharedModule(key);
                 pending = compiled !== undefined ? Promise.resolve(compiled)
-                    : /** @type {Promise<Uint8Array | null>} */ (store.get(key).then(moduleIn));
+                    : /** @type {Promise<Uint8Array | null>} */ (store.get(key, FIXED).then(moduleIn));
                 modules.set(key, pending);
             }
             return pending;

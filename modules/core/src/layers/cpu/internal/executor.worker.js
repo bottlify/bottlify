@@ -19,9 +19,8 @@
  */
 
 import { createCorkHost } from './cork-host.js';
-import { readPieces } from './translation-store.js';
-import { unframe } from './record-frame.js';
 import { startGcNudge } from './gc-nudge.js';
+import { storeClient } from './store-relay.js';
 import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
     from './executor-channel.js';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
@@ -38,6 +37,8 @@ import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
  * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
  * @property {boolean} [store]  the process answers for the run's translation store
+ * @property {import('../../cache/module.js').Joined | null} [cache]  the run's cache as
+ *     the process joined this executor to it, where it reads the records put there
  * @property {SharedArrayBuffer} [emittedHere]  where it writes the milliseconds its
  *     translator emitted on its own thread, read by a pool that lends it workers
  */
@@ -104,53 +105,14 @@ const portTranslator = port=>({
 /** Its side of the channel's wakes and sleeps (`channelOf`), once started. @type {any} */
 let waits = null;
 
-/** The store's answers awaited, by the ask's id. @type {Map<number, (bytes: Uint8Array | null) => void>} */
-const storeAnswers = new Map();
-let storeAsks = 0;
 /**
- * This executor's own handle on the store's records file, beside the store's: a lookup is
- * then answered with where the record is (`placeOf`) and read here, not on the process's
- * thread. Null until the process hands the file, or where the browser keeps it to one handle.
- * @type {any}
- */
-let records = null;
-
-/**
- * The run's translation store as this executor reaches it: through the
- * process, which holds it and its index. Where the executor holds a handle of
- * its own on the records file (`records`), the process names where a record
- * is and the executor reads it. A lookup is answered on the process's event loop,
- * a turn or a few later, and the runtime interprets meanwhile as it does
- * while any store answers late; a record goes and is not waited on.
+ * The run's translation store as this executor reaches it, through the process
+ * (`store-relay.js`), with the run's cache where the process joined it to that.
+ * Made once the worker is bound to its process.
  *
- * @param {(message: any, transfer?: any[]) => void} send
- * @returns {import('../engine.js').TranslationStore}
+ * @type {ReturnType<typeof storeClient> | null}
  */
-function processStore(send){
-    return {
-        // Made for this executor's runtime, the only one its thread has.
-        alone: true,
-        get: key=>new Promise(resolve=>{
-            const id = ++storeAsks;
-            storeAnswers.set(id, resolve);
-            send({ type: 'store', id, method: 'get', key, place: records !== null });
-        }),
-        put(key, bytes, options){
-            // The bytes are the store's from the call on (`TranslationStore`):
-            // a record that is the whole of its buffer goes without a copy.
-            const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-                && bytes.buffer instanceof ArrayBuffer;
-            send({ type: 'store', method: 'put', key, bytes, options },
-                whole ? [bytes.buffer] : []);
-            return Promise.resolve();
-        },
-        append(key, bytes){
-            send({ type: 'store', method: 'append', key, bytes });
-            return Promise.resolve();
-        },
-        touch: key=>send({ type: 'store', method: 'touch', key }),
-    };
-}
+let storeRelay = null;
 
 /**
  * Where the executor's time went since it started, in milliseconds: in slices
@@ -172,11 +134,13 @@ const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0
  * @param {(message: any, transfer?: any[]) => void} send
  */
 async function serve(
-    { engineUrl, config, memory, channel: buffer, bell, unbroken, store, emittedHere }, send)
+    { engineUrl, config, memory, channel: buffer, bell, unbroken, store, emittedHere, cache }, send)
 {
+    storeRelay?.join(cache);
     const engine = await import(engineUrl);
     const host = createCorkHost({ ...config, engine, memory,
-        ...(store === true ? { cork: { ...config.cork, store: processStore(send) } } : {}) });
+        ...(store === true && storeRelay !== null
+            ? { cork: { ...config.cork, store: storeRelay.store } } : {}) });
     running = host;
     emitted = emittedHere ? new Int32Array(emittedHere) : null;
     for (const adapter of lentWaiting.splice(0))
@@ -410,38 +374,21 @@ async function serve(
  * @param {(message: any, transfer?: any[]) => void} send
  */
 function bind(listen, send){
+    storeRelay = storeClient(send);
     listen(data=>{
         if (data?.type === 'start')
         {
             serve(data, send).catch(e=>send({ type: 'failed',
                 message: String(e?.stack ?? e) }));
         }
-        else if (data?.type === 'store')
+        else if (storeRelay?.take(data))
         {
-            const answer = storeAnswers.get(data.id);
-            storeAnswers.delete(data.id);
-            if (Array.isArray(data.pieces) && records !== null)
-            {
-                let bytes = null;
-                try
-                {
-                    const framed = readPieces(records, data.pieces);
-                    bytes = framed === null ? null : unframe(framed);
-                }
-                catch {
-                    // A read that fails is a miss: the region is formed here.
-                }
-                answer?.(bytes);
-            }
-            else
-            {
-                answer?.(data.pieces === null ? null : data.bytes ?? null);
-            }
+            // An answer of the store's, or a message of the run's cache.
         }
         else if (data?.type === 'records')
         {
             data.file.createSyncAccessHandle({ mode: 'readwrite-unsafe' }).then((/** @type {any} */ handle)=>{
-                records = handle;
+                storeRelay?.holdRecords(handle);
             }, ()=>{
                 // One handle a file in this browser: the process reads for it, as before.
             });
@@ -480,7 +427,8 @@ function bind(listen, send){
             send({ type: 'diagnostics', id: data.id,
                 value: running === null ? null : { ...running.cork().diagnostics(),
                     spent: { ...spent, wallMs: performance.now() - spent.startedAt,
-                        waits: { ...waits } } } });
+                        waits: { ...waits } },
+                    storeRecords: { ...storeRelay?.counts } } });
         }
     });
 }

@@ -9,6 +9,7 @@ import { openMemoryBudget } from './internal/memory-budget.js';
 import { mayWait } from '../../system/may-wait.js';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
+import { STORE_SPACE } from './internal/store-relay.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
 import { engineContractProblem } from './engine.js';
@@ -278,7 +279,7 @@ export function createCpuModule(){
     return {
         name: 'cpu',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['log']),
+        requires: /** @type {readonly string[]} */ (['log', 'cache']),
 
         /**
          * @param {any} config
@@ -287,6 +288,9 @@ export function createCpuModule(){
          */
         async create(config, moduleHost){
             const log = moduleHost?.requireApi('log');
+            // The run's cache, where a translation another executor of the process
+            // asks for is put once and read there in place (`createRemoteExecutor`).
+            const cache = moduleHost?.requireApi('cache') ?? null;
 
             /**
              * Who is told the guest's memory grew (`onGrow`), kept from before
@@ -873,6 +877,8 @@ export function createCpuModule(){
                                 ? { workerUrl: new URL(settings.executorWorker) } : {}),
                             unbroken: state.unbroken.buffer,
                             store: hostConfig.cork?.store ?? null,
+                            ...cache?.join ? { cache: { join: cache.join,
+                                space: cache.space(STORE_SPACE) } } : {},
                             config: { ...hostConfig, cork } }).then(remote=>{
                             if (lending === null)
                             {
@@ -2004,6 +2010,10 @@ export function createCpuModule(){
                             refused: figures.refused ?? null,
                             refusedWhy: figures.refusedWhy ?? null,
                             spent: figures.spent,
+                            // How the store's records it asked for came to it: read in
+                            // the run's cache (`cacheHits`, `cachePut`) or copied across.
+                            storeRecords: figures.storeRecords ?? null,
+                            storeSent: remote.storeAnswers?.() ?? null,
                             heldBytes: figures.heldBytes ?? null,
                             evictions: figures.evictions ?? null,
                             broughtBack: figures.broughtBack ?? null,

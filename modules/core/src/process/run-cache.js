@@ -131,3 +131,43 @@ export function remoteCacheReader(joined, link){
         },
     });
 }
+
+/**
+ * The run's cache passed on by a thread that was joined to it (a process in a
+ * worker of its own) to threads of its own (its executors): `adopt` takes each
+ * message the thread is told, keeps the segments a thread joining later is handed and
+ * tells it to every thread joined here; `join` is the run's `join` as seen from
+ * here.
+ *
+ * @param {{ shared: any, segments: (SharedArrayBuffer | null)[] }} joined
+ */
+export function relayedJoin(joined){
+    const segments = [...joined.segments];
+    /** @type {Set<(message: any) => void>} */
+    const told = new Set();
+    return {
+        /** @param {{ segment?: number, buffer?: SharedArrayBuffer | null, table?: SharedArrayBuffer }} message */
+        adopt(message){
+            if (message.segment !== undefined)
+            {
+                while (segments.length <= message.segment)
+                {
+                    segments.push(null);
+                }
+                segments[message.segment] = message.buffer ?? null;
+            }
+            for (const tell of told)
+            {
+                tell(message);
+            }
+        },
+        /** @param {(message: any) => void} post */
+        join(post){
+            told.add(post);
+            return {
+                shared: joined.shared, segments: [...segments],
+                leave: ()=>told.delete(post),
+            };
+        },
+    };
+}

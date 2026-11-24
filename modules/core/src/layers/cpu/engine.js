@@ -406,7 +406,10 @@ export function engineContractProblem(engineModule, url){
  * Where translations are kept between runs.
  *
  * @typedef {Object} TranslationStore
- * @property {(key: string) => Promise<Uint8Array | null>} get
+ * @property {(key: string, options?: { fixed?: boolean }) => Promise<Uint8Array | null>} get
+ *     `fixed`: the record's bytes never change under its key (a batch's module, named by what
+ *     its bytes hash to), so a store that hands records on to other threads (an executor's,
+ *     through its process) may keep it once where they all read it.
  * @property {(key: string, bytes: Uint8Array, options?: { needs?: string }) => Promise<void>} put
  *     The bytes are the store's from the call on: a directory store hands a record that is the
  *     whole of its buffer to the worker that writes it, and the caller's view of it is then

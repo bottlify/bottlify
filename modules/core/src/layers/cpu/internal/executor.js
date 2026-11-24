@@ -21,6 +21,7 @@
 
 import { BELL_BYTES, Bell, CHANNEL_BYTES, Said, Turn, Word, channelOf, lookFor, sleepAsync,
     waitWhile } from './executor-channel.js';
+import { answerStoreAsks } from './store-relay.js';
 
 /**
  * A worker, as a page's `Worker` or Node's `worker_threads` makes one.
@@ -146,15 +147,19 @@ export function createBell(){
  *     config: Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory' | 'executor'>,
  *     workerUrl?: URL, bell?: ReturnType<typeof createBell>,
  *     unbroken?: SharedArrayBuffer | ArrayBuffer,
- *     store?: import('../engine.js').TranslationStore | null }} options
+ *     store?: import('../engine.js').TranslationStore | null,
+ *     cache?: { join: import('../../cache/module.js').Join,
+ *         space: import('../../cache/module.js').CacheSpace } | null }} options
  *     host: the process's cork host, made for `config.executors`; config: the configuration
  *     it was made with; bell: the one its executors share, when it waits on several;
  *     unbroken: the routines no slice ends inside (`unbroken.js`), the process's table;
- *     store: the run's translation store, which the executor's translator asks through here
+ *     store: the run's translation store, which the executor's translator asks through here;
+ *     cache: the run's cache as this process reaches it (`join`, and its `STORE_SPACE`
+ *     space), where a record of the store the executor asks for is put once and read in place
  */
 export async function createRemoteExecutor({ host, index, engineUrl, config,
     workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell(),
-    unbroken = undefined, store = null })
+    unbroken = undefined, store = null, cache = null })
 {
     // Its pages zeroed first where a gone process left its engine's state there.
     if (host.makeRoomFor?.(index) === false)
@@ -178,51 +183,14 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     const asked = new Map();
     let asks = 0;
     /**
-     * What the executor's translator asks of the run's store: a record looked
-     * up is answered with a copy (the store may keep the bytes it read), one
-     * put or touched is the store's from here on.
-     *
-     * @param {{ id?: number, method: string, key: string, bytes?: Uint8Array,
-     *     options?: { needs?: string }, place?: boolean }} ask
+     * The run's cache joined for its worker, which reads the records put in it
+     * there: null where the process reaches no cache.
      */
-    const answerStore = ask=>{
-        if (store === null)
-        {
-            if (ask.method === 'get')
-            {
-                worker.post({ type: 'store', id: ask.id, bytes: null });
-            }
-            return;
-        }
-        if (ask.method === 'put' && ask.bytes instanceof Uint8Array)
-        {
-            Promise.resolve(store.put(ask.key, ask.bytes, ask.options)).catch(()=>{});
-            return;
-        }
-        if (ask.method === 'append' && ask.bytes instanceof Uint8Array)
-        {
-            Promise.resolve(store.append?.(ask.key, ask.bytes)).catch(()=>{});
-            return;
-        }
-        if (ask.method === 'touch')
-        {
-            store.touch?.(ask.key);
-            return;
-        }
-        // An executor reading the records file itself is told where the record is: the
-        // read and its copy across were the engine thread's, a twentieth of it at a film's
-        // start, every executor's lookups answered here.
-        const pieces = ask.place === true ? store.placeOf?.(ask.key) : undefined;
-        if (pieces !== undefined)
-        {
-            worker.post({ type: 'store', id: ask.id, pieces });
-            return;
-        }
-        const now = store.getNow?.(ask.key);
-        // An answer to an executor closed meanwhile goes nowhere.
-        Promise.resolve(now !== undefined ? now : store.get(ask.key)).catch(()=>null)
-            .then(bytes=>worker.post({ type: 'store', id: ask.id, bytes })).catch(()=>{});
-    };
+    const joined = cache?.join(message=>worker.post({ type: 'cache', message })) ?? null;
+    /** What the executor's translator asks of the run's store (`store-relay.js`). */
+    const storeAsks = answerStoreAsks({ store,
+        cache: cache ? { space: cache.space, joined: joined !== null } : null,
+        post: message=>worker.post(message) });
     /** Whether it said it is ready. */
     let ready = false;
     /** Whether the process ended it (`close`): its worker's exit is then no loss. */
@@ -285,11 +253,12 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             }
             else if (data?.type === 'store')
             {
-                answerStore(data);
+                storeAsks.answer(data);
             }
         });
         worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
             unbroken, store: store !== null, emittedHere: emittedHere.buffer,
+            cache: joined === null ? null : { shared: joined.shared, segments: joined.segments },
             config: { ...config, executor: index } });
     });
     try
@@ -298,6 +267,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     }
     catch (e){
         // What failed to start holds the process's memory: let it go.
+        joined?.leave();
         await worker.terminate().catch(()=>{});
         throw e;
     }
@@ -591,9 +561,12 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
          */
         close(){
             closing = true;
+            joined?.leave();
             channel.say(Turn.CLOSE);
             return worker.terminate();
         },
+        /** How the store's records this executor asked for crossed to it. */
+        storeAnswers: ()=>({ ...storeAsks.counts }),
     };
     return executor;
 }
