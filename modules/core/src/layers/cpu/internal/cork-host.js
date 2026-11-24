@@ -884,6 +884,10 @@ export function createCorkHost(config){
             ram[address + at] = bytes[at];
         }
     };
+    // A dword's bytes for the store that cannot go as one word: written
+    // through before the call returns, so one is enough.
+    const dwordBytes = new Uint8Array(4);
+    const dword = new DataView(dwordBytes.buffer);
     /** @param {number} address @param {Uint8Array} bytes */
     const copyAround = (address, bytes)=>{
         reach(address + bytes.length);
@@ -2699,6 +2703,27 @@ export function createCorkHost(config){
             hostWrittenBytes += bytes.length;
             copyAround(address, bytes);
             invalidate(address, bytes.length);
+        },
+        /**
+         * A dword the host stores into data: one word into the RAM, nothing
+         * made for it, where it lies whole in the RAM clear of the engine's
+         * own ranges; anywhere else the bytes go as writeData's.
+         *
+         * @param {number} at @param {number} value
+         */
+        writeU32Data: (at, value)=>{
+            const address = isFar(at) ? -1 : hostAt(at);
+            if (address < 0 || (address & 3) !== 0 || acrossEngine(address, 4))
+            {
+                dword.setUint32(0, value >>> 0, true);
+                host.writeData(at, dwordBytes);
+                return;
+            }
+            reach(address + 4);
+            ramWords[ramOffset(address) / 4] = value | 0;
+            hostWrites++;
+            hostWrittenBytes += 4;
+            invalidate(address, 4);
         },
         /**
          * Bytes already in the RAM -- swapped there by the host, written by a

@@ -1187,3 +1187,37 @@ test('a wide window\'s RAM is made as long as the program is given, not the wind
         window: 2 ** 33, codeBase: 0 }), /memory64/);
     assert.deepEqual(asked, [2 ** 33], 'the window whole where nothing less is named');
 });
+
+test('a dword the host stores into data is one word in the RAM: beside translated code it keeps'
+    + ' it, into it drops it, and unaligned it goes as bytes', async()=>{
+    const h = host();
+    const runtime = h.cork();
+    // call F; mov ebx, eax; mov dx, 0x1234; out dx, eax; call F; hlt -- F (0x11100): mov eax,
+    // 1; ret, translated before the program starts; the trap's handler stores over it.
+    load(h, 0x11000, [0xe8, 0xfb, 0x00, 0, 0, 0x89, 0xc3, 0x66, 0xba, 0x34, 0x12, 0xef,
+        0xe8, 0xef, 0x00, 0, 0, 0xf4]);
+    h.writePhysical(0x11100, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xc3]));
+    runtime.noteHot(0x11100);
+    assert.equal(await runtime.translatePending(), 1);
+    /** @type {boolean[]} */
+    const held = [];
+    h.onTrap(()=>{
+        h.writeU32Data(0x2fff00, 0x04030201);
+        h.writeU32Data(0x2fff05, 0x08070605);
+        held.push(runtime.entryOf(0x11100) >= 0);
+        // b8 07 00 00: mov eax, 7, its last immediate byte and the ret left as they are.
+        h.writeU32Data(0x11100, 0x000007b8);
+        held.push(runtime.entryOf(0x11100) >= 0);
+    });
+    for (let slice = 0; slice < 10 && !h.halted(); slice++)
+    {
+        h.runSlice(1000);
+    }
+    assert.equal(h.halted(), true);
+    assert.deepEqual([...h.readPhysical(0x2fff00, 9)], [1, 2, 3, 4, 0, 5, 6, 7, 8],
+        'aligned and unaligned, little-endian, nothing beside them touched');
+    assert.deepEqual(held, [true, false],
+        'kept past the stores beside it, dropped by the one into it');
+    assert.equal(h.readReg32('ebx'), 1, 'the first call ran the code as translated');
+    assert.equal(h.readReg32('eax'), 7, 'the second ran the code the host stored');
+});

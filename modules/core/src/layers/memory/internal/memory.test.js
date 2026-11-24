@@ -800,3 +800,40 @@ test('an address above 2 GiB handed over signed names the same guest bytes', ()=
     accessors.readU32sInto(signed + 4, 1, words);
     assert.equal(words[0], 0x420041);
 });
+
+test('a dword the host stores into data goes as one word, no bytes made; into code, as bytes'
+    + ' the translator is told of', ()=>{
+    const raw = fakeMemory();
+    /** @type {[number, number][]} */
+    const words = [];
+    /** @type {number[]} */
+    const written = [];
+    const regions = mapWithCode();
+    regions.register({
+        name: 'patched', base: 0x4000, size: 0x1000,
+        kind: RegionKind.IMAGE, access: Access.READ_WRITE_EXECUTE,
+    });
+    const accessors = createAccessors({
+        raw: {
+            ...raw,
+            writePhysical: (address, data)=>{
+                written.push(address);
+                raw.bytes.set(data, address);
+            },
+            writeU32Data: (address, value)=>{
+                words.push([address, value >>> 0]);
+                new DataView(raw.bytes.buffer).setUint32(address, value, true);
+            },
+        },
+        regions,
+    });
+    accessors.writeU32(0x2010, 0xcafebabe);
+    assert.deepEqual(words, [[0x2010, 0xcafebabe]], 'data: one word');
+    assert.deepEqual(written, [], 'and no bytes');
+    assert.equal(accessors.readU32(0x2010), 0xcafebabe);
+    accessors.writeU32(0x4010, 7);
+    assert.deepEqual(written, [0x4010], 'code the guest may run: through the write that tells');
+    assert.equal(words.length, 1);
+    assert.throws(()=>accessors.writeU32(0x1010, 1), /write/i, 'a read-only region still refuses');
+    assert.equal(words.length, 1);
+});

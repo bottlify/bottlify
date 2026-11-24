@@ -1164,6 +1164,8 @@ export function createCpuModule(){
                 writeData: (address, bytes)=>started().writeData(address, bytes),
                 /** @param {number} address @param {number} value @param {number} length */
                 fillData: (address, value, length)=>started().fillData(address, value, length),
+                /** @param {number} address @param {number} value  a dword into data */
+                writeU32Data: (address, value)=>started().writeU32Data(address, value),
                 /** @param {string} name */
                 readReg32: name=>started().readReg32(name),
                 /**

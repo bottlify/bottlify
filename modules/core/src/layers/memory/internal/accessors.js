@@ -25,6 +25,9 @@ import { guestFault, unterminated } from './faults.js';
  * @property {(address: number, value: number, length: number) => void} [fillData]
  *     The same, for a run of one repeated byte, with no buffer to hold the
  *     pattern. Absent in a build whose memory has no such path.
+ * @property {(address: number, value: number) => void} [writeU32Data]
+ *     A dword stored into data, with no bytes made for it; the region
+ *     checks are the caller's, as writeData's are.
  * @property {(address: number, length: number) => Uint8Array} readPhysical
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, with nothing allocated. Absent in a build whose
@@ -455,6 +458,22 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
      * @param {number} length
      */
     const writeInteger = (address, value, length)=>{
+        if (length === 4 && raw.writeU32Data)
+        {
+            // The store every host call makes several of -- an out-parameter,
+            // a field, a count: one word into the RAM, no bytes made for it.
+            address = unsigned(address);
+            regions.assert(address, 4, 'write');
+            if (!regions.executable(address))
+            {
+                if (charge)
+                {
+                    charge(4);
+                }
+                raw.writeU32Data(address, value);
+                return;
+            }
+        }
         for (let i = 0; i < length; i++)
         {
             scratch[i] = (value >>> (i * 8)) & 0xff;
