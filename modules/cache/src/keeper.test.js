@@ -185,6 +185,42 @@ test('a table filled is made larger and sent; every name is found through it', a
     }
 });
 
+test('a run after a save finds every body cold on the disk and reads it back as it was', async()=>{
+    const disk = memoryDisk();
+    const first = await cacheOf({ disk });
+    first.reader.put('kept', bodyOf(9000, 4), { onlyCopy: true });
+    for (let i = 0; i < 12; i++)
+    {
+        first.reader.put(`n${i}`, bodyOf(32 * KIB, i));
+    }
+    first.keeper.close();
+    const second = await cacheOf({ disk });
+    assert.equal(second.keeper.figures().loaded, 13);
+    assert.equal(second.reader.look('n0'), 'cold');
+    assert.equal(second.reader.look('n11'), 'cold');
+    assert.deepEqual(second.reader.with('n0', body=>Array.from(body), { wait: true }),
+        Array.from(bodyOf(32 * KIB, 0)));
+    assert.deepEqual(second.reader.with('kept', body=>Array.from(body), { wait: true }),
+        Array.from(bodyOf(9000, 4)));
+});
+
+test('a save torn mid-write leaves the one before it, which the next run reads', async()=>{
+    const disk = memoryDisk();
+    const first = await cacheOf({ disk });
+    first.reader.put('a', bodyOf(100, 1));
+    first.keeper.save();
+    first.reader.put('b', bodyOf(100, 2));
+    first.keeper.close();
+    // The newer of the two index files, cut short as a tab closing mid-write leaves it.
+    const [newer] = [...disk.files].filter(([name])=>name.startsWith('index-'))
+        .sort(([, x], [, y])=>y.length - x.length);
+    disk.files.set(newer[0], newer[1].slice(0, newer[1].length - 5));
+    const second = await cacheOf({ disk });
+    assert.equal(second.reader.look('a'), 'cold');
+    assert.equal(second.reader.look('b'), null, 'the torn save is not read');
+    assert.equal(second.reader.with('a', body=>body[1], { wait: true }), (31 + 1) & 255);
+});
+
 test('a body larger than a segment is refused and said so', async()=>{
     const { reader, keeper } = await cacheOf();
     assert.equal(reader.put('big', new Uint8Array(65 * KIB)), false);

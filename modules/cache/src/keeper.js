@@ -43,6 +43,8 @@ const MIB = 1024 * 1024;
 const MAX_RECORDS = 1 << 20;
 const MAX_NAME_UNITS = 1 << 25;
 const FIRST_TABLE = 1024;
+/** The layout of the index saved on the disk: another is not read. */
+const INDEX_VERSION = 1;
 
 /**
  * A file on the disk as the keeper uses it: the shape of a
@@ -112,7 +114,8 @@ export async function openKeeper(options){
     const counts = {
         reserved: 0, refusedBusy: 0, refusedRoom: 0, refusedLarge: 0, refusedUnseen: 0,
         replaced: 0, raised: 0, raiseFailed: 0, cooled: 0, written: 0, writtenBytes: 0, gone: 0,
-        segmentsMade: 0, segmentsLetGo: 0, letGoBytes: 0, deadDiskBytes: 0, diskFailures: 0,
+        loaded: 0, saved: 0, segmentsMade: 0, segmentsLetGo: 0, letGoBytes: 0, deadDiskBytes: 0,
+        diskFailures: 0,
     };
 
     const tick = ()=>Math.max(0, Math.floor(now() - started));
@@ -519,6 +522,77 @@ export async function openKeeper(options){
         return true;
     };
 
+    // --- the index on the disk -----------------------------------------------
+
+    /** The two files the index is saved to in turn, the newer whole one read. */
+    const INDEX_FILES = ['index-a', 'index-b'];
+    /** @type {DiskFile[]} */
+    const indexFiles = [];
+    let generation = 0;
+
+    /** @param {DiskFile} file */
+    const readIndex = file=>{
+        const bytes = new Uint8Array(file.getSize());
+        file.read(bytes, { at: 0 });
+        try
+        {
+            const saved = JSON.parse(new TextDecoder().decode(bytes));
+            return saved?.version === INDEX_VERSION ? saved : null;
+        }
+        catch {
+            // Torn mid-write: the other file is the index.
+            return null;
+        }
+    };
+
+    /** What the disk held when the keeper opened: packs, and a record cold for each body. */
+    const load = async()=>{
+        if (disk === null)
+        {
+            return;
+        }
+        for (const name of INDEX_FILES)
+        {
+            indexFiles.push(await disk.open(name));
+        }
+        const saved = indexFiles.map(readIndex).filter(one=>one !== null)
+            .sort((a, b)=>b.generation - a.generation)[0];
+        if (saved === undefined)
+        {
+            return;
+        }
+        generation = saved.generation;
+        for (let at = 0; at < saved.packs; at++)
+        {
+            packs.push(await disk.open(`pack-${at}`));
+        }
+        if (packs.length > 0)
+        {
+            pack = packs.length - 1;
+            packTop = packs[pack].getSize();
+        }
+        for (const [name, from, offset, length, flags] of saved.records)
+        {
+            const id = recordOf(name);
+            if (id < 0 || from >= packs.length)
+            {
+                continue;
+            }
+            set(id, R_PACK, from);
+            set(id, R_PACK_OFFSET, offset);
+            set(id, R_LENGTH, length);
+            set(id, R_FLAGS, (flags & F_ONLY_COPY) | F_ON_DISK);
+            set(id, R_TICK, 0);
+            store(id, COLD);
+            counts.loaded++;
+        }
+    };
+
+    /** @param {number} id */
+    const nameOf = id=>String.fromCharCode(...index.names.subarray(get(id, R_NAME),
+        get(id, R_NAME) + get(id, R_NAME_LENGTH)));
+
+    await load();
     keepSpare();
     openNextPack();
 
@@ -698,6 +772,61 @@ export async function openKeeper(options){
             {
                 file.flush();
             }
+        },
+
+        /**
+         * Writes the hot bodies the disk lacks and the index of all it holds,
+         * for the next run to find: true where the disk holds them all now.
+         */
+        save(){
+            if (disk === null || indexFiles.length === 0)
+            {
+                return false;
+            }
+            let whole = true;
+            /** @type {[string, number, number, number, number][]} */
+            const records = [];
+            for (let id = 0; id < words[H_COUNT]; id++)
+            {
+                const state = stateOf(stateWordOf(id));
+                if (state === HOT && (get(id, R_FLAGS) & F_ON_DISK) === 0)
+                {
+                    // Only no one may write it meanwhile: the keeper's thread
+                    // is the one placing, and a reader does not write.
+                    whole = writeOut(id) && whole;
+                }
+                if ((state === HOT || state === COLD) && (get(id, R_FLAGS) & F_ON_DISK) !== 0)
+                {
+                    records.push([nameOf(id), get(id, R_PACK), get(id, R_PACK_OFFSET),
+                        get(id, R_LENGTH), get(id, R_FLAGS) & F_ONLY_COPY]);
+                }
+            }
+            for (const file of packs)
+            {
+                file.flush();
+            }
+            generation++;
+            const bytes = new TextEncoder().encode(JSON.stringify({
+                version: INDEX_VERSION, generation, packs: packs.length, records,
+            }));
+            const file = indexFiles[generation % indexFiles.length];
+            file.truncate(0);
+            file.write(bytes, { at: 0 });
+            file.flush();
+            counts.saved++;
+            return whole;
+        },
+
+        /** Saves, then lets go of every file. */
+        close(){
+            this.save();
+            for (const file of [...packs, ...indexFiles, ...readyPack ? [readyPack] : []])
+            {
+                file.close();
+            }
+            packs.length = 0;
+            indexFiles.length = 0;
+            readyPack = null;
         },
 
         /** Hot bytes, segments, cold bytes and what was done, for the report. */
