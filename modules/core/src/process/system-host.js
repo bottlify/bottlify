@@ -234,12 +234,14 @@ export const CALLS_OFF = Object.freeze({
  *     now: () => number,
  *     across: () => { image: string, id: number,
  *         link: ReturnType<typeof import('../system/link.js').openLink> }[],
- *     libraries: () => string[] }} deps
+ *     libraries: () => string[],
+ *     runCache?: import('../layers/cache/module.js').Reader | null }} deps
  *     `across`: the processes standing in workers, oldest first; `libraries`:
  *     the system libraries the run's own program knew, once it is over
  */
 export async function buildSystemHost(deps){
-    const { options, events, system, translationStore, now, across, libraries } = deps;
+    const { options, events, system, translationStore, now, across, libraries,
+        runCache = null } = deps;
     const core = await assembleModules({
         ...Object.fromEntries(defaultModules().map(module=>[module.name, false])),
         log: { categories: { ...CALLS_OFF, ...options.log?.categories },
@@ -268,7 +270,7 @@ export async function buildSystemHost(deps){
         filesystem, registry: system.registry, inherited: false, system });
     // Cork's own decoder reads the bundle's blocks: no processor is asked.
     const blocks = await furnishVolume({ options, events, filesystem,
-        blocks: await mountBundle({ options, events, translationStore }), seeded,
+        blocks: await mountBundle({ options, events, translationStore, runCache }), seeded,
         registry: system.registry });
     system.bundle = blocks;
     // The output every process plays into, each in a span of its arena lent

@@ -19,6 +19,7 @@ import zlib from 'node:zlib';
 import { packBlock, writeBundle } from '../../../../bundle-node.js';
 import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
+import { testCache } from '../../../cache/testing.fixture.js';
 import { blockCacheName, cachedBundle, createBlockCache, storedLength } from './cache.js';
 
 const BLOCK_SIZE = 1024;
@@ -139,18 +140,14 @@ const open = ()=>openBundle(
 /**
  * @param {Object} [options]
  * @param {number[] | null} [options.resident]
- * @param {number} [options.cacheBlocks]
- * @param {number} [options.hotBlocks]
- * @param {number} [options.maxDecodedBytes]
+ * @param {import('./source.js').DecodedBlocks} [options.decoded]  where decoded
+ *     blocks are kept: nowhere by default
  */
 async function mount(options = {}){
     const bundle = await open();
     const { decode, calls } = countingDecoder();
     const { readBlock, asked } = blockReader(options.resident ?? null);
-    const source = createBundleSource({
-        bundle, readBlock, decode, cacheBlocks: options.cacheBlocks,
-        hotBlocks: options.hotBlocks, maxDecodedBytes: options.maxDecodedBytes,
-    });
+    const source = createBundleSource({ bundle, readBlock, decode, decoded: options.decoded });
     return { bundle, source, calls, asked };
 }
 
@@ -279,54 +276,44 @@ test('a miss reports every absent block, not just the first', async()=>{
     });
 });
 
-test('the cache evicts the oldest block and loses nothing doing it', async()=>{
-    // The scan tier on its own: no block is kept because it was read twice.
-    const { source, calls } = await mount({ cacheBlocks: 1, hotBlocks: 0 });
+test('with nowhere to keep decoded blocks, a read decodes what it reads', async()=>{
+    const { source, calls } = await mount();
     const ramp = CONTENT['Game\\Ramp.dat'];
-
     same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
-    assert.equal(calls.length, 1);
     same(source.read('Game\\Ramp.dat', 32, 16), ramp.subarray(32, 48));
-    assert.equal(calls.length, 1, 'a resident block is not decoded twice');
-
-    same(source.read('Game\\Ramp.dat', 1024, 16), ramp.subarray(1024, 1040));
     assert.equal(calls.length, 2);
-    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
-        'evicted, decoded again, and still the right bytes');
-    assert.equal(calls.length, 3);
-
-    // A read wider than the whole cache still assembles correctly, which is the
-    // case where eviction happens in the middle of serving it.
-    same(source.read('Game\\Ramp.dat', 0, 3000), ramp);
 });
 
-test('a block read twice is not decoded again when a scan passes over it', async()=>{
-    // The shape a movie reader makes: a header consulted between every chunk of
-    // the file it streams. One cache for both roles evicts the header on the
-    // first pass of the scan, and every later look at it decodes the whole
-    // block again -- for a packed block, the decompression of all it holds.
-    const { source, calls } = await mount({ cacheBlocks: 1 });
+test('a block is decoded once a run and read from the run\'s cache by every mount of it', async()=>{
+    // Each process of a run mounts the bundle, and every one reads the same
+    // blocks: decoded once, kept in the run's cache, read where they lie.
+    const cache = await testCache();
+    const first = await mount({ decoded: cache.space('bundle-blocks') });
+    const second = await mount({ decoded: cache.space('bundle-blocks') });
     const ramp = CONTENT['Game\\Ramp.dat'];
 
-    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
-    assert.equal(calls.length, 1);
-    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
-    assert.equal(calls.length, 1, 'the second look is a hit, and it is kept apart');
+    same(first.source.read('Game\\Ramp.dat', 0, 3000), ramp);
+    assert.equal(first.calls.length, 3);
+    assert.deepEqual(first.calls.map(call=>call.expectedLength), [1024, 1024, 952],
+        'a short final block is decoded to its own length, not the block size');
+    same(first.source.read('Game\\Ramp.dat', 100, 2000), ramp.subarray(100, 2100));
+    assert.equal(first.calls.length, 3, 'read again: nothing decoded');
+    same(second.source.read('Game\\Ramp.dat', 0, 3000), ramp, 'the other mount, the same bytes');
+    assert.equal(second.calls.length, 0, 'and it decoded nothing');
+    assert.deepEqual(second.asked, [], 'nor asked for a stored block');
+    assert.equal(cache.keeper.figures().hot, 3);
 
-    source.read('Game\\Ramp.dat', 1024, 16);
-    source.read('Game\\Ramp.dat', 2048, 16);
-    assert.equal(calls.length, 3, 'the scan decoded its own blocks, evicting the scan tier');
-
-    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
-        'the header outlived the scan');
-    assert.equal(calls.length, 3, 'and looking at it again decoded nothing');
+    const read = second.source.read('Game\\Ramp.dat', 0, 16);
+    read[0] ^= 0xff;
+    same(first.source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
+        'a reader writing into what it read changes nothing kept');
 });
 
-test('the decoded blocks kept stay under their bytes\' ceiling, a read served whole', async()=>{
-    // The heaps' pool (`HEAP_POOLS.decodedBlocks`) at two of the fixture's
-    // blocks: by count the tiers would keep all of them.
-    const ceiling = 2 * 1024;
-    const { source } = await mount({ cacheBlocks: 16, hotBlocks: 8, maxDecodedBytes: ceiling });
+test('a block the cache let go of is decoded again, every read whole', async()=>{
+    // A cache of four blocks' room for a bundle of more: what it lets go of
+    // to keep a new block is decoded again on its next read.
+    const cache = await testCache({ budget: 4096, segmentBytes: 4096 });
+    const { source, calls } = await mount({ decoded: cache.space('bundle-blocks') });
     const ramp = CONTENT['Game\\Ramp.dat'];
     let seed = 3;
     for (let read = 0; read < 300; read++)
@@ -335,26 +322,17 @@ test('the decoded blocks kept stay under their bytes\' ceiling, a read served wh
         const at = seed % ramp.length;
         const length = 1 + (seed >>> 8) % (ramp.length - at);
         same(source.read('Game\\Ramp.dat', at, length), ramp.subarray(at, at + length));
-        for (const [path, bytes] of Object.entries(CONTENT))
+        if (read % 37 === 0)
         {
-            if (read % 37 === 0)
+            for (const [path, bytes] of Object.entries(CONTENT))
             {
                 same(source.read(path, 0, bytes.length), bytes, path);
             }
         }
-        assert.ok(source.heldBytes() <= ceiling, `read ${read}: ${source.heldBytes()} bytes kept`);
+        assert.ok(cache.keeper.figures().segmentBytes <= 4096, 'under the cache\'s budget');
     }
-    assert.ok(source.heldBytes() > 0, 'something is kept');
-});
-
-test('a cache big enough for the file decodes each block once', async()=>{
-    const { source, calls } = await mount({ cacheBlocks: 4 });
-
-    source.read('Game\\Ramp.dat', 0, 3000);
-    source.read('Game\\Ramp.dat', 0, 3000);
-    assert.equal(calls.length, 3);
-    assert.deepEqual(calls.map(call=>call.expectedLength), [1024, 1024, 952],
-        'a short final block is decoded to its own length, not the block size');
+    const blocks = (await open()).blockCount;
+    assert.ok(calls.length > blocks, `${calls.length} decodes for ${blocks} blocks: some again`);
 });
 
 test('reading something that is not in the bundle fails as a missing file', async()=>{

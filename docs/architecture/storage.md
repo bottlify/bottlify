@@ -27,7 +27,7 @@ flowchart TD
   F --> CRC["CRC-32 check"]
   CRC --> PUT["Write to the slot and the bitmap"]
   PUT --> SL
-  SL --> DEC["zstd: decoded, with a cache<br/>of decoded blocks in front;<br/>deflate is stored inflated"]
+  SL --> DEC["zstd: decoded once a run,<br/>kept in the run's cache (Cellar);<br/>deflate is stored inflated"]
   DEC --> OUT["Bytes to the program"]
   OV --> OUT
 ```

@@ -17,6 +17,7 @@ import {
 } from '../layers/filesystem/internal/bundle/cache.js';
 import { HEAP_POOLS, NOT_MEASURED } from '../memory-zones.js';
 import { BLOCK_MISS, createBundleSource } from '../layers/filesystem/internal/bundle/source.js';
+import { cacheSpace } from '../layers/cache/module.js';
 import { decompressZstd } from '../zstd.js';
 import { inflateRaw } from '../storage.js';
 import { crc32 } from '../layers/filesystem/internal/bundle/crc32.js';
@@ -451,12 +452,14 @@ export function expectIndex(expected){
  * own, named by its own id - a layer shared by bottles is cached once.
  *
  * A miss names the blocks of one bundle, a layer's tagged with its number
- * (`layer`, from 1), and the run's `fetch` hands each to its bundle.
+ * (`layer`, from 1), and the run's `fetch` hands each to its bundle. The
+ * blocks are kept decoded in the run's cache (`deps.runCache`, its reader),
+ * once for every process of the run.
  *
  * @param {any} deps
  * @returns {Promise<MountedBundle | null>}
  */
-export async function mountBundle({ options, events, translationStore }){
+export async function mountBundle({ options, events, translationStore, runCache = null }){
     // A run with no bundle of its own - an installer writing its whole
     // volume - may still stand on layers (`layers`): a setup whose wizard is
     // a managed program needs the Framework while it installs.
@@ -513,7 +516,7 @@ export async function mountBundle({ options, events, translationStore }){
     // One bundle that fails fails the run: the others stop waiting for its
     // cache's name, and those already mounted stop fetching and close theirs.
     const outcomes = await Promise.allSettled(specs.map(one=>mountOneBundle({ ...one, held,
-        opened,
+        opened, runCache,
         // A layer's events say whose they are.
         events: one.layer ? { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             events.emit(name, { ...payload, layer: one.id }) } : events,
@@ -657,13 +660,16 @@ export function missesNamed(source, layer){
  * are: `prefix` is null for it, and nothing seeds the translator from it.
  *
  * @param {{ spec: any, id: string, layer: boolean, events: any, translationStore?: any,
- *     held: string[], opened: (name: string) => Promise<void> }} deps
+ *     held: string[], opened: (name: string) => Promise<void>,
+ *     runCache?: import('../layers/cache/module.js').Reader | null }} deps
  *     `spec`: the bundle's options. `held`: the names of every block cache the
  *     run reads, this one's among them. `opened`: told this bundle's cache's
  *     name once its index is read, and waited on before the cache is opened.
+ *     `runCache`: the run's cache, where its blocks are kept decoded.
  * @returns {Promise<MountedBundle>}
  */
-export async function mountOneBundle({ spec, id, layer, events, translationStore, held, opened }){
+export async function mountOneBundle(deps){
+    const { spec, id, layer, events, translationStore, held, opened, runCache = null } = deps;
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.
     const retrying = retryingFetch({
@@ -757,7 +763,9 @@ export async function mountOneBundle({ spec, id, layer, events, translationStore
         /** @param {number} index */
         readBlock: index=>cache.read(index, storedLength(bundle.block(index))),
         decode,
-        maxDecodedBytes: HEAP_POOLS.decodedBlocks,
+        // Decoded once a run and read where they lie by every process of it,
+        // under the cache's one budget: a block let go is decoded again.
+        decoded: cacheSpace(runCache, 'bundle-blocks'),
         // A game lives in a directory of its own, the way an installation does.
         // At the root of the volume a program's own directory and the system
         // root are the same place, so every answer to "where do I live" happens
@@ -1224,7 +1232,6 @@ export async function mountOneBundle({ spec, id, layer, events, translationStore
         /** What the bundle's pools hold of the tab's heaps (`memory-zones.js`). */
         held: ()=>({
             blockCache: cache.diagnostics().heapBytes ?? NOT_MEASURED,
-            decodedBlocks: source.heldBytes(),
         }),
         /** Range requests made and bytes asked for, ever. */
         ranges: ()=>({ ...ranges }),

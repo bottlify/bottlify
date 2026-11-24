@@ -2329,7 +2329,8 @@ async function buildApp(options){
     // first.
     mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
-        ?? await mountBundle({ options, events, translationStore });
+        ?? await mountBundle({ options, events, translationStore,
+            runCache: options.cache?.reader ?? null });
     if (options.system && blocks)
     {
         options.system.bundle = blocks;
@@ -4356,7 +4357,8 @@ export async function createApp(options){
     const rootLibraries = { value: [] };
     let current = rootAcross
         ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
-            across: ()=>[...standingAcross], libraries: ()=>rootLibraries.value })
+            across: ()=>[...standingAcross], libraries: ()=>rootLibraries.value,
+            runCache: runCache?.reader ?? null })
         : await build();
     // What every process's devices present comes back from the run's
     // graphics worker to the machine that opened it; where no process stands

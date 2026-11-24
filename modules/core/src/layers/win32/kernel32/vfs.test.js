@@ -15,8 +15,7 @@ import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createSessionSource } from '../../filesystem/internal/session-source.js';
 import { PIECE_SIZE } from '../../filesystem/internal/memory-store.js';
-import { createCacheModule } from '../../cache/module.js';
-import { createReader, openKeeper } from '../../../../vendor/cellar/cellar.js';
+import { testCache } from '../../cache/testing.fixture.js';
 import { createVolume, FETCHED_PIECE_BYTES, KEPT_PART_BYTES, KEPT_READ_MIN,
     MISS_FETCHES } from './vfs.js';
 
@@ -641,29 +640,10 @@ test('a name renamed to itself in other letters is respelled, its contents kept'
     assert.equal(vol.stat('C:\\dir\\f')?.exists, true, 'what was in it, still in it');
 });
 
-/**
- * The run's cache as a test makes it: a keeper on this thread over a small
- * budget, a clock the test moves, and the `reads` space a volume keeps in.
- */
+/** The run's cache as a test makes it, and the `reads` space a volume keeps in. */
 async function runCache(){
-    const clock = { time: 0 };
-    /** @type {any} */
-    let reader = null;
-    const keeper = await openKeeper({
-        budget: 64 << 20, segmentBytes: 16 << 20, coldAfterMs: 1000, now: ()=>clock.time,
-        announce: message=>reader?.adopt(message),
-    });
-    reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
-        keeper: {
-            reserve: (name, length, options)=>keeper.reserve(name, length, options),
-            raise: name=>keeper.raise(name),
-            raiseLater: ()=>{},
-            drop: name=>{
-                keeper.drop(name);
-            },
-        } });
-    const cache = await createCacheModule().create({ reader });
-    return { keeper, clock, space: ()=>cache.space('reads') };
+    const cache = await testCache();
+    return { ...cache, space: ()=>cache.space('reads') };
 }
 
 /**

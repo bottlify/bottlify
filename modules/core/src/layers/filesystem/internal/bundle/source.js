@@ -58,25 +58,28 @@ export const BLOCK_MISS = 'BLOCK_MISS';
  */
 
 /**
- * How many decoded blocks to keep. A guest reads the same block many times over
- * -- a structure, then the record after it -- and decoding it again each time is
- * the cost this avoids.
+ * Where decoded blocks are kept with no cache to keep them in: nowhere, each
+ * read decodes what it reads.
+ *
+ * @type {DecodedBlocks}
  */
-const DEFAULT_CACHE_BLOCKS = 16;
+const DECODED_NOWHERE = Object.freeze({
+    with: ()=>undefined,
+    put: ()=>false,
+});
 
 /**
- * How many of those are blocks the program has read a second time.
+ * Where a bundle's decoded blocks are kept: a space of the run's cache, by the
+ * block's name. Decoded once a run, a block is read in place by every process
+ * of the run, under the cache's one budget; one the cache let go is decoded
+ * again from its stored bytes.
  *
- * A program that consults a structure and then streams the file past it does
- * both through one cache, and the scan evicts the structure between two looks
- * at it: the block is decoded, every other block pushed through evicts it, and
- * the next look pays for the decode of the whole block again -- which for a
- * packed block is the decompression of everything it holds. A block read twice
- * has been asked for deliberately, so it is kept in a tier of its own, where a
- * scan through the other tier cannot reach it and the next thousand looks are a
- * map lookup.
+ * @typedef {Object} DecodedBlocks
+ * @property {<T>(name: string, read: (body: Uint8Array) => T) => T | undefined} with
+ *     the block read in place inside `read`; undefined where it is not kept
+ * @property {(name: string, bytes: Uint8Array) => boolean} put  a copy kept: false
+ *     where there was no room
  */
-const DEFAULT_HOT_BLOCKS = 8;
 
 /** The path separator, named so it is not confused with an escape. */
 const SEPARATOR = String.fromCharCode(92);
@@ -86,14 +89,9 @@ const SEPARATOR = String.fromCharCode(92);
  * @param {import('./format.js').Bundle} options.bundle
  * @param {ReadBlock} options.readBlock
  * @param {import('./format.js').Decode} options.decode
- * @param {number} [options.cacheBlocks]
- * @param {number} [options.hotBlocks]
- *        Blocks kept because they were read more than once, out of reach of a
- *        scan through the rest.
- * @param {number} [options.maxDecodedBytes]
- *        The most both tiers hold together, in bytes: a pool of the tab's
- *        heaps (`memory-zones.js`), which a bundle of large blocks would
- *        otherwise fill by count alone. The scan tier gives way first.
+ * @param {DecodedBlocks} [options.decoded]
+ *        Where decoded blocks are kept: the run's cache (`cacheSpace`), named
+ *        by the bundle's fingerprint and the block's index. Nowhere by default.
  * @param {string | null} [options.prefix]
  *        A directory the whole bundle appears under, without separators at
  *        either end. A game belongs in a directory of its own rather than at
@@ -107,12 +105,10 @@ const SEPARATOR = String.fromCharCode(92);
  *        `prefix`, by their path in the bundle: what a bottle carries for
  *        `C:\WINDOWS\system32` lies in the bundle beside its registry, and is
  *        found where Windows keeps it. No separators at either end of either.
- * @returns {import('../memory-store.js').SourceStore & { heldBytes: () => number,
- *     unplaced: number }}
+ * @returns {import('../memory-store.js').SourceStore & { unplaced: number }}
  */
 export function createBundleSource({
-    bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS,
-    hotBlocks = DEFAULT_HOT_BLOCKS, maxDecodedBytes = Infinity, prefix = '', relocate = {},
+    bundle, readBlock, decode, decoded: kept = DECODED_NOWHERE, prefix = '', relocate = {},
 })
 {
     /** @type {import('../memory-store.js').StoredEntry[]} */
@@ -180,79 +176,43 @@ export function createBundleSource({
         }
     }
 
-    /** @type {Map<number, Uint8Array>} Decoded blocks, oldest use first. */
-    const cache = new Map();
     /**
-     * Decoded blocks the program has read a second time, oldest use first. Kept
-     * apart from the scan tier so that a structure read between two passes of a
-     * scan is not evicted by the scan and decoded again.
+     * Each block's name, made once: a read looks a block up by the same
+     * string each time, whose hash the engine keeps.
      *
-     * @type {Map<number, Uint8Array>}
+     * @type {string[]}
      */
-    const hot = new Map();
-
-    /** Bytes of the decoded blocks both tiers hold. */
-    let heldBytes = 0;
-
-    /** @param {Map<number, Uint8Array>} tier @returns {number} the bytes let go */
-    const dropOldest = tier=>{
-        const [index, bytes] = /** @type {[number, Uint8Array]} */ (tier.entries().next().value);
-        tier.delete(index);
-        return bytes.length;
-    };
+    const names = [];
+    /** @param {number} index */
+    const nameOf = index=>(names[index] ??= `${bundle.fingerprint}/${index}`);
 
     /**
-     * @param {Map<number, Uint8Array>} tier @param {number} bound
-     * @param {number} keep  the block just kept, which stays however large: a
-     *     read wants it next
+     * A block's bytes as stored, decoded and checked, then kept for the run;
+     * null when its stored bytes are not here yet.
+     *
+     * @param {import('./format.js').BundleBlock} block
      */
-    const trim = (tier, bound, keep)=>{
-        while (tier.size > bound)
+    const decodeBlock = block=>{
+        const stored = readBlock(block.index, block.offset, block.packed);
+        if (!stored)
         {
-            heldBytes -= dropOldest(tier);
+            return null;
         }
-        while (heldBytes > maxDecodedBytes)
+        const bytes = decode(block.codec, stored, block.length);
+        if (bytes.length !== block.length)
         {
-            const from = [cache, hot].find(one=>one.size > 0 && one.keys().next().value !== keep);
-            if (from === undefined)
-            {
-                break;
-            }
-            heldBytes -= dropOldest(from);
+            // Not an fsError: nothing the guest asked for is wrong, the
+            // bundle or the decoder is, and a short block would
+            // otherwise be handed out as zeroes.
+            throw new Error(`Block ${block.index} of this bundle decoded to `
+                + `${bytes.length} bytes, not ${block.length}`);
         }
-    };
-
-    /** @param {number} index */
-    const cached = index=>{
-        const hit = cache.get(index);
-        if (hit === undefined)
-        {
-            const kept = hot.get(index);
-            if (kept !== undefined)
-            {
-                hot.delete(index);
-                hot.set(index, kept);
-            }
-            return kept ?? null;
-        }
-        // Read twice: this is a block the program keeps coming back to, and the
-        // tier a scan cannot evict is where it belongs from now on.
-        cache.delete(index);
-        hot.set(index, hit);
-        trim(hot, hotBlocks, index);
-        return hit;
-    };
-
-    /** @param {number} index @param {Uint8Array} bytes */
-    const remember = (index, bytes)=>{
-        heldBytes += bytes.length - (cache.get(index)?.length ?? 0);
-        cache.set(index, bytes);
-        trim(cache, cacheBlocks, index);
+        // A cache with no room keeps nothing: this read has the bytes all the same.
+        kept.put(nameOf(block.index), bytes);
+        return bytes;
     };
 
     return {
-        /** Bytes of the decoded blocks kept, for the tab's heaps (`memory-zones.js`). */
-        heldBytes: ()=>heldBytes,
         unplaced,
 
         list: ()=>entries.map(entry=>({ ...entry })),
@@ -284,40 +244,38 @@ export function createBundleSource({
             }
 
             const ranges = bundle.rangesFor(file, offset, length);
-            /** @type {(Uint8Array | null)[]} */
-            const decoded = [];
+            let total = 0;
+            for (const range of ranges)
+            {
+                total += range.to - range.from;
+            }
+            // Copied out, a kept block read where it lies: whoever gets these
+            // bytes may write to them.
+            const out = new Uint8Array(total);
             /** @type {MissingBlock[]} */
             const missing = [];
-
+            let at = 0;
             for (const range of ranges)
             {
                 const { block } = range;
-                const hit = cached(block.index);
-                if (hit)
+                const into = at;
+                at += range.to - range.from;
+                if (kept.with(nameOf(block.index), body=>{
+                    out.set(body.subarray(range.from, range.to), into);
+                    return true;
+                }) === true)
                 {
-                    decoded.push(hit);
                     continue;
                 }
-                const stored = readBlock(block.index, block.offset, block.packed);
-                if (!stored)
+                const bytes = decodeBlock(block);
+                if (!bytes)
                 {
                     missing.push({
                         index: block.index, offset: block.offset, packed: block.packed,
                     });
-                    decoded.push(null);
                     continue;
                 }
-                const bytes = decode(block.codec, stored, block.length);
-                if (bytes.length !== block.length)
-                {
-                    // Not an fsError: nothing the guest asked for is wrong, the
-                    // bundle or the decoder is, and a short block would
-                    // otherwise be handed out as zeroes.
-                    throw new Error(`Block ${block.index} of this bundle decoded to `
-                        + `${bytes.length} bytes, not ${block.length}`);
-                }
-                remember(block.index, bytes);
-                decoded.push(bytes);
+                out.set(bytes.subarray(range.from, range.to), into);
             }
 
             if (missing.length > 0)
@@ -328,21 +286,6 @@ export function createBundleSource({
                 miss.blocks = missing;
                 throw miss;
             }
-
-            let total = 0;
-            for (const range of ranges)
-            {
-                total += range.to - range.from;
-            }
-            // Copied rather than handed out as a view: the cache keeps the
-            // decoded block, and whoever gets these bytes may write to them.
-            const out = new Uint8Array(total);
-            let at = 0;
-            ranges.forEach((range, position)=>{
-                const bytes = /** @type {Uint8Array} */ (decoded[position]);
-                out.set(bytes.subarray(range.from, range.to), at);
-                at += range.to - range.from;
-            });
             return out;
         },
     };

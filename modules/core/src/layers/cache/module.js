@@ -48,6 +48,55 @@ export const noCache = Object.freeze({ space: ()=>NOTHING });
 
 /** @typedef {import('../../../vendor/cellar/cellar.js').Reader} Reader */
 
+/** Whole names a space keeps made, at most: past it it makes them again. */
+const NAMES_KEPT = 1 << 16;
+
+/**
+ * The names `name/...` of the run's cache as a space, read through `reader`;
+ * without one, a space that keeps nothing. Whoever holds the run's reader
+ * outside a layer (the bundle's mount) takes its space here, as the layer
+ * hands its own.
+ *
+ * @param {Reader | null | undefined} reader @param {string} name
+ * @param {{ onlyCopy?: boolean }} [options]  `onlyCopy`: bodies that cannot be
+ *     made again, which go to the disk and never away
+ * @returns {CacheSpace}
+ */
+export function cacheSpace(reader, name, { onlyCopy = false } = {}){
+    if (!reader)
+    {
+        return NOTHING;
+    }
+    /**
+     * Each key's whole name, made once: a hit is then a lookup by the same
+     * string, whose hash the engine keeps (a key is a caller's own string
+     * kept the same way, a block's or a range's).
+     *
+     * @type {Map<string, string>}
+     */
+    const names = new Map();
+    /** @param {string} key */
+    const named = key=>{
+        let whole = names.get(key);
+        if (whole === undefined)
+        {
+            if (names.size >= NAMES_KEPT)
+            {
+                names.clear();
+            }
+            whole = `${name}/${key}`;
+            names.set(key, whole);
+        }
+        return whole;
+    };
+    return {
+        look: key=>reader.look(named(key)),
+        with: (key, read, options)=>reader.with(named(key), read, options),
+        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy }),
+        drop: key=>reader.drop(named(key)),
+    };
+}
+
 /** The cache layer's module for one graph; see `defaultModules`. */
 export function createCacheModule(){
     /** @type {Reader | null} */
@@ -73,16 +122,8 @@ export function createCacheModule(){
                 return noCache;
             }
             return {
-                space(name, { onlyCopy = false } = {}){
-                    /** @param {string} key */
-                    const named = key=>`${name}/${key}`;
-                    return {
-                        look: key=>given.look(named(key)),
-                        with: (key, read, options)=>given.with(named(key), read, options),
-                        put: (key, bytes)=>given.put(named(key), bytes, { onlyCopy }),
-                        drop: key=>given.drop(named(key)),
-                    };
-                },
+                /** @param {string} name @param {{ onlyCopy?: boolean }} [options] */
+                space: (name, options)=>cacheSpace(given, name, options),
             };
         },
 

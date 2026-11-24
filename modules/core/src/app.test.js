@@ -2169,7 +2169,7 @@ test('a whole file larger than the heap\'s pool of fetched blocks is read whole,
         const cache = await createBlockCache({ store: null, name: 'b', blockSize: BLOCK,
             blockCount: bundle.blockCount, maxHeapBytes: 8 * BLOCK });
         const source = createBundleSource({ bundle, readBlock: index=>cache.read(index),
-            decode: (_, bytes)=>bytes, cacheBlocks: 0, hotBlocks: 0 });
+            decode: (_, bytes)=>bytes });
         // The volume's handle reads, which move only by what they answer.
         const filesystem = {
             open: (/** @type {string} */ path)=>({ path, position: 0 }),
