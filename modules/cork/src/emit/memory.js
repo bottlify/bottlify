@@ -2641,9 +2641,10 @@ export function pageIndex(e, delta = 0){
  */
 function windowTest(e, size, counted){
     const { b } = e;
-    b.localGet(Local.t64).localGet(Local.t64).i64const(BigInt(Math.max(size, 1) - 1))
-        .op(I64.add).op(I64.or)
-        .i64const(BigInt(windowBits(e.layout))).op(I64.shrU).i64const(0n).op(I64.ne);
+    // Past the window where its last byte is: one compare, unsigned, which takes
+    // an address near 2^64 (a negative pointer) as past it too.
+    b.localGet(Local.t64)
+        .i64const(BigInt(2 ** windowBits(e.layout) - Math.max(size, 1))).op(I64.gtU);
     e.openGuard('window', EMPTY);
     if (e.layout.far === undefined)
     {

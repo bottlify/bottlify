@@ -59,7 +59,7 @@ import {
     planLoop, planRegion, ramAlways, readsWrapped, registersChanged, HOST_OPS, MADE, RARE, FAR,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { LONG_SCRATCH, WIDTH_32, widthOf } from './width.js';
+import { LONG_SCRATCH, WIDTH_32, registerLocal, widthOf } from './width.js';
 import { atState, atTables, importBases, intoState, intoTables } from './bases.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
     pageFlagsAt, transferTargetAt, usedAt, usedSlot }
@@ -1094,6 +1094,38 @@ export function emitRegion(context, region, options = {}){
  */
 
 /** The state the emitter keeps while writing one function. */
+/**
+ * Whether a long-mode instruction may move rsp anywhere: a write of the whole
+ * register other than a push, a pop of another register, a call, a return, or
+ * a constant added, subtracted or masked - those keep a stack in the window
+ * where it was. `leave` takes rsp from rbp.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+function movesStackAnywhere(instruction){
+    const { op, operands } = instruction;
+    if (op === 'leave')
+    {
+        return true;
+    }
+    if (op === 'push' || op === 'call' || op === 'ret' || op === 'enter' || op === 'pushf'
+        || op === 'popf')
+    {
+        return false;
+    }
+    /** @param {import('../decode/decoder.js').Operand | undefined} operand */
+    const isRsp = operand=>operand?.kind === 'reg' && operand.reg === 4 && operand.size === 8;
+    if (op === 'xchg' || op === 'xadd')
+    {
+        return isRsp(operands[0]) || isRsp(operands[1]);
+    }
+    if (!isRsp(operands[0]))
+    {
+        return false;
+    }
+    return !((op === 'add' || op === 'sub' || op === 'and') && operands[1]?.kind === 'imm');
+}
+
 export class RegionEmitter {
     /**
      * @param {ModuleContext} context
@@ -4914,6 +4946,19 @@ export class RegionEmitter {
                 // may have changed, with EIP at the next instruction.
                 this.staleCheck = false;
                 emitStaleExit(this, instruction.eip + instruction.length);
+            }
+            if (this.layout.far !== undefined && this.context.looseStacks === true
+                && movesStackAnywhere(instruction))
+            {
+                // Far chunks (`FAR`): accesses through rsp go untested, as its low
+                // half, only while the stack is in the window. One moved past it
+                // leaves here, and the runtime tests stacks from then on
+                // (`stackFar`) before it enters translated code again.
+                this.b.localGet(registerLocal(this, 4)).i64const(32n).op(I64.shrU)
+                    .op(I64.wrap);
+                this.openGuard('stackFar', EMPTY);
+                this.exitAt(instruction.eip + instruction.length, Exit.UNTRANSLATED, RARE);
+                this.close();
             }
         }
         this.settleLows(this.pendingLows.keys(), true);

@@ -276,8 +276,8 @@
  *           `far`: a 64-bit process in its 4 GiB layout reserves past 4 GiB, up to
  *           64 GiB, where its reservations do not fit or are 256 MiB or more: each
  *           64 KiB it commits there is given a frame of its window's memory, which stays
- *           as long as what the program holds. Off by default: an access past 4 GiB
- *           then costs a lookup, and every stack access a test.
+ *           as long as what the program holds. Off by default: every read then tests
+ *           whether it lies past 4 GiB, and an access there costs a lookup.
  * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,

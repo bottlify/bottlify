@@ -128,14 +128,8 @@ export function createVariants(state){
      * reach.
      */
     let readsChecked = settings.checkReads === true;
-    /**
-     * Whether regions are made loose (`looseStacks`): until code is translated on a
-     * stack. Never with far chunks (`FAR`): a stack a program places in a far
-     * reservation is reached only through its chunks' frames, which an access
-     * through rsp left untested would miss.
-     */
-    let loose = settings.looseStacks !== false && settings.precise !== true
-        && layout.far === undefined;
+    /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
+    let loose = settings.looseStacks !== false && settings.precise !== true;
     /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
     const stackPages = new Set();
     /**
@@ -152,15 +146,17 @@ export function createVariants(state){
     /**
      * Code is translated on a page of a thread's stack: the regions that store
      * through esp untested go, and every region from now on tests them -- a
-     * store through esp could write the code itself.
+     * store through esp could write the code itself. So too where a stack lies
+     * past 4 GiB in far chunks (`stackFar`): reached only through its frames,
+     * which an access through rsp's low half would miss.
      */
-    const stackCodeSeen = ()=>{
+    const stackCodeSeen = (/** @type {'stackCode' | 'stackFar'} */ why = 'stackCode')=>{
         if (!loose)
         {
             return;
         }
         loose = false;
-        counts.stackCode++;
+        counts[why]++;
         codeShared?.raise(SharedSwitch.STACKS_TESTED);
         const on = new Set([...regions].filter(record=>record.loose)
             .flatMap(record=>[...record.pages]));

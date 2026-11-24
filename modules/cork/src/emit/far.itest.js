@@ -109,3 +109,30 @@ test('a far chunk with no frame faults at its far address, translated as interpr
     const { failures } = compare(cases(), { budget: 7, far: { by: BY, unmapped: true } });
     assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
 });
+
+test('a stack moved past 4 GiB by translated code is tested from there on', ()=>{
+    // The stack in the window first - the page the second chunk's frame lies on when
+    // the frames are apart - then moved into the far data by mov, lea or xchg, pushed,
+    // read and popped there, as a program runs.
+    const far = { by: BY, apart: 0x40000 };
+    const moves = [[0x48, 0x89, 0xdc], [0x48, 0x8d, 0xa3, 0x00, 0x01, 0x00, 0x00],
+        [0x48, 0x87, 0xdc]];
+    const work = [0x50, 0x51, 0x48, 0x8b, 0x54, 0x24, 0x08, 0x48, 0x89, 0x44, 0x24, 0x08, 0x59,
+        0x58];
+    const one = CORPUS.cases[0];
+    const all = moves.flatMap((move, m)=>[0x800, 0xf00, 0x1800].map(at=>{
+        const body = [...move, ...work];
+        const back = -(body.length + 9);
+        const code = Buffer.from([...body, 0x41, 0xff, 0xcf, 0x0f, 0x85, back & 255,
+            back >> 8 & 255, back >> 16 & 255, back >> 24 & 255]);
+        const regs = [...one.regs];
+        regs[3] = (CORPUS.dataAt + at).toString(16);
+        regs[4] = (CORPUS.dataAt + 0x1f00 + 0x40000).toString(16);
+        regs[15] = '8';
+        return { ...one, text: `stack moved ${m} to +${at.toString(16)}`,
+            code: code.toString('hex'), regs };
+    }));
+    const { failures, exits } = compare(all, { budget: 1000, far, config: { precise: false } });
+    assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
+    assert.equal(exits, all.length);
+});

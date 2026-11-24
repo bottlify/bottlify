@@ -2751,6 +2751,7 @@ to 64 GiB, lowest place first, though Windows would place a small one bottom-up 
 too: the window's arena is what every heap, stack and frame comes out of. Each 64 KiB chunk with
 a page committed is given 64 KiB of the window's arena, so a commit of one page holds 64 KiB.
 Code is not run from past 4 GiB (a fetch there faults), and a reservation larger than 4 GiB is
-refused as before. In such a process every access through the stack is tested
-(`looseStacks` off), since a stack a program places in a far reservation is reached only through
-its frames. *2026-11-24.*
+refused as before. Every read such a process makes tests whether it lies past 4 GiB (exact
+counts on the x64 PE bench, far on against off: vm +23 %, entities +13-19 %, spread +2 %), and
+accesses through rsp go untested only while its stack is in the window: a stack moved past it
+tests them from then on. *2026-11-24.*

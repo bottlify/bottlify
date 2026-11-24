@@ -256,8 +256,11 @@ there, adds its chunk's entry to its address's low half instead (`farTranslate`)
 no frame, or spans two chunks whose frames are apart, runs on the interpreter, which takes it the
 same way, a byte at a time where it must, and raises the access violation at the far address.
 A region whose windows of accesses (tested once for a block) were found past 4 GiB is formed again
-with each access tested on its own, and stacks are tested in such a process. So a memory holds what
-its program committed, not the 8 GiB and more a 64-bit Unity player reserves. What the Windows layer has at 64 bits is in
+with each access tested on its own; a read the translator leaves untested elsewhere tests here
+whether it lies past 4 GiB, and accesses through rsp stay untested only while the stack is in the
+window (an instruction that may move rsp anywhere leaves when it moved it past, and the runtime
+tests stacks from then on). So a memory holds what its program committed, not the 8 GiB and more a
+64-bit Unity player reserves. What the Windows layer has at 64 bits is in
 [the limits](../core/limits/README.md#programs).
 
 Where to look in the code: [`cork/src/decode/`](../../modules/cork/src/decode/), [`cork/src/region.js`](../../modules/cork/src/region.js), [`cork/src/emit/`](../../modules/cork/src/emit/),

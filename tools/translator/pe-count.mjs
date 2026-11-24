@@ -23,11 +23,12 @@
  * a settled one starts past them (entities and spread: 1200 million on).
  *
  *     node tools/translator/pe-count.mjs --qemu DIR [--root DIR]... [--variant x87|sse|x64]
- *         [--from MILLIONS] [--to MILLIONS] [--cork JSON] [--jobs N] workload...
+ *         [--from MILLIONS] [--to MILLIONS] [--cork JSON] [--app JSON] [--jobs N] workload...
  *         [--arm64 NODE [--sysroot DIR] [--lib DIR] [--node-flags 'FLAG...']]
  *
  * Workloads are the benchmark's (`vm`, `entities`, `math`, `path`, `lz`, `containers`,
- * `spread`, `api`); DIR as emit-count's. `--cork` is merged into cork's settings.
+ * `spread`, `api`); DIR as emit-count's. `--cork` is merged into cork's settings, `--app`
+ * into createApp's options (`{"cpu":{"far":true}}`: far reservations).
  * `--arm64` and what follows it count an arm64 host, as run-count's.
  */
 
@@ -39,7 +40,7 @@ import { between, mark, runCounted, takeTarget, work } from '../lib/qemu-count.m
 /** @param {string[]} argv */
 const optionsOf = argv=>{
     const options = { roots: /** @type {string[]} */ ([]), variant: 'x87', from: 1200, to: 1300,
-        cork: '{}', jobs: Math.max(1, availableParallelism() - 1),
+        cork: '{}', app: '{}', jobs: Math.max(1, availableParallelism() - 1),
         qemu: process.env.QEMU_PLUGIN_DIR ?? '', inner: false,
         names: /** @type {string[]} */ ([]),
         target: /** @type {import('../lib/qemu-count.mjs').Target} */ ({}) };
@@ -54,9 +55,10 @@ const optionsOf = argv=>{
         {
             options.roots.push(argv[++i]);
         }
-        else if (name === '--qemu' || name === '--variant' || name === '--cork')
+        else if (name === '--qemu' || name === '--variant' || name === '--cork'
+            || name === '--app')
         {
-            options[/** @type {'qemu' | 'variant' | 'cork'} */ (name.slice(2))] = argv[++i];
+            options[/** @type {'qemu' | 'variant' | 'cork' | 'app'} */ (name.slice(2))] = argv[++i];
         }
         else if (name === '--from' || name === '--to' || name === '--jobs')
         {
@@ -87,19 +89,20 @@ const optionsOf = argv=>{
  *
  * @param {string} root @param {string} variant @param {string} workload
  * @param {number} from @param {number} to  millions of guest instructions
- * @param {string} cork  settings, as JSON
+ * @param {string} cork  settings, as JSON @param {string} app  createApp's options, as JSON
  */
-const inner = async(root, variant, workload, from, to, cork)=>{
+const inner = async(root, variant, workload, from, to, cork, app = '{}')=>{
     await import('../lib/closed-clock.mjs');
     await import('../lib/chromium-v8.mjs');
     const { createApp } = await import(`${root}/modules/core/src/app.js`);
     // More iterations than any window reaches: the run is cut at the second mark.
-    const app = await createApp({
+    const running = await createApp({
+        ...JSON.parse(app),
         executable: readFileSync(`${root}/modules/cork/bench/bin/bench-${variant}.exe`),
         exitNotice: false, commandLine: `bench.exe ${workload} 100000000`,
         cork: { config: { clock: 'virtual', worker: false, wasmInterpreterAfter: 0,
             ...JSON.parse(cork) } } });
-    const cpu = ()=>app.diagnostics().find((/** @type {{ name: string }} */ layer)=>
+    const cpu = ()=>running.diagnostics().find((/** @type {{ name: string }} */ layer)=>
         layer.name === 'cpu').metrics;
     const bounds = [from * 1e6, to * 1e6];
     /** @type {number[]} */
@@ -121,7 +124,7 @@ const inner = async(root, variant, workload, from, to, cork)=>{
             process.exit(0);
         }
     }, 5);
-    const code = await app.run({ timeoutMs: 36_000_000, maxTurns: Number.MAX_SAFE_INTEGER });
+    const code = await running.run({ timeoutMs: 36_000_000, maxTurns: Number.MAX_SAFE_INTEGER });
     throw new Error(`pe-count: ${workload} ended (${code >>> 0}) at ${Number(cpu().instructions)}`
         + ` instructions, before ${bounds[at.length]}`);
 };
@@ -130,7 +133,8 @@ const options = optionsOf(process.argv.slice(2));
 if (options.inner)
 {
     const [root, workload] = options.names;
-    await inner(root, options.variant, workload, options.from, options.to, options.cork);
+    await inner(root, options.variant, workload, options.from, options.to, options.cork,
+        options.app);
 }
 else
 {
@@ -148,7 +152,8 @@ else
             const { root, name } = jobs[next++];
             const { marks, out } = await runCounted(options.qemu, [fileURLToPath(import.meta.url),
                 '--inner', '--variant', options.variant, '--from', String(options.from),
-                '--to', String(options.to), '--cork', options.cork, root, name], {},
+                '--to', String(options.to), '--cork', options.cork, '--app', options.app,
+                root, name], {},
             options.target);
             if (marks.length !== 2)
             {

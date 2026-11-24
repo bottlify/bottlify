@@ -91,7 +91,7 @@ export function createCorkRuntime(env){
     } = join(rt, createQueue(rt));
     join(rt, createModules(rt));
     const { heldOnEntry, closedIn, copiesWanted } = join(rt, createRegions(rt));
-    const { readsFaulted, precisionMissed, floatMissed, heldMissed, shapeMissed
+    const { readsFaulted, precisionMissed, floatMissed, heldMissed, shapeMissed, stackCodeSeen
     } = join(rt, createVariants(rt));
     const { liftVolatile, invalidatePage, storeIntoBlock, translatable, stored,
         codeWritten,
@@ -188,6 +188,13 @@ export function createCorkRuntime(env){
             // unless this run ends in the fault it was left for.
             const leftHeld = heldAt >= 0 && counts.codeStores === heldStores ? heldAt : -1;
             heldAt = -1;
+            if (layout.far !== undefined && rt.loose
+                && view().getUint32(layout.regs + 4 * 8 + 4, true) !== 0)
+            {
+                // A stack past 4 GiB in far chunks (`FAR`): moved there by the host or
+                // the interpreter, or by translated code, which left at once.
+                stackCodeSeen('stackFar');
+            }
             const code = enterRegion(fn, label, budget, view(), layout) >>> 0;
             const retired = (counterWord() - before) >>> 0;
             corkRetired += tierEntered === null ? retired

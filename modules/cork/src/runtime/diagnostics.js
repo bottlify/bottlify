@@ -160,6 +160,8 @@ export function createDiagnostics(state){
         toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
+        // Stacks tested from a stack found past 4 GiB in far chunks (`stackCodeSeen`).
+        stackFar: 0,
         // Inner entries that left held at their start, nothing run (`heldOnEntry`).
         heldEntries: 0,
         // Batches the store answered in the call that formed them, and a turn later.
@@ -611,6 +613,7 @@ export function createDiagnostics(state){
             // often code on a stack switched that off (once at most).
             looseStacks: rt.loose,
             stackCode: counts.stackCode,
+            stackFar: counts.stackFar,
             heldEntries: counts.heldEntries,
             // The x87 entries by the precision control they are compiled for.
             precision: rt.precisionCounts(),
