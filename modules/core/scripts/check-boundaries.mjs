@@ -17,7 +17,7 @@ import { findBoundaryIssues } from './lib/boundaries.mjs';
  *  - anything in src/system must not import src/layers;
  *  - a layer may import another layer only if it declared it in `requires`;
  *  - nothing imports vendor/ but vendor/cellar/, the one library core carries
- *    as sources (`vendor-cellar.mjs`): the rest is binaries, which the root of
+ *    as code (`fetch-cellar.mjs`): the rest is binaries, which the root of
  *    src reaches by URL;
  *  - no file may import an engine package (`lib/boundaries.mjs`): the cpu layer
  *    loads one by URL when a launch selects it;

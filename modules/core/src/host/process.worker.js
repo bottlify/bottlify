@@ -382,7 +382,7 @@ const lendings = [];
  */
 let toRun = null;
 
-/** The readers of the run's cache in this worker, each told of the segments the keeper makes and lets go. @type {Set<import('../../vendor/cellar/reader.js').Reader>} */
+/** The readers of the run's cache in this worker, each told of the segments the keeper makes and lets go. @type {Set<import('../../vendor/cellar/cellar.js').Reader>} */
 const cacheReaders = new Set();
 
 /**

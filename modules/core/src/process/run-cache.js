@@ -16,8 +16,7 @@
  * it: nothing is copied from one thread to another.
  */
 
-import { openKeeper } from '../../vendor/cellar/keeper.js';
-import { createReader } from '../../vendor/cellar/reader.js';
+import { createReader, openKeeper } from '../../vendor/cellar/cellar.js';
 
 const MIB = 1024 * 1024;
 

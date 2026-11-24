@@ -16,8 +16,7 @@ import { filesystemModule } from '../../filesystem/module.js';
 import { createSessionSource } from '../../filesystem/internal/session-source.js';
 import { PIECE_SIZE } from '../../filesystem/internal/memory-store.js';
 import { createCacheModule } from '../../cache/module.js';
-import { openKeeper } from '../../../../vendor/cellar/keeper.js';
-import { createReader } from '../../../../vendor/cellar/reader.js';
+import { createReader, openKeeper } from '../../../../vendor/cellar/cellar.js';
 import { createVolume, FETCHED_PIECE_BYTES, KEPT_PART_BYTES, KEPT_READ_MIN,
     MISS_FETCHES } from './vfs.js';
 

@@ -46,7 +46,7 @@ const NOTHING = Object.freeze({
  */
 export const noCache = Object.freeze({ space: ()=>NOTHING });
 
-/** @typedef {import('../../../vendor/cellar/reader.js').Reader} Reader */
+/** @typedef {import('../../../vendor/cellar/cellar.js').Reader} Reader */
 
 /** The cache layer's module for one graph; see `defaultModules`. */
 export function createCacheModule(){

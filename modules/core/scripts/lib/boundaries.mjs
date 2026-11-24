@@ -274,8 +274,8 @@ export function findBoundaryIssues({ src, vendor, requires }){
             }
 
             const target = resolve(dirname(file), spec);
-            // The one library core carries in vendor/, as sources of its own
-            // project copied in (`scripts/vendor-cellar.mjs`): imported as src is.
+            // The one library core carries in vendor/, the build of its own
+            // project fetched by `scripts/fetch-cellar.mjs`: imported as src is.
             if (target.startsWith(join(vendor, 'cellar') + sep))
             {
                 continue;

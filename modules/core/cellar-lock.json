@@ -1,0 +1,12 @@
+{
+  "repo": "bottlify/cellar",
+  "tag": "v0.1.0",
+  "files": {
+    "cellar.js": "109a356e7a7b3bc84d1f6005a38806827c279078535aa4608365bbbadb7ee157",
+    "types/buddy.d.ts": "be3e65337c5a5d2b704a860eb1830516482a71c2212ee80a0a8e9a01287564e1",
+    "types/index.d.ts": "90193d22a21ac253f1b95f59283f87b8989090cd90920d1e01b43bb2a1bb24fe",
+    "types/keeper.d.ts": "403764e05e7bee1915a4692f00dc7d3ac78913415877ad0827fd29036b5b5a2d",
+    "types/reader.d.ts": "c9441d29588424867d7e432983f6aa2716d0f153d535d4e666ccf2ed39469ead",
+    "types/shared.d.ts": "17f93860ca2cf6474f88bacaf9684702d7a4230dd90afd7d996f15429108d859"
+  }
+}
