@@ -105,7 +105,8 @@ const SEPARATOR = String.fromCharCode(92);
  *        `prefix`, by their path in the bundle: what a bottle carries for
  *        `C:\WINDOWS\system32` lies in the bundle beside its registry, and is
  *        found where Windows keeps it. No separators at either end of either.
- * @returns {import('../memory-store.js').SourceStore & { unplaced: number }}
+ * @returns {import('../memory-store.js').SourceStore & { unplaced: number,
+ *     readInto: NonNullable<import('../memory-store.js').SourceStore['readInto']> }}
  */
 export function createBundleSource({
     bundle, readBlock, decode, decoded: kept = DECODED_NOWHERE, prefix = '', relocate = {},
