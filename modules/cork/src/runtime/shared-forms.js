@@ -29,6 +29,8 @@
 const byStore = new WeakMap();
 /** The runtimes each store made for one (`alone`) was handed. @type {WeakMap<object, number>} */
 const handed = new WeakMap();
+/** The runtimes each store was handed, whatever it was made for. @type {WeakMap<object, number>} */
+const formingHanded = new WeakMap();
 
 /**
  * The store a runtime keeps formed regions and compiled modules beside, for
@@ -53,6 +55,30 @@ export function sharedStoreOf(store){
     }
     const runtimes = (handed.get(store) ?? 0) + 1;
     handed.set(store, runtimes);
+    return runtimes > 1 ? store : null;
+}
+
+/**
+ * The store a runtime keeps its formed regions beside: the store from the
+ * second runtime handed it on, whatever it was made for, counting this runtime
+ * as handed it; null for the first. A formed region is many small objects
+ * that only another runtime forming the same code takes - a store hit of a
+ * later process is taken by its record's summary all the same (`summary.js`)
+ * - and a game that runs as one process held 305 MB of the engine thread's
+ * heap in them for a second process that never came (Doom 3 demo on its first
+ * map, 300 s), its own reforms no faster for them. Compiled modules are kept
+ * for the run from the first runtime as before (`sharedStoreOf`).
+ *
+ * @param {object | null} store
+ * @returns {object | null}
+ */
+export function formsStoreOf(store){
+    if (store === null || typeof store !== 'object')
+    {
+        return null;
+    }
+    const runtimes = (formingHanded.get(store) ?? 0) + 1;
+    formingHanded.set(store, runtimes);
     return runtimes > 1 ? store : null;
 }
 

@@ -26,7 +26,7 @@ import { createSharedCode } from './shared-code.js';
 import { Tables, basesOf, tablesSize } from './layout.js';
 import { CACHE_VERSION } from './cache.js';
 import { runtimeSettings } from './settings.js';
-import { sharedStoreOf } from './shared-forms.js';
+import { formsStoreOf, sharedStoreOf } from './shared-forms.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
 
@@ -207,10 +207,14 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
      * the other runtimes of its thread handed it, or null where none would take
      * them (`sharedStoreOf`). */
     const sharesStore = sharedStoreOf(settings.store ?? null);
+    /** The store this runtime keeps its formed regions beside, from the second
+     * runtime handed it on (`formsStoreOf`). */
+    const formsStore = formsStoreOf(settings.store ?? null) === null ? null : sharesStore;
     return { memory, ram, layout, sharedLayout, config, imports, features, nowMs, ramOf, codeBase,
         read, readBytes, settings, cacheVersion, clock, formOptions, formHere, leaveOut, found,
         emitLayout, baseGlobals, sharedMemory, codeShared, pages, codePages, table, resumable,
-        entries, view, guestBytes, counterWord, profiling, transfersCounted, sharesStore };
+        entries, view, guestBytes, counterWord, profiling, transfersCounted, sharesStore,
+        formsStore };
 }
 
 /**

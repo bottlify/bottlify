@@ -139,8 +139,8 @@ export const SETTINGS = {
         doc: 'Formed regions kept for every runtime handed the same `store` that forms as this'
             + ' one does (`shared-forms.js`): a store hit whose every byte and page forming read'
             + ' answer as they did takes the region formed earlier instead of decoding it again'
-            + ' (0: none kept). None kept for the first runtime handed a store made for one'
-            + ' (`alone: true`).' },
+            + ' (0: none kept). None kept for the first runtime handed any store'
+            + ' (`formsStoreOf`): a run of one process keeps none.' },
     // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
     // false keeps every tail call inside its own instance, a transfer to a
     // region of another module leaving for this loop, which enters it. iOS

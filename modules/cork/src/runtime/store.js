@@ -45,7 +45,7 @@ const BLOCKS_EVERY_MS = 3000;
 export function createStore(state){
     const rt = /** @type {import('./state.js').State} */ (state);
     const { cacheVersion, emitLayout, entries, formHere, formOptions, found, leaveOut, profiling,
-        guestBytes, layout, read, readBytes, settings, sharedMemory, sharesStore, view
+        guestBytes, layout, read, readBytes, settings, sharedMemory, formsStore, view
     } = /** @type {import('./state.js').Base} */ (state);
     /**
      * The regions this run took from the store, by store key: their entries, whose byte
@@ -161,7 +161,7 @@ export function createStore(state){
      * @type {ReturnType<typeof sharedFormsOf> | null}
      */
     const sharedForms = settings.interpretRange || leaveOut.size > 0 || profiling ? null
-        : sharedFormsOf(sharesStore, JSON.stringify(formOptions), settings.sharedFormed);
+        : sharedFormsOf(formsStore, JSON.stringify(formOptions), settings.sharedFormed);
     /**
      * Whether a region formed earlier would be formed the same here now: every
      * page forming asked about answers as it did, and every byte it read is as

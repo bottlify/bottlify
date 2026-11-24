@@ -195,7 +195,10 @@ test('a process started again observes the same whether it takes the earlier one
                 [['apart', apart], ['shared', {}]]))
             {
                 const store = storeOf(now);
+                // The first keeps no formed regions (`formsStoreOf`): the second
+                // keeps them for the third, which is the one observed.
                 await run(first, { store, ...config });
+                await run(second, { store, ...config });
                 const again = await run(second, { store, ...config });
                 seen[path] = again.seen;
                 if (path === 'shared')
@@ -222,7 +225,8 @@ test('a process started again observes the same whether it takes the earlier one
 });
 
 test('a store made for one runtime keeps nothing beside the first runtime handed it, and is '
-    + 'shared from the second on, the modules held for other threads all along', async()=>{
+    + 'shared from the second on, the modules held for other threads all along; any store keeps '
+    + 'formed regions from the second runtime on', async()=>{
     // A process in a worker of its own is handed a proxy of the run's store
     // made for it alone: what it kept for others there was heap and wasm no
     // one took, unless a child ran beside it in its worker.
@@ -242,9 +246,12 @@ test('a store made for one runtime keeps nothing beside the first runtime handed
     const after = await run(second, { store, summaries: false });
     assert.ok(after.formed > 0 && after.shared > 0,
         `the third takes what the second kept (${after.formed}, ${after.shared})`);
-    const shared = await run(first, { store: storeOf(true) });
-    assert.deepEqual(shared.keeps, { forms: true, modules: true },
-        'a store not made for one keeps from the first');
+    const run1 = storeOf(true);
+    const shared = await run(first, { store: run1 });
+    assert.deepEqual(shared.keeps, { forms: false, modules: true },
+        'a store not made for one keeps modules from the first, formed regions from the second');
+    const next = await run(second, { store: run1 });
+    assert.deepEqual(next.keeps, { forms: true, modules: true });
 });
 
 test('a process started again observes the same whether it takes the stored regions by '
