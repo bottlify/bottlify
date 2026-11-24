@@ -63,9 +63,10 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   Win32, graphics, sound, networking, storage); `docs/core/` is `@bottlify/core`'s public
   contract (API, configuration, limits), written for someone outside the project;
   `docs/cork/` is the translator. A module's own `README.md` is its npm page and stays short.
-- `modules/cellar` — Cellar, the run's one cache (shared memory read in place, one keeper, idle
-  bodies on OPFS), a project of its own; core carries its sources in `vendor/cellar/`, copied by
-  `node modules/core/scripts/vendor-cellar.mjs` and checked by `check:boundaries`.
+- `modules/core/vendor/cellar/` — Cellar (https://github.com/bottlify/cellar), the run's one
+  cache (shared memory read in place, one keeper, idle bodies on OPFS), a project of its own:
+  its sources copied in at a commit by `node modules/core/scripts/vendor-cellar.mjs --from DIR`
+  and checked against their checksums by `check:boundaries`. Changed there, not here.
 - `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
   derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):

@@ -1,7 +1,8 @@
 {
   "name": "@bottlify/cellar",
   "version": "0.1.0",
-  "source": "modules/cellar",
+  "source": "https://github.com/bottlify/cellar",
+  "commit": "0602a1049e337671174b96e94597d94c9515396a",
   "files": {
     "buddy.js": "c867b1fae65549b5fe52a6e21e26fefd93ca88ab9b9d76dcd6d3f9e5c73a26be",
     "index.js": "46a463386fd5e0cb5a97cd1cc0da4980ec2621e3f89d0f65b30cef9f8237baa2",
