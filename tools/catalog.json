@@ -357,7 +357,7 @@
    "category": "bench",
    "browser": true,
    "question": "How fast is cork on this device, in its own browser, and is one build of cork faster than another there, over several runs?",
-   "command": "node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); its fields (or ?only=NAME,NAME and ?warmMs=N in the address) narrow the run to workloads by their names' beginnings and set the guest work before the rounds, at least (more for a workload of many regions)",
+   "command": "node tools/bench/serve.mjs, then open the address it prints (this checkout); or node tools/bench/build.mjs --arm A=REV --arm B=. and serve or publish tools/bench/dist/ (two builds side by side); an arm takes ,window=GIB (64-bit over a memory64 window), ,far (64-bit with far chunks, cpu.far) or ,callTargets=off (no predicted callees), each compared by what it computes; its arm boxes (or ?arms=NAME,NAME) pick the arms run; its fields (or ?only=NAME,NAME and ?warmMs=N in the address) narrow the run to workloads by their names' beginnings and set the guest work before the rounds, at least (more for a workload of many regions)",
    "tests": [],
    "parts": [
     "tools/bench/stand.worker.js",

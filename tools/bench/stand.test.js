@@ -47,6 +47,30 @@ for (const [at, cork] of expected.settings.entries())
     }
 }
 
+for (const [what, other] of /** @type {[string, Record<string, any>][]} */ ([
+    ['far chunks', { far: true }], ['no predicted callees', { cork: { callTargets: false } }]]))
+{
+    test(`an arm with ${what} computes what the record does`, async()=>{
+        for (const name of ['vcall-x87', 'vcall-x64'])
+        {
+            const { retired, eax } = await workOf({ ...arm, ...other }, workloadOf(name),
+                expected.warm);
+            const recorded = expected.workloads[name].work[0];
+            assert.deepEqual({ retired, eax }, { retired: recorded.retired, eax: recorded.eax },
+                name);
+        }
+    });
+}
+
+test('an arm with far chunks runs its 64-bit workloads with the table of far chunks', ()=>{
+    // The stand's memory is its RAM whole: the table lies past everything.
+    const host = createCorkHost({ engine, memorySize: 16 << 20, trapPort: 0xb077,
+        entryVector: 0x7000, initialStack: 0x800000, bits: 64, far: true,
+        cork: { clock: 'virtual', worker: false } });
+    assert.deepEqual(host.farSpace(), { base: 2 ** 32, top: 2 ** 36, chunk: 2 ** 16 });
+    host.dispose?.();
+});
+
 test('an iPhone\'s settings are recorded, and the record answers by settings', ()=>{
     const iphone = withoutFaultingTailCalls({ cork: { config: {} } }, true).cork.config;
     assert.ok(recordFor(expected, iphone) !== undefined);

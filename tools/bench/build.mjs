@@ -10,11 +10,16 @@
  * `serve.mjs --dir` serves, or that is published as it is (a page whose files are
  * its own, nothing fetched from elsewhere).
  *
- *     node tools/bench/build.mjs --arm NAME=REV|DIR[,window=GIB] [--arm ...] [--out DIR]
+ *     node tools/bench/build.mjs --arm NAME=REV|DIR[,window=GIB][,far][,callTargets=off]
+ *         [--arm ...] [--out DIR]
  *
  * `,window=GIB` runs that arm's 64-bit workloads over a wide window of so many GiB
  * (cork's memory64 layout) where the others run them in the 4 GiB layout: the same
- * build under both is what memory64 costs on the device.
+ * build under both is what memory64 costs on the device. `,far` gives its 64-bit
+ * workloads the table of far chunks (`cpu.far`, reservations past 4 GiB), whose
+ * accesses past the window are tested: what that costs code that never goes there.
+ * `,callTargets=off` samples no indirect call and forms no predicted callee in:
+ * the same build with and without is what predicted callees give.
  *
  * Each arm is a git revision (its `modules/core/src` and `modules/cork/src`
  * taken out of the repository) or a checkout's folder as it is, `.` this one with
@@ -82,8 +87,15 @@ const arms = [];
 for (const spec of specs)
 {
     const [name, rest] = [spec.slice(0, spec.indexOf('=')), spec.slice(spec.indexOf('=') + 1)];
-    const wide = /^(.+),window=(\d+)$/.exec(rest);
-    const [source, window] = wide ? [wide[1], Number(wide[2])] : [rest, 0];
+    const [source, ...options] = rest.split(',');
+    const window = Number(options.find(one=>one.startsWith('window='))?.slice(7) ?? 0);
+    const far = options.includes('far');
+    const callTargets = !options.includes('callTargets=off');
+    const unknown = options.filter(one=>!/^(window=\d+|far|callTargets=off)$/.test(one));
+    if (unknown.length > 0)
+    {
+        throw new Error(`build: unknown arm options ${unknown.join(', ')} in ${spec}`);
+    }
     const tree = treeOf(source);
     const entry = join(tree.root, '.stand-arm.js');
     writeFileSync(entry, [
@@ -95,9 +107,11 @@ for (const spec of specs)
     {
         rmSync(tree.root, { recursive: true, force: true });
     }
-    const describe = window > 0
-        ? `${tree.describe} [64-bit over a ${window} GiB window]` : tree.describe;
-    arms.push({ name, url: `./arm-${name}.js`, describe, ...window > 0 ? { window } : {} });
+    const notes = [...window > 0 ? [`64-bit over a ${window} GiB window`] : [],
+        ...far ? ['64-bit with far chunks'] : [], ...callTargets ? [] : ['no predicted callees']];
+    const describe = notes.length > 0 ? `${tree.describe} [${notes.join(', ')}]` : tree.describe;
+    arms.push({ name, url: `./arm-${name}.js`, describe, ...window > 0 ? { window } : {},
+        ...far ? { far } : {}, ...callTargets ? {} : { callTargets } });
     console.log(`arm-${name}.js  ${describe}`);
 }
 await build({ ...COMMON, entryPoints: [join(HERE, 'stand.worker.js')],

@@ -34,7 +34,7 @@ main { max-width: 980px; margin: 0 auto; padding-block: 24px 48px;
 h1 { font-size: 22px; margin: 0; text-wrap: balance; }
 p { margin: 0; color: var(--muted); max-width: 72ch; }
 .arms { display: flex; flex-wrap: wrap; gap: 8px; }
-.arm { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+.arm { cursor: pointer; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
     font: 13px/1.4 var(--mono); min-width: 0; overflow-wrap: anywhere; }
 .arm b { font-family: var(--text); }
 .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -119,14 +119,28 @@ catch
 {
     // A checkout's page has none.
 }
-const arms = manifest.arms;
-for (const [at, arm] of arms.entries())
+// The arms run: every one, or those `?arms=` names; a box ticked or cleared
+// reloads the page with its set, the first ticked one the base.
+const picked = new URLSearchParams(location.search).get('arms')?.split(',') ?? null;
+const arms = manifest.arms.filter(arm=>picked === null || picked.includes(arm.name));
+for (const arm of manifest.arms)
 {
-    const box = document.createElement('div');
+    const box = document.createElement('label');
     box.className = 'arm';
+    const tick = document.createElement('input');
+    tick.type = 'checkbox';
+    tick.checked = arms.includes(arm);
+    tick.onchange = ()=>{
+        const names = manifest.arms.filter(one=>(one === arm ? tick.checked
+            : arms.includes(one))).map(one=>one.name);
+        const address = new URL(location.href);
+        address.searchParams.set('arms', names.join(','));
+        location.href = address.href;
+    };
+    const at = arms.indexOf(arm);
     const name = document.createElement('b');
-    name.textContent = `${letter(at)} · ${arm.name}`;
-    box.append(name, document.createTextNode(arm.describe ? ` ${arm.describe}` : ''));
+    name.textContent = at < 0 ? ` - · ${arm.name}` : ` ${letter(at)} · ${arm.name}`;
+    box.append(tick, name, document.createTextNode(arm.describe ? ` ${arm.describe}` : ''));
     $('arms').append(box);
 }
 const headers = ['workload', 'bits', ...arms.map((_, at)=>`MIPS ${letter(at)}`),

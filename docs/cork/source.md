@@ -71,7 +71,9 @@ node tools/bench/serve.mjs                  # the same stand as a page, for any 
   with the noise of its rounds beside it. The page runs it in a person's own browser;
   `npm run cdp:bench` runs the page in Chromium and holds its work to the record Node made.
   `tools/bench/build.mjs --arm A=REV --arm B=.` makes the page with two builds of cork as static
-  files, run on a device several times over with B's speed against A's in each run. A change that
+  files, run on a device several times over with B's speed against A's in each run; an arm's
+  `,far` runs its 64-bit workloads with far chunks (`cpu.far`), `,callTargets=off` with no
+  predicted callees, `,window=GIB` over a memory64 window. A change that
   makes cork form otherwise records it again (`node tools/bench/stand.mjs --write`).
 
 ## Judging a change

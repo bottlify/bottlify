@@ -72,8 +72,9 @@ self.onmessage = async(/** @type {MessageEvent} */ event)=>{
         {
             const module = await import(here(arm.url).href);
             arms.push({ createCorkHost: module.createCorkHost, engine: module.engine,
-                label: arm.name, cork, tick: nudge === null ? undefined : nudge.poke,
-                window: arm.window });
+                label: arm.name, tick: nudge === null ? undefined : nudge.poke,
+                cork: arm.callTargets === false ? { ...cork, callTargets: false } : cork,
+                window: arm.window, far: arm.far });
         }
         const record = await recordOf();
         const workloads = [];

@@ -151,9 +151,9 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} [wideRam]  With `window`: the bytes of its RAM memory, the rest of
  *     the window closed; the window's whole length when absent.
  * @property {WebAssembly.Memory} [ram]  With `window`: the RAM's memory, made here when absent.
- * @property {boolean} [far]  Long mode's 4 GiB layout in a memory that grows: a table of far
- *     chunks in the engine's range (cork's `FAR`), so reservations may lie past 4 GiB, their
- *     committed chunks given frames of the window.
+ * @property {boolean} [far]  Long mode's 4 GiB layout: a table of far chunks (cork's `FAR`) in
+ *     the engine's range of a memory that grows, past everything in one that does not, so
+ *     reservations may lie past 4 GiB, their committed chunks given frames of the window.
  * @property {number} trapPort
  * @property {number} entryVector  Linear address of the dword holding the entry point.
  * @property {number} [thunkBase]  Where the thunk table and its park loop begin.
@@ -507,6 +507,12 @@ export function createCorkHost(config){
         && corkConfig?.lowBlock !== false
         ? ownLayout({ ...layoutOptions, codeBase: 0, tablesAt: firstPages * 65536 }) : null;
     const lowPages = lowLayout === null ? 0 : Math.ceil(tables / 65536);
+    // A memory of its RAM whole has the table of far chunks past everything else.
+    const fixedPages = firstPages + (executors - 1) * executorPages + sharedPages + lowPages;
+    if (!growing && farBytes > 0)
+    {
+        own = ownLayout({ ...layoutOptions, far: fixedPages * 65536 });
+    }
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
         : othersArea.to > othersArea.from ? othersArea.from + (index - 1) * executorPages * 65536
@@ -522,7 +528,7 @@ export function createCorkHost(config){
     // A growing memory starts with its floor and the slack past it, and may
     // grow to its whole RAM's (wasm's 4 GiB at most).
     const pages = growing ? (ramFloor + engine.WRAP_SLACK) / 65536
-        : firstPages + (executors - 1) * executorPages + sharedPages + lowPages;
+        : fixedPages + Math.ceil(farBytes / 65536);
     const maximumPages = growing
         ? Math.min(65536, (memorySize + engine.WRAP_SLACK) / 65536) : pages;
     if (given !== undefined && given.buffer.byteLength < pages * 65536)
