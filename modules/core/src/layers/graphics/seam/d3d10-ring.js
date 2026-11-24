@@ -55,6 +55,9 @@ const HELD_WAIT_MS = 200;
  * @typedef {Object} RingMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     A run of one byte value, with no buffer made for it: the command ring
+ *     started over with zeros.
  * @property {(address: number) => number} readU32
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  * @property {(address: number) => number} [loadU32]
@@ -123,6 +126,7 @@ export function createDeviceRing(deps){
                 : new Uint32Array(bytes.slice(0, words * 4).buffer);
         },
         writeMemory: memory.writeMemory,
+        fillMemory: memory.fillMemory,
         compareExchangeU32: memory.compareExchangeU32,
         loadU32: memory.loadU32,
         take: records=>{

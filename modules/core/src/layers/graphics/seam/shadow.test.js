@@ -1302,3 +1302,42 @@ test('a host mirror writes what it read as it was read, with no second copy', ()
     assert.deepEqual(writes.map(bytes=>bytes.length), [64, 24]);
     writes.forEach((bytes, i)=>assert.equal(bytes, reads[i], 'written as read'));
 });
+
+test('a ring started over where the memory fills is zeroed by the fill, no buffer of zeros', ()=>{
+    const memory = new Uint8Array(0x20000);
+    const words = new DataView(memory.buffer);
+    const block = 0x1000;
+    const ring = 0x2000;
+    /** @type {[number, number, number][]} */
+    const fills = [];
+    let ringWrites = 0;
+    const reader = createCommandReader({
+        block, ring,
+        readWord: address=>words.getUint32(address, true),
+        readWords: (address, count)=>new Uint32Array(memory.buffer, address, count),
+        writeMemory: (address, bytes)=>{
+            ringWrites += address >= ring ? 1 : 0;
+            memory.set(bytes, address);
+        },
+        fillMemory: (address, value, length)=>{
+            fills.push([address, value, length]);
+            memory.fill(value, address, address + length);
+        },
+        take: records=>records.byteLength / 8,
+        refuse: detail=>assert.fail(detail),
+    });
+    const head = COMMAND_RING_BYTES - 1024;
+    for (let turn = 0; turn < 3; turn++)
+    {
+        for (let at = 0; at < head; at += 8)
+        {
+            words.setUint32(ring + at + COMMAND.SLOT, 1, true);
+            words.setUint32(ring + at + COMMAND.BYTES, 8, true);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        reader.take();
+        assert.ok(memory.subarray(ring, ring + head).every(byte=>byte === 0), 'zeroed');
+    }
+    assert.deepEqual(fills, [[ring, 0, head], [ring, 0, head], [ring, 0, head]]);
+    assert.equal(ringWrites, 0, 'no bytes written into the ring');
+});

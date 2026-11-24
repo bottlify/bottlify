@@ -3711,6 +3711,7 @@ export function createDirect3D9Seam(
                 readMemory: memory.windowMemory ?? memory.readMemory,
                 readU32: memory.readU32,
                 writeMemory: memory.writeMemory,
+                fillMemory: memory.fillMemory,
                 compareExchangeU32: memory.compareExchangeU32,
                 loadU32: memory.loadU32,
                 device: held.device,

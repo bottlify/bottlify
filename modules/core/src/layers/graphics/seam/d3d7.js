@@ -491,6 +491,7 @@ export function createDirect3D7Seam(
             readMemory: memory.windowMemory ?? memory.readMemory,
             readU32: memory.readU32,
             writeMemory: memory.writeMemory,
+            fillMemory: memory.fillMemory,
             device: legacy ? withoutStates(device, legacy.answersFor) : device,
             divergence,
             name: legacy ? 'IDirect3DDevice3' : 'IDirect3DDevice7',

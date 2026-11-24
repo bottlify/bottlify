@@ -756,6 +756,8 @@ export function createGraphicsModule(){
                 readF32sInto: (address, count, into)=>memory.readF32sInto(address, count, into),
                 /** @param {number} address @param {Uint8Array} bytes */
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                /** @param {number} address @param {number} value @param {number} length */
+                fillMemory: (address, value, length)=>memory.fillBytes(address, value, length),
                 /**
                  * A dword swapped only if it holds `expected`, indivisible against
                  * the guest's threads on the process's other executors: a word

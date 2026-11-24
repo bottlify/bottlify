@@ -91,6 +91,8 @@ export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_
  * @param {(address: number) => number} deps.readWord
  * @param {(address: number, words: number) => Uint32Array} deps.readWords
  * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
+ * @param {(address: number, value: number, length: number) => void} [deps.fillMemory]
+ *     the memory's fill: the ring zeroed with no buffer of zeros
  * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
  * @param {(detail: string) => void} deps.refuse
  * @param {number} [deps.bytes]  the ring's size, `COMMAND_RING_BYTES` unless given
@@ -101,16 +103,16 @@ export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_
  *     words and what the program wrote before the call are seen after it
  */
 export function createCommandReader(deps){
-    const { block, ring, readWord, readWords, writeMemory, take, refuse,
+    const { block, ring, readWord, readWords, writeMemory, fillMemory, take, refuse,
         bytes = COMMAND_RING_BYTES, compareExchangeU32 } = deps;
     const lengthAt = deps.loadU32 ?? readWord;
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
     /**
-     * Zeroes to start the ring over with, made once: a buffer the length of
-     * what was read, made at every turn of the ring, was the most garbage a
-     * frame of Direct3D made.
+     * Zeroes to start the ring over with where the memory cannot fill, made
+     * once: a buffer the length of what was read, made at every turn of the
+     * ring, was the most garbage a frame of Direct3D made.
      *
      * @type {Uint8Array | null}
      */
@@ -173,8 +175,15 @@ export function createCommandReader(deps){
                 // another executor may have taken space since the head was read
                 // here: the head goes back only from where it was read, as one
                 // compare-and-swap, and otherwise the next take starts it over.
-                zeroes ??= new Uint8Array(bytes);
-                writeMemory(ring, zeroes.subarray(0, head));
+                if (fillMemory)
+                {
+                    fillMemory(ring, 0, head);
+                }
+                else
+                {
+                    zeroes ??= new Uint8Array(bytes);
+                    writeMemory(ring, zeroes.subarray(0, head));
+                }
                 if (compareExchangeU32 === undefined)
                 {
                     writeMemory(block + SHADOW.COMMAND_HEAD, zero);
@@ -356,6 +365,9 @@ export function settledAfter(shadow, call){
  *     May answer with the guest's own bytes rather than a copy; nothing here
  *     keeps what it returns past the call that read it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     A run of one byte value, with no buffer made for it: the command ring
+ *     started over with zeros.
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, for the words looked at on every call: a view
  *     per call was a measured share of a frame.
@@ -1503,6 +1515,7 @@ export function createShadow(deps){
                     placeCommandRing(address, commands, deps.writeMemory, ringBytes);
                     commandReader = createCommandReader({ block: address, ring: commands,
                         readWord, readWords, writeMemory: deps.writeMemory,
+                        fillMemory: deps.fillMemory,
                         compareExchangeU32: deps.compareExchangeU32, loadU32: deps.loadU32,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
                         refuse: detail=>refuse(`${name}::commands`, detail),

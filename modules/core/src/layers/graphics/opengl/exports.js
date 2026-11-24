@@ -422,6 +422,8 @@ const LIST_TYPES = new Map([
  *           does not wire one -- and then these are read through a window and
  *           a `DataView` instead.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} [fillMemory]
+ *     a run of one byte value with no buffer made: the command ring zeroed
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *     A dword swapped only if it holds `expected`, indivisible against the guest's
  *     threads on the process's other executors.
@@ -743,6 +745,7 @@ export function createOpengl(services){
             block, ring, readWords,
             readWord: address=>readWords(address, 1)[0],
             writeMemory: services.writeMemory,
+            fillMemory: services.fillMemory,
             compareExchangeU32: services.compareExchangeU32,
             loadU32: services.loadU32,
             take: records=>{
