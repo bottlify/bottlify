@@ -213,7 +213,6 @@ vcall 0.9995).
 | 2026-11-12 | more room for shared compiled modules (`sharedModuleBytes` 1 GiB) | 671.1 vs 655-691 s, 1 run | holds | let-go modules are asked for |
 | 2026-11-12 | the shared formed regions (`sharedFormed` 8192) cost ngen's short processes | median 618.7 vs 655.1 s, 5 runs | holds (kept) | a region kept in fewer objects |
 | 2026-11-14 | one machine memory with page tables (a software MMU) | paged +36.5 % x64, +47.1 % arm64 | holds | wasm gains mapping primitives |
-| 2026-11-24 | a granule map for a memory64 program's sparse reservations (its memory's length, which V8 counts against a thread's ~8 GiB GC limit, made what it holds): its lower bound, every read tested as stores are today (`checkReads` on), without the lookup | run-count x64 host, 883ad889, 18 workloads: geomean 1.331 (32-bit 1.11-1.41, 64-bit 1.16-1.59), before the per-access add (floor +4-6 %) | holds | reads tested per loop, not per access |
 | 2026-11-20 | one copy of the code of system modules of one family (d3dx9_24..43, the five guest CRTs), each module keeping its own data | measured, not built: since modules are written only when loaded (A280) a process holds only the copies it loads - a kernel32 program 0, 3DMark06 (MSVCR71 + MSVCR80) 188 KiB, Crysis (d3dx9_34 + d3dx9_35) 76 KiB, all four together 340 KiB, against a game's hundreds of MiB of guest memory (node, `createApp` layout listing, cork at the change) | holds | a program loads several of one family at once, or the code's addresses must agree across a family for its translations |
 
 ## Win32 and core
