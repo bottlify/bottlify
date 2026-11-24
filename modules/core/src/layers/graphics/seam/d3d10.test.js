@@ -121,6 +121,8 @@ function machine(){
     return {
         memory,
         allocate,
+        /** @param {number} address @param {number} length  the bytes themselves */
+        view: (address, length)=>bytes.subarray(address, address + length),
         services: withPointers({ readMemory: readBytes, writeMemory: writeBytes }),
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
@@ -2878,4 +2880,40 @@ test('a swap chain made GDI-compatible makes its buffers so, and only then hands
     assert.equal(await h.box.callParked(gdiBuffer, slot(IDXGISURFACE1_SLOTS, 'GetDC'),
         [1, dcAt]), S_OK, 'DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE');
     assert.equal(h.box.call(gdiBuffer, slot(IDXGISURFACE1_SLOTS, 'ReleaseDC'), [0]), S_OK);
+});
+
+test('UpdateSubresource hands the device the program\'s bytes where they lie, copied once', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const services = /** @type {any} */ (h.box.services);
+    const texels = Uint8Array.from({ length: 64 }, (_, at)=>at * 3 + 1);
+    const dataAt = h.box.placeBytes(texels);
+    /** @type {number[]} */
+    const copiedFrom = [];
+    const readMemory = services.readMemory;
+    services.readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
+        copiedFrom.push(address);
+        return readMemory(address, length);
+    };
+    // The machine's bytes themselves, as the engine's window hands them.
+    services.windowMemory = h.box.view;
+    /** @param {number} usage @param {number} bind @param {number} cpu */
+    const desc = (usage, bind, cpu)=>h.box.place([4, 4, 1, 1, DXGI_FORMAT.R8G8B8A8_UNORM, 1, 0,
+        usage, bind, cpu, 0]);
+    const textureAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateTexture2D',
+        [desc(D3D10_USAGE.DEFAULT, D3D10_BIND.SHADER_RESOURCE, 0), 0, textureAt]), S_OK);
+    const texture = h.box.memory.readU32(textureAt);
+    const stagingAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateTexture2D',
+        [desc(D3D10_USAGE.STAGING, 0, D3D10_CPU_ACCESS.READ), 0, stagingAt]), S_OK);
+    const staging = h.box.memory.readU32(stagingAt);
+    h.device(device, 'UpdateSubresource', [texture, 0, 0, dataAt, 16, 64]);
+    assert.ok(!copiedFrom.includes(dataAt), 'the program\'s bytes not read through a copy');
+    h.device(device, 'CopyResource', [staging, texture]);
+    const mapped = h.box.place([0, 0]);
+    assert.equal(h.box.call(staging, slot(ID3D10TEXTURE_SLOTS, 'Map'),
+        [0, D3D10_MAP.READ, 0, mapped]), S_OK);
+    assert.deepEqual([...readMemory(h.box.memory.readU32(mapped), 64)], [...texels]);
+    assert.deepEqual(h.divergences, []);
 });

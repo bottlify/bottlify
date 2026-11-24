@@ -331,6 +331,14 @@ export function createDirect3D11Seam(describe, kit, guests){
     const isNull = address=>(address >>> 0) === 0;
     /** @param {number} address */
     const guidAt = address=>readGuid(k().memory, address);
+    /**
+     * The program's bytes where they lie, for a receiver that copies them at
+     * the call; a copy where the memory cannot hand them.
+     *
+     * @param {number} address @param {number} length @returns {Uint8Array}
+     */
+    const windowOf = (address, length)=>(k().memory.windowMemory ?? k().memory.readMemory)(
+        address, length);
 
     // --- children ---
 
@@ -1095,7 +1103,8 @@ export function createDirect3D11Seam(describe, kit, guests){
             const mapped = deferredMaps.get(target)?.get(resource);
             if (mapped)
             {
-                target.WriteMapped(resource, k().memory.readMemory(mapped.address, mapped.bytes));
+                // The list copies them as it records the call.
+                target.WriteMapped(resource, windowOf(mapped.address, mapped.bytes));
             }
             return;
         }
@@ -1474,8 +1483,10 @@ export function createDirect3D11Seam(describe, kit, guests){
             {
                 return;
             }
+            // The program's bytes where they lie: the device, or a deferred
+            // context's list, copies them at the call, as Direct3D does.
             target.UpdateSubresource(resource, subresource >>> 0, box,
-                k().memory.readMemory(data >>> 0, bytes), rowPitch >>> 0, depthPitch >>> 0);
+                windowOf(data >>> 0, bytes), rowPitch >>> 0, depthPitch >>> 0);
         },
         /** @param {any} target @param {number[]} args */
         CopyStructureCount: (target, [dst, offset, viewAt])=>{

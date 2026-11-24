@@ -52,7 +52,7 @@ const RELEASE = 2;
  * GPU: the device drawn here, or recorded and played elsewhere.
  *
  * @param {{ elsewhere?: boolean, pointerSize?: 4 | 8, long?: boolean, ring?: boolean,
- *     sharedHandles?: { open: (key: number) => number,
+ *     window?: boolean, sharedHandles?: { open: (key: number) => number,
  *     resolve: (handle: number) => number | null } }} [options]
  */
 function seamed(options = {}){
@@ -101,9 +101,20 @@ function seamed(options = {}){
         now: ()=>0 });
     /** @type {string[]} */
     const divergences = [];
+    /** @type {number[]} where the seam read the program's bytes through a copy */
+    const copiedFrom = [];
     const seam = createDirect3D10Seam({
         publisher,
-        memory: withPointers({ readMemory: memory.readBytes, writeMemory: memory.writeBytes }),
+        memory: withPointers({
+            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                copiedFrom.push(address);
+                return memory.readBytes(address, length);
+            },
+            writeMemory: memory.writeBytes,
+            // The bytes themselves, as the engine's window hands them.
+            ...options.window ? { windowMemory: (/** @type {number} */ address,
+                /** @type {number} */ length)=>bytes.subarray(address, address + length) } : {},
+        }),
         allocate,
         root: factoryOptions=>{
             const drawing = {
@@ -187,7 +198,7 @@ function seamed(options = {}){
         };
     };
     return { memory, place, placeGuid, call, answer, query, create, divergences, seam, registered,
-        bytes };
+        bytes, allocate, copiedFrom };
 }
 
 test('D3D11CreateDevice answers S_FALSE asked for nothing, and makes a device of level 11.0'
@@ -634,4 +645,57 @@ test('a 64-bit process places the immediate context\'s ring routines as x86-64; 
             [...code.subarray(0, Math.min(host ?? 32, 32) - 1)], `${name}: its x86-64`);
     }
     assert.ok(s.registered.has(target('ClearDepthStencilView')), 'ClearDepthStencilView: the trap');
+});
+
+test('UpdateSubresource and a deferred unmap hand on the program\'s bytes where they lie; a list'
+    + ' keeps its own copy', async()=>{
+    const s = seamed({ window: true });
+    const { device, context } = s.create();
+    /** @param {number} usage @param {number} bind @param {number} cpu */
+    const createBuffer = (usage, bind, cpu)=>{
+        const out = s.place([0]);
+        assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateBuffer'),
+            [s.place([16, usage, bind, cpu, 0, 0]), 0, out]), S_OK);
+        return s.memory.readU32(out);
+    };
+    const target = createBuffer(D3D10_USAGE.DEFAULT, D3D10_BIND.VERTEX_BUFFER, 0);
+    const dynamic = createBuffer(D3D10_USAGE.DYNAMIC, D3D10_BIND.VERTEX_BUFFER, 0x10000);
+    const staging = createBuffer(D3D10_USAGE.STAGING, 0, 0x20000);
+    const mapSlot = slot(ID3D11DEVICECONTEXT_SLOTS, 'Map');
+    const unmapSlot = slot(ID3D11DEVICECONTEXT_SLOTS, 'Unmap');
+    const mapped = s.place([0, 0, 0]);
+    /** @param {number} buffer */
+    const readBack = async buffer=>{
+        s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'CopyResource'), [staging, buffer]);
+        assert.equal(await s.answer(context, mapSlot, [staging, 0, 1, 0, mapped]) >>> 0, S_OK);
+        const at = s.memory.readU32(mapped);
+        const words = [0, 1, 2, 3].map(index=>s.memory.readU32(at + 4 * index));
+        s.call(context, unmapSlot, [staging, 0]);
+        return words;
+    };
+
+    const data = s.place([5, 6, 7, 8]);
+    s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'UpdateSubresource'),
+        [target, 0, 0, data, 16, 16]);
+    assert.ok(!s.copiedFrom.includes(data), 'UpdateSubresource read nothing through a copy');
+    assert.deepEqual(await readBack(target), [5, 6, 7, 8]);
+
+    const deferredOut = s.place([0]);
+    assert.equal(s.call(device, slot(ID3D11DEVICE_SLOTS, 'CreateDeferredContext'),
+        [0, deferredOut]), S_OK);
+    const deferred = s.memory.readU32(deferredOut);
+    assert.equal(s.call(deferred, mapSlot, [dynamic, 0, 4, 0, mapped]), S_OK, 'WRITE_DISCARD');
+    const written = s.memory.readU32(mapped);
+    [1, 2, 3, 4].forEach((word, index)=>s.memory.writeU32(written + 4 * index, word));
+    s.call(deferred, unmapSlot, [dynamic, 0]);
+    assert.ok(!s.copiedFrom.includes(written), 'the unmap read nothing through a copy');
+    // What the program writes there after its unmap is not the list's.
+    s.memory.writeU32(written, 0xdead);
+    const listOut = s.place([0]);
+    assert.equal(s.call(deferred, slot(ID3D11DEVICECONTEXT_SLOTS, 'FinishCommandList'),
+        [0, listOut]), S_OK);
+    s.call(context, slot(ID3D11DEVICECONTEXT_SLOTS, 'ExecuteCommandList'),
+        [s.memory.readU32(listOut), 0]);
+    assert.deepEqual(await readBack(dynamic), [1, 2, 3, 4]);
+    assert.deepEqual(s.divergences, []);
 });

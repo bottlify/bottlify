@@ -3651,8 +3651,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 {
                     return;
                 }
+                // The program's bytes where they lie: the device copies them at
+                // the call, as Direct3D does.
                 device.UpdateSubresource(resource, subresource >>> 0, box,
-                    memory.readMemory(data >>> 0, bytes), rowPitch >>> 0, depthPitch >>> 0);
+                    (memory.windowMemory ?? memory.readMemory)(data >>> 0, bytes), rowPitch >>> 0,
+                    depthPitch >>> 0);
             },
             /** @param {any} device @param {number[]} args */
             ClearRenderTargetView: (device, [view, colorAt])=>{
