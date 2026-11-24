@@ -406,22 +406,42 @@ export function serveGraphics(scope, deps){
     const readPixels = (device, { surface, frameIndex, serial })=>{
         const { width, height, format } = surface;
         const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
-        const buffer = device.createBuffer({ size: bytesPerRow * height,
-            usage: BUFFER_MAP_READ | BUFFER_COPY_DST });
+        const buffer = readBackFor(device, bytesPerRow * height);
         const encoder = device.createCommandEncoder();
         encoder.copyTextureToBuffer({ texture: surface.texture }, { buffer, bytesPerRow },
             [width, height]);
         device.queue.submit([encoder.finish()]);
         buffer.mapAsync(MAP_READ).then(()=>{
+            // The one copy: a mapped range is the buffer's until it is unmapped.
             const pixels = new Uint8Array(buffer.getMappedRange()).slice();
-            buffer.destroy();
+            buffer.unmap();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
                 format, dropped, source: surface.source, ...sentWith(surface, serial) },
             [pixels.buffer]);
         }, ()=>{
-            buffer.destroy();
+            readBack?.buffer.destroy();
+            readBack = null;
             sending = false;
         });
+    };
+    /**
+     * The buffer frames are read back through, kept while frames are the
+     * same size on the same device: one frame is in flight at a time
+     * (`sending`), so a buffer a frame was made and destroyed for nothing.
+     *
+     * @type {{ device: any, size: number, buffer: any } | null}
+     */
+    let readBack = null;
+    /** @param {any} device @param {number} size */
+    const readBackFor = (device, size)=>{
+        if (readBack !== null && readBack.device === device && readBack.size === size)
+        {
+            return readBack.buffer;
+        }
+        readBack?.buffer.destroy();
+        const buffer = device.createBuffer({ size, usage: BUFFER_MAP_READ | BUFFER_COPY_DST });
+        readBack = { device, size, buffer };
+        return buffer;
     };
 
     /** @param {boolean} software  The browser's software adapter, as the engine's (AppOptions.gpuAdapter). */
