@@ -15,7 +15,7 @@
  * and the played one reads the same bytes at the same call.
  */
 
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
 
 /** The calls whose answers only the renderer has: what it says of itself, and the pixels it drew. */
 const ANSWERED = new Set(['diagnostics', 'glReadPixels', 'glGetQueryObject', 'readDrawable']);
@@ -118,11 +118,7 @@ export function playedOpengl(factory, services){
             playing = true;
             try
             {
-                const answer = live.play(call);
-                // What this side holds of the program's memory, which only it can say.
-                return call.m === 'diagnostics' && answer
-                    ? { ...answer, mirrored: { held: mirror.bytes(), reached: mirror.reached() } }
-                    : answer;
+                return withMirrored(call, live.play(call), mirror);
             }
             finally
             {

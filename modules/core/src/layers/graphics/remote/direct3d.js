@@ -10,7 +10,7 @@
  * and the played root that draws, wherever its calls are carried to.
  */
 
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
 import { WAIT, createWriter } from './wire.js';
 
 /** D3DQUERYTYPE_EVENT. */
@@ -329,7 +329,7 @@ export function playedDirect3D(factory, services){
             playing = true;
             try
             {
-                return live.play(call);
+                return withMirrored(call, live.play(call), mirror);
             }
             finally
             {

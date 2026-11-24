@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopbackDirect3D } from './loopback.js';
-import { SWEEP_SLICE, createMirror } from './replay.js';
+import { SWEEP_SLICE, createMirror, withMirrored } from './replay.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
 import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
@@ -1559,4 +1559,31 @@ test('a batch\'s buffer an answer still to come keeps a view of goes back only o
     fill();
     await new Promise(resolve=>setTimeout(resolve, 0));
     assert.equal(said.filter(message=>message.type === 'spent').length, 2);
+});
+
+test('a mirror says what it holds of the heap: its pages, the pages kept to be made again and'
+    + ' its stamps; a played root\'s diagnostics answer carries it, no other answer does', ()=>{
+    const mirror = createMirror({ forget: true });
+    assert.deepEqual(mirror.figures(), { held: 0, pages: 0, spare: 0, stampBytes: 0, reached: 0 },
+        'nothing written: nothing held');
+    mirror.write(0x1fff0, new Uint8Array(0x20));
+    mirror.write(0x50000, Uint8Array.of(1));
+    // The stamps grow to whole 64 KiB pages of 4 KiB stamps, 4096 at least: 4 bytes each, and
+    // one large stamp for each sixteen.
+    const stampBytes = 4096 * 4 + 256 * 4;
+    assert.deepEqual(mirror.figures(), { held: 3 * 0x10000 + stampBytes, pages: 3, spare: 0,
+        stampBytes, reached: 3 * 0x10000 });
+    mirror.settle();
+    mirror.write(0x50000, Uint8Array.of(2));
+    mirror.settle();
+    mirror.write(0x50000, Uint8Array.of(3));
+    mirror.settle();
+    // The two pages of the first write were let go and kept to be made again: still held.
+    assert.deepEqual(mirror.figures(), { held: 3 * 0x10000 + stampBytes, pages: 1, spare: 2,
+        stampBytes, reached: 3 * 0x10000 });
+    const answer = { device: 'played' };
+    assert.deepEqual(withMirrored({ m: 'diagnostics' }, answer, mirror),
+        { device: 'played', mirrored: mirror.figures() });
+    assert.equal(withMirrored({ m: 'GetData' }, answer, mirror), answer, 'another call: as it was');
+    assert.equal(withMirrored({ m: 'diagnostics' }, null, mirror), null);
 });

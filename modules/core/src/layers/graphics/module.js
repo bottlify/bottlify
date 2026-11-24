@@ -331,17 +331,18 @@ const ringLine = direct3d10=>{
 
 /**
  * What this layer holds of the tab's memory, by zone (`memory-zones.js`): of
- * the heaps, the pages of guest memory a played OpenGL device keeps (its
- * answer's `mirrored`), and what is not measured yet -- the engine thread's
+ * the heaps, the pages of guest memory the graphics worker keeps for each of
+ * this process's played devices (every root's answer's `mirrored`; none where
+ * nothing is played), and what is not measured yet -- the engine thread's
  * recorded batches and shadows, the worker's other caches; and the device's
  * buffers and textures as its ledger counts them, a zone of their own: a GPU
  * process holds them, not the tab, unless the device is one in JavaScript.
  *
  * @param {any} worker  the graphics worker's figures, or null
- * @param {any} seam  the seam's
  */
-const bytesHeldOf = (worker, seam)=>{
-    const mirrored = seam?.device?.mirrored?.held;
+const bytesHeldOf = worker=>{
+    // No worker, no mirror: a device in this thread reads the guest's memory.
+    const mirrored = worker ? worker.mirrored : 0;
     const ledger = worker?.gpuMemory;
     /** @param {any} kind */
     const bytesOf = kind=>(typeof kind?.bytes === 'number' ? kind.bytes : NOT_MEASURED);
@@ -1882,7 +1883,7 @@ export function createGraphicsModule(){
                     blockCompression: instance.blockCompression,
                     seam,
                     // What this layer holds of the tab's memory (`memory-zones.js`).
-                    bytesHeld: bytesHeldOf(worker, seam),
+                    bytesHeld: bytesHeldOf(worker),
                     // The desktop shown at a paint, and kept back under a
                     // windowed swap chain's window that fills the screen.
                     desktops: { ...desktops },

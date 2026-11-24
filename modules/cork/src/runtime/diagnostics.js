@@ -38,6 +38,67 @@ const FORMS_EVERY_MS = 30_000;
  * loop that forces are the ones that go on forcing. */
 const FORCED_KEPT = 256;
 
+/**
+ * The JS heap a runtime's state takes, by thing kept: weighed from 100 000
+ * of each, collected heaps on V8 14.6 (Node without compressed pointers;
+ * Chrome's are smaller), so what `stateBytesOf` answers is an estimate from
+ * counts, not a measure. A region's record with its empty sets, maps and
+ * arrays and its hash; an entry of a set; an element of an array of pairs, or
+ * of a map to pairs; a number in an array or a map; a kept array of bytes
+ * beside its bytes; an entry's key and its places; a queued or remembered
+ * address.
+ */
+const STATE_BYTES = Object.freeze({
+    record: 580, setEntry: 12, pair: 78, number: 14, bytesBeside: 260, entry: 30,
+    remembered: 40, summary: 600,
+});
+
+/**
+ * What a runtime's state holds of the JS heap, estimated by kind from what it
+ * counts (`STATE_BYTES`): its regions' records, the code bytes some of them
+ * keep (`sources`, counted whole), their summaries, the entries, the queue and
+ * the addresses it remembers, and the code pages it keeps copies of (counted
+ * whole).
+ *
+ * @param {{ regions: Iterable<RegionRecord>, entries: number, remembered: number,
+ *     pageBytes: Map<number, Uint8Array> }} kept
+ * @returns {{ regions: number, sources: number, summaries: number, entries: number,
+ *     queue: number, codePages: number, total: number }}
+ */
+export function stateBytesOf({ regions, entries, remembered, pageBytes }){
+    const B = STATE_BYTES;
+    let records = 0;
+    let sources = 0;
+    let summaries = 0;
+    for (const record of regions)
+    {
+        records += B.record + (record.pages.size + (record.reads?.size ?? 0)
+            + (record.formable?.size ?? 0)) * B.setEntry
+            + (record.spans.length + record.extents.size) * B.pair
+            + record.slots.length * B.number + record.labels.length;
+        for (const source of record.sources ?? [])
+        {
+            sources += B.bytesBeside + source.bytes.length;
+        }
+        const summary = record.summary;
+        if (summary)
+        {
+            summaries += B.summary + (summary.pages.length + summary.reads.length
+                + summary.formable.length) * B.number
+                + (summary.read.length + summary.calls.length + summary.empties.length
+                    + summary.crt.length) * B.pair;
+        }
+    }
+    let codePages = 0;
+    for (const bytes of pageBytes.values())
+    {
+        codePages += B.bytesBeside + bytes.length;
+    }
+    const counted = { regions: records, sources, summaries, entries: entries * B.entry,
+        queue: remembered * B.remembered, codePages };
+    return { ...counted, total: Object.values(counted).reduce((sum, one)=>sum + one, 0) };
+}
+
 
 /**
  * Under `precise`, a NaN hunt's record (`layout.nanFirst`): the first x87 NaN
@@ -647,6 +708,11 @@ export function createDiagnostics(state){
             dropped: counts.dropped,
             queued: rt.queue.size,
             barren: rt.barren.size,
+            // The JS heap this state takes, estimated by kind from its counts.
+            stateBytes: stateBytesOf({ regions: rt.regions, entries: entries.count(),
+                remembered: rt.queue.size + rt.barren.size + rt.exitTargets.size
+                    + (rt.misses?.size ?? 0) + (rt.heatOf?.size ?? 0),
+                pageBytes: rt.pageBytes }),
             queueDrops: counts.queueDrops,
             emitFailures: counts.emitFailures,
             formedApart: counts.formedApart,

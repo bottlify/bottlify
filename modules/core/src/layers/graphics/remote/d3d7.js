@@ -27,7 +27,7 @@
 import { createDirect3D7 } from '../d3d7/device.js';
 import { D3D_OK, DDERR_NOTFOUND } from '../d3d7/constants.js';
 import { DDCKEY_SRCBLT, DDSCAPS_ZBUFFER } from '../ddraw/constants.js';
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
 
 /** The calls whose answer only the renderer has. */
 const ANSWERED = new Set(['diagnostics', 'idle', 'ReadBack']);
@@ -580,7 +580,7 @@ export function playedDirect3D7(services){
             playing = true;
             try
             {
-                return live.play(call);
+                return withMirrored(call, live.play(call), mirror);
             }
             finally
             {
