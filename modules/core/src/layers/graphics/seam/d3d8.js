@@ -1460,12 +1460,15 @@ export function createDirect3D8Seam(
      * @param {number} pointer
      */
     const readGammaRamp = pointer=>{
-        const words = new Uint16Array(
-            memory.readMemory(pointer, D3DGAMMARAMP.SIZE).slice().buffer);
+        // One array of the ramp's own, its channels parts of it: the device
+        // keeps copies of the channels, and the ramp is the caller's to keep.
+        const words = new Uint16Array(GAMMA_RAMP_ENTRIES * 3);
+        new Uint8Array(words.buffer).set(
+            (memory.windowMemory ?? memory.readMemory)(pointer, D3DGAMMARAMP.SIZE));
         return {
-            red: words.slice(0, GAMMA_RAMP_ENTRIES),
-            green: words.slice(GAMMA_RAMP_ENTRIES, GAMMA_RAMP_ENTRIES * 2),
-            blue: words.slice(GAMMA_RAMP_ENTRIES * 2),
+            red: words.subarray(0, GAMMA_RAMP_ENTRIES),
+            green: words.subarray(GAMMA_RAMP_ENTRIES, GAMMA_RAMP_ENTRIES * 2),
+            blue: words.subarray(GAMMA_RAMP_ENTRIES * 2),
         };
     };
 

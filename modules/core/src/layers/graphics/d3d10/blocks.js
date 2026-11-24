@@ -84,14 +84,24 @@ export function programTexelBytes(conversion){
 }
 
 /**
+ * The words of `byteLength` bytes, for a conversion that reads them once:
+ * over the bytes themselves where they are aligned for it, copied only where
+ * not.
+ *
+ * @param {Uint8Array} bytes @param {number} byteLength
+ */
+const wordsOver = (bytes, byteLength)=>((bytes.byteOffset & 3) === 0
+    ? new Uint32Array(bytes.buffer, bytes.byteOffset, byteLength >>> 2)
+    : new Uint32Array(bytes.slice(0, byteLength).buffer));
+
+/**
  * Texels kept in four 32-bit channels as the program's three: the fourth dropped.
  *
  * @param {Uint8Array} four
  * @returns {Uint8Array}
  */
 export function threeWordsFromFour(four){
-    const words = new Uint32Array(four.buffer.slice(four.byteOffset,
-        four.byteOffset + (four.byteLength & ~15)));
+    const words = wordsOver(four, four.byteLength & ~15);
     const out = new Uint32Array((words.length >>> 2) * 3);
     for (let index = 0; index < out.length / 3; index++)
     {
@@ -112,8 +122,8 @@ export function threeWordsFromFour(four){
  */
 export function sixteenBitFromFloats(conversion, floats){
     const { signed } = SIXTEEN_BIT[conversion];
-    const values = new Float32Array(floats.buffer.slice(floats.byteOffset,
-        floats.byteOffset + (floats.byteLength & ~3)));
+    const words = wordsOver(floats, floats.byteLength & ~3);
+    const values = new Float32Array(words.buffer, words.byteOffset, words.length);
     const out = new Uint8Array(values.length * 2);
     const view = new DataView(out.buffer);
     for (let at = 0; at < values.length; at++)
@@ -272,8 +282,7 @@ export function convertTexels(conversion, bytes, width, height){
             {
                 return null;
             }
-            const words = new Uint32Array(bytes.buffer.slice(bytes.byteOffset,
-                bytes.byteOffset + count * 12));
+            const words = wordsOver(bytes, count * 12);
             const out = new Uint32Array(count * 4);
             for (let index = 0; index < count; index++)
             {

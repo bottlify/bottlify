@@ -103,8 +103,12 @@ export function createShaderValidator({ memory, callGuest, currentThread, alloca
     };
     /** @param {number} address @param {number} count */
     const words = (address, count)=>{
+        // readMemory answers bytes of their own: words over them where they are
+        // aligned for it, a copy only where they are not.
         const bytes = memory.readMemory(address >>> 0, count * 4);
-        return new Uint32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + count * 4));
+        return (bytes.byteOffset & 3) === 0
+            ? new Uint32Array(bytes.buffer, bytes.byteOffset, count)
+            : new Uint32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + count * 4));
     };
 
     let open = false;

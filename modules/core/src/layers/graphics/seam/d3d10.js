@@ -797,6 +797,16 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
 {
     const setEvent = events?.set;
     const fields = createFields(memory);
+    /**
+     * Guest bytes in place where the memory has a window, for a caller that
+     * copies them at once (an unmap or a DC let go of writes them into the
+     * resource's own bytes): a copy first would be a second one.
+     *
+     * @param {number} address @param {number} length @returns {Uint8Array}
+     */
+    const windowOf = (address, length)=>(memory.windowMemory
+        ? memory.windowMemory(address, length)
+        : memory.readMemory(address, length));
     const long = pointerSize === 8;
     /**
      * An interface, an address or a handle written to an out parameter: in a
@@ -2253,7 +2263,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
         const block = mappings.get(resource)?.get(subresource);
         if (block)
         {
-            block.data.set(memory.readMemory(block.address, block.data.length));
+            block.data.set(windowOf(block.address, block.data.length));
             mappings.get(resource)?.delete(subresource);
             free?.(block.address);
         }
@@ -2482,7 +2492,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, root: 
                 return DXGI_ERROR_INVALID_CALL;
             }
             contexts.delete(texture);
-            held.data.set(memory.readMemory(held.address, held.data.length));
+            held.data.set(windowOf(held.address, held.data.length));
             gdi.deleteSurfaceDc(held.handle);
             free?.(held.address);
             return texture.CloseDC();

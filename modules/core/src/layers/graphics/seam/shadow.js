@@ -2190,7 +2190,9 @@ export function guestWords(memory){
  * @typedef {Object} GuestWords
  * @property {(at: number) => number} u32
  * @property {(at: number, value: number) => void} setU32
- * @property {(at: number, length: number) => Uint8Array} read
+ * @property {(at: number, length: number) => Uint8Array} read  bytes handed straight
+ *     to `write`, with nothing run between: a copy of its own (the memory layer's
+ *     readBytes) or a view (which write takes as TypedArray#set does, overlap and all)
  * @property {(at: number, bytes: Uint8Array) => void} write
  * @property {(at: number, expected: number, value: number) => number} [compareExchangeU32]
  *     the word's value before, swapped for `value` where it was `expected`: atomic, where
@@ -2290,7 +2292,7 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.write(block + SHADOW.TRANSFORMS + slot * 64, m.read(matrix, 64).slice());
+        m.write(block + SHADOW.TRANSFORMS + slot * 64, m.read(matrix, 64));
         return true;
     },
     /** @type {HostMirror} */
@@ -2300,7 +2302,7 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.write(block + SHADOW.VIEWPORT, m.read(viewport, 24).slice());
+        m.write(block + SHADOW.VIEWPORT, m.read(viewport, 24));
         return true;
     },
     /** @type {HostMirror} */
@@ -2344,7 +2346,7 @@ export const HOST_MIRRORS = Object.freeze({
         {
             return false;
         }
-        m.write(block + SHADOW.SCISSOR, m.read(rect, 16).slice());
+        m.write(block + SHADOW.SCISSOR, m.read(rect, 16));
         return true;
     },
     /** @type {HostMirror} */
@@ -2814,17 +2816,17 @@ function recordCommand(m, shape, mirror, block, a){
     }
     if (pointer >= 0 && size > 0)
     {
-        m.write(record + header, m.read(a[pointer], size).slice());
+        m.write(record + header, m.read(a[pointer], size));
     }
     if (indexed && copied)
     {
-        m.write(record + header, m.read(a[indexed.indices], copied.indices).slice());
-        m.write(record + header + copied.at, m.read(a[indexed.data], copied.vertices).slice());
+        m.write(record + header, m.read(a[indexed.indices], copied.indices));
+        m.write(record + header + copied.at, m.read(a[indexed.data], copied.vertices));
     }
     rects.forEach((arg, rect)=>{
         if (a[arg] !== 0)
         {
-            m.write(record + header + RECT_BYTES * rect, m.read(a[arg], RECT_BYTES).slice());
+            m.write(record + header + RECT_BYTES * rect, m.read(a[arg], RECT_BYTES));
         }
     });
     m.setU32(record + COMMAND.BYTES, length);

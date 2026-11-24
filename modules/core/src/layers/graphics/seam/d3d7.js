@@ -29,7 +29,7 @@ import {
 } from './iids.js';
 import {
     D3DCLIPSTATUS, D3DDEVICEDESC7, D3DLIGHT7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC,
-    D3DVIEWPORT7, RECT, createFields,
+    D3DVIEWPORT7, RECT, createFields, floatsOf,
 } from './structs.js';
 import { readGuid } from './ddraw.js';
 import { TEXTURE_FORMATS } from './texture-formats.js';
@@ -594,8 +594,12 @@ export function createDirect3D7Seam(
     const canEnumerate = ()=>callGuest !== undefined && scratchBlock() !== 0;
 
     /** @param {number} pointer @param {number} count @returns {Float32Array} */
-    const readFloats = (pointer, count)=>new Float32Array(
-        memory.readMemory(pointer >>> 0, count * 4).slice().buffer);
+    const readFloats = (pointer, count)=>{
+        // Out of the window where there is one: `floatsOf` answers an array of
+        // its own, so a copy of the bytes first would be a second one.
+        const read = memory.windowMemory ?? memory.readMemory;
+        return floatsOf(read(pointer >>> 0, count * 4), count);
+    };
 
     /** @param {number} pointer @returns {import('../d3d7/device.js').Material} */
     const readMaterial = pointer=>{

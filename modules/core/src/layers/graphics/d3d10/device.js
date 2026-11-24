@@ -2075,13 +2075,13 @@ export function createDevice(options = {}){
                 : { hr: E_INVALIDARG };
         },
 
-        /** @param {any} view @param {readonly number[]} color */
+        /** @param {any} view @param {ArrayLike<number>} color  copied at once */
         ClearRenderTargetView(view, color){
             if (!view || !color)
             {
                 return;
             }
-            renderer.clearRenderTargetView(view, [...color]);
+            renderer.clearRenderTargetView(view, Array.from(color));
         },
 
         /**

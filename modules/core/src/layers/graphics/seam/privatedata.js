@@ -194,7 +194,7 @@ export function createPrivateData({ memory, publisher, rules, callGuest, current
                 }
                 else
                 {
-                    entry.bytes = memory.readMemory(data >>> 0, size >>> 0).slice();
+                    entry.bytes = memory.readMemory(data >>> 0, size >>> 0);
                 }
                 if ((flags & VOLATILE) !== 0 && rules.expired !== undefined)
                 {
