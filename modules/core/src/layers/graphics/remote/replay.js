@@ -2183,8 +2183,11 @@ export function createRecording(options){
                 // something is sent of all of it: once, at its first draw,
                 // watched from before the read.
                 const watch = watchWrites?.(base, buffer.length) ?? null;
-                const bytes = readMemory(base, buffer.length);
-                // Kept only to compare against where there is no watch to say.
+                // Read where they lie where a watch says what changes after:
+                // the call's record copies them when it is finished, before
+                // the program runs again. Kept, and so copied, only to compare
+                // against where there is no watch to say.
+                const bytes = (watch ? windowMemory : readMemory)(base, buffer.length);
                 sentOf.set(key, { base, length: buffer.length, bytes: watch ? null : bytes,
                     watch, dirty: pageMarksOf(base, buffer.length) });
                 compared.take(key, 0, buffer.length);

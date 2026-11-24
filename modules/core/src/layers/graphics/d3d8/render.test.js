@@ -36,7 +36,8 @@ import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
     gpuFormatOf,
     normalMatrixFor, normalMatrixOf, viewerDirection,
-    HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
+    HARDWARE_SAMPLER, filledIndices, indicesFrom, listIndices, multiplyMatrices, packLight,
+    pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
     addressVariantOf, clipMaskOf, clipPlanesOf, isAffine, lodBiasOf, samplerDescriptorOf,
@@ -5018,4 +5019,113 @@ test('a managed texture is copied from its memory, and taken up again when the m
     into.surface.release();
     managed.texture.release();
     plain.texture.release();
+});
+
+test('a texture written in a rectangle sends the rectangle\'s rows, read where they lie', async()=>{
+    // A level read whole and cut down after was a copy of all of it for a
+    // few rows of new texels; one taken as it lies goes up as the guest's
+    // own bytes, which the upload copies before it returns.
+    const h = harness();
+    const { device, gpu } = h;
+    const texture = textureFrom(h, 64, 64, D3DFMT.A8R8G8B8, new Uint8Array(64 * 64 * 4).fill(1));
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    selectTexture(device);
+    const draw = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+    };
+    await draw();
+    /** @type {{ pBits?: number, Pitch?: number }} */
+    const locked = {};
+    const rect = { left: 16, top: 10, right: 24, bottom: 14 };
+    // A managed texture's lock that asks for no dirty update, then the
+    // rectangle said dirty: what is known to have changed is that alone.
+    assert.equal(texture.LockRect(0, locked, rect, 0x8000), D3D_OK);
+    const pitch = /** @type {number} */ (locked.Pitch);
+    for (let row = 0; row < 4; row++)
+    {
+        h.write(/** @type {number} */ (locked.pBits) + row * pitch,
+            new Uint8Array(32).fill(10 + row));
+    }
+    assert.equal(texture.UnlockRect(0), D3D_OK);
+    assert.equal(texture.AddDirtyRect(rect), D3D_OK);
+    /** @type {Uint8Array[]} */
+    const handed = [];
+    const upload = h.backend.uploadTexture;
+    h.backend.uploadTexture = (/** @type {any} */ request)=>{
+        handed.push(request.data);
+        return upload.call(h.backend, request);
+    };
+    h.windows.length = 0;
+    await draw();
+    assert.deepEqual(h.windows, [3 * pitch + 32], 'the rectangle\'s rows, nothing around them');
+    const last = gpu.of('writeTexture').at(-1);
+    assert.deepEqual([last.size.width, last.size.height, last.destination.origin.x,
+        last.destination.origin.y], [8, 4, 16, 10]);
+    assert.deepEqual([...last.bytes], [10, 11, 12, 13].flatMap(value=>Array(32).fill(value)));
+    assert.equal(handed.length, 1);
+    assert.equal(handed[0].buffer.byteLength, 8 * 4 * 4, 'the rows laid tight, once');
+
+    // All of it said dirty: rows as wide as the pitch go up as they lie.
+    assert.equal(texture.AddDirtyRect(null), D3D_OK);
+    h.windows.length = 0;
+    await draw();
+    assert.deepEqual(h.windows, [64 * 64 * 4]);
+    assert.equal(handed.length, 2);
+    assert.equal(handed[1].buffer.byteLength, RAM_SIZE, 'handed as the guest\'s bytes, no copy');
+});
+
+test('a render target the program wrote and a volume level go up read where they lie', async()=>{
+    const h = harness({ depth: false, writable: true });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const target = {};
+    assert.equal(device.CreateRenderTarget(8, 8, D3DFMT.X8R8G8B8, true, target), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(await target.surface.LockRect(locked, null, 0), D3D_OK);
+    h.write(/** @type {number} */ (locked.pBits), new Uint8Array(8 * 8 * 4).fill(3));
+    assert.equal(target.surface.UnlockRect(), D3D_OK);
+    h.windows.length = 0;
+    assert.equal(device.SetRenderTarget(target.surface, null), D3D_OK);
+    assert.equal(device.Clear(1, [{ x1: 0, y1: 0, x2: 1, y2: 1 }], D3DCLEAR.TARGET, 0, 1, 0),
+        D3D_OK);
+    await h.present();
+    assert.ok(h.windows.includes(8 * 8 * 4), `the target's bytes through a window: ${h.windows}`);
+
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateVolumeTexture(4, 4, 2, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out),
+        D3D_OK);
+    /** @type {{ pBits?: number, SlicePitch?: number }} */
+    const box = {};
+    assert.equal(out.texture.LockBox(0, box, null, 0), D3D_OK);
+    const slices = 2 * /** @type {number} */ (box.SlicePitch);
+    h.write(/** @type {number} */ (box.pBits), new Uint8Array(slices).fill(5));
+    assert.equal(out.texture.UnlockBox(0), D3D_OK);
+    assert.equal(device.SetTexture(0, out.texture), D3D_OK);
+    selectTexture(device);
+    h.windows.length = 0;
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD | (1 << 16)), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(96), 32), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.ok(h.windows.includes(slices), `the volume's slices through a window: ${h.windows}`);
+});
+
+test('indices are read as words where they lie, copied only off their alignment', ()=>{
+    const bytes = Uint8Array.from([1, 0, 2, 0, 3, 0, 4, 0, 5, 0]);
+    const aligned = indicesFrom(bytes.subarray(2, 8), 2);
+    assert.deepEqual([...aligned], [2, 3, 4]);
+    assert.equal(aligned.buffer, bytes.buffer, 'a view, no copy');
+    const wide = indicesFrom(bytes.subarray(0, 8), 4);
+    assert.deepEqual([...wide], [0x20001, 0x40003]);
+    assert.equal(wide.buffer, bytes.buffer);
+    const odd = indicesFrom(bytes.subarray(1, 7), 2);
+    assert.deepEqual([...odd], [0x200, 0x300, 0x400]);
+    assert.notEqual(odd.buffer, bytes.buffer, 'off the alignment: a copy a view can start at');
 });

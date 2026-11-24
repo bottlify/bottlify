@@ -497,6 +497,22 @@ const LIST_OF = Object.freeze({
 });
 
 /**
+ * Indices as words, read where their bytes lie: every caller is done with
+ * them before the bytes can change. Copied only where they lie off the
+ * element's alignment, which a typed view cannot start at.
+ *
+ * @param {Uint8Array} bytes
+ * @param {number} elementBytes  2 or 4
+ * @returns {Uint16Array | Uint32Array}
+ */
+export function indicesFrom(bytes, elementBytes){
+    const aligned = bytes.byteOffset % elementBytes === 0 ? bytes : bytes.slice();
+    return elementBytes === 2
+        ? new Uint16Array(aligned.buffer, aligned.byteOffset, aligned.byteLength >>> 1)
+        : new Uint32Array(aligned.buffer, aligned.byteOffset, aligned.byteLength >>> 2);
+}
+
+/**
  * A strip or fan, rewritten as the list it draws.
  *
  * Indexed strips need a strip index format the pipeline does not declare, and
@@ -5499,10 +5515,12 @@ export function createRenderer(options){
         if (dirtyTargets.delete(surface))
         {
             const desc = describe(surface);
-            const bytes = readMemory(surface.base,
-                surfaceBytes(desc.Format, desc.Width, desc.Height));
             const keepsBlocks = COMPRESSED_FORMAT[desc.Format] !== undefined && compressedTextures
                 && blockAligned(desc.Width, desc.Height);
+            // Read where it lies unless its blocks go up as they are: the
+            // upload waits in the frame's order and keeps what it is given.
+            const bytes = (keepsBlocks ? readMemory : windowMemory)(surface.base,
+                surfaceBytes(desc.Format, desc.Width, desc.Height));
             uploadTexels(made, {
                 format: made.format,
                 mipLevel: 0,
@@ -5512,8 +5530,8 @@ export function createRenderer(options){
                     ? bytes
                     : isCompressed(desc.Format)
                         ? decodeCompressed(bytes, desc.Format, desc.Width, desc.Height)
-                        : expandTexels(desc.Format, tightRows(bytes, desc.Format, desc.Width,
-                            desc.Height, surface.pitch), desc.Width * desc.Height, float32),
+                        : texelsFrom(bytes, desc.Format, desc.Width, desc.Height, surface.pitch,
+                            desc.Width * desc.Height, true),
             }, true);
         }
         return made;
@@ -5552,7 +5570,8 @@ export function createRenderer(options){
             });
             plainSurfaces.set(surface, made);
         }
-        const bytes = readMemory(surface.base, surfaceBytes(desc.Format, desc.Width, desc.Height));
+        const bytes = windowMemory(surface.base,
+            surfaceBytes(desc.Format, desc.Width, desc.Height));
         uploadTexels(made, {
             format: made.format,
             mipLevel: 0,
@@ -5560,8 +5579,8 @@ export function createRenderer(options){
             height: desc.Height,
             texels: isCompressed(desc.Format)
                 ? decodeCompressed(bytes, desc.Format, desc.Width, desc.Height)
-                : expandTexels(desc.Format, tightRows(bytes, desc.Format, desc.Width,
-                    desc.Height, surface.pitch), desc.Width * desc.Height, float32),
+                : texelsFrom(bytes, desc.Format, desc.Width, desc.Height, surface.pitch,
+                    desc.Width * desc.Height, true),
         }, true);
         return made;
     };
@@ -5719,6 +5738,26 @@ export function createRenderer(options){
                 y: upload.y ?? 0, z: upload.layer ?? 0 } } : {}),
             ...(upload.depth ? { depthOrArrayLayers: upload.depth } : {}),
         });
+    };
+
+    /**
+     * Texels as the backend takes them, from rows read where they lie in guest
+     * memory: a format that is widened is widened straight from there into
+     * bytes of its own, and one taken as it lies goes as the view, which an
+     * upload copies before it returns; one that waits in the frame's order,
+     * or that a dump keeps, is copied once.
+     *
+     * @param {Uint8Array} view  the rows, a window on guest memory
+     * @param {number} format @param {number} width @param {number} rows
+     * @param {number | undefined} pitch  bytes from one row's start to the next
+     * @param {number} count  texels in all
+     * @param {boolean} keeps  whether what is answered is kept past the call
+     * @returns {Uint8Array}
+     */
+    const texelsFrom = (view, format, width, rows, pitch, count, keeps)=>{
+        const texels = expandTexels(format, tightRows(view, format, width, rows, pitch), count,
+            float32);
+        return keeps && texels.buffer === view.buffer ? texels.slice() : texels;
     };
 
     /** @param {any} buffer a d3d8 vertex or index buffer */
@@ -5902,12 +5941,12 @@ export function createRenderer(options){
         }
         held.volume.release();
         const depth = levelExtent(record.depth, level);
-        const bytes = readMemory(held.volume.base, held.volume.slicePitch * depth);
+        const bytes = windowMemory(held.volume.base, held.volume.slicePitch * depth);
         uploadTexels(record.gpu, {
             format: gpuFormatOf(record.format, record.width, record.height, false, float32),
             mipLevel: level, width, height, depth,
-            texels: expandTexels(record.format, tightRows(bytes, record.format, width,
-                height * depth), width * height * depth, float32),
+            texels: texelsFrom(bytes, record.format, width, height * depth, undefined,
+                width * height * depth, ordered),
         }, ordered);
         (record.written ??= new Set()).add(level);
     };
@@ -6012,10 +6051,39 @@ export function createRenderer(options){
                     continue;
                 }
                 held.surface.release();
-                // A level decoded here is read where it lies: the decoder is
-                // done with it before the guest runs again.
+                // Read where it lies, unless its blocks go up as they are: a
+                // decoder or a widening is done with it before the guest runs
+                // again, and makes bytes of its own.
                 const decodes = isCompressed(record.format) && !keepsBlocks;
-                const bytes = (decodes ? windowMemory : readMemory)(held.surface.base,
+                const keeps = ordered || dumpDraws;
+                const part = isCompressed(record.format) ? undefined
+                    : record.dirtyRects.get(subresource);
+                const texel = FORMAT_INFO[record.format]?.bytesPerPixel ?? 0;
+                const pitch = held.surface.pitch;
+                // A rectangle's rows alone, read and widened, where all of the
+                // level is not wanted here: a dump takes the whole of it, and
+                // a level small enough keeps its texels whole (`tails`).
+                if (part && part.right > part.left && part.bottom > part.top && texel > 0
+                    && part.right <= width && part.bottom <= height
+                    && !dumpDraws && width * height > 16)
+                {
+                    const across = part.right - part.left;
+                    const rows = part.bottom - part.top;
+                    const view = windowMemory(held.surface.base + part.top * pitch
+                        + part.left * texel, (rows - 1) * pitch + across * texel);
+                    uploadTexels(record.gpu, { format: gpuFormat, mipLevel: level,
+                        width: across, height: rows,
+                        texels: texelsFrom(view, record.format, across, rows, pitch,
+                            across * rows, keeps),
+                        layer: face, x: part.left, y: part.top }, ordered);
+                    if (level === 0)
+                    {
+                        markMips(record);
+                    }
+                    (record.written ??= new Set()).add(level);
+                    continue;
+                }
+                const bytes = (keepsBlocks && keeps ? readMemory : windowMemory)(held.surface.base,
                     surfaceBytes(record.format, width, height));
                 // Compressed blocks go as they lie when the surface stayed a
                 // BC texture; a compressed base too narrow or short for a
@@ -6029,32 +6097,11 @@ export function createRenderer(options){
                     ? bytes
                     : decodes
                         ? decodeCompressed(bytes, record.format, width, height, room)
-                        : expandTexels(record.format, tightRows(bytes, record.format, width,
-                            height, held.surface.pitch), width * height, float32);
-                const part = isCompressed(record.format) ? undefined
-                    : record.dirtyRects.get(subresource);
-                if (part && part.right > part.left && part.bottom > part.top)
-                {
-                    // The rectangle alone: what lies around it on the GPU is
-                    // what was uploaded before.
-                    const texel = texels.byteLength / (width * height);
-                    const across = (part.right - part.left) * texel;
-                    const rows = new Uint8Array(across * (part.bottom - part.top));
-                    for (let y = part.top; y < part.bottom; y++)
-                    {
-                        rows.set(texels.subarray((y * width + part.left) * texel,
-                            (y * width + part.left) * texel + across), (y - part.top) * across);
-                    }
-                    uploadTexels(record.gpu, { format: gpuFormat, mipLevel: level,
-                        width: part.right - part.left, height: part.bottom - part.top,
-                        texels: rows, layer: face, x: part.left, y: part.top }, ordered);
-                }
-                else
-                {
-                    uploadTexels(record.gpu,
-                        { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
-                        ordered);
-                }
+                        : texelsFrom(bytes, record.format, width, height, pitch, width * height,
+                            keeps);
+                uploadTexels(record.gpu,
+                    { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
+                    ordered);
                 if (level === 0)
                 {
                     markMips(record);
@@ -9766,18 +9813,6 @@ export function createRenderer(options){
     const INDEX16 = Object.freeze({ gpu: 'uint16', bytes: 2 });
     const INDEX32 = Object.freeze({ gpu: 'uint32', bytes: 4 });
 
-    /**
-     * @param {Uint8Array} bytes
-     * @param {number} elementBytes
-     * @returns {Uint16Array | Uint32Array}
-     */
-    const indicesFrom = (bytes, elementBytes)=>{
-        // Copied, so that the view is aligned whatever offset the bytes came in at.
-        const copy = bytes.slice();
-        return elementBytes === 2
-            ? new Uint16Array(copy.buffer, 0, copy.byteLength >>> 1)
-            : new Uint32Array(copy.buffer, 0, copy.byteLength >>> 2);
-    };
 
     /**
      * Counts a buffer draw's shape (`counters.shapes`).
@@ -10020,15 +10055,8 @@ export function createRenderer(options){
         {
             return false;
         }
-        const raw = bytes();
-        const words = format.bytes === 2
-            ? (raw.byteOffset % 2 === 0
-                ? new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength >> 1)
-                : new Uint16Array(raw.slice().buffer, 0, raw.byteLength >> 1))
-            : (raw.byteOffset % 4 === 0
-                ? new Uint32Array(raw.buffer, raw.byteOffset, raw.byteLength >> 2)
-                : new Uint32Array(raw.slice().buffer, 0, raw.byteLength >> 2));
-        return !words.includes(format.bytes === 2 ? 0xffff : 0xffffffff);
+        return !indicesFrom(bytes(), format.bytes)
+            .includes(format.bytes === 2 ? 0xffff : 0xffffffff);
     };
 
     /**
