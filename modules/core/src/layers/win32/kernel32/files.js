@@ -567,7 +567,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write', 'p
  * @property {(path: string, id: number) => string | null} pathOfFileId
  *           Where the file numbered `id` is on the volume `path` is on.
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
- * @property {(node: any, offset: number, length: number, onlyCopied?: boolean) =>
+ * @property {(node: any, offset: number, length: number) =>
  *     Uint8Array | Promise<Uint8Array>} read
  *           Short at the end of the file; empty past it, which is not an error.
  *           A promise when the bytes are not resident yet -- see ReadFile.
@@ -873,14 +873,11 @@ export function withSystemLibraries(real, libraries, where = {}){
          * @param {any} node
          */
         standInImage: node=>opened.get(node)?.image ?? null,
-        /**
-         * @param {any} node @param {number} offset @param {number} length
-         * @param {boolean} [onlyCopied]
-         */
-        read: (node, offset, length, onlyCopied)=>{
+        /** @param {any} node @param {number} offset @param {number} length */
+        read: (node, offset, length)=>{
             const image = opened.get(node)?.image;
             return image ? image.slice(offset, offset + length)
-                : real.read(node, offset, length, onlyCopied);
+                : real.read(node, offset, length);
         },
         /** @param {any} node */
         retain: node=>{

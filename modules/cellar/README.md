@@ -1,4 +1,4 @@
-# `@bottlify/cache`
+# Cellar (`@bottlify/cellar`)
 
 One cache for every thread of a page. Bodies live in shared memory and are read in place by name,
 from any worker, without a message. One keeper thread places them under one budget, moves idle
@@ -10,7 +10,7 @@ Status: the core and its concurrency gate; not yet published.
 ## Install
 
 ```sh
-npm install @bottlify/cache
+npm install @bottlify/cellar
 ```
 
 ## Use
@@ -18,7 +18,7 @@ npm install @bottlify/cache
 The keeper runs in one thread. It hands out the index and the segments every thread reads:
 
 ```js
-import { openKeeper } from '@bottlify/cache';
+import { openKeeper } from '@bottlify/cellar';
 
 const keeper = await openKeeper({
     budget: 256 << 20,           // bytes of shared memory for hot bodies, at most
@@ -33,7 +33,7 @@ Each thread reads through a reader. It reaches the keeper only for room to write
 to be brought back from the disk, through whatever blocking call its threads already have:
 
 ```js
-import { createReader } from '@bottlify/cache';
+import { createReader } from '@bottlify/cellar';
 
 const cache = createReader({ shared, segments, keeper: calls });
 self.onmessage = event=>cache.adopt(event.data);   // segments made and let go

@@ -15,7 +15,10 @@ import assert from 'node:assert/strict';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createSessionSource } from '../../filesystem/internal/session-source.js';
 import { PIECE_SIZE } from '../../filesystem/internal/memory-store.js';
-import { createVolume, FETCHED_PIECE_BYTES, KEPT_IDLE_MS, KEPT_READ_BYTES, KEPT_READ_MIN,
+import { createCacheModule } from '../../cache/module.js';
+import { openKeeper } from '../../../../vendor/cellar/keeper.js';
+import { createReader } from '../../../../vendor/cellar/reader.js';
+import { createVolume, FETCHED_PIECE_BYTES, KEPT_PART_BYTES, KEPT_READ_MIN,
     MISS_FETCHES } from './vfs.js';
 
 async function volume(){
@@ -640,12 +643,38 @@ test('a name renamed to itself in other letters is respelled, its contents kept'
 });
 
 /**
- * A volume whose filesystem reads are counted, on a clock the test moves, and
- * a file of `size` bytes in it, written long enough ago to be trusted.
- *
- * @param {number} size
+ * The run's cache as a test makes it: a keeper on this thread over a small
+ * budget, a clock the test moves, and the `reads` space a volume keeps in.
  */
-async function countedVolume(size){
+async function runCache(){
+    const clock = { time: 0 };
+    /** @type {any} */
+    let reader = null;
+    const keeper = await openKeeper({
+        budget: 64 << 20, segmentBytes: 16 << 20, coldAfterMs: 1000, now: ()=>clock.time,
+        announce: message=>reader?.adopt(message),
+    });
+    reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
+        keeper: {
+            reserve: (name, length, options)=>keeper.reserve(name, length, options),
+            raise: name=>keeper.raise(name),
+            raiseLater: ()=>{},
+            drop: name=>{
+                keeper.drop(name);
+            },
+        } });
+    const cache = await createCacheModule().create({ reader });
+    return { keeper, clock, space: ()=>cache.space('reads') };
+}
+
+/**
+ * A volume whose filesystem reads are counted, on a clock the test moves, and
+ * a file of `size` bytes in it, written long enough ago to be trusted; its
+ * ranges read again kept in `kept`.
+ *
+ * @param {number} size @param {any} [kept] @param {(at: number) => number} [byte]
+ */
+async function countedVolume(size, kept = undefined, byte = ()=>1){
     const fs = await filesystemModule.create({});
     const counted = { reads: 0, time: 1e9 };
     const reading = Object.create(fs);
@@ -653,13 +682,14 @@ async function countedVolume(size){
         counted.reads++;
         return fs.read(node, length);
     };
-    const vol = /** @type {any} */ (createVolume(reading, null, { now: ()=>counted.time }));
+    const vol = /** @type {any} */ (createVolume(reading, null,
+        { now: ()=>counted.time, ...kept ? { kept } : {} }));
     const path = 'C:\\game.exe';
     const node = vol.open(path, { read: true, write: true, create: true });
-    vol.write(node, 0, new Uint8Array(size).fill(1));
+    vol.write(node, 0, Uint8Array.from({ length: size }, (_, at)=>byte(at)));
     const settled = ()=>vol.setModified(path, counted.time - 60000);
     settled();
-    return { vol, node, counted, settled };
+    return { vol, node, counted, settled, fs };
 }
 
 test('a large range read again is kept; a write makes the next one fresh', async()=>{
@@ -667,12 +697,13 @@ test('a large range read again is kept; a write makes the next one fresh', async
     // each map decoded the file's blocks again. What tells a kept copy is
     // still the file is its identity, size and last write.
     const size = KEPT_READ_MIN * 2;
-    const { vol, node, counted, settled } = await countedVolume(size);
+    const cache = await runCache();
+    const { vol, node, counted, settled } = await countedVolume(size, cache.space());
 
     vol.read(node, 0, size);
-    assert.deepEqual(vol.held(), { keptReads: 0 }, 'read once: nothing kept');
+    assert.equal(cache.keeper.figures().hot, 0, 'read once: nothing kept');
     const second = vol.read(node, 0, size);
-    assert.deepEqual(vol.held(), { keptReads: size }, 'read again: kept');
+    assert.equal(cache.keeper.figures().hotBytes, size, 'read again: kept');
     second[0] = 7;
     assert.equal(vol.read(node, 0, size)[0], 1,
         'a caller writing into its copy changes nothing kept');
@@ -694,48 +725,81 @@ test('a large range read again is kept; a write makes the next one fresh', async
     vol.close(node);
 });
 
+test('without a cache a range read again is read again', async()=>{
+    const size = KEPT_READ_MIN * 2;
+    const { vol, node, counted } = await countedVolume(size);
+    for (let i = 0; i < 3; i++)
+    {
+        vol.read(node, 0, size);
+    }
+    assert.equal(counted.reads, 3);
+    vol.close(node);
+});
+
 test('a file read through once in large pieces keeps none of them', async()=>{
     // A setup extracting a cabinet reads it a mebibyte at a time, each piece
     // once: keeping them held a quarter of a gibibyte a process.
     const size = KEPT_READ_MIN * 40;
-    const { vol, node, counted } = await countedVolume(size);
+    const cache = await runCache();
+    const { vol, node, counted } = await countedVolume(size, cache.space());
     for (let at = 0; at < size; at += KEPT_READ_MIN)
     {
         vol.read(node, at, KEPT_READ_MIN);
     }
     assert.equal(counted.reads, 40);
-    assert.deepEqual(vol.held(), { keptReads: 0 });
+    assert.equal(cache.keeper.figures().hot, 0);
     vol.close(node);
 });
 
-test('kept ranges share a small pool, and one past it is kept alone', async()=>{
-    const piece = KEPT_READ_MIN * 4;
-    const pieces = KEPT_READ_BYTES / piece;
-    const { vol, node } = await countedVolume(KEPT_READ_BYTES * 2);
-    for (let at = 0; at <= pieces; at++)
-    {
-        vol.read(node, at * piece, piece);
-        vol.read(node, at * piece, piece);
-    }
-    assert.equal(vol.held().keptReads, KEPT_READ_BYTES, 'the oldest let go past the pool');
-
-    const whole = KEPT_READ_BYTES * 2;
-    vol.read(node, 0, whole);
-    vol.read(node, 0, whole);
-    assert.equal(vol.held().keptReads, whole, 'everything else let go for it');
+test('a range larger than a part is kept in parts and read back whole', async()=>{
+    const size = KEPT_PART_BYTES * 2 + 4097;
+    const cache = await runCache();
+    const byte = (/** @type {number} */ at)=>(at * 31 + (at >>> 13)) & 255;
+    const { vol, node, counted } = await countedVolume(size, cache.space(), byte);
+    vol.read(node, 0, size);
+    vol.read(node, 0, size);
+    assert.equal(cache.keeper.figures().hot, 3, 'three parts');
+    const kept = vol.read(node, 0, size);
+    assert.equal(counted.reads, 2, 'the third read was the kept one');
+    assert.ok(kept.every((/** @type {number} */ value, /** @type {number} */ at)=>value === byte(at)),
+        'whole, every byte where it was');
     vol.close(node);
+});
+
+test('a process of the run reads at once the range another process kept', async()=>{
+    // Each process has a volume of its own; the cache is the run's. An engine's
+    // child mapping the executable its parent mapped twice reads no block.
+    const size = KEPT_READ_MIN * 2;
+    const cache = await runCache();
+    const first = await countedVolume(size, cache.space());
+    first.vol.read(first.node, 0, size);
+    first.vol.read(first.node, 0, size);
+    // Closed, as a process that ended or let go of it: another opens it.
+    first.vol.close(first.node);
+    const other = /** @type {any} */ (createVolume(Object.assign(Object.create(first.fs), {
+        read: ()=>{
+            throw new Error('read past the cache');
+        },
+    }), null, { now: ()=>first.counted.time, kept: cache.space() }));
+    const node = other.open('C:\\game.exe', { read: true });
+    assert.equal(other.read(node, 0, size).length, size, 'from the run\'s cache');
+    other.close(node);
 });
 
 test('a kept range not read again for a while is let go', async()=>{
     const size = KEPT_READ_MIN * 2;
-    const { vol, node, counted } = await countedVolume(size);
+    const cache = await runCache();
+    const { vol, node, counted } = await countedVolume(size, cache.space());
     vol.read(node, 0, size);
     vol.read(node, 0, size);
-    counted.time += KEPT_IDLE_MS / 2;
+    cache.clock.time += 500;
+    cache.keeper.sweep();
     vol.read(node, 0, size);
     assert.equal(counted.reads, 2, 'read within the idle time: kept');
-    counted.time += KEPT_IDLE_MS + 1;
-    vol.read(node, 0, 100);
-    assert.deepEqual(vol.held(), { keptReads: 0 }, 'let go at the next read after it');
+    cache.clock.time += 1001;
+    cache.keeper.sweep();
+    assert.equal(cache.keeper.figures().hot, 0, 'let go after it');
+    vol.read(node, 0, size);
+    assert.equal(counted.reads, 3);
     vol.close(node);
 });

@@ -58,6 +58,7 @@ is ignored; `executors`, the older name of `cpu.cores`, is refused.
 | `gpuProfile` | `'sm1'` \| `'sm2'` \| `'sm3'` \| `'sm4'` \| `'host'` | `'host'` | The card the video adapter is shown as ([configuration.md](configuration.md#graphics)). |
 | `memorySize` | number | 1 GiB | The program's RAM in bytes, up to 4 GiB: a limit on what each process is given, not its address space; a process's memory grows to what its program takes ([configuration.md](configuration.md#cpu)). |
 | `machineMemory` | number | none | The tab's memory in bytes: the guest's memories, the engine's own and the translations never hold more together ([configuration.md](configuration.md#cpu)). |
+| `cache` | `{ budget }` | `{ budget: 160 MiB }` | The run's cache (Cellar): bodies every process of the run reads in place from shared memory, today the ranges of files a process read twice. `budget` is the bytes of shared memory it holds them in at most; past it the least recently read go, and a body unread for 30 s goes. Counted among the heaps ([configuration.md](configuration.md#memory-zones)). |
 | `machineWaitMs` | number | 600000 | How long a process asked for while the tab's memory is full waits for another to end before it fails to start with STATUS_NO_MEMORY. |
 | `cpu` | `{ cores?, grow? }` | automatic | The program's processors ([configuration.md](configuration.md#cpu)). |
 | `win32` | `{ trustedRoots?, steam? }` | none | The machine's trusted roots and a Steam account ([configuration.md](configuration.md#win32)). |

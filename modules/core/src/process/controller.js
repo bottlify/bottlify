@@ -12,7 +12,7 @@ import { liveDumpOf } from './live-dump.js';
 import { jumpBytes, relocatablePrefix } from '../layers/loader/internal/hooks.js';
 import { portTranslator } from '../host/pool/pool.js';
 import { readProgramImage } from './system-host.js';
-import { NOT_MEASURED, withZones } from '../memory-zones.js';
+import { withZones } from '../memory-zones.js';
 import { captureTrace, formatTrace } from '../trace.js';
 import {
     HOST_ANSWER_TICKS, IDLE_LOOK_MS, SOUND_PUMP_MS, answeringWhile, idleWait,
@@ -1320,14 +1320,15 @@ export function processController(deps){
                         pacing: /** @type {any} */ (pacing).counts?.() ?? null,
                         // What the program holds of its RAM, the bundle's pools,
                         // where this process mounted it (a bundle the run's system
-                        // mounted is the system's to report), and its volume's
-                        // ranges kept for a read again.
+                        // mounted is the system's to report), and the run's cache
+                        // where its keeper is on this thread (a process in a
+                        // worker of its own holds none of it).
                         bytesHeld: {
                             guest: guestHeld(),
                             heaps: {
                                 ...mountedBlocks() ? blocks()?.held?.() ?? {} : {},
-                                ...core.api('win32')?.volumeHeld?.()
-                                    ?? { keptReads: NOT_MEASURED },
+                                ...options.cache?.figures
+                                    ? { cache: options.cache.figures().segmentBytes } : {},
                             },
                         },
                     },

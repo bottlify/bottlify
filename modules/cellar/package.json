@@ -1,14 +1,14 @@
 {
-  "name": "@bottlify/cache",
+  "name": "@bottlify/cellar",
   "version": "0.1.0",
   "type": "module",
   "license": "MPL-2.0",
   "description": "One cache for every thread of a page: bodies in shared memory read in place by name, one budget, idle bodies on OPFS",
-  "homepage": "https://github.com/bottlify/bottlify/tree/main/modules/cache#readme",
+  "homepage": "https://github.com/bottlify/bottlify/tree/main/modules/cellar#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/bottlify/bottlify.git",
-    "directory": "modules/cache"
+    "directory": "modules/cellar"
   },
   "bugs": {
     "url": "https://github.com/bottlify/bottlify/issues"

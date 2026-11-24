@@ -23,6 +23,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { win32Module } from './module.js';
+import { noCache } from '../cache/module.js';
 
 /** SM_CXSCREEN and SM_CYSCREEN, the two a program sizes itself from. */
 const SM_CXSCREEN = 0;
@@ -92,6 +93,8 @@ function stubHost(){
             drives: ()=>[],
             stat: ()=>null,
         },
+        // No run's cache: every read is a miss.
+        cache: noCache,
     };
     return /** @type {any} */ ({
         /** @param {string} name */

@@ -1,0 +1,12 @@
+{
+  "name": "@bottlify/cellar",
+  "version": "0.1.0",
+  "source": "modules/cellar",
+  "files": {
+    "buddy.js": "c867b1fae65549b5fe52a6e21e26fefd93ca88ab9b9d76dcd6d3f9e5c73a26be",
+    "index.js": "46a463386fd5e0cb5a97cd1cc0da4980ec2621e3f89d0f65b30cef9f8237baa2",
+    "keeper.js": "91d86bc0b05b157e81012c3c66db63cb401838abfe674416eaaca6368fcaaf09",
+    "reader.js": "4895f6022b3f04ceb0c06f5233a1e8ebb603bcb5555d6501467c50d60cf4fb27",
+    "shared.js": "f67c91ca4dd5d32c608fbfc393326d3150dfea0782f0d5937d7a45d88d15b148"
+  }
+}

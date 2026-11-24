@@ -40,29 +40,23 @@ export const FETCHED_PIECE_BYTES = 8 << 20;
 /** How many times a read or write fetches blocks it fetched before and misses again before it fails (`fetchedAgain`). */
 export const MISS_FETCHES = 4;
 /**
- * Large reads kept whole, by the file's identity, size and last write, once
- * the same range is read a second time: an engine maps its own executable,
- * reads its tables and unmaps it hundreds of times while it loads, and each
- * map decoded every bundle block of it again (a second a time for 111 MB).
- * Only a second read keeps: a setup extracting a cabinet reads it once, a
- * mebibyte a batch, and keeping each batch held a quarter of a gibibyte a
- * process of bytes nothing read again. Ranges read again share this pool,
- * the least recently read let go first.
- */
-export const KEPT_READ_BYTES = 32 << 20;
-/**
- * One range read again larger than the pool is kept alone, everything else let
- * go for it, up to this: the executable mapped whole again and again.
+ * Large reads kept whole in the run's cache (the `cache` layer's space
+ * `reads`), by the file's identity, size and last write, once the same range
+ * is read a second time: an engine maps its own executable, reads its tables
+ * and unmaps it hundreds of times while it loads, and each map decoded every
+ * bundle block of it again (a second a time for 111 MB). Only a second read
+ * keeps: a setup extracting a cabinet reads it once, a mebibyte a batch, and
+ * keeping each batch held a quarter of a gibibyte a process of bytes nothing
+ * read again. The cache's budget bounds them and its idle time lets them go;
+ * every process of the run reads what one of them kept.
+ *
+ * Up to this many bytes a range: the executable mapped whole again and again.
  */
 export const KEPT_READ_LARGEST = 128 << 20;
 /** A read smaller than this costs less than keeping it. */
 export const KEPT_READ_MIN = 1 << 20;
-/**
- * A kept range not read again for this long is let go at the next read: what
- * was read twice at a start and never after holds nothing for the rest of
- * the run.
- */
-export const KEPT_IDLE_MS = 30000;
+/** A range is kept in parts of this many bytes at most, each a body of the cache's. */
+export const KEPT_PART_BYTES = 8 << 20;
 /** How many large ranges read once are remembered, by key alone, to tell a second read. */
 const SEEN_READS = 256;
 /**
@@ -70,6 +64,11 @@ const SEEN_READS = 256;
  * writes in one millisecond carry the same stamp.
  */
 const SETTLED_MS = 2000;
+
+/** A volume with no cache to keep reads in. @type {import('../../cache/module.js').CacheSpace} */
+const KEEP_NOTHING = Object.freeze({
+    look: ()=>null, with: ()=>undefined, put: ()=>false, drop: ()=>{},
+});
 
 const CHANGE_FILE_NAME = 0x001;
 const CHANGE_DIR_NAME = 0x002;
@@ -100,10 +99,12 @@ export const FILE_ACTION_RENAMED_NEW_NAME = 5;
  * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
  *        Brings absent bundle blocks in. Absent itself when nothing is mounted
  *        from a bundle, in which case a miss is a fault rather than a wait.
- * @param {{ now?: () => number }} [options]  `now`: the clock reads are kept
- *        by and a last write is aged against, in milliseconds (`Date.now`).
+ * @param {{ now?: () => number,
+ *     kept?: import('../../cache/module.js').CacheSpace }} [options]
+ *        `now`: the clock a last write is aged against, in milliseconds
+ *        (`Date.now`); `kept`: where ranges read again are kept (none: never)
  */
-export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
+export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KEEP_NOTHING } = {}){
     const { ErrorCode, Disposition, SeekFrom } = fs;
 
     /**
@@ -349,12 +350,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
 
     /** The path each node was opened by, for its version. @type {WeakMap<any, string>} */
     const pathOf = new WeakMap();
-    /**
-     * Kept reads, the least recently read first, each with when it was read
-     * last. @type {Map<string, { bytes: Uint8Array, at: number }>}
-     */
-    const kept = new Map();
-    let keptBytes = 0;
     /** Large ranges read once, by key: a second read of one keeps it. @type {Set<string>} */
     const seen = new Set();
     /**
@@ -370,33 +365,48 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             ? `${entry.identity ?? entry.path}|${entry.size}|${entry.modified}|${offset}|${length}`
             : null;
     };
-    /** @param {string} key */
-    const letGo = key=>{
-        keptBytes -= /** @type {{ bytes: Uint8Array }} */ (kept.get(key)).bytes.length;
-        kept.delete(key);
-    };
-    /** Lets go of what was not read again for `KEPT_IDLE_MS`. @param {number} time */
-    const expire = time=>{
-        for (const [key, held] of kept)
+    /** @param {string} key @param {number} part */
+    const partOf = (key, part)=>`${key}#${part}`;
+    /**
+     * A range kept by any process of the run, read out of the cache into bytes
+     * of the caller's own; null where any part of it is not there.
+     *
+     * @param {string} key @param {number} length
+     */
+    const keptRead = (key, length)=>{
+        if (kept.look(partOf(key, 0)) === null)
         {
-            if (time - held.at <= KEPT_IDLE_MS)
-            {
-                break;
-            }
-            letGo(key);
+            return null;
         }
+        const out = new Uint8Array(length);
+        for (let at = 0, part = 0; at < length; at += KEPT_PART_BYTES, part++)
+        {
+            const want = Math.min(KEPT_PART_BYTES, length - at);
+            const whole = kept.with(partOf(key, part), body=>{
+                if (body.length !== want)
+                {
+                    return false;
+                }
+                out.set(body, at);
+                return true;
+            });
+            if (whole !== true)
+            {
+                return null;
+            }
+        }
+        return out;
     };
     /**
-     * Keeps a read when its range was read before, and answers whether it
-     * did: what is kept is handed out only as a copy, or as it is to a
-     * caller that only copies out of it.
+     * Keeps a read when its range was read before: a copy of it, in parts, in
+     * the cache. A part the cache had no room for leaves the range unkept.
      *
      * @param {string | null} key @param {Uint8Array} bytes
      */
     const keep = (key, bytes)=>{
         if (key === null || bytes.length > KEPT_READ_LARGEST)
         {
-            return false;
+            return;
         }
         if (!seen.delete(key))
         {
@@ -405,21 +415,19 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
             {
                 seen.delete(/** @type {string} */ (seen.values().next().value));
             }
-            return false;
+            return;
         }
-        kept.set(key, { bytes, at: now() });
-        keptBytes += bytes.length;
-        // A range past the pool is kept alone.
-        const limit = Math.max(KEPT_READ_BYTES, bytes.length);
-        for (const oldest of kept.keys())
+        for (let at = 0, part = 0; at < bytes.length; at += KEPT_PART_BYTES, part++)
         {
-            if (keptBytes <= limit || oldest === key)
+            if (!kept.put(partOf(key, part), bytes.subarray(at, at + KEPT_PART_BYTES)))
             {
-                break;
+                for (let earlier = 0; earlier < part; earlier++)
+                {
+                    kept.drop(partOf(key, earlier));
+                }
+                return;
             }
-            letGo(oldest);
         }
-        return true;
     };
 
     /** @param {string} path  The volume's own spelling, no trailing separator. */
@@ -686,13 +694,6 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
          */
         openRefusal: ()=>refusedOpen,
 
-        /**
-         * What the volume holds of the tab's heaps (`memory-zones.js`): the
-         * ranges kept for a read again.
-         *
-         * @returns {{ keptReads: number }}
-         */
-        held: ()=>({ keptReads: keptBytes }),
 
         /**
          * @param {string} path
@@ -756,33 +757,28 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now } = {}){
          * fetches them, and the guest thread is parked in the meantime by the
          * same machinery that parks it on any other call that cannot answer yet.
          *
+         * The bytes are the caller's own, kept ones a copy of what the run's
+         * cache holds: whoever reads may write into them or keep them.
+         *
          * @param {any} node @param {number} offset @param {number} length
-         * @param {boolean} [onlyCopied]  the caller copies the bytes out and
-         *        never writes into them, so kept ones come as they are
          * @returns {Uint8Array | Promise<Uint8Array>}
          */
-        read(node, offset, length, onlyCopied = false){
-            const time = now();
-            if (kept.size > 0)
-            {
-                expire(time);
-            }
+        read(node, offset, length){
             const key = keptKey(node, offset, length);
-            const held = key === null ? undefined : kept.get(key);
-            if (held)
+            const held = key === null ? null : keptRead(key, length);
+            if (held !== null)
             {
-                kept.delete(/** @type {string} */ (key));
-                held.at = time;
-                kept.set(/** @type {string} */ (key), held);
-                return onlyCopied ? held.bytes : held.bytes.slice();
+                return held;
             }
             const bytes = this.readFresh(node, offset, length);
-            // Copied out when kept: whoever reads may write into what it got.
             /** @param {Uint8Array} arrived */
-            const kept_ = arrived=>(keep(key, arrived) && !onlyCopied ? arrived.slice() : arrived);
+            const keeping = arrived=>{
+                keep(key, arrived);
+                return arrived;
+            };
             return typeof (/** @type {any} */ (bytes))?.then === 'function'
-                ? /** @type {Promise<Uint8Array>} */ (bytes).then(kept_)
-                : kept_(/** @type {Uint8Array} */ (bytes));
+                ? /** @type {Promise<Uint8Array>} */ (bytes).then(keeping)
+                : keeping(/** @type {Uint8Array} */ (bytes));
         },
 
         /**

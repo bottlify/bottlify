@@ -63,6 +63,9 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   Win32, graphics, sound, networking, storage); `docs/core/` is `@bottlify/core`'s public
   contract (API, configuration, limits), written for someone outside the project;
   `docs/cork/` is the translator. A module's own `README.md` is its npm page and stays short.
+- `modules/cellar` — Cellar, the run's one cache (shared memory read in place, one keeper, idle
+  bodies on OPFS), a project of its own; core carries its sources in `vendor/cellar/`, copied by
+  `node modules/core/scripts/vendor-cellar.mjs` and checked by `check:boundaries`.
 - `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
   derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):
@@ -94,9 +97,9 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   degrades the system without breaking it. `npm run check:boundaries` enforces the graph:
 
   ```
-  log → nothing          cpu, filesystem, media → log          memory → cpu, log
+  log → nothing          cache, cpu, filesystem, media → log          memory → cpu, log
   kernel, loader → cpu, memory, log                 bridge → cpu, kernel, memory, log
-  win32 → bridge, kernel, memory, loader, filesystem, media, log
+  win32 → bridge, kernel, memory, loader, filesystem, media, cache, log
   graphics → win32, bridge, memory, log            audio, input → win32, bridge, memory
   ```
 - **Derived from the specification, not a reference implementation**: contract (ABI, signatures,

@@ -70,6 +70,7 @@ import { mobileOrSafari, tailCallsFault, withoutFaultingTailCalls } from './tail
 import { createModuleTable, pathKey } from './process/module-table.js';
 import { createSystemModules, shapeOf } from './process/system-modules.js';
 import { bindSidecar } from './process/sidecar.js';
+import { openRunCache } from './process/run-cache.js';
 import { processesBeside } from './process/beside.js';
 import { processMemories } from './process/memories.js';
 import { compatibilityOf } from './process/image-resources.js';
@@ -4064,6 +4065,12 @@ export async function createApp(options){
     const translationStore = openedStore && !options.system && (options.concurrency ?? 1) > 1
         && heldModuleBytes > 0 ? withHeldModules(openedStore, heldModuleBytes) : openedStore;
 
+    // The run's cache, its keeper on this thread beside the stores: a process
+    // here reads it through the reader made with it, one in a worker of its own
+    // through a reader there (`processesBeside`). A process joined to a run
+    // across a link is handed the run's reader (`options.cache`).
+    const runCache = options.system ? null : await openRunCache(options.cache);
+
     // The disk under the run's writable layers is the run's, as its volume is:
     // a process in a worker of its own writes through the run's.
     if (!options.system)
@@ -4129,6 +4136,8 @@ export async function createApp(options){
         // One machine for every process of the run: a 32-bit child of a 64-bit
         // program runs under WOW64 on it.
         machine: runMachine,
+        ...runCache === null ? {}
+            : { cache: { reader: runCache.reader, figures: runCache.figures } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,
@@ -4691,7 +4700,7 @@ export async function createApp(options){
         presenter, releaseHolder, replayLogLevels, retire, rootAcross, rootLibraries,
         routedInput, runDesktop, runMachine, runWindows, serverImage, servers, servicesAcross,
         serving, spareMemories, standing, standingAcross, standingBeside, starting, system,
-        translationPool, translationStore,
+        translationPool, translationStore, runCache,
         audioMemory: ()=>audioMemory,
         current: ()=>current,
         imagePath: ()=>imagePath,
@@ -4852,6 +4861,7 @@ export async function createApp(options){
                 // The run's store outlives each machine it was handed to, and
                 // goes with the last of them; the run is gone once its last
                 // records are written and the file let go of.
+                runCache?.close();
                 if (runStoreSpec === 'local')
                 {
                     return translationStore?.close?.();

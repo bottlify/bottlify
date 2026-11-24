@@ -5,7 +5,7 @@
  */
 
 /**
- * @bottlify/cache - one cache for every thread of a page: bodies in shared
+ * @bottlify/cellar - one cache for every thread of a page: bodies in shared
  * memory read in place by name, one keeper thread placing them, a budget for
  * all of them, idle bodies on the disk (OPFS) and brought back on demand.
  */

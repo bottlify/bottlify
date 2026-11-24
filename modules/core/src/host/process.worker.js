@@ -33,6 +33,7 @@ import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
+import { remoteCacheReader } from '../process/run-cache.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {
@@ -102,7 +103,8 @@ export const plainOf = (read, failed = ()=>null)=>{
  *     volume?: import('../layers/filesystem/internal/volume-link.js').VolumeMemory | null,
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
- *     windowCells?: Int32Array | null, memories?: any[] }} start
+ *     windowCells?: Int32Array | null, memories?: any[],
+ *     cache?: { shared: any, segments: (SharedArrayBuffer | null)[] } | null }} start
  *     `memories`: the run's memories of gone processes (`SpareMemory`) the
  *     process takes from, and puts its own back into as it goes
  * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any,
@@ -112,7 +114,7 @@ export const plainOf = (read, failed = ()=>null)=>{
  */
 export async function serveProcess(start){
     const { end, volume, graphics, display, options, run, windowCells = null,
-        memories = [] } = start;
+        memories = [], cache = null } = start;
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
     const link = openLink(end, handlers);
@@ -148,6 +150,15 @@ export async function serveProcess(start){
     };
     /** @param {string} target @param {string} method @param {any[]} args */
     const ask = (target, method, args)=>link.callWaiting(target, method, args);
+    // The run's cache, read here in place, its keeper asked across the link.
+    const cacheReader = cache === null ? null : remoteCacheReader(cache, {
+        ask: (method, args)=>ask('cache', method, args),
+        call: (method, args)=>link.call('cache', method, args),
+    });
+    if (cacheReader !== null)
+    {
+        cacheReaders.add(cacheReader);
+    }
     const system = remoteSystem(ask, handlers, (target, method, args)=>
         link.call(target, method, args), volume, windowCells);
     // A wait on another process's object ended there: its word comes in
@@ -260,6 +271,7 @@ export async function serveProcess(start){
             // The translator rings the link's bell after each batch it posts, so
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
+            ...cacheReader === null ? {} : { cache: { reader: cacheReader } },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'
@@ -275,6 +287,10 @@ export async function serveProcess(start){
     }
     catch (e){
         madeNow();
+        if (cacheReader !== null)
+        {
+            cacheReaders.delete(cacheReader);
+        }
         link.close();
         await serving;
         throw e;
@@ -324,6 +340,10 @@ export async function serveProcess(start){
     finally
     {
         await app.dispose();
+        if (cacheReader !== null)
+        {
+            cacheReaders.delete(cacheReader);
+        }
         link.close();
         await serving;
         graphics?.postMessage({ type: 'close' });
@@ -362,6 +382,9 @@ const lendings = [];
  */
 let toRun = null;
 
+/** The readers of the run's cache in this worker, each told of the segments the keeper makes and lets go. @type {Set<import('../../vendor/cellar/reader.js').Reader>} */
+const cacheReaders = new Set();
+
 /**
  * @param {(handler: (data: any) => void) => void} listen
  * @param {(message: any) => void} send
@@ -371,6 +394,14 @@ const bind = (listen, send)=>{
     listen(data=>{
         // A worker of the run's translation pool, lent to this process or asked
         // back: taken by the machine, or kept until the machine is built.
+        if (data?.type === 'cache')
+        {
+            for (const reader of cacheReaders)
+            {
+                reader.adopt(data.message);
+            }
+            return;
+        }
         if (data?.type === 'translator' || data?.type === 'recall')
         {
             lendings.push(data);

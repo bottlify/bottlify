@@ -44,6 +44,7 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { isMain } from '../lib/common.mjs';
+import { noCache } from '../../modules/core/src/layers/cache/module.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -285,6 +286,8 @@ async function build(){
     const apis = {
         memory,
         filesystem,
+        // The run's cache as a machine built alone has it: none, every read a miss.
+        cache: noCache,
         log: standIn('log', { enabled: ()=>false, Level: {}, write: ()=>{} }),
         kernel: standIn('kernel', {
             // Where the win32 layer lends the pool its thread stacks, at create.

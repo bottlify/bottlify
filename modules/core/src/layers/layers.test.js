@@ -10,6 +10,7 @@ import { assembleModules } from '../core.js';
 
 const ALL_LAYERS = [
     'log',
+    'cache',
     'cpu',
     'memory',
     'kernel',
@@ -25,7 +26,7 @@ const ALL_LAYERS = [
 
 /** Layers with a real implementation; the rest are still stubs. */
 const IMPLEMENTED = [
-    'log', 'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'media', 'win32',
+    'log', 'cache', 'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'media', 'win32',
     'graphics', 'audio', 'input',
 ];
 

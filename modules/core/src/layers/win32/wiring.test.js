@@ -20,6 +20,7 @@ import { win32Module } from './module.js';
 import { filesystemModule } from '../filesystem/module.js';
 import { createMemoryModule } from '../memory/module.js';
 import { certificates, NOW, signedCabinet } from './wintrust/fixtures.test.js';
+import { noCache } from '../cache/module.js';
 
 const ARENA = { base: 0x100000, size: 0x200000 };
 
@@ -98,6 +99,8 @@ function hostOver(replace = {}){
             label: ()=>{},
         },
         filesystem: replace.filesystem ?? { drives: ()=>[], stat: ()=>null },
+        // No run's cache: every read is a miss.
+        cache: noCache,
     };
     if (replace.memory)
     {

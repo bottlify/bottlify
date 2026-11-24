@@ -302,6 +302,11 @@
  * @property {any} [system]  The run's system half -- registry, volume, windows, ids, named
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
+ * @property {{ budget?: number, reader?: any, figures?: () => any }} [cache]  The run's
+ *           cache (Cellar): `budget`, the bytes of shared memory it holds bodies in at most
+ *           (`RUN_CACHE_BYTES` by default); `reader`, the reader a process reads it through,
+ *           and `figures`, its keeper's, where the keeper is on the process's thread --
+ *           both set by the run, not by its caller.
  * @property {(name: string, payload: any) => void} [relay]
  *           Told every event this process emits, for a process in a worker of its own
  *           to tell the bus of the run that started it.

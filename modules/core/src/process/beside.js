@@ -43,7 +43,7 @@ export function processesBeside(deps){
         presenter, releaseHolder, replayLogLevels, retire, rootAcross, rootLibraries,
         routedInput, runDesktop, runMachine, runWindows, serverImage, servers, servicesAcross,
         serving, spareMemories, standing, standingAcross, standingBeside, starting, system,
-        translationPool, translationStore,
+        translationPool, translationStore, runCache,
     } = deps;
     const {
         audioMemory, current, imagePath, logSequence, own, runOptionsNow,
@@ -260,6 +260,8 @@ export function processesBeside(deps){
             pipes,
             // The run's translation store, which only this thread can hold open.
             ...translationStore ? storeHandlers(translationStore) : {},
+            // The run's cache, whose keeper only this thread runs.
+            ...runCache ? runCache.handlers : {},
             process: {
                 output: (/** @type {number} */ handle, /** @type {string} */ text)=>
                     events.emit('output', { handle, text }),
@@ -327,9 +329,12 @@ export function processesBeside(deps){
          *
          * @type {{ worker: import('../host/process-worker.js').ProcessWorker | null,
          *     sound: { giveBack: () => void } | null, shown: { dispose: () => void } | null,
-         *     display: MessageChannel | null, asked: any, holder?: number }}
+         *     display: MessageChannel | null, asked: any, holder?: number,
+         *     cache: { shared: any, segments: (SharedArrayBuffer | null)[],
+         *         leave: () => void } | null }}
          */
-        const held = { worker: null, sound: null, shown: null, display: null, asked: null };
+        const held = { worker: null, sound: null, shown: null, display: null, asked: null,
+            cache: null };
         /** The code it exited with, once it has. @type {number | null} */
         let ended = null;
         try
@@ -370,6 +375,9 @@ export function processesBeside(deps){
             const worker = await openProcessWorker();
             held.worker = worker;
             lending.worker = worker;
+            // The run's cache as the process reads it there, the segments the
+            // keeper makes and lets go told to it as they come.
+            held.cache = runCache?.join((/** @type {any} */ message)=>worker.post({ type: 'cache', message })) ?? null;
             translationPool?.addProcess(request.id, /** @type {PoolProcess} */ ({
                 lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
                 recall: token=>worker.post({ type: 'recall', token }),
@@ -450,6 +458,8 @@ export function processesBeside(deps){
                     // The run's foreground window, focus and captured window,
                     // read where the run keeps them.
                     windowCells: system.windows?.cells ?? null,
+                    cache: held.cache === null ? null
+                        : { shared: held.cache.shared, segments: held.cache.segments },
                     graphics: graphics?.port1 ?? null,
                     display: display?.port2 ?? null,
                     options: {
@@ -502,6 +512,7 @@ export function processesBeside(deps){
             // The worker goes first.
             await teardown([
                 ()=>held.worker?.terminate(),
+                ()=>held.cache?.leave(),
                 // A worker ended without saying so: what it held goes with it.
                 ()=>{
                     if (held.holder !== undefined)

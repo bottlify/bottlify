@@ -655,6 +655,9 @@ export async function layerConfig(deps){
             placeCursor: (x, y)=>core().api('input')?.place?.(x, y),
             cursorAt: ()=>core().api('input')?.cursor?.() ?? null,
         },
+        // The run's cache, read through this process's reader where the run
+        // made one (`app.js`); none, and every space answers a miss.
+        cache: { reader: options.cache?.reader ?? null },
         win32: {
             // A 64-bit process's structures hold 8-byte pointers.
             bits: processBits,

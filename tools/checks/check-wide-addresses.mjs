@@ -57,6 +57,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { isMain } from '../lib/common.mjs';
+import { noCache } from '../../modules/core/src/layers/cache/module.js';
 import { ORIGINAL_EXPORT } from '../../modules/core/src/layers/win32/msvcrt/invalid-parameter.js';
 import { standIn } from './check-guest-pointers.mjs';
 import { checkReturns, pointersOf } from './check-wide-arguments.mjs';
@@ -157,6 +158,8 @@ async function layerAt(base){
     const apis = {
         memory,
         filesystem,
+        // The run's cache as a machine built alone has it: none, every read a miss.
+        cache: noCache,
         log: standIn('log', { enabled: ()=>false, Level: {}, write: ()=>{} }),
         kernel: standIn('kernel', {
             // Where the win32 layer lends the pool its thread stacks, at create.

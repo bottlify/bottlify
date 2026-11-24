@@ -586,6 +586,7 @@ export function createWin32Module(){
             'loader',
             'filesystem',
             'media',
+            'cache',
             'log',
         ]),
 
@@ -1322,7 +1323,9 @@ export function createWin32Module(){
             // Every file call's volume, with the engine's libraries standing in
             // their folders as files of their images (A41).
             // The volume as its files have it, no library of the engine's in it.
-            const filesOnly = createVolume(filesystem, config?.fetchBlocks ?? null);
+            // Ranges read again kept in the run's cache, for every process of it.
+            const filesOnly = createVolume(filesystem, config?.fetchBlocks ?? null,
+                { kept: host.requireApi('cache').space('reads') });
             const volume = withSystemLibraries(
                 filesOnly,
                 ()=>systemLibraryNames(),
@@ -4435,9 +4438,7 @@ export function createWin32Module(){
                              *
                              * @param {any} node @param {number} offset @param {number} length
                              */
-                            // Copied into the view and never written into: a
-                            // kept read comes as it is.
-                            read: (node, offset, length)=>volume.read(node, offset, length, true),
+                            read: (node, offset, length)=>volume.read(node, offset, length),
                             /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                             write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                             /** @param {any} node */
@@ -7853,8 +7854,6 @@ export function createWin32Module(){
                 setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
-                /** What the volume holds of the tab's heaps (`memory-zones.js`), by pool. */
-                volumeHeld: ()=>volume.held(),
                 /**
                  * The last files CreateFile and NtCreateFile would not open, each
                  * with the error and what was asked: a program that goes silent or
