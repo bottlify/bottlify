@@ -16,23 +16,22 @@
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
-import { openLink } from '../../../system/link.js';
+import { caller } from './channel.fixture.js';
 import { createReader } from './reader.js';
 import { hashName } from './shared.js';
 
-const { end, shared, segments, seed, operations, pool } = workerData;
-const link = openLink(end, {});
+const { channel, shared, segments, seed, operations, pool } = workerData;
+const keeper = caller(channel);
 const reader = createReader({
     shared, segments,
     keeper: {
-        reserve: (name, length, options)=>link.callWaiting('cache', 'reserve',
-            [name, length, options], 10_000),
-        raise: name=>link.callWaiting('cache', 'raise', [name], 10_000),
+        reserve: (name, length, options)=>keeper.call('reserve', name, length, options),
+        raise: name=>keeper.call('raise', name),
         raiseLater: name=>{
-            link.call('cache', 'raise', [name]).catch(()=>{});
+            keeper.call('raise', name);
         },
         drop: name=>{
-            link.call('cache', 'drop', [name]).catch(()=>{});
+            keeper.call('drop', name);
         },
     },
 });
@@ -45,6 +44,9 @@ const next = ()=>{
     state ^= state << 5;
     return state >>> 0;
 };
+
+/** How long a reader holds a body between its two passes, in ms. */
+const HOLD_MS = 0.3;
 
 /** @param {number} a @param {number} version @param {number} i */
 const byteAt = (a, version, i)=>(a + version * 7 + i * 13) & 255;
@@ -74,11 +76,20 @@ const check = (name, body)=>{
             }
             now += body[i];
         }
-        if (pass === 1 && now !== sum)
+        if (pass === 1 && (now !== sum || view.getInt32(0, true) !== a
+            || view.getUint32(8, true) !== version))
         {
             return `${name}: the body changed between two passes`;
         }
         sum = now;
+        // Held a while between the passes, as a reader decoding a block holds it:
+        // long enough for a keeper that took bodies being read to give the room
+        // to another and for that one to be written.
+        const until = performance.now() + HOLD_MS;
+        while (performance.now() < until)
+        {
+            // Holding.
+        }
     }
     return null;
 };
@@ -138,4 +149,3 @@ for (let op = 0; op < operations; op++)
 }
 parentPort?.postMessage({ done: true, counts, failures: failures.slice(0, 20),
     failed: failures.length, reader: reader.figures() });
-link.close();

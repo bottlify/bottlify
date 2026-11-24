@@ -17,7 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createLinkMemory, openLink } from '../../../system/link.js';
+import { channelMemory, serve } from './channel.fixture.js';
 import { openKeeper } from './keeper.js';
 import { memoryDisk } from './disk.fixture.js';
 
@@ -29,7 +29,7 @@ test('threads on one pool never read a body the keeper gave away', { timeout: 12
     const workers = [];
     const keeper = await openKeeper({
         budget: 512 * KIB, segmentBytes: 64 * KIB, disk: memoryDisk(),
-        coldAfterMs: 20, goneAfterMs: 200, releaseAfterMs: 10,
+        coldAfterMs: 5, goneAfterMs: 200, releaseAfterMs: 10,
         announce: message=>{
             for (const worker of workers)
             {
@@ -43,18 +43,14 @@ test('threads on one pool never read a body the keeper gave away', { timeout: 12
     const done = [];
     for (let t = 0; t < THREADS; t++)
     {
-        const memory = createLinkMemory();
-        const link = openLink(memory.a, {
-            cache: {
-                reserve: (name, length, options)=>keeper.reserve(name, length, options),
-                raise: name=>keeper.raise(name),
-                drop: name=>keeper.drop(name),
-            },
-        });
-        links.push(link);
-        link.serve();
+        const memory = channelMemory();
+        links.push(serve(memory, {
+            reserve: (name, length, options)=>keeper.reserve(name, length, options ?? {}),
+            raise: name=>keeper.raise(name),
+            drop: name=>keeper.drop(name),
+        }));
         const worker = new Worker(new URL('./concurrency.worker.fixture.js', import.meta.url), {
-            workerData: { end: memory.b, shared: keeper.shared, segments: keeper.segmentBuffers(),
+            workerData: { channel: memory, shared: keeper.shared, segments: keeper.segmentBuffers(),
                 seed: 0x9e3779b9 + t * 7919, operations: 6000, pool: 120 },
         });
         workers.push(worker);
@@ -78,7 +74,7 @@ test('threads on one pool never read a body the keeper gave away', { timeout: 12
         clearInterval(sweeping);
         for (const link of links)
         {
-            link.close();
+            link.stop();
         }
         await Promise.all(workers.map(worker=>worker.terminate()));
     }
