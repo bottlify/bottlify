@@ -160,14 +160,17 @@ export function recordedDirect3D(factory, services, transport){
         observe: targets.observe,
         // Written here only: the played side made the same copies in its own
         // memory when it answered.
+        // Each row is read where it lies and written at once, before the
+        // guest runs again: no copy of it is kept.
         applyMoves: write && services.readMemory
             ? (/** @type {any[]} */ moves)=>{
+                const rowAt = services.windowMemory ?? services.readMemory;
                 for (const move of moves)
                 {
                     for (let row = 0; row < move.rows; row++)
                     {
                         write(move.to + row * move.toPitch,
-                            services.readMemory(move.from + row * move.fromPitch, move.rowBytes));
+                            rowAt(move.from + row * move.fromPitch, move.rowBytes));
                     }
                 }
             }
@@ -345,7 +348,7 @@ export function playedDirect3D(factory, services){
  * A carrier that plays each call where it is made: the recorded and the
  * played root in one thread.
  *
- * @param {Pick<ReturnType<typeof playedDirect3D>, 'read' | 'play'>} played
+ * @param {Pick<ReturnType<typeof playedDirect3D>, 'read' | 'play' | 'spent'>} played
  * @returns {import('./replay.js').Transport}
  */
 export function playedAtOnce(played){
@@ -361,9 +364,15 @@ export function playedAtOnce(played){
             }
         }
         let answer;
-        played.read(writer.take(), call=>{
+        // The batch is read off the writer's own buffer, which comes back to
+        // be written on once nothing played from it keeps a view of it, as
+        // the worker's batches do: a copy of each batch was a fresh buffer
+        // for every call a program waits on.
+        const { buffer, length } = writer.give();
+        played.read(buffer, call=>{
             answer = played.play(call);
-        });
+        }, length);
+        played.spent(buffer, ()=>writer.reuse(buffer));
         return answer;
     };
     return {

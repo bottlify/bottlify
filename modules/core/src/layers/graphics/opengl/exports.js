@@ -875,7 +875,7 @@ export function createOpengl(services){
         {
             view.setUint32(index * 4, values[index] >>> 0, true);
         }
-        services.writeMemory(address >>> 0, answerBytes.slice(0, values.length * 4));
+        services.writeMemory(address >>> 0, answerBytes.subarray(0, values.length * 4));
     };
 
     /** @param {number} address @param {number} count @returns {number[]} */
@@ -1024,7 +1024,7 @@ export function createOpengl(services){
                 view.setFloat64(index * 8, values[index], true);
             }
         }
-        services.writeMemory(address >>> 0, answerBytes.slice(0, length));
+        services.writeMemory(address >>> 0, answerBytes.subarray(0, length));
     };
 
     /**
@@ -1565,7 +1565,8 @@ export function createOpengl(services){
         const attributes = [];
         for (let at = list >>> 0; at !== 0 && attributes.length < 256; at += 8)
         {
-            const pair = new DataView(services.readMemory(at, 8).slice().buffer);
+            const read = services.readMemory(at, 8);
+            const pair = new DataView(read.buffer, read.byteOffset, 8);
             const name = pair.getUint32(0, true);
             if (name === 0)
             {

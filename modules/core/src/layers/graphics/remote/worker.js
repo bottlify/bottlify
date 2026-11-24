@@ -531,7 +531,10 @@ export function serveGraphics(scope, deps){
                 post({ type: 'wrote', writes: [{ address, length: bytes.length }] });
                 return;
             }
-            post({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
+            // A copy of its own, moved rather than cloned again on the way:
+            // `bytes` may be a view the next call writes over.
+            const copy = bytes.slice();
+            post({ type: 'wrote', writes: [{ address, bytes: copy }] }, [copy.buffer]);
         };
         /**
          * An occlusion count straight into its query's block where guest memory is
