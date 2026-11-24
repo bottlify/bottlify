@@ -1760,11 +1760,15 @@ export class RegionEmitter {
         const flagsOut = planned?.flagsOut
             ?? liveFlagsOut(blocks, this.labels, this.context.precise === true);
         // A block the x87 plan cuts runs nothing to take windows for.
+        // Far chunks (`FAR`): a region whose windows were found past 4 GiB
+        // (`ownWindows`) tests each access, which takes a far one to its frame.
+        const unplanned = this.ownWindows && this.layout.far !== undefined;
         const memoryPlan = planned !== null ? planned.memoryPlan
-            : planRegion(blocks, { entry: this.region.entry,
-                heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                returns: this.returns, masked: readsWrapped(this.context),
-                long: this.width.bits === 64, reach: !this.ownWindows });
+            : unplanned ? null
+                : planRegion(blocks, { entry: this.region.entry,
+                    heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
+                    returns: this.returns, masked: readsWrapped(this.context),
+                    long: this.width.bits === 64, reach: !this.ownWindows });
         this.flagsIn = blocks.map((block, i)=>block.instructions.reduceRight((live, instruction)=>
             liveBefore(instruction, live, this.context.precise === true), flagsOut[i]));
         if (this.copies.length > 0 && !this.copyFunction)

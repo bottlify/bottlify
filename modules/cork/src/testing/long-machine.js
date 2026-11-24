@@ -15,7 +15,9 @@
 import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { allowMemory64 } from './memory64.js';
-import { Tables, ownLayout, pageFlagsAt, pagesFor, tablesSize } from '../runtime/layout.js';
+import {
+    FAR, Tables, farEntry, ownLayout, pageFlagsAt, pagesFor, tablesSize,
+} from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { blockState64, interpret64 } from '../interp64.js';
 import { MODE_64, decode } from '../decode/decoder.js';
@@ -62,7 +64,9 @@ export function fill(seed, size){
  * @param {{ config?: Record<string, unknown>, trapPort?: number, tiered?: boolean,
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
  *     high?: number, codeHigh?: number, processors?: number, lowBlock?: boolean,
- *     tierHot?: number, features?: Record<string, boolean> }} [options]
+ *     tierHot?: number, features?: Record<string, boolean>, far?: FarPlacing }} [options]
+ *     `far`: the data area past 4 GiB in far chunks (`FAR`), its pages in the window as their
+ *     frames (`FarPlacing`), the registers pointing at it there;
  *     `processors`: the layout's (the first executor's, with the process's lock word);
  *     `lowBlock`: with a code block past 4 GiB, the block below it translated by a runtime
  *     of its own (`wideLayout`), as the core's host has it; `tierHot`: the tier's hot
@@ -80,14 +84,20 @@ export function fill(seed, size){
 export function machine({ config = {}, trapPort = undefined, tiered = false,
     makeRunner = null, ramSize = CORPUS.codeAt + 0x100000, closed = [], window = undefined,
     high = 0, codeHigh = 0, processors = 1, lowBlock = false, tierHot = 1,
-    features = undefined } = {})
+    features = undefined, far = undefined } = {})
 {
     if (window !== undefined)
     {
         allowMemory64();
     }
+    // The table of far chunks past everything else of the memory.
+    const farAt = far === undefined ? undefined
+        : pagesFor(ownLayout({ ramSize, ramBase: 0, bits: 64, processors }),
+            tablesSize(ownLayout({ ramSize, ramBase: 0, bits: 64, processors }))
+                + (tiered ? WASM_INTERPRETER_AREA : 0)) * 65536;
     const layout = window === undefined
-        ? ownLayout({ ramSize, ramBase: 0, bits: 64, processors })
+        ? ownLayout({ ramSize, ramBase: 0, bits: 64, processors,
+            ...farAt === undefined ? {} : { far: farAt } })
         : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,
             // The code area's 4 GiB block, which its code is translated in.
             codeBase: Math.floor((CORPUS.codeAt + codeHigh) / 2 ** 32) * 2 ** 32 });
@@ -97,15 +107,37 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
         ? ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window, codeBase: 0,
             tablesAt: pagesFor(layout, past) * 65536 }) : undefined;
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, past)
-        + (low === undefined ? 0 : Math.ceil(tablesSize(layout) / 65536)) });
+        + (low === undefined ? 0 : Math.ceil(tablesSize(layout) / 65536))
+        + (far === undefined ? 0 : FAR.BYTES / 65536) });
     const ram = window === undefined ? undefined : memory64(window);
     const flags = new Uint8Array(memory.buffer, pageFlagsAt(layout), (window ?? 2 ** 32) / 4096);
     flags.fill(PageFlag.INACCESSIBLE);
-    for (const [at, size, by] of [[CORPUS.dataAt, CORPUS.dataSize, high],
-        [CORPUS.codeAt, CORPUS.codeSize, codeHigh]])
+    const pieces = far === undefined ? [[0, CORPUS.dataSize, CORPUS.dataAt + high]]
+        : farPieces(far);
+    if (far !== undefined)
     {
-        flags.fill(0, (at + by) / 4096, (at + by + size) / 4096);
+        // Each piece's chunk given the frame it lies in.
+        const table = new Uint32Array(memory.buffer, /** @type {number} */ (farAt), FAR.ENTRIES);
+        for (const [offset, , frameAt] of pieces.slice(0, far.unmapped === true ? 1 : undefined))
+        {
+            const address = CORPUS.dataAt + far.by + offset;
+            const chunk = Math.floor(address / FAR.CHUNK) * FAR.CHUNK;
+            table[(chunk - FAR.BASE) / FAR.CHUNK] = farEntry(frameAt - (address - chunk), chunk);
+        }
     }
+    for (const [, size, at] of pieces)
+    {
+        flags.fill(0, at / 4096, (at + size) / 4096);
+    }
+    if (far?.apart !== undefined)
+    {
+        // The page past the first frame's part open too: an access across the two
+        // chunks made in the first frame alone reads it, not a fault.
+        const [, size, at] = pieces[0];
+        flags.fill(0, (at + size) / 4096, (at + size) / 4096 + 1);
+    }
+    flags.fill(0, (CORPUS.codeAt + codeHigh) / 4096,
+        (CORPUS.codeAt + codeHigh + CORPUS.codeSize) / 4096);
     for (const at of closed)
     {
         flags[(at + codeHigh) / 4096] = PageFlag.INACCESSIBLE;
@@ -128,8 +160,38 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
     };
     const state = blockState64({ memory, ram, layout, ports, atomic: config.atomic === true,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
-    return { layout, memory, ram, high, codeHigh, state, runner, writes,
-        view: new DataView(memory.buffer) };
+    return { layout, memory, ram, high: far === undefined ? high : far.by, codeHigh, state,
+        runner, writes, pieces, view: new DataView(memory.buffer) };
+}
+
+/**
+ * The data area past 4 GiB (`machine`'s `far`): `by` past its place, in far
+ * chunks whose frames are the window's pages at the area's own place - or,
+ * `apart`, its part in the second chunk that many bytes further, so the two
+ * frames are not adjacent; `unmapped`, the second chunk given no frame.
+ *
+ * @typedef {{ by: number, apart?: number, unmapped?: boolean }} FarPlacing
+ */
+
+/**
+ * Where the data area's parts lie in the window: [offset in the area, bytes,
+ * address], one part a chunk.
+ *
+ * @param {FarPlacing} far
+ * @returns {[number, number, number][]}
+ */
+function farPieces(far){
+    const start = CORPUS.dataAt + far.by;
+    /** @type {[number, number, number][]} */
+    const pieces = [];
+    for (let offset = 0; offset < CORPUS.dataSize;)
+    {
+        const chunkEnd = (Math.floor((start + offset) / FAR.CHUNK) + 1) * FAR.CHUNK;
+        const size = Math.min(CORPUS.dataSize - offset, chunkEnd - start - offset);
+        pieces.push([offset, size, CORPUS.dataAt + offset + (offset > 0 ? far.apart ?? 0 : 0)]);
+        offset += size;
+    }
+    return pieces;
 }
 
 /**
@@ -448,7 +510,11 @@ export function load(m, one){
         codeAt + code.length);
     new DataView(ram.buffer).setBigUint64(codeAt + CORPUS.codeSize - 8,
         BigInt(EXIT + (layout.codeBase ?? 0)), true);
-    ram.set(fill(one.seed, CORPUS.dataSize), CORPUS.dataAt + high);
+    const data = fill(one.seed, CORPUS.dataSize);
+    for (const [offset, size, at] of m.pieces)
+    {
+        ram.set(data.subarray(offset, offset + size), at);
+    }
     // A register pointing into an area points into it where it lies.
     const moved = (/** @type {bigint} */ value)=>[[CORPUS.dataAt, CORPUS.dataSize, high],
         [CORPUS.codeAt, CORPUS.codeSize, codeHigh]].reduce((at, [from, size, by])=>(
@@ -540,9 +606,8 @@ export function run(m, translated, budget = 7){
             + [layout.x87Top, layout.x87Empty, layout.x87Control, layout.x87Control + 1,
                 layout.x87Status, layout.x87Status + 1]
                 .map(at=>bytes[at].toString(16)).join(','),
-        data: Buffer.from(new Uint8Array((m.ram ?? memory).buffer).subarray(CORPUS.dataAt + m.high,
-            CORPUS.dataAt + m.high + CORPUS.dataSize))
-            .toString('base64'),
+        data: Buffer.concat(m.pieces.map(([, size, at])=>new Uint8Array((m.ram ?? memory)
+            .buffer).subarray(at, at + size))).toString('base64'),
     };
 }
 
@@ -553,14 +618,14 @@ export function run(m, translated, budget = 7){
  * @param {{ budget?: number, config?: Record<string, unknown>, tiered?: boolean,
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
  *     high?: number, codeHigh?: number, processors?: number, lowBlock?: boolean,
- *     tierHot?: number, features?: Record<string, boolean> }} [options]
+ *     tierHot?: number, features?: Record<string, boolean>, far?: FarPlacing }} [options]
  *     `budget`: each translated run's; `closed` both machines'; the rest the translated
  *     machine's (`machine`)
  */
 export function compare(cases, { budget = 7, ...options } = {}){
     const translatedMachine = machine(options);
     const interpretedMachine = machine({ closed: options.closed, window: options.window,
-        high: options.high, codeHigh: options.codeHigh });
+        high: options.high, codeHigh: options.codeHigh, far: options.far });
     /** @type {string[]} */
     const failures = [];
     let exits = 0;

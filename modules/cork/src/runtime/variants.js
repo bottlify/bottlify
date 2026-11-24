@@ -128,8 +128,14 @@ export function createVariants(state){
      * reach.
      */
     let readsChecked = settings.checkReads === true;
-    /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
-    let loose = settings.looseStacks !== false && settings.precise !== true;
+    /**
+     * Whether regions are made loose (`looseStacks`): until code is translated on a
+     * stack. Never with far chunks (`FAR`): a stack a program places in a far
+     * reservation is reached only through its chunks' frames, which an access
+     * through rsp left untested would miss.
+     */
+    let loose = settings.looseStacks !== false && settings.precise !== true
+        && layout.far === undefined;
     /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
     const stackPages = new Set();
     /**
@@ -221,6 +227,9 @@ export function createVariants(state){
         }
     };
 
+    // With far chunks (`FAR`) a window held at its test is most often one past 4 GiB,
+    // which only each access's own test takes to its frame: formed again at once.
+    const heldOwn = layout.far === undefined ? HELD_OWN : 1;
     /**
      * A region left to the host on purpose (`HELD`): a window of its accesses would
      * fault, or a store of it would land in code. The window is tested where the first
@@ -238,7 +247,7 @@ export function createVariants(state){
         const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>record.ownWindows !== true
             && !ownKeys.has(keyOf(record.entry, record.entryTop))
             && record.spans.some(([from, to])=>eip >= from && eip < to)
-            && (record.heldMisses = (record.heldMisses ?? 0) + 1) >= HELD_OWN);
+            && (record.heldMisses = (record.heldMisses ?? 0) + 1) >= heldOwn);
         for (const record of going)
         {
             ownKeys.add(keyOf(record.entry, record.entryTop));

@@ -23,7 +23,7 @@ import { registerLocal } from './width.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
-import { Tables, codeRangesAt, pageFlagsAt, windowBits } from '../runtime/layout.js';
+import { FAR as FAR_SPACE, Tables, codeRangesAt, pageFlagsAt, windowBits } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { I32, I64 } from './flags.js';
 import { Exit, Local } from './region.js';
@@ -296,7 +296,17 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
     {
         beyond(e);
         e.openGuard('beyond', EMPTY);
-        faultHere(e, counted);
+        if (e.layout.far === undefined)
+        {
+            faultHere(e, counted);
+        }
+        else
+        {
+            // The frame's flags from here on, the last byte's or'd in below.
+            farTranslate(e, size, counted);
+            pageIndex(e);
+            loadFlags(e, table, 'i32_8u').localSet(Local.pflags);
+        }
         e.close();
     }
     if (size > 1)
@@ -2635,8 +2645,72 @@ function windowTest(e, size, counted){
         .op(I64.add).op(I64.or)
         .i64const(BigInt(windowBits(e.layout))).op(I64.shrU).i64const(0n).op(I64.ne);
     e.openGuard('window', EMPTY);
+    if (e.layout.far === undefined)
+    {
+        faultHere(e, counted);
+    }
+    else
+    {
+        farTranslate(e, size, counted);
+    }
+    e.close();
+}
+
+/**
+ * Long mode's access past the 4 GiB window in a layout with far chunks
+ * (`FAR_SPACE`): its whole address in `t64` made the address of its chunk's frame in
+ * `addr` - the chunk's entry less one added to the address's low half. An
+ * address past the far space, a chunk with no frame, and an access across two
+ * chunks whose frames are not adjacent leave as a fault before the
+ * instruction, which the interpreter runs again: it raises the access
+ * violation at the far address, or makes the access a byte at a time.
+ * Leaves `pflags` holding the entry.
+ *
+ * @param {E} e @param {number} size @param {boolean} counted
+ */
+function farTranslate(e, size, counted){
+    const { b } = e;
+    b.localGet(Local.t64).i64const(BigInt(Math.log2(FAR_SPACE.TOP))).op(I64.shrU).op(I64.wrap);
+    e.openGuard('farTop', EMPTY);
     faultHere(e, counted);
     e.close();
+    farEntryOf(e, 0);
+    b.localSet(Local.pflags);
+    if (size > 1)
+    {
+        b.localGet(Local.t64).localGet(Local.t64).i64const(BigInt(size - 1)).op(I64.add)
+            .op(I64.xor).i64const(BigInt(FAR_SPACE.SHIFT)).op(I64.shrU).op(I64.wrap);
+        e.openGuard('farAcross', EMPTY);
+        farEntryOf(e, size - 1);
+        b.localGet(Local.pflags).op(I32.ne);
+        e.openGuard('farApart', EMPTY);
+        faultHere(e, counted);
+        e.close();
+        e.close();
+    }
+    b.localGet(Local.pflags).op(I32.eqz);
+    e.openGuard('farNone', EMPTY);
+    faultHere(e, counted);
+    e.close();
+    b.localGet(Local.t64).op(I64.wrap).localGet(Local.pflags).op(I32.add)
+        .i32const(-1).op(I32.add).localSet(Local.addr);
+}
+
+/**
+ * Pushes the far table's entry of the chunk `t64` + `delta` lies in.
+ *
+ * @param {E} e @param {number} delta
+ */
+function farEntryOf(e, delta){
+    const { b } = e;
+    b.localGet(Local.t64);
+    if (delta !== 0)
+    {
+        b.i64const(BigInt(delta)).op(I64.add);
+    }
+    b.i64const(BigInt(FAR_SPACE.SHIFT)).op(I64.shrU).op(I64.wrap)
+        .i32const(FAR_SPACE.BASE / FAR_SPACE.CHUNK).op(I32.sub).i32const(2).op(I32.shl)
+        .load('i32', { offset: /** @type {number} */ (e.layout.far) });
 }
 
 /**

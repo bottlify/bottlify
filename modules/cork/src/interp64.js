@@ -25,7 +25,7 @@ import { MODE_64, decode } from './decode/decoder.js';
 import { BlockMemory } from './interp.js';
 import { Fault, Unsupported } from './ir.js';
 import { evaluate64, freshX87 } from './ir64.js';
-import { WINDOW } from './runtime/layout.js';
+import { FAR, WINDOW } from './runtime/layout.js';
 import { WideMemory } from './wide-memory.js';
 
 /**
@@ -36,56 +36,139 @@ import { WideMemory } from './wide-memory.js';
 class WindowMemory {
     /**
      * @param {BlockMemory | WideMemory} memory @param {{ faultEip: number }} owner
-     * @param {number} window
+     * @param {number} window @param {number} [far]  the layout's table of far chunks (`FAR`)
      */
-    constructor(memory, owner, window){
+    constructor(memory, owner, window, far){
         this.memory = memory;
         this.owner = owner;
         this.window = BigInt(window);
+        this.far = far ?? -1;
     }
 
-    /** @param {bigint} address @param {number} size */
-    place(address, size){
-        if (address + BigInt(size) > this.window)
+    /**
+     * Where the access lies in the memory: its address inside the window; past
+     * it, a far chunk's frame (`FAR`), or -1 where its bytes lie in two chunks
+     * whose frames are not adjacent, each byte to be placed on its own. A far
+     * address with no frame faults as a closed page does, at the address.
+     *
+     * @param {bigint} address @param {number} size @param {boolean} write
+     */
+    place(address, size, write){
+        if (address + BigInt(size) <= this.window)
+        {
+            return Number(address);
+        }
+        const at = Number(address);
+        if (this.far < 0 || address < this.window || at + size > FAR.TOP)
         {
             throw new Fault(13, this.owner.faultEip);
         }
-        return Number(address);
+        const first = this.entry(at, write);
+        if (first !== this.entry(at + size - 1, write))
+        {
+            return -1;
+        }
+        return (at + first - 1) % 2 ** 32;
+    }
+
+    /**
+     * The far chunk's entry, faulting at the address where it has no frame.
+     *
+     * @param {number} at @param {boolean} write
+     */
+    entry(at, write){
+        const words = /** @type {BlockMemory} */ (this.memory).words32;
+        const entry = words[(this.far + Math.floor((at - FAR.BASE) / FAR.CHUNK) * 4) >>> 2];
+        if (entry === 0)
+        {
+            throw Object.assign(new Fault(13, this.owner.faultEip), { address: at, write });
+        }
+        return entry;
+    }
+
+    /**
+     * A fault the window's memory raised at a far access's frame, named at the
+     * far address it stands for.
+     *
+     * @param {unknown} error @param {bigint} address @param {number} at
+     */
+    farFault(error, address, at){
+        if (error instanceof Fault && /** @type {any} */ (error).address !== undefined
+            && address >= this.window)
+        {
+            /** @type {any} */ (error).address += Number(address) - at;
+        }
+        return error;
     }
 
     /** @param {bigint} address @param {number} size @returns {bigint} */
     read(address, size){
-        const at = this.place(address, size);
-        if (size <= 4)
+        const at = this.place(address, size, false);
+        if (at < 0)
         {
-            return BigInt(this.memory.read(at, size) >>> 0);
+            let value = 0n;
+            for (let offset = size - 1; offset >= 0; offset--)
+            {
+                value = value << 8n | this.read(address + BigInt(offset), 1);
+            }
+            return value;
         }
-        // The last dword first: a read across into a closed page faults before
-        // the value is put together.
-        let value = 0n;
-        for (let offset = size - 4; offset >= 0; offset -= 4)
+        try
         {
-            value = value << 32n | BigInt(this.memory.read(at + offset, 4) >>> 0);
+            if (size <= 4)
+            {
+                return BigInt(this.memory.read(at, size) >>> 0);
+            }
+            // The last dword first: a read across into a closed page faults before
+            // the value is put together.
+            let value = 0n;
+            for (let offset = size - 4; offset >= 0; offset -= 4)
+            {
+                value = value << 32n | BigInt(this.memory.read(at + offset, 4) >>> 0);
+            }
+            return value;
         }
-        return value;
+        catch (e){
+            throw this.farFault(e, address, at);
+        }
     }
 
     /** @param {bigint} address @param {number} size @param {bigint} value */
     write(address, size, value){
-        const at = this.place(address, size);
-        if (size <= 4)
+        const at = this.place(address, size, true);
+        if (at < 0)
         {
-            this.memory.write(at, size, Number(value & 0xffffffffn));
+            // Every byte placed, and so tested, before any of them lands.
+            for (let offset = 0; offset < size; offset++)
+            {
+                this.place(address + BigInt(offset), 1, true);
+            }
+            for (let offset = 0; offset < size; offset++)
+            {
+                this.write(address + BigInt(offset), 1, value >> BigInt(offset * 8) & 0xffn);
+            }
             return;
         }
-        // Every page the store reaches is tested before a byte of it lands.
-        if (this.memory.inaccessible(at, size))
+        try
         {
-            throw this.memory.fault(at, size, true);
+            if (size <= 4)
+            {
+                this.memory.write(at, size, Number(value & 0xffffffffn));
+                return;
+            }
+            // Every page the store reaches is tested before a byte of it lands.
+            if (this.memory.inaccessible(at, size))
+            {
+                throw this.memory.fault(at, size, true);
+            }
+            for (let offset = 0; offset < size; offset += 4)
+            {
+                this.memory.write(at + offset, 4,
+                    Number(value >> BigInt(offset * 8) & 0xffffffffn));
+            }
         }
-        for (let offset = 0; offset < size; offset += 4)
-        {
-            this.memory.write(at + offset, 4, Number(value >> BigInt(offset * 8) & 0xffffffffn));
+        catch (e){
+            throw this.farFault(e, address, at);
         }
     }
 }
@@ -110,6 +193,8 @@ class LockedAccess64 {
     constructor(memory){
         this.memory = memory;
         this.address = -1n;
+        // Where the operand lies in the memory (`place`): a far one's frame.
+        this.at = 0;
         this.size = 0;
         this.old = 0n;
         this.value = 0n;
@@ -118,11 +203,12 @@ class LockedAccess64 {
 
     /** @param {bigint} address @param {number} size @returns {bigint} */
     read(address, size){
-        if (this.address < 0n && size <= 8)
+        const at = this.address < 0n && size <= 8 ? this.memory.place(address, size, true) : -1;
+        if (at >= 0)
         {
-            const at = this.memory.place(address, size);
             const block = /** @type {BlockMemory} */ (this.memory.memory);
             this.address = address;
+            this.at = at;
             this.size = size;
             this.old = size === 8 ? block.loadQword(at) : BigInt(block.loadLocked(at, size) >>> 0);
             return this.old;
@@ -148,7 +234,7 @@ class LockedAccess64 {
         {
             return true;
         }
-        const at = Number(this.address);
+        const { at } = this;
         const block = /** @type {BlockMemory} */ (this.memory.memory);
         const next = this.wrote ? this.value : this.old;
         return this.size === 8
@@ -224,7 +310,7 @@ class BlockState64 {
         this.blockMemory = ram === undefined ? new BlockMemory(memory, layout, onCodeWrite, this)
             : new WideMemory(memory, ram, layout, onCodeWrite, this);
         this.window = layout.window ?? WINDOW;
-        this.memory = new WindowMemory(this.blockMemory, this, this.window);
+        this.memory = new WindowMemory(this.blockMemory, this, this.window, layout.far);
         this.halted = false;
         this.retired = 0;
         /** @type {number[]} */

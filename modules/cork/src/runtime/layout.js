@@ -262,7 +262,7 @@ export const WRAP_SLACK = 2 * PAGE;
  *
  * @param {{ ramSize: number, hashSlots?: number, processors?: number,
  *     ramBase?: number, bits?: 32 | 64, tablesAt?: number, ramFloor?: number,
- *     window?: number, codeBase?: number }} options
+ *     window?: number, codeBase?: number, far?: number }} options
  *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
  *     `processors`: the process's executors, which `cpuid` says the machine has --
  *     a field only past one, so one processor's layout, and its translations, are
@@ -278,12 +278,18 @@ export const WRAP_SLACK = 2 * PAGE;
  *     the RAM the memory holds now, less one, as it grows;
  *     `window`: long mode's address space, 4 GiB (the default), 8 or 16 GiB
  *     (`wideLayout`); `codeBase`: a wide window's 4 GiB block its code lies in
- *     (`wideLayout`), 0 by default; `tablesAt` there places a second block's tables
+ *     (`wideLayout`), 0 by default; `tablesAt` there places a second block's tables;
+ *     `far`: long mode's 4 GiB layout only, where the table of far chunks lies (`FAR`): a
+ *     process whose reservations reach past 4 GiB
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
-    ramBase = PAGE, bits = 32, tablesAt, ramFloor, window = WINDOW, codeBase = 0 })
+    ramBase = PAGE, bits = 32, tablesAt, ramFloor, window = WINDOW, codeBase = 0, far })
 {
+    if (far !== undefined && (bits !== 64 || window !== WINDOW || far % 4096 !== 0 || far <= 0))
+    {
+        throw new Error(`cork: a far table at ${far}, not on a page of long mode's 4 GiB layout`);
+    }
     if (codeBase !== 0 && (window === WINDOW || codeBase % WINDOW !== 0 || codeBase < 0
         || codeBase >= window))
     {
@@ -321,7 +327,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
             throw new Error('cork: a wide window runs on one executor so far');
         }
         return window === WINDOW
-            ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors)
+            ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors, far)
             : wideLayout(window, ramSize, hashSlots, codeBase, tablesAt);
     }
     const fields = {
@@ -397,7 +403,9 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
  * @param {number} hashSlots @param {number} [tablesAt] @param {number} [ramFloor]
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors = 1){
+function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors = 1,
+    /** @type {number | undefined} */ far = undefined)
+{
     // The last page of the 4 GiB window is never RAM: translated code finds a
     // store window that crosses 4 GiB by that page's INACCESSIBLE flag alone.
     if (ramSize > (ramFloor === undefined ? 2 ** 32 - 4096 : 2 ** 32))
@@ -438,9 +446,55 @@ function longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, proc
         ...processors > 1
             ? { processors, processor: 0, interrupt: state + 2048, apic: state + 2052,
                 lockWord: state + 2056 } : {},
+        // The process's table of far chunks (`FAR`), one for every executor.
+        .../** @type {Record<string, number>} */ (far === undefined ? {} : { far }),
     };
     return { ...fields, id: layoutId(fields) };
 }
+
+/**
+ * Far reservations: the space past long mode's 4 GiB window, from `BASE` to
+ * `TOP`, which a process's memory does not reach. A reservation that does not
+ * fit in the window is placed there, and each 64 KiB chunk of it the program
+ * commits is given a frame of the window's RAM: the chunk's entry in the
+ * process's table (`layout.far`, a dword a chunk) holds the frame less the
+ * chunk's own low half, plus one - zero for a chunk with no frame, so a table
+ * no one wrote is all unmapped. An access past 4 GiB adds its entry less one
+ * to its address's low half, where it found one, and lands in the frame; the
+ * frames of a commit run need not be adjacent, so an access across a chunk's
+ * end is the interpreter's unless both entries are the same.
+ *
+ * The memory's length is what the program holds, not how far its reservations
+ * reach: a browser collects without end once a thread holds a memory longer
+ * than its limit (4 GiB in Chrome 157), and a 64-bit Unity player reserves
+ * 512 MiB at a time, 8 GiB and more of space for megabytes of pages.
+ */
+export const FAR = Object.freeze({
+    BASE: 2 ** 32,
+    TOP: 2 ** 36,
+    SHIFT: 16,
+    CHUNK: 2 ** 16,
+    ENTRIES: (2 ** 36 - 2 ** 32) / 2 ** 16,
+    BYTES: (2 ** 36 - 2 ** 32) / 2 ** 16 * 4,
+});
+
+/**
+ * The entry of the far chunk `address` lies in, as the table holds it: the
+ * frame less the chunk's low half, plus one, as a dword; zero for none.
+ *
+ * @param {number} frame  the frame's address in the window, a multiple of `FAR.CHUNK`
+ * @param {number} address  the chunk's far address
+ */
+export const farEntry = (frame, address)=>((frame - (address % 2 ** 32)) + 1) >>> 0;
+
+/**
+ * Where the far chunk's entry lies in the table, or -1 for an address outside
+ * the far space.
+ *
+ * @param {{ far?: number }} layout @param {number} address
+ */
+export const farSlot = (layout, address)=>(layout.far === undefined || address < FAR.BASE
+    || address >= FAR.TOP ? -1 : layout.far + Math.floor((address - FAR.BASE) / FAR.CHUNK) * 4);
 
 /** Long mode's address space unless a layout says otherwise: 4 GiB, RAM in the one memory. */
 export const WINDOW = 2 ** 32;

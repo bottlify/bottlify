@@ -2142,7 +2142,7 @@ export function prepare(e, operand, options){
 function wrappedFirst(e, operand, store){
     const disp = operand.disp ?? 0;
     const { ramSize } = e.layout;
-    if ((ramSize & ramSize - 1) !== 0 || e.guest !== null
+    if ((ramSize & ramSize - 1) !== 0 || e.guest !== null || e.layout.far !== undefined
         || operand.addressSize === 16 || (operand.base ?? -1) < 0 && (operand.index ?? -1) < 0
         || e.memPlan?.access != null || !wrapsRead(e, store))
     {
@@ -2473,7 +2473,7 @@ function windowed(e, operand, store){
             .localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
         return false;
     }
-    if (wrapsRead(e, store) || e.memPlan?.access != null)
+    if ((wrapsRead(e, store) && e.layout.far === undefined) || e.memPlan?.access != null)
     {
         // Untested, or a stream's window test covered it, the window included:
         // the low half alone, summed in i32, which the host's 32-bit `lea`
