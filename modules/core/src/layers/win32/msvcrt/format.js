@@ -778,6 +778,28 @@ function pad(spec, { prefix, body, zeroable }){
     return ' '.repeat(missing) + prefix + body;
 }
 
+/** Two dwords made a double, read back at once: one for every `%f` printed. */
+const DOUBLE_SCRATCH = new DataView(new ArrayBuffer(8));
+
+/** Code units an argument list carries at most into `String.fromCharCode`. */
+const CHARACTERS_AT_ONCE = 8192;
+
+/**
+ * Bytes as code units of the same values, the C locale's text: a chunk at a
+ * time rather than a string a byte.
+ *
+ * @param {Uint8Array} bytes
+ */
+export function byteText(bytes){
+    let text = '';
+    for (let at = 0; at < bytes.length; at += CHARACTERS_AT_ONCE)
+    {
+        text += String.fromCharCode.apply(null,
+            /** @type {any} */ (bytes.subarray(at, at + CHARACTERS_AT_ONCE)));
+    }
+    return text;
+}
+
 /**
  * The argument slots behind a `va_list`, read as one block.
  *
@@ -791,7 +813,7 @@ function pad(spec, { prefix, body, zeroable }){
  * slots join the zeros this engine already answers for a format that outran
  * its arguments.
  *
- * @param {(address: number, length: number) => Uint8Array} read
+ * @param {(address: number, length: number) => Uint8Array} readSlots
  * @param {(address: number) => { base: number, size: number } | null} locate
  *         The region containing an address; null when nothing does, and then
  *         the whole window is read and a genuinely unmapped list faults there.
@@ -800,16 +822,23 @@ function pad(spec, { prefix, body, zeroable }){
  *         eight bytes (`wideSlots`).
  * @returns {number[]}
  */
-export function varargsSlots(read, locate, list, slots, slotWords = 1){
+export function varargsSlots(readSlots, locate, list, slots, slotWords = 1){
     const words = slots * slotWords;
     const width = words * 4;
     const at = wholeAddress(list);
     const region = locate(at);
-    const bytes = new Uint8Array(width);
-    bytes.set(read(at, region
+    const read = readSlots(at, region
         ? Math.max(0, Math.min(width, region.base + region.size - at))
-        : width));
-    const view = new DataView(bytes.buffer);
+        : width);
+    // Read where they lie: zeros are laid under them only when the region
+    // ended before the window did, the rare list at the edge of a mapping.
+    let bytes = read;
+    if (read.length < width)
+    {
+        bytes = new Uint8Array(width);
+        bytes.set(read);
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, width);
     const values = Array.from({ length: words }, (unused, word)=>view.getInt32(word * 4, true));
     return slotWords === 1 ? values : wideSlots(values);
 }
@@ -866,6 +895,7 @@ export function guestAccess(readMemory, writeMemory){
  *        string is read as bytes, which is wrong but visible, rather than
  *        refused.
  * @param {(address: number, length: number) => Uint8Array} [options.readMemory]
+ *        Bytes of the caller's own, as `MsvcrtHost.readMemory` gives them.
  *        Where %Z reads its counted string's length and buffer. Absent, %Z
  *        prints "(null)".
  * @param {(pointer: number, value: number) => void} [options.writeCount]
@@ -919,13 +949,12 @@ export function formatToString(format, varargs, readString, options = {}){
         const [lowWord, highWord] = takeEight();
         const low = wholeAddress(lowWord);
         const high = wholeAddress(highWord);
-        const bytes = new DataView(new ArrayBuffer(8));
-        bytes.setUint32(0, low, true);
-        bytes.setUint32(4, high, true);
-        return { value: bytes.getFloat64(0, true), high, low };
+        DOUBLE_SCRATCH.setUint32(0, low, true);
+        DOUBLE_SCRATCH.setUint32(4, high, true);
+        return { value: DOUBLE_SCRATCH.getFloat64(0, true), high, low };
     };
     const decode = options.decodeBytes
-        ?? (bytes=>Array.from(bytes, byte=>String.fromCharCode(byte)).join(''));
+        ?? byteText;
     /**
      * Wide text as a narrow printer under the C locale writes it: to its
      * first character with no byte.
@@ -960,19 +989,20 @@ export function formatToString(format, varargs, readString, options = {}){
         {
             return null;
         }
-        const header = new DataView(read(pointer, 8).slice().buffer);
+        const head = read(pointer, 8);
+        const header = new DataView(head.buffer, head.byteOffset, 8);
         const length = header.getUint16(0, true);
         const buffer = header.getUint32(4, true);
         if (buffer === 0)
         {
             return null;
         }
-        const bytes = read(buffer, length).slice();
+        const bytes = read(buffer, length);
         if (!asWide)
         {
             return decode(bytes);
         }
-        const units = new Uint16Array(bytes.buffer, 0, length >> 1);
+        const units = new Uint16Array(bytes.buffer, bytes.byteOffset, length >> 1);
         return narrowed(String.fromCharCode(...units));
     };
     /** @param {number} code @param {boolean} asWide */

@@ -237,7 +237,7 @@ export function createUcrtMathFunctions(host){
         const x = readSingle([bits], 0);
         const whole = Number.isFinite(x) ? Math.trunc(x) : x;
         scratch.setFloat32(0, whole, true);
-        host.writeMemory(wholeAddress(out), new Uint8Array(scratch.buffer.slice(0, 4)));
+        host.writeMemory(wholeAddress(out), new Uint8Array(scratch.buffer, 0, 4));
         return Number.isNaN(x) ? x : Number.isFinite(x) ? x - whole : copySign(0, x);
     }, ONE_FLOAT);
 

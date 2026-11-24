@@ -101,7 +101,7 @@ test('srand and rand in the guest draw what their handlers draw, from any seed',
     };
     const fns = createMsvcrtFunctions(/** @type {any} */ ({
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
-            host.readPhysical(address, length),
+            host.readPhysical(address, length).slice(),
         writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
             host.writePhysical(address, bytes),
         fillMemory: ()=>{},

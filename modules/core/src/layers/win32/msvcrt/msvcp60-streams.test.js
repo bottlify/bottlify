@@ -132,7 +132,7 @@ function setup(files = {}){
     /** @type {Map<string, number>} */
     const placed = new Map();
     const fns = createMsvcp60Functions(crt, {
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         addressOf: name=>placed.get(name) ?? 0,
         divergence: (api, detail, kind)=>said.push(`${api}: ${detail}${kind ? ` (${kind})` : ''}`),

@@ -30,7 +30,7 @@ function library(){
         '??3@YAXPAX@Z': { handler: ()=>0 },
     };
     const table = createMsvcp80Functions(crt, {
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         pointerSize: 8,
     });

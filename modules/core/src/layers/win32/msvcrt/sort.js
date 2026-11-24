@@ -52,24 +52,33 @@ export function createSortFunctions(host){
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
         .getUint32(0, true);
 
+    // A dword's bytes for every count lsearch stores: writeMemory has put
+    // them in guest memory by the time it returns.
+    const dword = new Uint8Array(4);
+    const dwordView = new DataView(dword.buffer);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-        host.writeMemory(wholeAddress(address), bytes);
+        dwordView.setUint32(0, value >>> 0, true);
+        host.writeMemory(wholeAddress(address), dword);
     };
 
-    /** Two elements exchanged in place. @param {number} a @param {number} b @param {number} width */
+    /**
+     * Two elements exchanged in place. Both are read before either is
+     * written, each a copy of its own (`MsvcrtHost.readMemory`): the write
+     * of one lands on the other.
+     *
+     * @param {number} a @param {number} b @param {number} width
+     */
     const swap = (a, b, width)=>{
         if (a === b)
         {
             return;
         }
-        const left = host.readMemory(a, width).slice();
-        const right = host.readMemory(b, width).slice();
+        const left = host.readMemory(a, width);
+        const right = host.readMemory(b, width);
         host.writeMemory(a, right);
         host.writeMemory(b, left);
     };
@@ -318,7 +327,7 @@ export function createSortFunctions(host){
                     return found;
                 }
                 const end = (base + count * width) >>> 0;
-                host.writeMemory(end, host.readMemory(wholeAddress(key), width >>> 0).slice());
+                host.writeMemory(end, host.readMemory(wholeAddress(key), width >>> 0));
                 writeU32(num, count + 1);
                 return end;
             });

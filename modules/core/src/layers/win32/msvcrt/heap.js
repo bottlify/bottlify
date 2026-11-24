@@ -145,7 +145,7 @@ export function createHeapFunctions(host){
         const kept = Math.min(held, size);
         if (kept > 0)
         {
-            host.writeMemory(moved, host.readMemory(block, kept).slice());
+            host.writeMemory(moved, host.readMemory(block, kept));
         }
         host.free(base);
         return moved;
@@ -436,7 +436,7 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 host.writeMemory(moved,
-                    host.readMemory(address, Math.min(existing.size, bytes)).slice());
+                    host.readMemory(address, Math.min(existing.size, bytes)));
                 host.free(address);
                 return moved;
             },

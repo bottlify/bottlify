@@ -197,7 +197,7 @@ export function createClassFunctions(host){
     const pointer = host.pointerSize ?? 4;
     const { NAME, DO_FREE, EXCEPTION_SIZE, UNDECORATED, DECORATED } = layoutOf(pointer);
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(address, 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(address, 4).buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{

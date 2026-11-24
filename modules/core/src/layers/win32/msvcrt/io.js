@@ -925,6 +925,9 @@ export function createDescriptors(host){
          * says the caller reads a binary file as UTF-16, so a line ends
          * after an LF unit rather than after an LF byte.
          *
+         * The answer may be the stream's read-ahead itself: read, never
+         * written, and done with before the descriptor is read again.
+         *
          * @param {Descriptor} descriptor @param {number} limit @param {boolean} line
          * @param {boolean} [units]
          * @returns {Uint8Array | Promise<Uint8Array>}
@@ -941,7 +944,7 @@ export function createDescriptors(host){
             if (!descriptor.text)
             {
                 return settle(readAhead(descriptor, descriptor.position, limit), raw=>{
-                    const taken = raw.slice(0, line ? lineEnd(raw, units ? 2 : 1) : raw.length);
+                    const taken = line ? raw.subarray(0, lineEnd(raw, units ? 2 : 1)) : raw;
                     descriptor.position += taken.length;
                     return taken;
                 });
@@ -962,7 +965,7 @@ export function createDescriptors(host){
                         {
                             descriptor.ended = true;
                             descriptor.position = sizeOf(descriptor);
-                            return out.slice(0, filled);
+                            return out.subarray(0, filled);
                         }
                         if (byte === CR && at + 1 === raw.length && raw.length === wanted)
                         {
@@ -974,11 +977,12 @@ export function createDescriptors(host){
                         if (line && out[filled - 1] === LF)
                         {
                             descriptor.position += at;
-                            return out.slice(0, filled);
+                            return out.subarray(0, filled);
                         }
                     }
                     descriptor.position += at;
-                    return filled === limit || raw.length < wanted ? out.slice(0, filled) : round();
+                    return filled === limit || raw.length < wanted
+                        ? out.subarray(0, filled) : round();
                 });
             };
             return round();
@@ -1296,7 +1300,7 @@ export function createIoFunctions(host, descriptors){
         let stampSeconds = Math.floor((host.systemTimeMs?.() ?? Date.now()) / 1000);
         if ((times >>> 0) !== 0)
         {
-            const view = new DataView(host.readMemory(wholeAddress(times) + width, width).slice()
+            const view = new DataView(host.readMemory(wholeAddress(times) + width, width)
                 .buffer);
             stampSeconds = width === 8 ? Number(view.getBigInt64(0, true)) : view.getInt32(0, true);
             if (stampSeconds < 0)
@@ -1356,10 +1360,11 @@ export function createIoFunctions(host, descriptors){
      * folds to LF and a ^Z ends the data. A CR that is the last byte read is
      * decided by the byte after it -- see `_read`.
      *
-     * @param {Uint8Array} raw
+     * @param {Uint8Array} raw  The volume's answer, the caller's own: folded
+     *        in place, each byte written no further on than it was read.
      */
     const fold = raw=>{
-        const out = new Uint8Array(raw.length);
+        const out = raw;
         let filled = 0;
         for (let at = 0; at < raw.length; at++)
         {
@@ -1609,11 +1614,19 @@ export function createIoFunctions(host, descriptors){
                 descriptor.position = start + consumed;
                 return bytes.length;
             };
+            if (!descriptor.text)
+            {
+                // Binary: what the volume holds goes to the program's buffer
+                // where it lies, one copy.
+                const to = wholeAddress(buffer);
+                return settle(host.files.readInto(descriptor.node, start, wanted,
+                    (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>
+                        host.writeMemory(to + at, bytes)), read=>{
+                    descriptor.position = start + read;
+                    return read;
+                });
+            }
             return settle(host.files.read(descriptor.node, start, wanted), raw=>{
-                if (!descriptor.text)
-                {
-                    return deliver(raw, raw.length);
-                }
                 const { out, filled, ended, trailingCr } = fold(raw);
                 descriptor.ended = ended;
                 if (!trailingCr)
@@ -1663,7 +1676,7 @@ export function createIoFunctions(host, descriptors){
                 fail(EINVAL);
                 return -1;
             }
-            const bytes = host.readMemory(wholeAddress(buffer), wanted).slice();
+            const bytes = host.readMemory(wholeAddress(buffer), wanted);
             if (descriptors.put(descriptor, bytes) < wanted)
             {
                 fail(ENOSPC);

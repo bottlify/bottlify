@@ -86,7 +86,7 @@ export function createMsvcp80Functions(crt, host){
     const SIZE = POINTER === 8 ? 24 : STRING_SIZE;
     const RESERVED = POINTER === 8 ? 32 : STRING_RESERVED;
     /** @param {number} address */
-    const u32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
+    const u32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const setU32 = (address, value)=>{
@@ -156,7 +156,7 @@ export function createMsvcp80Functions(crt, host){
         }
         if (kept > 0)
         {
-            host.writeMemory(block, host.readMemory(textOf(self), kept).slice());
+            host.writeMemory(block, host.readMemory(textOf(self), kept));
         }
         tidy(self);
         setWord(self + BUFFER, block);
@@ -182,7 +182,7 @@ export function createMsvcp80Functions(crt, host){
         {
             const kept = Math.min(wanted, length);
             const heap = u32(self + BUFFER);
-            const text = host.readMemory(heap, kept).slice();
+            const text = host.readMemory(heap, kept);
             crt['??3@YAXPAX@Z'].handler([heap]);
             setWord(self + RESERVED, STRING_INLINE);
             host.writeMemory(self + BUFFER, text);
@@ -198,7 +198,7 @@ export function createMsvcp80Functions(crt, host){
      * @param {number} self @param {number} from @param {number} length
      */
     const assign = (self, from, length)=>{
-        const text = host.readMemory(from, length).slice();
+        const text = host.readMemory(from, length);
         setWord(self + RESERVED, STRING_INLINE);
         endAt(self, 0);
         if (length > STRING_INLINE)
@@ -250,9 +250,9 @@ export function createMsvcp80Functions(crt, host){
     };
 
     /** A string's text, copied out. @param {number} self */
-    const bytesOf = self=>host.readMemory(textOf(self), u32(self + SIZE)).slice();
+    const bytesOf = self=>host.readMemory(textOf(self), u32(self + SIZE));
     /** A C string's bytes, copied out. @param {number} at */
-    const bytesAt = at=>host.readMemory(wholeAddress(at), lengthOf(at >>> 0)).slice();
+    const bytesAt = at=>host.readMemory(wholeAddress(at), lengthOf(at >>> 0));
     /** @param {Uint8Array} a @param {Uint8Array} b */
     const same = (a, b)=>a.length === b.length && a.every((byte, at)=>byte === b[at]);
 
@@ -271,7 +271,7 @@ export function createMsvcp80Functions(crt, host){
         const ALLOCATOR = '?$allocator@D@std@@';
         const COMPLEX = 'V?$complex@M@0@';
         /** @param {number} at */
-        const f32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
+        const f32 = at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
             .getFloat32(0, true);
         /** A complex<float> written to the caller's result. @param {number} out */
         const complex = (out, /** @type {number} */ re, /** @type {number} */ im)=>{
@@ -387,7 +387,7 @@ export function createMsvcp80Functions(crt, host){
             }),
             /** void allocator<char>::construct(char *, const char &) */
             [`?construct@${ALLOCATOR}QEAAXPEADAEBD@Z`]: { ...cdecl(12, ([, at, from])=>{
-                host.writeMemory(wholeAddress(at), host.readMemory(wholeAddress(from), 1).slice());
+                host.writeMemory(wholeAddress(at), host.readMemory(wholeAddress(from), 1));
                 return 0;
             }), long: ()=>LONG_LEAVES.construct },
             /** void allocator<char>::destroy(char *): a char has nothing to destroy. */

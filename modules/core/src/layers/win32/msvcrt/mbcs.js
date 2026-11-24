@@ -933,7 +933,7 @@ export function createMultiByteHandlers(host, page){
             for (let i = 0; i < count >>> 0 && u8(at) !== 0; i++)
             {
                 const w = width(at);
-                host.writeMemory(end, host.readMemory(at, w).slice());
+                host.writeMemory(end, host.readMemory(at, w));
                 end += w;
                 at += w;
             }
@@ -957,7 +957,7 @@ export function createMultiByteHandlers(host, page){
                 {
                     break;
                 }
-                host.writeMemory(end, host.readMemory(at, w).slice());
+                host.writeMemory(end, host.readMemory(at, w));
                 end += w;
                 at += w;
                 left -= w;
@@ -1121,7 +1121,7 @@ export function createMultiByteHandlers(host, page){
                 length++;
             }
             const kept = Math.min(length, room);
-            host.writeMemory(destination, host.readMemory(source, kept).slice());
+            host.writeMemory(destination, host.readMemory(source, kept));
             if (length + 1 > room)
             {
                 setU8(destination, 0);
@@ -1173,7 +1173,7 @@ export function createMultiByteHandlers(host, page){
                 length++;
             }
             const kept = Math.min(length, room - end);
-            host.writeMemory(destination + end, host.readMemory(source, kept).slice());
+            host.writeMemory(destination + end, host.readMemory(source, kept));
             if (end + length + 1 > room)
             {
                 setU8(destination, 0);

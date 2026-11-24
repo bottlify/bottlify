@@ -182,7 +182,7 @@ export function createThreadFunctions(seam){
             }
             // Before the thread runs: CreateThread does not switch to it.
             writeU32(block + BLOCK.HANDLE, handle);
-            const id = new DataView(runtime.readMemory(block + BLOCK.ID, 4).slice().buffer)
+            const id = new DataView(runtime.readMemory(block + BLOCK.ID, 4).buffer)
                 .getUint32(0, true);
             owned.set(id, { handle, block });
             return handle;

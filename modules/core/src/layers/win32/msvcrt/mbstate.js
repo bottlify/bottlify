@@ -51,7 +51,7 @@ export function createRestartableFunctions(host){
     const cdecl = (argBytes, handler)=>({ convention: 'cdecl', argBytes, handler });
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
         .getUint32(0, true);
 
     /** @param {number} address @param {number} value */

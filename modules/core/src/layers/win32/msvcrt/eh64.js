@@ -726,7 +726,7 @@ export function createCxxExceptions64(host){
         }
         if ((properties & CT.SIMPLE) !== 0)
         {
-            host.writeMemory(into, host.readMemory(thrown.object, size).slice());
+            host.writeMemory(into, host.readMemory(thrown.object, size));
             // A pointer is caught as the base it is being caught as.
             if (size === 8 && readPointer(into) !== 0)
             {
@@ -737,7 +737,7 @@ export function createCxxExceptions64(host){
         const source = adjust(thrown.object, catchable);
         if (copyRva === 0 || !host.isMapped(copy))
         {
-            host.writeMemory(into, host.readMemory(source, size).slice());
+            host.writeMemory(into, host.readMemory(source, size));
             return;
         }
         await pass.call(copy, { rcx: into, rdx: source,

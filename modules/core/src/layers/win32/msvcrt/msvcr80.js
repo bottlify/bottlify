@@ -83,7 +83,7 @@ export function createMsvcr80Functions(crt, host){
     };
 
     /** @param {number} address */
-    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).slice().buffer)
+    const readU32 = address=>new DataView(host.readMemory(wholeAddress(address), 4).buffer)
         .getUint32(0, true);
     const pointer = host.pointerSize ?? 4;
     /** A pointer, every address below 4 GiB. @param {number} address @param {number} value */
@@ -311,7 +311,7 @@ export function createMsvcr80Functions(crt, host){
                 {
                     return 0;
                 }
-                return new DataView(host.readMemory(crt._errno.handler([]), 4).slice().buffer)
+                return new DataView(host.readMemory(crt._errno.handler([]), 4).buffer)
                     .getInt32(0, true);
             },
         },

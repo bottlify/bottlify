@@ -25,6 +25,9 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wholeAddress } from '../common/pointers.js';
 
+/** A string's terminator, where a string ends: never itself written. */
+const NUL = new Uint8Array(1);
+
 /**
  * @typedef {Object} StringHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -193,7 +196,7 @@ export function createStringFunctions(host){
                 const token = tokenAt + start;
                 if (end < rest.length)
                 {
-                    host.writeMemory(tokenAt + end, new Uint8Array(1));
+                    host.writeMemory(tokenAt + end, NUL);
                     tokenAt = tokenAt + end + 1;
                 }
                 else
@@ -249,7 +252,7 @@ export function createStringFunctions(host){
                 {
                     return 0;
                 }
-                const bytes = host.readMemory(source, length).slice();
+                const bytes = host.readMemory(source, length);
                 for (let at = 0; at < length; at += 2)
                 {
                     const first = bytes[at];
@@ -280,7 +283,7 @@ export function createStringFunctions(host){
                 }
                 /** @param {number} at */
                 const bytesOf = at=>host.readMemory(at,
-                    host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1).slice();
+                    host.scanCString(at, MAX_STRING, scanTable.fill(0)).index + 1);
                 const a = bytesOf(wholeAddress(left));
                 const b = bytesOf(wholeAddress(right));
                 for (let at = 0; ; at++)
@@ -321,7 +324,7 @@ export function createStringFunctions(host){
                 if (room !== 0)
                 {
                     host.writeMemory(destination,
-                        host.readMemory(source, Math.min(room, length + 1)).slice());
+                        host.readMemory(source, Math.min(room, length + 1)));
                 }
                 return length;
             },
@@ -348,7 +351,7 @@ export function createStringFunctions(host){
                     host.errno?.(EINVAL);
                     return NLS_COMPARE_ERROR;
                 }
-                const a = host.readMemory(left, length).slice();
+                const a = host.readMemory(left, length);
                 const b = host.readMemory(right, length);
                 for (let at = 0; at < length; at++)
                 {
