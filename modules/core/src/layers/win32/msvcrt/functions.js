@@ -65,6 +65,12 @@ import { O_UNICODE, bytesOfUnits, unitsOfText, wideStringAt } from './widetext.j
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
 
+/** A string's terminator, where a string ends: never itself written. */
+const NUL = new Uint8Array(1);
+
+/** A wide string's terminator, where a string ends: never itself written. */
+const WIDE_NUL = new Uint8Array(2);
+
 /** A double the code reads as its two halves, which a 64-bit caller passes in XMM0. */
 const DOUBLE_HALVES = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
 
@@ -194,7 +200,13 @@ const seededCode = (made, long, argBytes, handler)=>({
 /**
  * @typedef {Object} MsvcrtHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ *           Bytes of the caller's own, never a window on guest memory: a
+ *           handler keeps them across a guest step or a write, decodes them
+ *           (`TextDecoder` refuses shared memory) and takes `.buffer` from
+ *           them, so no caller copies them a second time.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ *           The bytes are in guest memory when it returns: a caller may
+ *           write the same scratch again at once.
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The region an address sits in, from the memory layer's map: the
  *           `va_list` window stops at its end rather than faulting the run.
@@ -310,21 +322,22 @@ export function createMsvcrtFunctions(host){
     const memoryAccess = guestAccess(host.readMemory, host.writeMemory);
 
     /**
-     * Text into bytes that may be longer than it, in the ANSI page the text
-     * was read in: a string a program passed is copied as its own bytes.
+     * Text in the ANSI page the text was read in, a byte a character, so a
+     * string a program passed is written back as its own bytes; and the
+     * terminator after it when `terminated` says so.
      *
-     * @param {Uint8Array} bytes @param {string} text
+     * @param {number} pointer @param {string} text @param {boolean} terminated
      */
-    const packInto = (bytes, text)=>{
-        bytes.set(encodeAnsi(text));
-        return bytes;
+    const putText = (pointer, text, terminated)=>{
+        host.writeMemory(pointer, encodeAnsi(text));
+        if (terminated)
+        {
+            host.fillMemory(pointer + text.length, 0, 1);
+        }
     };
 
     /** @param {number} pointer @param {string} text */
-    const writeString = (pointer, text)=>{
-        // One byte longer than the text: a caller expects the terminator too.
-        host.writeMemory(pointer, packInto(new Uint8Array(text.length + 1), text));
-    };
+    const writeString = (pointer, text)=>putText(pointer, text, true);
 
     /** What `_set_output_format` was given: `_TWO_DIGIT_EXPONENT` or nothing. */
     let outputFormat = 0;
@@ -381,8 +394,7 @@ export function createMsvcrtFunctions(host){
             return -1;
         }
         const kept = text.slice(0, limit);
-        host.writeMemory(buffer, packInto(
-            new Uint8Array(kept.length + (text.length < limit ? 1 : 0)), kept));
+        putText(buffer, kept, text.length < limit);
         return text.length > limit ? -1 : text.length;
     };
 
@@ -551,7 +563,7 @@ export function createMsvcrtFunctions(host){
     const boundedText = (buffer, room, text)=>{
         if (text.length + 1 > room)
         {
-            host.writeMemory(buffer, new Uint8Array(1));
+            host.writeMemory(buffer, NUL);
             errno(ERANGE);
             return -1;
         }
@@ -1037,7 +1049,7 @@ export function createMsvcrtFunctions(host){
                 const limit = truncate ? room - 1 : Math.min(count >>> 0, room - 1);
                 if (!truncate && (count >>> 0) > room - 1 && text.length > room - 1)
                 {
-                    host.writeMemory(buffer, new Uint8Array(2));
+                    host.writeMemory(buffer, WIDE_NUL);
                     errno(ERANGE);
                     return -1;
                 }
@@ -1470,7 +1482,7 @@ export function createMsvcrtFunctions(host){
         ...createProcessFunctions({
             errno,
             readCString: readString,
-            readU32: at=>new DataView(host.readMemory(wholeAddress(at), 4).slice().buffer)
+            readU32: at=>new DataView(host.readMemory(wholeAddress(at), 4).buffer)
                 .getUint32(0, true),
             allocate,
             writeMemory: host.writeMemory,

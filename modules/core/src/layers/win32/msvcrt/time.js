@@ -31,6 +31,9 @@ import { EINVAL, ERANGE } from './globals.js';
 import { wideStringAt } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
 
+/** A string's terminator, where a string ends: never itself written. */
+const NUL = new Uint8Array(1);
+
 const MAX_STRING = 1 << 20;
 
 /** msvcrt's clock ticks once per millisecond, unlike most Unix runtimes. */
@@ -588,10 +591,10 @@ export function createTimeFunctions(host){
 
     /** @param {number} pointer */
     const readInt = pointer=>
-        new DataView(host.readMemory(pointer, 4).slice().buffer).getInt32(0, true);
+        new DataView(host.readMemory(pointer, 4).buffer).getInt32(0, true);
 
     /** A 64-bit time_t. @param {number} pointer */
-    const readTime64 = pointer=>Number(new DataView(host.readMemory(pointer, 8).slice().buffer)
+    const readTime64 = pointer=>Number(new DataView(host.readMemory(pointer, 8).buffer)
         .getBigInt64(0, true));
 
     /** In the ANSI page a format is read in. @param {number} pointer @param {string} text */
@@ -637,7 +640,7 @@ export function createTimeFunctions(host){
 
     /** @param {number} block @returns {BrokenDown} */
     const readTm = block=>{
-        const view = new DataView(host.readMemory(block, TM.SIZE).slice().buffer);
+        const view = new DataView(host.readMemory(block, TM.SIZE).buffer);
         const at = (/** @type {number} */ offset)=>view.getInt32(offset, true);
         return { sec: at(TM.SEC), min: at(TM.MIN), hour: at(TM.HOUR), mday: at(TM.MDAY),
             mon: at(TM.MON), year: at(TM.YEAR), wday: at(TM.WDAY), yday: at(TM.YDAY),
@@ -683,7 +686,7 @@ export function createTimeFunctions(host){
      * @returns {TimeNames}
      */
     const readTimeNames = block=>{
-        const view = new DataView(host.readMemory(block, LC_TIME_DATA.POINTERS * 4).slice().buffer);
+        const view = new DataView(host.readMemory(block, LC_TIME_DATA.POINTERS * 4).buffer);
         return timeNamesOf(Array.from({ length: LC_TIME_DATA.POINTERS }, (_, at)=>{
             const pointer = view.getUint32(at * 4, true);
             return pointer === 0 ? '' : host.readCString(pointer, 256);
@@ -1042,7 +1045,7 @@ export function createTimeFunctions(host){
             {
                 return fail(EINVAL);
             }
-            host.writeMemory(buffer, new Uint8Array(1));
+            host.writeMemory(buffer, NUL);
             if ((pointer >>> 0) === 0)
             {
                 return fail(EINVAL);
@@ -1079,7 +1082,7 @@ export function createTimeFunctions(host){
             }
             if ((size >>> 0) < 9)
             {
-                host.writeMemory(buffer, new Uint8Array(1));
+                host.writeMemory(buffer, NUL);
                 return fail(ERANGE);
             }
             writeString(buffer, stampOf(format));

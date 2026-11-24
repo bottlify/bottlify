@@ -65,7 +65,7 @@ test('setjmp and _setjmp3 in the guest leave the buffer their handlers leave', (
     let registers = /** @type {Record<string, number>} */ ({});
     const crt = createCrtSeh(/** @type {any} */ ({
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
-            host.readPhysical(at, length),
+            host.readPhysical(at, length).slice(),
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
             host.writePhysical(at, bytes),
         isMapped: ()=>true,

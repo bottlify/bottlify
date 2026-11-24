@@ -91,7 +91,7 @@ export function createLocaleFunctions(host){
             const text = host.readCString(pointer, MAX_STRING);
             return encodeAnsi(terminated ? `${text}\0` : text);
         }
-        const bytes = host.readMemory(pointer, count | 0).slice();
+        const bytes = host.readMemory(pointer, count | 0);
         const end = bytes.indexOf(0);
         return end < 0 ? bytes : bytes.subarray(0, end);
     };

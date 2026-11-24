@@ -175,6 +175,32 @@ test('a text-mode _write puts CR before each LF and answers with the caller\'s c
     fns._close.handler([fd]);
 });
 
+test('_read copies what it reads once: binary straight to the buffer, text folded in place', ()=>{
+    const { files, open, read, tell } = build({
+        'C:\\game\\b.bin': bytesOf(DOSTEXT), 'C:\\game\\t.txt': bytesOf(DOSTEXT),
+    });
+    /** @type {Uint8Array[]} */
+    const answered = [];
+    const plain = files.read;
+    files.read = (/** @type {string} */ node, /** @type {number} */ at, /** @type {number} */ length)=>{
+        const bytes = /** @type {Uint8Array<ArrayBuffer>} */ (plain(node, at, length));
+        answered.push(bytes);
+        return bytes;
+    };
+
+    const binary = open('C:\\game\\b.bin', O_RDONLY | O_BINARY);
+    assert.equal(read(binary, 10), DOSTEXT.slice(0, 10));
+    assert.equal(tell(binary), 10);
+    assert.equal(answered.length, 0,
+        'a binary read goes from the volume to the buffer, no array of its own');
+
+    const text = open('C:\\game\\t.txt', O_RDONLY | O_TEXT);
+    assert.equal(read(text, 256), MYTEXT);
+    assert.equal(answered.length, 1);
+    assert.equal(String.fromCharCode(...answered[0].subarray(0, MYTEXT.length)), MYTEXT,
+        'the volume\'s answer is the one folded, no second array');
+});
+
 test('a text-mode _read folds CR LF to LF, and a CR last in the read looks one further', ()=>{
     // Every case is one of Wine's msvcrt test_file_write_read.
     const { fns, open, read, tell } = build({ 'C:\\game\\t.txt': bytesOf(DOSTEXT) });

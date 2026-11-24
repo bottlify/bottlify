@@ -362,7 +362,7 @@ export function createMathFunctions(host){
     const read = host.readMemory;
     handlers._cabs = host.pointerSize === 8 && read
         ? returningDouble(fpu, 4, ([at])=>{
-            const parts = new DataView(read(wholeAddress(at), 16).slice().buffer);
+            const parts = new DataView(read(wholeAddress(at), 16).buffer);
             const real = parts.getFloat64(0, true);
             const imaginary = parts.getFloat64(8, true);
             return answer([real, imaginary], Math.hypot(real, imaginary));

@@ -108,7 +108,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
             writeUnits(destination, unit, terminated ? [...units, 0] : units);
             return terminated;
         }
-        const window = host.readMemory(source, gap + most * unit).slice();
+        const window = host.readMemory(source, gap + most * unit);
         for (let index = 0; index < most; index++)
         {
             const from = index * unit;
@@ -477,7 +477,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                     }
                     return fail((source >>> 0) === 0 ? EINVAL : ERANGE);
                 }
-                host.writeMemory(destination, host.readMemory(source, length).slice());
+                host.writeMemory(destination, host.readMemory(source, length));
                 return 0;
             },
         }),
@@ -504,7 +504,7 @@ export function createSecureFunctions(host, { inGuest: guestCode = true } = {}){
                 {
                     return fail(ERANGE);
                 }
-                host.writeMemory(destination, host.readMemory(source, length).slice());
+                host.writeMemory(destination, host.readMemory(source, length));
                 return 0;
             },
         }),

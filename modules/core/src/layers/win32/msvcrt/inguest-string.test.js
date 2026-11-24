@@ -178,7 +178,7 @@ test('the host grows a string as the library does, and trims it back inline', ()
         '??3@YAXPAX@Z': { handler: (/** @type {number[]} */ [block])=>freed.push(block) },
     };
     const table = createMsvcp80Functions(crt, {
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
     });
     const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
@@ -230,7 +230,7 @@ test('assignment, appending and comparison read their text before they grow', ()
         '??3@YAXPAX@Z': { handler: ()=>0 },
     };
     const table = createMsvcp80Functions(crt, {
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
     });
     const STRING = '?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@';
@@ -284,7 +284,7 @@ test('a 64-bit process\'s string: forty bytes, the text after the iterator list,
     /** @type {number[]} */
     const singles = [];
     const table = createMsvcp80Functions(crt, {
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>memory.slice(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         pointerSize: 8,
         fpu: /** @type {any} */ ({ setResult: ()=>{},

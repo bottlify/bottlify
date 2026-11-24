@@ -9,10 +9,13 @@ import { createScanStore, runScan, VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
 import {
-    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOf, unitsOfText, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOfText, wideStringAt,
 } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+
+/** A line's terminator, where fgets ends it: never itself written. */
+const NUL = new Uint8Array(1);
 
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
@@ -203,10 +206,15 @@ export function createStdioFunctions(host){
         host.errno?.(code);
     };
 
+    // One dword's bytes for every store into a FILE record: writeMemory has
+    // put them in guest memory by the time it returns.
+    const dword = new Uint8Array(4);
+    const dwordView = new DataView(dword.buffer);
     /** @param {number} address @param {number} value */
-    const writeU32 = (address, value)=>host.writeMemory(address, new Uint8Array([
-        value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-    ]));
+    const writeU32 = (address, value)=>{
+        dwordView.setUint32(0, value >>> 0, true);
+        host.writeMemory(address, dword);
+    };
 
     /**
      * Which of `_iob`'s standard three a record is, or -1.
@@ -493,8 +501,11 @@ export function createStdioFunctions(host){
                         raise(stream, IOEOF);
                     }
                     stores.forEach(apply=>apply());
-                    stream.pushback.push(...[...encodeAnsi(text.slice(progress.consumed))]
-                        .reverse());
+                    const left = encodeAnsi(text.slice(progress.consumed));
+                    for (let i = left.length - 1; i >= 0; i--)
+                    {
+                        stream.pushback.push(left[i]);
+                    }
                     return assigned;
                 }
                 const more = take(stream, 4096, true);
@@ -1076,7 +1087,7 @@ export function createStdioFunctions(host){
                 fail(EINVAL);
                 return 0;
             }
-            const stored = emit(stream, host.readMemory(wholeAddress(buffer), wanted).slice());
+            const stored = emit(stream, host.readMemory(wholeAddress(buffer), wanted));
             return Math.floor(stored / (size >>> 0));
         }) },
 
@@ -1314,10 +1325,10 @@ export function createStdioFunctions(host){
                 {
                     return 0;
                 }
-                const line = new Uint8Array(bytes.length + 1);
-                line.set(bytes);
-                host.writeMemory(wholeAddress(buffer), line);
-                return wholeAddress(buffer);
+                const to = wholeAddress(buffer);
+                host.writeMemory(to, bytes);
+                host.writeMemory(to + bytes.length, NUL);
+                return to;
             });
         }), returns: 'pointer' },
 
@@ -1435,16 +1446,33 @@ export function createStdioFunctions(host){
             const limit = (count | 0) - 1;
             const width = widthOf(stream);
             return settle(take(stream, limit * width, true, width), bytes=>{
-                const units = width === 2 ? unitsOf(bytes) : [...bytes];
-                if (units.length < limit && units[units.length - 1] !== LF)
+                const read = width === 2 ? bytes.length >> 1 : bytes.length;
+                const last = read === 0 ? -1
+                    : width === 2 ? bytes[read * 2 - 2] | bytes[read * 2 - 1] << 8
+                        : bytes[read - 1];
+                if (read < limit && last !== LF)
                 {
                     raise(stream, IOEOF);
                 }
-                if (units.length === 0 && limit > 0)
+                if (read === 0 && limit > 0)
                 {
                     return 0;
                 }
-                host.writeMemory(wholeAddress(buffer), bytesOfUnits([...units, 0]));
+                // The line as UTF-16 and its terminator, laid out once: a
+                // Unicode stream's bytes are that already, an ANSI one's widen.
+                const out = new Uint8Array(read * 2 + 2);
+                if (width === 2)
+                {
+                    out.set(bytes.subarray(0, read * 2));
+                }
+                else
+                {
+                    for (let i = 0; i < read; i++)
+                    {
+                        out[i * 2] = bytes[i];
+                    }
+                }
+                host.writeMemory(wholeAddress(buffer), out);
                 return wholeAddress(buffer);
             });
         }), returns: 'pointer' },

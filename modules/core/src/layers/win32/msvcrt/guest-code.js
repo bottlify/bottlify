@@ -350,7 +350,7 @@ export function guestMemory(host){
             // same bytes the ascending one does.
             if ((destination - source >>> 0) >= length)
             {
-                host.writeMemory(at(destination), host.readMemory(at(source), length).slice());
+                host.writeMemory(at(destination), host.readMemory(at(source), length));
                 return;
             }
             for (let i = 0; i < length; i++)
@@ -362,7 +362,7 @@ export function guestMemory(host){
             const length = count >>> 0;
             if ((source - destination >>> 0) >= length)
             {
-                host.writeMemory(at(destination), host.readMemory(at(source), length).slice());
+                host.writeMemory(at(destination), host.readMemory(at(source), length));
                 return;
             }
             for (let i = length - 1; i >= 0; i--)

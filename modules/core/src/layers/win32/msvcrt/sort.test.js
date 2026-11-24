@@ -16,8 +16,10 @@ const BASE = 0x100;
  * The table over a fake memory whose comparator is Wine's qsort_comp: the
  * values modulo 1000, each call's element indices recorded.
  */
-const build = ()=>{
+const build = (/** @type {(plain: (a: number, n: number) => Uint8Array) =>
+    ((a: number, n: number) => Uint8Array)} */ reader = plain=>plain)=>{
     const memory = fakeMemory();
+    memory.readMemory = /** @type {typeof memory.readMemory} */ (reader(memory.readMemory));
     /** @type {[number, number][]} */
     const calls = [];
     /** @type {number[]} */
@@ -104,6 +106,26 @@ test('qsort_s sorts a hundred values and refuses what it cannot sort', async()=>
     assert.equal(await table.qsort_s.handler([BASE, 4, 0, COMPARE, 0]), 0);
     assert.equal(await table.qsort_s.handler([BASE, 4, 4, 0, 0]), 0);
     assert.deepEqual(errno, [22, 22]);
+});
+
+test('qsort_s copies no element twice: what memory reads is the caller\'s already', async()=>{
+    // The memory layer answers a copy (`MsvcrtHost.readMemory`); every
+    // further copy of it is counted, and a swap per comparison makes any
+    // second one show at once.
+    let copied = 0;
+    const { table, put, read } = build(plain=>(address, length)=>{
+        const bytes = plain(address, length);
+        bytes.slice = (...range)=>{
+            copied++;
+            return Uint8Array.prototype.slice.apply(bytes, range);
+        };
+        return bytes;
+    });
+    const values = Array.from({ length: 100 }, (_, i)=>(i * 7919) % 1000);
+    put(values);
+    await table.qsort_s.handler([BASE, 100, 4, COMPARE, 0]);
+    assert.deepEqual(read(100), values.slice().sort((a, b)=>a - b));
+    assert.equal(copied, 0);
 });
 
 test('_lfind_s finds the first element its comparator calls equal, or null', async()=>{

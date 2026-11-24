@@ -405,7 +405,7 @@ export function createCxxExceptions(host){
         }
         if ((properties & CT.SIMPLE) !== 0)
         {
-            host.writeMemory(into, host.readMemory(object, size).slice());
+            host.writeMemory(into, host.readMemory(object, size));
             // A pointer is caught as the base it is being caught as.
             if (size === 4 && readU32(into) !== 0)
             {
@@ -416,7 +416,7 @@ export function createCxxExceptions(host){
         const source = adjust(object, catchable);
         if (copy === 0 || !host.isMapped(copy))
         {
-            host.writeMemory(into, host.readMemory(source, size).slice());
+            host.writeMemory(into, host.readMemory(source, size));
             return;
         }
         await host.callGuest({

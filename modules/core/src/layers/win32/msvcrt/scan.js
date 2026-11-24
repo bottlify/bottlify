@@ -26,6 +26,9 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
 
+/** A string's terminator, where a stored string ends: never itself written. */
+const NUL = new Uint8Array(1);
+
 /**
  * How many stack slots a variadic function reads past its fixed arguments.
  *
@@ -626,9 +629,12 @@ export function createScanStore(host){
                 host.writeMemory(pointer, buffer);
                 return;
             }
-            const buffer = new Uint8Array(value.length + (terminate ? 1 : 0));
-            buffer.set(encodeAnsi(value));
-            host.writeMemory(pointer, buffer);
+            // A byte a character in the ANSI page, then the terminator.
+            host.writeMemory(pointer, encodeAnsi(value));
+            if (terminate)
+            {
+                host.writeMemory(pointer + value.length, NUL);
+            }
         },
     };
 }

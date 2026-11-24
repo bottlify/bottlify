@@ -115,7 +115,7 @@ const stringOf = element=>`?$basic_string@${element}U?$char_traits@${element}@st
  */
 export function createMsvcp60Functions(crt, host){
     /** @param {number} address */
-    const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).slice().buffer)
+    const u32 = address=>new DataView(host.readMemory(address >>> 0, 4).buffer)
         .getUint32(0, true);
     /** @param {number} address @param {number} value */
     const setU32 = (address, value)=>{
@@ -226,7 +226,7 @@ export function createMsvcp60Functions(crt, host){
             ? Uint8Array.of(value & 0xff) : Uint8Array.of(value & 0xff, value >>> 8 & 0xff));
         /** The elements at a place, as a copy. @param {number} at @param {number} count */
         const read = (at, count)=>(count === 0 ? new Uint8Array(0)
-            : host.readMemory(at >>> 0, count * unit).slice());
+            : host.readMemory(at >>> 0, count * unit));
         /**
          * Elements written at a place: none written is no access, as a
          * string of no text has no place (its `_Ptr` is null).

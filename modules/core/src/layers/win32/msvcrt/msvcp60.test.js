@@ -57,7 +57,7 @@ function setup(){
         // The first page closed, as a process's is: a null text is never touched.
         readMemory: (address, length)=>{
             assert.ok(address >= 0x100, `read of ${length} at ${address}`);
-            return memory.subarray(address, address + length);
+            return memory.slice(address, address + length);
         },
         writeMemory: (address, bytes)=>{
             assert.ok(address >= 0x100, `write of ${bytes.length} at ${address}`);

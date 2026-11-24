@@ -26,12 +26,16 @@ import {
 } from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
+import { byteText } from './format.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import {
     SHIFT_JIS, jisToShiftJis, shiftJisToJis, toHiragana, toKatakana, isKatakana, toFullWidth,
     toHalfWidth, jisLevel,
 } from './kana.js';
+
+/** A wide string's terminator, where a string ends: never itself written. */
+const WIDE_NUL = new Uint8Array(2);
 
 const MAX_STRING = 1 << 20;
 
@@ -97,8 +101,7 @@ export function createWideFunctions(host){
      *
      * @param {number} pointer
      */
-    const readNarrowUnits = pointer=>Array.from(encodeAnsi(host.readCString(pointer, MAX_STRING)),
-        byte=>String.fromCharCode(byte)).join('');
+    const readNarrowUnits = pointer=>byteText(encodeAnsi(host.readCString(pointer, MAX_STRING)));
 
     /**
      * A wide string up to its terminator, sixty-four thousand units at most:
@@ -338,7 +341,7 @@ export function createWideFunctions(host){
                 const token = wideTokenAt + start * 2;
                 if (end < rest.length)
                 {
-                    host.writeMemory(wideTokenAt + end * 2, new Uint8Array(2));
+                    host.writeMemory(wideTokenAt + end * 2, WIDE_NUL);
                     wideTokenAt += (end + 1) * 2;
                 }
                 else
@@ -543,8 +546,7 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
                 const source = width.get(new DataView(host.readMemory(wholeAddress(from),
-                    width.size)
-                    .slice().buffer), 0);
+                    width.size).buffer), 0);
                 const text = readNarrowUnits(source);
                 if (wholeAddress(destination) === 0)
                 {
@@ -574,8 +576,7 @@ export function createWideFunctions(host){
             /** @param {number[]} args */
             handler: ([destination, from, count])=>{
                 const source = width.get(new DataView(host.readMemory(wholeAddress(from),
-                    width.size)
-                    .slice().buffer), 0);
+                    width.size).buffer), 0);
                 const text = readWide(source);
                 const room = wholeAddress(destination) === 0 ? text.length + 1 : count >>> 0;
                 const converted = text.slice(0, room);

@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatToString, guestAccess, sequentialArguments, wideSlots } from './format.js';
+import {
+    formatToString, guestAccess, sequentialArguments, varargsSlots, wideSlots,
+} from './format.js';
 
 /** Pointers the guest would hold; the engine never invents one of its own. */
 const HELLO = 0x100;
@@ -211,7 +213,7 @@ test('%Z prints a counted string and %n writes the count, where the guest memory
     const memory = new Uint8Array(0x1000);
     const view = new DataView(memory.buffer);
     const read = (/** @type {number} */ at, /** @type {number} */ length)=>
-        memory.subarray(at, at + length);
+        memory.slice(at, at + length);
     const write = (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
         memory.set(bytes, at);
     memory.set([...'not wide'].map(c=>c.charCodeAt(0)), 0x100);
@@ -295,4 +297,32 @@ test('%F is the universal runtime\'s conversion, and far before a letter', ()=>{
     assert.equal(styled('%F', slots(1.23)), '1.230000');
     assert.equal(styled('%Fd %Nd', [123, 456]), '123 456');
     assert.equal(render('%Fd', [123]), '123');
+});
+
+test('varargsSlots reads the slots where the reader put them, and pads only a list cut short', ()=>{
+    // Slots 1, 2, -3 at an offset in a larger buffer, as a reader may answer.
+    const backing = new Uint8Array(4 + 12);
+    const view = new DataView(backing.buffer);
+    view.setInt32(4, 1, true);
+    view.setInt32(8, 2, true);
+    view.setInt32(12, -3, true);
+    /** @param {number} at @param {number} length */
+    const reader = (at, length)=>backing.subarray(4, 4 + length);
+    const set = Uint8Array.prototype.set;
+    let copies = 0;
+    Uint8Array.prototype.set = function(/** @type {any[]} */ ...args){
+        copies++;
+        return set.apply(this, /** @type {any} */ (args));
+    };
+    try
+    {
+        assert.deepEqual(varargsSlots(reader, ()=>null, 0x1000, 3), [1, 2, -3]);
+        assert.equal(copies, 0, 'a whole window is read where it lies, not copied again');
+        assert.deepEqual(varargsSlots(reader, ()=>({ base: 0x1000, size: 8 }), 0x1000, 3),
+            [1, 2, 0], 'past the region\'s end, zeros');
+    }
+    finally
+    {
+        Uint8Array.prototype.set = set;
+    }
 });
