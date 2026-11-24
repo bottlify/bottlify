@@ -1295,10 +1295,10 @@ const viewPageProtection = (view, page)=>{
  *           a reservation's pages not committed, and those protected
  *           PAGE_NOACCESS, fault on any access, as on Windows. False where the
  *           processor does not fault a read, and then every page reads.
- * @property {() => ({ base: number, top: number, chunk: number, direct?: number } | null)}
- *           [farSpace]  Where the process may reserve past 4 GiB (the memory layer's
- *           `farSpace`), null where it may not; below `direct` (a wide window's RAM) each
- *           chunk is its own frame.
+ * @property {() => ({ base: number, top: number, chunk: number, direct?: number,
+ *     table?: number } | null)} [farSpace]  Where the process may reserve past 4 GiB (the
+ *           memory layer's `farSpace`), null where it may not; below `direct` (a wide
+ *           window's RAM) each chunk is its own frame, from `table` on the table's.
  * @property {(base: number, size: number, held: boolean) => void} [held]  A reservation
  *           of a wide window's RAM past 4 GiB made or released, for the memory layer's map
  *           of the process's space.
@@ -2558,10 +2558,11 @@ export function createHeapFunctions(host){
      * base, or 0 where the far space or the window's frames have no room.
      *
      * @param {NonNullable<ReturnType<typeof far>>} farSpace @param {number} span
-     * @param {number} kind @param {number} protection
+     * @param {number} kind @param {number} protection @param {number} [from]  the lowest
+     *     place, the space's start unless given
      */
-    const farReserve = (farSpace, span, kind, protection)=>{
-        const base = farSpace.reserve(span, protection);
+    const farReserve = (farSpace, span, kind, protection, from = farSpace.space.base)=>{
+        const base = farSpace.reserve(span, protection, from);
         if (base === 0)
         {
             return 0;
@@ -2833,13 +2834,15 @@ export function createHeapFunctions(host){
         // pages up to the granule's end is within its rights, and was
         // refused here as if it had left its reservation.
         const span = roundUp(size, ALLOCATION_GRANULARITY);
-        // A large one past 4 GiB first through the table of far chunks, where the
-        // window is kept for frames; a wide window's RAM past 4 GiB only once the
-        // space below has no room, where every address the system is handed lies.
-        if (farSpace !== null && where === null && span >= FAR_FIRST
-            && farSpace.space.direct === undefined)
+        // A large one past the window first, through the table of far chunks, where
+        // the space below 4 GiB is kept for frames; a wide window's RAM past 4 GiB
+        // only once the space below has no room, where every address the system is
+        // handed lies.
+        const tableFrom = farSpace?.space.direct === undefined ? farSpace?.space.base
+            : farSpace.space.table;
+        if (farSpace !== null && where === null && span >= FAR_FIRST && tableFrom !== undefined)
         {
-            const placedFar = farReserve(farSpace, span, kind, protection);
+            const placedFar = farReserve(farSpace, span, kind, protection, tableFrom);
             if (placedFar !== 0)
             {
                 return placedFar;

@@ -455,7 +455,9 @@ export function createCorkHost(config){
     const apart = area?.others;
     const othersBytes = (executors - 1) * executorPages * 65536;
     // The table of far chunks (`far`), last in the first executor's range.
-    const farBytes = farAsked && long && wideWindow === undefined ? engine.FAR.BYTES : 0;
+    // A wide window's runs from the window's end (cork's `farBytes`).
+    const farBytes = !farAsked || !long ? 0 : wideWindow === undefined ? engine.FAR.BYTES
+        : (engine.FAR.TOP - wideWindow) / engine.FAR.CHUNK * 4;
     const farOffset = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
         + (apart ? 0 : othersBytes);
     const areaBytes = farOffset + farBytes;
@@ -503,16 +505,21 @@ export function createCorkHost(config){
     // A wide window whose code block lies past 4 GiB: the block below it, where the system's
     // libraries, the heap and a JIT's pages lie, is translated by a runtime of its own
     // (`twoBlockRuntime`), its tables past everything of the first's (cork's `wideLayout`).
-    const lowLayout = long && wideWindow !== undefined && codeBase !== 0 && executors === 1
-        && corkConfig?.lowBlock !== false
-        ? ownLayout({ ...layoutOptions, codeBase: 0, tablesAt: firstPages * 65536 }) : null;
-    const lowPages = lowLayout === null ? 0 : Math.ceil(tables / 65536);
-    // A memory of its RAM whole has the table of far chunks past everything else.
+    const lowWanted = long && wideWindow !== undefined && codeBase !== 0 && executors === 1
+        && corkConfig?.lowBlock !== false;
+    const lowPages = lowWanted ? Math.ceil(tables / 65536) : 0;
+    // A memory of its RAM whole has the table of far chunks past everything else,
+    // one for both of a wide window's blocks.
     const fixedPages = firstPages + (executors - 1) * executorPages + sharedPages + lowPages;
-    if (!growing && farBytes > 0)
+    /** @type {{ far?: number }} */
+    const farPlace = !growing && farBytes > 0 ? { far: fixedPages * 65536 } : {};
+    if (farPlace.far !== undefined)
     {
-        own = ownLayout({ ...layoutOptions, far: fixedPages * 65536 });
+        own = ownLayout({ ...layoutOptions, ...farPlace });
     }
+    const lowLayout = lowWanted
+        ? ownLayout({ ...layoutOptions, codeBase: 0, tablesAt: firstPages * 65536, ...farPlace })
+        : null;
     /** Where an executor's state page begins. @param {number} index */
     const executorBase = index=>(index === 0 ? own.regs
         : othersArea.to > othersArea.from ? othersArea.from + (index - 1) * executorPages * 65536
@@ -680,7 +687,7 @@ export function createCorkHost(config){
         // The table of far chunks: none mapped.
         if (own.far !== undefined)
         {
-            bytes.fill(0, own.far, own.far + engine.FAR.BYTES);
+            bytes.fill(0, own.far, own.far + farBytes);
         }
     }
 
@@ -794,6 +801,8 @@ export function createCorkHost(config){
     // Far reservations (`far`): the process's table of far chunks, -1 for none.
     const farTable = layout.far ?? -1;
     const FAR = engine.FAR;
+    /** Where the far space's table begins: past the window (cork's `farBase`). */
+    const farStart = wideWindow ?? FAR.BASE;
     /**
      * The pieces of a far span the host reads or writes, each in one chunk:
      * its offset in the span, its length and where it lies in the window -- -1
@@ -811,14 +820,14 @@ export function createCorkHost(config){
             const chunkEnd = (Math.floor(address / FAR.CHUNK) + 1) * FAR.CHUNK;
             const piece = Math.min(length - offset, chunkEnd - address);
             const entry = address >= FAR.TOP ? 0 : wholeWords[(farTable
-                + Math.floor((address - FAR.BASE) / FAR.CHUNK) * 4) >>> 2] >>> 0;
+                + Math.floor((address - farStart) / FAR.CHUNK) * 4) >>> 2] >>> 0;
             pieces.push([offset, piece, entry === 0 ? -1 : (address + entry - 1) % 2 ** 32]);
             offset += piece;
         }
         return pieces;
     };
-    /** Whether the host's access is past 4 GiB in a process with far reservations. @param {number} at */
-    const isFar = at=>farTable >= 0 && at >= FAR.BASE;
+    /** Whether the host's access is past the window in a process with far reservations. @param {number} at */
+    const isFar = at=>farTable >= 0 && at >= farStart;
     /**
      * A far span's bytes, a copy: zeros where a chunk has no frame.
      *
@@ -2537,11 +2546,12 @@ export function createCorkHost(config){
          * `direct`, a wide window's RAM, each chunk its own frame; null for a
          * process with neither.
          */
-        farSpace: ()=>(farTable >= 0 ? { base: FAR.BASE, top: FAR.TOP, chunk: FAR.CHUNK }
-            // A wide window's RAM past 4 GiB: each chunk its own frame.
-            : long && wideWindow !== undefined && wideRamTop > FAR.BASE
-                ? { base: FAR.BASE, top: wideRamTop, chunk: FAR.CHUNK, direct: wideRamTop }
-                : null),
+        farSpace: ()=>(long && wideWindow !== undefined && wideRamTop > FAR.BASE
+            // A wide window's RAM past 4 GiB, each chunk its own frame, and past the
+            // window the table's chunks where it has one.
+            ? { base: FAR.BASE, top: farTable >= 0 ? FAR.TOP : wideRamTop, chunk: FAR.CHUNK,
+                direct: wideRamTop, ...farTable >= 0 ? { table: farStart } : {} }
+            : farTable >= 0 ? { base: FAR.BASE, top: FAR.TOP, chunk: FAR.CHUNK } : null),
         /**
          * Gives the far chunk `address` lies in the frame `frame` of the window,
          * or none (-1): every executor's code finds it at its next access.
@@ -2549,12 +2559,12 @@ export function createCorkHost(config){
          * @param {number} address @param {number} frame
          */
         mapFar(address, frame){
-            if (farTable < 0 || address < FAR.BASE || address >= FAR.TOP)
+            if (farTable < 0 || address < farStart || address >= FAR.TOP)
             {
                 throw new Error(`cpu: no far chunk at 0x${address.toString(16)}`);
             }
             const chunk = Math.floor(address / FAR.CHUNK) * FAR.CHUNK;
-            Atomics.store(wholeWords, (farTable + (chunk - FAR.BASE) / FAR.CHUNK * 4) >>> 2,
+            Atomics.store(wholeWords, (farTable + (chunk - farStart) / FAR.CHUNK * 4) >>> 2,
                 frame < 0 ? 0 : engine.farEntry(frame, chunk) | 0);
         },
         /**

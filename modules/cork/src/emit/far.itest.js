@@ -5,7 +5,8 @@
  */
 
 /**
- * Far chunks (`FAR`): long mode's accesses past the 4 GiB window, sent by the
+ * Far chunks (`FAR`): long mode's accesses past its window - 4 GiB, or a wide
+ * one's 8 GiB of memory64 - sent by the
  * process's table to their frames in it (`farTranslate`), against the
  * long-mode interpreter, which takes them there too (`interp64.js`): the
  * corpus's cases and seeded programs with their data area past 4 GiB, its two
@@ -25,6 +26,11 @@ const BY = 2 ** 34 + 0xf000;
 const PLACINGS = [
     { name: 'frames side by side', far: { by: BY } },
     { name: 'frames apart', far: { by: BY, apart: 0x40000 } },
+    // Past an 8 GiB wide window (memory64): the same chunks from its end, their
+    // frames below 4 GiB in its RAM.
+    { name: 'past a wide window, frames side by side', far: { by: BY }, window: 2 ** 33 },
+    { name: 'past a wide window, frames apart', far: { by: BY, apart: 0x40000 },
+        window: 2 ** 33 },
 ];
 
 /**
@@ -71,10 +77,12 @@ function cases(){
  * with the flags each leaves undefined, which the emitter leaves as it will.
  *
  * @param {any[]} all @param {import('../testing/long-machine.js').FarPlacing} far
+ * @param {number} [window]  a wide window's bytes
  */
-function clean(all, far){
-    const interpreter = machine({ far });
-    const bytes = new Uint8Array(interpreter.memory.buffer);
+function clean(all, far, window){
+    const interpreter = machine({ far, window });
+    // The code where it lies: a wide window's RAM is a memory of its own.
+    const bytes = new Uint8Array((interpreter.ram ?? interpreter.memory).buffer);
     return all.flatMap(one=>{
         load(interpreter, one);
         const undefinedFlags = flagsLeftUndefined(interpreter.state, address=>bytes[address]);
@@ -84,10 +92,10 @@ function clean(all, far){
     });
 }
 
-for (const { name, far } of PLACINGS)
+for (const { name, far, window } of PLACINGS)
 {
     test(`data past 4 GiB in far chunks, ${name}, precise: translated as interpreted`, ()=>{
-        const { failures, exits, stats } = compare(cases(), { budget: 7, far,
+        const { failures, exits, stats } = compare(cases(), { budget: 7, far, window,
             config: { precise: true } });
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.ok(exits > CORPUS.cases.length * 0.9, `${exits} cases ran to their exit`);
@@ -95,9 +103,9 @@ for (const { name, far } of PLACINGS)
     });
     test(`data past 4 GiB in far chunks, ${name}, as a program runs - reads untested in the`
         + ' window: translated as interpreted', ()=>{
-        const kept = clean(cases(), far);
+        const kept = clean(cases(), far, window);
         assert.ok(kept.length > CORPUS.cases.length * 0.8, `${kept.length} cases`);
-        const { failures, exits, stats } = compare(kept, { budget: 7, far,
+        const { failures, exits, stats } = compare(kept, { budget: 7, far, window,
             config: { precise: false } });
         assert.deepEqual(failures.slice(0, 20), [], `${failures.length} differences`);
         assert.equal(exits, kept.length);

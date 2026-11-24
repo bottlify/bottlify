@@ -2463,7 +2463,7 @@ function windowed(e, operand, store){
         windowAddress(e, ()=>emitAddress64(e, operand));
         return false;
     }
-    if (e.guest !== null && wrapsRead(e, store))
+    if (e.guest !== null && wrapsRead(e, store) && e.layout.far === undefined)
     {
         // A wide window's read left untested: its whole address, the quadword sum
         // wrapped into the window as a 4 GiB one's 32-bit sum is into RAM

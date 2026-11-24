@@ -23,7 +23,8 @@ import { registerLocal } from './width.js';
 import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
-import { FAR as FAR_SPACE, Tables, codeRangesAt, pageFlagsAt, windowBits } from '../runtime/layout.js';
+import { FAR as FAR_SPACE, Tables, codeRangesAt, farBase, pageFlagsAt, windowBits }
+    from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { I32, I64 } from './flags.js';
 import { Exit, Local } from './region.js';
@@ -265,7 +266,13 @@ export function checkAccess(e, size, { counted = true, store = false, window = f
             // A wide window's read: its whole address wrapped into the window, as a
             // 4 GiB one's is into RAM - by `windowed` already, or here from the
             // quadword `windowAddress` left in `t64`.
-            if (window)
+            if (window && e.layout.far !== undefined)
+            {
+                // Past the window to its far chunk's frame (`farTranslate`), tested.
+                windowTest(e, size, counted);
+                b.localGet(Local.t64).localTee(e.guest.whole).op(I64.wrap).localSet(Local.addr);
+            }
+            else if (window)
             {
                 b.localGet(Local.t64).i64const(BigInt(/** @type {number} */ (e.layout.window) - 1))
                     .op(I64.and).localTee(Local.t64).localTee(e.guest.whole).op(I64.wrap)
@@ -2695,6 +2702,11 @@ function farTranslate(e, size, counted){
     e.close();
     b.localGet(Local.t64).op(I64.wrap).localGet(Local.pflags).op(I32.add)
         .i32const(-1).op(I32.add).localSet(Local.addr);
+    if (e.guest !== null)
+    {
+        // A wide window's frame lies below 4 GiB too: its whole address, zero-extended.
+        b.localGet(Local.addr).op(I64.extendU).localTee(Local.t64).localSet(e.guest.whole);
+    }
 }
 
 /**
@@ -2710,7 +2722,7 @@ function farEntryOf(e, delta){
         b.i64const(BigInt(delta)).op(I64.add);
     }
     b.i64const(BigInt(FAR_SPACE.SHIFT)).op(I64.shrU).op(I64.wrap)
-        .i32const(FAR_SPACE.BASE / FAR_SPACE.CHUNK).op(I32.sub).i32const(2).op(I32.shl)
+        .i32const(farBase(e.layout) / FAR_SPACE.CHUNK).op(I32.sub).i32const(2).op(I32.shl)
         .load('i32', { offset: /** @type {number} */ (e.layout.far) });
 }
 

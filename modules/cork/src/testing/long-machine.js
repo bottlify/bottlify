@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { gunzipSync } from 'node:zlib';
 import { allowMemory64 } from './memory64.js';
 import {
-    FAR, Tables, farEntry, ownLayout, pageFlagsAt, pagesFor, tablesSize,
+    FAR, Tables, farBase, farBytes, farEntry, ownLayout, pageFlagsAt, pagesFor, tablesSize,
 } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { blockState64, interpret64 } from '../interp64.js';
@@ -65,8 +65,8 @@ export function fill(seed, size){
  *     makeRunner?: MakeRunner | null, ramSize?: number, closed?: number[], window?: number,
  *     high?: number, codeHigh?: number, processors?: number, lowBlock?: boolean,
  *     tierHot?: number, features?: Record<string, boolean>, far?: FarPlacing }} [options]
- *     `far`: the data area past 4 GiB in far chunks (`FAR`), its pages in the window as their
- *     frames (`FarPlacing`), the registers pointing at it there;
+ *     `far`: the data area past the window in far chunks (`FAR`), its pages below 4 GiB as
+ *     their frames (`FarPlacing`), the registers pointing at it there;
  *     `processors`: the layout's (the first executor's, with the process's lock word);
  *     `lowBlock`: with a code block past 4 GiB, the block below it translated by a runtime
  *     of its own (`wideLayout`), as the core's host has it; `tierHot`: the tier's hot
@@ -90,25 +90,28 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
     {
         allowMemory64();
     }
-    // The table of far chunks past everything else of the memory.
-    const farAt = far === undefined ? undefined
-        : pagesFor(ownLayout({ ramSize, ramBase: 0, bits: 64, processors }),
-            tablesSize(ownLayout({ ramSize, ramBase: 0, bits: 64, processors }))
-                + (tiered ? WASM_INTERPRETER_AREA : 0)) * 65536;
-    const layout = window === undefined
-        ? ownLayout({ ramSize, ramBase: 0, bits: 64, processors,
-            ...farAt === undefined ? {} : { far: farAt } })
+    const own = window === undefined
+        ? ownLayout({ ramSize, ramBase: 0, bits: 64, processors })
         : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,
             // The code area's 4 GiB block, which its code is translated in.
             codeBase: Math.floor((CORPUS.codeAt + codeHigh) / 2 ** 32) * 2 ** 32 });
-    const past = tablesSize(layout) + (tiered ? WASM_INTERPRETER_AREA : 0);
+    const past = tablesSize(own) + (tiered ? WASM_INTERPRETER_AREA : 0);
     // The block below 4 GiB's tables past everything of the code block's.
-    const low = lowBlock && window !== undefined && layout.codeBase !== 0
-        ? ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window, codeBase: 0,
-            tablesAt: pagesFor(layout, past) * 65536 }) : undefined;
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, past)
-        + (low === undefined ? 0 : Math.ceil(tablesSize(layout) / 65536))
-        + (far === undefined ? 0 : FAR.BYTES / 65536) });
+    const lowWanted = lowBlock && window !== undefined && own.codeBase !== 0;
+    const lowPages = lowWanted ? Math.ceil(tablesSize(own) / 65536) : 0;
+    // The table of far chunks past everything else of the memory.
+    const farAt = far === undefined ? undefined : (pagesFor(own, past) + lowPages) * 65536;
+    const withFar = farAt === undefined ? {} : { far: farAt };
+    const layout = farAt === undefined ? own : window === undefined
+        ? ownLayout({ ramSize, ramBase: 0, bits: 64, processors, ...withFar })
+        : ownLayout({ ramSize: window - 4096, ramBase: 0, bits: 64, window,
+            codeBase: own.codeBase, ...withFar });
+    const low = lowWanted
+        ? ownLayout({ ramSize: /** @type {number} */ (window) - 4096, ramBase: 0, bits: 64,
+            window, codeBase: 0, tablesAt: pagesFor(layout, past) * 65536, ...withFar })
+        : undefined;
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, past) + lowPages
+        + (far === undefined ? 0 : Math.ceil(farBytes(layout) / 65536)) });
     const ram = window === undefined ? undefined : memory64(window);
     const flags = new Uint8Array(memory.buffer, pageFlagsAt(layout), (window ?? 2 ** 32) / 4096);
     flags.fill(PageFlag.INACCESSIBLE);
@@ -117,12 +120,14 @@ export function machine({ config = {}, trapPort = undefined, tiered = false,
     if (far !== undefined)
     {
         // Each piece's chunk given the frame it lies in.
-        const table = new Uint32Array(memory.buffer, /** @type {number} */ (farAt), FAR.ENTRIES);
+        const table = new Uint32Array(memory.buffer, /** @type {number} */ (farAt),
+            farBytes(layout) / 4);
         for (const [offset, , frameAt] of pieces.slice(0, far.unmapped === true ? 1 : undefined))
         {
             const address = CORPUS.dataAt + far.by + offset;
             const chunk = Math.floor(address / FAR.CHUNK) * FAR.CHUNK;
-            table[(chunk - FAR.BASE) / FAR.CHUNK] = farEntry(frameAt - (address - chunk), chunk);
+            table[(chunk - farBase(layout)) / FAR.CHUNK] = farEntry(frameAt - (address - chunk),
+                chunk);
         }
     }
     for (const [, size, at] of pieces)

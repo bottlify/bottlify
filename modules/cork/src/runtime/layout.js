@@ -279,16 +279,16 @@ export const WRAP_SLACK = 2 * PAGE;
  *     `window`: long mode's address space, 4 GiB (the default), 8 or 16 GiB
  *     (`wideLayout`); `codeBase`: a wide window's 4 GiB block its code lies in
  *     (`wideLayout`), 0 by default; `tablesAt` there places a second block's tables;
- *     `far`: long mode's 4 GiB layout only, where the table of far chunks lies (`FAR`): a
- *     process whose reservations reach past 4 GiB
+ *     `far`: long mode's only, where the table of far chunks lies (`FAR`): a process whose
+ *     reservations reach past its window (`farBase`)
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
     ramBase = PAGE, bits = 32, tablesAt, ramFloor, window = WINDOW, codeBase = 0, far })
 {
-    if (far !== undefined && (bits !== 64 || window !== WINDOW || far % 4096 !== 0 || far <= 0))
+    if (far !== undefined && (bits !== 64 || far % 4096 !== 0 || far <= 0))
     {
-        throw new Error(`cork: a far table at ${far}, not on a page of long mode's 4 GiB layout`);
+        throw new Error(`cork: a far table at ${far}, not on a page of a long mode layout`);
     }
     if (codeBase !== 0 && (window === WINDOW || codeBase % WINDOW !== 0 || codeBase < 0
         || codeBase >= window))
@@ -328,7 +328,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         }
         return window === WINDOW
             ? longLayout(state, ramBase, ramSize, hashSlots, tablesAt, ramFloor, processors, far)
-            : wideLayout(window, ramSize, hashSlots, codeBase, tablesAt);
+            : wideLayout(window, ramSize, hashSlots, codeBase, tablesAt, far);
     }
     const fields = {
         bits: /** @type {32} */ (32),
@@ -491,10 +491,27 @@ export const farEntry = (frame, address)=>((frame - (address % 2 ** 32)) + 1) >>
  * Where the far chunk's entry lies in the table, or -1 for an address outside
  * the far space.
  *
- * @param {{ far?: number }} layout @param {number} address
+ * @param {{ far?: number, window?: number }} layout @param {number} address
  */
-export const farSlot = (layout, address)=>(layout.far === undefined || address < FAR.BASE
-    || address >= FAR.TOP ? -1 : layout.far + Math.floor((address - FAR.BASE) / FAR.CHUNK) * 4);
+export const farSlot = (layout, address)=>(layout.far === undefined
+    || address < farBase(layout) || address >= FAR.TOP ? -1
+    : layout.far + Math.floor((address - farBase(layout)) / FAR.CHUNK) * 4);
+
+/**
+ * Where a layout's far space begins: past its window, 4 GiB in the 4 GiB layout,
+ * the window's end over a wide one (whose RAM past 4 GiB is its own).
+ *
+ * @param {{ window?: number }} layout
+ */
+export const farBase = layout=>layout.window ?? WINDOW;
+
+/**
+ * The bytes of a layout's table of far chunks: a dword for each chunk from its
+ * far base to `FAR.TOP`.
+ *
+ * @param {{ window?: number }} layout
+ */
+export const farBytes = layout=>(FAR.TOP - farBase(layout)) / FAR.CHUNK * 4;
 
 /** Long mode's address space unless a layout says otherwise: 4 GiB, RAM in the one memory. */
 export const WINDOW = 2 ** 32;
@@ -528,9 +545,10 @@ export const WIDE_WINDOWS = Object.freeze([2 ** 33, 2 ** 34]);
  *
  * @param {number} window @param {number} ramSize @param {number} hashSlots
  * @param {number} codeBase @param {number} [tablesAt]
+ * @param {number} [far]  where its table of far chunks lies, past the window (`farBase`)
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-function wideLayout(window, ramSize, hashSlots, codeBase, tablesAt){
+function wideLayout(window, ramSize, hashSlots, codeBase, tablesAt, far){
     if (!(ramSize > 0 && ramSize <= window - 4096 && ramSize % 4096 === 0))
     {
         throw new RangeError(`cork: ${ramSize} bytes of RAM in a window of ${window}`);
@@ -539,7 +557,8 @@ function wideLayout(window, ramSize, hashSlots, codeBase, tablesAt){
     const fields = { ...longLayout(LOW_STATE, 0, 4096, hashSlots), ramSize, window,
         ramMemory: 1, pageFlags: PAGE, codeRanges: PAGE + window / 4096,
         staleSpan: PAGE + window / 4096 * 3,
-        tables: tablesAt ?? PAGE * 2 + window / 4096 * 3, codeBase };
+        tables: tablesAt ?? PAGE * 2 + window / 4096 * 3, codeBase,
+        .../** @type {Record<string, number>} */ (far === undefined ? {} : { far }) };
     delete fields.id;
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }

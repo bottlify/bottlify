@@ -17,6 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { allowMemory64 } from '../../cork/src/testing/memory64.js';
 import { createApp } from './app.js';
 
 const GiB = 2 ** 30;
@@ -26,6 +27,7 @@ const GiB = 2 ** 30;
  * @returns {Promise<{ code: number, lines: string[], guest: any }>}
  */
 async function run(options){
+    allowMemory64();
     const app = await createApp({
         executable: new Uint8Array(await readFile(new URL('../test/fixtures/far64.exe',
             import.meta.url))),
@@ -61,6 +63,8 @@ for (const [name, options] of /** @type {[string, Record<string, unknown>][]} */
     ['translated', { cpu: { far: true } }],
     ['interpreted', { cpu: { far: true }, cork: { config: { translate: false } } }],
     ['on three executors', { cpu: { far: true, cores: 3 } }],
+    // Past an 8 GiB wide window (memory64), whose own RAM past 4 GiB is the program's too.
+    ['past a wide window', { cpu: { far: true }, memorySize: 8 * GiB }],
 ]))
 {
     test(`with far reservations a 64-bit process reserves 8 GiB past its window and uses what it`
@@ -70,6 +74,7 @@ for (const [name, options] of /** @type {[string, Record<string, unknown>][]} */
         assert.ok(lines.includes('reserved 16'), lines.join('\n'));
         assert.equal(code, 0);
         // The frames come out of the window: its memory holds no more than it did.
-        assert.ok(guest.held <= 4 * GiB, `${guest.held} bytes held`);
+        assert.ok(guest.held <= (options.memorySize === undefined ? 4 * GiB : 8 * GiB),
+            `${guest.held} bytes held`);
     });
 }

@@ -36,13 +36,18 @@ import { WideMemory } from './wide-memory.js';
 class WindowMemory {
     /**
      * @param {BlockMemory | WideMemory} memory @param {{ faultEip: number }} owner
-     * @param {number} window @param {number} [far]  the layout's table of far chunks (`FAR`)
+     * @param {number} window @param {number} [far]  the layout's table of far chunks (`FAR`),
+     *     its chunks from the window's end
+     * @param {Uint32Array} [table]  the memory the table lies in, where it is not the RAM's
      */
-    constructor(memory, owner, window, far){
+    constructor(memory, owner, window, far, table){
         this.memory = memory;
         this.owner = owner;
         this.window = BigInt(window);
         this.far = far ?? -1;
+        this.base = window;
+        /** Where the table of far chunks is read: the state's memory, a wide layout's too. */
+        this.table = table ?? null;
     }
 
     /**
@@ -77,8 +82,8 @@ class WindowMemory {
      * @param {number} at @param {boolean} write
      */
     entry(at, write){
-        const words = /** @type {BlockMemory} */ (this.memory).words32;
-        const entry = words[(this.far + Math.floor((at - FAR.BASE) / FAR.CHUNK) * 4) >>> 2];
+        const words = this.table ?? /** @type {BlockMemory} */ (this.memory).words32;
+        const entry = words[(this.far + Math.floor((at - this.base) / FAR.CHUNK) * 4) >>> 2];
         if (entry === 0)
         {
             throw Object.assign(new Fault(13, this.owner.faultEip), { address: at, write });
@@ -310,7 +315,9 @@ class BlockState64 {
         this.blockMemory = ram === undefined ? new BlockMemory(memory, layout, onCodeWrite, this)
             : new WideMemory(memory, ram, layout, onCodeWrite, this);
         this.window = layout.window ?? WINDOW;
-        this.memory = new WindowMemory(this.blockMemory, this, this.window, layout.far);
+        this.memory = new WindowMemory(this.blockMemory, this, this.window, layout.far,
+            ram === undefined || layout.far === undefined ? undefined
+                : new Uint32Array(memory.buffer));
         this.halted = false;
         this.retired = 0;
         /** @type {number[]} */

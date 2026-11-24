@@ -90,3 +90,24 @@ test('past the direct part the table\'s frames are given as before', ()=>{
     assert.deepEqual(said, [['frame', 0x100000], ['fill', 0x100000, CHUNK],
         ['map', past, 0x100000]]);
 });
+
+test('over a wide window with a table the space between its RAM and the table is no one\'s',
+    ()=>{
+        // Placed from the window's end when asked, the direct part first otherwise.
+        const made = createFarSpaceWithTable();
+        assert.equal(made.reserve(0x20000000, 4, 8 * GiB), 8 * GiB, 'from the table on');
+        assert.equal(made.reserve(4 * GiB - CHUNK, 4), 4 * GiB, 'the direct part first');
+        assert.equal(made.reserve(0x20000000, 4), 8 * GiB + 0x20000000,
+            'past the hole and the reservation there');
+        assert.equal(made.reserveAt(8 * GiB - CHUNK, CHUNK, 4), false, 'the hole');
+    });
+
+/** A far space whose direct part ends 64 KiB before an 8 GiB window and whose table begins there. */
+function createFarSpaceWithTable(){
+    return createFarSpace({
+        space: { base: 4 * GiB, top: 64 * GiB, chunk: CHUNK, direct: 8 * GiB - CHUNK,
+            table: 8 * GiB },
+        allocator: { allocate: ()=>0x100000, free: ()=>{} },
+        mapFar: ()=>{}, room: ()=>true, fill: ()=>{},
+    });
+}

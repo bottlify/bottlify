@@ -2756,7 +2756,10 @@ Code is not run from past 4 GiB (a fetch there faults), and a reservation larger
 refused as before. Every read such a process makes tests whether it lies past 4 GiB (exact
 counts on the x64 PE bench, far on against off: vm +23 %, entities +13-19 %, spread +2 %), and
 accesses through rsp go untested only while its stack is in the window: a stack moved past it
-tests them from then on. *2026-11-24.*
+tests them from then on. Over a wide window the far space begins at the window's end, its frames
+below 4 GiB as in the 4 GiB layout (the same entry, the frame's whole address zero-extended); a
+large reservation goes there first, the window's own RAM past 4 GiB (A289) taking what the space
+below has no room for. *2026-11-24.*
 
 **A289. Over a wide window the RAM past 4 GiB is handed out once the space below has no room.**
 A program that needs more than 4 GiB places itself: VirtualAlloc places a reservation past 4 GiB

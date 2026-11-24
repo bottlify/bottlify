@@ -2422,9 +2422,10 @@ async function buildApp(options){
     // A wide window's RAM past 4 GiB is registered by reservation, as kernel32 makes
     // them (`far-space.js`): an image may lie there too.
     const farSpace = memory.farSpace?.() ?? null;
-    if (farSpace !== null && farSpace.direct === undefined)
+    const farFrom = farSpace?.direct === undefined ? farSpace?.base : farSpace.table;
+    if (farSpace !== null && farFrom !== undefined)
     {
-        memory.register({ name: 'far', base: farSpace.base, size: farSpace.top - farSpace.base,
+        memory.register({ name: 'far', base: farFrom, size: farSpace.top - farFrom,
             kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE });
     }
     if (cutArea)

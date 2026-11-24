@@ -47,7 +47,8 @@ export const FAR_FRAME = 'far frame';
  */
 
 /**
- * @param {{ space: { base: number, top: number, chunk: number, direct?: number },
+ * @param {{ space: { base: number, top: number, chunk: number, direct?: number,
+ *         table?: number },
  *     allocator: { allocate: (bytes: number, options?: { alignment?: number, owner?: any })
  *         => number, free: (address: number) => void },
  *     mapFar: (address: number, frame: number) => void,
@@ -57,6 +58,8 @@ export const FAR_FRAME = 'far frame';
  *     held?: (base: number, span: number, held: boolean) => void,
  *     fill: (address: number, value: number, length: number) => void,
  *     pageAccess?: (address: number, length: number, open: boolean) => boolean }} host
+ *     `table`: where the table's chunks begin past a wide window, its last 64 KiB from
+ *     `direct` on no one's;
  *     `room` grows the guest's memory to hold a frame's end and charges it, false where
  *     the machine has no room; `charge` takes a chunk of its own frame (below `direct`)
  *     from the machine's memory, false where it has no room; `inTheWay` is the end of
@@ -67,6 +70,16 @@ export function createFarSpace(host){
     const { space, allocator } = host;
     const { chunk } = space;
     const direct = space.direct ?? space.base;
+    /**
+     * The end of what lies in [from, to) that is no reservation's: what the
+     * process has in its direct part itself (an image), or the space between a
+     * wide window's RAM and the table's first chunk; 0 for none. Past the window
+     * the far space is all its own.
+     *
+     * @param {number} from @param {number} to
+     */
+    const inTheWay = (from, to)=>(space.table !== undefined && direct < to && space.table > from
+        ? space.table : from < direct ? host.inTheWay?.(from, Math.min(to, direct)) ?? 0 : 0);
     /** Chunks of their own frames ever charged: given once, the tab's for good. @type {Set<number>} */
     const charged = new Set();
     // Nothing of the direct part reads as committed before it is.
@@ -106,7 +119,7 @@ export function createFarSpace(host){
 
     /** Whether [from, to) is free of reservations and inside the space. @param {number} from @param {number} to */
     const free = (from, to)=>from >= space.base && to <= space.top
-        && (host.inTheWay?.(from, to) ?? 0) === 0
+        && inTheWay(from, to) === 0
         && !bases.some(base=>{
             const other = /** @type {FarReservation} */ (reservations.get(base));
             return other.base < to && other.base + other.span > from;
@@ -158,25 +171,28 @@ export function createFarSpace(host){
 
         /**
          * A new reservation of `span` bytes, a multiple of 64 KiB, at the lowest
-         * place it fits; 0 where none does.
+         * place from `from` it fits; 0 where none does.
          *
-         * @param {number} span @param {number} protect
+         * @param {number} span @param {number} protect @param {number} [from]
          */
-        reserve(span, protect){
-            let at = space.base;
+        reserve(span, protect, from = space.base){
+            let at = from;
             for (const base of bases)
             {
+                const other = /** @type {FarReservation} */ (reservations.get(base));
+                if (other.base + other.span <= at)
+                {
+                    continue;
+                }
                 if (at + span <= base)
                 {
                     break;
                 }
-                const other = /** @type {FarReservation} */ (reservations.get(base));
                 at = Math.max(at, Math.ceil((other.base + other.span) / GRANULE) * GRANULE);
             }
             // Past what the process has there of its own (a wide window's image),
             // and past any reservation that then lies in the way.
-            for (let end = host.inTheWay?.(at, at + span) ?? 0; end > 0;
-                end = host.inTheWay?.(at, at + span) ?? 0)
+            for (let end = inTheWay(at, at + span); end > 0; end = inTheWay(at, at + span))
             {
                 at = Math.ceil(end / GRANULE) * GRANULE;
                 const after = bases.find(base=>{
