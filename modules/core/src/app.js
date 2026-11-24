@@ -1488,7 +1488,8 @@ async function buildApp(options){
     // library a game ships can itself be twelve megabytes, and a library
     // placed inside the heap would be overwritten by the first large
     // allocation.
-    const programLoaded = programImage(options.executable, { hostMemory: options.cpu?.hostMemory });
+    const programLoaded = programImage(options.executable, { hostMemory: options.cpu?.hostMemory,
+        memorySize: options.memorySize });
     // An image past 4 GiB (`wide`) lies apart from the space below, which is laid
     // out as for an image at the 32-bit programs' base: its libraries, stacks and
     // heap where any other process has them.
@@ -3725,6 +3726,17 @@ function volumeMemory(){
 const LONG_IMAGE_BASE = 0x00400000;
 
 /**
+ * A wide window's RAM: the whole window less its last 64 KiB, which no RAM
+ * reaches (`longLayout`). A memory that long is collected without end by
+ * Chrome 157 and later (past 4 GiB a thread, 8 GiB in Chrome 153); whether a
+ * program runs better there or in the 4 GiB layout is its launcher's to find
+ * out, run by run, not a cap of the engine's.
+ *
+ * @param {number} window
+ */
+const wideRam = window=>window - 65536;
+
+/**
  * The program's image headers, a 64-bit (PE32+) one included: one whose base
  * lies above 2 GiB is placed at `LONG_IMAGE_BASE`, which its relocations (or
  * its RIP-relative code, which needs none) allow, and every address its
@@ -3737,8 +3749,9 @@ const LONG_IMAGE_BASE = 0x00400000;
  * other address the process gives out below 2 GiB as before (`wide`).
  *
  * @param {Uint8Array} executable
- * @param {{ hostMemory?: number }} [machine]  the host's memory in bytes, which a
- *     16 GiB window needs 32 GB of
+ * @param {{ hostMemory?: number, memorySize?: number }} [machine]  the host's memory in
+ *     bytes, which a 16 GiB window needs 32 GB of; the program's RAM, past 4 GiB of which a
+ *     64-bit program runs over a wide window wherever its image lies
  * A 32-bit program linked for ASLR with its base in the heap's span (mscorsvw.exe at
  * 0x10000000) is placed where a program usually is, 0x00400000, as Windows places such a one
  * anywhere: at its own base it made the memory of every process of it as large as its base,
@@ -3750,6 +3763,15 @@ const LONG_IMAGE_BASE = 0x00400000;
  */
 function programImage(executable, machine = {}){
     const image = parsePe(executable, { wide: true });
+    // A 64-bit program given more than 4 GiB of memory: a wide window, its code
+    // in the first 4 GiB block, the image where any 64-bit image goes.
+    if (image.bits === 64 && (machine.memorySize ?? 0) > 2 ** 32
+        && (image.relocatable || image.imageBase + image.sizeOfImage <= 0x80000000))
+    {
+        return { ...image, ...image.imageBase + image.sizeOfImage > 0x80000000
+            ? { imageBase: LONG_IMAGE_BASE } : {},
+        wide: { window: 2 ** 33, codeBase: 0, ram: wideRam(2 ** 33) } };
+    }
     if (image.bits === 32 && image.relocatable && image.dynamicBase
         && image.imageBase >= HEAP_FLOOR && 0x00400000 + image.sizeOfImage <= HEAP_FLOOR)
     {
@@ -3767,12 +3789,8 @@ function programImage(executable, machine = {}){
             throw new Error(`image: an x86-64 program at 0x${image.imageBase.toString(16)} that`
                 + ' carries no relocations needs a window this machine cannot give it');
         }
-        // Its RAM a memory64 memory reaching the image's end and no further: nothing else
-        // is handed out past 4 GiB, and Chrome 157 collects without end once a thread
-        // holds a memory longer than 4 GiB, so every byte past the image only costs.
         return { ...image, wide: { window, codeBase: Math.floor(image.imageBase / 2 ** 32)
-            * 2 ** 32, ram: Math.min(window - 65536,
-            Math.ceil((image.imageBase + image.sizeOfImage) / 65536) * 65536) } };
+            * 2 ** 32, ram: wideRam(window) } };
     }
     return { ...image, imageBase: LONG_IMAGE_BASE };
 }
