@@ -149,6 +149,9 @@ const accessFor = page=>{
  * Windows maps a section's view and answers STATUS_IMAGE_NOT_AT_BASE: the
  * view is the program's to read, and only a loader would refuse to run it.
  *
+ * Only read: a view at the image's own base is the laid-out bytes the
+ * section keeps, copied into guest memory by the map and never written here.
+ *
  * @param {{ bytes: Uint8Array, image: import('../../loader/internal/pe.js').PeImage }} laid
  * @param {number} address
  * @returns {Uint8Array}
@@ -156,7 +159,7 @@ const accessFor = page=>{
 export function imageViewAt(laid, address){
     if (address === laid.image.imageBase || !laid.image.relocatable)
     {
-        return laid.bytes.slice();
+        return laid.bytes;
     }
     const bytes = laid.bytes.slice();
     relocateImage(bytes, laid.image, address);
