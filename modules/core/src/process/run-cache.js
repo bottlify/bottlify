@@ -39,9 +39,20 @@ const SWEEP_MS = 1000;
 export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
+    /**
+     * The index's table as it is now: the keeper makes a larger one as names
+     * are added, and a thread joining after is handed that one, not the first.
+     *
+     * @type {SharedArrayBuffer | null}
+     */
+    let table = null;
     const keeper = await openKeeper({
         budget, segmentBytes: 16 * MIB, coldAfterMs: IDLE_MS,
         announce: message=>{
+            if (message.table !== undefined)
+            {
+                table = message.table;
+            }
             for (const tell of told)
             {
                 tell(message);
@@ -90,7 +101,8 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
         join(post){
             told.add(post);
             return {
-                shared: keeper.shared, segments: keeper.segmentBuffers(),
+                shared: table === null ? keeper.shared : { ...keeper.shared, table },
+                segments: keeper.segmentBuffers(),
                 leave: ()=>told.delete(post),
             };
         },
@@ -135,19 +147,24 @@ export function remoteCacheReader(joined, link){
 /**
  * The run's cache passed on by a thread that was joined to it (a process in a
  * worker of its own) to threads of its own (its executors): `adopt` takes each
- * message the thread is told, keeps the segments a thread joining later is handed and
+ * message the thread is told, keeps what a thread joining later is handed and
  * tells it to every thread joined here; `join` is the run's `join` as seen from
  * here.
  *
  * @param {{ shared: any, segments: (SharedArrayBuffer | null)[] }} joined
  */
 export function relayedJoin(joined){
+    let table = joined.shared.table;
     const segments = [...joined.segments];
     /** @type {Set<(message: any) => void>} */
     const told = new Set();
     return {
         /** @param {{ segment?: number, buffer?: SharedArrayBuffer | null, table?: SharedArrayBuffer }} message */
         adopt(message){
+            if (message.table !== undefined && message.table.byteLength > table.byteLength)
+            {
+                table = message.table;
+            }
             if (message.segment !== undefined)
             {
                 while (segments.length <= message.segment)
@@ -165,7 +182,7 @@ export function relayedJoin(joined){
         join(post){
             told.add(post);
             return {
-                shared: joined.shared, segments: [...segments],
+                shared: { ...joined.shared, table }, segments: [...segments],
                 leave: ()=>told.delete(post),
             };
         },
