@@ -22,7 +22,6 @@
 import { formRegion } from '../region.js';
 import { CallStack } from '../emit/region.js';
 import { ANY_TOP, keyOf } from './entries.js';
-import { sharedFormsOf } from './shared-forms.js';
 import { cacheKey, moduleKey, packRegion, unpackRegion } from './cache.js';
 import { regionOfSummary, summaryOf } from './summary.js';
 import { usesX87 } from './variants.js';
@@ -44,8 +43,8 @@ const BLOCKS_EVERY_MS = 3000;
  */
 export function createStore(state){
     const rt = /** @type {import('./state.js').State} */ (state);
-    const { cacheVersion, emitLayout, entries, formHere, formOptions, found, leaveOut, profiling,
-        guestBytes, layout, read, readBytes, settings, sharedMemory, formsStore, view
+    const { cacheVersion, emitLayout, entries, formHere, found, leaveOut, profiling,
+        guestBytes, layout, read, settings, sharedMemory, view
     } = /** @type {import('./state.js').Base} */ (state);
     /**
      * The regions this run took from the store, by store key: their entries, whose byte
@@ -152,52 +151,7 @@ export function createStore(state){
         return summary === null ? {} : { summary };
     };
     /**
-     * The formed regions of the runtimes sharing the store and forming as this
-     * one does (`sharedFormed`), by entry and the callees formed in. None for a
-     * run that keeps no store, where no other runtime of this thread would take
-     * them (and a region formed to be kept is formed without what the rest of
-     * its call decoded), and for a diagnostic range left to the interpreter,
-     * which `translatable` answers by address rather than by page.
-     * @type {ReturnType<typeof sharedFormsOf> | null}
-     */
-    const sharedForms = settings.interpretRange || leaveOut.size > 0 || profiling ? null
-        : sharedFormsOf(formsStore, JSON.stringify(formOptions), settings.sharedFormed);
-    /**
-     * Whether a region formed earlier would be formed the same here now: every
-     * page forming asked about answers as it did, and every byte it read is as
-     * it was.
-     *
-     * @param {import('./shared-forms.js').Formed} formed
-     */
-    const formsAsBefore = ({ region, answers })=>{
-        const formable = formableFrom(region.entry);
-        for (const [page, yes] of answers)
-        {
-            if (formable(page * 4096) !== yes)
-            {
-                return false;
-            }
-        }
-        for (const { start, bytes } of region.sources ?? [])
-        {
-            const now = readBytes?.(start, start + bytes.length);
-            for (let at = 0; at < bytes.length; at++)
-            {
-                if ((now === undefined ? read(start + at) : now[at]) !== bytes[at])
-                {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    /**
-     * A region formed at `eip` with these callees formed in (`callTargets`), or
-     * the one a runtime sharing the store formed so where it forms the same
-     * (`formsAsBefore`). One formed to be kept shares what the other regions of
-     * the call decoded as any does (`shared`): what it takes from there it reads
-     * and asks about as the one that found it did, so its own reads are all of
-     * them.
+     * A region formed at `eip` with these callees formed in (`callTargets`).
      *
      * @param {number} eip @param {[number, number[]][] | undefined} targets
      * @param {import('../region.js').FormShared} [shared]
@@ -209,33 +163,8 @@ export function createStore(state){
         // What forming finds shared between the regions of a call is found under their
         // own pages: a region entered on a page of stubs may form on less than the others.
         const sharing = stubPage(eip >>> 12) ? undefined : shared;
-        if (sharedForms === null)
-        {
-            return formRegion(read, eip, { ...formHere, translatable: formable, shared: sharing,
-                ...called });
-        }
-        const key = `${eip}/${targets === undefined ? '' : JSON.stringify(targets)}`;
-        const known = sharedForms.get(key);
-        if (known !== undefined && formsAsBefore(known))
-        {
-            counts.formedShared++;
-            return known.region;
-        }
-        /** @type {Map<number, boolean>} */
-        const answers = new Map();
-        const region = formRegion(read, eip, { ...formHere, ...called, shared: sharing,
-            translatable: address=>{
-                const page = Math.floor(address / 4096);
-                let yes = answers.get(page);
-                if (yes === undefined)
-                {
-                    yes = formable(address);
-                    answers.set(page, yes);
-                }
-                return yes;
-            } });
-        sharedForms.set(key, { region, answers });
-        return region;
+        return formRegion(read, eip, { ...formHere, translatable: formable, shared: sharing,
+            ...called });
     };
 
     /**
@@ -1007,7 +936,6 @@ export function createStore(state){
         storeKey,
         besideKey,
         shapeOf,
-        sharedForms,
         formAt,
         accepted,
         storeHere,

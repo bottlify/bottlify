@@ -348,7 +348,7 @@ test('a process in a worker finds the modules an earlier one compiled kept alive
     app.on('process-resumed', (/** @type {any} */ event)=>{
         const cork = event.diagnostics?.find((/** @type {any} */ layer)=>layer.name === 'cpu')
             ?.metrics.cork;
-        keptBeside.push(cork && { forms: cork.sharedForms, modules: cork.sharedHeld });
+        keptBeside.push(cork && cork.sharedHeld);
     });
     try
     {
@@ -365,7 +365,7 @@ test('a process in a worker finds the modules an earlier one compiled kept alive
     assert.ok(held?.again > 0, `the second compiled the same ones: ${JSON.stringify(held)}`);
     // Alone in its worker, a child's regions and modules kept beside its
     // store would be for no one: what the next one finds is the run's.
-    assert.deepEqual(keptBeside, [{ forms: null, modules: null }, { forms: null, modules: null }]);
+    assert.deepEqual(keptBeside, [null, null]);
 });
 
 test('the run\'s translation store keeps its records file open past a child, until the run goes',

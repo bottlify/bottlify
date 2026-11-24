@@ -3677,9 +3677,6 @@ async function buildApp(options){
  */
 const RUN_ENGINE_BYTES = 384 << 20;
 
-/** What a formed region kept for every runtime costs on the heap, its decoded blocks. */
-const FORMED_REGION_BYTES = 64 << 10;
-
 /** Whether the run is in a browser's page or worker, where the machine is a tab. */
 const inBrowser = ()=>typeof (/** @type {any} */ (globalThis).WorkerGlobalScope) === 'function'
     || typeof (/** @type {any} */ (globalThis).document) === 'object';
@@ -3880,9 +3877,8 @@ export async function createApp(options){
     {
         const memoryBudget = createMemoryBudget(tabMemory);
         const run = openMemoryBudget(memoryBudget);
-        // The regions every process shares formed, sized to the machine and
-        // held for the run. The compiled modules kept beside them are taken
-        // as they are kept, by what they cost (`sharedCharge`).
+        // The compiled modules every process shares, sized to the machine and
+        // taken as they are kept, by what they cost (`sharedCharge`).
         const shared = Math.min(SHARED_MODULE_BYTES, Math.floor(tabMemory / 32));
         run.take(shared, 'translation');
         // In a tab, the tab's own: the page, the engine's thread, the graphics
@@ -3894,9 +3890,7 @@ export async function createApp(options){
         const config = options.cork?.config;
         options = { ...options, memoryBudget,
             cork: { ...options.cork, config: { ...config,
-                sharedModuleBytes: config?.sharedModuleBytes ?? shared,
-                sharedFormed: config?.sharedFormed
-                    ?? Math.max(64, Math.floor(shared / FORMED_REGION_BYTES)) } } };
+                sharedModuleBytes: config?.sharedModuleBytes ?? shared } } };
     }
     graphicsChoice(options.graphicsApi);
     // Both outlive every process: subscriptions a caller made before the first

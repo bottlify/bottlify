@@ -32,12 +32,11 @@
  * worker to another by its bytes, and there the modules kept would cost up to
  * their cap and pay nothing.
  *
- * The proxy is made for one process (`alone`): cork keeps no formed regions or
- * compiled modules beside it for other runtimes of its thread
- * (`sharedFormed`, `sharedModuleBytes`) until a child runs beside the process
- * in its worker, which the run starts there only when it has no room for
- * another worker: kept for the process alone, they are heap and wasm no one
- * takes.
+ * The proxy is made for one process (`alone`): cork keeps no compiled modules
+ * beside it for other runtimes of its thread (`sharedModuleBytes`) until a
+ * child runs beside the process in its worker, which the run starts there only
+ * when it has no room for another worker: kept for the process alone, they
+ * are heap and wasm no one takes.
  */
 
 import { runsJavaScriptCore } from './gc-nudge.js';

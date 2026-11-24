@@ -6,9 +6,8 @@
 
 /**
  * The gate of what the runtimes sharing a store share: a process started
- * again instantiates the modules an earlier one compiled (`shared-modules.js`)
- * and takes the regions it formed (`shared-forms.js`), where one that shares
- * nothing compiles them from the store's bytes and forms them again. Seeded
+ * again instantiates the modules an earlier one compiled (`shared-modules.js`),
+ * where one that shares nothing compiles them from the store's bytes. Seeded
  * programs of functions calling one another,
  * directly and through a register, one storing into another's code, are run
  * as a first process and then as a second over the same store, the second
@@ -162,10 +161,9 @@ async function run(code, config){
                 code: code.map(([at, bytes])=>[...m.read(at, bytes.length)]),
             },
             shared: d.sharedModules ?? 0,
-            formed: d.formedShared ?? 0,
             unformed: d.takenUnformed ?? 0,
             regions: d.regions ?? 0,
-            keeps: { forms: d.sharedForms !== null, modules: d.sharedHeld !== null },
+            keeps: d.sharedHeld !== null,
             hits: d.cacheHits ?? 0,
             misses: d.cacheMisses ?? 0,
         };
@@ -177,10 +175,9 @@ async function run(code, config){
 }
 
 test('a process started again observes the same whether it takes the earlier one\'s '
-    + 'compiled modules and formed regions or makes them', async()=>{
+    + 'compiled modules or compiles them', async()=>{
     const interpreted = { translate: false };
-    const apart = { sharedModuleBytes: 0, sharedFormed: 0 };
-    let formed = 0;
+    const apart = { sharedModuleBytes: 0 };
     let shared = 0;
     let hits = 0;
     for (let seed = 1; seed <= PROGRAMS; seed++)
@@ -195,22 +192,17 @@ test('a process started again observes the same whether it takes the earlier one
                 [['apart', apart], ['shared', {}]]))
             {
                 const store = storeOf(now);
-                // The first keeps no formed regions (`formsStoreOf`): the second
-                // keeps them for the third, which is the one observed.
                 await run(first, { store, ...config });
-                await run(second, { store, ...config });
                 const again = await run(second, { store, ...config });
                 seen[path] = again.seen;
                 if (path === 'shared')
                 {
                     shared += again.shared;
-                    formed += again.formed;
                     hits += again.hits;
                 }
                 else
                 {
-                    assert.deepEqual([again.shared, again.formed], [0, 0],
-                        'nothing shared with sharing off');
+                    assert.equal(again.shared, 0, 'nothing shared with sharing off');
                 }
             }
             const name = `seed ${seed}, a store that answers ${now ? 'at once' : 'later'}`;
@@ -221,37 +213,28 @@ test('a process started again observes the same whether it takes the earlier one
     // The gate runs the paths it is for.
     assert.ok(hits > PROGRAMS, `store hits (${hits})`);
     assert.ok(shared > PROGRAMS / 2, `modules taken as compiled earlier (${shared})`);
-    assert.ok(formed > PROGRAMS, `regions taken as formed earlier (${formed})`);
 });
 
 test('a store made for one runtime keeps nothing beside the first runtime handed it, and is '
-    + 'shared from the second on, the modules held for other threads all along; any store keeps '
-    + 'formed regions from the second runtime on', async()=>{
+    + 'shared from the second on, the modules held for other threads all along', async()=>{
     // A process in a worker of its own is handed a proxy of the run's store
     // made for it alone: what it kept for others there was heap and wasm no
     // one took, unless a child ran beside it in its worker.
     const { first, second } = program(7);
     /** @type {string[]} */
     const held = [];
-    // Formed as their records say (`summaries` off): a record's summary takes a
-    // stored region with no formed one, kept or made.
     const store = Object.assign(storeOf(true), { alone: true,
         hold: (/** @type {string} */ key)=>held.push(key) });
-    const alone = await run(first, { store, summaries: false });
-    assert.deepEqual(alone.keeps, { forms: false, modules: false }, 'the first keeps nothing');
+    const alone = await run(first, { store });
+    assert.equal(alone.keeps, false, 'the first keeps nothing');
     assert.ok(alone.hits + alone.misses > 0 && held.length > 0,
         `its modules still go to the store's thread (${held.length})`);
-    const beside = await run(second, { store, summaries: false });
-    assert.deepEqual(beside.keeps, { forms: true, modules: true }, 'the second keeps');
-    const after = await run(second, { store, summaries: false });
-    assert.ok(after.formed > 0 && after.shared > 0,
-        `the third takes what the second kept (${after.formed}, ${after.shared})`);
-    const run1 = storeOf(true);
-    const shared = await run(first, { store: run1 });
-    assert.deepEqual(shared.keeps, { forms: false, modules: true },
-        'a store not made for one keeps modules from the first, formed regions from the second');
-    const next = await run(second, { store: run1 });
-    assert.deepEqual(next.keeps, { forms: true, modules: true });
+    const beside = await run(second, { store });
+    assert.equal(beside.keeps, true, 'the second keeps');
+    const after = await run(second, { store });
+    assert.ok(after.shared > 0, `the third takes what the second kept (${after.shared})`);
+    const shared = await run(first, { store: storeOf(true) });
+    assert.equal(shared.keeps, true, 'a store not made for one keeps from the first');
 });
 
 test('a process started again observes the same whether it takes the stored regions by '

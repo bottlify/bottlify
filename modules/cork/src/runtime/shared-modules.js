@@ -24,6 +24,35 @@
  * it does: a module the charge has no room for is not kept.
  */
 
+/** The runtimes each store made for one (`alone`) was handed. @type {WeakMap<object, number>} */
+const handed = new WeakMap();
+
+/**
+ * The store a runtime keeps its compiled modules beside, for the runtimes
+ * handed it after: the store, counting this runtime as handed it,
+ * or null where none would take them. A store made for one runtime (`alone`: a
+ * proxy a process or an executor in a worker made for itself) is kept beside
+ * only from the second runtime handed it on -- a child run beside its parent
+ * in the parent's worker, whose siblings run beside it after -- and kept
+ * nothing beside for the first, which shares it with no one.
+ *
+ * @param {object | null} store
+ * @returns {object | null}
+ */
+export function sharedStoreOf(store){
+    if (store === null || typeof store !== 'object')
+    {
+        return null;
+    }
+    if (/** @type {{ alone?: boolean }} */ (store).alone !== true)
+    {
+        return store;
+    }
+    const runtimes = (handed.get(store) ?? 0) + 1;
+    handed.set(store, runtimes);
+    return runtimes > 1 ? store : null;
+}
+
 /**
  * @typedef {{ get: (key: string) => { module: WebAssembly.Module, bytes: number } | undefined,
  *     set: (key: string, module: WebAssembly.Module, bytes: number) => boolean,

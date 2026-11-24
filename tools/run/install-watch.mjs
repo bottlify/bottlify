@@ -895,7 +895,6 @@ setInterval(async()=>{
                         unformed: figures.takenUnformed,
                         // Modules taken as a runtime sharing the store compiled them.
                         sharedModules: figures.sharedModules, sharedHeld: figures.sharedHeld,
-                        formedShared: figures.formedShared, sharedForms: figures.sharedForms,
                     },
                     ms: {
                         forming: figures.formingMs, lookup: figures.lookupMs,

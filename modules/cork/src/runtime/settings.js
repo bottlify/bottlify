@@ -133,14 +133,6 @@ export const SETTINGS = {
             + ' for runtimes in other threads too. A store made for one runtime (`alone: true`,'
             + ' as a process or an executor in a worker of its own is handed) is kept beside'
             + ' only from the second runtime handed it on; `hold` is called all the same.' },
-    // Each formed region is many small objects; 32 768 of them held 1.8 GB of the
-    // engine thread's heap, whose collections cost more than they saved.
-    sharedFormed: { kind: 'host', value: 8192,
-        doc: 'Formed regions kept for every runtime handed the same `store` that forms as this'
-            + ' one does (`shared-forms.js`): a store hit whose every byte and page forming read'
-            + ' answer as they did takes the region formed earlier instead of decoding it again'
-            + ' (0: none kept). None kept for the first runtime handed any store'
-            + ' (`formsStoreOf`): a run of one process keeps none.' },
     // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
     // false keeps every tail call inside its own instance, a transfer to a
     // region of another module leaving for this loop, which enters it. iOS

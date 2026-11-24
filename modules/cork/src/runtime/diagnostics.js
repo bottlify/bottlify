@@ -156,7 +156,7 @@ export function createDiagnostics(state){
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
         missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
         hitsFormedAgain: 0, formedAsRecorded: 0,
-        takenUnformed: 0, sharedModules: 0, formedShared: 0,
+        takenUnformed: 0, sharedModules: 0,
         toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
@@ -588,8 +588,6 @@ export function createDiagnostics(state){
             sharedHeld: rt.sharedModules?.stats() ?? null,
             // Regions taken as a runtime sharing the store formed them, and
             // what the shared regions hold.
-            formedShared: counts.formedShared,
-            sharedForms: rt.sharedForms?.stats() ?? null,
             // What the store holds and what its opening kept, where it says.
             store: settings.store?.stats?.() ?? null,
             lookedUpNow: counts.lookedUpNow,
