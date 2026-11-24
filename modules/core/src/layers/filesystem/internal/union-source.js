@@ -20,6 +20,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
+import { readFromInto } from './memory-store.js';
 import { foldName } from './paths.js';
 
 /**
@@ -95,6 +96,21 @@ export function createUnionSource(sources){
                 throw fsError(ErrorCode.NOT_FOUND, `No file "${path}" in these sources`);
             }
             return owner.store.read(owner.path, offset, length);
+        },
+
+        /**
+         * read handed to `put` as the winning source hands it.
+         *
+         * @param {string} path @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         */
+        readInto(path, offset, length, put){
+            const owner = owners.get(foldName(path));
+            if (owner === undefined || owner.directory)
+            {
+                throw fsError(ErrorCode.NOT_FOUND, `No file "${path}" in these sources`);
+            }
+            return readFromInto(owner.store, owner.path, offset, length, put);
         },
 
         /**

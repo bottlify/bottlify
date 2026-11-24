@@ -25,7 +25,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
-import { PIECE_SIZE } from './memory-store.js';
+import { PIECE_SIZE, zeroes } from './memory-store.js';
 
 /** The first piece of a small file; it doubles as the file grows, up to PIECE_SIZE. */
 const SMALLEST_PIECE = 4096;
@@ -434,6 +434,37 @@ export function createPageFileStore(pageFile){
     };
 
     /**
+     * Hands `length` bytes of `pieces` from `offset` to `put`, at `into`
+     * onward, each piece's part where it lies; the page file may let a piece's
+     * bytes go once `put` is done with them (`trim`). Past a piece, and in one
+     * never written, they are zeroes, handed too unless `zeroed` says the
+     * destination holds them already.
+     *
+     * @param {(Piece | undefined)[]} pieces @param {number} offset @param {number} length
+     * @param {import('./memory-store.js').Put} put @param {number} into @param {boolean} zeroed
+     */
+    const putOut = (pieces, offset, length, put, into, zeroed)=>{
+        for (let done = 0; done < length;)
+        {
+            const at = offset + done;
+            const piece = pieces[Math.floor(at / PIECE_SIZE)];
+            const within = at % PIECE_SIZE;
+            const span = Math.min(length - done, PIECE_SIZE - within);
+            const held = piece ? Math.max(0, Math.min(span, piece.length - within)) : 0;
+            if (held > 0)
+            {
+                put(pageFile.bytesOf(/** @type {Piece} */ (piece)).subarray(within, within + held), into + done);
+                pageFile.trim();
+            }
+            if (held < span && !zeroed)
+            {
+                put(zeroes(span - held), into + done + held);
+            }
+            done += span;
+        }
+    };
+
+    /**
      * Copies `length` bytes of `pieces` from `offset` into `out` at `into`;
      * past a piece, and in one never written, they are zeroes, which `out`
      * already holds.
@@ -441,21 +472,8 @@ export function createPageFileStore(pageFile){
      * @param {(Piece | undefined)[]} pieces @param {number} offset @param {number} length
      * @param {Uint8Array} out @param {number} into
      */
-    const copyOut = (pieces, offset, length, out, into)=>{
-        for (let done = 0; done < length;)
-        {
-            const at = offset + done;
-            const piece = pieces[Math.floor(at / PIECE_SIZE)];
-            const within = at % PIECE_SIZE;
-            const span = Math.min(length - done, PIECE_SIZE - within);
-            if (piece && within < piece.length)
-            {
-                out.set(pageFile.bytesOf(piece).subarray(within, within + span), into + done);
-                pageFile.trim();
-            }
-            done += span;
-        }
-    };
+    const copyOut = (pieces, offset, length, out, into)=>
+        putOut(pieces, offset, length, (bytes, at)=>out.set(bytes, at), into, true);
 
     /**
      * The bytes of the piece at `index`, this file's own and able to hold
@@ -615,6 +633,20 @@ export function createPageFileStore(pageFile){
             const out = new Uint8Array(end - start);
             copyOut(entry.pieces, start, end - start, out, 0);
             return out;
+        },
+
+        /**
+         * read, handed to `put` piece by piece where the bytes lie.
+         *
+         * @param {string} path @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         */
+        readInto(path, offset, length, put){
+            const entry = existing(path);
+            const start = Math.min(Math.max(offset, 0), entry.size);
+            const end = Math.min(start + Math.max(length, 0), entry.size);
+            putOut(entry.pieces, start, end - start, put, 0, false);
+            return end - start;
         },
 
         write,

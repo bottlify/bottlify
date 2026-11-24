@@ -825,6 +825,23 @@ export function createVolume(fs, fetchBlocks = null, { now = Date.now, kept = KE
             {
                 return length;
             }
+            if (key === null)
+            {
+                // Nothing to keep: the volume hands its bytes where they lie.
+                fs.seek(node, offset, SeekFrom.BEGIN);
+                try
+                {
+                    return fs.readInto(node, length, put);
+                }
+                catch (e){
+                    if (/** @type {any} */ (e)?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                    {
+                        throw e;
+                    }
+                    // What was handed before the miss is handed again whole
+                    // once the blocks are here.
+                }
+            }
             return settled(this.readFresh(node, offset, length), arrived=>{
                 keep(key, arrived);
                 put(arrived, 0);

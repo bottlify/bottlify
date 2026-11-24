@@ -578,3 +578,42 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     assert.equal(await cachedBundle({ root: root(swapped), id: 'game', fetchRange,
         decode: decodeBlock, manifest }), null, 'a table naming another block\'s bytes: nothing');
 });
+
+test('readInto hands each block\'s part where it lies, the run\'s cache read in place', async()=>{
+    // ReadFile copies what it reads into guest memory: a read into bytes of
+    // its own first was a second copy of every block, made and let go.
+    const cache = await testCache();
+    const { source } = await mount({ decoded: cache.space('bundle-blocks') });
+    const ramp = CONTENT['Game\\Ramp.dat'];
+    source.read('Game\\Ramp.dat', 0, 3000);
+    /** @type {{ at: number, length: number, shared: boolean }[]} */
+    const parts = [];
+    const out = new Uint8Array(2000);
+    const count = source.readInto('Game\\Ramp.dat', 100, 2000, (bytes, at)=>{
+        parts.push({ at, length: bytes.length, shared: bytes.buffer instanceof SharedArrayBuffer });
+        out.set(bytes, at);
+    });
+    assert.equal(count, 2000);
+    same(out, ramp.subarray(100, 2100));
+    assert.deepEqual(parts, [
+        { at: 0, length: 924, shared: true },
+        { at: 924, length: 1024, shared: true },
+        { at: 1948, length: 52, shared: true },
+    ], 'a part a block, each in the cache\'s memory');
+});
+
+test('a readInto that misses names the blocks it needs, after handing what was here', async()=>{
+    const { bundle } = await mount();
+    const file = bundle.find('Game\\Ramp.dat');
+    assert.ok(file);
+    const partial = await mount({ resident: [file.firstBlock] });
+    /** @type {number[]} */
+    const handed = [];
+    assert.throws(()=>partial.source.readInto('Game\\Ramp.dat', 512, 1536,
+        (_, at)=>handed.push(at)), (/** @type {any} */ e)=>{
+        assert.equal(e.code, BLOCK_MISS);
+        assert.deepEqual(e.blocks.map((/** @type {any} */ block)=>block.index), [file.firstBlock + 1]);
+        return true;
+    });
+    assert.deepEqual(handed, [0], 'the resident block, handed again after the fetch');
+});

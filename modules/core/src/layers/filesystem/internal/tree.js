@@ -38,7 +38,7 @@
 
 import { ErrorCode, fsError } from './errors.js';
 import { foldName, matchName } from './paths.js';
-import { PIECE_SIZE, bytesOf } from './memory-store.js';
+import { PIECE_SIZE, bytesOf, readFromInto } from './memory-store.js';
 
 /**
  * A directory's entries in the order NTFS keeps its index and FindNextFile
@@ -916,6 +916,29 @@ export function createOverlay({
             return node.inSource && source
                 ? source.read(node.sourcePath, offset, length)
                 : new Uint8Array(0);
+        },
+
+        /**
+         * read, the bytes handed to `put` where the store holds them; how
+         * many there were.
+         *
+         * @param {string[]} components @param {number} offset @param {number} length
+         * @param {import('./memory-store.js').Put} put
+         * @returns {number}
+         */
+        readInto(components, offset, length, put){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (node.inWritable)
+            {
+                return readFromInto(writable, storePath(node), offset, length, put);
+            }
+            return node.inSource && source
+                ? readFromInto(source, node.sourcePath, offset, length, put)
+                : 0;
         },
 
         /**

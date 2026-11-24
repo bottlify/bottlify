@@ -1289,6 +1289,14 @@ export function createFilesystemModule(){
                 read: (handle, length)=>live()
                     ? state.files.read(handle, length)
                     : new Uint8Array(0),
+                /**
+                 * @param {any} handle @param {number} length
+                 * @param {(bytes: Uint8Array, at: number) => void} put
+                 * @returns {number}
+                 */
+                readInto: (handle, length, put)=>live()
+                    ? state.files.readInto(handle, length, put)
+                    : 0,
                 /** @param {any} handle @param {Uint8Array} bytes @returns {number} */
                 write: (handle, bytes)=>live() ? state.files.write(handle, bytes) : 0,
                 /** @param {any} handle @param {number} offset @param {string} [from] */
