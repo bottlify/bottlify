@@ -106,7 +106,7 @@ test('a call played where it is made reads the writer\'s own buffer, given back 
     for (let n = 0; n < 50; n++)
     {
         transport.writer.u32(n);
-        transport.called(WAIT.NONE);
+        transport.called(WAIT.NONE, 'Test');
     }
     assert.equal(watched.read.length, 50);
     // The one read and the one written on next alternate.
@@ -118,12 +118,12 @@ test('a batch the played side still keeps a view of is not written over', ()=>{
     const transport = playedAtOnce(/** @type {any} */ (watched.played));
     watched.hold(true);
     transport.writer.u32(1);
-    transport.called(WAIT.NONE);
+    transport.called(WAIT.NONE, 'Test');
     watched.hold(false);
     for (const n of [2, 3, 4])
     {
         transport.writer.u32(n);
-        transport.called(WAIT.NONE);
+        transport.called(WAIT.NONE, 'Test');
     }
     assert.ok(watched.read.slice(1).every(buffer=>buffer !== watched.read[0]),
         'the kept one is not written on');
@@ -135,7 +135,7 @@ test('a batch the played side still keeps a view of is not written over', ()=>{
     for (let n = 5; n < 50; n++)
     {
         transport.writer.u32(n);
-        transport.called(WAIT.NONE);
+        transport.called(WAIT.NONE, 'Test');
     }
     assert.equal(new Set(watched.read).size, 3, 'a buffer given back is written on again');
 });
