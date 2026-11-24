@@ -97,6 +97,10 @@ export function calleesWorth(targets, total, most, doubt = 1){
     return ranked.slice(0, best).map(([target])=>target).sort((a, b)=>a - b);
 }
 
+/** @param {ArrayBufferLike} buffer */
+const isShared = buffer=>typeof SharedArrayBuffer !== 'undefined'
+    && buffer instanceof SharedArrayBuffer;
+
 /**
  * @param {object} state  the runtime's state (`state.js`), typed inside: its type is
  *     made of what this returns
@@ -786,17 +790,27 @@ export function createRelink(state){
         {
             return false;
         }
-        const copies = copyPages(chunk.map(record=>record.reads ?? record.pages));
+        const translator = freeTranslator();
+        const pageSets = chunk.map(record=>record.reads ?? record.pages);
+        // The pages where they lie when the translator can read the guest's
+        // memory there too (it is shared) or forms here; a copy of each, given
+        // over, only to a worker the memory cannot be shared with. A region
+        // the guest wrote under while it was formed again fails its hash, or
+        // is gone from the run before the relink is applied (`relinkOne`).
+        const inPlace = translator === null || isShared(ramOf.buffer);
+        const copies = inPlace ? null : copyPages(pageSets);
         const relink = {
             jobs: chunk.map(record=>({ entry: record.entry, entryTop: record.entryTop,
                 hash: record.hash, checked: record.checked === true, copies: record.copies === true,
                 ...precisionJob(record),
                 ...(record.targets === undefined ? {} : { targets: record.targets }),
                 formable: [...record.formable ?? record.pages] })),
-            pages: [...copies],
+            ...(copies === null
+                ? { ram: { buffer: ramOf.buffer, at: layout.ramBase + codeBase,
+                    pages: [...new Set(pageSets.flatMap(set=>[...set]))] } }
+                : { pages: [...copies] }),
             form: formOptions,
         };
-        const translator = freeTranslator();
         if (translator !== null)
         {
             const pending = { id: ++rt.workerRequest, relink: chunk, store, at: performance.now(),
@@ -804,7 +818,7 @@ export function createRelink(state){
             translator.pending = pending;
             translator.adapter.post({ id: pending.id, relink, layout: emitLayout, features: found,
                 options: emitOptions(), ...storeVersionFor(store) },
-            [...copies.values()].map(bytes=>bytes.buffer));
+            copies === null ? [] : [...copies.values()].map(bytes=>bytes.buffer));
             return true;
         }
         const relinkedAt = performance.now();

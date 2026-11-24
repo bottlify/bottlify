@@ -264,3 +264,33 @@ test('regions of one batch are formed on the worker over each one\'s own pages, 
     }, layout, FEATURES, OPTIONS);
     assert.deepEqual(built.results.map(one=>(one.ok ? 'ok' : one.message)), ['ok', 'ok']);
 });
+
+test('a relink formed where the pages lie in the guest\'s memory makes the module copies of'
+    + ' them make; a page past the memory reads as zeros, as its copy did', ()=>{
+    for (const name of ['load-x87', 'vcall-x87'])
+    {
+        const relink = relinkOf(name, 24);
+        const at = 0x10000;
+        const last = Math.max(...relink.pages.map(([page])=>page));
+        // The memory ends a page short of the last one: read there as zeros, the
+        // copy of which is a page of zeros.
+        const memory = new Uint8Array(at + last * 4096);
+        for (const [page, bytes] of relink.pages)
+        {
+            if (page < last)
+            {
+                memory.set(bytes, at + page * 4096);
+            }
+        }
+        const copies = relink.pages.map(([page, bytes])=>
+            /** @type {[number, Uint8Array]} */ ([page, page < last ? bytes : new Uint8Array(4096)]));
+        const copied = relinkBatch({ ...relink, pages: copies }, layout, FEATURES, OPTIONS);
+        const { pages, ...rest } = relink;
+        const inPlace = relinkBatch({ ...rest, ram: { buffer: memory.buffer, at,
+            pages: pages.map(([page])=>page) } }, layout, FEATURES, OPTIONS);
+        assert.ok(inPlace.results.length > 0);
+        assert.deepEqual(inPlace.results.map(result=>result.ok),
+            copied.results.map(result=>result.ok), name);
+        assert.deepEqual(inPlace.module, copied.module, `${name}: the same bytes`);
+    }
+});
