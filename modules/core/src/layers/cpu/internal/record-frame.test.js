@@ -71,3 +71,37 @@ test('a framed record reads back whole; a small one is kept as it is, a bad one 
         assert.equal(unframe(framed.subarray(0, framed.length >> 1)), null, 'cut short');
         assert.equal(unframe(new Uint8Array(0)), null);
     });
+
+test('a compressed record is copied once, its pieces straight behind the kind byte', async()=>{
+    const big = sample(5, 300000);
+    const joined = Response.prototype.arrayBuffer;
+    const set = Uint8Array.prototype.set;
+    let joins = 0;
+    let copied = 0;
+    Response.prototype.arrayBuffer = function(){
+        joins++;
+        return joined.call(this);
+    };
+    /** @type {ArrayBufferLike[]} */
+    const targets = [];
+    Uint8Array.prototype.set = function(source, at){
+        targets.push(this.buffer);
+        copied += /** @type {ArrayLike<number>} */ (source).length;
+        return set.call(this, source, at);
+    };
+    /** @type {Uint8Array} */
+    let framed;
+    try
+    {
+        framed = await frame(big);
+    }
+    finally
+    {
+        Response.prototype.arrayBuffer = joined;
+        Uint8Array.prototype.set = set;
+    }
+    assert.equal(framed[0], 1, 'compressed');
+    assert.equal(joins, 0, 'no join of the stream before the frame is laid');
+    assert.ok(copied >= framed.length - 1 && targets.includes(framed.buffer), 'laid by set');
+    assert.deepEqual(unframe(framed), big);
+});
