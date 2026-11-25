@@ -30,14 +30,28 @@ export async function frame(bytes){
     if (bytes.length >= SMALLEST_COMPRESSED && typeof CompressionStream === 'function')
     {
         const part = /** @type {BlobPart} */ (bytes);
-        const stream = new Blob([part]).stream()
-            .pipeThrough(new CompressionStream('deflate-raw'));
-        const packed = new Uint8Array(await new Response(stream).arrayBuffer());
-        if (packed.length + 1 < bytes.length)
+        const reader = new Blob([part]).stream()
+            .pipeThrough(new CompressionStream('deflate-raw')).getReader();
+        // The stream's pieces go straight behind the kind byte: joined by the
+        // platform first (`Response.arrayBuffer`), they were copied twice.
+        /** @type {Uint8Array[]} */
+        const pieces = [];
+        let length = 1;
+        for (let read = await reader.read(); !read.done; read = await reader.read())
         {
-            const out = new Uint8Array(packed.length + 1);
+            pieces.push(read.value);
+            length += read.value.length;
+        }
+        if (length < bytes.length)
+        {
+            const out = new Uint8Array(length);
             out[0] = 1;
-            out.set(packed, 1);
+            let at = 1;
+            for (const piece of pieces)
+            {
+                out.set(piece, at);
+                at += piece.length;
+            }
             return out;
         }
     }

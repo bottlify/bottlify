@@ -190,18 +190,19 @@ export function openArena(buffer){
         return -1;
     };
     /**
-     * Copies an entry's bytes to the end of the current segment, taking the
-     * next one over when they do not fit; with the lock held.
-     * @param {Uint8Array} bytes @returns {number} where, or -1 when larger than a segment
+     * Room for an entry of `length` bytes at the end of the current segment,
+     * taking the next one over when it does not fit; with the lock held. The
+     * caller writes the entry there before the lock goes.
+     * @param {number} length @returns {number} where, or -1 when larger than a segment
      */
-    const append = bytes=>{
-        if (bytes.length > segmentBytes)
+    const reserve = length=>{
+        if (length > segmentBytes)
         {
             return -1;
         }
         let current = head[Header.CURRENT];
         let used = head[Header.USED];
-        if (used + bytes.length > segmentBytes)
+        if (used + length > segmentBytes)
         {
             current = (current + 1) % segments;
             gens[current] = (gens[current] + 1) | 0;
@@ -209,8 +210,7 @@ export function openArena(buffer){
             head[Header.CURRENT] = current;
         }
         const at = current * segmentBytes + used;
-        data.set(bytes, at);
-        head[Header.USED] = used + ((bytes.length + 7) & ~7);
+        head[Header.USED] = used + ((length + 7) & ~7);
         return at;
     };
     /** @param {number} slot @param {number} hash @param {number} at */
@@ -247,9 +247,10 @@ export function openArena(buffer){
                     bytes = data.slice(at, at + view.getUint32(at, true));
                     if (ageing(at))
                     {
-                        const moved = append(bytes);
+                        const moved = reserve(bytes.length);
                         if (moved >= 0)
                         {
+                            data.set(bytes, moved);
                             place(slot, hash, moved);
                             head[Header.REFRESHED]++;
                         }
@@ -278,7 +279,9 @@ export function openArena(buffer){
          * @param {string} key @param {number[]} shape @param {KeptFunction} kept
          */
         set(key, shape, kept){
-            const bytes = encodeEntry(key, shape, kept);
+            // Laid out before the lock, written into its place under it: the
+            // body, the largest part, copied once, from the emitter's bytes.
+            const entry = entryOf(key, shape, kept);
             const hash = hashOf(key);
             lock();
             try
@@ -292,9 +295,10 @@ export function openArena(buffer){
                 {
                     return;
                 }
-                const at = append(bytes);
+                const at = reserve(entry.length);
                 if (at >= 0)
                 {
+                    entry.write(data, at);
                     place(slot, hash, at);
                     head[Header.WRITES]++;
                 }
@@ -318,27 +322,40 @@ export function openArena(buffer){
 }
 
 /**
+ * An entry laid out: its length, and how to write it at an offset of the
+ * arena's bytes, each part once, where it goes.
+ *
  * @param {string} key @param {number[]} shape @param {KeptFunction} kept
- * @returns {Uint8Array}
+ * @returns {{ length: number, write: (target: Uint8Array, at: number) => void }}
  */
-function encodeEntry(key, shape, { typeIndex, locals, body, hints, region }){
+export function entryOf(key, shape, { typeIndex, locals, body, hints, region }){
     const keyBytes = encoder.encode(key);
     const rest = encoder.encode(JSON.stringify([typeIndex, locals, hints, region]));
     const shapeAt = (ENTRY_WORDS * 4 + keyBytes.length + 7) & ~7;
     const bodyAt = shapeAt + shape.length * 8;
     const restAt = bodyAt + body.length;
-    const bytes = new Uint8Array(restAt + rest.length);
-    const view = new DataView(bytes.buffer);
-    view.setUint32(0, bytes.length, true);
-    view.setUint32(4, keyBytes.length, true);
-    view.setUint32(8, shape.length, true);
-    view.setUint32(12, body.length, true);
-    view.setUint32(16, rest.length, true);
-    bytes.set(keyBytes, ENTRY_WORDS * 4);
-    new Float64Array(bytes.buffer, shapeAt, shape.length).set(shape);
-    bytes.set(body, bodyAt);
-    bytes.set(rest, restAt);
-    return bytes;
+    const length = restAt + rest.length;
+    return {
+        length,
+        write(target, at){
+            const view = new DataView(target.buffer, target.byteOffset + at, length);
+            view.setUint32(0, length, true);
+            view.setUint32(4, keyBytes.length, true);
+            view.setUint32(8, shape.length, true);
+            view.setUint32(12, body.length, true);
+            view.setUint32(16, rest.length, true);
+            target.set(keyBytes, at + ENTRY_WORDS * 4);
+            // The key's pad zero, as a fresh buffer's was: the arena's bytes
+            // there are an earlier entry's.
+            target.fill(0, at + ENTRY_WORDS * 4 + keyBytes.length, at + shapeAt);
+            for (let i = 0; i < shape.length; i++)
+            {
+                view.setFloat64(shapeAt + i * 8, shape[i], true);
+            }
+            target.set(body, at + bodyAt);
+            target.set(rest, at + restAt);
+        },
+    };
 }
 
 /**
