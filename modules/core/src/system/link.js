@@ -228,20 +228,36 @@ export function openLink(end, handlers){
     /** The parts of a record still coming. @type {Uint8Array[]} */
     const parts = [];
     /**
-     * Records taken off the ring and not handled yet, in the order they came.
-     * A handler that makes a call of its own and waits for it pumps again
-     * from inside its record, and goes on from here: the ring's head would
-     * hand it that record a second time.
+     * Records taken off the ring and not handled yet, in the order they came,
+     * decoded where they lay (what the decoder keeps of them it copies): a
+     * handler that makes a call of its own and waits for it pumps again from
+     * inside its record, and goes on from here, where the ring's head would
+     * hand it that record a second time. A record that does not decode is
+     * kept as its error, thrown where the record would have been handled.
      *
-     * @type {Uint8Array[]}
+     * @type {any[]}
      */
     const taken = [];
     /** @param {Uint8Array} bytes */
-    const handle = bytes=>{
-        let record = decodeValue(bytes);
+    const decoded = bytes=>{
+        try
+        {
+            return decodeValue(bytes);
+        }
+        catch (e){
+            return { unreadable: e };
+        }
+    };
+    /** @param {any} record */
+    const handle = record=>{
+        if (record.unreadable)
+        {
+            throw record.unreadable;
+        }
         if (record[0] === PART)
         {
-            parts.push(record[2].slice());
+            // The decoder's copy of the part, taken as it is.
+            parts.push(record[2]);
             if (!record[1])
             {
                 return;
@@ -283,10 +299,10 @@ export function openLink(end, handlers){
      */
     const pump = ()=>{
         flush();
-        const count = inbound.drain(bytes=>void taken.push(bytes.slice()));
+        const count = inbound.drain(bytes=>void taken.push(decoded(bytes)));
         while (taken.length > 0)
         {
-            handle(/** @type {Uint8Array} */ (taken.shift()));
+            handle(taken.shift());
         }
         return count;
     };

@@ -320,3 +320,37 @@ test('a closed link fails the calls still waiting on it and every call after, on
         await assert.rejects(told, { closed: true },
             'the side that serves nothing fails its own at the close');
     });
+
+test('a record is decoded where it lies in the ring, not copied out of it first', ()=>{
+    const { a, b } = createLinkMemory();
+    /** @type {number[][]} */
+    const taken = [];
+    const system = openLink(a, {});
+    const process = openLink(b, { endpoint: {
+        take: (/** @type {number[]} */ values)=>void taken.push(values),
+    } });
+    const values = Array.from({ length: 200 }, (_, i)=>i * 7);
+    void system.call('endpoint', 'take', [values]);
+    /** @type {number[]} */
+    const copied = [];
+    const slice = Uint8Array.prototype.slice;
+    Uint8Array.prototype.slice = function(...args){
+        if (this.buffer instanceof SharedArrayBuffer)
+        {
+            copied.push(this.length);
+        }
+        return slice.apply(this, /** @type {any} */ (args));
+    };
+    try
+    {
+        process.pump();
+    }
+    finally
+    {
+        Uint8Array.prototype.slice = slice;
+    }
+    assert.deepEqual(taken, [values]);
+    // What the decoder copies are the record's short strings: the target and
+    // the method's names. A copy of the whole record is the bytes of 200 values.
+    assert.ok(copied.every(length=>length < 64), `copied out of the ring: ${copied.join(', ')}`);
+});
