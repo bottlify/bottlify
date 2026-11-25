@@ -53,6 +53,7 @@ import {
     unmarshalRequest, unsupportedAt,
 } from '../oleaut32/marshal.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 /**
@@ -999,12 +1000,7 @@ export function createRemoting(host){
         let at = block + POINTER + GUID_BYTES;
         for (const [index, value] of strings.entries())
         {
-            const bytes = new Uint8Array((value.length + 1) * 2);
-            for (let unit = 0; unit < value.length; unit++)
-            {
-                bytes[unit * 2] = value.charCodeAt(unit) & 0xff;
-                bytes[unit * 2 + 1] = value.charCodeAt(unit) >>> 8;
-            }
+            const bytes = utf16z(value);
             host.writeMemory(at, bytes);
             await callSlot(creator, SLOT_ERROR_SET_SOURCE + index, [at], thread);
             at += bytes.length;

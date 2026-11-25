@@ -24,6 +24,7 @@ import { createAdapter } from '../oleaut32/objects.js';
 import { dword, u32 } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
+import { utf16z } from '../common/utf16.js';
 
 export const IID_ISTREAM = '{0000000C-0000-0000-C000-000000000046}';
 export const IID_ISEQUENTIAL_STREAM = '{0C733A30-2A1C-11CE-ADE5-00AA0044773D}';
@@ -485,12 +486,7 @@ export function createStreams(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                const text = new Uint8Array((name.length + 1) * 2);
-                for (let i = 0; i < name.length; i++)
-                {
-                    text[i * 2] = name.charCodeAt(i) & 0xff;
-                    text[i * 2 + 1] = name.charCodeAt(i) >>> 8;
-                }
+                const text = utf16z(name);
                 host.writeMemory(at, text);
                 view.setUint32(STATSTG.NAME, at, true);
             }

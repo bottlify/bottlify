@@ -419,13 +419,7 @@ export function createRegistryFunctions(host){
      */
     const widened = bytes=>{
         const text = decodeAnsi(bytes);
-        const out = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const unit = text.charCodeAt(at);
-            out[at * 2] = unit & 0xff;
-            out[at * 2 + 1] = unit >>> 8;
-        }
+        const out = utf16(text);
         return out;
     };
 

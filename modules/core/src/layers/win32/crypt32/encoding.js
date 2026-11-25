@@ -25,6 +25,7 @@ import { derElement, oidContents, readGeneralNames } from '../crypto/x509.js';
 import { NAME_STR, stringToName } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
 import { fromBase64, toBase64 } from '../../../system/base64.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_DATA = 13;
@@ -404,12 +405,7 @@ export function createEncodingFunctions(host){
 
     /** @param {string} text */
     const wideZ = text=>{
-        const out = new Uint8Array(text.length * 2 + 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            out[i * 2] = text.charCodeAt(i) & 0xff;
-            out[i * 2 + 1] = text.charCodeAt(i) >> 8;
-        }
+        const out = utf16z(text);
         return out;
     };
     /** @param {string} text */

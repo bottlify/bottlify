@@ -33,6 +33,7 @@ import {
 } from '../common/shell-link.js';
 import { listBytes, pathOfList } from './namespace.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** CLSID_ShellLink, and the interfaces the object answers to. */
 export { CLSID_SHELL_LINK };
@@ -223,13 +224,7 @@ function writeStringBuffer(host, buffer, cch, text, wide){
     const kept = text.slice(0, cch - 1);
     if (wide)
     {
-        const bytes = new Uint8Array((kept.length + 1) * 2);
-        for (let at = 0; at < kept.length; at++)
-        {
-            const unit = kept.charCodeAt(at);
-            bytes[at * 2] = unit & 0xff;
-            bytes[at * 2 + 1] = (unit >>> 8) & 0xff;
-        }
+        const bytes = utf16z(kept);
         host.writeMemory(buffer, bytes);
         return;
     }
@@ -789,13 +784,7 @@ export function createShellLink(host){
                 host.writeMemory(slot, dword(0));
                 return S_FALSE;
             }
-            const bytes = new Uint8Array((state.curFile.length + 1) * 2);
-            for (let at = 0; at < state.curFile.length; at++)
-            {
-                const unit = state.curFile.charCodeAt(at);
-                bytes[at * 2] = unit & 0xff;
-                bytes[at * 2 + 1] = (unit >>> 8) & 0xff;
-            }
+            const bytes = utf16z(state.curFile);
             const block = host.allocate(bytes.length);
             if (block === 0)
             {

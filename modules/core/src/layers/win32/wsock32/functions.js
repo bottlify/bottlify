@@ -52,6 +52,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
 import { formatGuid } from '../../../system/guid.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 export const HOSTNAME = 'bottlify';
@@ -1378,12 +1379,7 @@ export function createWinsockFunctions(host){
 
     /** UTF-16LE with its terminator. @param {string} text */
     const wide = text=>{
-        const out = new Uint8Array(text.length * 2 + 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            out[at * 2] = text.charCodeAt(at) & 0xff;
-            out[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
+        const out = utf16z(text);
         return out;
     };
 

@@ -45,6 +45,7 @@ import { INTERACTIVE_SESSION } from './teb.js';
 import { dropUnclaimed } from './pipes.js';
 import { HANDLE_STDERR, HANDLE_STDIN, HANDLE_STDOUT } from './console.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /** Codes this surface reports. */
 const ERROR_SUCCESS = 0;
@@ -687,12 +688,7 @@ export function createSpawnFunctions(host){
             const text = `${path}\0`;
             if (wide)
             {
-                const bytes = new Uint8Array(text.length * 2);
-                for (let i = 0; i < text.length; i++)
-                {
-                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
-                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-                }
+                const bytes = utf16(text);
                 host.writeMemory(wholeAddress(buffer), bytes);
             }
             else
@@ -750,12 +746,7 @@ export function createSpawnFunctions(host){
             const text = `${path}\0`;
             if (wide)
             {
-                const bytes = new Uint8Array(text.length * 2);
-                for (let i = 0; i < text.length; i++)
-                {
-                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
-                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-                }
+                const bytes = utf16(text);
                 host.writeMemory(wholeAddress(buffer), bytes);
             }
             else

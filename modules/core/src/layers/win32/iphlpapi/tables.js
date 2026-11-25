@@ -21,6 +21,7 @@
 import { readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
 import { formatGuid } from '../../../system/guid.js';
+import { utf16z } from '../common/utf16.js';
 
 const NO_ERROR = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -185,16 +186,6 @@ export function createIphlpapiTables(host, model){
     };
     /** @param {string} text */
     const ansiBytes = text=>Uint8Array.from([...text, '\0'], char=>char.charCodeAt(0) & 0xff);
-    /** @param {string} text */
-    const wideBytes = text=>{
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        return bytes;
-    };
 
     /** NET_LUID's NetLuidIndex, the 24 bits under the type. @param {bigint} luid */
     const luidIndex = luid=>Number((luid >> 24n) & 0xffffffn);
@@ -1589,7 +1580,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_NOT_ENOUGH_MEMORY;
         }
-        host.writeMemory(wholeAddress(out), wide ? wideBytes(text) : ansiBytes(text));
+        host.writeMemory(wholeAddress(out), wide ? utf16z(text) : ansiBytes(text));
         return NO_ERROR;
     }
 
@@ -1626,7 +1617,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_INSUFFICIENT_BUFFER;
         }
-        host.writeMemory(wholeAddress(out), wide ? wideBytes(text) : ansiBytes(text));
+        host.writeMemory(wholeAddress(out), wide ? utf16z(text) : ansiBytes(text));
         return NO_ERROR;
     }
 }

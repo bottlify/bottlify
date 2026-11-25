@@ -665,12 +665,7 @@ export function createVersionFunctions(host){
         VerLanguageNameA: verLanguageName((address, text)=>
             host.writeMemory(address, encodeAnsi(text))),
         VerLanguageNameW: verLanguageName((address, text)=>{
-            const bytes = new Uint8Array(text.length * 2);
-            for (let at = 0; at < text.length; at++)
-            {
-                bytes[at * 2] = text.charCodeAt(at) & 0xff;
-                bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-            }
+            const bytes = utf16(text);
             host.writeMemory(address, bytes);
         }),
 

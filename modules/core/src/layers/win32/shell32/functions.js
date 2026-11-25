@@ -52,6 +52,7 @@ import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import { urlOfShortcut } from './internet-shortcut.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -381,13 +382,7 @@ export function createShellFunctions(host){
             return;
         }
         const text = path.slice(0, MAX_PATH - 1);
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
+        const bytes = utf16z(text);
         host.writeMemory(buffer, bytes);
     };
 

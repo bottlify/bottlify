@@ -23,6 +23,7 @@
 import { STATUS } from './status.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem, upcaseUnit } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** @param {string} text */
 export const upcaseText = text=>Array.from(text,
@@ -136,12 +137,7 @@ export function createCountedStringFunctions(host){
 
     /** @param {number} at @param {string} text  The terminator is written too. */
     const writeWide = (at, text)=>{
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let index = 0; index < text.length; index++)
-        {
-            view.setUint16(index * 2, text.charCodeAt(index), true);
-        }
+        const bytes = utf16z(text);
         host.writeMemory(at, bytes);
     };
 

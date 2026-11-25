@@ -34,6 +34,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
 import { wholeAddress } from '../common/pointers.js';
 import { formatGuid, guidBytes } from '../../../system/guid.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * setupapi — INF files, cabinets and file queues: how an installer that
@@ -107,7 +108,6 @@ const DEVPKEY_INTERFACE = '{026e516e-b814-414b-83cd-856d6fef4822}';
 /** DEVPROP_TYPE_BOOLEAN: one byte, 0 or 0xff. */
 const DEVPROP_TYPE_BOOLEAN = 0x11;
 
-
 const SPDRP_CLASSGUID = 0x8;
 const SPDRP_PHYSICAL_DEVICE_OBJECT_NAME = 0xe;
 /** The last index, which no call may set. */
@@ -168,7 +168,6 @@ const CM_GETIDLIST_FILTER_NONE = 0x0;
 const CM_GETIDLIST_FILTER_ENUMERATOR = 0x1;
 const CM_GETIDLIST_FILTER_CLASS = 0x200;
 const CM_GET_DEVICE_INTERFACE_LIST_ALL_DEVICES = 0x1;
-
 
 const ERROR_PARTIAL_COPY = 299;
 const ERROR_DEVINFO_NOT_REGISTERED = 0xe0000208;
@@ -424,12 +423,7 @@ export function createSetupapiFunctions(host){
         {
             return ansi(value);
         }
-        const bytes = new Uint8Array((value.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < value.length; at++)
-        {
-            view.setUint16(at * 2, value.charCodeAt(at), true);
-        }
+        const bytes = utf16z(value);
         return bytes;
     };
     /** @param {number} code @param {number} [result] */
@@ -1206,9 +1200,6 @@ export function createSetupapiFunctions(host){
         fmtid: formatGuid(host.readMemory(wholeAddress(address), 16).slice()).toLowerCase(),
         pid: readU32(wholeAddress(address) + 16),
     });
-
-    /** UTF-16, terminated. @param {string} value */
-    const utf16z = value=>encodeIn(value, true);
 
     /**
      * The properties of a device the system keeps, by format and id: how
@@ -2345,7 +2336,6 @@ export function createSetupapiFunctions(host){
      */
     const COMPONENTS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\Setup\\OsComponents';
     const HKEY_LOCAL_MACHINE = 0x80000002;
-
 
     /**
      * What a file is, compressed or not: an LZ-compressed (SZDD) file the

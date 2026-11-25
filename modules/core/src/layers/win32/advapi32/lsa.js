@@ -21,6 +21,7 @@ import {
     PRIVILEGES, USER_NAME, accountNamed, accountOfSid, isThisMachine, sidBytes, sidText,
 } from './tokens.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const STATUS_SUCCESS = 0;
 const STATUS_SOME_NOT_MAPPED = 0x00000107;
@@ -146,12 +147,7 @@ class Block {
      * @param {number} at @param {string} text
      */
     string(at, text){
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
+        const bytes = utf16z(text);
         this.u16(at, text.length * 2);
         this.u16(at + 2, bytes.length);
         this.pointer(at + 4, this.blob(bytes));

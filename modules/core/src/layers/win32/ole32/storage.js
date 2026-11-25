@@ -29,6 +29,7 @@ import {
 } from './cfb.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
 const GMEM_MOVEABLE = 0x0002;
@@ -336,13 +337,7 @@ export function createStorageFunctions(host){
         {
             return 0;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            const unit = text.charCodeAt(index);
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = unit >>> 8;
-        }
+        const bytes = utf16z(text);
         host.writeMemory(block, bytes);
         return block;
     };

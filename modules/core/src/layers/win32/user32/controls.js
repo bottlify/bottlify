@@ -36,6 +36,7 @@ import { directoryItems } from './dlgdir.js';
 import { createButtonV6 } from './button-v6.js';
 import { translated } from './unicode.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** Messages the controls answer. */
 export const WM_CREATE = 0x0001;
@@ -2450,12 +2451,7 @@ export function createControlProcedures(host){
         {
             return encodeAnsi(`${text}\0`);
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[2 * at] = text.charCodeAt(at) & 0xff;
-            bytes[2 * at + 1] = text.charCodeAt(at) >>> 8;
-        }
+        const bytes = utf16z(text);
         return bytes;
     };
     /**

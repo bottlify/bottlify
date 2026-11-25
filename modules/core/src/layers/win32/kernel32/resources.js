@@ -22,6 +22,7 @@
 
 /** Codes this surface reports. */
 import { forwarded, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
@@ -250,12 +251,7 @@ export function createResourceFunctions(host){
         {
             return Uint8Array.from([...text].map(c=>c.charCodeAt(0) & 0xff).concat(0));
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i * 2] = text.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-        }
+        const bytes = utf16z(text);
         return bytes;
     };
 

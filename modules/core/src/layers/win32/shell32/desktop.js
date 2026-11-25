@@ -18,6 +18,7 @@
 
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const E_FAIL = 0x80004005 | 0;
 
@@ -150,12 +151,7 @@ export function createDesktopFunctions(host){
             /** @param {string} value */
             const wide = value=>{
                 const at = allocate(value.length * 2 + 2);
-                const bytes = new Uint8Array(value.length * 2 + 2);
-                for (let index = 0; index < value.length; index++)
-                {
-                    bytes[index * 2] = value.charCodeAt(index) & 0xff;
-                    bytes[index * 2 + 1] = value.charCodeAt(index) >>> 8;
-                }
+                const bytes = utf16z(value);
                 host.writeMemory(at, bytes);
                 return at;
             };

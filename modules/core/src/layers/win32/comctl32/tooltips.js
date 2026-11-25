@@ -24,6 +24,7 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const TOOLTIPS_CLASS = 'tooltips_class32';
@@ -193,12 +194,7 @@ export function createTooltipProcedure(host, tk, resources){
                 bytes.length > ANSI_COPY ? bytes.slice(0, ANSI_COPY) : bytes);
             return;
         }
-        const bytes = new Uint8Array((clipped.length + 1) * 2);
-        for (let i = 0; i < clipped.length; i++)
-        {
-            bytes[i * 2] = clipped.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = clipped.charCodeAt(i) >>> 8;
-        }
+        const bytes = utf16z(clipped);
         host.writeMemory(wholeAddress(address), bytes);
     };
 

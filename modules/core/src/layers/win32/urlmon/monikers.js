@@ -28,6 +28,7 @@
 import { pathFromFileUrl } from '../shlwapi/path.js';
 import { wholeAddress } from '../common/pointers.js';
 import { guidBytes } from '../../../system/guid.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -124,12 +125,7 @@ export const fileUrlPath = url=>pathFromFileUrl(url, code=>String.fromCharCode(c
 
 /** @param {string} text */
 const wide = text=>{
-    const bytes = new Uint8Array(text.length * 2 + 2);
-    for (let i = 0; i < text.length; i++)
-    {
-        bytes[i * 2] = text.charCodeAt(i) & 0xff;
-        bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
-    }
+    const bytes = utf16z(text);
     return bytes;
 };
 

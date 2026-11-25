@@ -61,6 +61,7 @@ import { REGISTRY_NATIVES, UNLOAD_KEY } from '../advapi32/functions.js';
 import { TOKEN_NATIVES, USER_SID_TEXT } from '../advapi32/tokens.js';
 import { PROCESSOR_NAME } from '../kernel32/processor.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * The C runtime functions ntdll publishes under its own name.
@@ -986,11 +987,7 @@ export function createNtdllFunctions(host){
             /** @param {number[]} args */
             handler: ([out])=>{
                 const text = `\\REGISTRY\\USER\\${USER_SID_TEXT}`;
-                const bytes = new Uint8Array(text.length * 2 + 2);
-                for (let at = 0; at < text.length; at++)
-                {
-                    bytes[at * 2] = text.charCodeAt(at);
-                }
+                const bytes = utf16z(text);
                 const buffer = allocate(bytes.length);
                 if (buffer === 0)
                 {
