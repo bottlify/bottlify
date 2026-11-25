@@ -104,6 +104,43 @@ test('a context on a bitmap draws there at glFinish, into the bitmap selected th
     f.wgl.wglDeleteContext(gl);
 });
 
+test('meeting the bitmap again keeps its snapshots in place, no copy made', ()=>{
+    const f = fixture([{ width: 4, height: 4, bitCount: 32 }]);
+    assert.ok(f.wgl.SetPixelFormat(MEMORY_DC, bitmapFormat(32)));
+    const gl = f.wgl.wglCreateContext(MEMORY_DC);
+    assert.ok(f.wgl.wglMakeCurrent(MEMORY_DC, gl));
+    clear(gl, 0x10, 0x20, 0x30);
+    f.wgl.meetBitmap(gl);
+    const slice = Uint8Array.prototype.slice;
+    let copies = 0;
+    Uint8Array.prototype.slice = function(...args){
+        copies++;
+        return slice.apply(this, args);
+    };
+    try
+    {
+        for (const value of [0x40, 0x50])
+        {
+            clear(gl, value, value, value);
+            f.wgl.meetBitmap(gl);
+            assert.equal(word(f.bitmaps[0].surface.bytes, 0) & 0xffffff, value * 0x10101);
+        }
+        // Nothing drawn since: the snapshot says so, the bitmap is not written.
+        f.bitmaps[0].surface.bytes[0] = 0x99;
+        f.wgl.meetBitmap(gl);
+    }
+    finally
+    {
+        Uint8Array.prototype.slice = slice;
+    }
+    assert.equal(copies, 0, 'the snapshots of the buffer and the bitmap are reused');
+    // The bitmap's first row is the top one, its first byte a blue.
+    assert.deepEqual([...gl.glReadPixels(0, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE)].slice(0, 3),
+        [0x50, 0x50, 0x99], 'the program\'s own write to the bitmap is read in');
+    f.wgl.wglMakeCurrent(MEMORY_DC, null);
+    f.wgl.wglDeleteContext(gl);
+});
+
 test('a bitmap is met in the format\'s words, its values the depth the context was made in', ()=>{
     // A 32-bit context over a sixteen-bit DIB writes 32-bit pixels into it
     // (test_bitmap_rendering's DIB half), and one made over that DIB draws
