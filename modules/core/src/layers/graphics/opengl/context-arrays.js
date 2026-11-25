@@ -753,10 +753,11 @@ export function installArrayCalls(context, kernel){
             return;
         }
         const plain = WITHOUT_ADJACENCY.get(mode);
+        /** The draw's vertices in order: through the adjacency's expansion where it has one. */
+        const order = plain === undefined ? null
+            : /** @type {Uint32Array} */ (expandMode(mode, indices.length));
         if (plain !== undefined)
         {
-            const order = /** @type {Uint32Array} */ (expandMode(mode, indices.length));
-            indices = Array.from(order, k=>indices[k]);
             mode = plain;
         }
         if (record(GL.VERTEX_ARRAY).values[0] === 0)
@@ -772,8 +773,10 @@ export function installArrayCalls(context, kernel){
         for (let instance = 0; instance < instancing.instances; instance++)
         {
             const vertices = [];
-            for (const index of indices)
+            const count = order ? order.length : indices.length;
+            for (let k = 0; k < count; k++)
             {
+                const index = indices[order ? order[k] : k];
                 const vertex = gather(index, instance, instancing.baseInstance);
                 if (vertex)
                 {
@@ -963,8 +966,10 @@ export function installArrayCalls(context, kernel){
         const end = Math.min(offset + size, buffer.mapOffset + buffer.mapLength);
         if (end > start)
         {
+            // Written into guest memory before the call returns: the store's
+            // own bytes are handed, not a copy of them.
             kernel.memory()?.write(buffer.mapped + start - buffer.mapOffset,
-                buffer.data.slice(start, end));
+                buffer.data.subarray(start, end));
         }
     };
 
@@ -976,11 +981,26 @@ export function installArrayCalls(context, kernel){
      * @param {Uint8Array} bytes
      */
     function storeIntoBuffer(buffer, offset, bytes){
-        buffer.data.set(bytes, offset);
+        // Bytes a packer wrote where they lie in the store are there already.
+        if (bytes.buffer !== buffer.data.buffer
+            || bytes.byteOffset !== buffer.data.byteOffset + offset)
+        {
+            buffer.data.set(bytes, offset);
+        }
         noteWritten(buffer, offset, bytes.length);
         mirrorToMap(buffer, offset, bytes.length);
     }
     kernel.side.storeIntoBuffer = storeIntoBuffer;
+
+    /**
+     * The array pointers as they are now, for a vertex array object or the
+     * client attribute stack to keep: each a record of numbers, copied
+     * field by field.
+     *
+     * @param {Record<string, import('./arrays.js').ArrayPointer>} from
+     */
+    const pointersNow = from=>Object.fromEntries(
+        Object.entries(from).map(([name, pointer])=>[name, { ...pointer }]));
 
     /**
      * Whether a map of `bits` is refused for the store's flags (4.4): what
@@ -1084,8 +1104,8 @@ export function installArrayCalls(context, kernel){
             return {
                 values: new Map(VERTEX_ARRAY_OBJECT_QUERIES.map(query=>
                     [query, [...record(query).values]])),
-                pointers: structuredClone(pointers),
-                texCoordPointers: structuredClone(texCoordPointers),
+                pointers: pointersNow(pointers),
+                texCoordPointers: texCoordPointers.map(pointer=>({ ...pointer })),
                 texCoordEnabled: [...texCoordEnabled],
                 programs: kernel.side.saveClientPrograms(GL.CLIENT_VERTEX_ARRAY_BIT),
             };
@@ -1126,8 +1146,8 @@ export function installArrayCalls(context, kernel){
                 return null;
             }
             return {
-                pointers: structuredClone(pointers),
-                texCoordPointers: structuredClone(texCoordPointers),
+                pointers: pointersNow(pointers),
+                texCoordPointers: texCoordPointers.map(pointer=>({ ...pointer })),
                 texCoordEnabled: [...texCoordEnabled],
                 clientActive,
                 locked,
@@ -2424,11 +2444,13 @@ export function installArrayCalls(context, kernel){
                     {
                         readsCaptured('glGetBufferSubDataARB', buffer);
                     }
-                    return buffer.data.slice(offset, offset + size);
+                    return buffer.data.subarray(offset, offset + size);
                 });
             }
             readsCaptured('glGetBufferSubDataARB', buffer);
-            return buffer.data.slice(offset, offset + size);
+            // The store's bytes themselves: the caller writes them into guest
+            // memory as soon as it has them, and keeps nothing.
+            return buffer.data.subarray(offset, offset + size);
         },
 
         /**

@@ -81,7 +81,8 @@ export function installVertexArrayCalls(context, kernel){
             objects.set(bound, leaving);
         }
         const state = name === 0 ? defaultState : objects.get(name);
-        kernel.side.useVertexArrayState(state ?? structuredClone(initial));
+        // A state is read, never written: the initial one serves every new object.
+        kernel.side.useVertexArrayState(state ?? initial);
         if (name !== 0)
         {
             // Bound once, the name is an object; what it holds is the context's now.
@@ -173,7 +174,7 @@ export function installVertexArrayCalls(context, kernel){
             {
                 if (!objects.has(next))
                 {
-                    objects.set(next, structuredClone(initial));
+                    objects.set(next, initial);
                     names.push(next);
                 }
             }

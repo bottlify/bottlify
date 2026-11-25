@@ -294,7 +294,8 @@ export function installLegacyCalls(context, kernel){
         }
         if (buffer)
         {
-            return buffer.data.slice(address, address + length);
+            // Read where it lies: every caller decodes it before it returns.
+            return buffer.data.subarray(address, address + length);
         }
         const memory = kernel.memory();
         return memory && address !== 0 ? memory.read(address, length) : null;
@@ -315,7 +316,9 @@ export function installLegacyCalls(context, kernel){
         }
         if (buffer)
         {
-            const bytes = buffer.data.slice(address, address + length);
+            // Packed where it goes: the checks are passed, so writing over the
+            // store's own bytes is the pack.
+            const bytes = buffer.data.subarray(address, address + length);
             fill(bytes);
             kernel.side.storeIntoBuffer(buffer, address, bytes);
             return;
@@ -666,7 +669,9 @@ export function installLegacyCalls(context, kernel){
             }
             if (enter('glPolygonStipple', [words]))
             {
-                stipple = { words: words.slice(), key: patternKey(words) };
+                // Words read from memory are this call's own; the caller's are copied.
+                stipple = { words: words === source ? words.slice() : words,
+                    key: patternKey(words) };
             }
         },
 

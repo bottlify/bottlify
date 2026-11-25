@@ -177,12 +177,14 @@ export function installAttribBindingCalls(context, kernel){
         placeOf: index=>places[index],
 
         /** @returns {any} what a vertex array object keeps of the model */
-        save: ()=>({ places: structuredClone(places), points: structuredClone(points) }),
+        // A place is written in place, so each is copied; a point is only
+        // ever replaced whole, so the list of them is enough.
+        save: ()=>({ places: places.map(place=>({ ...place })), points: points.slice() }),
 
         /** @param {any} saved */
         restore(saved){
-            places = structuredClone(saved.places);
-            points = structuredClone(saved.points);
+            places = saved.places.map((/** @type {AttribPlace} */ place)=>({ ...place }));
+            points = saved.points.slice();
             places.forEach((_, index)=>resync(index));
         },
     };

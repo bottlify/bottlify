@@ -779,7 +779,8 @@ export function installTextureCalls(context, kernel){
                 if (mask & GL.TEXTURE_BIT)
                 {
                     unit.bindings = new Map(was.bindings);
-                    unit.env = structuredClone(was.env);
+                    // The popped snapshot's own, nobody else's.
+                    unit.env = was.env;
                     unit.genModes = [...was.genModes];
                     unit.objectPlanes = was.objectPlanes.map((/** @type {number[]} */ p)=>[...p]);
                     unit.eyePlanes = was.eyePlanes.map((/** @type {number[]} */ p)=>[...p]);
@@ -1748,15 +1749,17 @@ export function installTextureCalls(context, kernel){
      * blue as the level is sampled. A copy where that changes anything.
      *
      * @param {Uint8Array} texels @param {number} baseFormat
+     * @param {boolean} [owned]  the texels are this read's own (a transfer's
+     *     copy, zeros made for it): changed where they lie, not copied again
      * @returns {Uint8Array}
      */
-    function returnedTexels(texels, baseFormat){
+    function returnedTexels(texels, baseFormat, owned = false){
         if (baseFormat !== GL.LUMINANCE && baseFormat !== GL.LUMINANCE_ALPHA
             && baseFormat !== GL.INTENSITY)
         {
             return texels;
         }
-        const out = texels.slice();
+        const out = owned ? texels : texels.slice();
         for (let at = 0; at < out.length; at += 4)
         {
             out[at + 1] = 0;
@@ -1767,6 +1770,20 @@ export function installTextureCalls(context, kernel){
             }
         }
         return out;
+    }
+
+    /**
+     * A legacy level's texels as glGetTexImage hands them: through the pixel
+     * transfer and table 6.1, copied once at most - the level's own bytes
+     * when neither changes them.
+     *
+     * @param {any} stored  a level without a sized format
+     * @returns {Uint8Array}
+     */
+    function readBack(stored){
+        const texels = transferredCopy(stored.texels
+            ?? new Uint8Array(stored.width * stored.height * 4));
+        return returnedTexels(texels, stored.baseFormat, texels !== stored.texels);
     }
 
     /**
@@ -4416,10 +4433,8 @@ export function installTextureCalls(context, kernel){
                 }
                 const packed = stored.sized ? packSized(stored, format, type)
                     : checkTransfer(RGBA8, format, type)
-                        ? packFromStorage(returnedTexels(transferredCopy(stored.texels
-                            ?? new Uint8Array(stored.width * stored.height * 4)),
-                        stored.baseFormat), stored.width, stored.height, 1, format, type,
-                        transferState(true), RGBA8)
+                        ? packFromStorage(readBack(stored), stored.width, stored.height, 1,
+                            format, type, transferState(true), RGBA8)
                         : null;
                 return packed ? { packed } : null;
             }
@@ -4437,8 +4452,7 @@ export function installTextureCalls(context, kernel){
                 diverge('glGetTexImage was accepted and read black: the texels live with'
                     + ' the context that draws, in the graphics worker, and are not read back');
             }
-            return returnedTexels(transferredCopy(stored.texels
-                ?? new Uint8Array(stored.width * stored.height * 4)), stored.baseFormat);
+            return readBack(stored);
         },
 
         /** @param {number} target @param {number} parameter @param {number} value */
@@ -4587,7 +4601,9 @@ export function installTextureCalls(context, kernel){
             if (stored?.sized?.compressed)
             {
                 const sized = stored.sized;
-                return stored.data?.slice() ?? new Uint8Array(storageBytes(sized, stored.width,
+                // The level's own blocks: the caller writes them into guest
+                // memory before it returns and keeps nothing.
+                return stored.data ?? new Uint8Array(storageBytes(sized, stored.width,
                     stored.height, stored.depth ?? 1));
             }
             if (stored && !stored.compressedFormat)
