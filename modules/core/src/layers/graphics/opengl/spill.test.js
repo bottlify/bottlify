@@ -74,11 +74,11 @@ async function run(seed, cached){
     if (texels)
     {
         renderer.spill(all());
-        for (let turns = 0; turns < 1000 && renderer.diagnostics().spills.levels < count; turns++)
+        for (let turns = 0; turns < 1000 && /** @type {any} */ (renderer.diagnostics()).spills.levels < count; turns++)
         {
             await turn();
         }
-        assert.equal(renderer.diagnostics().spills.levels, count, 'every undrawn level moved');
+        assert.equal(/** @type {any} */ (renderer.diagnostics()).spills.levels, count, 'every undrawn level moved');
         const held = renderer.heldTexels(all());
         assert.equal(held.undrawnBytes, 0, 'none of their texels left on this thread');
         assert.equal(held.cachedLevels, count);
@@ -107,7 +107,7 @@ async function run(seed, cached){
     }
     const uploads = fake.calls.filter((/** @type {any} */ call)=>call.op === 'writeTexture')
         .map((/** @type {any} */ call)=>[...call.bytes].join(','));
-    const figures = renderer.diagnostics();
+    const figures = /** @type {any} */ (renderer.diagnostics());
     // What was taken back is dropped from the cache: nothing of it stays there.
     for (let turns = 0; turns < 100 && (runCache?.figures().hot ?? 0) > 0; turns++)
     {
