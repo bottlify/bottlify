@@ -1389,9 +1389,10 @@ export function createGpuRenderer(services){
      *
      * @param {import('./objects.js').TextureLevel} image
      * @param {import('./objects.js').DirtyRect} rect
+     * @param {boolean} own  bytes of their own, never a view of the level
      * @returns {Uint8Array}
      */
-    const sliceRect = (image, rect)=>{
+    const sliceRect = (image, rect, own)=>{
         // Read once: a compressed level on a device decodes at each read.
         const texels = image.texels;
         if (!texels)
@@ -1411,8 +1412,9 @@ export function createGpuRenderer(services){
         }
         if (rect.x === 0 && rect.width === image.width)
         {
-            return texels.subarray(rect.y * image.width * 4,
+            const rows = texels.subarray(rect.y * image.width * 4,
                 (rect.y + rect.height) * image.width * 4);
+            return own ? rows.slice() : rows;
         }
         const packed = new Uint8Array(rect.width * rect.height * 4);
         for (let row = 0; row < rect.height; row++)
@@ -1632,7 +1634,9 @@ export function createGpuRenderer(services){
                     origin: { x: area.x, y: area.y, z: cube ? face : 0 },
                     depthOrArrayLayers: oneArray ? image.height
                         : solid || twoArray ? imageDepth : 1,
-                    data: ordered ? slice.slice() : slice,
+                    // A command keeps bytes of its own: the level's own
+                    // storage is copied, an area packed here already is.
+                    data: ordered && slice === image.data ? slice.slice() : slice,
                 };
                 if (ordered)
                 {
@@ -1984,9 +1988,9 @@ export function createGpuRenderer(services){
                     width: area.width,
                     height: area.height,
                     origin: { x: area.x, y: area.y, z: face },
-                    // A command keeps bytes of its own: the slice may be a
-                    // view of the level the program goes on writing.
-                    data: ordered ? sliceRect(image, area).slice() : sliceRect(image, area),
+                    // A command keeps bytes of its own: rows taken whole
+                    // would be a view of the level the program goes on writing.
+                    data: sliceRect(image, area, ordered),
                 });
             }
         }

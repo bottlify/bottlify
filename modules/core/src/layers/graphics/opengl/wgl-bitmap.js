@@ -154,6 +154,21 @@ export function createBitmapDrawables(gdi){
         return true;
     };
 
+    /**
+     * `bytes` as they stand now, in the snapshot kept before where it has
+     * their size: a context met at every glFinish makes no garbage of it.
+     *
+     * @param {Uint8Array} kept @param {Uint8Array} bytes @returns {Uint8Array}
+     */
+    const keep = (kept, bytes)=>{
+        if (kept.length !== bytes.length)
+        {
+            return bytes.slice();
+        }
+        kept.set(bytes);
+        return kept;
+    };
+
     return {
         /**
          * The depth a context made now on a memory DC draws in: the selected
@@ -229,8 +244,8 @@ export function createBitmapDrawables(gdi){
                 return;
             }
             record.bitmap = selected.bitmap;
-            record.synced = frame.bytes.slice();
-            record.seen = selected.surface.bytes.slice();
+            record.synced = keep(record.synced, frame.bytes);
+            record.seen = keep(record.seen, selected.surface.bytes);
         },
 
         /** @param {any} context @returns {boolean} whether it is on a memory DC */
