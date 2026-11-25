@@ -24,12 +24,13 @@
  */
 
 import { HashedStates } from './statehash.js';
-import { floatToDword } from '../d3d9/constants.js';
+
 import {
     DEFAULT_RENDER_STATES as DEFAULT_RENDER_STATES_9, resolveRenderStateDefault
     as resolveSharedDefault,
 } from '../d3d9/renderstates.js';
 import { D3DRS, D3DRS_MAX, D3DRS_RENAMED_IN_D3D9 } from './constants.js';
+import { floatBits } from '../../../system/floats.js';
 
 const TRUE = 1;
 const FALSE = 0;
@@ -75,7 +76,7 @@ export const D3D8_ONLY_RENDER_STATES = Object.freeze([
         value: FALSE,
         dependsOn: 'softwareVertexProcessing',
     },
-    { state: D3DRS.PATCHSEGMENTS, name: 'PATCHSEGMENTS', value: floatToDword(1.0) },
+    { state: D3DRS.PATCHSEGMENTS, name: 'PATCHSEGMENTS', value: floatBits(1.0) },
 ]);
 
 /** @type {readonly RenderStateDefault[]} */

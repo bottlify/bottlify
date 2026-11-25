@@ -23,8 +23,9 @@ import { createDirect3D9 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
-import { fromHalf, toHalf } from './half.js';
+
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;

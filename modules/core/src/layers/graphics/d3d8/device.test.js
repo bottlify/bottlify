@@ -9,11 +9,8 @@ import assert from 'node:assert/strict';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
     D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER,
-    D3DPOOL, D3DPT, D3DRS, D3DRS_MAX,
-    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DRTYPE, D3DSBT, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS,
-    D3DTSS,
-    D3DUSAGE, D3D_OK,
-    dwordToFloat, floatToDword, isShaderHandle, surfaceBytes,
+    D3DPOOL, D3DPT, D3DRS, D3DRS_MAX, D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DRTYPE, D3DSBT,
+    D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3D_OK, isShaderHandle, surfaceBytes,
 } from './constants.js';
 import { DEFAULT_STAGE_STATES } from './stagestates.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
@@ -21,6 +18,7 @@ import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D8 } from './device.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** Distinguishes "the call wrote nothing" from "the call wrote a zero". */
 const UNTOUCHED = Symbol('untouched');
@@ -211,7 +209,7 @@ test('the D3D8-only defaults are the ones D3D9 has no state for', ()=>{
     assert.equal(device.GetRenderState(D3DRS.ZVISIBLE, out), D3D_OK);
     assert.equal(out.value, 0);
     assert.equal(device.GetRenderState(D3DRS.PATCHSEGMENTS, out), D3D_OK);
-    assert.equal(dwordToFloat(out.value ?? 0), 1.0);
+    assert.equal(bitsFloat(out.value ?? 0), 1.0);
 
     assert.equal(device.GetRenderState(D3DRS.POSITIONORDER, out), D3D_OK);
     assert.equal(out.value, D3DORDER.CUBIC);
@@ -243,10 +241,10 @@ test('a float render state is stored as the bit pattern the guest wrote', ()=>{
     /** @type {{ value?: number }} */
     const out = {};
 
-    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatToDword(0.25)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatBits(0.25)), D3D_OK);
     assert.equal(device.GetRenderState(D3DRS.FOGSTART, out), D3D_OK);
     assert.equal(out.value, 0x3e800000);
-    assert.equal(dwordToFloat(out.value ?? 0), 0.25);
+    assert.equal(bitsFloat(out.value ?? 0), 0.25);
 
     assertFullyReleased(device);
 });
@@ -257,7 +255,7 @@ test('POINTSIZE_MAX follows the reported maximum point size', ()=>{
     const out = {};
 
     assert.equal(device.GetRenderState(D3DRS.POINTSIZE_MAX, out), D3D_OK);
-    assert.equal(dwordToFloat(out.value ?? 0), 8.0);
+    assert.equal(bitsFloat(out.value ?? 0), 8.0);
 
     assertFullyReleased(device);
 });

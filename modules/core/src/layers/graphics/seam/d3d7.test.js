@@ -44,13 +44,13 @@ import {
 } from '../ddraw/constants.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DDP_DONOTCLIP,
-    D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP,
-    D3D_OK, DDERR_INVALIDCAPS,
-    DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
+    D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP, D3D_OK, DDERR_INVALIDCAPS, DDERR_INVALIDPARAMS,
+    DDERR_NOTFOUND, DEVICE_IDS,
 } from '../d3d7/constants.js';
 import { D3DCLEAR, D3DPT } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { floatBits } from '../../../system/floats.js';
 
 const HWND = 0x00010044;
 const SCREEN = { width: 16, height: 16, bitsPerPixel: 32 };
@@ -490,16 +490,16 @@ test('a viewport goes through as a structure, and Clear reads its Z as a float',
     h.box.memory.writeU32(at + D3DVIEWPORT7.dwY, 2);
     h.box.memory.writeU32(at + D3DVIEWPORT7.dwWidth, 8);
     h.box.memory.writeU32(at + D3DVIEWPORT7.dwHeight, 4);
-    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMinZ, floatToDword(0.25));
-    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMaxZ, floatToDword(0.75));
+    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMinZ, floatBits(0.25));
+    h.box.memory.writeU32(at + D3DVIEWPORT7.dvMaxZ, floatBits(0.75));
     assert.equal(h.device(device, 'SetViewport', [at]), D3D_OK);
 
     const back = 0x6200;
     assert.equal(h.device(device, 'GetViewport', [back]), D3D_OK);
     assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dwWidth), 8);
-    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMinZ), floatToDword(0.25),
+    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMinZ), floatBits(0.25),
         'the two Z bounds are floats in dword slots, and come back as they went in');
-    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMaxZ), floatToDword(0.75));
+    assert.equal(h.box.memory.readU32(back + D3DVIEWPORT7.dvMaxZ), floatBits(0.75));
     assert.equal(h.device(device, 'SetViewport', [0]), DDERR_INVALIDPARAMS >>> 0);
 
     // Clear's Z is the same kind of argument, but arrives in a stack slot
@@ -511,11 +511,11 @@ test('a viewport goes through as a structure, and Clear reads its Z as a float',
     h.box.memory.writeU32(rect + D3DRECT.x2, 4);
     h.box.memory.writeU32(rect + D3DRECT.y2, 4);
     assert.equal(h.device(device, 'Clear',
-        [1, rect, D3DCLEAR.TARGET, 0xff203040, floatToDword(1), 0]), D3D_OK);
+        [1, rect, D3DCLEAR.TARGET, 0xff203040, floatBits(1), 0]), D3D_OK);
     assert.equal(h.device(device, 'Clear', [0, 0, 0, 0, 0, 0]), DDERR_INVALIDPARAMS >>> 0,
         'clearing nothing is not a clear');
     assert.equal(
-        h.device(device, 'Clear', [0, 0, D3DCLEAR.ZBUFFER, 0, floatToDword(1), 0]),
+        h.device(device, 'Clear', [0, 0, D3DCLEAR.ZBUFFER, 0, floatBits(1), 0]),
         DDERR_INVALIDPARAMS >>> 0, 'and there is no depth buffer attached to clear');
 
     assert.equal(h.release(device), 0);
@@ -590,7 +590,7 @@ test('a strided draw gathers each stream into packed vertices and draws those', 
     const strided = 0x7300;
     const corners = [[-1, -1, 0], [-1, 1, 0], [1, 1, 0], [1, -1, 0]];
     corners.forEach((corner, k)=>corner.forEach((value, axis)=>
-        h.box.memory.writeU32(positions + k * 12 + axis * 4, floatToDword(value))));
+        h.box.memory.writeU32(positions + k * 12 + axis * 4, floatBits(value))));
     corners.forEach((_, k)=>h.box.memory.writeU32(colours + k * 4, 0x0000ff00 + k));
     [0, 1, 2, 2, 3, 0].forEach((index, k)=>{
         h.box.bytes[indices + k * 2] = index;
@@ -622,8 +622,8 @@ test('a strided draw gathers each stream into packed vertices and draws those', 
     // array: the eight sets follow the specular entry in the structure.
     const uvs = 0x7400;
     corners.forEach((_, k)=>{
-        h.box.memory.writeU32(uvs + k * 8, floatToDword(k));
-        h.box.memory.writeU32(uvs + k * 8 + 4, floatToDword(-k));
+        h.box.memory.writeU32(uvs + k * 8, floatBits(k));
+        h.box.memory.writeU32(uvs + k * 8 + 4, floatBits(-k));
     });
     h.box.memory.writeU32(strided + 4 * 8, uvs);
     h.box.memory.writeU32(strided + 4 * 8 + 4, 8);
@@ -972,7 +972,6 @@ test('a buffer no draw has read is locked in place, read whole at its first draw
     h.release(ddraw);
     h.assertAllReleased();
 });
-
 
 /**
  * The enumerations, driven through the descriptor directly: each answers with

@@ -10,12 +10,12 @@ import v8 from 'node:v8';
 import vm from 'node:vm';
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DFMT,
-    D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK, dwordToFloat,
-    floatToDword,
+    D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK,
 } from './constants.js';
 import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D9 } from './device.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** Distinguishes "the call wrote nothing" from "the call wrote a zero". */
 const UNTOUCHED = Symbol('untouched');
@@ -177,7 +177,7 @@ test('POINTSIZE_MAX follows the reported maximum point size', ()=>{
     const out = {};
 
     assert.equal(device.GetRenderState(D3DRS.POINTSIZE_MAX, out), D3D_OK);
-    assert.equal(dwordToFloat(out.value ?? 0), 8.0);
+    assert.equal(bitsFloat(out.value ?? 0), 8.0);
 
     assertFullyReleased(device);
 });
@@ -187,10 +187,10 @@ test('a float render state is stored as the bit pattern the guest wrote', ()=>{
     /** @type {{ value?: number }} */
     const out = {};
 
-    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatToDword(0.25)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatBits(0.25)), D3D_OK);
     assert.equal(device.GetRenderState(D3DRS.FOGSTART, out), D3D_OK);
     assert.equal(out.value, 0x3e800000);
-    assert.equal(dwordToFloat(out.value ?? 0), 0.25);
+    assert.equal(bitsFloat(out.value ?? 0), 0.25);
 
     assertFullyReleased(device);
 });

@@ -19,22 +19,9 @@
  */
 
 import { D3D10_SVC, D3D10_SVT } from './effect.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** @typedef {'float' | 'int' | 'bool'} Given */
-
-const scratch = new DataView(new ArrayBuffer(4));
-
-/** @param {number} value */
-const floatBits = value=>{
-    scratch.setFloat32(0, value, true);
-    return scratch.getUint32(0, true);
-};
-
-/** @param {number} bits */
-const bitsFloat = bits=>{
-    scratch.setUint32(0, bits >>> 0, true);
-    return scratch.getFloat32(0, true);
-};
 
 /**
  * A value a program gives, as the dword a variable of this type keeps.

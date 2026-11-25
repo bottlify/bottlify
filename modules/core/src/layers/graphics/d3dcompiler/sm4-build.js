@@ -29,6 +29,7 @@
  */
 
 import * as hm from '../../win32/d3dx9/hlsl-math.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** @typedef {'f' | 'i' | 'u' | 'b'} Kind */
 
@@ -65,19 +66,6 @@ export class TargetError4 extends Error {
 }
 
 const f32 = Math.fround;
-const scratch = new DataView(new ArrayBuffer(4));
-
-/** The bits of a float, as a uint32. @param {number} x */
-export function floatBits(x){
-    scratch.setFloat32(0, x, true);
-    return scratch.getUint32(0, true);
-}
-
-/** The float a uint32 is the bits of. @param {number} bits */
-export function bitsFloat(bits){
-    scratch.setUint32(0, bits >>> 0, true);
-    return scratch.getFloat32(0, true);
-}
 
 /** The bits a lane of a literal is, by its kind. @param {number} x @param {Kind} t */
 export function laneBits(x, t){

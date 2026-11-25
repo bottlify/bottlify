@@ -35,6 +35,7 @@ import { literalOf } from '../../win32/d3dx9/effect-model.js';
 import { compileShader4 } from './compile.js';
 import { layoutOf } from './hlsl4.js';
 import { writeContainer } from './dxbc-write.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** @typedef {import('../../win32/d3dx9/hlsl-types.js').Type} Type */
 
@@ -1289,13 +1290,6 @@ function fieldAssignment(field, index, entry, symbols){
     }
     return { state: field.id, index, kind: ASSIGN.CONSTANT,
         constants: constantsOf(v, field.count ?? 1, field.names, entry.pos) };
-}
-
-const scratch = new DataView(new ArrayBuffer(4));
-/** @param {number} x */
-function floatBits(x){
-    scratch.setFloat32(0, x, true);
-    return scratch.getUint32(0, true);
 }
 
 /**

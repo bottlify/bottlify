@@ -22,6 +22,7 @@
 
 import { baseOf, scalarCount, vectorOf } from '../../win32/d3dx9/hlsl-types.js';
 import { TargetError4 } from './sm4-build.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** @typedef {import('./sm4-ir.js').ConstantBuffer} ConstantBuffer */
 /** @typedef {import('./sm4-ir.js').CbVariable} CbVariable */
@@ -131,7 +132,7 @@ function placed(at, type, size){
  */
 function defaultWords(type, value, rowMajor, out, at){
     const put = (/** @type {number} */ offset, /** @type {number} */ x, /** @type {string} */ base)=>{
-        out[offset / 4] = base === 'float' ? floatWord(x) : base === 'bool' ? (x ? 1 : 0)
+        out[offset / 4] = base === 'float' ? floatBits(x) : base === 'bool' ? (x ? 1 : 0)
             : x >>> 0;
     };
     switch (type.kind)
@@ -163,13 +164,6 @@ function defaultWords(type, value, rowMajor, out, at){
         }
         default:
     }
-}
-
-const wordScratch = new DataView(new ArrayBuffer(4));
-/** @param {number} x */
-function floatWord(x){
-    wordScratch.setFloat32(0, x, true);
-    return wordScratch.getUint32(0, true);
 }
 
 /**

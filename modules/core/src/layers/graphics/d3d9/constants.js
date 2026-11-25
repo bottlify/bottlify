@@ -657,8 +657,6 @@ export function surfaceBytes(format, width, height){
     return surfacePitch(format, width) * Math.ceil(height / (blockSize ?? 1));
 }
 
-const reinterpret = new DataView(new ArrayBuffer(4));
-
 /** The render targets a pixel shader writes at once, oC0 to oC3. */
 export const SIMULTANEOUS_TARGETS = 4;
 
@@ -673,21 +671,3 @@ export const SIMULTANEOUS_TARGETS = 4;
  * leave in it then decides how opaque the frame is.
  */
 export const COLORWRITEENABLE_ALPHA = 8;
-
-/**
- * @param {number} value
- * @returns {number} the DWORD a float render state is stored as
- */
-export function floatToDword(value){
-    reinterpret.setFloat32(0, value, true);
-    return reinterpret.getUint32(0, true);
-}
-
-/**
- * @param {number} value
- * @returns {number} the float a render-state DWORD stands for
- */
-export function dwordToFloat(value){
-    reinterpret.setUint32(0, value >>> 0, true);
-    return reinterpret.getFloat32(0, true);
-}

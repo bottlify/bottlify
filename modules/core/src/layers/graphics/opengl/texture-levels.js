@@ -19,7 +19,8 @@ import { COMPRESSED_FORMAT } from '../d3d10/gpuformats.js';
 import { convertTexels } from '../d3d10/blocks.js';
 import { GL } from './constants.js';
 import { SIZED_FORMATS, TEX, componentTypeOf, modelTexelBytes } from './formats.js';
-import { decodeStorage, encodeStorage, toHalf } from './texture-transfer.js';
+import { decodeStorage, encodeStorage } from './texture-transfer.js';
+import { toHalf } from '../../../system/floats.js';
 
 /**
  * @typedef {import('./formats.js').SizedFormat} SizedFormat

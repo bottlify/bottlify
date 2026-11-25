@@ -17,9 +17,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-    D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK, floatToDword,
-} from './constants.js';
+import { D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK } from './constants.js';
 import { D3DSAMP } from './samplerstates.js';
 import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
@@ -31,6 +29,7 @@ import {
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { UNIFORM_FLOATS, multiplyMatrices, normalMatrixOf } from '../d3d8/render.js';
+import { floatBits } from '../../../system/floats.js';
 
 const RAM_BASE = 0x40000000;
 const RAM_SIZE = 4 << 20;
@@ -341,8 +340,8 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         const matrix = [0, 0.5, -0.5, 0];
         [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10, D3DTSS.BUMPENVMAT11]
             .forEach((state, at)=>
-                h.device.SetTextureStageState(1, state, floatToDword(matrix[at])));
-        h.device.SetTextureStageState(1, D3DTSS.BUMPENVLSCALE, floatToDword(2));
+                h.device.SetTextureStageState(1, state, floatBits(matrix[at])));
+        h.device.SetTextureStageState(1, D3DTSS.BUMPENVLSCALE, floatBits(2));
         h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 4 | 0x100);
 
         await h.draw();
@@ -2067,13 +2066,13 @@ test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and o
         for (const bias of [0, -0.5, -0.75, 0])
         {
             // D3DSAMP_MIPMAPLODBIAS.
-            assert.equal(h.device.SetSamplerState(0, 8, floatToDword(bias)), D3D_OK);
+            assert.equal(h.device.SetSamplerState(0, 8, floatBits(bias)), D3D_OK);
             assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
         }
         h.device.SetVertexShader(vs.shader);
         h.device.SetPixelShader(null);
         assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
-        assert.equal(h.device.SetSamplerState(0, 8, floatToDword(-0.5)), D3D_OK);
+        assert.equal(h.device.SetSamplerState(0, 8, floatBits(-0.5)), D3D_OK);
         assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
         assert.equal(h.device.EndScene(), D3D_OK);
         assert.equal(h.device.Present(), D3D_OK);
@@ -2277,8 +2276,8 @@ test('table fog through a vertex shader without oFog runs over z or w as the pro
         h.device.SetTransform(D3DTS.PROJECTION, projection);
         h.device.SetRenderState(D3DRS.FOGENABLE, 1);
         h.device.SetRenderState(D3DRS.FOGTABLEMODE, 3);
-        h.device.SetRenderState(D3DRS.FOGSTART, floatToDword(30));
-        h.device.SetRenderState(D3DRS.FOGEND, floatToDword(350));
+        h.device.SetRenderState(D3DRS.FOGSTART, floatBits(30));
+        h.device.SetRenderState(D3DRS.FOGEND, floatBits(350));
         await h.draw();
         const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
         // The range is the block's last register: start, end, density, and
@@ -2340,7 +2339,7 @@ test('a sampler\'s level-of-detail bias reaches the GPU in the draw\'s own regis
     h.device.SetVertexShader(vs.shader);
     h.device.SetPixelShader(ps.shader);
     // D3DSAMP_MIPMAPLODBIAS.
-    assert.equal(h.device.SetSamplerState(0, 8, floatToDword(-0.75)), D3D_OK);
+    assert.equal(h.device.SetSamplerState(0, 8, floatBits(-0.75)), D3D_OK);
     await h.draw();
     assert.deepEqual(h.reports, []);
     const pixel = modulesOf(h, 'ps:').find(code=>code.includes('_lodBias'));

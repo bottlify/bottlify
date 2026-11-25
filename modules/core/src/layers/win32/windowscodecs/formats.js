@@ -20,6 +20,7 @@
  */
 
 import { GUID } from './layout.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 /**
  * @typedef {Object} PixelFormat
@@ -47,52 +48,6 @@ export const toSrgb = v=>(v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 
 const clamp = v=>(Number.isNaN(v) ? 0 : Math.min(1, Math.max(0, v)));
 /** A value of 0 to 1 as an integer of `max`, rounded. @param {number} v @param {number} max */
 const quantise = (v, max)=>Math.floor(clamp(v) * max + 0.5);
-
-/** A half float's bits as a number. @param {number} bits */
-function fromHalf(bits){
-    const sign = bits & 0x8000 ? -1 : 1;
-    const exponent = bits >> 10 & 0x1f;
-    const fraction = bits & 0x3ff;
-    if (exponent === 0)
-    {
-        return sign * fraction * 2 ** -24;
-    }
-    if (exponent === 0x1f)
-    {
-        return fraction ? NaN : sign * Infinity;
-    }
-    return sign * (1 + fraction / 1024) * 2 ** (exponent - 15);
-}
-
-const F32 = new Float32Array(1);
-const U32 = new Uint32Array(F32.buffer);
-/** A number as a half float's bits, rounded to nearest even. @param {number} value */
-function toHalf(value){
-    F32[0] = value;
-    const bits = U32[0];
-    const sign = bits >>> 16 & 0x8000;
-    const exponent = (bits >>> 23 & 0xff) - 127 + 15;
-    const fraction = bits & 0x7fffff;
-    if ((bits & 0x7fffffff) > 0x7f800000)
-    {
-        return sign | 0x7e00;
-    }
-    if (exponent >= 0x1f)
-    {
-        return sign | 0x7c00;
-    }
-    if (exponent <= 0)
-    {
-        if (exponent < -10)
-        {
-            return sign;
-        }
-        const mantissa = (fraction | 0x800000) >> (1 - exponent);
-        return sign | (mantissa + 0xfff + (mantissa >> 13 & 1) >> 13);
-    }
-    return sign | ((exponent << 10 | fraction >> 13) + ((fraction & 0x1fff) > 0x1000
-        || (fraction & 0x3fff) === 0x3000 ? 1 : 0));
-}
 
 /**
  * The luminance of linear red, green and blue, by the weights Windows' grey

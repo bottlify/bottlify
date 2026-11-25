@@ -33,6 +33,7 @@ import { assembleShader } from './shader-asm.js';
 import { check } from './hlsl-check.js';
 import { D3DXSHADER, compileShader, withLineMarkers } from './hlsl-compile.js';
 import { arrayOf, flatBases, flattenValue, fromTypeRef, scalarCount } from './hlsl-types.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** @typedef {import('./hlsl-parser.js').Expr} Expr */
 /** @typedef {import('./hlsl-parser.js').TypeRef} TypeRef */
@@ -365,9 +366,6 @@ export const STATES = new Map([
 ].map(([name, entry])=>[/** @type {string} */(name).toLowerCase(),
     /** @type {{ kind: StateKind, op: number, value: ValueKind, enumeration?: string }} */
     (entry)]));
-
-/** @param {number} value */
-const floatBits = value=>new Uint32Array(Float32Array.of(value).buffer)[0];
 
 /**
  * The value of an expression made only of literals -- numbers, `true`, strings,

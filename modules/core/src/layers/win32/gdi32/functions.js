@@ -58,6 +58,7 @@ import {
     writeTextMetricsW,
     writeU32s,
 } from './structs.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** ABC: the three widths of one character, A and C the bearings either side of B. */
 const ABC_SIZE = 12;
@@ -1538,13 +1539,6 @@ export function createGdiFunctions(host){
             writeSize(host, size, { cx: extents.at(-1) ?? 0, cy: currentMetrics(dc).height });
         }
         return 1;
-    };
-
-    /** A float's bits as the dword they are written as. @param {number} value */
-    const floatBits = value=>{
-        const view = new DataView(new ArrayBuffer(4));
-        view.setFloat32(0, value, true);
-        return view.getUint32(0, true);
     };
 
     /**

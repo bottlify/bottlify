@@ -21,8 +21,9 @@
  */
 
 import { D3D_OK, DDERR_INVALIDPARAMS } from './constants.js';
-import { D3DFOG, D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS, dwordToFloat } from '../d3d8/constants.js';
+import { D3DFOG, D3DLIGHTTYPE, D3DMCS, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { bitsFloat } from '../../../system/floats.js';
 
 /** D3DVOP: what ProcessVertices is asked to do. */
 export const D3DVOP = Object.freeze({
@@ -307,9 +308,9 @@ export function processVertices(request){
     // material's.
     const fogMode = state.renderState(D3DRS.FOGENABLE) !== 0
         ? state.renderState(D3DRS.FOGVERTEXMODE) : D3DFOG.NONE;
-    const fogStart = dwordToFloat(state.renderState(D3DRS.FOGSTART));
-    const fogEnd = dwordToFloat(state.renderState(D3DRS.FOGEND));
-    const fogDensity = dwordToFloat(state.renderState(D3DRS.FOGDENSITY));
+    const fogStart = bitsFloat(state.renderState(D3DRS.FOGSTART));
+    const fogEnd = bitsFloat(state.renderState(D3DRS.FOGEND));
+    const fogDensity = bitsFloat(state.renderState(D3DRS.FOGDENSITY));
     const rangeFog = state.renderState(D3DRS.RANGEFOGENABLE) !== 0;
     /** @param {number} x @param {number} y @param {number} z @returns {number} 0 to 1 */
     const fogOf = (x, y, z)=>{
