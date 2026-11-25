@@ -160,6 +160,7 @@ export function createCorkRuntime(env){
             if (one.owner !== null)
             {
                 one.owner.ran = corkRetired;
+                one.owner.ranAt = rt.nowMs();
             }
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && profileResetAt !== null
                 && performance.now() >= profileResetAt)

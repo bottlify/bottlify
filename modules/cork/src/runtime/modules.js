@@ -10,7 +10,7 @@
  * the table (`placeModule`), a range of its own where modules are placed;
  * the modules some running region's function is in (`heldModules`), let go
  * past `cacheBytes` by when they last ran (`evict`), or once none of their
- * regions has run for `coldAfter` instructions (`evictCold`), and charged to the host's
+ * regions the engine has touched for `coldMs` (`evictCold`), and charged to the host's
  * bound (`charge`); and the compiled modules kept for the other runtimes
  * sharing the store (`share`, `sharedModule`). A region joins its module when
  * it is published and leaves it when it goes; a module no region holds is
@@ -205,8 +205,12 @@ export function createModules(state){
                 const bytes = instanceBytes.get(instance) ?? 0;
                 makeRoom(bytes);
                 const charged = keptInstances.has(instance) ? 0 : chargeFor(bytes);
-                held = { instance, bytes, records: new Set(), ran: rt.corkRetired, keepUntil: 0,
-                    charged };
+                held = { instance, bytes, records: new Set(), ran: rt.corkRetired,
+                    ranAt: rt.nowMs(), keepUntil: 0, charged };
+                if (parked.delete(instance))
+                {
+                    counts.unparked++;
+                }
                 heldModules.set(instance, held);
                 heldBytes += bytes;
             }
@@ -307,8 +311,9 @@ export function createModules(state){
      * Only between slices, so no frame of the module is on the stack.
      *
      * @param {Held} held
+     * @param {boolean} [park]  its instance kept for a miss to take again (`evictCold`)
      */
-    const evict = held=>{
+    const evict = (held, park = false)=>{
         const records = [...held.records];
         for (const record of records)
         {
@@ -321,7 +326,7 @@ export function createModules(state){
         }
         rt.unpublish(records);
         const key = instanceKeys.get(held.instance);
-        if (key !== undefined && batchInstances.get(key) === held.instance)
+        if (!park && key !== undefined && batchInstances.get(key) === held.instance)
         {
             batchInstances.delete(key);
         }
@@ -329,33 +334,58 @@ export function createModules(state){
         counts.evictedRegions += records.length;
     };
 
-    /** When the held modules were last swept for cold ones (`evictCold`). */
-    let sweptAt = 0;
     /**
-     * Lets go the modules none of whose regions has run for `coldAfter`
-     * translated instructions, and not brought back lately: a program's load and
-     * menu code, which a level's frames never reach again, left to the store
-     * rather than held for the rest of the run. A module is marked as it is
-     * entered from the runtime's loop, and every slice that ends inside one
-     * resumes through such an entry, so a module the program spends any time in
-     * keeps its mark fresh; one entered only by other modules' tail calls, and
-     * so briefly that no slice ever ends there, can go and be brought back.
-     * Swept an eighth of `coldAfter` apart; only between slices.
+     * Modules taken off the entry hash and the table for not having been touched
+     * lately, their instances still held: by instance, when it was parked. A miss
+     * at any of their regions finds the instance through the store as it is
+     * (`batchInstances`) and publishes it again without compiling: proof the
+     * engine still touches it, whatever its mark said. One nothing has touched
+     * for `coldMs` since is let go for good.
+     * @type {Map<WebAssembly.Instance, number>}
+     */
+    const parked = new Map();
+    /** When the held modules were last swept (`evictCold`), in ms. */
+    let sweptAt = -Infinity;
+    /**
+     * Lets go the modules the engine has not touched for `coldMs`: a program's
+     * load and menu code, which a level's frames never reach again, left to the
+     * store rather than held for the rest of the run. A module's mark
+     * (`ranAt`) is set as the runtime's loop enters it, which misses one entered
+     * only by other modules' tail calls; so one whose mark is half `coldMs` old
+     * is first parked -- its regions unpublished, its instance kept -- and any
+     * touch brings it straight back. Only one parked a whole `coldMs` with no
+     * touch goes. Swept a quarter of `coldMs` apart; only between slices.
      */
     const evictCold = ()=>{
-        const after = settings.coldAfter;
-        const retired = rt.corkRetired;
-        if (!(after > 0) || retired - sweptAt < after / 8)
+        const after = settings.coldMs;
+        const now = rt.nowMs();
+        if (!(after > 0) || now - sweptAt < after / 4)
         {
             return;
         }
-        sweptAt = retired;
+        sweptAt = now;
+        for (const [instance, since] of parked)
+        {
+            if (now - since >= after)
+            {
+                parked.delete(instance);
+                const key = instanceKeys.get(instance);
+                if (key !== undefined && batchInstances.get(key) === instance)
+                {
+                    batchInstances.delete(key);
+                }
+                counts.evictedCold++;
+                counts.evictedColdBytes += instanceBytes.get(instance) ?? 0;
+            }
+        }
+        const retired = rt.corkRetired;
         for (const held of [...heldModules.values()])
         {
-            if (retired - held.ran >= after && held.keepUntil <= retired)
+            if (now - held.ranAt >= after / 2 && held.keepUntil <= retired)
             {
-                evict(held);
-                counts.evictedCold++;
+                evict(held, true);
+                parked.set(held.instance, now);
+                counts.parkedModules++;
             }
         }
     };
@@ -491,6 +521,7 @@ export function createModules(state){
         joinHeld,
         leaveHeld,
         evictCold,
+        parked,
         instantiate,
         batchInstances,
         keepBatch,

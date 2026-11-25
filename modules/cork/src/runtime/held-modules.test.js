@@ -24,8 +24,9 @@ import { random } from '../testing/seeded-pieces.js';
 const NO_TAIL_CALLS = 'this host\'s wasm has no tail calls: every region leaves for the host'
     + ' and there is no entry hash';
 
-/** A machine of 4 MiB with cork's own layout and a runtime over it. @param {Record<string, unknown>} config */
-function machine(config){
+/** A machine of 4 MiB with cork's own layout and a runtime over it.
+ * @param {Record<string, unknown>} config @param {() => number} [now]  the runtime's clock */
+function machine(config, now = undefined){
     const layout = ownLayout({ ramSize: 4 << 20, hashSlots: 1 << 16 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
@@ -36,6 +37,7 @@ function machine(config){
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
         imports: { trap: ()=>0, rdtsc: ()=>0 },
+        ...now ? { now } : {},
     });
     return {
         runtime,
@@ -318,18 +320,23 @@ test('every module let go is told to the host by its bytes (`letGo`), none twice
 
 /**
  * A program that calls a few functions once, as a load does, then runs a loop
- * over another for a long time: under `coldAfter` the modules of the first ones
- * are let go to the store once the loop has run that long without them, and the
- * program leaves what it leaves without the age.
+ * over another, the loop run again and again for `wallMs` of the clock as a
+ * level's frames are: under `coldMs` the modules the loop never touches are
+ * parked and then let go, those it touches stay or come back, and the program
+ * leaves what it leaves without.
  *
- * @param {Record<string, unknown>} config
+ * @param {Record<string, unknown>} config @param {number} frames  each 10 ms of the runtime's clock
+ * @param {number} [budget]  a slice's: one past the loop's whole run leaves no slice ending in
+ *     the callee, so the runtime's loop never marks it
  */
-async function loadThenLoop(config){
+async function loadThenLoop(config, frames, budget = 200){
+    let clock = 0;
     const DRIVER = 0x2000;
+    const LOOP = 0x2800;
     const FUNCTIONS = 0x3000;
     const DATA = 0x9000;
     const m = machine({ leafCalls: false, batchRegions: 1, maxBatchRegions: 1, relinkAfter: 0,
-        store: memoryTranslationStore(), bundleId: 'test', ...config });
+        store: memoryTranslationStore(), bundleId: 'test', ...config }, ()=>clock);
     try
     {
         // f_i: add eax, k; add [DATA + 4 i], eax; ret
@@ -341,26 +348,36 @@ async function loadThenLoop(config){
         });
         const [loopee, ...loaded] = functions;
         /** @type {number[]} */
-        const code = [];
+        const load = [];
         for (const target of loaded)
         {
-            code.push(...call(DRIVER + code.length, target));
+            load.push(...call(DRIVER + load.length, target));
         }
-        code.push(0xb9, ...le32(5000));
-        const loop = code.length;
-        code.push(...call(DRIVER + loop, loopee));
-        code.push(0x49, 0x0f, 0x85, ...le32(loop - (code.length + 7)), 0xf4);
-        m.write(DRIVER, code);
-        for (const at of [...functions, DRIVER])
+        load.push(0xf4);
+        m.write(DRIVER, load);
+        // mov ecx, 200; L: call loopee; dec ecx; jnz L; hlt
+        const code = [0xb9, ...le32(200)];
+        const head = code.length;
+        code.push(...call(LOOP + head, loopee));
+        code.push(0x49, 0x0f, 0x85, ...le32(head - (code.length + 7)), 0xf4);
+        m.write(LOOP, code);
+        for (const at of [...functions, DRIVER, LOOP])
         {
             m.runtime.noteHot(at, 0, 64);
             await until(m, ()=>m.runtime.entryOf(at) >= 0);
         }
         m.setReg(4, 0x80000);
         await runToHalt(m, DRIVER, { held: [], budget: 200 });
+        for (let frame = 0; frame < frames; frame++)
+        {
+            m.setReg(4, 0x80000);
+            await runToHalt(m, LOOP, { held: [], budget });
+            clock += 10;
+            // The translator's turn a frame's end gives it.
+            await m.runtime.translatePending();
+        }
         const d = diagnostics(m);
-        return { state: [m.reg(0), m.reg(1), m.reg(4), ...m.read(DATA, 20)],
-            evictedCold: d.evictedCold, coldBytes: d.coldBytes, heldModules: d.heldModules,
+        return { state: [m.reg(0), m.reg(4), ...m.read(DATA, 20)], d,
             loaded: loaded.filter(at=>m.runtime.entryOf(at) >= 0).length };
     }
     finally
@@ -369,16 +386,30 @@ async function loadThenLoop(config){
     }
 }
 
-test('the modules of code a program ran once and not since are let go after `coldAfter`,'
-    + ' and the program runs as it does without', async()=>{
-    const kept = await loadThenLoop({});
-    assert.equal(kept.evictedCold, 0);
-    assert.equal(kept.coldBytes, null, 'not measured without an age');
-    assert.equal(kept.loaded, 4);
-    const swept = await loadThenLoop({ coldAfter: 4000 });
+test('the modules of code the engine has not touched for `coldMs` are let go, those it'
+    + ' touches stay, and the program runs as it does without', async()=>{
+    // 60 frames of 10 ms past an age of 100 ms: what the loop never runs is
+    // parked at 50 ms untouched and let go 100 ms after.
+    const swept = await loadThenLoop({ coldMs: 100 }, 60);
+    const kept = await loadThenLoop({ coldMs: 0 }, 60);
     assert.deepEqual(swept.state, kept.state);
-    assert.ok(swept.evictedCold >= 4, `${swept.evictedCold} let go`);
+    assert.equal(kept.d.evictedCold, 0);
+    assert.equal(kept.d.parkedNow, null, 'not measured without an age');
+    assert.equal(kept.loaded, 4);
+    assert.equal(swept.d.evictedCold, 5, 'the four called once and the code that called them');
     assert.equal(swept.loaded, 0, 'the functions called once no longer have an entry');
-    assert.ok(swept.heldModules >= 2, 'the loop and its callee held');
-    assert.equal(typeof swept.coldBytes, 'number');
+    assert.equal(swept.d.heldModules, 2, 'the loop and its callee held');
+    // Parked is not gone: 10 frames in, nothing has been untouched a whole age.
+    const early = await loadThenLoop({ coldMs: 100 }, 10);
+    assert.ok(early.d.parkedModules >= 5, `${early.d.parkedModules} parked`);
+    assert.equal(early.d.evictedCold, 0);
+});
+
+test('a module entered only from another module, which the runtime\'s loop never marks, is'
+    + ' parked, taken back at its first touch, and runs on', async()=>{
+    const swept = await loadThenLoop({ coldMs: 100 }, 60, 1_000_000);
+    const kept = await loadThenLoop({ coldMs: 0 }, 60, 1_000_000);
+    assert.deepEqual(swept.state, kept.state);
+    assert.ok(swept.d.unparked >= 1, `${swept.d.unparked} taken back`);
+    assert.equal(swept.d.heldModules, 2, 'the loop and its callee held');
 });

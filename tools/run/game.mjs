@@ -939,14 +939,14 @@ function describeCork(cork, say){
         + ` (retired ${cork.retired ?? 0})`
         + (cork.relinks || cork.merges ? `, ${cork.relinked} regions relinked in ${cork.relinks}`
             + ` relinks and ${cork.merges ?? 0} merges` : ''));
-    // What the translated code holds, and what of it has not run for `coldAfter`.
+    // What the translated code holds, and what of it the engine left untouched (`coldMs`).
     const mib = (/** @type {number} */ n)=>(n / 1048576).toFixed(1);
     say(`    held: ${cork.heldModules ?? 0} modules, ${mib(cork.heldBytes ?? 0)} MB of`
-        + ` ${mib(cork.moduleBytes ?? 0)} MB made; cold: ${cork.coldBytes === null
-            || cork.coldBytes === undefined ? 'not measured (no coldAfter)'
-            : `${cork.coldModules} modules, ${mib(cork.coldBytes)} MB`}; let go`
-        + ` ${cork.evictions ?? 0} (${cork.evictedCold ?? 0} cold), brought back`
-        + ` ${cork.broughtBack ?? 0}`);
+        + ` ${mib(cork.moduleBytes ?? 0)} MB made; untouched: ${cork.parkedNow === null
+            || cork.parkedNow === undefined ? 'not measured (no coldMs)'
+            : `${cork.parkedModules} parked, ${cork.unparked} touched again, ${cork.evictedCold}`
+                + ` let go (${mib(cork.evictedColdBytes ?? 0)} MB), ${cork.parkedNow} parked now`}`
+        + `; brought back ${cork.broughtBack ?? 0}`);
     say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
         + `, switched ${cork.precisionSwitches ?? 0} times`);
     if (cork.prediction)

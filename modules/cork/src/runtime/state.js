@@ -234,7 +234,8 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
  * bound (`charge`).
  *
  * @typedef {{ instance: WebAssembly.Instance, bytes: number,
- *     records: Set<RegionRecord>, ran: number, keepUntil: number, charged: number }} Held
+ *     records: Set<RegionRecord>, ran: number, ranAt: number,
+ *     keepUntil: number, charged: number }} Held
  */
 
 /**

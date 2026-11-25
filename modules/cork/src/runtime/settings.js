@@ -95,11 +95,12 @@ export const SETTINGS = {
         doc: 'The wasm bytes of the modules running regions are in, past which those gone'
             + ' longest without running are let go (0: no ceiling); the core sets a ceiling'
             + ' only on the iOS path below.' },
-    // Measured on the user's machine first: a menu and a level's load reach code
-    // the level never runs again, and nothing let it go outside the iOS ceiling.
-    coldAfter: { kind: 'host', value: 0,
-        doc: 'Translated instructions after which a module none of whose regions ran is let'
-            + ' go to the store, brought back from it if asked for again (0: never).' },
+    // A menu and a level's load reach code the level's frames never run again,
+    // and outside the iOS ceiling nothing let it go: a module untouched this
+    // long is let go to the store (`evictCold`).
+    coldMs: { kind: 'host', value: 60_000,
+        doc: 'Milliseconds without the engine touching a module before it is let go to the'
+            + ' store, brought back from it if asked for again (0: never).' },
     // A module the bound has no room for lets those gone longest without running
     // go until there is (`take` answers false where there is none).
     charge: { kind: 'host',
