@@ -80,14 +80,16 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                         counter.writables = (counter.writables ?? 0) + 1;
                         let draft = how.keepExistingData
                             ? new Uint8Array(file.bytes) : new Uint8Array(0);
+                        let cursor = 0;
                         return {
                             /** @param {Uint8Array | { type: string, position: number, data: Uint8Array }} b */
                             async write(b){
                                 if (b instanceof Uint8Array)
                                 {
-                                    draft = new Uint8Array(b);
-                                    return;
+                                    // At the stream's cursor, which follows what it wrote.
+                                    b = { type: 'write', position: cursor, data: b };
                                 }
+                                cursor = b.position + b.data.length;
                                 const grown = new Uint8Array(
                                     Math.max(draft.length, b.position + b.data.length));
                                 grown.set(draft);

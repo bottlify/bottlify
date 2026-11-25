@@ -26,6 +26,7 @@
 // A bundle's translations are kept beside its saves in the origin's file
 // system; a launcher clears them from here, as it opens the saves.
 export { clearTranslations } from './layers/cpu/internal/translation-store.js';
+import { replaceWhole } from './system/opfs-file.js';
 // Everything this browser keeps of a bottle -- caches and saves -- listed and
 // removed by kind, for a launcher's storage screen.
 export { bottleStorage, clearBottleStorage, storageName } from './storage-budget.js';
@@ -396,8 +397,20 @@ export function opfsSession(key, directory){
     /** Whether the browser agreed to keep the origin's storage; null before it was asked. */
     /** @type {Promise<boolean> | null} */
     let persisting = null;
-    /** @type {Promise<void>} */
+    /** The writes in turn; settled whether the last one failed or not. @type {Promise<void>} */
     let writing = Promise.resolve();
+    /**
+     * A write after those in turn: its failure is its caller's, and the next
+     * write goes on (a save refused for room must not leave every later one
+     * unwritten).
+     *
+     * @param {() => Promise<void>} task
+     */
+    const inTurn = task=>{
+        const done = writing.then(task);
+        writing = done.catch(()=>{});
+        return done;
+    };
     /** Whether the folder holds this run's whole session, so a change is all a save needs. */
     let whole = false;
     /**
@@ -430,14 +443,12 @@ export function opfsSession(key, directory){
      */
     const put = async(folder, path, file)=>{
         const parts = file instanceof Uint8Array ? [file] : file.parts?.() ?? [file.bytes];
-        const handle = await folder.getFileHandle(await entryName(path), { create: true });
-        const stream = await handle.createWritable();
-        await stream.write(entryHeader(path));
-        for (const part of parts)
-        {
-            await stream.write(part);
-        }
-        await stream.close();
+        // Atomic: a save cut short (the disk full, the tab gone) leaves the
+        // entry the last save wrote, never half of a saved game.
+        await replaceWhole(folder, await entryName(path), (function* (){
+            yield entryHeader(path);
+            yield* parts;
+        })(), { atomic: true });
     };
     /** @param {any} folder @param {string} name */
     const drop = async(folder, name)=>{
@@ -569,8 +580,7 @@ export function opfsSession(key, directory){
          * @param {string} path @param {Uint8Array} bytes
          */
         write(path, bytes){
-            writing = writing.then(async()=>put(await folderToEdit(), path, bytes));
-            return writing;
+            return inTurn(async()=>put(await folderToEdit(), path, bytes));
         },
         /**
          * A file taken out of the session.
@@ -578,8 +588,7 @@ export function opfsSession(key, directory){
          * @param {string} path
          */
         remove(path){
-            writing = writing.then(async()=>drop(await folderToEdit(), await entryName(path)));
-            return writing;
+            return inTurn(async()=>drop(await folderToEdit(), await entryName(path)));
         },
         /**
          * The session as it was last saved. `lazy`: each file's path, size and
@@ -679,7 +688,7 @@ export function opfsSession(key, directory){
             const { files, registry } = normal;
             const links = linksBytes(normal);
             const linksText = links ? new TextDecoder().decode(links) : null;
-            writing = writing.then(async()=>{
+            return inTurn(async()=>{
                 const dir = await open();
                 const folder = await dir.getDirectoryHandle(folderName, { create: true });
                 const full = !(whole || loadedWhole) || !changes
@@ -791,7 +800,6 @@ export function opfsSession(key, directory){
                     linksSaved = linksText;
                 }
             });
-            return writing;
         },
         /**
          * The whole session taken away, in whichever form it was kept: every
@@ -799,7 +807,7 @@ export function opfsSession(key, directory){
          * registry. What removing a program from this machine asks.
          */
         clear(){
-            writing = writing.then(async()=>{
+            return inTurn(async()=>{
                 const dir = await open();
                 try
                 {
@@ -811,7 +819,6 @@ export function opfsSession(key, directory){
                 await drop(dir, legacy);
                 whole = false;
             });
-            return writing;
         },
     };
     return store;

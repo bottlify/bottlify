@@ -79,6 +79,8 @@ function fakeDirectory(){
     /** @type {Map<string, any>} */
     const entries = new Map();
     let writes = 0;
+    /** Whether the disk refuses writes for room, and the streams aborted after. */
+    const disk = { full: false, aborted: 0 };
     /** @returns {any} */
     const folder = ()=>{
         /** @type {Map<string, any>} */
@@ -103,6 +105,10 @@ function fakeDirectory(){
                             /** @param {Uint8Array} chunk */
                             // Appended at the stream's position, as the browser's does.
                             write: async chunk=>{
+                                if (disk.full)
+                                {
+                                    throw new DOMException('full', 'QuotaExceededError');
+                                }
                                 const grown = new Uint8Array(written.length + chunk.length);
                                 grown.set(written);
                                 grown.set(chunk, written.length);
@@ -111,6 +117,9 @@ function fakeDirectory(){
                             close: async()=>{
                                 writes++;
                                 here.set(name, written);
+                            },
+                            abort: async()=>{
+                                disk.aborted++;
                             },
                         };
                     },
@@ -143,7 +152,7 @@ function fakeDirectory(){
             },
         };
     };
-    return { root: folder(), entries, writes: ()=>writes };
+    return { root: folder(), entries, writes: ()=>writes, disk };
 }
 
 test('a file the volume keeps in pieces is saved a piece at a time and read back whole', async()=>{
@@ -187,6 +196,25 @@ test('a session in the origin file system is kept a file to each file and read b
     assert.deepEqual(back.files.map(file=>[file.path, [...file.bytes]]).sort(),
         [['C:\\Dir\\Ünïcode.cfg', [1]], ['C:\\save.dat', [7, 7]]]);
 });
+
+test('a save the disk refuses for room fails, its stream aborted, and the last save stays',
+    async()=>{
+        const disk = fakeDirectory();
+        const store = opfsSession('game', async()=>disk.root);
+        await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([1]) }],
+            registry: null });
+        disk.disk.full = true;
+        await assert.rejects(store.save({ files: [{ path: 'C:\\save.dat',
+            bytes: new Uint8Array([2]) }], registry: null }), { name: 'QuotaExceededError' });
+        assert.equal(disk.disk.aborted, 1, 'the stream let go of, its copy with it');
+        disk.disk.full = false;
+        const back = await opfsSession('game', async()=>disk.root).load();
+        assert.deepEqual(back.files.map(file=>[...file.bytes]), [[1]]);
+        await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([3]) }],
+            registry: null });
+        assert.deepEqual((await store.load()).files.map(file=>[...file.bytes]), [[3]],
+            'the room back, the next save is written');
+    });
 
 test('a session cleared is gone whole, saved games and registry, and a clear of none is no error',
     async()=>{

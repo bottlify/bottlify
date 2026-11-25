@@ -162,25 +162,10 @@ function inTurn(file, write){
 /** @typedef {{ type: 'write', position: number, data: Uint8Array }} StreamWrite */
 
 /**
- * Parts one after another as writes at their places: a stream's own cursor is
- * not what a caller sees of the file.
- *
- * @param {Parts<Uint8Array>} parts @returns {AsyncIterable<StreamWrite>}
- */
-async function* placed(parts){
-    let position = 0;
-    for await (const data of parts)
-    {
-        yield { type: 'write', position, data };
-        position += data.length;
-    }
-}
-
-/**
  * Writes the parts into a stream, closed when all are in and aborted when one
  * is refused: an unclosed stream keeps its copy and the file's lock.
  *
- * @param {any} stream @param {Parts<StreamWrite>} parts
+ * @param {any} stream @param {Parts<Uint8Array | StreamWrite>} parts
  */
 async function intoStream(stream, parts){
     try
@@ -218,7 +203,7 @@ export async function replaceWhole(directory, name, parts, { atomic = false } = 
         const access = atomic ? null : await openSync(file);
         if (access === null)
         {
-            await intoStream(await file.createWritable(), placed(parts));
+            await intoStream(await file.createWritable(), parts);
             return;
         }
         try
