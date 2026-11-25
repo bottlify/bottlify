@@ -206,8 +206,8 @@ export function createMemoryModule(){
                         // No machine yet: asked again next time.
                         return null;
                     }
-                    ramWords = ram && ram.buffer instanceof SharedArrayBuffer
-                        && ram.byteOffset % 4 === 0
+                    ramWords = ram && typeof SharedArrayBuffer === 'function'
+                        && ram.buffer instanceof SharedArrayBuffer && ram.byteOffset % 4 === 0
                         ? new Int32Array(ram.buffer, ram.byteOffset,
                             Math.floor(ram.byteLength / 4))
                         : null;
@@ -441,7 +441,8 @@ export function createMemoryModule(){
                     catch {
                         // No machine yet: nothing to share.
                     }
-                    return ram && ram.buffer instanceof SharedArrayBuffer ? ram : null;
+                    return ram && typeof SharedArrayBuffer === 'function'
+                        && ram.buffer instanceof SharedArrayBuffer ? ram : null;
                 },
                 /**
                  * What a worker wrote into the shared RAM, taken as a write of
