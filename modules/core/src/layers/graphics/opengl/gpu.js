@@ -5906,6 +5906,48 @@ export function createGpuRenderer(services){
         /** Every replay queued so far has run. */
         settled: ()=>chain,
 
+        /**
+         * What the given textures' levels hold of texels and blocks here, by
+         * why: a texture never drawn (no copy on the device yet), a level past
+         * what its device copy took, and the rest (a dump or probe keeping
+         * them, compressed blocks kept for a device without them).
+         *
+         * @param {Iterable<any>} all
+         */
+        heldTexels(all){
+            const held = { textures: 0, undrawn: 0, undrawnBytes: 0, pastChainBytes: 0,
+                keptBytes: 0, blockBytes: 0 };
+            for (const texture of all)
+            {
+                held.textures++;
+                const copy = textures.get(texture);
+                for (const [key, image] of texture.levels ?? [])
+                {
+                    const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
+                    const bytes = texels?.byteLength ?? 0;
+                    held.blockBytes += image.compressed?.bytes?.byteLength ?? 0;
+                    if (bytes === 0)
+                    {
+                        continue;
+                    }
+                    if (copy === undefined)
+                    {
+                        held.undrawnBytes += bytes;
+                    }
+                    else if (key % FACE_STRIDE >= copy.levels)
+                    {
+                        held.pastChainBytes += bytes;
+                    }
+                    else
+                    {
+                        held.keptBytes += bytes;
+                    }
+                }
+                held.undrawn += copy === undefined ? 1 : 0;
+            }
+            return held;
+        },
+
         diagnostics: ()=>({
             ...stats,
             resident: pipelines.size,

@@ -63,6 +63,8 @@ export function createOpenglRoot(services){
      * @type {any}
      */
     let gpu;
+    /** The share groups of the contexts made here, whose textures the diagnostics count. */
+    const groups = new Set();
     const renderer = ()=>{
         if (gpu === undefined)
         {
@@ -101,7 +103,7 @@ export function createOpenglRoot(services){
          *     root has, as the generic renderer of a memory DC does.
          */
         CreateContext(options){
-            return createGlContext({
+            const context = createGlContext({
                 extensions: options.extensions,
                 version: options.version,
                 memory,
@@ -116,6 +118,8 @@ export function createOpenglRoot(services){
                 raster: services.raster,
                 keepPrimitives: services.keepPrimitives,
             });
+            groups.add(context.shareGroup);
+            return context;
         },
 
         /**
@@ -141,6 +145,15 @@ export function createOpenglRoot(services){
             return settled ? services.frameQueued?.(settled) ?? null : null;
         },
 
-        diagnostics: ()=>renderer()?.diagnostics() ?? null,
+        diagnostics: ()=>{
+            const figures = renderer()?.diagnostics() ?? null;
+            if (figures === null || typeof gpu?.heldTexels !== 'function')
+            {
+                return figures;
+            }
+            // What the contexts' textures still hold beside the device's copy.
+            const all = [...groups].flatMap(group=>[...group.textures.objects.values()]);
+            return { ...figures, heldTexels: gpu.heldTexels(all) };
+        },
     };
 }
