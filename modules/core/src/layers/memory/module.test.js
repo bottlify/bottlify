@@ -14,7 +14,7 @@ import { readTable } from '../log/internal/table.js';
 function fakeLog(){
     /** @type {string[]} */
     const words = [];
-    const metrics = createMetrics({ shared: false });
+    const metrics = createMetrics();
     return {
         words,
         metrics,

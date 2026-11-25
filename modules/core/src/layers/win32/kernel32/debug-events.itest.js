@@ -137,7 +137,7 @@ const faulting = buildExe({
 
 /**
  * @param {Uint8Array} executable @param {Uint8Array} child
- * @param {import('../../../mode.js').Concurrency} [concurrency]  above one, the debugger runs in a worker and
+ * @param {import('../../../concurrency.js').Concurrency} [concurrency]  above one, the debugger runs in a worker and
  *     its child beside it there
  * @param {[string, boolean][]} [started]  each process started: its image,
  *     and whether in a worker of its own

@@ -531,12 +531,6 @@ const DRAIN_CAP_FRAMES = 16384;
  * moved off the per-turn `pump()` call into this timer instead of gone --
  * see `dbg/opengl/report-next-2.md` for what that costs in practice.
  *
- * Without shared memory there is no worklet this engine could ever hand a
- * ring to, so the ring is read here and dropped instead: what matters for a
- * measurement is that it is read on the clock, because a play cursor is what
- * the device consumed and a film that paces itself by its own sound has no
- * clock at all without one.
- *
  * @param {any} app
  * @param {{ fromMs: number, toMs: number, blocks: Int16Array[] } | null} [capture]
  *     what was mixed between two moments of the run, kept to be written out
@@ -557,33 +551,7 @@ function drainSound(app, capture = null, elsewhere = undefined){
         drainTable(table, app.audio.format().sampleRate, capture);
         return 'table';
     }
-    const ring = app.audio.ring?.();
-    if (!ring)
-    {
-        return 'none';
-    }
-    const { sampleRate, channels } = app.audio.format();
-    const block = new Float32Array(ring.capacity * channels);
-    let readAt = performance.now();
-    setInterval(()=>{
-        // By elapsed time rather than a fixed count per turn: this page's main
-        // thread is inside the engine most of the time, so the reads are late
-        // and bursty, and only the clock keeps the total honest.
-        const owed = Math.floor((performance.now() - readAt) * sampleRate / 1000);
-        const frames = Math.min(ring.capacity, owed);
-        if (frames <= 0)
-        {
-            return;
-        }
-        // The clock moves on by what was really taken, not by what was asked
-        // for. A device reading on its own thread never misses its turn; this
-        // one is on the thread the engine is holding, and a read that gave up
-        // whatever it was late for would model a device running slow -- which
-        // is indistinguishable, in a report, from an engine that cannot feed
-        // one.
-        readAt += ring.read(block.subarray(0, frames * channels)) * 1000 / sampleRate;
-    }, 20);
-    return 'ring';
+    return 'none';
 }
 
 /**
@@ -1590,7 +1558,7 @@ export function createHarness(canvas, how = {}){
      *           bundlePrefix?: string,
      *           imagePath: string,
      *           commandLine?: string,
-     *           concurrency?: import('../../../src/mode.js').Concurrency,
+     *           concurrency?: import('../../../src/concurrency.js').Concurrency,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
      *           gpuProfile?: 'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host',
      *           sidecarHooks?: { spec: any, source: string },

@@ -6,9 +6,8 @@
 
 /**
  * A back buffer read back for the program comes into guest memory from the
- * graphics worker -- in place, where the memory is shared, and through a
- * message the engine writes, where it is not -- and the program reads the
- * colour it cleared to either way.
+ * graphics worker, in place in the shared guest memory, and the program reads
+ * the colour it cleared to.
  *
  * The program clears the back buffer, ends the scene, locks the back buffer
  * to read, takes its first pixel and exits with it. The device is played in
@@ -96,8 +95,7 @@ function program(){
     });
 }
 
-/** @param {boolean} shared */
-async function run(shared){
+async function run(){
     const gpu = createFakeDevice();
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set();
@@ -122,7 +120,6 @@ async function run(shared){
     {
         const app = await createApp({
             executable: program(),
-            cork: /** @type {any} */ ({ config: { sharedMemory: shared } }),
             device: {
                 device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
                 adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
@@ -134,8 +131,7 @@ async function run(shared){
         /** @param {string} name */
         const metrics = name=>diagnostics.find((/** @type {any} */ layer)=>layer.name === name)
             ?.metrics;
-        const result = { code, sharedMemory: metrics('cpu')?.sharedMemory,
-            readBack: metrics('graphics')?.worker?.readBack };
+        const result = { code, readBack: metrics('graphics')?.worker?.readBack };
         await app.dispose();
         return result;
     }
@@ -147,18 +143,8 @@ async function run(shared){
 
 test('a back buffer read back is written into shared guest memory in place', { timeout: 60000 },
     async()=>{
-        const result = await run(true);
-        assert.equal(result.sharedMemory, true);
+        const result = await run();
         assert.equal(result.code, COLOUR, 'the program read the colour it cleared to');
         assert.ok(result.readBack.shared >= 64 * 32 * 4, JSON.stringify(result.readBack));
         assert.equal(result.readBack.sent, 0, 'and none of it came as a message');
-    });
-
-test('a back buffer read back comes as a message where guest memory is not shared',
-    { timeout: 60000 }, async()=>{
-        const result = await run(false);
-        assert.equal(result.sharedMemory, false);
-        assert.equal(result.code, COLOUR);
-        assert.ok(result.readBack.sent >= 64 * 32 * 4, JSON.stringify(result.readBack));
-        assert.equal(result.readBack.shared, 0);
     });

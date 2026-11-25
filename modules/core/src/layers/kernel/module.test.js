@@ -345,7 +345,7 @@ function fakeLog(){
     const words = [];
     return {
         words,
-        metrics: createMetrics({ shared: false }),
+        metrics: createMetrics(),
         /** @param {string} text */
         intern: text=>{
             const at = words.indexOf(text);

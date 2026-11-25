@@ -119,7 +119,6 @@ export function openJournalMemory(buffer){
  * @param {number} [options.records]      Records the index remembers.
  * @param {number} [options.bytes]        Bytes of the record ring.
  * @param {number} [options.dictionary]   Bytes of the string dictionary.
- * @param {boolean} [options.shared]      Whether to ask for shared memory when there is any.
  * @param {number} [options.sequenceBase]
  *        The sequence the first record gets. A machine rebuilt on a child's
  *        image starts a fresh block, and a reader holding a cursor from the one
@@ -131,9 +130,7 @@ export function createJournalMemory(options = {}){
     const ringBytes = align(Math.max(4096, options.bytes ?? 1024 * 1024), 8);
     const dictBytes = align(Math.max(256, options.dictionary ?? 512 * 1024), 8);
     const total = CONTROL_BYTES + dictBytes + records * 4 + ringBytes;
-    const buffer = (options.shared ?? true) && typeof SharedArrayBuffer === 'function'
-        ? new SharedArrayBuffer(align(total, 8))
-        : new ArrayBuffer(align(total, 8));
+    const buffer = new SharedArrayBuffer(align(total, 8));
     const control = new Int32Array(buffer, 0, CONTROL_WORDS);
     control[VERSION] = LAYOUT_VERSION;
     control[RECORDS] = records;

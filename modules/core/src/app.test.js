@@ -1977,33 +1977,28 @@ test('the cpu setup\'s cores are a whole number from 1 to 32, and `executors`, t
 
 test('cores the caller names open before the program starts, automatic ones as threads want them',
     ()=>{
-        const browser = { node: false, processors: 4, shareable: true };
+        const browser = { node: false, processors: 4 };
         assert.equal(withCpuSetup({ cpu: { cores: 4 } }).cpu?.eager, true);
         assert.equal(withCpuSetup({ cpu: { cores: 4, eager: false } }).cpu?.eager, false,
             'unless the caller says otherwise');
         assert.equal(withCpuSetup({}, browser).cpu?.eager, false, 'automatic: lazy');
         assert.equal(withCpuSetup({ cpu: { eager: true } }, browser).cpu?.eager, true);
-        assert.equal(withCpuSetup({}, { node: true, processors: 4, shareable: true, named: '4' })
+        assert.equal(withCpuSetup({}, { node: true, processors: 4, named: '4' })
             .cpu?.eager, false, 'BOTTLIFY_CORES is the suite\'s choice, not the caller\'s');
     });
 
-test('a run that names no cores gets one fewer than a browser host\'s processors where it shares'
-    + ' memory, at most eight, and one where it cannot; in node the cores BOTTLIFY_CORES names',
+test('a run that names no cores gets one fewer than a browser host\'s processors, at most eight;'
+    + ' in node the cores BOTTLIFY_CORES names',
 ()=>{
-    const browser = { node: false, processors: 4, shareable: true };
+    const browser = { node: false, processors: 4 };
     assert.equal(withCpuSetup({}, browser).cpu?.cores, 3, 'four processors: three cores');
     assert.equal(withCpuSetup({}, { ...browser, processors: 16 }).cpu?.cores, 8, 'at most eight');
     assert.equal(withCpuSetup({}, { ...browser, processors: 2 }).cpu?.cores, 1);
     assert.equal(withCpuSetup({}, { ...browser, processors: 1 }).cpu?.cores, undefined, 'one');
     assert.equal(withCpuSetup({}, { ...browser, processors: undefined }).cpu?.cores, undefined,
         'a host that does not say: one');
-    assert.equal(withCpuSetup({}, { ...browser, shareable: false }).cpu?.cores, undefined,
-        'a page that is not cross-origin isolated: one');
-    assert.equal(withCpuSetup({ mode: 'compatible' }, browser).cpu?.cores, undefined);
-    assert.equal(withCpuSetup({ cork: { config: { sharedMemory: false } } }, browser).cpu?.cores,
-        undefined);
     assert.equal(withCpuSetup({ cpu: { cores: 1 } }, browser).cpu?.cores, 1, 'named, as named');
-    const node = { node: true, processors: 4, shareable: true };
+    const node = { node: true, processors: 4 };
     assert.equal(withCpuSetup({}, node).cpu?.cores, undefined, 'node: one, the same everywhere');
     assert.equal(withCpuSetup({}, { ...node, named: '4' }).cpu?.cores, 4, 'BOTTLIFY_CORES');
     assert.equal(withCpuSetup({}, { ...node, named: '' }).cpu?.cores, undefined);
@@ -2133,9 +2128,9 @@ test('an iPhone translates without wasm tail calls; phones and Safari run on one
     const options = {};
     assert.equal(withoutFaultingTailCalls(options, false), options);
 
-    const browser = { node: false, processors: 8, shareable: true };
-    assert.equal(automaticCores({}, browser), 7);
-    assert.equal(automaticCores({}, { ...browser, oneCore: true }), undefined, 'one core');
+    const browser = { node: false, processors: 8 };
+    assert.equal(automaticCores(browser), 7);
+    assert.equal(automaticCores({ ...browser, oneCore: true }), undefined, 'one core');
     assert.equal(withCpuSetup({ cpu: { cores: 3 } }, { ...browser, oneCore: true }).cpu?.cores, 3,
         'cores asked for by name are given');
 });

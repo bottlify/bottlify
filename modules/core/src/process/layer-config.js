@@ -367,12 +367,6 @@ export async function layerConfig(deps){
             // place: the arena span it was lent, and nothing of the other's
             // closed.
             beside: options.audio?.beside,
-            // Shared memory is what a worklet needs to read the far end at
-            // all, so this is an environment question answered here rather
-            // than guessed inside the mixer: without it (a page that is not
-            // cross-origin isolated) only this thread can ever read the
-            // output, and the engine mixer is the only backend built for that.
-            shared: options.audio?.shared ?? (typeof SharedArrayBuffer === 'function'),
             // A 64-bit process's DirectSound structures and out pointers.
             ...long ? { pointerSize: 8 } : {},
             // Whose call a sound provider is answering, read before it awaits

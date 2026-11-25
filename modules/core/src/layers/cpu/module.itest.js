@@ -28,7 +28,7 @@ const u32 = value=>[
  * @param {Uint8Array} code @param {number} at @param {any} [config]
  */
 async function booted(code, at, config = {}){
-    const metrics = createMetrics({ shared: false });
+    const metrics = createMetrics();
     /** @type {string[]} */
     const words = [];
     const moduleHost = /** @type {any} */ ({
@@ -51,7 +51,7 @@ async function booted(code, at, config = {}){
 }
 
 test('the frame counters carry what the host wrote into guest memory', async()=>{
-    const metrics = createMetrics({ shared: false });
+    const metrics = createMetrics();
     const api = await cpuModule.create({
         engineUrl: CORK,
     }, /** @type {any} */ ({
@@ -148,7 +148,7 @@ test('a second instance in one realm boots on its own, never seeing the first on
     async()=>{
         const { api: first } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
 
-        const metrics = createMetrics({ shared: false });
+        const metrics = createMetrics();
         const second = await cpuModule.create({ engineUrl: CORK },
             /** @type {any} */ ({
                 requireApi: ()=>({ metrics, intern: ()=>-1 }),

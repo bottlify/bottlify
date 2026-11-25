@@ -35,12 +35,9 @@ import { createTable } from './table.js';
  */
 
 /**
- * @param {Object} [options]
- * @param {boolean} [options.shared]
  * @returns {MetricsRegistry}
  */
-export function createMetrics(options = {}){
-    const shared = options.shared ?? true;
+export function createMetrics(){
     /** @type {Map<string, Map<string, import('./table.js').TableWriter>>} */
     const layers = new Map();
     /** @type {(() => void)[]} */
@@ -58,7 +55,7 @@ export function createMetrics(options = {}){
         {
             throw new Error(`log: ${layer} already publishes a table named "${name}"`);
         }
-        const made = createTable({ rows, columns, shared });
+        const made = createTable({ rows, columns });
         tables.set(name, made);
         return made;
     };

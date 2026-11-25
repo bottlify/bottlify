@@ -77,7 +77,7 @@ test('the layer publishes the figures a live view reads into the log, not on req
     // layer copies them into the log's tables as a frame closes, and a device
     // that keeps none is said as not measured rather than as zero draws.
     const logModule = createLogModule();
-    const log = await logModule.create({ now: ()=>0, shared: false });
+    const log = await logModule.create({ now: ()=>0 });
     const host = hostWith(fakeMemory());
     const apis = { log };
     const given = host.requireApi;

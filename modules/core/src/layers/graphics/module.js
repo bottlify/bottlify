@@ -663,7 +663,6 @@ export function createGraphicsModule(){
                     sharedMemory: ()=>memory.shared?.() ?? null,
                     memoryGrown: listener=>memory.onGrow?.(listener),
                     adoptMemory: (address, length)=>memory.adopt?.(address, length),
-                    lendMemory: config?.lendMemory !== false,
                     // The bound the run's presenter holds a device here to, for
                     // the devices that draw there.
                     maxFrameLatency: config?.maxFrameLatency,

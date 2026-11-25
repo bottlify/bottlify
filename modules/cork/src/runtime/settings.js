@@ -89,9 +89,6 @@ export const SETTINGS = {
         doc: 'When candidates are formed: once a frame, and at a slice\'s end once the program'
             + ' has run a frame\'s worth with none presented, or after every slice (`\'slice\'`;'
             + ' `createMachine`\'s).' },
-    sharedMemory: { kind: 'host', value: undefined, shown: '`true` where possible',
-        doc: 'Guest memory a `SharedArrayBuffer` where the page is cross-origin isolated;'
-            + ' `false` keeps it private and the program on one executor.' },
     // Their regions leave the table and the entry hash, stay in the store, and
     // are brought back from it as any miss is (`EVICT_HOLD`).
     cacheBytes: { kind: 'host', value: 256 << 20,

@@ -433,10 +433,7 @@ const bind = (listen, send)=>{
         serveProcess({ ...data, memories }).then(
             ({ code, diagnostics, systemLibraries, journal })=>
                 send({ type: 'exited', code, diagnostics, systemLibraries, journal,
-                    // Only a shared memory crosses to another thread.
-                    memories: memories.splice(0).filter((/** @type {any} */ spare)=>
-                        typeof SharedArrayBuffer === 'function'
-                        && spare?.memory?.buffer instanceof SharedArrayBuffer) }),
+                    memories: memories.splice(0) }),
             (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),
                 diagnostics: e?.diagnostics ?? null }));
     });

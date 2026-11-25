@@ -183,8 +183,7 @@ function describe(before, after, windowMs){
                 + ' retired while they ran a thread'
                 : '')
             + (after.layers.cpu.executorsRefused ? `; refused: ${after.layers.cpu.executorsRefused}`
-                : '')
-            + `; memory ${after.layers.cpu.sharedMemory ? 'shared' : 'not shared'}`);
+                : ''));
         // Modules each runtime let go past its `cacheBytes` and regions brought back:
         // an executor that keeps doing both is translating its code over and over.
         const own = after.layers.cpu.cork;

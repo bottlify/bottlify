@@ -261,27 +261,6 @@ export function serveKeeper(port, options = {}){
                 poll();
                 return;
             }
-            case 'feed':
-            {
-                // No shared memory: the page relays what the engine answered,
-                // one batch per look, and the keeper keeps it like a poll would.
-                const records = /** @type {any[]} */ (message.records ?? []);
-                if (records.length > 0)
-                {
-                    append(records);
-                    deliver(records);
-                }
-                if (message.lost > 0)
-                {
-                    lost += message.lost;
-                    port.postMessage({ type: 'lost', count: message.lost });
-                }
-                if (typeof message.next === 'number')
-                {
-                    cursor = Math.max(cursor, message.next);
-                }
-                return;
-            }
             case 'poll':
             {
                 // The manual clock a test drives with `intervalMs: 0`. It

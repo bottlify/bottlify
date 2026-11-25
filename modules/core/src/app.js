@@ -52,7 +52,7 @@ import { resolveTranslationStore } from './layers/cpu/internal/translation-store
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
-import { canShareMemory, withRunMode } from './mode.js';
+import { withConcurrency } from './concurrency.js';
 import { SHARED_MODULE_BYTES, withHeldModules } from './layers/cpu/internal/store-link.js';
 import { createMemoryBudget, openMemoryBudget, RUN_HOLDER }
     from './layers/cpu/internal/memory-budget.js';
@@ -366,7 +366,7 @@ export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs =
     // node, whose macrotask posts nothing and whose loop an async wait does
     // not hold open.
     const nap = napWord !== undefined ? napWord
-        : typeof setImmediate !== 'function' && typeof SharedArrayBuffer === 'function'
+        : typeof setImmediate !== 'function'
             && typeof (/** @type {any} */ (Atomics).waitAsync) === 'function'
             ? new Int32Array(new SharedArrayBuffer(4)) : null;
     return {
@@ -756,8 +756,7 @@ export function clockCredit(source, clock, cap){
 async function openTranslationPool(options){
     const cork = options.cork ?? {};
     const config = /** @type {any} */ (cork.config ?? {});
-    if (options.system || typeof SharedArrayBuffer !== 'function'
-        || typeof MessageChannel !== 'function')
+    if (options.system || typeof MessageChannel !== 'function')
     {
         return null;
     }
@@ -782,9 +781,7 @@ async function openTranslationPool(options){
     return createTranslatorPool({
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
-            executors: options.cpu?.cores,
-            sharedMemory: options.cork?.config?.sharedMemory,
-        }), host),
+            executors: options.cpu?.cores }), host),
         capacity: cork.poolCapacity ?? translatorsInRun(host),
     });
 }
@@ -825,7 +822,7 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
  * milliseconds late, a stall in the middle of a game. Automatic cores stay
  * lazy, so a program of one thread pays for none.
  *
- * @template {{ cpu?: { cores?: number, eager?: boolean }, mode?: string, cork?: any }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean } }} T
  * @param {T} options
  * @param {CoresHost} [host]  where the run is made (`coresHost`)
  * @returns {T & { cpu?: { cores?: number, eager?: boolean } }}
@@ -836,7 +833,7 @@ export function withCpuSetup(options, host = coresHost()){
         throw new Error('cpu: `executors` is `cpu.cores` now -- set that');
     }
     const named = options.cpu?.cores !== undefined;
-    const cores = options.cpu?.cores ?? automaticCores(options, host);
+    const cores = options.cpu?.cores ?? automaticCores(host);
     if (cores === undefined)
     {
         return options;
@@ -877,8 +874,8 @@ export function withKnownRoutines(options){
  * and 830 MB holding an untouched 512 MB buffer); a phone has the least memory
  * to give it.
  *
- * @typedef {{ node: boolean, named?: string, processors?: number, shareable: boolean,
- *     oneCore?: boolean }} CoresHost
+ * @typedef {{ node: boolean, named?: string, processors?: number, oneCore?: boolean }}
+ *     CoresHost
  */
 
 /** @returns {CoresHost} */
@@ -886,7 +883,7 @@ export function coresHost(){
     const scope = /** @type {any} */ (globalThis);
     return { node: scope.process?.versions?.node !== undefined,
         named: scope.process?.env?.BOTTLIFY_CORES,
-        processors: scope.navigator?.hardwareConcurrency, shareable: canShareMemory(),
+        processors: scope.navigator?.hardwareConcurrency,
         oneCore: mobileOrSafari(scope.navigator ?? {}) };
 }
 
@@ -894,28 +891,24 @@ export function coresHost(){
 export const AUTOMATIC_CORES = 8;
 
 /**
- * The cores a run that names none gets from where it runs. In a browser whose
- * page shares memory, one fewer than the host's processors -- the page, the
- * graphics worker and a translator take about one between them -- and at most
- * `AUTOMATIC_CORES`; the program is told of them from its first instruction and
- * sizes its threads to them, and their executors open as its threads want them.
- * One where its memory cannot be shared (a page that is not cross-origin
- * isolated, `compatible`). In node, `BOTTLIFY_CORES`, so
- * every suite can be run with its programs on several executors, and otherwise
- * one: a suite runs the same on every machine.
+ * The cores a run that names none gets from where it runs. In a browser, one
+ * fewer than the host's processors -- the page, the graphics worker and a
+ * translator take about one between them -- and at most `AUTOMATIC_CORES`; the
+ * program is told of them from its first instruction and sizes its threads to
+ * them, and their executors open as its threads want them. One on Safari and a
+ * phone. In node, `BOTTLIFY_CORES`, so every suite can be run with its programs
+ * on several executors, and otherwise one: a suite runs the same on every
+ * machine.
  *
- * @param {{ mode?: string, cork?: any }} options
  * @param {CoresHost} host
  * @returns {number | undefined}  none: one
  */
-export function automaticCores(options, host){
+export function automaticCores(host){
     if (host.node)
     {
         return host.named === undefined || host.named === '' ? undefined : Number(host.named);
     }
-    if (!host.shareable || host.oneCore || options.mode === 'compatible'
-        || options.cork?.config?.sharedMemory === false
-        || !(Number(host.processors) >= 2))
+    if (host.oneCore || !(Number(host.processors) >= 2))
     {
         return undefined;
     }
@@ -1505,11 +1498,9 @@ async function buildApp(options){
         = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage, mainImage.imageBase);
     // The engine's range in the guest's space (`engineAreaFor`): where the
     // memory grows as the guest is given more, rather than every process
-    // committing the whole of `memorySize`. Only over shared memory, and not
-    // where the run asks for the whole memory from the start (`cpu.grow` false).
-    const mayGrow = options.cpu?.grow !== false && options.cork?.config?.sharedMemory !== false
-        && typeof SharedArrayBuffer === 'function'
-        && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
+    // committing the whole of `memorySize`. Not where the run asks for the
+    // whole memory from the start (`cpu.grow` false).
+    const mayGrow = options.cpu?.grow !== false;
     /** @param {number} size */
     const areaFor = size=>(mayGrow ? engineAreaFor({ wide: programLoaded.wide !== undefined,
         memorySize: size,
@@ -3707,16 +3698,11 @@ const journalOf = tables=>tables.find(table=>table.name === 'system-log')
  * shared memory: a word per drive letter, raised by every change to the
  * drive, under which a process in a worker of its own keeps what it read of
  * the drive; and the sharing every open is settled against, which that
- * process settles its own opens in (`volume-link.js`). A run without shared
- * memory has no process across a link, and keeps neither.
+ * process settles its own opens in (`volume-link.js`).
  *
- * @returns {{ revisions?: Int32Array, sharing?: any, sharingMemory?: SharedArrayBuffer }}
+ * @returns {{ revisions: Int32Array, sharing: any, sharingMemory: SharedArrayBuffer }}
  */
 function volumeMemory(){
-    if (typeof SharedArrayBuffer !== 'function')
-    {
-        return {};
-    }
     const sharingMemory = createSharingMemory();
     return { revisions: new Int32Array(new SharedArrayBuffer(26 * 4)),
         sharing: openSharedSharing(sharingMemory), sharingMemory };
@@ -3867,7 +3853,7 @@ export async function createApp(options){
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     // Settled once, here, so every process the run makes is built in it.
-    options = withRunMode(withCpuSetup(withoutFaultingTailCalls(withKnownRoutines(options))));
+    options = withConcurrency(withCpuSetup(withoutFaultingTailCalls(withKnownRoutines(options))));
     options = { ...options, processId: options.processId ?? runProcessId() };
     // The machine's memory, made once by the run and carried to every process
     // it starts, here or in a worker of its own (`memory-budget.js`).
@@ -3904,13 +3890,6 @@ export async function createApp(options){
     if (options.relay)
     {
         events.onAny(options.relay);
-    }
-    // A run asked for more than this page allows starts all the same, as
-    // much as it allows, and says so: the first subscriber hears it.
-    if (options.fallback)
-    {
-        events.emit('fallback', { ...options.fallback, mode: options.mode,
-            concurrency: options.concurrency });
     }
     // The Windows `auto` chose, and why: what the program was made for.
     if (chosenWindows)
@@ -4210,7 +4189,7 @@ export async function createApp(options){
     let runOptionsNow;
     /** The machines of the run not yet retired. @type {Set<any>} */
     const standing = new Set();
-    /** Whether the run's processes run at once, each beside its parent (`mode.js`). */
+    /** Whether the run's processes run at once, each beside its parent (`concurrency.js`). */
     const processesAtOnce = (options.concurrency ?? 1) > 1;
     /**
      * Whether every process of the run stands in a worker of its own, its
@@ -4478,7 +4457,7 @@ export async function createApp(options){
         }
     };
 
-    const { borrowSound, lendSound, ownSound } = processSound({
+    const { lendSound, ownSound } = processSound({
         events, options,
         audioMemory: ()=>audioMemory,
     });
@@ -4697,7 +4676,7 @@ export async function createApp(options){
     };
 
     const processesBesideParts = processesBeside({
-        across, besides, bindLogLevels, borrowSound, build, classTable, endServices, events,
+        across, besides, bindLogLevels, build, classTable, endServices, events,
         facade, inWorker, keepMemory, keepSpare, lendSound, lentConfig, machineMemory, mainLine,
         mediaInstance, names, newProcessIds, noteLogSequence, noticeExit, options, ownSound,
         presenter, releaseHolder, replayLogLevels, retire, rootAcross, rootLibraries,

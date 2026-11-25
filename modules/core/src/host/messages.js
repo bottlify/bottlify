@@ -30,15 +30,12 @@
  * seeded volume by its files, a watch by the libraries and ordinals it covers.
  * A disc crosses as the `Blob` the person chose, which is cloned by reference
  * rather than copied, and the worker reads it a range at a time.
- * On a page without shared memory, `audio.port` is the engine's end of a
- * channel whose other end the page gave its audio worklet: the worker posts
- * the mix down it, and the worklet says back what it played.
  *
  * @typedef {Omit<import('../app.js').AppOptions,
  *     'executable' | 'device' | 'bundle' | 'storage' | 'watchImport'
  *     | 'sample' | 'onCall' | 'pageHidden' | 'pacing' | 'discs' | 'audio'> & {
  *     executable: Uint8Array,
- *     audio?: NonNullable<import('../app.js').AppOptions['audio']> & { port?: MessagePort },
+ *     audio?: NonNullable<import('../app.js').AppOptions['audio']>,
  *     bundle?: { url?: string, file?: Blob, store?: string | null, id?: string, prefix?: string,
  *         prefetch?: boolean, preload?: boolean, revision?: number, indexSha256?: string,
  *         retry?: { attempts?: number, baseDelayMs?: number, maxDelayMs?: number },
@@ -117,16 +114,13 @@
  * `{ control, samples }` -- the engine mixer's own float ring, mixed on this
  * thread -- where there is none to hand a worklet at all.
  *
- * `log` is null where the origin has no shared memory: the block would cross
- * as a copy that never moves again, so the page asks the engine for what it
- * wants to read instead. Everything a reader does is on one side or the other,
- * never half on each.
+ * `log` is the log's shared block: the page reads it in place, the engine's
+ * thread never reads for it.
  *
  * @typedef {Object} Started
- * @property {{ memory: { table: ArrayBufferLike }
- *         | { control: ArrayBufferLike, samples: ArrayBufferLike },
+ * @property {{ memory: { table: ArrayBufferLike },
  *     sampleRate: number, channels: number } | null} audio
- * @property {import('../layers/log/internal/reader.js').LogMemory | null} log
+ * @property {import('../layers/log/internal/reader.js').LogMemory} log
  * @property {{ vendor: string, architecture: string, description: string }} adapter
  */
 

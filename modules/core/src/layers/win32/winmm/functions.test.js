@@ -98,6 +98,33 @@ function header(m, device, at, length){
 const WHDR_DONE = 1;
 const WHDR_INQUEUE = 16;
 
+
+/**
+ * The audio thread reading a mixer's track table, as the worklet does: `frames`
+ * output frames mixed from every slot, which moves the cursors the program waits on.
+ *
+ * @param {any} mixer
+ */
+async function deviceOf(mixer){
+    const mix = await import('../../audio/output/mix.js');
+    const table = mixer.table;
+    const global = new Int32Array(table, 0, mix.GLOBAL_HEADER_INT32);
+    const slots = Array.from({ length: mix.SLOTS }, (_, slot)=>({
+        header: new Int32Array(table, mix.slotHeaderOffset(slot), mix.SLOT_HEADER_INT32),
+        pcm: new Uint8Array(table, mix.slotPcmOffset(slot), mix.SLOT_BYTES),
+    }));
+    const seams = slots.map(()=>mix.createSeam());
+    const arena = new Uint8Array(table, mix.ARENA_OFFSET, mix.ARENA_BYTES);
+    return {
+        /** @param {number} frames */
+        read(frames){
+            const block = new Float32Array(frames * 2);
+            mix.mixBlock({ global, slots, seams, block, blockFrames: frames,
+                outputRate: mixer.sampleRate, arena });
+        },
+    };
+}
+
 test('the clock a frame loop reads is the guest\'s own', ()=>{
     const m = machine();
     assert.equal(m.winmm.timeGetTime.handler([]), 1000);
@@ -757,13 +784,13 @@ test('a device with a real mixer retires even a very small buffer', async()=>{
     assert.equal(winmm.waveOutPrepareHeader.handler([device, 0x300, 32]), 0);
     assert.equal(winmm.waveOutWrite.handler([device, 0x300, 32]), 0);
 
-    // The device plays it and the ring drains, as a running worklet would,
-    // and the driver's own tick moves the cursor between guest calls.
-    const speaker = new Float32Array(256 * 2);
+    // The device plays it as a running worklet would, and the driver's own
+    // tick moves the cursor between guest calls.
+    const speaker = await deviceOf(mixer);
     for (let turn = 0; turn < 16; turn++)
     {
         mixer.pump();
-        mixer.ring.read(speaker);
+        speaker.read(256);
         clock += 50;
         wave.tick();
     }
@@ -869,11 +896,11 @@ test('PlaySound plays a WAVE image from memory, loops it, and null stops it', as
 
     assert.equal(winmm.PlaySoundA.handler([0x800, 0, 0x0001 | 0x0004 | 0x0008]), 1);
     assert.equal(mixer.diagnostics().tracks, 1);
-    const speaker = new Float32Array(64 * 2);
+    const speaker = await deviceOf(mixer);
     for (let turn = 0; turn < 8; turn++)
     {
         mixer.pump();
-        mixer.ring.read(speaker);
+        speaker.read(64);
         wave.tick();
     }
     assert.ok(mixer.diagnostics().produced > 8 * 48000 / 44100 + 1,

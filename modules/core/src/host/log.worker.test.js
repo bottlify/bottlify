@@ -113,7 +113,7 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
-    const journal = createJournal({ now: ()=>0, shared: true, capacity: 64 });
+    const journal = createJournal({ now: ()=>0, capacity: 64 });
     journal.write(Level.INFO, 'boot', 'one');
     journal.write(Level.WARN, 'call.cpu', 'two');
     journal.write(Level.INFO, 'boot', 'three');
@@ -173,7 +173,7 @@ test('a read catches the current block up, so a tail since the last poll is not 
 
     // The block's own ring is larger than the keeper's mirror, as an engine sized
     // for a capture of a call area leaves it.
-    const journal = createJournal({ now: ()=>0, shared: true, capacity: 512 });
+    const journal = createJournal({ now: ()=>0, capacity: 512 });
     journal.write(Level.INFO, 'boot', 'one');
     keeper.send({ type: 'attach', memory: { journal: journal.memory() }, sequenceBase: 0 });
     await keeper.poll();
@@ -207,7 +207,7 @@ test('a second block attached continues the first, and a cursor from it resolves
     const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
-    const first = createJournal({ now: ()=>0, shared: true, capacity: 64 });
+    const first = createJournal({ now: ()=>0, capacity: 64 });
     first.write(Level.INFO, 'boot', 'one');
     keeper.send({ type: 'attach', memory: { journal: first.memory() }, sequenceBase: 0 });
     await keeper.poll();
@@ -215,7 +215,7 @@ test('a second block attached continues the first, and a cursor from it resolves
     const cursor = 0;
     const base = first.diagnostics().written;
 
-    const second = createJournal({ now: ()=>0, shared: true, capacity: 64,
+    const second = createJournal({ now: ()=>0, capacity: 64,
         sequenceBase: base });
     second.write(Level.INFO, 'child', 'eight');
     second.write(Level.INFO, 'child', 'nine');
@@ -245,7 +245,7 @@ test('a live view is answered by the keeper from what the layers published', asy
     t.after(()=>keeper.stop());
     const logModule = createLogModule();
     let time = 0;
-    const log = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: true });
+    const log = await logModule.create({ now: ()=>time, wallClock: ()=>time });
     t.after(()=>logModule.dispose());
     const { metrics } = log;
 

@@ -272,7 +272,7 @@ const child = buildExe({
 /**
  * What a seeded parent wrote, run one way.
  *
- * @param {Uint8Array} parent @param {import('./mode.js').Concurrency} concurrency
+ * @param {Uint8Array} parent @param {import('./concurrency.js').Concurrency} concurrency
  * @param {boolean} through
  * @param {import('node:test').TestContext} t
  * @param {Uint8Array} [childImage]  C:\App\child.exe

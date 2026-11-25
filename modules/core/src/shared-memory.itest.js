@@ -5,10 +5,12 @@
  */
 
 /**
- * Executors asked for where memory cannot be shared -- a page that is not
- * cross-origin isolated has no SharedArrayBuffer -- or where the engine's
- * thread may not block on it (a page's window) run the program on one, as by
- * default, and the cpu's report says why; the launch does not fail.
+ * The engine runs over shared memory and only there: where there is none -- a
+ * page that is not cross-origin isolated has no SharedArrayBuffer -- a run is
+ * refused before anything is built, with what turns it on, and the engine's
+ * modules still load so the refusal can be said. Executors asked for where the
+ * engine's thread may not block on that memory (a page's window) run the
+ * program on one, and the cpu's report says why; the launch does not fail.
  */
 
 import { test } from 'node:test';
@@ -21,40 +23,6 @@ import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 const u32 = value=>[
     value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
 ];
-
-test('three executors without SharedArrayBuffer run the program on one and say why',
-    { timeout: 60_000 }, async()=>{
-        const executable = buildExe({
-            imports: { 'KERNEL32.dll': ['ExitProcess'] },
-            code: ({ iat })=>[0x6a, 0x07, 0xff, 0x15, ...u32(iat('ExitProcess'))],
-        });
-        const shared = globalThis.SharedArrayBuffer;
-        // As on a page served without COOP/COEP.
-        // @ts-ignore -- removed for the run, put back below
-        delete globalThis.SharedArrayBuffer;
-        try
-        {
-            const app = await createApp({ executable, cpu: { cores: 3 } });
-            try
-            {
-                assert.equal(await app.run({ timeoutMs: 30_000 }), 7);
-                const tables = await app.diagnostics();
-                const cpu = (Array.isArray(tables) ? tables : [])
-                    .find(table=>table.name === 'cpu');
-                assert.match(String(cpu?.metrics?.executorsRefused),
-                    /3 asked, 1 run: no SharedArrayBuffer/);
-                assert.deepEqual(cpu?.metrics?.executors, []);
-            }
-            finally
-            {
-                await app.dispose();
-            }
-        }
-        finally
-        {
-            globalThis.SharedArrayBuffer = shared;
-        }
-    });
 
 test('three executors on a thread that may not block run the program on one and say why',
     { timeout: 60_000 }, async()=>{
@@ -92,12 +60,46 @@ test('three executors on a thread that may not block run the program on one and 
         }
     });
 
-test('the engine loads and runs a program where SharedArrayBuffer never existed',
+test('a run where SharedArrayBuffer is gone is refused before it is built, and says which headers'
+    + ' turn it on', { timeout: 60_000 }, async()=>{
+    const executable = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 0x07, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const shared = globalThis.SharedArrayBuffer;
+    // As on a page served without COOP/COEP.
+    // @ts-ignore -- removed for the run, put back below
+    delete globalThis.SharedArrayBuffer;
+    try
+    {
+        await assert.rejects(createApp({ executable }),
+            /needs shared memory.*Cross-Origin-Opener-Policy: same-origin/s);
+    }
+    finally
+    {
+        globalThis.SharedArrayBuffer = shared;
+    }
+});
+
+test('the mode option is refused as removed, so a stale caller learns why', async()=>{
+    const executable = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 0x07, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    for (const mode of ['compatible', 'isolated', 'auto'])
+    {
+        await assert.rejects(createApp(/** @type {any} */ ({ executable, mode })),
+            /unknown option mode .*removed/);
+    }
+});
+
+test('where SharedArrayBuffer never existed the engine\'s modules load, and the run is refused',
     { timeout: 60_000 },
     ()=>{
         // A page served without COOP/COEP has none from its first module on: a
-        // module that makes one as it loads stops the page before anything
-        // runs, which removing it after the import above cannot see.
+        // module that makes one as it loads would stop the page before the
+        // refusal could be said, which removing it after the import above
+        // cannot see.
         const app = new URL('./app.js', import.meta.url).href;
         const pe = new URL('../../../tools/fixtures/make-pe.mjs', import.meta.url).href;
         const script = `delete globalThis.SharedArrayBuffer;
@@ -107,11 +109,10 @@ test('the engine loads and runs a program where SharedArrayBuffer never existed'
                 code: ({ iat })=>{ const at = iat('ExitProcess');
                     return [0x6a, 0x07, 0xff, 0x15, at & 0xff, (at >>> 8) & 0xff,
                         (at >>> 16) & 0xff, (at >>> 24) & 0xff]; } });
-            const run = await createApp({ executable });
-            const code = await run.run({ timeoutMs: 30000 });
-            await run.dispose();
-            process.stdout.write('exit ' + code);`;
+            try { await createApp({ executable }); process.stdout.write('built'); }
+            catch (e) { process.stdout.write('refused: ' + e.message); }`;
         const child = spawnSync(process.execPath, ['--input-type=module', '-e', script],
             { encoding: 'utf8', timeout: 50_000 });
-        assert.equal(child.stdout.trim(), 'exit 7', child.stderr.slice(0, 2000));
+        assert.match(child.stdout.trim(), /^refused: the engine needs shared memory/,
+            child.stderr.slice(0, 2000));
     });

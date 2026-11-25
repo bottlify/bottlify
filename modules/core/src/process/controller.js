@@ -990,14 +990,6 @@ export function processController(deps){
             lend: bytes=>core.api('audio').output().lend?.(bytes) ?? -1,
             /** @param {number} offset @param {number} bytes */
             takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
-            /**
-             * The output for a process beside this one where it has no arena
-             * to lend (`mixer.js` borrow); null where it cannot be borrowed.
-             *
-             * @param {{ fill?: () => void }} asked
-             */
-            borrow: asked=>core.api('audio').output().borrow?.(asked) ?? null,
-            ring: ()=>core.api('audio').output().ring,
             table: ()=>core.api('audio').output().table,
             memory: ()=>core.api('audio').output().memory,
             format: ()=>{
@@ -1308,12 +1300,8 @@ export function processController(deps){
                         // read beside the bridge's own per-hook rows: these calls
                         // never cross the bridge, so they are not in `hooks` at all.
                         kernelGlCalls: glCounters.calls,
-                        // Whether the guest's memory is shared with other threads, and
-                        // how many processes run at once (`mode.js`).
-                        mode: options.mode ?? null,
+                        // How many processes run at once (`concurrency.js`).
                         concurrency: options.concurrency ?? 1,
-                        // What was asked for and not had, when the run fell back.
-                        fallback: options.fallback ?? null,
                         // What a pacing that counts said of the run: in the workers
                         // mode, the page's messages read between turns, the yields
                         // to the event loop, and the sleeps on the doorbell.

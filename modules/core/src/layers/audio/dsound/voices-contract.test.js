@@ -146,7 +146,6 @@ async function machine(){
         now: ()=>ms,
         sampleRate: DEVICE_RATE,
         drained: true,
-        shared: true,
         allocate: (/** @type {number} */ size)=>{
             const address = nextAddress;
             nextAddress += (size + 0xfff) & ~0xfff;
@@ -426,7 +425,7 @@ test('a voice that does not loop plays once, whichever block its end falls in', 
     // different frame of the sound for each; one of them is the last frame.
     // One table for all of them, as the device has one: each voice closed
     // and its slot freed by the device before the next is opened.
-    const mixer = createMixer({ shared: true, sampleRate: DEVICE_RATE });
+    const mixer = createMixer({ sampleRate: DEVICE_RATE });
     const table = mixer.table;
     const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
     const slots = [{

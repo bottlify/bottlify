@@ -434,11 +434,6 @@ export function createCorkHost(config){
     // Every other executor's: its state page, its tables and what lies past them.
     const executorPages = Math.ceil((executorBytes(own) - tables + past) / 65536);
     const sharedPages = executors > 1 ? Math.ceil(engine.SHARED_CODE_BYTES / 65536) : 0;
-    // Shared where the host can share it -- a page that is cross-origin
-    // isolated, or node -- so another worker can read and write guest memory
-    // in place; the translated code runs as fast on either.
-    const shared = corkConfig?.sharedMemory !== false && typeof SharedArrayBuffer === 'function'
-        && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
     // A growing memory (`engineArea`): the first executor's tables, the other
     // executors' pages and their shared record in a range of the guest's own
     // space the process keeps from the program, RAM at 0 up to a ceiling of
@@ -461,7 +456,7 @@ export function createCorkHost(config){
     const farOffset = Math.ceil(past / 65536) * 65536 + sharedPages * 65536
         + (apart ? 0 : othersBytes);
     const areaBytes = farOffset + farBytes;
-    const growing = area !== undefined && shared && wideWindow === undefined
+    const growing = area !== undefined && wideWindow === undefined
         && typeof engine.WRAP_SLACK === 'number' && (memorySize & memorySize - 1) === 0
         && area.at % 0x100000 === 0 && area.at >= 0x100000 && areaBytes <= area.span
         && area.at + areaBytes <= memorySize
@@ -548,8 +543,6 @@ export function createCorkHost(config){
     const taken = given === undefined && reused !== undefined && own.ramMemory === undefined
         && (growing ? reused.memory.buffer.byteLength >= pages * 65536
             : reused.memory.buffer.byteLength === pages * 65536)
-        && (typeof SharedArrayBuffer === 'function'
-            && reused.memory.buffer instanceof SharedArrayBuffer) === shared
         ? reused.memory : undefined;
     // A memory made here is the machine's to give: refused past it, as a
     // process Windows cannot find the memory for fails to start. A taken one
@@ -565,14 +558,16 @@ export function createCorkHost(config){
         machineBudget.made();
     }
     const memory = given ?? taken
-        ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared });
+        // Shared, so another worker -- an executor, the graphics worker, the
+        // sound worklet -- reads and writes guest memory in place.
+        ?? new WebAssembly.Memory({ initial: pages, maximum: maximumPages, shared: true });
     /**
      * A wide window's RAM, a memory64 memory made whole: as long as the program
      * is given (`wideRam`), not the window, whose rest stays closed. None otherwise.
      */
     const ramMemory = own.ramMemory === undefined ? undefined
         : config.ram ?? wideMemory(engine, Math.min(/** @type {number} */ (own.window),
-            Math.ceil((wideRam ?? Infinity) / 65536) * 65536), shared);
+            Math.ceil((wideRam ?? Infinity) / 65536) * 65536), true);
     /** Where a wide window's RAM ends, in whole far chunks; 0 without one. */
     const wideRamTop = ramMemory === undefined ? 0
         : Math.floor(Math.min(/** @type {number} */ (own.window), wideRam ?? Infinity)

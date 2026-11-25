@@ -74,12 +74,6 @@ flowchart TB
 - **Limits.** With no free slot, or no room for its copy in the arena, a buffer plays through a
   queue track, and its cursor follows the clock instead. The rest (3D sound, capture) is in
   [`core/limits.md`](../core/limits/README.md#sound).
-- **Without cross-origin isolation** (the COOP/COEP headers, which `ui/server.mjs` sets unless
-  `ISOLATION=off`) there is no `SharedArrayBuffer`. The engine then mixes into a ring of its own,
-  and `output/feed.js` posts the mix to the worklet over a `MessageChannel` the page made, in
-  chunks no more than 160 ms ahead of what the worklet has played; the worklet reports how far it
-  got every four blocks, and that report is what the ring counts as consumed. A DirectSound
-  buffer's cursor follows the clock here.
 
 Where to look in the code: [`core/src/layers/audio/`](../../modules/core/src/layers/audio/): `output/mixer.js`, `output/mix.js`,
 `output/worklet.js`, `dsound/buffers.js`, `asi/provider.js`; waveOut is

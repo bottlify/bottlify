@@ -1,5 +1,5 @@
 # @bottlify/core
-<!-- covers: modules/core/src/core.js modules/core/src/mode.js -->
+<!-- covers: modules/core/src/core.js modules/core/src/concurrency.js -->
 
 `@bottlify/core` runs an unchanged 32- or 64-bit Windows program in a browser tab: its layers answer the
 program's calls into Windows on WebGPU, Web Audio, OPFS and WebSocket
@@ -32,10 +32,12 @@ page needs:
 
 - **WebGPU** for any picture: https, or `localhost`.
 - **Cross-origin isolation** (`Cross-Origin-Opener-Policy: same-origin`,
-  `Cross-Origin-Embedder-Policy: require-corp`) for `SharedArrayBuffer`, which the `isolated` mode
-  runs on. Without it the engine runs `compatible`: the log is read by asking the engine, guest
-  memory belongs to the engine alone, and sound is mixed on the engine's thread and posted to the
-  worklet.
+  `Cross-Origin-Embedder-Policy: require-corp` or `credentialless`) for `SharedArrayBuffer`, which
+  the engine runs on: guest memory, the run's cache, the log and the sound's track table are shared
+  with the workers beside the engine, each reading them in place. Without it `createApp` refuses
+  to start and says which headers are missing. An iframe, image or script from another origin then
+  loads only if it sends `Cross-Origin-Resource-Policy` or CORS headers (or under `credentialless`),
+  and a sign-in pop-up from another origin cannot reach the page through `window.opener`.
 - **`Document-Policy: js-profiling`** on the page and every worker script, only for `sampleJs`:
   the browser grants its JavaScript sampler only to a document or worker served with it. Without
   it the `js` diagnostics table says the sampler was refused; nothing else changes.
@@ -86,8 +88,8 @@ The whole player page is [`tools/run/play/index.html`](../../tools/run/play/inde
 smallest page it plays sound, which is why it starts on a click, and mounts a bottle made by the
 installer where its setup put it.
 
-`node tools/run/play.mjs <id> [--port 8080] [--compatible]` is a local server for exactly this layout,
-with Range and the isolation headers (`--compatible` leaves them off). For a measurement the player
+`node tools/run/play.mjs <id> [--port 8080]` is a local server for exactly this layout, with Range
+and the isolation headers. For a measurement the player
 page takes two more settings from its address: `&executors=3` runs the program's threads on three
 executors at once (`createApp`'s `executors`), and `&cork={"checkReads":true}` sets the
 translator's settings (`EngineConfig`).
@@ -139,27 +141,14 @@ await app.dispose();
 | `@bottlify/core/iso` | reading ISO 9660 disc images |
 | `@bottlify/core/worklet.js` | the sound output's `AudioWorklet` |
 
-## Which mode
-
-`createApp({ mode })` sets how much of the engine uses shared memory, and so what the page must
-allow.
-
-| Mode | Choose it when | What it gives | What it costs |
-| --- | --- | --- | --- |
-| `isolated` | The page can be cross-origin isolated: your origin serves the player and everything it loads, and nothing on it comes from a site that does not opt in | Guest memory is shared with the workers beside the engine: the graphics worker reads what a program unlocked straight from it, not from a copy per unlock, and sound plays from shared memory | An iframe, image or script from another origin loads only if it sends `Cross-Origin-Resource-Policy` or CORS headers, and a sign-in pop-up from another origin cannot reach the page through `window.opener` |
-| `compatible` | The page cannot be isolated (it sits in another site's iframe, or next to third-party content or sign-in pop-ups), or the program draws little and gains nothing from sharing: an installer, a console tool such as SteamCMD | Runs on any page | Everything that crosses to another thread is copied. Sound is mixed on the engine's thread, posted to the worklet, and lags further behind the picture ([limits](limits/README.md)) |
-| `auto` | The default: you want what the page allows | `isolated` on an isolated page, `compatible` elsewhere | |
-
-`createApp` refuses `isolated` on a page that cannot share memory rather than run in another mode.
-The network works in every mode: the relay is a WebSocket to the page's own origin, which isolation
-does not affect.
+## How many processes
 
 `createApp({ concurrency })` sets how many processes run at once. A child runs beside its parent
 from `CreateProcess` on, so a launcher keeps running beside the program it starts. With `1` (the
 default) the two take turns on one thread; with `2` or `4` every process, the program included,
-runs in its own worker. That needs shared memory: without it the
-run starts `compatible` with one process at a time and sends a `fallback` event. The full rules are
-under `concurrency` in [api.md](api.md).
+runs in its own worker. The network works at any concurrency: the relay is a WebSocket to the page's
+own origin, which isolation does not affect. The full rules are under `concurrency` in
+[api.md](api.md).
 
 ## Sound
 
@@ -183,9 +172,8 @@ button.onclick = async()=>{
 The speaker sets the page's audio session to playback, so a phone's silent switch does not mute the
 game; resumes a context the browser stopped on its own (a call, the app in the background) as soon
 as it may, and at the person's next gesture; and finds the worklet beside itself in the package
-(`openSpeaker({ worklet })` names another URL). With cross-origin isolation the worklet reads a
-track table the engine writes into shared memory; without it, `audioOptions()` carries the port the
-engine posts its mix down. `speaker.volume(level)` turns what is heard down without the program
+(`openSpeaker({ worklet })` names another URL). The worklet reads the track table the engine
+writes into shared memory. `speaker.volume(level)` turns what is heard down without the program
 knowing, `suspend()` and `resume()` hold it with a paused run, and `close()` ends it.
 
 ## What `createApp` returns

@@ -168,11 +168,11 @@ function measure(heard){
 }
 
 const program = PROGRAMS[/** @type {keyof typeof PROGRAMS} */ (workerData.program)];
-// The engine on this thread, in the mode a cross-origin isolated page runs it in,
+// The engine on this thread, over shared memory as a page runs it,
 // translating in a worker as a page does: node has no global Worker, and cork
 // translated on the engine's thread here, 110 ms at once on a slow machine as the
 // tone started - a gap the page never has.
-const app = await createApp({ host: 'thread', mode: 'isolated', executable: program(),
+const app = await createApp({ host: 'thread', executable: program(),
     imagePath: 'C:\\tone.exe', windows: workerData.windows,
     audio: { drained: true, sampleRate: RATE }, cork: { config: { worker: true } },
     ...workerData.across ? { concurrency: 2 } : {} });

@@ -37,7 +37,7 @@ import { diagnosticsSummary } from '../events.js';
  */
 export function processesBeside(deps){
     const {
-        across, besides, bindLogLevels, borrowSound, build, classTable, endServices, events,
+        across, besides, bindLogLevels, build, classTable, endServices, events,
         facade, inWorker, keepMemory, keepSpare, lendSound, lentConfig, machineMemory, mainLine,
         mediaInstance, names, newProcessIds, noteLogSequence, noticeExit, options, ownSound,
         presenter, releaseHolder, replayLogLevels, retire, rootAcross, rootLibraries,
@@ -433,11 +433,9 @@ export function processesBeside(deps){
                 // callback: neither crosses, and the child shows nothing itself.
                 const knobs = Object.fromEntries(Object.entries(options.graphics ?? {})
                     .filter(([key, value])=>key !== 'presenter' && typeof value !== 'function'));
-                // A gone process's memory to run in, where the run keeps one: a
-                // shared memory crosses to the worker, and comes back as it ends.
-                const shareable = spareMemories.filter((/** @type {SpareMemory} */ spare)=>typeof SharedArrayBuffer
-                    === 'function' && spare.memory.buffer instanceof SharedArrayBuffer);
-                const handed = shareable.at(-1);
+                // A gone process's memory to run in, where the run keeps one: it
+                // crosses to the worker, and comes back as it ends.
+                const handed = spareMemories.at(-1);
                 if (handed)
                 {
                     spareMemories.splice(spareMemories.indexOf(handed), 1);
@@ -818,14 +816,13 @@ export function processesBeside(deps){
      * @param {any} parent @param {any} request
      */
     const startBeside = (parent, request)=>{
-        const shared = audioMemory() && 'table' in audioMemory()
-            && typeof SharedArrayBuffer === 'function'
-            && audioMemory().table instanceof SharedArrayBuffer;
+        // The run's output, where there is one, is a table a child takes slots of.
+        const runOutput = audioMemory() !== null && audioMemory() !== undefined;
         if (inWorker())
         {
             startAcross({
                 readImage: path=>parent.readImage(path),
-                sound: ()=>(shared ? lendSound(parent) : null),
+                sound: ()=>(runOutput ? lendSound(parent) : null),
             }, request, code=>parent.childExited(request, code));
             return;
         }
@@ -837,7 +834,7 @@ export function processesBeside(deps){
         // A child it debugs stays beside it, where its events reach it.
         if (processesAcross && !request.debugged)
         {
-            const sound = shared ? lendSound(parent) : null;
+            const sound = runOutput ? lendSound(parent) : null;
             // Known before it is asked for: the run may ask for the position of
             // a file it was handed before the call that starts it returns.
             childrenAcross.set(request.id, { parent, request, sound });
@@ -907,11 +904,9 @@ export function processesBeside(deps){
             let failed = 2;
             // One device, one table: the child takes slots of the run's, as a
             // process in a worker does, and its mixer, told it stands beside
-            // another, leaves the parent's open. Where the run's output has
-            // nothing to lend -- the engine's own mixer, in `compatible` mode --
-            // it mixes onto its parent's output instead.
-            const sound = shared ? { announce(){}, ...lendSound(parent) }
-                : parent.audio?.borrow ? borrowSound(parent) : ownSound();
+            // another, leaves the parent's open. Without a run's output (no
+            // sound layer), a table of its own.
+            const sound = runOutput ? { announce(){}, ...lendSound(parent) } : ownSound();
             try
             {
                 const image = request.image ?? await parent.readImage(request.imagePath);
@@ -1202,7 +1197,7 @@ const STATUS_NO_MEMORY = 0xc0000017;
  */
 const SYSTEM_OPTIONS = new Set(['system', 'relay', 'pacing', 'device', 'bundle', 'storage',
     'discs', 'files', 'seed', 'events', 'spawned', 'logSinks', 'watchImport', 'hooks',
-    'executable', 'inheritedFiles', 'startup', 'fallback', 'graphics', 'audio', 'cork', 'log',
+    'executable', 'inheritedFiles', 'startup', 'graphics', 'audio', 'cork', 'log',
     'com', 'memoryCredit', 'memoryHolder']);
 
 /**

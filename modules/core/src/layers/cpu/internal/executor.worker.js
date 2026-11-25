@@ -35,7 +35,7 @@ import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
  * @property {WebAssembly.Memory} memory
  * @property {SharedArrayBuffer} channel
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
- * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
+ * @property {SharedArrayBuffer} [unbroken]  the routines no slice ends inside
  * @property {boolean} [store]  the process answers for the run's translation store
  * @property {import('../../cache/module.js').Joined | null} [cache]  the run's cache as
  *     the process joined this executor to it, where it reads the records put there

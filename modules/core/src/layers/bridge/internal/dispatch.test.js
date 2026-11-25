@@ -915,7 +915,7 @@ test('a write into guest memory is charged to the call in flight, however it nes
     // against the layer that will answer it rather than against a spy.
     /** @type {string[]} */
     const words = [];
-    const table = createTable({ rows: 8, columns: WRITER_COLUMNS, shared: false });
+    const table = createTable({ rows: 8, columns: WRITER_COLUMNS });
     const account = createWriterAccount({
         table,
         intern: text=>{
