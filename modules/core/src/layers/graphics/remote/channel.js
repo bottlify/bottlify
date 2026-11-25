@@ -248,6 +248,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let unchecked = 0;
     /** The batches posted, their bytes, and how many buffers the receiver gave back. */
     const sent = { batches: 0, bytes: 0, ms: 0, returned: 0 };
+    /** The messages the receiver posted back, by type: each one a task on this thread. */
+    /** @type {Record<string, number>} */
+    const received = {};
     /**
      * Of those bytes, the guest memory copied into them, by what copied it --
      * what a lend of buffers, or of anything else, would have left in place --
@@ -426,6 +429,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** @param {any} message  what the receiver posted */
         receive(message){
+            const type = String(message?.type);
+            received[type] = (received[type] ?? 0) + 1;
             switch (message?.type)
             {
                 case 'answer':
@@ -504,6 +509,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** The batches posted so far, their bytes, and the buffers given back. */
         sent: ()=>({ ...sent }),
+
+        /** The messages the played side posted back so far, by type. */
+        received: ()=>({ ...received }),
 
         /**
          * A recording copied guest bytes into the batch.

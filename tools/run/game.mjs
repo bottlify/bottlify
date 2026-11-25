@@ -1353,6 +1353,14 @@ function describe(result, context, calls, symbols){
             const { batches, bytes, ms } = graphics.sentToWorker;
             say(`    to the graphics worker: ${batches} batches, ${bytes} bytes, posting them`
                 + ` ${ms} ms`);
+            // Each a task on the other thread: the batches there, these here.
+            const back = graphics.receivedFromWorker;
+            say(`      messages back: ${back ? Object.entries(back)
+                .map(([type, count])=>`${type} ${count}`).join(', ') : 'not measured'}`);
+            const waits = graphics.waitsOnWorker;
+            say(`      calls waited on: ${waits ? Object.entries(waits)
+                .map(([name, one])=>`${name} ${one.count} (${one.ms} ms)`).join(', ') || 'none'
+                : 'not measured'}`);
             if (graphics.shippedToWorker)
             {
                 say(`      guest memory in them: ${Object.entries(graphics.shippedToWorker)

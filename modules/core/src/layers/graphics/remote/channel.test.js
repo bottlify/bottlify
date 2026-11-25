@@ -229,3 +229,13 @@ test('the played side says how far its GPU ran behind with its diagnostics', ()=
     unbounded.made.receive(toldBy(undefined));
     assert.equal(unbounded.made.latency(), null, 'a played side with no bound says none');
 });
+
+test('the sender counts every message the played side posted back, by type', ()=>{
+    const s = sender(0);
+    assert.deepEqual(s.made.received(), {});
+    s.made.receive({ type: 'presented', count: 1 });
+    s.made.receive({ type: 'presented', count: 2 });
+    s.made.receive({ type: 'spent', buffer: new ArrayBuffer(16) });
+    s.made.receive({ type: 'counts', counts: [] });
+    assert.deepEqual(s.made.received(), { presented: 2, spent: 1, counts: 1 });
+});
