@@ -248,7 +248,8 @@ const memoryReused = tables=>{
  * @param {string[]} commands
  * @param {{ path: string, bytes: Uint8Array }[]} files
  * @param {number} cores
- * @param {import('./concurrency.js').Concurrency} [concurrency]  2: each child in a worker of its own
+ * @param {import('./concurrency.js').Concurrency} [concurrency]  2: each child in a worker of
+ *     its own
  */
 async function runChildren(commands, files, cores, concurrency = 1){
     const app = await createApp({

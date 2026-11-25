@@ -206,7 +206,8 @@ export function createMemoryModule(){
                         // No machine yet: asked again next time.
                         return null;
                     }
-                    ramWords = ram && ram.buffer instanceof SharedArrayBuffer && ram.byteOffset % 4 === 0
+                    ramWords = ram && ram.buffer instanceof SharedArrayBuffer
+                        && ram.byteOffset % 4 === 0
                         ? new Int32Array(ram.buffer, ram.byteOffset,
                             Math.floor(ram.byteLength / 4))
                         : null;

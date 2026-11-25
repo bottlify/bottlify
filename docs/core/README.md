@@ -1,5 +1,5 @@
 # @bottlify/core
-<!-- covers: modules/core/src/core.js modules/core/src/mode.js -->
+<!-- covers: modules/core/src/core.js modules/core/src/concurrency.js -->
 
 `@bottlify/core` runs an unchanged 32- or 64-bit Windows program in a browser tab: its layers answer the
 program's calls into Windows on WebGPU, Web Audio, OPFS and WebSocket

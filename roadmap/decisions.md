@@ -2769,3 +2769,15 @@ past 4 GiB as its low dword would read and write 4 GiB below; the bridge watches
 high halves and says one it was never read whole as a loss, once a function (`watchCut`). A page
 past 4 GiB reserved and not committed does not fault there (the page flags hold 4 GiB).
 *2026-11-24.*
+
+**A290. The engine needs shared memory.** `createApp` refuses a page without `SharedArrayBuffer`
+(one that is not cross-origin isolated) before anything is built, and says which headers turn it
+on (`concurrency.js`); the `mode` option is refused as removed. It replaces the `compatible` mode,
+which kept guest memory the engine thread's own and gave every mechanism a second form: the engine
+mixer with its own ring posted to the worklet, the log read by asking the engine, the graphics
+worker given a copy of every unlock, the run's cache and the executors refused, a run of several
+processes falling back to one. Those forms were the copies and private heaps the memory work
+removes, and every one of them needed a gate of its own. One mechanism over shared memory is
+cheaper in memory, in speed and in code; the price is an embedding page that serves the isolation
+headers (`credentialless` lets other origins' resources load). The engine's modules still load
+where there is no `SharedArrayBuffer`, so the refusal can be said. *2026-11-25.*

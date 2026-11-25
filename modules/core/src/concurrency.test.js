@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { withConcurrency } from './concurrency.js';
 
 test('a run where memory cannot be shared is refused, and says which headers turn it on', ()=>{
-    assert.throws(()=>withConcurrency({}, false), (error)=>{
+    assert.throws(()=>withConcurrency({}, false), error=>{
         const text = /** @type {Error} */ (error).message;
         return /needs shared memory/.test(text) && /not cross-origin isolated/.test(text)
             && /Cross-Origin-Opener-Policy: same-origin/.test(text)

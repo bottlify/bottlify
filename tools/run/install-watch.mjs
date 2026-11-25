@@ -108,8 +108,8 @@
  * program's width when not named), a 32-bit setup on a 64-bit one under WOW64.
  *
  * `--worker` plays the devices' calls in a graphics worker over the fake GPU,
- * as a page does; `--cork JSON` sets cork's own settings (`EngineConfig`), and `--graphics JSON` the graphics layer's
- * (`{"guestCode":false}` traps every Direct3D call).
+ * as a page does; `--cork JSON` sets cork's own settings (`EngineConfig`), and
+ * `--graphics JSON` the graphics layer's (`{"guestCode":false}` traps every Direct3D call).
  */
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { open } from 'node:fs/promises';
