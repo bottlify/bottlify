@@ -99,7 +99,9 @@ export class StoredBlocks {
             words.set(this.words.subarray(at * WORDS, at * WORDS + WORDS), kept * WORDS);
             kept++;
         }
-        return new StoredBlocks(words.slice(0, kept * WORDS));
+        // Cut to what was kept only when a block came twice: a map's own blocks
+        // never do, and a record's repeats are rare.
+        return new StoredBlocks(kept === this.size ? words : words.slice(0, kept * WORDS));
     }
 
     /**

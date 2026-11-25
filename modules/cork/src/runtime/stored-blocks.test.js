@@ -97,3 +97,30 @@ test('a record with pieces appended to it reads as the map with the later owners
         }
     }
 });
+
+test('blocks sorted from a map are laid out once, not copied again to their length', ()=>{
+    const map = new Map([[keyOf(0x403000, 0), keyOf(0x403000, 0)],
+        [keyOf(0x401000, 1), keyOf(0x400f00, 1)], [keyOf(0x402000, 0), keyOf(0x401000, 0)]]);
+    const slice = Uint32Array.prototype.slice;
+    let sliced = 0;
+    /** @type {typeof slice} */
+    Uint32Array.prototype.slice = function(start, end){
+        sliced++;
+        return slice.call(this, start, end);
+    };
+    let blocks;
+    try
+    {
+        blocks = StoredBlocks.fromMap(map);
+    }
+    finally
+    {
+        Uint32Array.prototype.slice = slice;
+    }
+    assert.equal(sliced, 0);
+    assert.equal(blocks.size, 3);
+    for (const [block, owner] of map)
+    {
+        assert.equal(blocks.get(block), owner);
+    }
+});
