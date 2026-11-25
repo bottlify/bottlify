@@ -5747,6 +5747,15 @@ export function createGpuRenderer(services){
         copyImage,
 
         /**
+         * Whether a level's content is the device's alone: its texels or
+         * blocks let go once uploaded, or the level drawn or copied into
+         * there. What this side holds of it is not what a read-back answers.
+         *
+         * @param {object} level @returns {boolean}
+         */
+        deviceHolds: level=>releasedLevels.has(level),
+
+        /**
          * The frame recorded since the last swap is replayed and shown; the
          * next one draws into the other colour surface.
          *

@@ -1787,6 +1787,21 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * A read-back answered from this side's bytes of a level whose content
+     * the device holds alone (let go once uploaded, or written there) does
+     * not answer what the device holds: a loss, said.
+     *
+     * @param {import('./objects.js').TextureLevel} stored
+     */
+    function readsOwn(stored){
+        if (kernel.gpuBacked() && kernel.deviceHolds?.(stored))
+        {
+            lose('glGetTexImage of a level the device holds alone answered this side\'s bytes'
+                + ' of it, zeros where they were let go');
+        }
+    }
+
+    /**
      * A rectangle of the processor's framebuffer written into a sized level's
      * slice: read as RGBA bytes, then kept as the level's format keeps them.
      *
@@ -4438,6 +4453,7 @@ export function installTextureCalls(context, kernel){
                     diverge('glGetTexImage was accepted and read zeros: the texels live with'
                         + ' the context that draws, in the graphics worker, and are not read back');
                 }
+                readsOwn(stored);
                 const packed = stored.sized ? packSized(stored, format, type)
                     : checkTransfer(RGBA8, format, type)
                         ? packFromStorage(readBack(stored), stored.width, stored.height, 1,
@@ -4459,6 +4475,7 @@ export function installTextureCalls(context, kernel){
                 diverge('glGetTexImage was accepted and read black: the texels live with'
                     + ' the context that draws, in the graphics worker, and are not read back');
             }
+            readsOwn(stored);
             return readBack(stored);
         },
 

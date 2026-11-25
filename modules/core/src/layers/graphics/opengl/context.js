@@ -550,6 +550,7 @@ export function createGlContext(options = {}){
         copyImage: gpu?.copyImage
             ? (from, into, size)=>attached && gpu.copyImage(context, from, into, size)
             : null,
+        deviceHolds: gpu?.deviceHolds ? level=>gpu.deviceHolds(level) : null,
         fence: gpu?.fence
             ? ()=>(attached ? gpu.fence(context) : null)
             : null,
