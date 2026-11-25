@@ -39,8 +39,8 @@ export const NEEDS_SHARED_MEMORY = 'the engine needs shared memory (SharedArrayB
 /**
  * The options a run is built from, with its concurrency settled. Refused
  * before anything is built: a page without shared memory, a concurrency that
- * is not 1, 2 or 4, the `mode` option, which is gone (the engine has one
- * mode: shared memory), and cork asked to keep its memory unshared.
+ * is not 1, 2 or 4, and the `mode` option, which is gone (the engine has one
+ * mode: shared memory).
  *
  * @template {{ concurrency?: Concurrency }} T
  * @param {T} options
@@ -57,10 +57,6 @@ export function withConcurrency(options, shareable = canShareMemory()){
     {
         throw new Error(`unknown option mode ${JSON.stringify(mode)}: it was removed - the engine`
             + ' runs only over shared memory');
-    }
-    if (/** @type {any} */ (options).cork?.config?.sharedMemory === false)
-    {
-        throw new Error('cork.config.sharedMemory false: the engine runs only over shared memory');
     }
     const concurrency = options.concurrency ?? 1;
     if (!CONCURRENCY.includes(concurrency))

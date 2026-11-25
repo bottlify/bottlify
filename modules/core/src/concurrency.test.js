@@ -27,13 +27,6 @@ test('the mode option is refused as removed, whatever it asks for', ()=>{
     }
 });
 
-test('cork asked to keep its memory unshared is refused', ()=>{
-    assert.throws(()=>withConcurrency(/** @type {any} */ ({ cork: { config: { sharedMemory: false } } }),
-        true), /sharedMemory false/);
-    assert.equal(withConcurrency(/** @type {any} */ ({ cork: { config: { sharedMemory: true } } }),
-        true).concurrency, 1);
-});
-
 test('concurrency is 1, 2 or 4 processes at once, 1 unless asked; the caller\'s settings stand',
     ()=>{
         assert.equal(withConcurrency({}, true).concurrency, 1);

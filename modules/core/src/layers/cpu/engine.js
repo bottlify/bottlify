@@ -252,9 +252,6 @@ export function engineContractProblem(engineModule, url){
  *     at once, each a region's frames on the worker's stack; a deeper call leaves for the
  *     runtime's loop and its callers return through the entry hash. Default 256; `createApp`
  *     gives an iPhone fewer (HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671).
- * @property {boolean} [sharedMemory]  Cork's own setting (`docs/cork/settings.md`): whether its
- *     tables are shared. `false` is refused at `createApp`: the engine runs only over shared
- *     memory (decision A290).
  * @property {boolean} [wasmInterpreter]  Under cork alone, the interpreter tier's integer, x87
  *     and SSE instructions run in wasm (`interp-wasm.js`), the JavaScript interpreter taking
  *     the rest; false runs the JavaScript interpreter alone. Default true.
