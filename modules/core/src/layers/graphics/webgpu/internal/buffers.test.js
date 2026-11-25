@@ -464,3 +464,31 @@ test('a lock that renamed a backing nothing is carried into sends all of itself'
     assert.equal(writes.at(-1).bufferOffset, 0);
     assert.equal(writes.at(-1).size, 4096);
 });
+
+test('a buffer read from its source keeps no shadow and sends what an unlock names at once', ()=>{
+    // An OpenGL store: ten bytes in a backing of twelve, its last word partial.
+    const gpu = createFakeDevice();
+    const store = Uint8Array.from({ length: 10 }, (_, i)=>i + 1);
+    const dynamic = createDynamicBuffer({ device: gpu.device, queue: gpu.queue, size: 12,
+        usage: 0, label: 'store', source: ()=>store });
+    assert.equal(dynamic.held.shadow, 0, 'no copy beside the store');
+    const lock = dynamic.lock(6, 4, LockFlags.NOOVERWRITE);
+    assert.equal(lock.data.buffer, store.buffer, 'the lock is a view on the store');
+    assert.equal(lock.data.byteOffset, 6);
+    dynamic.unlock(lock);
+    const sent = ()=>gpu.of('writeBuffer').map((/** @type {any} */ write)=>
+        [write.bufferOffset, ...write.bytes]);
+    assert.deepEqual(sent(), [[4, 5, 6, 7, 8], [8, 9, 10, 0, 0]],
+        'the whole words from the store, the partial last one padded, before any flush');
+    store.fill(0xee);
+    dynamic.flush();
+    assert.equal(gpu.of('writeBuffer').length, 2, 'what the store holds after is not sent');
+    assert.deepEqual([...gpu.of('createBuffer')[0].createBuffer.bytes.subarray(4, 10)],
+        [5, 6, 7, 8, 9, 10], 'the queue kept the bytes as they were at the unlock');
+
+    // A rename with nothing to carry it resends the whole store.
+    store.set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    dynamic.unlock(dynamic.lock(0, 2, LockFlags.DISCARD));
+    assert.deepEqual(sent().slice(2), [[0, 1, 2, 3, 4, 5, 6, 7, 8], [8, 9, 10, 0, 0]]);
+    assert.throws(()=>dynamic.rewrite(0, new Uint8Array(4)), /source/);
+});
