@@ -97,8 +97,13 @@ function fakeFile({ sync = true, short = 0, failStream = Infinity } = {}){
     return file;
 }
 
-/** A directory of one file. @param {ReturnType<typeof fakeFile>} file */
-const directoryOf = file=>({ getFileHandle: async()=>file });
+/**
+ * A directory of one file, a new handle for it at every look as a browser
+ * gives: what the handles stand for is the one file.
+ *
+ * @param {ReturnType<typeof fakeFile>} file
+ */
+const directoryOf = file=>({ getFileHandle: async()=>Object.create(file) });
 
 const text = (/** @type {string} */ s)=>new TextEncoder().encode(s);
 const read = (/** @type {Uint8Array} */ b)=>new TextDecoder().decode(b);

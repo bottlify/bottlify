@@ -25,8 +25,9 @@
  *   Otherwise through a synchronous handle where the thread has one, the
  *   reader then expected to tell a file cut short from a whole one.
  * - Two writes of one file through this module go one after the other
- *   (`replaceWhole`, `writeAt`): a sync handle is the origin's exclusive lock
- *   on its file, and a second taken while the first is held is refused.
+ *   (`replaceWhole` by its directory's handle and its name, `writeAt` by the
+ *   file's handle its caller holds): a sync handle is the origin's exclusive
+ *   lock on its file, and a second taken while the first is held is refused.
  * - The disk full is `QuotaExceededError` as the browser names it, passed on
  *   as it is: each writer decides what it gives up (`isQuota`).
  *
@@ -131,12 +132,38 @@ export function writeAll(access, bytes, at){
 export const isQuota = e=>/** @type {any} */ (e)?.name === 'QuotaExceededError';
 
 /**
- * The writes of each file under way through this module, by its handle: the
- * next one waits for them.
+ * The writes of each file under way through this module, by the object that
+ * stands for the file: the next one waits for them.
  *
  * @type {WeakMap<object, Promise<unknown>>}
  */
 const underWay = new WeakMap();
+
+/**
+ * What stands for a file named in a directory: a file's handle cannot, since
+ * the browser gives a new one at every `getFileHandle`, so two replaces of one
+ * name would not see each other's turn.
+ *
+ * @type {WeakMap<object, Map<string, object>>}
+ */
+const names = new WeakMap();
+
+/** @param {object} directory @param {string} name */
+function named(directory, name){
+    let files = names.get(directory);
+    if (files === undefined)
+    {
+        files = new Map();
+        names.set(directory, files);
+    }
+    let key = files.get(name);
+    if (key === undefined)
+    {
+        key = {};
+        files.set(name, key);
+    }
+    return key;
+}
 
 /**
  * `write` after every write of `file` this module has under way.
@@ -197,9 +224,9 @@ async function intoStream(stream, parts){
  *     generator: a compaction reads each record as it copies it
  * @param {{ atomic?: boolean }} [options]
  */
-export async function replaceWhole(directory, name, parts, { atomic = false } = {}){
-    const file = await directory.getFileHandle(name, { create: true });
-    return inTurn(file, async()=>{
+export function replaceWhole(directory, name, parts, { atomic = false } = {}){
+    return inTurn(named(directory, name), async()=>{
+        const file = await directory.getFileHandle(name, { create: true });
         const access = atomic ? null : await openSync(file);
         if (access === null)
         {
