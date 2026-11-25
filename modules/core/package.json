@@ -54,9 +54,9 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist",
     "LICENSE",
     "THIRD-PARTY-NOTICES.md",
+    "dist",
     "src/bundle-in-place.js",
     "src/bundle-node.js",
     "src/bundle.js",
@@ -95,6 +95,7 @@
     "src/layers/win32/common/overlapped.js",
     "src/layers/win32/common/pointers.js",
     "src/layers/win32/common/refusal.js",
+    "src/layers/win32/common/utf16.js",
     "src/layers/win32/crypto/digest.js",
     "src/layers/win32/dsetup/functions.js",
     "src/layers/win32/dsetup/redistributable.js",
@@ -128,7 +129,6 @@
     "src/layers/win32/ntdll/status-windows.js",
     "src/layers/win32/ntdll/status.js",
     "src/layers/win32/ole32/cfb.js",
-    "src/layers/win32/ole32/guid.js",
     "src/layers/win32/ole32/objects.js",
     "src/layers/win32/programs/command-line.js",
     "src/layers/win32/programs/dxsetup.js",
@@ -158,6 +158,7 @@
     "src/steam/redist.js",
     "src/storage-budget.js",
     "src/storage.js",
+    "src/system/guid.js",
     "src/system/opfs-file.js",
     "src/zstd.js"
   ],
