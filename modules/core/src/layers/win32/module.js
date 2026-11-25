@@ -240,6 +240,7 @@ import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
 import { safeArrayLayout } from './common/safearray.js';
 import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
 import { utf16z } from './common/utf16.js';
+import { fromBase64 } from '../../system/base64.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
 // 64-bit process places (`withLongCode`), the conversions here and the flush in heap.js.
@@ -5302,7 +5303,7 @@ export function createWin32Module(){
                     trustedRoots: ()=>(config?.trustedRoots ?? defaultTrustedRoots()).map((
                         /** @type {Uint8Array | string} */ root)=>
                         (typeof root === 'string'
-                            ? Uint8Array.from(atob(root), ch=>ch.charCodeAt(0)) : root)),
+                            ? fromBase64(root) : root)),
                     divergence: config?.divergence,
                 }),
 

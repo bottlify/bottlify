@@ -21,6 +21,7 @@ import { TRUST, verifyAuthenticode } from './authenticode.js';
 import { defaultTrustedRoots } from './roots.js';
 import { msiSubject, readSubject } from './subject.js';
 import { wholeAddress } from '../common/pointers.js';
+import { fromBase64 } from '../../../system/base64.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -273,7 +274,7 @@ export function createWintrustFunctions(host){
             try
             {
                 out.push(parseCertificate(typeof entry === 'string'
-                    ? Uint8Array.from(atob(entry), ch=>ch.charCodeAt(0)) : entry));
+                    ? fromBase64(entry) : entry));
             }
             catch (e){
                 if (!(e instanceof DerError) && !(e instanceof DOMException))

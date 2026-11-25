@@ -72,6 +72,7 @@ import {
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 import { bitsFloat, fromHalf, toHalf } from '../../../system/floats.js';
+import { toBase64 } from '../../../system/base64.js';
 
 /**
  * Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE. Its number is free in Direct3D
@@ -3919,16 +3920,6 @@ export function createRenderer(options){
         return (hash >>> 0).toString(16).padStart(8, '0');
     };
 
-    /** @param {Uint8Array} bytes */
-    const bytesToBase64 = bytes=>{
-        let text = '';
-        for (let at = 0; at < bytes.length; at += 4096)
-        {
-            text += String.fromCharCode(...bytes.subarray(at, at + 4096));
-        }
-        return btoa(text);
-    };
-
     /**
      * What is bound to a stage, by format and size.
      *
@@ -4335,13 +4326,13 @@ export function createRenderer(options){
         // field above -- so such a draw carries its bytes and its transform,
         // for a replay of the one draw on its own.
         const geometry64 = box && box.behind > 0 && drawn <= 128
-            ? ` geo=v:${bytesToBase64(vertices)};i:${indices
-                ? bytesToBase64(new Uint8Array(Uint16Array.from(indices).buffer))
+            ? ` geo=v:${toBase64(vertices)};i:${indices
+                ? toBase64(new Uint8Array(Uint16Array.from(indices).buffer))
                 : '-'};m:${Array.from(prepared.uniforms.subarray(
                 UNIFORM_AT.worldViewProjection, UNIFORM_AT.worldViewProjection + 16)).join(',')}`
-                + `;u:${bytesToBase64(new Uint8Array(prepared.uniforms.buffer,
+                + `;u:${toBase64(new Uint8Array(prepared.uniforms.buffer,
                     prepared.uniforms.byteOffset, prepared.uniforms.byteLength))}`
-                + `;s:${bytesToBase64(new TextEncoder().encode(JSON.stringify(state)))}`
+                + `;s:${toBase64(new TextEncoder().encode(JSON.stringify(state)))}`
             : '';
         const cascade = state.stages.map((/** @type {any} */ stage, /** @type {number} */ at)=>
             `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`

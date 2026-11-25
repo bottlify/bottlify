@@ -24,6 +24,7 @@ import { createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { derElement, oidContents, readGeneralNames } from '../crypto/x509.js';
 import { NAME_STR, stringToName } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
+import { fromBase64, toBase64 } from '../../../system/base64.js';
 
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_DATA = 13;
@@ -86,16 +87,6 @@ const HEADERS = Object.freeze({
  * @property {(bytes: number) => number} localAlloc
  * @property {(api: string, detail: string) => void} [divergence]
  */
-
-/** @param {Uint8Array} bytes */
-const toBase64 = bytes=>{
-    let text = '';
-    for (let at = 0; at < bytes.length; at += 0x8000)
-    {
-        text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
-    }
-    return btoa(text);
-};
 
 /**
  * Bytes as text in one of CryptBinaryToString's formats.
@@ -165,7 +156,7 @@ export function stringToBinary(text, format){
         }
         try
         {
-            return Uint8Array.from(atob(clean), ch=>ch.charCodeAt(0));
+            return fromBase64(clean);
         }
         catch {
             return null;

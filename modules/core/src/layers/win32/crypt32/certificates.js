@@ -41,6 +41,7 @@ import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
 import { msiSubject, readSubject } from '../wintrust/subject.js';
 import { nameToString, NAME_STR } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
+import { fromBase64 } from '../../../system/base64.js';
 
 /** @typedef {import('../crypto/x509.js').Certificate} Certificate */
 
@@ -1293,7 +1294,7 @@ export function createCertificateFunctions(host){
                 const body = (pem ? pem[1] : text).replace(/\s/g, '');
                 if (/^[A-Za-z0-9+/]+={0,2}$/.test(body))
                 {
-                    forms.push({ der: Uint8Array.from(atob(body), ch=>ch.charCodeAt(0)),
+                    forms.push({ der: fromBase64(body),
                         format: FORMAT.BASE64 });
                 }
             }

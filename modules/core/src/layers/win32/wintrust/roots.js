@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { fromBase64 } from '../../../system/base64.js';
+
 /**
  * The root certificates the verifier trusts unless it is configured with others.
  *
@@ -215,9 +217,6 @@ const VERISIGN_UNIVERSAL_ROOT = [
     'wGZsY6rp2aQW9IHRlRQOfc2VNNnSj3BzgXucfr2YYdhFh5iQxeuGMMY1v/D/w1WIg0vvBZIGcfK4',
     'mJO37M2CYfE45k+XmCpajQ==',
 ].join('');
-
-/** @param {string} text */
-const fromBase64 = text=>Uint8Array.from(atob(text), ch=>ch.charCodeAt(0));
 
 /** The default root store, as DER. @returns {Uint8Array[]} */
 export const defaultTrustedRoots = ()=>[MICROSOFT_ROOT_AUTHORITY, THAWTE_TIMESTAMPING_CA,
