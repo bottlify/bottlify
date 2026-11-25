@@ -31,7 +31,7 @@
 import { argumentsOf, splitArguments } from './command-line.js';
 import { ROOTS, importRegEntries, parseRegFile } from './regfile.js';
 import { readText } from './notepad.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 export const REG_EXIT = Object.freeze({ SUCCESS: 0, FAILURE: 1 });
 
@@ -223,7 +223,7 @@ export function valueBytes(type, data, separator){
     {
         case REG_TYPES.REG_SZ:
         case REG_TYPES.REG_EXPAND_SZ:
-            return utf16(`${data}\0`);
+            return utf16z(data);
         case REG_TYPES.REG_MULTI_SZ: {
             const items = data === '' ? [] : data.split(separator);
             return utf16(`${items.map(item=>`${item}\0`).join('')}\0`);

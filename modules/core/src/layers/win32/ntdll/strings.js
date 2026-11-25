@@ -137,8 +137,7 @@ export function createCountedStringFunctions(host){
 
     /** @param {number} at @param {string} text  The terminator is written too. */
     const writeWide = (at, text)=>{
-        const bytes = utf16z(text);
-        host.writeMemory(at, bytes);
+        host.writeMemory(at, utf16z(text));
     };
 
     /**

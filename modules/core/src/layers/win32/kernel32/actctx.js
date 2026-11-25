@@ -34,7 +34,7 @@ import {
     compareVersions, encodeIdentity, identityMatches, parseManifest,
 } from './manifest.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16z } from '../common/utf16.js';
 
 /** Codes and statuses these calls answer with. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -353,8 +353,8 @@ const dllRedirectData = ()=>{
  * @param {number} at @param {string} versioned @param {string} module
  */
 const wndclassData = (at, versioned, module)=>{
-    const name = utf16(`${versioned}\0`);
-    const moduleName = utf16(`${module}\0`);
+    const name = utf16z(versioned);
+    const moduleName = utf16z(module);
     const bytes = new Uint8Array(WNDCLASS_REDIRECT_DATA + name.length + moduleName.length);
     const view = viewOf(bytes);
     view.setUint32(0, WNDCLASS_REDIRECT_DATA, true);
@@ -381,8 +381,8 @@ const comClassData = (comClass, alias, file, global)=>{
     let clr = new Uint8Array(0);
     if (file === null)
     {
-        const name = utf16(`${comClass.name ?? ''}\0`);
-        const runtime = utf16(`${comClass.runtime ?? ''}\0`);
+        const name = utf16z(comClass.name ?? '');
+        const runtime = utf16z(comClass.runtime ?? '');
         clr = new Uint8Array(CLRCLASS_DATA + name.length + runtime.length);
         const view = viewOf(clr);
         const server = CLR_SERVER.toLowerCase();
@@ -397,7 +397,7 @@ const comClassData = (comClass, alias, file, global)=>{
         clr.set(name, CLRCLASS_DATA);
         clr.set(runtime, CLRCLASS_DATA + name.length);
     }
-    const progid = comClass.progid === null ? null : utf16(`${comClass.progid}\0`);
+    const progid = comClass.progid === null ? null : utf16z(comClass.progid);
     const bytes = new Uint8Array(COMCLASS_REDIRECT_DATA + clr.length + (progid?.length ?? 0));
     const view = viewOf(bytes);
     const server = file ?? CLR_SERVER;
@@ -444,7 +444,7 @@ const comClassData = (comClass, alias, file, global)=>{
  * @param {import('./manifest.js').ProxyStub} stub @param {boolean} external
  */
 const proxyStubData = (stub, external)=>{
-    const name = stub.name === null ? null : utf16(`${stub.name}\0`);
+    const name = stub.name === null ? null : utf16z(stub.name);
     const bytes = new Uint8Array(IFACEPS_REDIRECT_DATA + (name?.length ?? 0));
     const view = viewOf(bytes);
     view.setUint32(0, IFACEPS_REDIRECT_DATA, true);
@@ -472,7 +472,7 @@ const proxyStubData = (stub, external)=>{
  * @param {string} file @param {(value: string | Uint8Array) => number} global
  */
 const typelibData = (typelib, file, global)=>{
-    const help = typelib.helpdir === '' ? null : utf16(`${typelib.helpdir}\0`);
+    const help = typelib.helpdir === '' ? null : utf16z(typelib.helpdir);
     const bytes = new Uint8Array(TLIB_REDIRECT_DATA + (help?.length ?? 0));
     const view = viewOf(bytes);
     const [major = 0, minor = 0] = typelib.version.split('.').map(part=>parseInt(part, 10) || 0);
@@ -499,8 +499,8 @@ const typelibData = (typelib, file, global)=>{
  * @param {{ clsid: string, name: string, runtime: string }} surrogate
  */
 const surrogateData = surrogate=>{
-    const runtime = utf16(`${surrogate.runtime}\0`);
-    const name = utf16(`${surrogate.name}\0`);
+    const runtime = utf16z(surrogate.runtime);
+    const name = utf16z(surrogate.name);
     const bytes = new Uint8Array(CLRSURROGATE_DATA + runtime.length + name.length);
     const view = viewOf(bytes);
     view.setUint32(0, CLRSURROGATE_DATA, true);
@@ -1127,7 +1127,7 @@ export function createActivationContexts(host){
             at += (bytes.length + 3) & ~3;
             return { bytes, offset };
         };
-        const names = guids ? [] : keys.map(entry=>place(utf16(`${entry.key}\0`)));
+        const names = guids ? [] : keys.map(entry=>place(utf16z(entry.key)));
         // The global data holds what the items share: module names, aliases.
         /** @type {Map<string, { bytes: Uint8Array, offset: number }>} */
         const pool = new Map();
@@ -1138,7 +1138,7 @@ export function createActivationContexts(host){
             const name = typeof value === 'string' ? `s${value}` : `g${formatGuid(value)}`;
             if (!pool.has(name))
             {
-                pool.set(name, { bytes: typeof value === 'string' ? utf16(`${value}\0`) : value,
+                pool.set(name, { bytes: typeof value === 'string' ? utf16z(value) : value,
                     offset: 0 });
             }
             return /** @type {{ bytes: Uint8Array, offset: number }} */ (pool.get(name));
@@ -1509,8 +1509,8 @@ export function createActivationContexts(host){
                 }
                 const root = context.rootManifestPath;
                 const app = context.appDirectory;
-                const rootBytes = root === null ? new Uint8Array(0) : utf16(`${root}\0`);
-                const appBytes = utf16(`${app}\0`);
+                const rootBytes = root === null ? new Uint8Array(0) : utf16z(root);
+                const appBytes = utf16z(app);
                 const bytes = new Uint8Array(detailed.size + rootBytes.length + appBytes.length);
                 const view = new DataView(bytes.buffer);
                 const [rootPath, , appPath] = detailed.paths;
@@ -1540,7 +1540,7 @@ export function createActivationContexts(host){
                 const strings = [encodeIdentity(assembly.identity), assembly.manifestPath ?? '',
                     assembly.directoryName ?? ''];
                 const encoded = strings.map(text=>(text === '' ? new Uint8Array(0)
-                    : utf16(`${text}\0`)));
+                    : utf16z(text)));
                 const bytes = new Uint8Array(ASSEMBLY.size
                     + encoded.reduce((sum, part)=>sum + part.length, 0));
                 const view = new DataView(bytes.buffer);
@@ -1573,7 +1573,7 @@ export function createActivationContexts(host){
                 {
                     return { status: STATUS_INVALID_PARAMETER };
                 }
-                const name = utf16(`${file.name}\0`);
+                const name = utf16z(file.name);
                 const bytes = new Uint8Array(FILE.size + name.length);
                 const view = new DataView(bytes.buffer);
                 view.setUint32(0, 2, true);

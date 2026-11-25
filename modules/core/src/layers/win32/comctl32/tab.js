@@ -266,8 +266,7 @@ export function createTabProcedure(host, tk, images){
             host.writeMemory(wholeAddress(address), encodeAnsi(`${clipped}\0`));
             return;
         }
-        const bytes = utf16z(clipped);
-        host.writeMemory(wholeAddress(address), bytes);
+        host.writeMemory(wholeAddress(address), utf16z(clipped));
     };
 
     /**

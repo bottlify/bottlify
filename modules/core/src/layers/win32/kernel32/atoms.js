@@ -22,7 +22,7 @@
 
 import { encodeAnsi } from './locale.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** Atoms a caller allocates start here; below it are the integer atoms. */
 const FIRST_ATOM = 0xc000;
@@ -212,7 +212,7 @@ export function createAtomFunctions(host){
         }
         const kept = text.slice(0, room - 1);
         host.writeMemory(wholeAddress(buffer),
-            wide ? utf16(`${kept}\0`) : encodeAnsi(`${kept}\0`));
+            wide ? utf16z(kept) : encodeAnsi(`${kept}\0`));
         if (kept.length < text.length && (global || kept.length === 0))
         {
             host.setLastError?.(short);

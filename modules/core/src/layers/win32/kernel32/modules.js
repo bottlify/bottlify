@@ -441,8 +441,7 @@ export function createModuleFunctions(host){
         const kept = `${fits ? path : path.slice(0, room - 1)}\0`;
         if (wide)
         {
-            const bytes = utf16(kept);
-            host.writeMemory(wholeAddress(buffer), bytes);
+            host.writeMemory(wholeAddress(buffer), utf16(kept));
         }
         else
         {
@@ -489,8 +488,7 @@ export function createModuleFunctions(host){
             return writeString(wholeAddress(buffer), size >>> 0, text);
         }
         const kept = text.slice(0, (size >>> 0) - 1);
-        const bytes = utf16z(kept);
-        host.writeMemory(wholeAddress(buffer), bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(kept));
         return kept.length;
     };
 
@@ -552,8 +550,7 @@ export function createModuleFunctions(host){
         }
         if (wide)
         {
-            const bytes = utf16z(text);
-            host.writeMemory(buffer, bytes);
+            host.writeMemory(buffer, utf16z(text));
         }
         else
         {

@@ -60,7 +60,7 @@ import {
 } from './archive.js';
 import { parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 /** MsiEnableLog: the bit that lists the properties at the end, and appending to the file. */
@@ -479,7 +479,7 @@ export function createMsiFunctions(host){
         }
         if (externalUi && (externalUi.filter & bit) !== 0)
         {
-            const bytes = externalUi.wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`);
+            const bytes = externalUi.wide ? utf16z(text) : encodeAnsi(`${text}\0`);
             const block = host.allocate(bytes.length);
             host.writeMemory(block, bytes);
             try
@@ -1619,8 +1619,8 @@ export function createMsiFunctions(host){
      * @param {string} path @param {string | null} helpDir @param {unknown} thread
      */
     const registerTypeLib = async(path, helpDir, thread)=>{
-        const name = utf16(`${path}\0`);
-        const help = helpDir === null ? new Uint8Array(0) : utf16(`${helpDir}\0`);
+        const name = utf16z(path);
+        const help = helpDir === null ? new Uint8Array(0) : utf16z(helpDir);
         // The out-pointer first, then the path and the help folder.
         const data = new Uint8Array(4 + name.length + help.length);
         data.set(name, 4);
@@ -1746,7 +1746,7 @@ export function createMsiFunctions(host){
      * @param {boolean} wide @param {string} text @param {number} buffer
      */
     const putFixed = (wide, text, buffer)=>{
-        host.writeMemory(wholeAddress(buffer), wide ? utf16(`${text}\0`) : encodeAnsi(`${text}\0`));
+        host.writeMemory(wholeAddress(buffer), wide ? utf16z(text) : encodeAnsi(`${text}\0`));
     };
 
     /** @type {Record<string, { argBytes: number, handler: (args: number[]) => any }>} */

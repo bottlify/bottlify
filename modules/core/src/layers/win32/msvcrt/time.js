@@ -605,8 +605,7 @@ export function createTimeFunctions(host){
 
     /** @param {number} pointer @param {string} text */
     const writeWide = (pointer, text)=>{
-        const bytes = utf16z(text);
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /** @param {number} code */

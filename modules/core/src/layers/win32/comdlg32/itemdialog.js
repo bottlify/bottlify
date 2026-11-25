@@ -120,8 +120,7 @@ export function registerFileDialogClasses(registry, host){
         {
             return 0;
         }
-        const bytes = utf16z(text);
-        host.writeMemory(at, bytes);
+        host.writeMemory(at, utf16z(text));
         return at;
     };
 

@@ -1379,8 +1379,7 @@ export function createWinsockFunctions(host){
 
     /** UTF-16LE with its terminator. @param {string} text */
     const wide = text=>{
-        const out = utf16z(text);
-        return out;
+        return utf16z(text);
     };
 
     /**

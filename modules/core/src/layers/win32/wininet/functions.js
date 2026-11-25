@@ -606,8 +606,7 @@ export function createWininetFunctions(host){
 
     /** Writes UTF-16 and its terminator. @param {number} pointer @param {string} text */
     const writeWide = (pointer, text)=>{
-        const bytes = utf16z(text);
-        host.writeMemory(wholeAddress(pointer), bytes);
+        host.writeMemory(wholeAddress(pointer), utf16z(text));
     };
 
     /** @param {boolean} wide */

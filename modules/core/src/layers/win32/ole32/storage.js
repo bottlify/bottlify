@@ -337,8 +337,7 @@ export function createStorageFunctions(host){
         {
             return 0;
         }
-        const bytes = utf16z(text);
-        host.writeMemory(block, bytes);
+        host.writeMemory(block, utf16z(text));
         return block;
     };
 

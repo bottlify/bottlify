@@ -63,7 +63,7 @@ import {
 } from './vartypes.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
 import { safeArrayLayout } from '../common/safearray.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -3504,7 +3504,7 @@ export function createAutomationFunctions(host){
                 {
                     const strings = [...names, ''].map(name=>{
                         const at = host.heap.allocate(name.length * 2 + 2);
-                        host.writeMemory(at, utf16(`${name}\0`));
+                        host.writeMemory(at, utf16z(name));
                         return at;
                     });
                     table = host.heap.allocate(strings.length * 4);

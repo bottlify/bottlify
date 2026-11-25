@@ -224,8 +224,7 @@ function writeStringBuffer(host, buffer, cch, text, wide){
     const kept = text.slice(0, cch - 1);
     if (wide)
     {
-        const bytes = utf16z(kept);
-        host.writeMemory(buffer, bytes);
+        host.writeMemory(buffer, utf16z(kept));
         return;
     }
     host.writeMemory(buffer, encodeAnsi(`${kept}\0`));

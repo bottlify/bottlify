@@ -256,8 +256,7 @@ const encode = (text, wide)=>{
     {
         return encodeAnsi(`${text}\0`);
     }
-    const bytes = utf16z(text);
-    return bytes;
+    return utf16z(text);
 };
 
 /**

@@ -251,8 +251,7 @@ export function createResourceFunctions(host){
         {
             return Uint8Array.from([...text].map(c=>c.charCodeAt(0) & 0xff).concat(0));
         }
-        const bytes = utf16z(text);
-        return bytes;
+        return utf16z(text);
     };
 
     /**

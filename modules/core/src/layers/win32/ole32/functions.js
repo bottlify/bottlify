@@ -1296,8 +1296,7 @@ export function createOleFunctions(host){
 
     /** @param {number} address @param {string} text  Written with its terminator. */
     const writeOleString = (address, text)=>{
-        const bytes = utf16z(text);
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16z(text));
     };
 
     /**
@@ -1889,8 +1888,7 @@ export function createOleFunctions(host){
         {
             return 0;
         }
-        const bytes = utf16z(text);
-        host.writeMemory(block, bytes);
+        host.writeMemory(block, utf16z(text));
         return block;
     };
 

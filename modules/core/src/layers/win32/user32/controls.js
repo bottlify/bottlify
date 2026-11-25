@@ -2451,8 +2451,7 @@ export function createControlProcedures(host){
         {
             return encodeAnsi(`${text}\0`);
         }
-        const bytes = utf16z(text);
-        return bytes;
+        return utf16z(text);
     };
     /**
      * Writes the text back into the buffer: in place while the block holds

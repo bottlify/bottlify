@@ -850,8 +850,7 @@ export function createLocaleFunctions(host){
 
     /** @param {number} address @param {string} text */
     const writeWide = (address, text)=>{
-        const bytes = utf16(text);
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16(text));
     };
 
     /**

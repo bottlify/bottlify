@@ -11,7 +11,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { verLanguageName } from '../kernel32/languages.js';
 import { DISPLAY_DRIVER } from '../user32/display.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -158,7 +158,7 @@ const TRANSLATION = '040904B0';
  */
 function buildNode(key, value, children = []){
     const text = typeof value === 'string';
-    const bytes = text ? utf16(`${value}\0`) : value ?? new Uint8Array(0);
+    const bytes = text ? utf16z(value) : value ?? new Uint8Array(0);
     const valueAt = aligned(6 + (key.length + 1) * 2);
     let end = valueAt + bytes.length;
     const offsets = children.map(child=>{
@@ -665,8 +665,7 @@ export function createVersionFunctions(host){
         VerLanguageNameA: verLanguageName((address, text)=>
             host.writeMemory(address, encodeAnsi(text))),
         VerLanguageNameW: verLanguageName((address, text)=>{
-            const bytes = utf16(text);
-            host.writeMemory(address, bytes);
+            host.writeMemory(address, utf16(text));
         }),
 
         /**

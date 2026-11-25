@@ -17,7 +17,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /**
  * How far a string a program hands these is looked through for its
@@ -69,7 +69,7 @@ export function createWidths(host){
         read: (address, limit = MAX_LENGTH)=>((address >>> 0) === 0 || !host.readWideString
             ? null : host.readWideString(wholeAddress(address), limit)),
         bytes: utf16,
-        sz: text=>utf16(`${text}\0`),
+        sz: text=>utf16z(text),
         char: code=>String.fromCharCode(code & 0xffff),
     };
     return { A, W };

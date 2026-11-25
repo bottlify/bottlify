@@ -266,8 +266,7 @@ export function createPagerProcedure(host, tk){
     const putWide = (address, text, room)=>{
         const clipped = text.slice(0, Math.max(0, room));
         const units = clipped.length < room ? `${clipped}\0` : clipped;
-        const bytes = utf16(units);
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16(units));
     };
 
     /** A Unicode copy of a text, left for the program to keep. @param {string} text */

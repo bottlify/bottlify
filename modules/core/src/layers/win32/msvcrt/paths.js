@@ -271,8 +271,7 @@ export function createPathFunctions(host){
         {
             return;
         }
-        const bytes = utf16z(text);
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /**

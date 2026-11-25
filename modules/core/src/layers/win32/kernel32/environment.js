@@ -432,8 +432,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        const bytes = utf16z(path);
-        host.writeMemory(wholeAddress(buffer), bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(path));
         return path.length;
     };
 
@@ -675,8 +674,7 @@ export function createEnvironmentFunctions(host){
                 {
                     for (const { at, units } of placeExpansion(pieces, size >>> 0))
                     {
-                        const bytes = utf16(units);
-                        host.writeMemory(wholeAddress(destination) + at * 2, bytes);
+                        host.writeMemory(wholeAddress(destination) + at * 2, utf16(units));
                     }
                 }
                 return length + 1;

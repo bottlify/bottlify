@@ -211,8 +211,7 @@ export function createKit(host){
         {
             return 0x88982f8c | 0;
         }
-        const bytes = utf16z(text);
-        host.writeMemory(wholeAddress(buffer), bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(text));
         return S_OK;
     };
 

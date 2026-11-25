@@ -19,7 +19,7 @@ import { ANSI_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { publishEnumerator } from './enumerator.js';
 import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -203,7 +203,7 @@ export const emptySection = (fmtid, codepage)=>({
 const encodeText = (text, codepage)=>{
     if (codepage === CP_UNICODE)
     {
-        return utf16(`${text}\0`);
+        return utf16z(text);
     }
     const bytes = encodeAnsi(`${text}\0`);
     return bytes;
@@ -289,7 +289,7 @@ export function encodeValue(property, codepage){
     }
     else if (vt === VT.LPWSTR)
     {
-        const text = utf16(`${value}\0`);
+        const text = utf16z(value);
         data = join([u32(text.length / 2), text]);
     }
     else if (STRING_TYPES.has(vt))
@@ -700,7 +700,7 @@ export function createPropertySetFunctions(env){
     const writeU32 = (address, value)=>env.writeMemory(wholeAddress(address), u32(value));
     /** @param {number} address @param {string} text */
     const writeWideAt = (address, text)=>env.writeMemory(wholeAddress(address),
-        utf16(`${text}\0`));
+        utf16z(text));
     /** @param {number} address @returns {string} */
     const readWideAt = address=>{
         let text = '';
@@ -919,7 +919,7 @@ export function createPropertySetFunctions(env){
         }
         else if (vt === VT.LPWSTR)
         {
-            made = point(taskCopy(utf16(`${value}\0`)));
+            made = point(taskCopy(utf16z(value)));
         }
         else if (vt === VT.BSTR)
         {
@@ -1102,7 +1102,7 @@ export function createPropertySetFunctions(env){
             for (let index = 0; index < (count >>> 0); index++)
             {
                 const name = section.names.get(readU32(wholeAddress(ids) + index * 4));
-                const block = name === undefined ? 0 : taskCopy(utf16(`${name}\0`));
+                const block = name === undefined ? 0 : taskCopy(utf16z(name));
                 writeU32(wholeAddress(names) + index * 4, block);
                 found ||= block !== 0;
             }
@@ -1170,7 +1170,7 @@ export function createPropertySetFunctions(env){
                 items,
                 write: (at, item)=>{
                     const name = item.name === undefined ? 0
-                        : taskCopy(utf16(`${item.name}\0`));
+                        : taskCopy(utf16z(item.name));
                     if (item.name !== undefined && name === 0)
                     {
                         return false;

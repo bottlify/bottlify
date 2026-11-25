@@ -109,8 +109,7 @@ export function createDwriteFunctions(host){
     };
     /** @param {number} at @param {string} text */
     const putWide = (at, text)=>{
-        const bytes = utf16z(text);
-        host.writeMemory(wholeAddress(at), bytes);
+        host.writeMemory(wholeAddress(at), utf16z(text));
     };
     /** @param {number} at @param {number} count */
     const readU16s = (at, count)=>{

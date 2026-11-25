@@ -18,7 +18,7 @@
 
 import { STATUS } from './status.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 const STATUS_VARIABLE_NOT_FOUND = 0xc0000100;
 /** The most a block may hold, in UTF-16 units; a walk stops there. */
@@ -160,7 +160,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             {
                 if (written + text.length + 1 <= count)
                 {
-                    writeMemory(destination + written * 2, utf16(`${text}\0`));
+                    writeMemory(destination + written * 2, utf16z(text));
                     written += text.length;
                     continue;
                 }

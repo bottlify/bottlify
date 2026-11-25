@@ -405,8 +405,7 @@ export function createEncodingFunctions(host){
 
     /** @param {string} text */
     const wideZ = text=>{
-        const out = utf16z(text);
-        return out;
+        return utf16z(text);
     };
     /** @param {string} text */
     const asciiZ = text=>Uint8Array.from([...text, '\0'], ch=>ch.charCodeAt(0));

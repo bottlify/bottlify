@@ -151,8 +151,7 @@ export function createDesktopFunctions(host){
             /** @param {string} value */
             const wide = value=>{
                 const at = allocate(value.length * 2 + 2);
-                const bytes = utf16z(value);
-                host.writeMemory(at, bytes);
+                host.writeMemory(at, utf16z(value));
                 return at;
             };
             const textAt = wide(text);

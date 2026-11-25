@@ -486,8 +486,7 @@ export function createStreams(host){
                 {
                     return E_OUTOFMEMORY;
                 }
-                const text = utf16z(name);
-                host.writeMemory(at, text);
+                host.writeMemory(at, utf16z(name));
                 view.setUint32(STATSTG.NAME, at, true);
             }
             view.setUint32(STATSTG.TYPE, STGTY_STREAM, true);

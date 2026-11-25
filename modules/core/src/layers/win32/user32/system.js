@@ -2011,8 +2011,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
     /** @param {number} address @param {string} text @param {number} limit */
     const writeWideString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        const bytes = utf16z(clipped);
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16z(clipped));
         return clipped.length;
     };
 
@@ -5596,8 +5595,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 const kept = text.slice(0, (size | 0) - 1);
-                const bytes = utf16z(kept);
-                host.writeMemory(buffer, bytes);
+                host.writeMemory(buffer, utf16z(kept));
                 return kept.length;
             },
         },

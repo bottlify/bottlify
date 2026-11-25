@@ -138,8 +138,7 @@ export function createDropFunctions(host, decode, encode){
             const cut = path.slice(0, (room >>> 0) - 1);
             if (wide)
             {
-                const bytes = utf16z(cut);
-                host.writeMemory(wholeAddress(buffer), bytes);
+                host.writeMemory(wholeAddress(buffer), utf16z(cut));
                 return cut.length;
             }
             const bytes = encode(cut);

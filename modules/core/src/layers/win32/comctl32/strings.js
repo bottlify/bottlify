@@ -73,7 +73,6 @@ export function writeText(host, address, text, wide, room){
         host.writeMemory(wholeAddress(address), out);
         return fit.length;
     }
-    const bytes = utf16z(clipped);
-    host.writeMemory(wholeAddress(address), bytes);
+    host.writeMemory(wholeAddress(address), utf16z(clipped));
     return clipped.length;
 }

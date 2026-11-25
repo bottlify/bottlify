@@ -40,7 +40,7 @@ import { SOUND_ADAPTER_NAME, SOUND_DEVICE_INTERFACE } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
@@ -1141,7 +1141,7 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                host.writeMemory(first, utf16(`${SOUND_DEVICE_INTERFACE}\0`));
+                host.writeMemory(first, utf16z(SOUND_DEVICE_INTERFACE));
                 return MMSYSERR_NOERROR;
             case DRVM_MAPPER_PREFERRED_GET:
             case DRVM_MAPPER_CONSOLEVOICECOM_GET:

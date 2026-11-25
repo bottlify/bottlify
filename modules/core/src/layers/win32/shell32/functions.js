@@ -382,8 +382,7 @@ export function createShellFunctions(host){
             return;
         }
         const text = path.slice(0, MAX_PATH - 1);
-        const bytes = utf16z(text);
-        host.writeMemory(buffer, bytes);
+        host.writeMemory(buffer, utf16z(text));
     };
 
     const memory = host.readMemory

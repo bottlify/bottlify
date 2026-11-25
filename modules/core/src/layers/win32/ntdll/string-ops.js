@@ -22,7 +22,7 @@ import { formatMessageText } from '../kernel32/format-message.js';
 import { decodeAnsi, decodeOem, downcaseUnit, encodeAnsi, encodeOem, upcaseUnit }
     from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
-import { bytesOfUnits, utf16 } from '../common/utf16.js';
+import { bytesOfUnits, utf16, utf16z } from '../common/utf16.js';
 import { readGuid } from '../../../system/guid.js';
 
 const SOME_NOT_MAPPED = 0x00000107;
@@ -287,7 +287,7 @@ export function createStringOperations(host){
     const overflowed = (text, piece, total)=>{
         if (piece.kind === 'insert' && total - 1 > piece.start)
         {
-            return utf16(`${text.slice(0, total - 1)}\0`);
+            return utf16z(text.slice(0, total - 1));
         }
         return utf16(text.slice(0, piece.kind === 'character' ? total
             : Math.min(piece.start, total)));
@@ -744,7 +744,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                host.writeMemory(to.buffer, utf16(`${text}\0`));
+                host.writeMemory(to.buffer, utf16z(text));
                 writeDescriptor(wholeAddress(string), { ...to, length: text.length * 2 });
                 return STATUS.SUCCESS;
             },
@@ -792,7 +792,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.NO_MEMORY;
                 }
-                host.writeMemory(buffer, utf16(`${text}\0`));
+                host.writeMemory(buffer, utf16z(text));
                 writeDescriptor(wholeAddress(string),
                     { length: text.length * 2, maximumLength: (text.length + 1) * 2, buffer });
                 return STATUS.SUCCESS;
@@ -906,7 +906,7 @@ export function createStringOperations(host){
                     host.writeMemory(wholeAddress(buffer), overflowed(text, piece, total));
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                host.writeMemory(wholeAddress(buffer), utf16(`${text}\0`));
+                host.writeMemory(wholeAddress(buffer), utf16z(text));
                 if (returned !== 0)
                 {
                     host.writeMemory(wholeAddress(returned), u32((text.length + 1) * 2));

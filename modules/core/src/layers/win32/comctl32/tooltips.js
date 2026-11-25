@@ -194,8 +194,7 @@ export function createTooltipProcedure(host, tk, resources){
                 bytes.length > ANSI_COPY ? bytes.slice(0, ANSI_COPY) : bytes);
             return;
         }
-        const bytes = utf16z(clipped);
-        host.writeMemory(wholeAddress(address), bytes);
+        host.writeMemory(wholeAddress(address), utf16z(clipped));
     };
 
     /** @param {any} record */

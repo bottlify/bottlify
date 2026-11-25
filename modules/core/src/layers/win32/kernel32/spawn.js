@@ -688,8 +688,7 @@ export function createSpawnFunctions(host){
             const text = `${path}\0`;
             if (wide)
             {
-                const bytes = utf16(text);
-                host.writeMemory(wholeAddress(buffer), bytes);
+                host.writeMemory(wholeAddress(buffer), utf16(text));
             }
             else
             {
@@ -746,8 +745,7 @@ export function createSpawnFunctions(host){
             const text = `${path}\0`;
             if (wide)
             {
-                const bytes = utf16(text);
-                host.writeMemory(wholeAddress(buffer), bytes);
+                host.writeMemory(wholeAddress(buffer), utf16(text));
             }
             else
             {

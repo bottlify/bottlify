@@ -26,7 +26,7 @@
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToDosDateTime, msToFileTime } from '../kernel32/filetime.js';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
-import { utf16 } from './utf16.js';
+import { utf16, utf16z } from './utf16.js';
 
 /** The class a link's header names, and the COM class that reads and writes one. */
 export const CLSID_SHELL_LINK = '{00021401-0000-0000-C000-000000000046}';
@@ -195,9 +195,6 @@ const ansiRoundTrips = text=>decodeAnsi(encodeAnsi(text)) === text;
 /** @param {string} text @returns {Uint8Array} */
 const ansiZ = text=>encodeAnsi(`${text}\0`);
 
-/** @param {string} text */
-const utf16Z = text=>utf16(`${text}\0`);
-
 /** @param {Uint8Array[]} parts */
 function concat(parts){
     const bytes = new Uint8Array(parts.reduce((sum, part)=>sum + part.length, 0));
@@ -243,7 +240,7 @@ const trimSeparators = path=>(/^[A-Za-z]:\\?$/.test(path)
  */
 function fileEntryItem(name, directory, entry){
     const wide = !ansiRoundTrips(name);
-    const text = wide ? utf16Z(name) : ansiZ(name);
+    const text = wide ? utf16z(name) : ansiZ(name);
     const fixed = 14;
     const size = fixed + text.length + ((fixed + text.length) & 1);
     const item = new Uint8Array(size);
@@ -448,7 +445,7 @@ export function pathOfIdList(list){
  */
 const bothWidths = text=>({
     ansi: ansiZ(text),
-    unicode: ansiRoundTrips(text) ? null : utf16Z(text),
+    unicode: ansiRoundTrips(text) ? null : utf16z(text),
 });
 
 /**
@@ -460,7 +457,7 @@ function volumeId(volume){
     const label = volume.label ?? '';
     const wide = !ansiRoundTrips(label);
     const head = wide ? 0x14 : 0x10;
-    const text = wide ? utf16Z(label) : ansiZ(label);
+    const text = wide ? utf16z(label) : ansiZ(label);
     return concat([
         u32(head + text.length),
         u32(volume.driveType ?? DRIVE_FIXED),
@@ -539,13 +536,13 @@ function encodeLinkInfo(target, volume){
     const suffixAt = baseAt + base.ansi.length;
     let end = suffixAt + suffix.ansi.length;
     end += end & 1;
-    const baseUnicode = local && wide ? base.unicode ?? utf16Z(target) : null;
+    const baseUnicode = local && wide ? base.unicode ?? utf16z(target) : null;
     const baseUnicodeAt = baseUnicode ? end : 0;
     if (baseUnicode)
     {
         end += baseUnicode.length;
     }
-    const suffixUnicode = wide ? suffix.unicode ?? utf16Z('') : null;
+    const suffixUnicode = wide ? suffix.unicode ?? utf16z('') : null;
     const suffixUnicodeAt = suffixUnicode ? end : 0;
     if (suffixUnicode)
     {

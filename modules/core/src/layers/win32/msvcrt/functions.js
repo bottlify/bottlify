@@ -62,7 +62,7 @@ import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
 import { O_UNICODE, unitsOfText, wideStringAt } from './widetext.js';
-import { bytesOfUnits } from '../common/utf16.js';
+import { bytesOfUnits, utf16z } from '../common/utf16.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -438,7 +438,7 @@ export function createMsvcrtFunctions(host){
             return -1;
         }
         const kept = text.slice(0, room - 1);
-        host.writeMemory(buffer, bytesOfUnits([...unitsOfText(kept), 0]));
+        host.writeMemory(buffer, utf16z(kept));
         return text.length < room ? text.length : -1;
     };
 
@@ -476,7 +476,7 @@ export function createMsvcrtFunctions(host){
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             const text = wideText(args[1], args.slice(2));
-            host.writeMemory(args[0], bytesOfUnits([...unitsOfText(text), 0]));
+            host.writeMemory(args[0], utf16z(text));
             return text.length;
         },
     };
@@ -661,7 +661,7 @@ export function createMsvcrtFunctions(host){
         /** @param {number[]} args */
         handler: ([buffer, format, list])=>{
             const text = wideText(format, varargsAt(list));
-            host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+            host.writeMemory(buffer, utf16z(text));
             return text.length;
         },
     });
@@ -974,7 +974,7 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, format, , list])=>{
                 const text = wideText(format, varargsAt(list));
-                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(text), 0]));
+                host.writeMemory(buffer, utf16z(text));
                 return text.length;
             },
         },
@@ -1055,7 +1055,7 @@ export function createMsvcrtFunctions(host){
                     return -1;
                 }
                 const kept = text.slice(0, limit);
-                host.writeMemory(buffer, bytesOfUnits([...unitsOfText(kept), 0]));
+                host.writeMemory(buffer, utf16z(kept));
                 return text.length > limit ? -1 : text.length;
             },
         },

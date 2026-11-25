@@ -423,8 +423,7 @@ export function createSetupapiFunctions(host){
         {
             return ansi(value);
         }
-        const bytes = utf16z(value);
-        return bytes;
+        return utf16z(value);
     };
     /** @param {number} code @param {number} [result] */
     const fail = (code, result = 0)=>{

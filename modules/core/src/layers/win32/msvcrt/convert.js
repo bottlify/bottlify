@@ -480,8 +480,7 @@ export function createConversionFunctions(host){
 
     /** @param {number} pointer @param {string} text */
     const writeWideString = (pointer, text)=>{
-        const bytes = utf16z(text);
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /** @param {number} pointer @param {number} value */

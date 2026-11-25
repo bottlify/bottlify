@@ -151,8 +151,7 @@ export function textBytes(text, unicode){
         bytes.set(encoded);
         return bytes.subarray(0, encoded.length + 1);
     }
-    const bytes = utf16z(text);
-    return bytes;
+    return utf16z(text);
 }
 
 /**

@@ -27,7 +27,7 @@
  */
 
 import { decodeAnsi } from '../kernel32/locale.js';
-import { utf16 } from '../common/utf16.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** The registry's roots, by the short name and the long one, as reg and regedit read them. */
 export const ROOTS = Object.freeze({
@@ -100,7 +100,7 @@ function valueOf(text, ansi){
     {
         const string = quoted(text, 1);
         return string && text.slice(string.end).trim() === ''
-            ? { type: REG_SZ, data: utf16(`${string.text}\0`) } : undefined;
+            ? { type: REG_SZ, data: utf16z(string.text) } : undefined;
     }
     const dword = /^dword:([0-9a-f]{1,8})$/i.exec(text);
     if (dword)

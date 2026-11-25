@@ -125,8 +125,7 @@ export const fileUrlPath = url=>pathFromFileUrl(url, code=>String.fromCharCode(c
 
 /** @param {string} text */
 const wide = text=>{
-    const bytes = utf16z(text);
-    return bytes;
+    return utf16z(text);
 };
 
 /**

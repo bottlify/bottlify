@@ -419,8 +419,7 @@ export function createRegistryFunctions(host){
      */
     const widened = bytes=>{
         const text = decodeAnsi(bytes);
-        const out = utf16(text);
-        return out;
+        return utf16(text);
     };
 
     /** @param {number} pointer @returns {string | null} */

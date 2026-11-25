@@ -5371,8 +5371,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const kept = name.slice(0, (count | 0) - 1);
-                const bytes = utf16z(kept);
-                host.writeMemory(wholeAddress(out), bytes);
+                host.writeMemory(wholeAddress(out), utf16z(kept));
                 return kept.length + 1;
             },
         },
