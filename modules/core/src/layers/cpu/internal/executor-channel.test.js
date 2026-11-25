@@ -99,13 +99,14 @@ test('a turn ended while the other side looks wakes nothing, and one it sleeps t
         // after a whole look of its own, and is notified only when it sleeps,
         // so however long a loaded machine keeps the other off its core -- a
         // look that runs out is a sleep it took fairly -- the sleeps are few
-        // and each notify has a sleeper.
-        const awake = await handTurns(2000, 5000, 5000);
-        assertLooksFirst(awake, 5000, 5000);
+        // and each notify has a sleeper. A second, the longest look a wait
+        // takes, is long past a hand-over.
+        const awake = await handTurns(2000, 1000, 1000);
+        assertLooksFirst(awake, 1000, 1000);
         // One sleeping, one looking: the sleeper is woken, the looker only
         // when a look of its own ran out.
-        const mixed = await handTurns(2000, 5000, 0);
-        assertLooksFirst(mixed, 5000, 0);
+        const mixed = await handTurns(2000, 1000, 0);
+        assertLooksFirst(mixed, 1000, 0);
         assert.ok(mixed.mine.woke > 0, JSON.stringify(mixed));
     });
 
