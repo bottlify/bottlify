@@ -801,9 +801,10 @@ export function createGpuRenderer(services){
     const stats = {
         frames: 0, pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0,
         refused: 0, skipped: 0, cut: 0,
-        // Texels let go once on the device, in bytes, and levels carried from
-        // a texture's old copy to the one that replaced it (`textureFor`).
-        letGo: 0, carried: 0, imageCopies: 0,
+        // Texels and S3TC blocks let go once on the device, in bytes, and
+        // levels carried from a texture's old copy to the one that replaced
+        // it (`textureFor`).
+        letGo: 0, blocksLetGo: 0, carried: 0, imageCopies: 0,
         // Compressed levels a device without their blocks took decoded: the
         // blocks' bytes and the texels' they were uploaded as.
         decoded: { levels: 0, blockBytes: 0, texelBytes: 0 },
@@ -2132,20 +2133,32 @@ export function createGpuRenderer(services){
         // rectangle written later goes up alone, from texels made for it, and
         // a copy made again in another shape takes the level from the one it
         // replaces. A level past the chain was never uploaded and keeps its
-        // own; one decoded from blocks never held any. A run that dumps or
-        // probes its draws from its start keeps them for the dump's census.
+        // own. One decoded from S3TC blocks never held texels, and its blocks
+        // go the same way (the Doom 3 demo's drawn textures: 18 MB): the
+        // device holds what they decode to. A run that dumps or probes its
+        // draws from its start keeps them for the dump's census.
         if (!bcFormat && !fixedDump && probeSpec === null)
         {
             for (const [key, image] of texture.levels)
             {
                 const level = key % FACE_STRIDE;
                 const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
-                if (level < levels && texels)
+                const blocks = Object.getOwnPropertyDescriptor(image, 'compressed')?.value;
+                if (level >= levels || !texels && !blocks)
+                {
+                    continue;
+                }
+                if (texels)
                 {
                     stats.letGo += texels.byteLength;
                     image.texels = null;
-                    releasedLevels.add(image);
                 }
+                if (blocks)
+                {
+                    stats.blocksLetGo += blocks.bytes.byteLength;
+                    image.compressed = null;
+                }
+                releasedLevels.add(image);
             }
         }
         return record;

@@ -595,6 +595,11 @@ test('a DXT5 level reaches the upload decoded, its alpha per texel intact', asyn
     context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
         GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, block);
     assert.equal(context.glGetError(), GL.NO_ERROR, 'the compressed level loaded');
+    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.equal(level.baseFormat, GL.RGBA, 'the level keeps the four components of DXT5');
+    assert.equal(level.compressedFormat, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT);
+    assert.deepEqual([...level.texels.subarray(3, 4)], [255], 'texel 0: table index 0');
+    assert.deepEqual([...level.texels.subarray(7, 8)], [0], 'texel 1: table index 1');
     context.glEnable(GL.TEXTURE_2D);
     context.glBegin(GL.TRIANGLES);
     context.glVertex2f(0, 0);
@@ -603,11 +608,7 @@ test('a DXT5 level reaches the upload decoded, its alpha per texel intact', asyn
     context.glEnd();
     await r.swap();
 
-    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
-    assert.equal(level.baseFormat, GL.RGBA, 'the level keeps the four components of DXT5');
-    assert.equal(level.compressedFormat, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT);
-    assert.deepEqual([...level.texels.subarray(3, 4)], [255], 'texel 0: table index 0');
-    assert.deepEqual([...level.texels.subarray(7, 8)], [0], 'texel 1: table index 1');
+    assert.equal(level.compressed, null, 'the blocks let go once the device holds their texels');
     const upload = r.gpu.of('writeTexture').find(w=>w.destination.origin.z === 0
         && w.destination.origin.x === 0);
     assert.ok(upload, 'the level was uploaded');
@@ -2205,20 +2206,25 @@ test('on a device a DXT level is decoded for each read and a sub-image on it is 
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
     context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
         GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, new Uint8Array(16).fill(7));
+    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.notEqual(level.texels, level.texels, 'decoded when read, never kept');
     context.glEnable(GL.TEXTURE_2D);
     drawUnswapped(context);
     await r.swap();
-    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
-    assert.notEqual(level.texels, level.texels, 'decoded when read, never kept');
+    assert.deepEqual([level.texels, level.compressed], [null, null],
+        'once on the device, neither texels nor blocks are held here');
 
     context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
         Uint8Array.from([1, 2, 3, 4]));
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 3, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        Uint8Array.from([5, 6, 7, 8]));
     const uploads = r.gpu.of('writeTexture').length;
     drawUnswapped(context);
     await r.swap();
-    const upload = r.gpu.of('writeTexture')[uploads];
-    assert.deepEqual([...upload.bytes.subarray(0, 4)], [1, 2, 3, 4],
-        'the written texel reaches the device over the decoded blocks');
+    const sent = r.gpu.of('writeTexture').slice(uploads);
+    assert.deepEqual(sent.map(upload=>[...upload.bytes]), [[1, 2, 3, 4], [5, 6, 7, 8]],
+        'the written texels alone reach the device, over the decoded blocks it holds');
+    assert.deepEqual(r.divergences.filter(d=>/let go|lost/.test(d)), []);
 });
 
 test('a read-back of a level the device holds alone says what it answered', async()=>{
