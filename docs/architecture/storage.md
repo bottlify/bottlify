@@ -42,6 +42,13 @@ flowchart TD
 - **Synchronous handles** (`createSyncAccessHandle`) exist only in a worker. In return, a read from
   OPFS waits for nothing, and `ReadFile` on a block already fetched answers at once.
 - **The session** is read and written asynchronously (`getFile`, `createWritable`).
+- **One writer:** every store above writes through one module, which says once how: a
+  synchronous handle is taken in one place; a write the disk takes in part is a failure, as a
+  refused one is (a translation record so written breaks the store for the run, a block is
+  held in the heap, the page file stops writing out); an entry of the session is replaced
+  through a stream, so a save cut short leaves the last one whole, and a stream refused for
+  room is aborted, and the next save is written once there is room; a translation store's
+  `current` cut short names no generation, and nothing is removed for it.
 - **What the program writes is not held in memory whole:** an installer that unpacks a gigabyte
   holds the page file's 64 MiB of it, and its first write into a file the bundle carries copies
   that file into the writable layer a mebibyte at a time.
@@ -50,4 +57,4 @@ Where to look in the code: [`core/src/layers/filesystem/internal/bundle/cache.js
 [`core/src/layers/filesystem/internal/opfs-store.js`](../../modules/core/src/layers/filesystem/internal/opfs-store.js) (handles),
 [`core/src/layers/filesystem/internal/page-file.js`](../../modules/core/src/layers/filesystem/internal/page-file.js) (the page file),
 [`core/src/layers/cpu/internal/translation-store.js`](../../modules/core/src/layers/cpu/internal/translation-store.js) (translations), [`core/src/storage.js`](../../modules/core/src/storage.js)
-(sessions).
+(sessions), [`core/src/system/opfs-file.js`](../../modules/core/src/system/opfs-file.js) (how every one of them writes).
