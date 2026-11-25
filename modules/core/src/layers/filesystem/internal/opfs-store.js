@@ -255,7 +255,7 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
         let access;
         try
         {
-            access = await openSync(handle);
+            access = /** @type {OpfsAccess | null} */ (await openSync(handle));
         }
         catch (e){
             // The lock is per origin, so the holder may be another window
