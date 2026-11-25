@@ -35,6 +35,40 @@ test('an arena hands back what was kept, under its key and shape only', ()=>{
     assert.deepEqual(arena.counts().writes, 1);
 });
 
+test('a hit is copied out of the arena once: its key compared where it lies, its body a'
+    + ' view in that copy', ()=>{
+    const arena = openArena(createArena(1 << 20));
+    // Keys that share a probe's start would all be compared; a key past ASCII too.
+    const keys = ['ctx:4198400:9f3a:0', 'ctx:4198400:9f3a:1', 'cl\u00e9:1'];
+    keys.forEach((key, n)=>arena.set(key, [n], kept(n)));
+    const decode = TextDecoder.prototype.decode;
+    let decoded = 0;
+    /** @type {typeof decode} */
+    TextDecoder.prototype.decode = function(input, options){
+        decoded++;
+        return decode.call(this, input, options);
+    };
+    try
+    {
+        for (const [n, key] of keys.entries())
+        {
+            decoded = 0;
+            const hit = arena.get(key, [n]);
+            assert.deepEqual(hit, kept(n), key);
+            assert.equal(decoded, 1, `${key}: the entry's fields alone decoded, not its key`);
+            assert.ok(/** @type {import('./arena.js').KeptFunction} */ (hit).body.buffer.byteLength
+                > 64, `${key}: the body is not copied again out of the entry`);
+        }
+        assert.equal(arena.get('ctx:4198400:9f3a:', [0]), undefined, 'a key one shorter');
+        assert.equal(arena.get('ctx:4198400:9f3a:00', [0]), undefined, 'one longer');
+        assert.equal(arena.get('cl\u00e8:1', [2]), undefined, 'one past ASCII, its bytes other');
+    }
+    finally
+    {
+        TextDecoder.prototype.decode = decode;
+    }
+});
+
 test('every view of one arena sees what any of them kept', ()=>{
     const buffer = createArena(1 << 20);
     const one = openArena(buffer);

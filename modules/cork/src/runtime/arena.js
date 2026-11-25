@@ -130,16 +130,51 @@ export function openArena(buffer){
                 return -1;
             }
             if (index[slot] === hash && gens[Math.floor(at / segmentBytes)] === index[slot + 2]
-                && keyAt(at) === key)
+                && sameKey(at, key))
             {
                 return slot;
             }
         }
         return -1;
     };
-    const keyAt = (/** @type {number} */ at)=>{
+    /**
+     * Whether the entry at `at` is kept under `key`, its bytes read where they lie:
+     * a key is ASCII as the emitter makes it, its units the bytes; one that is not
+     * is encoded to compare.
+     */
+    const sameKey = (/** @type {number} */ at, /** @type {string} */ key)=>{
         const length = view.getUint32(at + 4, true);
-        return decoder.decode(data.slice(at + ENTRY_WORDS * 4, at + ENTRY_WORDS * 4 + length));
+        const from = at + ENTRY_WORDS * 4;
+        let i = 0;
+        for (; i < key.length; i++)
+        {
+            const unit = key.charCodeAt(i);
+            if (unit >= 0x80)
+            {
+                break;
+            }
+            if (i >= length || data[from + i] !== unit)
+            {
+                return false;
+            }
+        }
+        if (i === key.length)
+        {
+            return length === key.length;
+        }
+        const bytes = encoder.encode(key);
+        if (bytes.length !== length)
+        {
+            return false;
+        }
+        for (let j = i; j < length; j++)
+        {
+            if (data[from + j] !== bytes[j])
+            {
+                return false;
+            }
+        }
+        return true;
     };
     /** A free or stale slot along the key's probe; with the lock held. */
     const freeSlot = (/** @type {number} */ hash)=>{
@@ -322,7 +357,9 @@ function decodeEntry(bytes){
     const shape = new Float64Array(bytes.buffer, bytes.byteOffset + shapeAt, shapeCount);
     const [typeIndex, locals, hints, region] = JSON.parse(
         decoder.decode(bytes.subarray(restAt, restAt + restLength)));
-    return { shape, kept: { typeIndex, locals, body: bytes.slice(bodyAt, restAt), hints, region } };
+    // The body where it lies in the entry, which is the caller's copy already.
+    return { shape, kept: { typeIndex, locals, body: bytes.subarray(bodyAt, restAt), hints,
+        region } };
 }
 
 /** @param {Float64Array} kept @param {number[]} shape */
