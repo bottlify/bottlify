@@ -112,6 +112,42 @@ test('a half float texture lives as rgba16float and uploads its own bytes', asyn
     assert.equal(r.renderer.diagnostics().failures?.length ?? 0, 0);
 });
 
+test('a sized write placed among a frame\'s commands copies only the level\'s own bytes',
+    async()=>{
+        const r = rig();
+        texture2D(r, TEX.RGBA16F, 8, 8, GL.RGBA, TEX.HALF_FLOAT, null);
+        r.draw();
+        await r.swap();
+        /** Uint8Array copies made while a draw runs. */
+        const copiesInDraw = ()=>{
+            const slice = Uint8Array.prototype.slice;
+            let copies = 0;
+            Uint8Array.prototype.slice = /** @this {Uint8Array} @param {number} [start] @param {number} [end] */ function(start, end){
+                copies++;
+                return slice.call(this, start, end);
+            };
+            try
+            {
+                r.draw();
+            }
+            finally
+            {
+                Uint8Array.prototype.slice = slice;
+            }
+            return copies;
+        };
+        /** @param {number} x @param {number} width @param {number} height */
+        const write = (x, width, height)=>r.context.glTexSubImage2D(GL.TEXTURE_2D, 0, x, 0,
+            width, height, GL.RGBA, TEX.HALF_FLOAT, new Uint8Array(width * height * 8).fill(0x3c));
+
+        r.draw();
+        write(1, 3, 2);
+        assert.equal(copiesInDraw(), 0, 'a rectangle packed for the upload is its own already');
+        write(0, 8, 8);
+        assert.equal(copiesInDraw(), 1, 'the whole level is the level\'s storage: copied once');
+        await r.swap();
+    });
+
 test('an RGB float texture lives as RGBA with an alpha of one', async()=>{
     const r = rig();
     const name = texture2D(r, TEX.RGB32F, 1, 1, GL.RGB, GL.FLOAT,

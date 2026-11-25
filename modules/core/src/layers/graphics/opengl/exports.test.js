@@ -714,6 +714,45 @@ test('a vector argument is decoded from the window over guest memory, not from a
     assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true)), [0.5, 0.25, 1, 0]);
 });
 
+test('list names in byte runs, an edge flag and glDrawPixels\' image are read through the window',
+    ()=>{
+        // Each is consumed before the handler returns -- names decoded,
+        // the flag taken, the image unpacked into texels of its own -- so a
+        // copy out of guest memory first is a second one.
+        const box = machine();
+        let copies = 0;
+        let windows = 0;
+        /** @type {any} */
+        const services = {
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+                copies++;
+                return box.readMemory(at, length);
+            },
+            windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+                windows++;
+                return box.readMemory(at, length);
+            },
+            writeMemory: box.writeMemory,
+            screen: ()=>({ width: 4, height: 4 }),
+            scratch: box.scratch,
+        };
+        const { table } = createOpengl(services);
+        startDrawing(table);
+        box.bytes.set([0, 1, 0, 2], 0x3000);
+        box.bytes[0x3100] = 1;
+        box.bytes.fill(200, 0x3200, 0x3200 + 2 * 2 * 4);
+        copies = 0;
+        windows = 0;
+
+        table.glCallLists.handler([2, GL.TWO_BYTES, 0x3000]);
+        table.glBegin.handler([GL.TRIANGLES]);
+        table.glEdgeFlagv.handler([0x3100]);
+        table.glEnd.handler([]);
+        table.glDrawPixels.handler([2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 0x3200]);
+        assert.equal(copies, 0, 'nothing copied out of guest memory first');
+        assert.equal(windows, 3, 'each read through the window, once');
+    });
+
 test('two consecutive glProgramEnvParameter4fvARB calls hand the context the same array '
     + 'object, with the second call\'s values, and construct zero DataViews', ()=>{
     // The env-parameter and matrix readers decode into one reused Float32Array

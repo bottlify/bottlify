@@ -2077,7 +2077,7 @@ export function createOpengl(services){
                     return;
                 }
                 context.glCallLists(count | 0, byteRunNames(
-                    services.readMemory(lists >>> 0, (count | 0) * width), width, count | 0));
+                    windowMemory(lists >>> 0, (count | 0) * width), width, count | 0));
                 return;
             }
             context.glCallLists(count | 0, readTyped(letter, lists, Math.max(0, count | 0)));
@@ -2093,7 +2093,7 @@ export function createOpengl(services){
         glEnd: ()=>answer(current()?.glEnd()),
         glEdgeFlag: ([flag])=>answer(current()?.glEdgeFlag(asBoolean(flag))),
         glEdgeFlagv: ([address])=>
-            answer(current()?.glEdgeFlag(services.readMemory(address >>> 0, 1)[0])),
+            answer(current()?.glEdgeFlag(windowMemory(address >>> 0, 1)[0])),
         glFogCoordfEXT: ([coord])=>answer(current()?.glFogCoordfEXT(asFloat(coord))),
         glFogCoordfvEXT: ([address])=>
             answer(current()?.glFogCoordfEXT(readF32s(address, 1)[0])),
@@ -2254,7 +2254,7 @@ export function createOpengl(services){
             const unpack = unpackState(context);
             const needed = imageBytes(width | 0, height | 0, format >>> 0, type >>> 0, unpack);
             const texels = needed > 0 && (pixels >>> 0) !== 0
-                ? unpackImage(services.readMemory(pixels >>> 0, needed), width | 0, height | 0,
+                ? unpackImage(windowMemory(pixels >>> 0, needed), width | 0, height | 0,
                     format >>> 0, type >>> 0, unpack)
                 : null;
             context.glDrawPixels(width | 0, height | 0, format >>> 0, type >>> 0, texels);
@@ -2533,8 +2533,7 @@ export function createOpengl(services){
 
     /** @param {number} address @returns {import('./pixelformat.js').PixelFormat} */
     function readDescriptor(address){
-        return decodePixelFormat(
-            services.readMemory(address >>> 0, PIXELFORMATDESCRIPTOR.SIZE));
+        return decodePixelFormat(windowMemory(address >>> 0, PIXELFORMATDESCRIPTOR.SIZE));
     }
 
     /**
