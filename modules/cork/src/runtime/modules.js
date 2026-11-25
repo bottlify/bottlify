@@ -9,7 +9,8 @@
  * the helpers and the shared function table (`instantiate`); placing it in
  * the table (`placeModule`), a range of its own where modules are placed;
  * the modules some running region's function is in (`heldModules`), let go
- * past `cacheBytes` by when they last ran (`evict`) and charged to the host's
+ * past `cacheBytes` by when they last ran (`evict`), or once none of their
+ * regions has run for `coldAfter` instructions (`evictCold`), and charged to the host's
  * bound (`charge`); and the compiled modules kept for the other runtimes
  * sharing the store (`share`, `sharedModule`). A region joins its module when
  * it is published and leaves it when it goes; a module no region holds is
@@ -328,6 +329,37 @@ export function createModules(state){
         counts.evictedRegions += records.length;
     };
 
+    /** When the held modules were last swept for cold ones (`evictCold`). */
+    let sweptAt = 0;
+    /**
+     * Lets go the modules none of whose regions has run for `coldAfter`
+     * translated instructions, and not brought back lately: a program's load and
+     * menu code, which a level's frames never reach again, left to the store
+     * rather than held for the rest of the run. A module is marked as it is
+     * entered from the runtime's loop, and every slice that ends inside one
+     * resumes through such an entry, so a module the program spends any time in
+     * keeps its mark fresh; one entered only by other modules' tail calls, and
+     * so briefly that no slice ever ends there, can go and be brought back.
+     * Swept an eighth of `coldAfter` apart; only between slices.
+     */
+    const evictCold = ()=>{
+        const after = settings.coldAfter;
+        const retired = rt.corkRetired;
+        if (!(after > 0) || retired - sweptAt < after / 8)
+        {
+            return;
+        }
+        sweptAt = retired;
+        for (const held of [...heldModules.values()])
+        {
+            if (retired - held.ran >= after && held.keepUntil <= retired)
+            {
+                evict(held);
+                counts.evictedCold++;
+            }
+        }
+    };
+
     /** @param {Uint8Array | WebAssembly.Module} module @returns {number} its wasm bytes */
     const bytesOf = module=>(module instanceof WebAssembly.Module
         ? compiledBytes.get(module) ?? 0 : module?.length ?? 0);
@@ -458,6 +490,7 @@ export function createModules(state){
         EVICT_HOLD,
         joinHeld,
         leaveHeld,
+        evictCold,
         instantiate,
         batchInstances,
         keepBatch,

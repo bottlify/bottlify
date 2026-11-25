@@ -463,6 +463,7 @@ export function createCorkRuntime(env){
         /** @type {() => Promise<number>} */
         async translatePending(){
             liftVolatile();
+            rt.evictCold();
             return translateNow();
         },
         invalidatePage,

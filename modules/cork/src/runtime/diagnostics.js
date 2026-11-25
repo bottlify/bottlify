@@ -109,6 +109,31 @@ export function stateBytesOf({ regions, entries, remembered, pageBytes }){
  * @param {DataView} view
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  */
+/**
+ * The held modules none of whose regions has run for `after` translated
+ * instructions, and their wasm bytes; not measured where no age is set.
+ *
+ * @param {any} rt @param {number | undefined} after
+ * @returns {{ coldModules: number | null, coldBytes: number | null }}
+ */
+function coldHeld(rt, after){
+    if (!(after > 0))
+    {
+        return { coldModules: null, coldBytes: null };
+    }
+    let coldModules = 0;
+    let coldBytes = 0;
+    for (const held of rt.heldModules.values())
+    {
+        if (rt.corkRetired - held.ran >= after)
+        {
+            coldModules++;
+            coldBytes += held.bytes;
+        }
+    }
+    return { coldModules, coldBytes };
+}
+
 function nanFirst(view, layout){
     const at = layout.nanFirst ?? -1;
     if (at < 0)
@@ -245,7 +270,7 @@ export function createDiagnostics(state){
         relinks: 0, relinked: 0, merges: 0, merged: 0, reforms: 0, copied: 0,
         // Modules let go past `cacheBytes`, their regions, and the regions of
         // them published again; the crossings counted by modules no longer placed.
-        evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
+        evictions: 0, evictedCold: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
         // The regions taken from the store this run and forgotten at its end, never entered.
         forgotten: 0,
         chargeRefused: 0, unchargedBytes: 0,
@@ -589,6 +614,11 @@ export function createDiagnostics(state){
             heldModules: rt.heldModules.size,
             cacheBytes: settings.cacheBytes,
             evictions: counts.evictions,
+            // Of them, those let go because none of their regions had run for
+            // `coldAfter` instructions, and what is held now that has not run
+            // that long (the next sweep's).
+            evictedCold: counts.evictedCold,
+            ...coldHeld(rt, settings.coldAfter),
             evictedRegions: counts.evictedRegions,
             // Where the host bounds the modules (`charge`): the times it had no
             // room for one, and the bytes held past it where nothing was left

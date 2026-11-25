@@ -315,3 +315,70 @@ test('every module let go is told to the host by its bytes (`letGo`), none twice
     assert.equal(taken - told.reduce((sum, bytes)=>sum + bytes, 0), run.heldBytes,
         'every module held is still held or was told let go, once');
 });
+
+/**
+ * A program that calls a few functions once, as a load does, then runs a loop
+ * over another for a long time: under `coldAfter` the modules of the first ones
+ * are let go to the store once the loop has run that long without them, and the
+ * program leaves what it leaves without the age.
+ *
+ * @param {Record<string, unknown>} config
+ */
+async function loadThenLoop(config){
+    const DRIVER = 0x2000;
+    const FUNCTIONS = 0x3000;
+    const DATA = 0x9000;
+    const m = machine({ leafCalls: false, batchRegions: 1, maxBatchRegions: 1, relinkAfter: 0,
+        store: memoryTranslationStore(), bundleId: 'test', ...config });
+    try
+    {
+        // f_i: add eax, k; add [DATA + 4 i], eax; ret
+        const functions = [0, 1, 2, 3, 4].map(i=>{
+            const at = FUNCTIONS + i * 0x40;
+            m.write(at, [0x05, ...le32(0x01010101 * (i + 1)), 0x01, 0x05, ...le32(DATA + i * 4),
+                0xc3]);
+            return at;
+        });
+        const [loopee, ...loaded] = functions;
+        /** @type {number[]} */
+        const code = [];
+        for (const target of loaded)
+        {
+            code.push(...call(DRIVER + code.length, target));
+        }
+        code.push(0xb9, ...le32(5000));
+        const loop = code.length;
+        code.push(...call(DRIVER + loop, loopee));
+        code.push(0x49, 0x0f, 0x85, ...le32(loop - (code.length + 7)), 0xf4);
+        m.write(DRIVER, code);
+        for (const at of [...functions, DRIVER])
+        {
+            m.runtime.noteHot(at, 0, 64);
+            await until(m, ()=>m.runtime.entryOf(at) >= 0);
+        }
+        m.setReg(4, 0x80000);
+        await runToHalt(m, DRIVER, { held: [], budget: 200 });
+        const d = diagnostics(m);
+        return { state: [m.reg(0), m.reg(1), m.reg(4), ...m.read(DATA, 20)],
+            evictedCold: d.evictedCold, coldBytes: d.coldBytes, heldModules: d.heldModules,
+            loaded: loaded.filter(at=>m.runtime.entryOf(at) >= 0).length };
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+}
+
+test('the modules of code a program ran once and not since are let go after `coldAfter`,'
+    + ' and the program runs as it does without', async()=>{
+    const kept = await loadThenLoop({});
+    assert.equal(kept.evictedCold, 0);
+    assert.equal(kept.coldBytes, null, 'not measured without an age');
+    assert.equal(kept.loaded, 4);
+    const swept = await loadThenLoop({ coldAfter: 4000 });
+    assert.deepEqual(swept.state, kept.state);
+    assert.ok(swept.evictedCold >= 4, `${swept.evictedCold} let go`);
+    assert.equal(swept.loaded, 0, 'the functions called once no longer have an entry');
+    assert.ok(swept.heldModules >= 2, 'the loop and its callee held');
+    assert.equal(typeof swept.coldBytes, 'number');
+});
