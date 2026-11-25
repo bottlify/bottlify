@@ -1,8 +1,8 @@
 {
   "repo": "bottlify/cellar",
-  "tag": "v0.5.9",
+  "tag": "v0.6.0",
   "files": {
-    "cellar.js": "6802d52a3094352c90f39b48a16d16ccc3b0e753839dfd1e95fed1237ec57d6d",
+    "cellar.js": "755775988424b854242d66eeecc043bc709e6f7b9c49bbcba47c616579e9969f",
     "types/bell.d.ts": "1be21a060e78a2d749ecec263f9067e966c6d67d7e68683603360ab2b5ac17af",
     "types/buddy.d.ts": "12799e4e9fca4a89aa19ae6e32668a2420c7d9365b1342f473a1eb54871c8eec",
     "types/bytes.d.ts": "fd87a8ca6bcb4e80876d8e1bf303fd6ea7dcf215ffff5a653c825fdc70e09a13",
@@ -10,7 +10,7 @@
     "types/index.d.ts": "76383d82dd9aedf086b286e3cac4d25223ba930e52de3afe23f926ff23f18838",
     "types/keeper.d.ts": "ddab41a7b8c66190b877bc2ad548b8233109fa440c1287a4621330f9bba4618d",
     "types/reader.d.ts": "159b4b61706287469108bd0e1e5025d445924501eee282a7000112a26ee38189",
-    "types/ring.d.ts": "1a8f16859e0286f22fcb47a8bfe07f9f0a4c4122a9b458afda722d6de88d11ed",
+    "types/ring.d.ts": "1a0f36c740e314b54e7a53084acfa4edd6b30de9fb43ae2e42d19418241cffbb",
     "types/shared.d.ts": "7b30e34dc6bfdaf74170bc64b54aad8658a8d2c324e8016f79c748c3bcfa9275"
   }
 }
