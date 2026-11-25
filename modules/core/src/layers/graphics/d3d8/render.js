@@ -62,7 +62,7 @@ import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { convertTexels } from '../d3d10/blocks.js';
-import { fromHalf, storedToHalves } from '../d3d9/half.js';
+import { fromHalf, storedToHalves, toHalf } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import { changedSpans, createCompared, pageMarksOf, writtenSpans }
     from '../webgpu/internal/changed.js';
@@ -805,12 +805,19 @@ export function expandTexels(format, pixels, count, float32 = false){
     const wide = FORMAT_INFO[format]?.wide;
     if (wide?.luminance)
     {
-        const halves = new Uint16Array(storedToHalves(wide.stored, pixels, count).buffer);
+        // Each texel's half made once, straight from where it lies, into its
+        // three colour channels and an opaque alpha: one pass, one array.
+        const from = new DataView(pixels.buffer, pixels.byteOffset, pixels.byteLength);
         const out = new Uint16Array(count * 4);
-        for (let index = 0; index < count; index++)
+        for (let index = 0, at = 0; index < count; index++, at += 4)
         {
-            out.fill(halves[index], index * 4, index * 4 + 3);
-            out[index * 4 + 3] = HALF_ONE;
+            const half = wide.stored === 'half' ? from.getUint16(index * 2, true)
+                : toHalf(wide.stored === 'float' ? from.getFloat32(index * 4, true)
+                    : from.getUint16(index * 2, true) / 0xffff);
+            out[at] = half;
+            out[at + 1] = half;
+            out[at + 2] = half;
+            out[at + 3] = HALF_ONE;
         }
         return new Uint8Array(out.buffer);
     }
