@@ -1220,9 +1220,9 @@ test('a write placed among a frame\'s commands copies only rows that are the lev
         const copiesIn = body=>{
             const slice = Uint8Array.prototype.slice;
             let copies = 0;
-            Uint8Array.prototype.slice = function(...args){
+            Uint8Array.prototype.slice = /** @this {Uint8Array} @param {number} [start] @param {number} [end] */ function(start, end){
                 copies++;
-                return slice.apply(this, args);
+                return slice.call(this, start, end);
             };
             try
             {
