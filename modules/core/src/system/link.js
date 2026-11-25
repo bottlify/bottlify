@@ -26,7 +26,7 @@
  */
 
 import { decodeValue, encodeValue } from './codec.js';
-import { createRingMemory, openRing } from '../../vendor/cellar/cellar.js';
+import { RingClosed, createRingMemory, openRing } from '../../vendor/cellar/cellar.js';
 
 /**
  * The records on a link: a call, an answer, and a part of one of them too
@@ -175,9 +175,20 @@ export function openLink(end, handlers){
         }
     };
     const flush = ()=>{
-        while (unsent.length > 0 && outbound.write(unsent[0]))
+        try
         {
-            unsent.shift();
+            while (unsent.length > 0 && outbound.write(unsent[0]))
+            {
+                unsent.shift();
+            }
+        }
+        catch (e){
+            // The other side closed the link: nobody will read them.
+            if (!(e instanceof RingClosed))
+            {
+                throw e;
+            }
+            unsent.length = 0;
         }
     };
 
@@ -197,7 +208,17 @@ export function openLink(end, handlers){
         catch (e){
             record = encodeValue([ANSWER, id, false, failureOf(e)]);
         }
-        send(record);
+        try
+        {
+            send(record);
+        }
+        catch (e){
+            // An answer to a side that closed the link goes to nobody.
+            if (!(e instanceof RingClosed))
+            {
+                throw e;
+            }
+        }
     };
 
     /** @param {number} id @param {string} target @param {string} method @param {any[]} args */
@@ -367,7 +388,14 @@ export function openLink(end, handlers){
             const id = nextId++;
             return new Promise((resolve, reject)=>{
                 promised.set(id, { resolve, reject, target, method });
-                send(encodeValue([CALL, id, target, method, args]));
+                try
+                {
+                    send(encodeValue([CALL, id, target, method, args]));
+                }
+                catch (e){
+                    promised.delete(id);
+                    reject(e instanceof RingClosed ? closedError(target, method) : e);
+                }
             });
         },
 
@@ -387,7 +415,13 @@ export function openLink(end, handlers){
             }
             const id = nextId++;
             const started = performance.now();
-            send(encodeValue([CALL, id, target, method, args]));
+            try
+            {
+                send(encodeValue([CALL, id, target, method, args]));
+            }
+            catch (e){
+                throw e instanceof RingClosed ? closedError(target, method) : e;
+            }
             const until = Date.now() + timeoutMs;
             for (;;)
             {
@@ -404,8 +438,9 @@ export function openLink(end, handlers){
                     }
                     return got.value;
                 }
-                // Closed while it waited, by a call it answered meanwhile.
-                if (state.closed)
+                // Closed while it waited, by a call it answered meanwhile, or
+                // by the other side, which will answer nothing now.
+                if (state.closed || inbound.closed())
                 {
                     throw closedError(target, method);
                 }
@@ -438,7 +473,8 @@ export function openLink(end, handlers){
             {
                 const seen = bell.seen();
                 const handled = pump();
-                if (!state.serving)
+                // Closed here, or by the other side: it writes nothing more.
+                if (!state.serving || inbound.closed())
                 {
                     break;
                 }
@@ -476,12 +512,17 @@ export function openLink(end, handlers){
         /**
          * Stops `serve`, and fails every call still waiting for an answer -
          * once `serve` has read what the other side wrote last, where it runs.
-         * A call made after this fails at once.
+         * A call made after this fails at once, and so does one the other side
+         * makes or waits on: the link is closed for both.
          */
         close(){
             state.serving = false;
             state.closed = true;
-            bell.ring();
+            // Both rings: a side waiting for room to write to this one, or
+            // for its answer, ends now rather than at its own time. Closing
+            // what this side reads rings its own doorbell, so its `serve` ends.
+            outbound.close();
+            inbound.close();
             if (!state.looping)
             {
                 failWaiting();

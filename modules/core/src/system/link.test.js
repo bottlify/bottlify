@@ -354,3 +354,59 @@ test('a record is decoded where it lies in the ring, not copied out of it first'
     // the method's names. A copy of the whole record is the bytes of 200 values.
     assert.ok(copied.every(length=>length < 64), `copied out of the ring: ${copied.join(', ')}`);
 });
+
+test('a side that closes the link closes it for the other: its calls fail, its serve ends, and'
+    + ' a call in another thread waiting for room to write is let go', { timeout: 60000 },
+async t=>{
+    const memory = createLinkMemory({ capacity: 4096 });
+    const here = openLink(memory.a, {});
+    const there = openLink(memory.b, { echo: { back: (/** @type {any} */ value)=>value } });
+    const serving = there.serve();
+    here.close();
+    await serving;
+    await assert.rejects(there.call('echo', 'back', [6]), /closed/);
+    assert.throws(()=>there.callWaiting('echo', 'back', [7], 5000), /closed/);
+
+    // A call far longer than the ring, from a thread that may block: its parts
+    // fill the ring nobody here reads, and it waits for room - until the close.
+    const other = createLinkMemory({ capacity: 4096 });
+    const quiet = openLink(other.a, {});
+    const caller = new Worker(`
+        const { parentPort, workerData } = require('node:worker_threads');
+        import(workerData.module).then(({ openLink })=>{
+            const link = openLink(workerData.end, {});
+            parentPort.postMessage('calling');
+            try
+            {
+                link.callWaiting('nobody', 'home', [new Uint8Array(1 << 16)]);
+                parentPort.postMessage('answered');
+            }
+            catch (e)
+            {
+                parentPort.postMessage(e.message);
+            }
+        });`, { eval: true, workerData: { module: LINK, end: other.b } });
+    // A wait a lost close left for good must not hold the test's process.
+    caller.unref();
+    t.after(()=>caller.terminate());
+    /** @type {string[]} */
+    const said = [];
+    const ended = new Promise((resolve, reject)=>{
+        caller.on('message', message=>{
+            said.push(message);
+            if (message !== 'calling')
+            {
+                resolve(message);
+            }
+        });
+        caller.once('error', reject);
+    });
+    while (said.length === 0)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 5));
+    }
+    // Long enough for the call's parts to fill the ring and the caller to sleep.
+    await new Promise(resolve=>setTimeout(resolve, 200));
+    quiet.close();
+    assert.match(String(await ended), /closed/, 'the waiting call was let go');
+});

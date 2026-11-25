@@ -995,11 +995,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             port.onmessage = null;
             breathe.close();
             closed = true;
-            // The ring's watch, woken to see it is over.
-            if (inboundReader)
-            {
-                inboundReader.bell.ring();
-            }
+            // The ring closed: its watch is woken to see it is over, and the
+            // page writes nothing more into it.
+            inboundReader?.close();
         },
     };
 }
