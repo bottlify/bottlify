@@ -154,7 +154,8 @@ const parsed = bytes=>(bytes.length === 0 ? undefined : JSON.parse(decoder.decod
  *
  * @param {ReturnType<typeof import('../../../vendor/cellar/cellar.js').openServer>} server
  * @param {{ reserve: (name: string, length: number, options?: any) => any,
- *     raise: (name: string) => boolean, drop: (name: string) => void }} keeper
+ *     raise: (name: string, options?: { known?: number }) => boolean,
+ *     drop: (name: string) => void }} keeper
  * @returns {{ close: () => void }}
  */
 export function serveKeeper(server, keeper){
@@ -162,7 +163,7 @@ export function serveKeeper(server, keeper){
     const handle = request=>{
         const { op, name, length, options } = parsed(request);
         const answer = op === 'reserve' ? keeper.reserve(name, length, options ?? {})
-            : op === 'raise' ? keeper.raise(name)
+            : op === 'raise' ? keeper.raise(name, options ?? {})
                 : (keeper.drop(name), null);
         return encoder.encode(JSON.stringify(answer));
     };
@@ -209,7 +210,7 @@ export function channelSpace(joined, channel, name){
                 granted.delete(whole);
                 return place ?? askNow({ op: 'reserve', name: whole, length, options });
             },
-            raise: whole=>askNow({ op: 'raise', name: whole }) === true,
+            raise: (whole, options)=>askNow({ op: 'raise', name: whole, options }) === true,
             raiseLater: whole=>{
                 askLater({ op: 'raise', name: whole }).catch(()=>{});
             },

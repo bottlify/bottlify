@@ -29,7 +29,7 @@ export async function testCache(made = {}){
     const opened = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
             reserve: (name, length, options)=>keeper.reserve(name, length, options),
-            raise: name=>keeper.raise(name),
+            raise: (name, options)=>keeper.raise(name, options),
             raiseLater: ()=>{},
             drop: name=>{
                 keeper.drop(name);

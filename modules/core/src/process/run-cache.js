@@ -40,20 +40,9 @@ const SWEEP_MS = 1000;
 export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
-    /**
-     * The index's table as it is now: the keeper makes a larger one as names
-     * are added, and a thread joining after is handed that one, not the first.
-     *
-     * @type {SharedArrayBuffer | null}
-     */
-    let table = null;
     const keeper = await openKeeper({
         budget, segmentBytes: 16 * MIB, coldAfterMs: IDLE_MS,
         announce: message=>{
-            if (message.table !== undefined)
-            {
-                table = message.table;
-            }
             for (const tell of told)
             {
                 tell(message);
@@ -64,7 +53,7 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
         shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
             reserve: (name, length, options)=>keeper.reserve(name, length, options),
-            raise: name=>keeper.raise(name),
+            raise: (name, options)=>keeper.raise(name, options),
             raiseLater: name=>{
                 keeper.raise(name);
             },
@@ -88,8 +77,8 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
             cache: {
                 /** @param {string} name @param {number} length @param {any} options */
                 reserve: (name, length, options)=>keeper.reserve(name, length, options ?? {}),
-                /** @param {string} name */
-                raise: name=>keeper.raise(name),
+                /** @param {string} name @param {{ known?: number }} [options] */
+                raise: (name, options)=>keeper.raise(name, options ?? {}),
                 /** @param {string} name */
                 drop: name=>keeper.drop(name),
             },
@@ -104,7 +93,8 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
         join(post){
             told.add(post);
             return {
-                shared: table === null ? keeper.shared : { ...keeper.shared, table },
+                // The index as it is now: the table the keeper made larger last.
+                shared: keeper.shared,
                 segments: keeper.segmentBuffers(),
                 leave: ()=>told.delete(post),
             };
@@ -153,7 +143,7 @@ export function remoteCacheReader(joined, link){
         shared: joined.shared, segments: joined.segments,
         keeper: {
             reserve: (name, length, options)=>link.ask('reserve', [name, length, options]),
-            raise: name=>link.ask('raise', [name]),
+            raise: (name, options)=>link.ask('raise', [name, options]),
             raiseLater: name=>{
                 link.call('raise', [name]).catch(()=>{});
             },
