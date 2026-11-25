@@ -21,6 +21,7 @@
 import { createCorkHost } from './cork-host.js';
 import { startGcNudge } from './gc-nudge.js';
 import { storeClient } from './store-relay.js';
+import { openSync } from '../../../system/opfs-file.js';
 import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor }
     from './executor-channel.js';
 import { deadlineOf, waitFor, waitForAsync } from '../../../../vendor/cellar/cellar.js';
@@ -388,8 +389,11 @@ function bind(listen, send){
         }
         else if (data?.type === 'records')
         {
-            data.file.createSyncAccessHandle({ mode: 'readwrite-unsafe' }).then((/** @type {any} */ handle)=>{
-                storeRelay?.holdRecords(handle);
+            openSync(data.file, { shared: true }).then(handle=>{
+                if (handle !== null)
+                {
+                    storeRelay?.holdRecords(handle);
+                }
             }, ()=>{
                 // One handle a file in this browser: the process reads for it, as before.
             });

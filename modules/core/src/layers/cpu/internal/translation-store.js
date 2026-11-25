@@ -27,6 +27,7 @@
  * to agree; the key's own characters would be a path.
  */
 
+import { openSync, replaceWhole, writeAll, writeAt } from '../../../system/opfs-file.js';
 import { frame, plain, unframe, unframeLater } from './record-frame.js';
 
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
@@ -348,33 +349,6 @@ const LIMITS = { keepSessions: 2, compactFloor: 64 << 20, cap: 512 << 20, indexF
 const generationName = (base, generation)=>(generation === 0 ? base : `${base}.${generation}`);
 
 /**
- * Writes a whole file, replacing what was there.
- *
- * @param {any} directory @param {string} name @param {Uint8Array} bytes
- */
-async function writeWhole(directory, name, bytes){
-    const handle = await directory.getFileHandle(name, { create: true });
-    if (typeof handle.createSyncAccessHandle === 'function')
-    {
-        const access = await handle.createSyncAccessHandle();
-        try
-        {
-            access.truncate(0);
-            access.write(bytes, { at: 0 });
-            access.flush();
-        }
-        finally
-        {
-            access.close();
-        }
-        return;
-    }
-    const writable = await handle.createWritable();
-    await writable.write(bytes);
-    await writable.close();
-}
-
-/**
  * A record name for a key.
  *
  * @param {string} key
@@ -525,32 +499,6 @@ export async function clearTranslations(name, root){
 }
 
 /**
- * Appends to a small file at a known end: the synchronous handle inside a
- * worker, the stream on the page.
- *
- * @param {any} handle @param {number} at @param {Uint8Array} bytes
- */
-async function appendAt(handle, at, bytes){
-    if (typeof handle.createSyncAccessHandle === 'function')
-    {
-        const access = await handle.createSyncAccessHandle();
-        try
-        {
-            access.write(bytes, { at });
-            access.flush();
-        }
-        finally
-        {
-            access.close();
-        }
-        return;
-    }
-    const writable = await handle.createWritable({ keepExistingData: true });
-    await writable.write({ type: 'write', position: at, data: bytes });
-    await writable.close();
-}
-
-/**
  * A store over a directory handle (the origin private file system's, or
  * anything with its shape).
  *
@@ -655,18 +603,22 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                     writerTried = true;
                     writer = openWriter();
                 }
-                access = await records.createSyncAccessHandle(writer === null ? undefined
-                    : { mode: 'readwrite-unsafe' }).catch((/** @type {any} */ e)=>{
-                    // A browser that has no shared handle refuses the mode
-                    // or the second holder: the store holds the file alone.
-                    if (writer === null)
-                    {
-                        throw e;
-                    }
-                    writer.close();
-                    writer = null;
-                    return records.createSyncAccessHandle();
-                });
+                access = await openSync(records, { shared: writer !== null })
+                    .catch((/** @type {any} */ e)=>{
+                        // A browser that has no shared handle refuses the mode
+                        // or the second holder: the store holds the file alone.
+                        if (writer === null)
+                        {
+                            throw e;
+                        }
+                        writer.close();
+                        writer = null;
+                        return openSync(records);
+                    });
+                if (access === null)
+                {
+                    throw new Error('the records file answers with promises');
+                }
                 end = access.getSize();
                 // A writer that cannot stand beside this handle leaves the
                 // writes to the store, as before there was one.
@@ -814,13 +766,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         const live = [...kept].map(recordName=>
             /** @type {[string, Place]} */ ([recordName, all.get(recordName)]));
         const next = generation + 1;
-        const target = await directory.getFileHandle(generationName(RECORDS, next),
-            { create: true });
         /** @type {Map<string, Place>} */
         const moved = new Map();
         let at = 0;
-        /** @param {(bytes: Uint8Array, at: number) => unknown} write */
-        const copy = async write=>{
+        await replaceWhole(directory, generationName(RECORDS, next), (async function* (){
             for (const [recordName, place] of live)
             {
                 const bytes = await readPlace(place);
@@ -828,32 +777,11 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 {
                     continue;
                 }
-                await write(bytes, at);
+                yield bytes;
                 moved.set(recordName, { offset: at, length: place.length, session: place.session });
                 at += place.length;
             }
-        };
-        if (typeof target.createSyncAccessHandle === 'function')
-        {
-            const out = await target.createSyncAccessHandle();
-            try
-            {
-                out.truncate(0);
-                await copy((bytes, offset)=>out.write(bytes, { at: offset }));
-                out.flush();
-            }
-            finally
-            {
-                out.close();
-            }
-        }
-        else
-        {
-            const out = await target.createWritable();
-            await copy((bytes, offset)=>out.write(
-                { type: 'write', position: offset, data: bytes }));
-            await out.close();
-        }
+        })());
         // The index by session, so the next opening reads each record's age.
         /** @type {Map<number, string[]>} */
         const bySession = new Map();
@@ -873,8 +801,8 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         const indexBytes = new TextEncoder().encode([...bySession].sort((a, b)=>a[0] - b[0])
             .map(([number, lines])=>`# ${number}\n${lines.join('')}`).join('')
             + [...needsOf].map(([region, module])=>`= ${region} ${module}\n`).join(''));
-        await writeWhole(directory, generationName(INDEX, next), indexBytes);
-        await writeWhole(directory, CURRENT, new TextEncoder().encode(String(next)));
+        await replaceWhole(directory, generationName(INDEX, next), [indexBytes]);
+        await replaceWhole(directory, CURRENT, [new TextEncoder().encode(String(next))]);
         access?.close();
         const old = generation;
         generation = next;
@@ -900,9 +828,17 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 {
                     const current = await directory.getFileHandle(CURRENT);
                     const text = await textOf(await current.getFile());
-                    generation = Number.isInteger(Number(text)) && Number(text) > 0
-                        ? Number(text) : 0;
-                    named = true;
+                    // A compaction names its generation (never 0) after writing it,
+                    // through a handle that cuts the file first: one cut short reads
+                    // empty, or as a generation of fewer digits that is not there,
+                    // and names none -- the generations there all stay.
+                    const n = Number(text);
+                    if (/^[1-9][0-9]*$/.test(text))
+                    {
+                        await directory.getFileHandle(generationName(RECORDS, n));
+                        generation = n;
+                        named = true;
+                    }
                 }
                 catch {
                     generation = 0;
@@ -1007,7 +943,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 const index = await directory.getFileHandle(generationName(INDEX, generation),
                     { create: true });
                 await (writer?.append ? writer.append(index, at, bytes)
-                    : appendAt(index, at, bytes));
+                    : writeAt(index, [[at, bytes]]));
             }
             publishing = null;
         })().catch(()=>{
@@ -1079,7 +1015,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             {
                 for (let at = 0; at < bytes.length; at += WRITE_PIECE)
                 {
-                    access.write(bytes.subarray(at, at + WRITE_PIECE), { at: offset + at });
+                    writeAll(access, bytes.subarray(at, at + WRITE_PIECE), offset + at);
                     if (performance.now() - since >= WRITE_SLICE_MS)
                     {
                         await new Promise(resolve=>setTimeout(resolve, 0));
@@ -1099,12 +1035,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         queued = batch;
         appending = appending.then(async()=>{
             queued = null;
-            const writable = await records.createWritable({ keepExistingData: true });
-            for (const [offset, bytes] of batch)
-            {
-                await writable.write({ type: 'write', position: offset, data: bytes });
-            }
-            await writable.close();
+            await writeAt(records, batch);
         });
         await appending;
     };
@@ -1491,7 +1422,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 }
                 if (identity)
                 {
-                    await writeWhole(directory, SEEDED, new TextEncoder().encode(identity));
+                    await replaceWhole(directory, SEEDED, [new TextEncoder().encode(identity)]);
                 }
                 return { taken: true, added: writes.length,
                     present: entries.length - writes.length };

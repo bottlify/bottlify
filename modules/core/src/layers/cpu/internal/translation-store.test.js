@@ -20,8 +20,9 @@ import {
  * worker gets from the origin's file system.
  *
  * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number,
- *     writables?: number, largest?: number }} [counter]  `largest`: the most bytes one
- *     write through the synchronous handle took
+ *     writables?: number, largest?: number, short?: number }} [counter]  `largest`: the most
+ *     bytes one write through the synchronous handle took; `short`: bytes each such write
+ *     leaves out
  * @param {boolean} [sync]
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
@@ -113,6 +114,8 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                                 write(from, { at }){
                                     counter.writes = (counter.writes ?? 0) + 1;
                                     counter.largest = Math.max(counter.largest ?? 0, from.length);
+                                    // A disk taking a write in part, where a test asks.
+                                    from = from.subarray(0, from.length - (counter.short ?? 0));
                                     // A disk that takes its time, where a test asks.
                                     const until = performance.now() + (counter.writeMs ?? 0);
                                     while (performance.now() < until)
@@ -475,6 +478,53 @@ test('an opening that cannot read which generation is current removes nothing', 
     }
     await second.close();
 });
+
+test('a `current` a write cut short left names no generation, and nothing is removed for it',
+    async()=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        await first.put('a', new Uint8Array([1]));
+        await first.close();
+        const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+        for (const name of ['records.12', 'index.12'])
+        {
+            (await directory.getFileHandle(name, { create: true })).bytes = new Uint8Array(0);
+        }
+        // `12` replaced through a synchronous handle and the page gone between the
+        // cut and the write, or after its first digit.
+        for (const torn of ['', '1'])
+        {
+            (await directory.getFileHandle('current', { create: true })).bytes =
+                new TextEncoder().encode(torn);
+            const store = await createDirectoryTranslationStore(root, 'bundle');
+            assert.deepEqual([...(await store.get('a') ?? [])], [1], `${torn || 'empty'}: `
+                + 'read as none named');
+            assert.equal(store.stats().opened.swept, 0, `${torn || 'empty'}: nothing removed`);
+            assert.ok(directory.children.has('records.12') && directory.children.has('records'));
+            await store.close();
+        }
+    });
+
+test('a record the disk took in part is a failure of the store, and no index names it',
+    async()=>{
+        const counter = { probes: 0, syncReads: 0, writes: 0, short: 0 };
+        const root = fakeDirectory(counter, true);
+        const store = await createDirectoryTranslationStore(root, 'bundle', undefined,
+            { writer: ()=>null });
+        await store.put('first', Uint8Array.from({ length: 64 }, (_, at)=>at));
+        await store.flush();
+        counter.short = 1;
+        await store.put('torn', Uint8Array.from({ length: 64 }, (_, at)=>255 - at));
+        counter.short = 0;
+        await store.put('after', new Uint8Array([7]));
+        await store.flush();
+        assert.ok(store.stats().broken, 'the store gave up for the run');
+        await store.close();
+        assert.ok(!(await indexOf(root, 'bundle')).includes(fileNameOf('torn')));
+        const next = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal(await next.get('torn'), null);
+        assert.equal((await next.get('first'))?.length, 64, 'what was whole stays');
+    });
 
 test('an index of touches is rewritten when it outgrows its records', async()=>{
     // A warm run that only reads: every run touches the same forty records,

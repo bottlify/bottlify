@@ -8,9 +8,13 @@
 // translation-store.js): a handle of this worker's own on the records file, opened as the
 // engine's own is, `readwrite-unsafe`, so the two stand together. A write through the
 // synchronous handle waits for the disk, and on the engine's thread one held a game's frame
-// for forty milliseconds; here it holds nothing but this worker.
+// for forty milliseconds; here it holds nothing but this worker. Its writes go through
+// `system/opfs-file.js` as every other OPFS writer's: a record the disk takes in part fails
+// its answer, and the store gives up for the run rather than name it.
 
-/** @type {any} */
+import { openSync, writeAll, writeAt } from '../../../system/opfs-file.js';
+
+/** @type {import('../../../system/opfs-file.js').SyncFile | null} */
 let access = null;
 
 /**
@@ -22,13 +26,17 @@ const serve = async data=>{
     {
         access?.close();
         access = null;
-        access = await data.file.createSyncAccessHandle({ mode: 'readwrite-unsafe' });
+        access = await openSync(data.file, { shared: true });
+        if (access === null)
+        {
+            throw new Error('no synchronous handle on the records file here');
+        }
     }
     else if (data.type === 'write')
     {
         for (const [offset, bytes] of data.writes ?? [])
         {
-            access.write(bytes, { at: offset });
+            writeAll(/** @type {any} */ (access), bytes, offset);
         }
     }
     else if (data.type === 'flush')
@@ -44,16 +52,8 @@ const serve = async data=>{
     {
         // The index's lines, at its end: a handle of its own for the one write,
         // flushed and closed here, where the disk holds this worker alone.
-        const index = await data.file.createSyncAccessHandle();
-        try
-        {
-            index.write(data.bytes, { at: data.at });
-            index.flush();
-        }
-        finally
-        {
-            index.close();
-        }
+        const at = /** @type {number} */ (data.at);
+        await writeAt(data.file, [[at, /** @type {Uint8Array} */ (data.bytes)]]);
     }
 };
 

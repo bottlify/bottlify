@@ -30,15 +30,40 @@
  * - The disk full is `QuotaExceededError` as the browser names it, passed on
  *   as it is: each writer decides what it gives up (`isQuota`).
  *
- * The writers, what each writes and how it survives a write cut short:
+ * The writers: what each writes; on which thread, through which handles;
+ * when it flushes; how it survives a write cut short; what reads it back.
  *
- * | writer | writes | thread, handles | flushed | cut short | read back by |
- * | --- | --- | --- | --- | --- | --- |
- * | `filesystem/internal/opfs-store.js` (the bundle's block cache, `bundle/cache.js`) | the cache's table, packs of blocks, read order | the engine's worker, a pool of exclusive sync handles, one a file | at `flush`, `close` and when a handle leaves the pool | the table names a block only once its record is written; a record's header is checked against the block it is taken for | the cache, this run and the next |
- * | `filesystem/internal/page-file.js` | what a program wrote that the pieces held in memory do not fit | the engine's worker, one exclusive sync handle on a file of the run's own | never: nothing after the run reads it | a write refused or cut short is said once and nothing more is written out; the pieces stay in memory | itself, this run only; a left file is removed at the next start |
- * | `cpu/internal/translation-store.js` | the records file, its index (a log), `current` and `seeded`, a compaction's next generation | the engine's worker: the records through the writer worker below or its own sync handle, the index appended and the small files replaced through a sync handle each time; a page: streams | before each index append (so the index never names bytes not on the disk), at `flush` | an index line past the records' end is no record; a torn `current` names no generation; a write cut short breaks the store for the run | the store at the next opening; an executor reading records by place |
- * | `cpu/internal/translation-store.writer.js` | the records and the index appends of the store above | a worker of its own, a shared (`readwrite-unsafe`) handle beside the store's | when the store asks | as the store above: its answer fails, and the store is broken | the store |
- * | `storage.js` (`opfsSession`) | a session's entries, one file each | whichever thread holds the session, streams (atomic) | at each stream's close | the stream's copy is swapped in only when whole; one cut short is aborted, the old entry left | `load`, `list`, `read` at the next start |
+ * - `filesystem/internal/opfs-store.js`, under the bundle's block cache
+ *   (`bundle/cache.js`): the cache's table, its packs of blocks and the order
+ *   the run read in. The engine's worker, a pool of exclusive sync handles,
+ *   one a file, kept open (a guest read cannot wait for one). Flushed at
+ *   `flush`, `close` and when a handle leaves the pool. Cut short: the table
+ *   names a block only once its record is written, and a record's header is
+ *   checked against the block it is taken for. Read by the cache, this run
+ *   and the next.
+ * - `filesystem/internal/page-file.js`: what a program wrote past the pieces
+ *   held in memory. The engine's worker, one exclusive sync handle on a file
+ *   of the run's own. Never flushed: nothing after the run reads it. Cut
+ *   short: said once, nothing more written out, the pieces stay in memory.
+ *   Read by itself, this run only; a file a killed run left is removed at the
+ *   next start.
+ * - `cpu/internal/translation-store.js`: the records file, its index (a log),
+ *   `current`, `seeded`, a compaction's next generation. The engine's worker:
+ *   the records through the writer worker below or its own sync handle, the
+ *   index appended and the small files replaced through a sync handle taken
+ *   each time; a page: streams. Flushed before each index append (the index
+ *   never names bytes not on the disk) and at `flush`. Cut short: an index
+ *   line past the records' end is no record, a `current` cut short names no
+ *   generation, a write taken in part breaks the store for the run. Read by
+ *   the store at its next opening and by an executor reading records by place.
+ * - `cpu/internal/translation-store.writer.js`: the records and the index
+ *   appends of the store above, in a worker of its own, through a shared
+ *   (`readwrite-unsafe`) handle beside the store's; flushed when the store
+ *   asks; a write cut short fails its answer and breaks the store.
+ * - `storage.js` (`opfsSession`): a session's entries, a file each, from
+ *   whichever thread holds the session, through streams (`atomic`), each
+ *   flushed at its close; one cut short is aborted and the old entry stays.
+ *   Read by `load`, `list` and `read` at the next start.
  *
  * Not writers: `cpu/internal/executor.worker.js` reads records through a
  * shared handle of its own (`openSync`); `storage-budget.js` lists and removes
@@ -134,12 +159,28 @@ function inTurn(file, write){
     return done;
 }
 
+/** @typedef {{ type: 'write', position: number, data: Uint8Array }} StreamWrite */
+
+/**
+ * Parts one after another as writes at their places: a stream's own cursor is
+ * not what a caller sees of the file.
+ *
+ * @param {Parts<Uint8Array>} parts @returns {AsyncIterable<StreamWrite>}
+ */
+async function* placed(parts){
+    let position = 0;
+    for await (const data of parts)
+    {
+        yield { type: 'write', position, data };
+        position += data.length;
+    }
+}
+
 /**
  * Writes the parts into a stream, closed when all are in and aborted when one
  * is refused: an unclosed stream keeps its copy and the file's lock.
  *
- * @param {any} stream @param {Parts<Uint8Array | { type: 'write', position: number,
- *     data: Uint8Array }>} parts
+ * @param {any} stream @param {Parts<StreamWrite>} parts
  */
 async function intoStream(stream, parts){
     try
@@ -177,7 +218,7 @@ export async function replaceWhole(directory, name, parts, { atomic = false } = 
         const access = atomic ? null : await openSync(file);
         if (access === null)
         {
-            await intoStream(await file.createWritable(), parts);
+            await intoStream(await file.createWritable(), placed(parts));
             return;
         }
         try
@@ -213,8 +254,7 @@ export function writeAt(file, writes){
         if (access === null)
         {
             await intoStream(await file.createWritable({ keepExistingData: true }),
-                writes.map(([position, data])=>({ type: /** @type {const} */ ('write'),
-                    position, data })));
+                writes.map(([position, data])=>({ type: 'write', position, data })));
             return;
         }
         try
