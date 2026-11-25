@@ -14,7 +14,7 @@
  * the 0x05 that marks a property set in front.
  */
 
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { ANSI_PAGE, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { publishEnumerator } from './enumerator.js';
 import { pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';

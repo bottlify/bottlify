@@ -22,7 +22,7 @@
  * are written against a backing rather than against the tree.
  */
 
-import { GUID_NULL, GUID_SIZE, formatGuid, readGuid, writeGuid } from './guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid, readGuid, writeGuid } from '../../../system/guid.js';
 import {
     MAX_NAME_LENGTH, createEntry, createRoot, isCompoundFile, nameKey,
     parseCompoundFile, serializeCompoundFile,

@@ -33,6 +33,7 @@ import { CATALOG_STORE } from '../sfc/functions.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CLASSES_ROOT, HKEY_USERS } from '../advapi32/registry.js';
 import { wholeAddress } from '../common/pointers.js';
+import { formatGuid, guidBytes } from '../../../system/guid.js';
 
 /**
  * setupapi — INF files, cabinets and file queues: how an installer that
@@ -1168,25 +1169,10 @@ export function createSetupapiFunctions(host){
 
     /** A GUID from guest memory, as lower-case text; null for none. @param {number} pointer */
     const guidAt = pointer=>((pointer >>> 0) === 0 ? null
-        : guidText(host.readMemory(wholeAddress(pointer), 16).slice()).toLowerCase());
+        : formatGuid(host.readMemory(wholeAddress(pointer), 16).slice()).toLowerCase());
 
     /** @param {number} address @param {string} guid  Braced. */
     const writeGuid = (address, guid)=>host.writeMemory(wholeAddress(address), guidBytes(guid));
-
-    /** A GUID's sixteen bytes. @param {string} guid  Braced. */
-    const guidBytes = guid=>{
-        const hex = guid.replace(/[{}-]/g, '');
-        const bytes = new Uint8Array(16);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(0, Number.parseInt(hex.slice(0, 8), 16), true);
-        view.setUint16(4, Number.parseInt(hex.slice(8, 12), 16), true);
-        view.setUint16(6, Number.parseInt(hex.slice(12, 16), 16), true);
-        for (let at = 0; at < 8; at++)
-        {
-            bytes[8 + at] = Number.parseInt(hex.slice(16 + at * 2, 18 + at * 2), 16);
-        }
-        return bytes;
-    };
 
     /**
      * SP_DEVINFO_DATA after its cbSize: the class, the device node, and
@@ -1217,7 +1203,7 @@ export function createSetupapiFunctions(host){
 
     /** A DEVPROPKEY at an address: its format, braced and lower case, and its id. @param {number} address */
     const propKeyAt = address=>({
-        fmtid: guidText(host.readMemory(wholeAddress(address), 16).slice()).toLowerCase(),
+        fmtid: formatGuid(host.readMemory(wholeAddress(address), 16).slice()).toLowerCase(),
         pid: readU32(wholeAddress(address) + 16),
     });
 
@@ -1363,7 +1349,7 @@ export function createSetupapiFunctions(host){
                     {
                         return ERROR_INVALID_DATA;
                     }
-                    hive.setValue(key, entry.name, 1, encodeAnsi(`${guidText(data)
+                    hive.setValue(key, entry.name, 1, encodeAnsi(`${formatGuid(data)
                         .toLowerCase()}\0`));
                     return ERROR_SUCCESS;
                 }
@@ -2360,15 +2346,6 @@ export function createSetupapiFunctions(host){
     const COMPONENTS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\Setup\\OsComponents';
     const HKEY_LOCAL_MACHINE = 0x80000002;
 
-    /** @param {Uint8Array} bytes  Sixteen bytes of a GUID, as {xxxxxxxx-...}. */
-    const guidText = bytes=>{
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
-        const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
-            value.toString(16).toUpperCase().padStart(width, '0');
-        const tail = [...bytes.subarray(8)].map(b=>hex(b, 2)).join('');
-        return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-            + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
-    };
 
     /**
      * What a file is, compressed or not: an LZ-compressed (SZDD) file the
@@ -6679,7 +6656,7 @@ export function createSetupapiFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 const hive = host.registry;
-                const guid = guidText(host.readMemory(wholeAddress(guidPointer), 16));
+                const guid = formatGuid(host.readMemory(wholeAddress(guidPointer), 16));
                 const key = hive?.open(hive.root(HKEY_LOCAL_MACHINE), `${COMPONENTS_KEY}\\${guid}`);
                 if (!key)
                 {
@@ -6728,7 +6705,7 @@ export function createSetupapiFunctions(host){
                 }
                 const data = host.readMemory(wholeAddress(dataPointer), dataSize).slice();
                 const { key } = hive.create(hive.root(HKEY_LOCAL_MACHINE),
-                    `${COMPONENTS_KEY}\\${guidText(data.subarray(4, 20))}`);
+                    `${COMPONENTS_KEY}\\${formatGuid(data.subarray(4, 20))}`);
                 hive.setValue(key, 'ComponentData', 3, data);
                 hive.setValue(key, 'ExceptionData', 3,
                     host.readMemory(wholeAddress(exceptionPointer), exceptionSize).slice());
@@ -6746,7 +6723,7 @@ export function createSetupapiFunctions(host){
                 {
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                const guid = guidText(host.readMemory(wholeAddress(guidPointer), 16));
+                const guid = formatGuid(host.readMemory(wholeAddress(guidPointer), 16));
                 const removed = hive.remove(hive.root(HKEY_LOCAL_MACHINE),
                     `${COMPONENTS_KEY}\\${guid}`);
                 return removed === 'deleted' ? fail(ERROR_SUCCESS, 1) : fail(ERROR_FILE_NOT_FOUND);

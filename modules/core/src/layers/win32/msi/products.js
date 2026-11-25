@@ -23,7 +23,7 @@ import { INSTALLSTATE } from './session.js';
 import { squashGuid, unsquashGuid, valueText } from './registration.js';
 import { decodeShellLink } from '../common/shell-link.js';
 import { createMd5 } from '../crypto/digest.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { REG_EXPAND_SZ, REG_SZ } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { BASE85 } from './system.js';

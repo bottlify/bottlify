@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComObject } from './objects.js';
 import {
     FMTID_DOC_SUMMARY_INFORMATION, FMTID_SUMMARY_INFORMATION, FMTID_USER_DEFINED_PROPERTIES,

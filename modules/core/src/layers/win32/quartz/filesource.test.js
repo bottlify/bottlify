@@ -10,7 +10,7 @@ import { createFilterBase, GUID_NULL, MEDIATYPE_STREAM } from './filter.js';
 import { IID_IASYNC_READER, IID_IFILE_SOURCE_FILTER, MEDIASUBTYPE, createFileSource,
     streamSubtype } from './filesource.js';
 import { createComObject } from '../ole32/objects.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 
 const IID_IBASE_FILTER = '{56A86895-0AD4-11CE-B03A-0020AF0BA770}';
 const IID_IPIN = '{56A86891-0AD4-11CE-B03A-0020AF0BA770}';

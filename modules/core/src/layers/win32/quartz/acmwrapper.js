@@ -21,7 +21,7 @@
 import { FORMAT_WAVE_FORMAT_EX, MEDIATYPE_AUDIO } from './filter.js';
 import { audioType } from './splitters.js';
 import { describe } from './describe.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0x00000000;

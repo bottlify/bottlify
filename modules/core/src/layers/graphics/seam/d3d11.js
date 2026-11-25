@@ -28,7 +28,7 @@ import {
     E_OUTOFMEMORY, IID, S_FALSE, S_OK,
 } from '../d3d10/constants.js';
 import { VIEW_UNION, readViewDesc, writeViewDesc } from '../d3d10/structs.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
 
 // --- the interfaces, after IUnknown's three, in their headers' order ---
 

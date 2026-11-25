@@ -19,7 +19,7 @@
  * GetURL, InvokeCommand after IUnknown's three.
  */
 
-import { writeGuid } from '../ole32/guid.js';
+import { writeGuid } from '../../../system/guid.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';

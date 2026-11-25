@@ -30,7 +30,7 @@
 import {
     GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, canonicalGuid, formatGuid, parseGuid, readGuid,
     writeGuid,
-} from './guid.js';
+} from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';

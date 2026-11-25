@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IID_IUNKNOWN, createComRegistry } from './objects.js';
-import { formatGuid } from './guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import {
     CLSID_MMDEVICE_ENUMERATOR, E_NOTFOUND, IID_IMMDEVICE, IID_IMMDEVICE_COLLECTION,
     IID_IMMDEVICE_ENUMERATOR, IID_IPROPERTY_STORE, registerMmDevApiClasses,

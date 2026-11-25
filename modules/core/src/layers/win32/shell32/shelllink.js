@@ -23,7 +23,7 @@
  * here that must not be surprised.
  */
 
-import { writeGuid } from '../ole32/guid.js';
+import { writeGuid } from '../../../system/guid.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';

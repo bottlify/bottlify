@@ -29,7 +29,7 @@
  * a DLL a context redirects lives (`loaderApi`).
  */
 
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, guidBytes, parseGuid } from '../../../system/guid.js';
 import {
     compareVersions, encodeIdentity, identityMatches, parseManifest,
 } from './manifest.js';
@@ -2364,25 +2364,6 @@ export function createActivationContexts(host){
     };
 
     return { functions, loaderApi };
-}
-
-/** @param {string} text  a GUID in braces */
-function guidBytes(text){
-    const hex = text.replace(/[{}-]/g, '');
-    const bytes = new Uint8Array(16);
-    if (hex.length !== 32)
-    {
-        return bytes;
-    }
-    const view = new DataView(bytes.buffer);
-    view.setUint32(0, parseInt(hex.slice(0, 8), 16), true);
-    view.setUint16(4, parseInt(hex.slice(8, 12), 16), true);
-    view.setUint16(6, parseInt(hex.slice(12, 16), 16), true);
-    for (let at = 0; at < 8; at++)
-    {
-        bytes[8 + at] = parseInt(hex.slice(16 + at * 2, 18 + at * 2), 16);
-    }
-    return bytes;
 }
 
 export { ISOLATIONAWARE_MANIFEST_RESOURCE_ID, CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST };

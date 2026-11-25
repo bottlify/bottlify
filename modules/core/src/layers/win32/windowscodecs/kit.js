@@ -13,7 +13,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { readGuid, writeGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../../../system/guid.js';
 import { CodecError } from './frames.js';
 import { INTERFACES } from './layout.js';
 import { wholeAddress } from '../common/pointers.js';

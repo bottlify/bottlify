@@ -28,7 +28,7 @@
 
 import { E_INVALIDARG, E_NOT_SUFFICIENT_BUFFER, E_OUTOFMEMORY, E_POINTER, S_OK, drive }
     from './kit.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 

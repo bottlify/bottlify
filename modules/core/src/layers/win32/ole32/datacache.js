@@ -22,7 +22,7 @@
  * or drawn, through gdi32.
  */
 
-import { GUID_NULL, formatGuid, parseGuid } from './guid.js';
+import { GUID_NULL, formatGuid, parseGuid } from '../../../system/guid.js';
 import { FORMATETC_SIZE, STGMEDIUM_SIZE, TYMED, DVASPECT_CONTENT } from './oleutil.js';
 import { publishEnumerator } from './enumerator.js';
 import { wholeAddress } from '../common/pointers.js';

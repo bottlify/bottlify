@@ -22,7 +22,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { canonicalGuid, parseGuid } from '../ole32/guid.js';
+import { canonicalGuid, parseGuid, readGuid } from '../../../system/guid.js';
 import { IID_ITYPEINFO, createClassInfo } from './classinfo.js';
 import {
     CLIENT_SITE, CLSID_WEB_BROWSER, CLSID_WEB_BROWSER_V1, CONNECTION_POINT, CONTROL_SITE,
@@ -1368,15 +1368,7 @@ export function createBrowsers(host){
     };
 
     /** A GUID in guest memory as text. @param {number} at */
-    const formatAt = at=>{
-        const raw = host.readMemory(wholeAddress(at), 16);
-        const view = new DataView(raw.buffer, raw.byteOffset, 16);
-        const hex = (/** @type {number} */ v, /** @type {number} */ n)=>v.toString(16)
-            .padStart(n, '0');
-        const tail = [...raw.subarray(8)].map(b=>hex(b, 2)).join('');
-        return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-            + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
-    };
+    const formatAt = at=>readGuid(host, wholeAddress(at)).toLowerCase();
 
     /**
      * An interface's methods as the bridge takes them: each one's own

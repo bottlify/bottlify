@@ -23,6 +23,7 @@
 import { dword } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
+import { formatGuid } from '../../../system/guid.js';
 
 /** Each is [ordinal, name]. @type {readonly (readonly [number, string])[]} */
 export const DATABLOCK_ORDINALS = Object.freeze([
@@ -251,13 +252,7 @@ export function createDataBlockFunctions(host){
             {
                 return E_FAIL;
             }
-            const bytes = read(guid, 16);
-            const view = new DataView(bytes.buffer);
-            const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
-                value.toString(16).toUpperCase().padStart(digits, '0');
-            const tail = Array.from(bytes.subarray(8), b=>hex(b, 2)).join('');
-            const text = `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}`
-                + `-${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
+            const text = formatGuid(read(guid, 16));
             const out = new Uint8Array((text.length + 1) * (wide ? 2 : 1));
             Array.from(text).forEach((c, i)=>{
                 out[wide ? i * 2 : i] = c.charCodeAt(0);

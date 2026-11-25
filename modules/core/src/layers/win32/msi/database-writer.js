@@ -24,7 +24,7 @@
  * named ":name") are copied the same way.
  */
 
-import { GUID_NULL } from '../ole32/guid.js';
+import { GUID_NULL } from '../../../system/guid.js';
 import { compoundBytes, storageOf, streamOf, writeCompound } from '../common/compound-writer.js';
 import {
     SYSTEM_COLUMNS, decodeStreamName, encodeStreamName, isBinaryType, isKey, isStringType,

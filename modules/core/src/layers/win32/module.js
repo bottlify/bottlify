@@ -201,7 +201,7 @@ import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 import { createFilterStore } from './devenum/devenum.js';
-import { parseGuid } from './ole32/guid.js';
+import { parseGuid } from '../../system/guid.js';
 import { createMfplatFunctions } from './mfplat/functions.js';
 import { createUiaFunctions } from './uiautomationcore/functions.js';
 import { createDxva2Functions } from './dxva2/functions.js';

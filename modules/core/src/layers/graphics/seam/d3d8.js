@@ -40,7 +40,8 @@ import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
     IID_IDirect3DTexture8, IID_IDirect3DVertexBuffer8, IID_IDirect3DVolume8,
     IID_IDirect3DVolumeTexture8, IID_IDirect3DSwapChain8 } from './iids.js';
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
-import { queryAs, readGuid } from './guid.js';
+import { queryAs } from './guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,

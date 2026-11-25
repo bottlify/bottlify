@@ -16,7 +16,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
-import { GUID_NULL, parseGuid } from '../ole32/guid.js';
+import { formatGuid, GUID_NULL, parseGuid } from '../../../system/guid.js';
 import { dword, u32 } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
@@ -1287,14 +1287,7 @@ export function createOrdinalFunctions(host){
                 {
                     return 0;
                 }
-                const guid = readBytes(wholeAddress(clsid), 16);
-                const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
-                    value.toString(16).toUpperCase().padStart(digits, '0');
-                const view = new DataView(guid.slice().buffer);
-                const tail = Array.from(guid.subarray(8), b=>hex(b, 2)).join('');
-                const name = `{${hex(view.getUint32(0, true), 8)}`
-                    + `-${hex(view.getUint16(4, true), 4)}`
-                    + `-${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
+                const name = formatGuid(readBytes(wholeAddress(clsid), 16));
                 const path = encodeAnsi(`${COMPAT_OBJECTS}\\${name}\0`);
                 return scratch(path.length + 80, async at=>{
                     host.writeMemory(at + 80, path);

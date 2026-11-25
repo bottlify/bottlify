@@ -22,7 +22,7 @@
 
 import { createDigestFor } from '../crypto/signature.js';
 import { bytesSource, CompoundError, openCompound } from '../msi/compound.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { sameBytes } from '../crypto/x509.js';
 import { utf16 } from '../common/utf16.js';
 

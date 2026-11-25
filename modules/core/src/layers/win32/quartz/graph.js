@@ -52,7 +52,7 @@ import {
     IID_IOBJECT_WITH_SITE, IOBJECT_WITH_SITE_SLOTS, IID_IVIDEO_FRAME_STEP, IVIDEO_FRAME_STEP_SLOTS,
 } from './interfaces.js';
 import { describe } from './describe.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createStreaming } from './stream.js';
 import { createSystemClock } from './clock.js';
 import { createMemoryAllocator } from './allocator.js';

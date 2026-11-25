@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createWindowscodecs } from './functions.js';
 import { GUID, INTERFACES } from './layout.js';
 import { WINCODEC } from './frames.js';

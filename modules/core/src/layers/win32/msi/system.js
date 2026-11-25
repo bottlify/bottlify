@@ -26,7 +26,7 @@ import {
     ERROR_SUCCESS, installing, readFile, removing, schedule, writeFile,
 } from './steps.js';
 import { removeKeyTree, squashGuid } from './registration.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 
 /** @typedef {import('./engine.js').Engine} Engine */
 

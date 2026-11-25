@@ -51,6 +51,7 @@ import { formatIpv6Text, parseIpv4Text, parseIpv6Text } from './inet.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
+import { formatGuid } from '../../../system/guid.js';
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 export const HOSTNAME = 'bottlify';
@@ -176,14 +177,7 @@ const TRANSMIT_CHUNK = 0x10000;
  *
  * @param {Uint8Array} bytes
  */
-const guidText = bytes=>{
-    const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
-    const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
-        value.toString(16).padStart(digits, '0');
-    const tail = [...bytes.subarray(8, 16)].map(byte=>hex(byte, 2)).join('');
-    return `${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-        + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}`;
-};
+const guidText = bytes=>formatGuid(bytes).slice(1, -1).toLowerCase();
 
 const AF_INET6 = 23;
 const WSASERVICE_NOT_FOUND = 10108;

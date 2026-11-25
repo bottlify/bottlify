@@ -33,7 +33,7 @@
  * run the stubs on, and a binding to another machine.
  */
 
-import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { NDR_LOCAL_DATA_REPRESENTATION, RPC_MESSAGE, STUB_DESC, STUB_MESSAGE } from './ndr.js';
 import { wholeAddress } from '../common/pointers.js';
 

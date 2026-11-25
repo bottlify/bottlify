@@ -14,7 +14,7 @@
  */
 
 import { dword, u32 } from './text.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const ERROR_SUCCESS = 0;

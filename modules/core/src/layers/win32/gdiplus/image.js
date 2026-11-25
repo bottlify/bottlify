@@ -22,7 +22,7 @@
 import { convertRow, FORMATS } from '../windowscodecs/formats.js';
 import { CodecError, sniff } from '../windowscodecs/frames.js';
 import { medianCut, predefinedPalette } from '../windowscodecs/palettes.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, guidBytes, parseGuid } from '../../../system/guid.js';
 import { Status, fn } from './kit.js';
 import {
     IMAGE_FORMAT, codecInfos, decoders, encodeBmp, encodePng, encoders,
@@ -1756,11 +1756,6 @@ export function createImageFunctions(kit, host){
             return Ok;
         })),
     };
-
-    /** @param {string} text */
-    function guidBytes(text){
-        return /** @type {Uint8Array} */ (parseGuid(text));
-    }
 
     /**
      * The codecs into the caller's buffer: its count and size exactly those

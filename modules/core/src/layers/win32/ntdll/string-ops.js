@@ -23,6 +23,7 @@ import { decodeAnsi, decodeOem, downcaseUnit, encodeAnsi, encodeOem, upcaseUnit 
     from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
 import { bytesOfUnits, utf16 } from '../common/utf16.js';
+import { readGuid } from '../../../system/guid.js';
 
 const SOME_NOT_MAPPED = 0x00000107;
 const NOT_FOUND = 0xc0000225;
@@ -293,16 +294,7 @@ export function createStringOperations(host){
     };
 
     /** @param {number} address */
-    const guidText = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 16);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
-        /** @param {number} value @param {number} width */
-        const hex = (value, width)=>value.toString(16).toUpperCase().padStart(width, '0');
-        const tail = [...bytes.subarray(8)].map(byte=>hex(byte, 2));
-        return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-            + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 2).join('')}-`
-            + `${tail.slice(2).join('')}}`;
-    };
+    const guidText = address=>readGuid(host, wholeAddress(address));
 
     return {
         /** NTSTATUS RtlInitUnicodeStringEx(PUNICODE_STRING Destination, PCWSTR Source) */

@@ -18,7 +18,7 @@
  */
 
 import { layoutOf } from './pixels.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 
 const D3DUSAGE_RENDERTARGET = 0x1;
 const D3DUSAGE_DEPTHSTENCIL = 0x2;

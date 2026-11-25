@@ -32,7 +32,7 @@
  * (dlls/ole32/tests/usrmarshal.c) check them byte for byte.
  */
 
-import { GUID_NULL, formatGuid, readGuid } from './guid.js';
+import { GUID_NULL, formatGuid, readGuid } from '../../../system/guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
 import { readToTerminator } from '../common/scan-windows.js';

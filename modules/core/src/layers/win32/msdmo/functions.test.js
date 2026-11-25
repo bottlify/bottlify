@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsdmoFunctions, listDmos } from './functions.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 
 const DMO = '{77777777-0000-0000-0000-000000000000}';
 const OTHER = '{88888888-0000-0000-0000-000000000000}';

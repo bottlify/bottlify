@@ -13,7 +13,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;

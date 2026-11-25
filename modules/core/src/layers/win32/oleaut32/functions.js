@@ -27,7 +27,7 @@
  */
 
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
-import { readGuid, writeGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../../../system/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { IID_IPICTURE, IID_IPICTUREDISP, createPictureObjects } from './picture.js';

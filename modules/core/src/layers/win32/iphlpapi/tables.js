@@ -20,6 +20,7 @@
 
 import { readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { formatGuid } from '../../../system/guid.js';
 
 const NO_ERROR = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -492,11 +493,7 @@ export function createIphlpapiTables(host, model){
     };
 
     /** A GUID as its registry text, in capitals. @param {Uint8Array} bytes */
-    const guidText = bytes=>{
-        const hex = (/** @type {number} */ byte)=>byte.toString(16).padStart(2, '0').toUpperCase();
-        const order = [3, 2, 1, 0, -1, 5, 4, -1, 7, 6, -1, 8, 9, -1, 10, 11, 12, 13, 14, 15];
-        return `{${order.map(at=>(at < 0 ? '-' : hex(bytes[at]))).join('')}}`;
-    };
+
 
     /** An interface's MIB_IPINTERFACE_ROW for IPv4. @param {InterfaceModel} one */
     const ipInterfaceRow = one=>{
@@ -1624,7 +1621,7 @@ export function createIphlpapiTables(host, model){
         {
             return ERROR_INVALID_PARAMETER;
         }
-        const text = guidText(host.readMemory(wholeAddress(guid), 16).slice());
+        const text = formatGuid(host.readMemory(wholeAddress(guid), 16).slice());
         if ((length >>> 0) < text.length + 1)
         {
             return ERROR_INSUFFICIENT_BUFFER;

@@ -13,7 +13,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
 import { createStorageFunctions } from './storage.js';
 import { HKEY_CLASSES_ROOT, REG_SZ, createHive } from '../advapi32/registry.js';

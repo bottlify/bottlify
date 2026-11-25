@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
 import { createGlobalMemory } from '../kernel32/moveable.js';
 import { callLong } from '../../bridge/internal/long-machine.fixture.js';

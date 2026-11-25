@@ -23,7 +23,7 @@
  */
 
 import { createDeviceCalls } from '../d3dx9/device.js';
-import { canonicalGuid, formatGuid, parseGuid } from '../ole32/guid.js';
+import { canonicalGuid, formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IUNKNOWN, createComObject } from '../ole32/objects.js';
 import { wholeAddress } from '../common/pointers.js';
 

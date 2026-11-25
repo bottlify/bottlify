@@ -17,9 +17,11 @@
  * accepts and which surfaces as "class not registered" rather than as anything
  * naming byte order.
  *
- * The canonical uppercase string is this layer's identity for a GUID: it is what
+ * The canonical uppercase string is the engine's identity for a GUID: it is what
  * a class registry is keyed by and what two interfaces are compared as. Bytes
- * only exist at the guest boundary.
+ * only exist at the guest boundary. Every layer that meets one - COM, the
+ * bridge answering QueryInterface, the graphics seams, sound - reads and writes
+ * it here.
  */
 
 /** sizeof(GUID). */
@@ -48,22 +50,29 @@ const GUID_PATTERN =
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  */
 
-/** @param {number} value @param {number} digits */
-const hex = (value, digits)=>value.toString(16).toUpperCase().padStart(digits, '0');
+/** Each byte as two uppercase digits: a GUID is formatted on every QueryInterface. */
+const BYTE_HEX = Array.from({ length: 256 }, (unused, byte)=>
+    byte.toString(16).toUpperCase().padStart(2, '0'));
 
 /**
  * @param {Uint8Array} bytes  At least GUID_SIZE bytes, starting at the GUID.
  * @returns {string} the canonical uppercase form, braces included
  */
 export function formatGuid(bytes){
-    const view = new DataView(bytes.buffer, bytes.byteOffset, GUID_SIZE);
-    let tail = '';
-    for (let index = 8; index < GUID_SIZE; index++)
-    {
-        tail += hex(bytes[index], 2);
-    }
-    return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}`
-        + `-${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
+    /**
+     * Bytes `from` up to `to`, backwards - a little-endian field - when `to < from`.
+     *
+     * @param {number} from @param {number} to
+     */
+    const digits = (from, to)=>{
+        let text = '';
+        for (let at = from; at !== to; at += from < to ? 1 : -1)
+        {
+            text += BYTE_HEX[bytes[at]];
+        }
+        return text;
+    };
+    return `{${digits(3, -1)}-${digits(5, 3)}-${digits(7, 5)}-${digits(8, 10)}-${digits(10, 16)}}`;
 }
 
 /**
@@ -90,6 +99,16 @@ export function parseGuid(text){
 }
 
 /**
+ * The sixteen bytes of a GUID the engine names itself - a class, an interface,
+ * a device - or of one a program's data holds; what is not a GUID in braces
+ * gives GUID_NULL's zeros rather than bytes made of what it was.
+ *
+ * @param {string} text
+ * @returns {Uint8Array}
+ */
+export const guidBytes = text=>parseGuid(text) ?? new Uint8Array(GUID_SIZE);
+
+/**
  * The form a GUID is stored and compared under. Going through the bytes rather
  * than upper-casing the string means a malformed one is rejected here instead of
  * becoming a registry key nothing will ever match.
@@ -103,12 +122,13 @@ export function canonicalGuid(text){
 }
 
 /**
- * @param {GuidMemory} memory
- * @param {number} address
+ * @param {Pick<GuidMemory, 'readMemory'>} memory
+ * @param {number} address  A dword as a program passed it (a negative one is the
+ *     same address read unsigned) or a whole address past 4 GiB.
  * @returns {string}
  */
 export function readGuid(memory, address){
-    return formatGuid(memory.readMemory(address, GUID_SIZE));
+    return formatGuid(memory.readMemory(address >= 2 ** 32 ? address : address >>> 0, GUID_SIZE));
 }
 
 /**

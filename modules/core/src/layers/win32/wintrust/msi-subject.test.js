@@ -16,7 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEntry, createRoot, nameKey, serializeCompoundFile } from '../ole32/cfb.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createSha1 } from '../crypto/digest.js';
 import { msiSubject, readSubject } from './subject.js';
 

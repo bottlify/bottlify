@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { shlwapiMachine } from './memory.fixture.js';
 import { SHLWAPI_ORDINALS } from './forwards.js';
 import { SHLWAPI_NAMED_ORDINALS } from './ordinals.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 
 const S_OK = 0;
 const E_FAIL = 0x80004005 | 0;

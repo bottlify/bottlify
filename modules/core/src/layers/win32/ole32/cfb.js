@@ -30,7 +30,7 @@
 import {
     MAX_NAME_LENGTH, compareNames, compoundBytesSync, memorySource, nameKey,
 } from '../common/compound-writer.js';
-import { GUID_NULL, formatGuid } from './guid.js';
+import { GUID_NULL, formatGuid } from '../../../system/guid.js';
 
 export { MAX_NAME_LENGTH, compareNames, nameKey };
 

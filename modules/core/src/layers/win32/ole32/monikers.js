@@ -27,7 +27,7 @@
  * the same whether the tree it was built from leaned left or right.
  */
 
-import { GUID_NULL, GUID_SIZE, canonicalGuid, formatGuid, parseGuid } from './guid.js';
+import { canonicalGuid, formatGuid, GUID_NULL, GUID_SIZE, guidBytes } from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
@@ -358,9 +358,6 @@ const u16 = value=>new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32Of = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
     | (bytes[at + 3] << 24)) >>> 0;
-
-/** @param {string} guid */
-const guidBytes = guid=>/** @type {Uint8Array} */ (parseGuid(guid));
 
 /**
  * A path in the pieces file monikers compose and compare by: each

@@ -10,7 +10,7 @@ import { inputModule, viewportOrigin } from './module.js';
 import { WM } from './router.js';
 import { createMessageQueue, ANY_WINDOW } from '../win32/user32/messages.js';
 import { createStubApi } from '../../system/stub.js';
-import { writeGuid } from '../win32/ole32/guid.js';
+import { writeGuid } from '../../system/guid.js';
 import { IID_IDirectInput8A, GUID_SysMouse } from './dinput/seam.js';
 import { withPointers } from '../memory/pointers.fixture.js';
 

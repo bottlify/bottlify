@@ -21,7 +21,7 @@
 
 import { createComObject } from '../ole32/objects.js';
 import { describe } from './describe.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { CLSID_LEGACY_AM_FILTER_CATEGORY, encodeFilterData } from '../devenum/devenum.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';

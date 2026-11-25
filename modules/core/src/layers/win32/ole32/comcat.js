@@ -16,7 +16,7 @@
  */
 
 import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
-import { canonicalGuid, formatGuid, parseGuid } from './guid.js';
+import { canonicalGuid, formatGuid, parseGuid } from '../../../system/guid.js';
 import { publishEnumerator } from './enumerator.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';

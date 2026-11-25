@@ -27,7 +27,7 @@
  * a proxy of the interface points at, which is the DLL's own code.
  */
 
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';

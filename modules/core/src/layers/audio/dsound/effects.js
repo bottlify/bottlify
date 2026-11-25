@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { formatGuid } from '../../../system/guid.js';
+
 /**
  * DirectSound's standard effects - gargle, chorus, flanger, echo,
  * distortion, compressor, parametric equalizer, I3DL2 and Waves reverb - as
@@ -161,7 +163,7 @@ const I3DL2_QUALITY_DEFAULT = 2;
  * @returns {{ tag: number, channels: number, rate: number, block: number, bits: number } | null}
  */
 export function readAudioType(host, at, pointerSize){
-    const guid = (/** @type {number} */ offset)=>guidText(host.readMemory(at + offset, 16));
+    const guid = (/** @type {number} */ offset)=>formatGuid(host.readMemory(at + offset, 16));
     const long = pointerSize === 8;
     const cbFormat = new DataView(host.readMemory(at + (long ? 72 : 64), 4).slice().buffer)
         .getUint32(0, true);
@@ -184,15 +186,6 @@ export function readAudioType(host, at, pointerSize){
         ? format : null;
 }
 
-/** @param {Uint8Array} bytes */
-function guidText(bytes){
-    const view = new DataView(bytes.slice().buffer);
-    const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
-        value.toString(16).toUpperCase().padStart(digits, '0');
-    const tail = [...bytes.subarray(8)].map(byte=>hex(byte, 2)).join('');
-    return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-        + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
-}
 
 /**
  * A parameter structure out of guest memory, or null when a field is out of

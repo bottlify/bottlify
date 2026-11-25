@@ -34,7 +34,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { describe } from './describe.js';
 import {
     CLSID_ASYNC_READER, IBASE_FILTER_SLOTS, IID_IBASE_FILTER, IID_IMEDIA_FILTER,

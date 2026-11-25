@@ -25,7 +25,7 @@
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToDosDateTime, msToFileTime } from '../kernel32/filetime.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { utf16 } from './utf16.js';
 
 /** The class a link's header names, and the COM class that reads and writes one. */

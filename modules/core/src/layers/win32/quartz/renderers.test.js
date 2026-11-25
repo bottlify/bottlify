@@ -10,7 +10,7 @@ import { createFilterBase, FORMAT_WAVE_FORMAT_EX, MEDIATYPE_AUDIO, MEDIATYPE_VID
     FORMAT_VIDEO_INFO } from './filter.js';
 import { CLSID_DSOUND_RENDER, CLSID_NULL_RENDERER, createRenderers } from './renderers.js';
 import { createComObject } from '../ole32/objects.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from '../ole32/objects.js';
 import { registerQuartzClasses } from './graph.js';
 import { createPassThru } from './passthru.js';

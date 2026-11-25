@@ -13,9 +13,9 @@ import {
 } from './functions.js';
 import { createComObject, createComRegistry } from '../ole32/objects.js';
 import {
-    DPERR_BUFFERTOOSMALL, DPERR_NOMESSAGES, DPERR_NOSESSIONS, DPSPGUID_TCPIP, guidBytes,
-    sessionDefinition,
+    DPERR_BUFFERTOOSMALL, DPERR_NOMESSAGES, DPERR_NOSESSIONS, DPSPGUID_TCPIP, sessionDefinition,
 } from './session.js';
+import { guidBytes } from '../../../system/guid.js';
 
 const make = ()=>{
     const memory = new Uint8Array(64).fill(0xcc);

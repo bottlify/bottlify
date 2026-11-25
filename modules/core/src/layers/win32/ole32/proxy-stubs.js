@@ -19,7 +19,7 @@
  * this kind: a type library describes what they marshal.
  */
 
-import { canonicalGuid } from './guid.js';
+import { canonicalGuid } from '../../../system/guid.js';
 
 const PSOAINTERFACE = '{00020424-0000-0000-C000-000000000046}';
 const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';

@@ -19,7 +19,7 @@
  * -- FAudio's xWMA playing silence, FNA's video not starting -- is its own.
  */
 
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const E_NOTIMPL = 0x80004001 | 0;

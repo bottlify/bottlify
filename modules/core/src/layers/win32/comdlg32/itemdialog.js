@@ -17,7 +17,7 @@
  * which every caller handles, and there is no result to get.
  */
 
-import { canonicalGuid, formatGuid, readGuid } from '../ole32/guid.js';
+import { canonicalGuid, formatGuid, readGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 const S_OK = 0;

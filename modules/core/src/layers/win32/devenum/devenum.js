@@ -23,7 +23,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, guidBytes, parseGuid } from '../../../system/guid.js';
 import { describe } from '../quartz/describe.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
 import { safeArrayLayout } from '../common/safearray.js';
@@ -269,8 +269,6 @@ export function createDeviceEnumeration(host, store){
         }
         return formatGuid(bytes);
     };
-    /** @param {string} text */
-    const guidBytes = text=>/** @type {Uint8Array} */ (parseGuid(text));
 
     /**
      * The values a registration's key holds beside its name and class: a

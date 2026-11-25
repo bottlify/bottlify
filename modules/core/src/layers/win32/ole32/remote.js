@@ -45,7 +45,7 @@
  * ends gives back everything its proxies held, as COM's rundown does.
  */
 
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { IUNKNOWN_METHODS } from './objects.js';
 import {
     IID_ICLASSFACTORY, IID_ITYPEINFO, IID_IUNKNOWN, argumentBytes, argumentSlots,

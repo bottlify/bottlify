@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComObject, createComRegistry } from './objects.js';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
 import { CLSID_STD_COMPONENT_CATEGORIES_MGR, registerComponentCategories } from './comcat.js';

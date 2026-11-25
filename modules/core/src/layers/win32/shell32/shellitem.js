@@ -15,7 +15,7 @@
 
 import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { parseGuid, readGuid } from '../ole32/guid.js';
+import { parseGuid, readGuid } from '../../../system/guid.js';
 import { itemsOf, listBytes, parentOf } from './namespace.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';

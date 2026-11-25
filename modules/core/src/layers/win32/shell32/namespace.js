@@ -19,7 +19,7 @@
  * and hands these back, which is what lets the content be ours to choose.
  */
 
-import { readGuid } from '../ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
 import { createAdapter } from '../oleaut32/objects.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';

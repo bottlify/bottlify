@@ -16,7 +16,7 @@
  * the same calls in the same order -- the order Windows makes them in.
  */
 
-import { GUID_SIZE, parseGuid } from './guid.js';
+import { GUID_SIZE, parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
 import { utf16z } from '../common/utf16.js';

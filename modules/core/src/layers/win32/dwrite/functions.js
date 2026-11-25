@@ -29,6 +29,7 @@ import { FontFormatError, analyzeFile, openTypeTag, tagText } from './sfnt.js';
 import { GLYPH_COUNT, SYSTEM_FAMILIES, UNITS_PER_EM, createSystemFace } from './system.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
+import { readGuid } from '../../../system/guid.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -1793,13 +1794,7 @@ export function createDwriteFunctions(host){
 
     /** A GUID in guest memory, as the canonical text. @param {number} at */
     function guidAt(at){
-        const raw = host.readMemory(wholeAddress(at), 16);
-        const view = new DataView(raw.buffer, raw.byteOffset, 16);
-        const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>value
-            .toString(16).toUpperCase().padStart(digits, '0');
-        const tail = [...raw.subarray(8)].map(b=>hex(b, 2)).join('');
-        return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-            + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
+        return readGuid(host, wholeAddress(at));
     }
 }
 

@@ -58,7 +58,7 @@ import { applyPatch as applyDeltaPatch } from '../mspatcha/pa19.js';
 import {
     ERROR_BAD_PATHNAME, exportTable, importTable, mergeDatabases, streamFolder,
 } from './archive.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16 } from '../common/utf16.js';
 

@@ -22,7 +22,7 @@
  */
 
 import { createComObject } from '../../win32/ole32/objects.js';
-import { readGuid, writeGuid, GUID_NULL } from '../../win32/ole32/guid.js';
+import { readGuid, writeGuid, GUID_NULL } from '../../../system/guid.js';
 import { parseSegment, parseWave, musicToMs, PPQ } from './riff.js';
 import { createPlayer, volumeToGain } from './player.js';
 import {
