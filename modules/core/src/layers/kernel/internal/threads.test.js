@@ -225,6 +225,28 @@ test('a resumed thread reports what it waited for and what it was answered', ()=
     assert.deepEqual(resumed, [['a', 'any of event "#403c", event "#4040"', 1]]);
 });
 
+test('what a parked call owes once its wait ends is done as the thread resumes, once', ()=>{
+    // GetOverlappedResult's count: only the end of the wait knows it.
+    const cpu = { ...fakeCpu(), resumeContextAt: ()=>{} };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    let owed = 0;
+    a.whenResumed = ()=>owed++;
+    sched.block(a, 'an event');
+    sched.runOnce();
+    assert.equal(owed, 0, 'not while it waits');
+    sched.wake(a);
+    a.parkedReturn = 0x401000;
+    a.waitResult = 1;
+    sched.runOnce();
+    assert.equal(owed, 1, 'as it resumes');
+    a.parkedReturn = 0x401000;
+    sched.block(a, 'an event');
+    sched.wake(a);
+    sched.runOnce();
+    assert.equal(owed, 1, 'and not at the next park');
+});
+
 test('waking a thread that is not blocked changes nothing', ()=>{
     const { sched } = scheduler();
     const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000 });

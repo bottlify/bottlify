@@ -1152,7 +1152,7 @@ export function createThreadingFunctions(host){
          * low bit is a flag, not part of the handle), or the file's handle
          * when there is none, and then answers TRUE with the count even if
          * Internal still says pending (Wine's kernel32 file tests,
-         * test_overlapped).
+         * test_overlapped); a wait that parks reads the count as it ends.
          */
         GetOverlappedResult: {
             argBytes: 16,
@@ -1192,7 +1192,9 @@ export function createThreadingFunctions(host){
                         host.currentThread());
                     if (answered === null)
                     {
-                        count();
+                        // The count is the one the I/O leaves when the wait
+                        // ends, not the one there now.
+                        kernel.whenResumed(host.currentThread(), count);
                         return host.park();
                     }
                     status = field(overlappedFields.internal);

@@ -118,6 +118,10 @@ function fakeKernel(){
     };
 
     const kernel = {
+        /** @param {any} thread @param {() => void} work */
+        whenResumed: (thread, work)=>{
+            thread.whenResumed = work;
+        },
         state,
         /** @param {any} options */
         createThread(options){
@@ -1452,6 +1456,14 @@ test('an operation still pending is incomplete without bWait, and waited for wit
         'the low bit of hEvent is a flag, not part of the handle');
     assert.deepEqual(parked, [current]);
     assert.equal(sets[1][1], object);
+    pending.view.setUint32(0x40, 0x5555, true);
+    assert.equal(pending.count(), 0x5555, 'a wait that parks writes no count before it ends');
+    // The read finishes while the caller sleeps; the count is the one it left.
+    pending.view.setUint32(0x20, 0, true);
+    pending.view.setUint32(0x24, 4, true);
+    current.whenResumed();
+    assert.equal(pending.count(), 4, 'the count the I/O left, written as the wait ends');
+    pending.view.setUint32(0x20, STATUS_PENDING, true);
 
     pending.view.setUint32(0x30, 0, true);
     assert.equal(fns.GetOverlappedResult.handler([0x9999, 0x20, 0x40, 1]), 0,

@@ -894,6 +894,18 @@ export function createKernelModule(){
                 threadGone: thread=>!live() || threadGone(thread),
 
                 /**
+                 * Runs `work` when `thread`, about to park in a host call, is
+                 * resumed, before it runs again: what the call writes only once
+                 * its wait has ended (GetOverlappedResult's count). One at a
+                 * time; a thread that parks again sets its own.
+                 *
+                 * @param {any} thread @param {() => void} work
+                 */
+                whenResumed: (/** @type {any} */ thread, /** @type {() => void} */ work)=>{
+                    thread.whenResumed = work;
+                },
+
+                /**
                  * Suspends a thread: it keeps its state -- a wait stays a wait,
                  * deadline and all -- and gets no turn, and no object it waits on
                  * is handed to it, until it has been resumed as often.

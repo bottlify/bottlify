@@ -859,6 +859,15 @@ export function createScheduler(options){
         let resume = null;
         if (next.parkedReturn !== null && next.parkedReturn !== undefined)
         {
+            // What the call that parked owes once its wait has ended (an
+            // out-parameter only the end of the wait can fill), done before
+            // the thread runs again.
+            const owed = next.whenResumed;
+            if (owed)
+            {
+                next.whenResumed = null;
+                owed();
+            }
             resume = {
                 eip: next.parkedReturn,
                 esp: next.resumeStack ?? null,
