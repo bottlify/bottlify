@@ -40,6 +40,7 @@ import { SOUND_ADAPTER_NAME, SOUND_DEVICE_INTERFACE } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
@@ -632,17 +633,6 @@ const dword = value=>new Uint8Array([
     value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
 ]);
 
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-    }
-    return bytes;
-};
-
 /**
  * Which ordinal is which export, for a program that links WINMM.dll by number.
  * Windows exports PlaySoundA a second time as ordinal 2, with no name.
@@ -1151,7 +1141,7 @@ export function createWinmmFunctions(host){
                 {
                     return MMSYSERR_INVALPARAM;
                 }
-                host.writeMemory(first, utf16(`${SOUND_DEVICE_INTERFACE}\0`));
+                host.writeMemory(first, utf16z(SOUND_DEVICE_INTERFACE));
                 return MMSYSERR_NOERROR;
             case DRVM_MAPPER_PREFERRED_GET:
             case DRVM_MAPPER_CONSOLEVOICECOM_GET:

@@ -10,7 +10,7 @@
  * crosses to another process.
  */
 
-import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { createMidl } from './midl.js';
 import { createRuntime } from './runtime.js';
 import { wholeAddress } from '../common/pointers.js';

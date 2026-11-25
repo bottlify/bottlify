@@ -27,11 +27,12 @@
  * the same whether the tree it was built from leaned left or right.
  */
 
-import { GUID_NULL, GUID_SIZE, canonicalGuid, formatGuid, parseGuid } from './guid.js';
+import { canonicalGuid, formatGuid, GUID_NULL, GUID_SIZE, guidBytes } from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -300,22 +301,6 @@ const upperText = text=>String.fromCharCode(...Array.from(text, c=>upperUnit(c.c
 const sameIgnoringCase = (a, b)=>a.length === b.length && upperText(a) === upperText(b);
 
 /**
- * @param {string} text
- * @param {boolean} [terminate]
- * @returns {Uint8Array} UTF-16LE
- */
-const encodeWide = (text, terminate = true)=>{
-    const bytes = new Uint8Array((text.length + (terminate ? 1 : 0)) * 2);
-    for (let index = 0; index < text.length; index++)
-    {
-        const unit = text.charCodeAt(index);
-        bytes[index * 2] = unit & 0xff;
-        bytes[index * 2 + 1] = unit >>> 8;
-    }
-    return bytes;
-};
-
-/**
  * @param {Uint8Array} bytes  UTF-16LE; reading stops at a terminator.
  * @returns {string}
  */
@@ -358,9 +343,6 @@ const u16 = value=>new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
 /** @param {Uint8Array} bytes @param {number} at */
 const readU32Of = (bytes, at)=>(bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
     | (bytes[at + 3] << 24)) >>> 0;
-
-/** @param {string} guid */
-const guidBytes = guid=>/** @type {Uint8Array} */ (parseGuid(guid));
 
 /**
  * A path in the pieces file monikers compose and compare by: each
@@ -439,9 +421,9 @@ const comparisonDataOf = state=>{
     switch (state.kind)
     {
         case 'item':
-            return concat(clsid, encodeWide(upperText(`${state.delimiter ?? ''}${state.name}`)));
+            return concat(clsid, utf16z(upperText(`${state.delimiter ?? ''}${state.name}`)));
         case 'file':
-            return concat(clsid, encodeWide(upperText(state.path)));
+            return concat(clsid, utf16z(upperText(state.path)));
         case 'class':
             return concat(clsid, guidBytes(state.clsid));
         case 'anti':
@@ -574,7 +556,7 @@ export function createMonikerFunctions(env){
      * @param {string} text @param {number} out
      */
     const answerString = (text, out)=>{
-        const bytes = encodeWide(text);
+        const bytes = utf16z(text);
         const block = env.taskAlloc(bytes.length) >>> 0;
         if (block === 0)
         {
@@ -1229,7 +1211,7 @@ export function createMonikerFunctions(env){
      *
      * @param {number} file @param {string} path @param {number} mode @param {unknown} thread
      */
-    const loadFile = (file, path, mode, thread)=>lend(encodeWide(path),
+    const loadFile = (file, path, mode, thread)=>lend(utf16z(path),
         name=>call(file, SLOT.PERSIST_FILE_LOAD, [name, mode], thread), E_OUTOFMEMORY);
 
     /**
@@ -1761,7 +1743,7 @@ export function createMonikerFunctions(env){
         {
             return concat(head, u32(0));
         }
-        const units = encodeWide(path, false);
+        const units = utf16(path);
         return concat(head, u32(units.length + 6), u32(units.length), u16(FILE_MONIKER_WIDE_TAG),
             units);
     };
@@ -2046,7 +2028,7 @@ export function createMonikerFunctions(env){
                     return container.hr;
                 }
                 const speed = await bindSpeed(context, thread);
-                const hr = await lend(encodeWide(state.name), name=>call(container.value,
+                const hr = await lend(utf16z(state.name), name=>call(container.value,
                     SLOT.GET_OBJECT, [name, speed, context, iidAt, out], thread), E_OUTOFMEMORY);
                 await release(container.value, thread);
                 return hr;
@@ -2128,7 +2110,7 @@ export function createMonikerFunctions(env){
                 {
                     return container.hr;
                 }
-                const hr = await lend(encodeWide(state.name), name=>call(container.value,
+                const hr = await lend(utf16z(state.name), name=>call(container.value,
                     SLOT.GET_OBJECT_STORAGE, [name, context, iidAt, out], thread), E_OUTOFMEMORY);
                 await release(container.value, thread);
                 return hr;
@@ -2478,7 +2460,7 @@ export function createMonikerFunctions(env){
                 {
                     return container.hr;
                 }
-                const hr = await lend(encodeWide(state.name), name=>call(container.value,
+                const hr = await lend(utf16z(state.name), name=>call(container.value,
                     SLOT.CONTAINER_IS_RUNNING, [name], thread), E_OUTOFMEMORY);
                 await release(container.value, thread);
                 return hr;
@@ -2995,7 +2977,7 @@ export function createMonikerFunctions(env){
                 }
                 const speed = await bindSpeed(context, thread);
                 const iidAt = (state.name.length + 1) * 2;
-                const parser = await lend(concat(encodeWide(state.name),
+                const parser = await lend(concat(utf16z(state.name),
                     guidBytes(IID_IPARSEDISPLAYNAME)), block=>outCall(
                     slot=>call(container.value, SLOT.GET_OBJECT,
                         [block, speed, context, block + iidAt, slot], thread)),
@@ -3666,7 +3648,7 @@ export function createMonikerFunctions(env){
         const extra = text.slice(at, end);
         return {
             hr: S_OK,
-            state: newState('class', { clsid, extra: extra.length > 0 ? encodeWide(extra)
+            state: newState('class', { clsid, extra: extra.length > 0 ? utf16z(extra)
                 : new Uint8Array(0) }),
             eaten: colon < 0 ? end : end + 1,
         };

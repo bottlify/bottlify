@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createActivationContexts, hashKey } from './actctx.js';
 
 const HEAD = '<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">';

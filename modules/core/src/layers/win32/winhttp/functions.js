@@ -24,6 +24,7 @@
 
 import { crackUrl } from '../wininet/url.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
@@ -111,13 +112,7 @@ export function createWinhttpFunctions(host){
     };
     /** @param {number} address @param {string} text */
     const writeWide = (address, text)=>{
-        const out = new Uint8Array(text.length * 2 + 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            out[i * 2] = text.charCodeAt(i) & 0xff;
-            out[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-        }
-        host.writeMemory(wholeAddress(address), out);
+        host.writeMemory(wholeAddress(address), utf16z(text));
     };
 
     /**
@@ -353,12 +348,7 @@ export function createWinhttpFunctions(host){
                 const date = `${HTTP_DAYS[word(2) % 7]}, ${two(word(3))}`
                     + ` ${HTTP_MONTHS[(word(1) + 11) % 12]} ${String(word(0)).padStart(4, '0')}`;
                 const text = `${date} ${two(word(4))}:${two(word(5))}:${two(word(6))} GMT`;
-                const bytes = new Uint8Array(text.length * 2 + 2);
-                for (let i = 0; i < text.length; i++)
-                {
-                    bytes[i * 2] = text.charCodeAt(i);
-                }
-                host.writeMemory(wholeAddress(out), bytes);
+                host.writeMemory(wholeAddress(out), utf16z(text));
                 return 1;
             },
         },

@@ -27,6 +27,7 @@ import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
@@ -270,13 +271,7 @@ export function createEnvironmentFunctions(host){
 
     /** @param {string} text */
     const writeWideString = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
+        const bytes = utf16z(text);
         const address = host.allocate(bytes.length);
         host.writeMemory(address, bytes);
         return address;
@@ -437,14 +432,7 @@ export function createEnvironmentFunctions(host){
         {
             return path.length + 1;
         }
-        const bytes = new Uint8Array((path.length + 1) * 2);
-        for (let at = 0; at < path.length; at++)
-        {
-            const code = path.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
-        host.writeMemory(wholeAddress(buffer), bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(path));
         return path.length;
     };
 
@@ -686,13 +674,7 @@ export function createEnvironmentFunctions(host){
                 {
                     for (const { at, units } of placeExpansion(pieces, size >>> 0))
                     {
-                        const bytes = new Uint8Array(units.length * 2);
-                        for (let index = 0; index < units.length; index++)
-                        {
-                            bytes[index * 2] = units.charCodeAt(index) & 0xff;
-                            bytes[index * 2 + 1] = units.charCodeAt(index) >> 8;
-                        }
-                        host.writeMemory(wholeAddress(destination) + at * 2, bytes);
+                        host.writeMemory(wholeAddress(destination) + at * 2, utf16(units));
                     }
                 }
                 return length + 1;

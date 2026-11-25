@@ -30,6 +30,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { notifyWindow } from './notify.js';
 import { readText } from './strings.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const PAGER_CLASS = 'SysPager';
@@ -265,13 +266,7 @@ export function createPagerProcedure(host, tk){
     const putWide = (address, text, room)=>{
         const clipped = text.slice(0, Math.max(0, room));
         const units = clipped.length < room ? `${clipped}\0` : clipped;
-        const bytes = new Uint8Array(units.length * 2);
-        for (let at = 0; at < units.length; at++)
-        {
-            bytes[at * 2] = units.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = units.charCodeAt(at) >>> 8;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16(units));
     };
 
     /** A Unicode copy of a text, left for the program to keep. @param {string} text */

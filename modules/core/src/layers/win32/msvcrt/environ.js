@@ -27,6 +27,7 @@ import { EINVAL, ERANGE } from './globals.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wideStringAt } from './widetext.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** A string is read no further than this. */
 const MAX_STRING = 1 << 20;
@@ -101,12 +102,7 @@ export function createEnvironment(host){
 
     /** @param {string} text */
     const wideString = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
+        const bytes = utf16z(text);
         return place(bytes);
     };
 
@@ -258,7 +254,7 @@ export function createEnvironment(host){
             return 0;
         }
         const value = start()[index].value;
-        const bytes = unit === 1 ? encodeAnsi(`${value}\0`) : wideBytes(value);
+        const bytes = unit === 1 ? encodeAnsi(`${value}\0`) : utf16z(value);
         writeU32(length, bytes.length / unit);
         if (bytes.length / unit > (size >>> 0))
         {
@@ -289,7 +285,7 @@ export function createEnvironment(host){
             const index = unit === 1 ? find(readNarrow(name)) : find(readWide(name), true);
             const value = index < 0 ? null : start()[index].value;
             const bytes = value === null ? null
-                : unit === 1 ? encodeAnsi(`${value}\0`) : wideBytes(value);
+                : unit === 1 ? encodeAnsi(`${value}\0`) : utf16z(value);
             const copy = bytes ? place(bytes) : 0;
             writePointer(buffer, copy);
             if ((length >>> 0) !== 0)
@@ -300,17 +296,6 @@ export function createEnvironment(host){
             return 0;
         },
     });
-
-    /** @param {string} text */
-    const wideBytes = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        return bytes;
-    };
 
     /**
      * _putenv_s's body: a name and a value, neither absent, the name with no

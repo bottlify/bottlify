@@ -47,7 +47,7 @@ import {
     D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS, D3DVIEWPORT, D3DVIEWPORT2,
 } from './structs-legacy.js';
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
-import { guidBytes } from './d3d7.js';
+import { guidBytes } from '../../../system/guid.js';
 import { SHADOW } from './block.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC, DDSURFACEDESC2, readSurfaceDesc, writeSurfaceDesc }

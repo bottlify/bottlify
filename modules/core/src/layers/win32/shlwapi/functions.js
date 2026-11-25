@@ -32,6 +32,7 @@ import { createWidths } from './text.js';
 import { createUrlFunctions } from './url.js';
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** As long as a path a program hands these may be, terminator included. */
 const MAX_LENGTH = 0x1000;
@@ -341,17 +342,6 @@ export function createShlwapiFunctions(host){
 
     /** In the ANSI page a path is read in. @param {string} text */
     const narrow = text=>encodeAnsi(`${text}\0`);
-
-    /** @param {string} text */
-    const wide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at * 2] = text.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
-        return bytes;
-    };
 
     /**
      * PathCombine for either width. The destination may be one of the two
@@ -757,7 +747,7 @@ export function createShlwapiFunctions(host){
     /** @param {string} char */
     const ansiChar = char=>encodeAnsi(char);
     /** @param {string} char */
-    const wideChar = char=>wide(char).subarray(0, char.length * 2);
+    const wideChar = char=>utf16z(char).subarray(0, char.length * 2);
 
     const widths = createWidths(host);
     const unattached = createRefusals(host)('SHAutoComplete', { argBytes: 8, answer: S_OK,
@@ -940,7 +930,7 @@ export function createShlwapiFunctions(host){
         PathCompactPathA: pathCompactPath(pathAt, narrow),
 
         /** BOOL PathCompactPathW(HDC hDC, LPWSTR pszPath, UINT dx) */
-        PathCompactPathW: pathCompactPath(widePathAt, wide),
+        PathCompactPathW: pathCompactPath(widePathAt, utf16z),
 
         /** LPSTR PathFindFileNameA(LPCSTR pszPath) */
         PathFindFileNameA: { ...pathFindFileName(pathAt, 1), returns: 'pointer' },
@@ -967,21 +957,21 @@ export function createShlwapiFunctions(host){
          * LPWSTR PathCombineW(LPWSTR, LPCWSTR, LPCWSTR)
          */
         PathCombineA: { ...pathCombine(pathAt, narrow), returns: 'pointer' },
-        PathCombineW: pathCombine(widePathAt, wide),
+        PathCombineW: pathCombine(widePathAt, utf16z),
 
         /**
          * BOOL PathAppendA(LPSTR pszPath, LPCSTR pszMore)
          * BOOL PathAppendW(LPWSTR, LPCWSTR)
          */
         PathAppendA: pathAppend(pathAt, narrow),
-        PathAppendW: pathAppend(widePathAt, wide),
+        PathAppendW: pathAppend(widePathAt, utf16z),
 
         /**
          * void PathStripPathA(LPSTR pszPath)
          * void PathStripPathW(LPWSTR pszPath)
          */
         PathStripPathA: pathStripPath(pathAt, narrow),
-        PathStripPathW: pathStripPath(widePathAt, wide),
+        PathStripPathW: pathStripPath(widePathAt, utf16z),
 
         /**
          * BOOL PathMatchSpecA(LPCSTR pszFile, LPCSTR pszSpec)

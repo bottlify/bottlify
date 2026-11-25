@@ -26,6 +26,7 @@
 
 import { ZONE_KEYS, zoneForYear } from './timezones.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** Codes this surface reports. */
 const ERROR_ACCESS_DENIED = 5;
@@ -391,23 +392,11 @@ export function fileAttributes(entry){
 const ID_BOTH_DIR_FIXED = 104;
 const ENTRY_ALIGNMENT = 8;
 
-/** @param {string} text @returns {Uint8Array} UTF-16, NUL-terminated. */
-const wide = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        const code = text.charCodeAt(at);
-        bytes[at * 2] = code & 0xff;
-        bytes[at * 2 + 1] = code >> 8;
-    }
-    return bytes;
-};
-
 /** The TIME_ZONE_INFORMATION this machine answers with: UTC, no transitions. */
 const currentZone = ()=>{
     const data = new Uint8Array(TIME_ZONE_INFORMATION.SIZE);
-    data.set(wide('UTC'), TIME_ZONE_INFORMATION.StandardName);
-    data.set(wide('UTC'), TIME_ZONE_INFORMATION.DaylightName);
+    data.set(utf16z('UTC'), TIME_ZONE_INFORMATION.StandardName);
+    data.set(utf16z('UTC'), TIME_ZONE_INFORMATION.DaylightName);
     return data;
 };
 
@@ -479,7 +468,7 @@ export function createFileTimeFunctions(host){
     const writeDynamic = (address, zone, key)=>{
         const bytes = new Uint8Array(DYNAMIC_TIME_ZONE.SIZE);
         bytes.set(zone);
-        bytes.set(wide(key).subarray(0, 254), DYNAMIC_TIME_ZONE.KeyName);
+        bytes.set(utf16z(key).subarray(0, 254), DYNAMIC_TIME_ZONE.KeyName);
         host.writeMemory(address, bytes);
     };
 

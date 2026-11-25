@@ -15,6 +15,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
+import { formatGuid } from '../../../system/guid.js';
 
 export const IID_IIMAGELIST = '{46EB5926-582E-4017-9FDF-E8998DAA0950}';
 export const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
@@ -42,15 +43,6 @@ const KNOWN = new Set([IID_IIMAGELIST, IID_IIMAGELIST2, '{00000000-0000-0000-C00
  *     ILIF_* flags, null for no such image
  */
 
-/** @param {Uint8Array} bytes */
-const guidText = bytes=>{
-    const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
-    const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>
-        value.toString(16).toUpperCase().padStart(digits, '0');
-    const tail = [...bytes.subarray(8, 16)].map(b=>hex(b, 2)).join('');
-    return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-        + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}}`;
-};
 
 /**
  * @param {ImageListComHost} host
@@ -99,7 +91,7 @@ export function createImageListObjects(host){
             return E_FAIL;
         }
         const object = objects.get(made >>> 0);
-        if (!object || !KNOWN.has(guidText(host.readGuid(riid >>> 0))))
+        if (!object || !KNOWN.has(formatGuid(host.readGuid(riid >>> 0))))
         {
             host.flat('ImageList_Destroy', [made]);
             host.putU32(out >>> 0, 0);
@@ -257,7 +249,7 @@ export function createImageListObjects(host){
         make,
         handOut,
         /** @param {number} at @returns {string} */
-        guidAt: at=>((at >>> 0) === 0 ? '' : guidText(host.readGuid(at >>> 0))),
+        guidAt: at=>((at >>> 0) === 0 ? '' : formatGuid(host.readGuid(at >>> 0))),
         /** @param {number} handle */
         objectOf: handle=>objects.get(handle >>> 0) ?? null,
         /**
@@ -276,7 +268,7 @@ export function createImageListObjects(host){
                 host.putU32(out >>> 0, 0);
                 return E_INVALIDARG;
             }
-            if (!KNOWN.has(guidText(host.readGuid(riid >>> 0))))
+            if (!KNOWN.has(formatGuid(host.readGuid(riid >>> 0))))
             {
                 host.putU32(out >>> 0, 0);
                 return E_NOINTERFACE;

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { synthesiseModule } from '../../loader/internal/synth.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { parseGuid, readGuid, writeGuid } from '../../win32/ole32/guid.js';
+import { parseGuid, readGuid, writeGuid } from '../../../system/guid.js';
 import {
     createDirectSound, createPublisher, describe,
     DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBUFFERDESC_64, DSBCAPS, DSCAPS, DSCAPS_FLAGS,

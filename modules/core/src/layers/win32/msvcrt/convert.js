@@ -32,6 +32,7 @@ import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 import * as inGuest64 from './inguest-int64.js';
 import { COMPILED as INT64_CODE } from './inguest-int64.x86.js';
+import { utf16z } from '../common/utf16.js';
 
 /** A double as the first argument, which a 64-bit caller passes in XMM0. */
 const DOUBLE_FIRST = Object.freeze({ 0: /** @type {'f64'} */ ('f64') });
@@ -479,13 +480,7 @@ export function createConversionFunctions(host){
 
     /** @param {number} pointer @param {string} text */
     const writeWideString = (pointer, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /** @param {number} pointer @param {number} value */

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IUNKNOWN, createComObject, createComRegistry } from './objects.js';
 import { createOleFunctions, createTaskAllocator } from './functions.js';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';

@@ -26,7 +26,7 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { readGuid, parseGuid } from '../../win32/ole32/guid.js';
+import { readGuid, parseGuid } from '../../../system/guid.js';
 import {
     createInputDevice, objectsOf, KEYBOARD, MOUSE, DIMOUSE_OFS, MOUSE_BUTTONS,
 } from './devices.js';

@@ -15,7 +15,7 @@
  * Errors are CodecErrors carrying the HRESULT the caller is answered with.
  */
 
-import { readGuid } from '../ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { CodecError, WINCODEC, cropRows } from './frames.js';
 import { convertRow, converts, formatOf, rowBytes } from './formats.js';
 import { GUID } from './layout.js';

@@ -26,13 +26,14 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { describe } from './describe.js';
 import {
     IBASE_FILTER_SLOTS, IID_IBASE_FILTER, IID_IMEDIA_FILTER, IID_IMEM_ALLOCATOR,
     IID_IMEM_INPUT_PIN, IID_IPERSIST, IID_IPIN, IMEDIA_FILTER_SLOTS, IPIN_SLOTS, VTABLE,
 } from './interfaces.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -277,10 +278,6 @@ const wideInline = (text, units)=>{
     [...text.slice(0, units - 1)].forEach((ch, at)=>view.setUint16(at * 2, ch.charCodeAt(0), true));
     return bytes;
 };
-
-/** @param {string} text */
-const wideString = text=>new Uint8Array(
-    Uint16Array.from([...text, '\0'], char=>char.charCodeAt(0)).buffer);
 
 /**
  * A media type with every field given, the rest defaulted.
@@ -921,7 +918,7 @@ export function createFilterBase(host){
             {
                 return E_POINTER;
             }
-            const text = wideString(pin.spec.id ?? pin.spec.name);
+            const text = utf16z(pin.spec.id ?? pin.spec.name);
             const at = host.allocate(text.length);
             if (at === 0)
             {

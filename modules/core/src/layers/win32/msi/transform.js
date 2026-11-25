@@ -42,7 +42,7 @@
 
 import { compoundBytesSync, nameKey, storageOf, streamOf } from '../common/compound-writer.js';
 import { createEntry, parseCompoundFile, serializeCompoundFile } from '../ole32/cfb.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { openCompound } from './compound.js';
 import {
     MSITYPE, columnWidth, decodeStreamName, encodeStreamName, encoderFor, isBinaryType, isKey,

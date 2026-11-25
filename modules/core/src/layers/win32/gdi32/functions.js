@@ -58,6 +58,8 @@ import {
     writeTextMetricsW,
     writeU32s,
 } from './structs.js';
+import { floatBits } from '../../../system/floats.js';
+import { utf16z } from '../common/utf16.js';
 
 /** ABC: the three widths of one character, A and C the bearings either side of B. */
 const ABC_SIZE = 12;
@@ -1538,13 +1540,6 @@ export function createGdiFunctions(host){
             writeSize(host, size, { cx: extents.at(-1) ?? 0, cy: currentMetrics(dc).height });
         }
         return 1;
-    };
-
-    /** A float's bits as the dword they are written as. @param {number} value */
-    const floatBits = value=>{
-        const view = new DataView(new ArrayBuffer(4));
-        view.setFloat32(0, value, true);
-        return view.getUint32(0, true);
     };
 
     /**
@@ -5376,13 +5371,7 @@ export function createGdiFunctions(host){
                     return 0;
                 }
                 const kept = name.slice(0, (count | 0) - 1);
-                const bytes = new Uint8Array((kept.length + 1) * 2);
-                for (let at = 0; at < kept.length; at++)
-                {
-                    bytes[at * 2] = kept.charCodeAt(at) & 0xff;
-                    bytes[at * 2 + 1] = kept.charCodeAt(at) >>> 8;
-                }
-                host.writeMemory(wholeAddress(out), bytes);
+                host.writeMemory(wholeAddress(out), utf16z(kept));
                 return kept.length + 1;
             },
         },

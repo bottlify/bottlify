@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { guidBytes } from '../../../system/guid.js';
 
 /**
  * The DirectPlay session object. Unbound it answers DPERR_UNINITIALIZED, as
@@ -43,21 +44,6 @@ const DPCAPS_ISHOST = 0x80;
 const DPSESSIONDESC2_SIZE = 80;
 const DPCAPS_SIZE = 40;
 const DPNAME_SIZE = 16;
-
-/** @param {string} guid @returns {Uint8Array} the GUID as it lies in memory */
-export const guidBytes = guid=>{
-    const hex = guid.replace(/[{}-]/g, '');
-    const out = new Uint8Array(16);
-    const view = new DataView(out.buffer);
-    view.setUint32(0, parseInt(hex.slice(0, 8), 16), true);
-    view.setUint16(4, parseInt(hex.slice(8, 12), 16), true);
-    view.setUint16(6, parseInt(hex.slice(12, 16), 16), true);
-    for (let i = 0; i < 8; i++)
-    {
-        out[8 + i] = parseInt(hex.slice(16 + 2 * i, 18 + 2 * i), 16);
-    }
-    return out;
-};
 
 /**
  * @typedef {Object} SessionHost

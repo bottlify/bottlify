@@ -22,6 +22,7 @@ import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { createAes } from '../crypto/aes.js';
 import { createMd4, createMd5, createSha1, createSha256 } from '../crypto/digest.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const STATUS_SUCCESS = 0;
 const STATUS_INVALID_HANDLE = 0xc0000008 | 0;
@@ -316,8 +317,7 @@ export function createBcryptFunctions(host){
                     HashDigestLength: ()=>new Uint8Array(
                         Uint32Array.of(digestLength(name)).buffer),
                     HashBlockLength: ()=>new Uint8Array(Uint32Array.of(HASH_BLOCK).buffer),
-                    AlgorithmName: ()=>new Uint8Array(
-                        Uint16Array.from(`${name}\0`, c=>c.charCodeAt(0)).buffer),
+                    AlgorithmName: ()=>utf16z(name),
                 };
                 // An AES algorithm's or key's: its block, its object, its chaining mode.
                 const chaining = key?.chaining ?? algorithms.get(object >>> 0)?.chaining;
@@ -326,8 +326,7 @@ export function createBcryptFunctions(host){
                     ObjectLength: properties.ObjectLength,
                     BlockLength: ()=>new Uint8Array(Uint32Array.of(AES_BLOCK).buffer),
                     AlgorithmName: properties.AlgorithmName,
-                    ChainingMode: ()=>new Uint8Array(
-                        Uint16Array.from(`${chaining}\0`, c=>c.charCodeAt(0)).buffer),
+                    ChainingMode: ()=>utf16z(`${chaining}`),
                     ...key ? { KeyLength: ()=>new Uint8Array(
                         Uint32Array.of(key.secret.length * 8).buffer) } : {},
                     // BCRYPT_KEY_LENGTHS_STRUCT: 128 to 256 bits by 64.

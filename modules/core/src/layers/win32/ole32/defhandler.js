@@ -24,7 +24,7 @@
  * cache it holds, so the handler is one object to the program.
  */
 
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import {
     IID_IDATAOBJECT, IID_IOLECACHE, IID_IOLECACHE2, IID_IOLECACHECONTROL, IID_IPERSISTSTORAGE,
     IID_IVIEWOBJECT, IID_IVIEWOBJECT2,

@@ -13,10 +13,11 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { readGuid, writeGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../../../system/guid.js';
 import { CodecError } from './frames.js';
 import { INTERFACES } from './layout.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const S_OK = 0;
 export const S_FALSE = 1;
@@ -210,13 +211,7 @@ export function createKit(host){
         {
             return 0x88982f8c | 0;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i * 2] = text.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
-        }
-        host.writeMemory(wholeAddress(buffer), bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(text));
         return S_OK;
     };
 

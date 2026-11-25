@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { createRuntime } from './runtime.js';
 import { FC, POINTER, PROXY_PHASE, RPC_MESSAGE, STUB_MESSAGE } from './ndr.js';
 import { HKEY_CLASSES_ROOT, createHive } from '../advapi32/registry.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 
 const IID_PROBE = '{8C5E2F10-4B1D-4E7A-9A61-3D2F0C9B7E01}';
 const IID_IPSFACTORYBUFFER = '{D5F569D0-593B-101A-B569-08002B2DBF7A}';

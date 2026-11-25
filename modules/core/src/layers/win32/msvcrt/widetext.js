@@ -333,20 +333,6 @@ export function textOfUnits(units){
 }
 
 /**
- * Units as the guest bytes of UTF-16LE.
- *
- * @param {number[]} units
- */
-export function bytesOfUnits(units){
-    const bytes = new Uint8Array(units.length * 2);
-    units.forEach((unit, at)=>{
-        bytes[at * 2] = unit & 0xff;
-        bytes[at * 2 + 1] = unit >>> 8;
-    });
-    return bytes;
-}
-
-/**
  * Up to `limit` units of what `decodeUnits` found, CR LF folded to LF --
  * stopping after the first LF when `line` says so -- and the offset just past
  * what they took. A character's two units go together or not at all.

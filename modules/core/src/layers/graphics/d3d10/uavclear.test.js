@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DXGI_FORMAT } from './constants.js';
-import { channelsOf, clearElement, clearTexel, halfBits, halfOf } from './uavclear.js';
+import { channelsOf, clearElement, clearTexel, halfBits } from './uavclear.js';
+import { fromHalf } from '../../../system/floats.js';
 
 const bitsOf = (/** @type {number} */ value)=>new Uint32Array(new Float32Array([value]).buffer)[0];
 
@@ -61,11 +62,11 @@ test('a texel is written as WGSL stores it', ()=>{
 test('halves round to nearest and come back', ()=>{
     for (const value of [0, 1, -2, 0.5, 65504, 2 ** -24, 1 / 3])
     {
-        assert.equal(halfOf(halfBits(value)), Math.fround(halfOf(halfBits(value))));
+        assert.equal(fromHalf(halfBits(value)), Math.fround(fromHalf(halfBits(value))));
     }
     assert.equal(halfBits(1), 0x3c00);
     assert.equal(halfBits(70000), 0x7c00);
     assert.equal(halfBits(2 ** -24), 1);
-    assert.equal(halfOf(0x3555), 0.333251953125);
+    assert.equal(fromHalf(0x3555), 0.333251953125);
     assert.equal(halfBits(1 / 3), 0x3555);
 });

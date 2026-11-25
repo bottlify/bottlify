@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComRegistry } from './objects.js';
 import {
     CLSID_ANTI_MONIKER, CLSID_CLASS_MONIKER, CLSID_COMPOSITE_MONIKER, CLSID_FILE_MONIKER,

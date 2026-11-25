@@ -15,6 +15,7 @@
  */
 
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** GpStatus (gdiplustypes.h). */
 export const Status = Object.freeze({
@@ -107,9 +108,9 @@ export function createKit(host){
         },
 
         /** A REAL argument, as its bits arrive. @param {number} bits */
-        real: bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0],
+        real: bitsFloat,
         /** A REAL's bits, to hand back where a REAL is returned. @param {number} value */
-        bits: value=>new Uint32Array(Float32Array.of(value).buffer)[0],
+        bits: floatBits,
 
         read,
         write,

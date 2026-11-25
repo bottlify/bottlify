@@ -9,10 +9,11 @@ import { createScanStore, runScan, VARIADIC_SLOTS } from './scan.js';
 import { EBADF, EILSEQ, EINVAL } from './globals.js';
 import { createDescriptors, LF, settle } from './io.js';
 import {
-    O_U16TEXT, O_U8TEXT, O_WTEXT, bytesOfUnits, unitsOfText, wideStringAt,
+    O_U16TEXT, O_U8TEXT, O_WTEXT, unitsOfText, wideStringAt,
 } from './widetext.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { bytesOfUnits } from '../common/utf16.js';
 
 /** A line's terminator, where fgets ends it: never itself written. */
 const NUL = new Uint8Array(1);

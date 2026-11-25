@@ -41,12 +41,13 @@ import {
     D3DERR_VIEWPORTDATANOTSET, D3DERR_VIEWPORTHASNODEVICE, D3DFILTER, D3DLIGHTSTATE,
     D3DLIGHT_ACTIVE, D3DLIGHT_GLSPOT, D3DLIGHT_NO_SPECULAR, D3DLIGHT_PARALLELPOINT, D3DNEXT_HEAD,
     D3DNEXT_NEXT, D3DNEXT_TAIL, D3DPT, D3DRENDERSTATE_D3D7_ONLY, D3DTA, D3DTBLEND, D3DTOP,
-    D3DTRANSFORMSTATE, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
+    D3DTRANSFORMSTATE, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS,
 } from './constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { IDENTITY, multiplyMatrices } from '../d3d8/render.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { DDPF_ALPHAPIXELS } from '../ddraw/constants.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** The render states these versions number and the Direct3D 7 device answers too. */
 const RS = Object.freeze({
@@ -829,9 +830,9 @@ function createLegacyDevice(inner, version, legacy){
         [D3DLIGHTSTATE.AMBIENT, 0],
         [D3DLIGHTSTATE.COLORMODEL, D3DCOLOR_RGB],
         [D3DLIGHTSTATE.FOGMODE, 0],
-        [D3DLIGHTSTATE.FOGSTART, floatToDword(0)],
-        [D3DLIGHTSTATE.FOGEND, floatToDword(1)],
-        [D3DLIGHTSTATE.FOGDENSITY, floatToDword(1)],
+        [D3DLIGHTSTATE.FOGSTART, floatBits(0)],
+        [D3DLIGHTSTATE.FOGEND, floatBits(1)],
+        [D3DLIGHTSTATE.FOGDENSITY, floatBits(1)],
         [D3DLIGHTSTATE.COLORVERTEX, 1],
     ]);
 

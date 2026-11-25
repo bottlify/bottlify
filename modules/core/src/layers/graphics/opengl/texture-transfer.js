@@ -26,6 +26,7 @@
 
 import { GL } from './constants.js';
 import { INTEGER_CLIENT_FORMATS, TEX, isIntegerFormat, modelTexelBytes } from './formats.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 /**
  * The pixel store state of one direction (OpenGL 4.6 table 8.1), 3D included.
@@ -228,53 +229,7 @@ export function clientBytes(width, height, depth, format, type, state){
         + width * layout.pixelBytes;
 }
 
-// --- half floats and the small floats of the packed formats ---
-
-const scratchFloat = new Float32Array(1);
-const scratchBits = new Uint32Array(scratchFloat.buffer);
-
-/** @param {number} value @returns {number} the nearest half float's bits */
-export function toHalf(value){
-    scratchFloat[0] = value;
-    const bits = scratchBits[0];
-    const sign = (bits >>> 16) & 0x8000;
-    const exponent = (bits >>> 23) & 0xff;
-    let mantissa = bits & 0x7fffff;
-    if (exponent === 0xff)
-    {
-        return sign | 0x7c00 | (mantissa !== 0 ? 0x200 : 0);
-    }
-    let e = exponent - 127 + 15;
-    if (e >= 0x1f)
-    {
-        return sign | 0x7c00;
-    }
-    if (e <= 0)
-    {
-        if (e < -10)
-        {
-            return sign;
-        }
-        mantissa |= 0x800000;
-        const shift = 14 - e;
-        let half = mantissa >>> shift;
-        const rest = mantissa & ((1 << shift) - 1);
-        const midway = 1 << (shift - 1);
-        if (rest > midway || (rest === midway && (half & 1) !== 0))
-        {
-            half++;
-        }
-        return sign | half;
-    }
-    let half = (e << 10) | (mantissa >>> 13);
-    const rest = mantissa & 0x1fff;
-    if (rest > 0x1000 || (rest === 0x1000 && (half & 1) !== 0))
-    {
-        half++;
-    }
-    e = half;
-    return sign | e;
-}
+// --- the small floats of the packed formats ---
 
 /**
  * An unsigned float of `mantissa` bits and five of exponent, as R11F_G11F_B10F
@@ -345,12 +300,6 @@ function fromSmallFloat(bits, mantissaBits){
     }
     return (1 + mantissa / (1 << mantissaBits)) * 2 ** (exponent - 15);
 }
-
-/** @param {number} bits @returns {number} a half float's value */
-export const fromHalf = bits=>{
-    const value = fromSmallFloat(bits & 0x7fff, 10);
-    return (bits & 0x8000) !== 0 ? -value : value;
-};
 
 /**
  * RGB9_E5's encoding of three values (section 8.5.2).

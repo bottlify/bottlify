@@ -21,6 +21,7 @@ import { APPLY_OPTION, PATCH_ERROR, PATCH_OPTION, SIGNATURE_LENGTH, applyPatch, 
 import { createMd5 } from '../crypto/digest.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -357,7 +358,7 @@ export function createMspatchaFunctions(host){
         }
         const text = `${signature}\0`;
         host.writeMemory(wholeAddress(buffer), wide
-            ? new Uint8Array(Uint16Array.from(text, c=>c.charCodeAt(0)).buffer)
+            ? utf16(text)
             : encodeAnsi(text));
         return 1;
     };

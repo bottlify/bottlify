@@ -37,7 +37,8 @@ import {
     offsetOfRect, pitchedRows, pixelRowsTaken, surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
-import { halvesToStored, toHalf } from './half.js';
+import { halvesToStored } from './half.js';
+import { toHalf } from '../../../system/floats.js';
 
 /**
  * D3DLOCK_READONLY, which is the same number in both versions of the API. Here

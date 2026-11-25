@@ -18,6 +18,7 @@
 import { STATUS } from './status.js';
 import { COUNTED_STRING } from './strings.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** RTL_RELATIVE_NAME_U: a counted string, a directory handle and a reference. */
 const RELATIVE_NAME_SIZE = 16;
@@ -36,17 +37,6 @@ const DOS_DEVICES = '\\??\\';
  *           RtlFreeUnicodeString gives the name back where it came from.
  * @property {(address: number) => boolean} free
  */
-
-/** @param {string} text @returns {Uint8Array} UTF-16 with its terminator. */
-const wide = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-    }
-    return bytes;
-};
 
 /** @param {string} c */
 const isSeparator = c=>c === '\\' || c === '/';
@@ -288,7 +278,7 @@ export function createPathFunctions(host){
         {
             return STATUS.OBJECT_NAME_INVALID;
         }
-        const bytes = wide(name);
+        const bytes = utf16z(name);
         if (bytes.length > 0xffff)
         {
             return STATUS.NAME_TOO_LONG;
@@ -460,7 +450,7 @@ export function createPathFunctions(host){
                         {
                             return STATUS.NO_MEMORY;
                         }
-                        host.writeMemory(scratch, wide(text));
+                        host.writeMemory(scratch, utf16z(text));
                         const done = host.kernel32.SetCurrentDirectoryW.handler([scratch]) !== 0;
                         host.free(scratch);
                         if (done)

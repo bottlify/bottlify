@@ -21,13 +21,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DCLEAR, D3DCULL, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DPOOL, D3DPT, D3DRS,
-    D3DSWAPEFFECT, D3DTS, D3DTSS, D3D_OK, floatToDword,
+    D3DSWAPEFFECT, D3DTS, D3DTSS, D3D_OK,
 } from './constants.js';
 import { createDirect3D8 } from './device.js';
 import { normalMatrixOf } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
+import { floatBits } from '../../../system/floats.js';
 
 const RAM_BASE = 0x40000000;
 const CAMERASPACENORMAL = 0x10000;
@@ -235,8 +236,8 @@ test('recorded: a frame of lit draws asks the same of the GPU as it did', async(
         {
             ok(device.SetRenderState(D3DRS.FOGENABLE, 1));
             ok(device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR));
-            ok(device.SetRenderState(D3DRS.FOGSTART, floatToDword(2)));
-            ok(device.SetRenderState(D3DRS.FOGEND, floatToDword(40)));
+            ok(device.SetRenderState(D3DRS.FOGSTART, floatBits(2)));
+            ok(device.SetRenderState(D3DRS.FOGEND, floatBits(40)));
         }
         if (frame === 3)
         {

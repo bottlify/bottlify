@@ -29,6 +29,8 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_LOCAL_MACHINE } from './registry.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
+import { formatGuid } from '../../../system/guid.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -80,7 +82,7 @@ const EVENT_TRACE_CONTROL_FLUSH = 3;
 /** ControlTrace's answer for a session that is not running. */
 const ERROR_WMI_INSTANCE_NOT_FOUND = 4201;
 /** The kernel logger's GUID and the one name a session of it may have. */
-const SYSTEM_TRACE_CONTROL_GUID = '9e814aad320411d29a82006008a86939';
+const SYSTEM_TRACE_CONTROL_GUID = '{9E814AAD-3204-11D2-9A82-006008A86939}';
 const KERNEL_LOGGER_NAME = 'NT KERNEL LOGGER';
 
 /** Where the logs and their sources are kept. */
@@ -137,7 +139,7 @@ const MAX_NAME = 0x8000;
 
 /** @param {string} text @param {boolean} wide @returns {Uint8Array} with its terminator */
 const textBytes = (text, wide)=>(wide
-    ? new Uint8Array(Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer)
+    ? utf16z(text)
     : encodeAnsi(`${text}\0`));
 
 /** @param {number} value */
@@ -706,11 +708,9 @@ export function createEventLogFunctions(host){
             {
                 return ERROR_INVALID_PARAMETER;
             }
-            const guid = [...host.readMemory(properties + TRACE.GUID, 16)]
-                .map(byte=>byte.toString(16).padStart(2, '0'));
-            const guidText = [...guid.slice(0, 4).reverse(), ...guid.slice(4, 6).reverse(),
-                ...guid.slice(6, 8).reverse(), ...guid.slice(8)].join('');
-            if (guidText === SYSTEM_TRACE_CONTROL_GUID && name.toUpperCase() !== KERNEL_LOGGER_NAME)
+            const guid = formatGuid(host.readMemory(properties + TRACE.GUID, 16));
+            if (guid === SYSTEM_TRACE_CONTROL_GUID
+                && name.toUpperCase() !== KERNEL_LOGGER_NAME)
             {
                 return ERROR_INVALID_PARAMETER;
             }

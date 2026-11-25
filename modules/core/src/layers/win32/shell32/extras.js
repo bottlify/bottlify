@@ -14,8 +14,9 @@
 
 import { createAdapter } from '../oleaut32/objects.js';
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid } from '../ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -126,17 +127,6 @@ const IID_IIMAGELIST2 = '{192B9D83-50FC-457B-90A0-2B82A8B5DAE1}';
 const dword = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-    return bytes;
-};
-
-/** @param {string} text */
-const utf16z = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
     return bytes;
 };
 

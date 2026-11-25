@@ -19,7 +19,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { canonicalGuid } from '../ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { UIA_IDS } from './ids.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -65,16 +65,7 @@ export function createUiaFunctions(host){
     const unknownTypes = new Set();
 
     /** A GUID in guest memory as its canonical text. @param {number} at */
-    const guidAt = at=>{
-        const raw = host.readMemory(wholeAddress(at), 16);
-        const view = new DataView(raw.buffer, raw.byteOffset, 16);
-        const hex = (/** @type {number} */ value, /** @type {number} */ digits)=>value
-            .toString(16).toUpperCase().padStart(digits, '0');
-        const tail = [...raw.subarray(8)].map(byte=>hex(byte, 2)).join('');
-        return canonicalGuid(`{${hex(view.getUint32(0, true), 8)}-`
-            + `${hex(view.getUint16(4, true), 4)}-${hex(view.getUint16(6, true), 4)}-`
-            + `${tail.slice(0, 4)}-${tail.slice(4)}}`) ?? '';
-    };
+    const guidAt = at=>readGuid(host, wholeAddress(at));
 
     /**
      * The two reserved values, each one object for the process: a provider

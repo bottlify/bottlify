@@ -11,6 +11,7 @@ import {
     GUID_SIZE,
     canonicalGuid,
     formatGuid,
+    guidBytes,
     parseGuid,
     readGuid,
     writeGuid,
@@ -115,4 +116,34 @@ test('reading is offset-correct: a GUID does not have to start at zero', ()=>{
     const memory = fakeMemory();
     memory.bytes.set(EXAMPLE_BYTES, 0x33);
     assert.equal(readGuid(memory, 0x33), EXAMPLE);
+});
+
+test('guidBytes is the parsed bytes, GUID_NULL for what is not a GUID in braces', ()=>{
+    assert.deepEqual(guidBytes(EXAMPLE), EXAMPLE_BYTES);
+    assert.deepEqual(guidBytes(EXAMPLE.toLowerCase()), EXAMPLE_BYTES);
+    for (const text of ['', EXAMPLE.slice(1, -1), '{6B29FC40-CA47-1067-B31D-00DD010662D}', 'x'])
+    {
+        assert.deepEqual(guidBytes(text), new Uint8Array(GUID_SIZE), text);
+    }
+});
+
+test('formatGuid reads the first sixteen bytes of a view wherever it starts', ()=>{
+    const bytes = new Uint8Array(24);
+    bytes.set(EXAMPLE_BYTES, 5);
+    assert.equal(formatGuid(bytes.subarray(5)), EXAMPLE);
+    assert.equal(formatGuid(new Uint8Array(16).fill(0xff)),
+        '{FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF}');
+});
+
+test('readGuid reads a negative dword unsigned and an address past 4 GiB whole', ()=>{
+    /** @type {number[]} */
+    const asked = [];
+    const memory = { readMemory: (/** @type {number} */ address)=>{
+        asked.push(address);
+        return EXAMPLE_BYTES;
+    } };
+    assert.equal(readGuid(memory, -16), EXAMPLE);
+    assert.equal(readGuid(memory, 0x1_4000_0010), EXAMPLE);
+    assert.equal(readGuid(memory, 0x1000), EXAMPLE);
+    assert.deepEqual(asked, [0xfffffff0, 0x1_4000_0010, 0x1000]);
 });

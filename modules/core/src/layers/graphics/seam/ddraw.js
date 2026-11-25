@@ -97,6 +97,7 @@ import { createRaster } from './raster.js';
 import { DDRAW_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { textureFormatOffered } from './texture-formats.js';
 import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, registryMode } from '../../win32/user32/display.js';
+import { readGuid } from '../../../system/guid.js';
 
 /** The classes DDRAW.dll's DllGetClassObject makes. */
 const CLSID_DirectDraw = '{D7B70EE0-4340-11CF-B063-0020AFC2CD35}';
@@ -327,26 +328,6 @@ const surfaceSupports = (key, own)=>own !== '7'
  */
 const surfaceRefusal = (key, own)=>(own !== '7' && key !== IID_IDirectDrawColorControl
     ? E_INVALIDARG : E_NOINTERFACE);
-
-/**
- * A GUID as the braced string the interface tables are keyed by: three
- * little-endian integers and eight raw bytes, which is not a flat read.
- *
- * @param {any} memory
- * @param {number} address
- * @returns {string}
- */
-export function readGuid(memory, address){
-    const bytes = memory.readMemory(address >>> 0, 16);
-    const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
-        value.toString(16).toUpperCase().padStart(width, '0');
-    const data1 = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-    const data2 = bytes[4] | (bytes[5] << 8);
-    const data3 = bytes[6] | (bytes[7] << 8);
-    const tail = [...bytes.slice(8)].map(byte=>hex(byte, 2)).join('');
-    return `{${hex(data1, 8)}-${hex(data2, 4)}-${hex(data3, 4)}-`
-        + `${tail.slice(0, 4)}-${tail.slice(4)}}`;
-}
 
 /**
  * The generation an interface identifier names, or null.

@@ -22,8 +22,9 @@
 
 import { createDigestFor } from '../crypto/signature.js';
 import { bytesSource, CompoundError, openCompound } from '../msi/compound.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { sameBytes } from '../crypto/x509.js';
+import { utf16 } from '../common/utf16.js';
 
 /**
  * @typedef {Object} Subject
@@ -212,16 +213,6 @@ export async function msiSubject(bytes){
         }
         throw e;
     }
-    /** @param {string} name */
-    const nameBytes = name=>{
-        const out = new Uint8Array(name.length * 2);
-        for (let i = 0; i < name.length; i++)
-        {
-            out[i * 2] = name.charCodeAt(i) & 0xff;
-            out[i * 2 + 1] = name.charCodeAt(i) >> 8;
-        }
-        return out;
-    };
     /** @param {Uint8Array} a @param {Uint8Array} b */
     const byBytes = (a, b)=>{
         for (let i = 0; i < Math.min(a.length, b.length); i++)
@@ -241,7 +232,7 @@ export async function msiSubject(bytes){
     /** @param {import('../msi/compound.js').CompoundNode} storage @param {boolean} root */
     const walk = async(storage, root)=>{
         const children = [...storage.children.values()]
-            .map(node=>({ node, key: nameBytes(node.name) }))
+            .map(node=>({ node, key: utf16(node.name) }))
             .sort((one, two)=>byBytes(one.key, two.key));
         for (const { node } of children)
         {
@@ -279,7 +270,7 @@ export async function msiSubject(bytes){
         const entry = node.entry ?? new Uint8Array(0x80);
         if (!root)
         {
-            take(nameBytes(node.name));
+            take(utf16(node.name));
         }
         take(node.kind === 'stream' ? entry.subarray(0x78, 0x7c) : entry.subarray(0x50, 0x60));
         take(entry.subarray(0x60, 0x64));
@@ -290,7 +281,7 @@ export async function msiSubject(bytes){
         if (node.kind === 'storage')
         {
             const children = [...node.children.values()]
-                .sort((one, two)=>byBytes(nameBytes(one.name), nameBytes(two.name)));
+                .sort((one, two)=>byBytes(utf16(one.name), utf16(two.name)));
             for (const child of children)
             {
                 if (!(root && (child.name === MSI_SIGNATURE || child.name === MSI_SIGNATURE_EX)))

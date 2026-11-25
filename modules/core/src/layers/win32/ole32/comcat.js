@@ -16,10 +16,11 @@
  */
 
 import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
-import { canonicalGuid, formatGuid, parseGuid } from './guid.js';
+import { canonicalGuid, formatGuid, parseGuid } from '../../../system/guid.js';
 import { publishEnumerator } from './enumerator.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const CLSID_STD_COMPONENT_CATEGORIES_MGR = '{0002E005-0000-0000-C000-000000000046}';
 const IID_ICATREGISTER = '{0002E012-0000-0000-C000-000000000046}';
@@ -81,16 +82,6 @@ export function registerComponentCategories(env){
     };
     /** @param {number} address */
     const guidAt = address=>formatGuid(env.readMemory(wholeAddress(address), GUID_BYTES));
-    /** @param {string} text */
-    const wide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
-        return bytes;
-    };
     /** @param {Uint8Array} data  A REG_SZ's bytes, as the hive keeps them. */
     const text = data=>{
         const end = data.indexOf(0);
@@ -265,7 +256,8 @@ export function registerComponentCategories(env){
                     const record = new Uint8Array(CATEGORYINFO_BYTES);
                     record.set(/** @type {Uint8Array} */ (parseGuid(item.catid)), 0);
                     new DataView(record.buffer).setUint32(16, item.about?.lcid ?? lcid >>> 0, true);
-                    record.set(wide((item.about?.text ?? '').slice(0, DESCRIPTION_UNITS - 1)), 20);
+                    record.set(utf16z((item.about?.text ?? '').slice(0, DESCRIPTION_UNITS - 1)),
+                        20);
                     env.writeMemory(at, record);
                     return true;
                 },
@@ -286,7 +278,7 @@ export function registerComponentCategories(env){
             {
                 return CAT_E_NODESCRIPTION;
             }
-            const bytes = wide(about.text);
+            const bytes = utf16z(about.text);
             const block = env.heap.allocate(bytes.length);
             if (block === 0)
             {

@@ -26,6 +26,7 @@
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const WM_CREATE = 0x0001;
 const WM_SETTEXT = 0x000c;
@@ -150,14 +151,7 @@ export function textBytes(text, unicode){
         bytes.set(encoded);
         return bytes.subarray(0, encoded.length + 1);
     }
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let index = 0; index < text.length; index++)
-    {
-        const code = text.charCodeAt(index);
-        bytes[index * 2] = code & 0xff;
-        bytes[index * 2 + 1] = code >>> 8;
-    }
-    return bytes;
+    return utf16z(text);
 }
 
 /**

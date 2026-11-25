@@ -19,7 +19,7 @@
  */
 
 import { versionTokenOf } from './hlsl-ir.js';
-import { float32Bits } from './hlsl-math.js';
+import { floatBits } from '../../../system/floats.js';
 
 /** D3DSPR, the register types. */
 export const REG = Object.freeze({
@@ -191,7 +191,7 @@ export function encodeProgram(program){
     for (const def of program.defs)
     {
         instruction(OP_DEF, 0, [destToken({ type: REG.CONST, index: def.index, mask: 0xf }),
-            ...def.values.map(float32Bits)]);
+            ...def.values.map(floatBits)]);
     }
     for (const def of program.intDefs ?? [])
     {

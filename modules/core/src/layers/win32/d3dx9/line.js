@@ -8,6 +8,7 @@ import { createComObject } from '../ole32/objects.js';
 import { DEVICE, STATEBLOCK_APPLY, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDeviceCalls }
     from './device.js';
 import { wholeAddress } from '../common/pointers.js';
+import { floatBits } from '../../../system/floats.js';
 
 /**
  * ID3DXLine: polylines drawn on the program's device as pre-transformed,
@@ -67,8 +68,6 @@ const FLOAT_RETURN_LENGTH = 17;
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  */
 
-/** @param {number} value */
-const bitsOf = value=>new Uint32Array(Float32Array.of(value).buffer)[0];
 /** @param {number} bits */
 const floatOf = bits=>new Float32Array(Uint32Array.of(bits >>> 0).buffer)[0];
 
@@ -252,7 +251,7 @@ export function createLines(host){
      */
     const floatMethod = (name, value)=>/** @type {any} */ ({
         name, argBytes: 4,
-        invoke: (/** @type {any} */ object)=>bitsOf(value(object.state)),
+        invoke: (/** @type {any} */ object)=>floatBits(value(object.state)),
         guest: (/** @type {{ trap: number }} */ { trap })=>{
             const placed = floatSlots.get(name);
             if (placed !== undefined)

@@ -66,6 +66,7 @@ import { createCommandReader, placeCommandRing } from '../seam/shadow.js';
 import { TEB_GL_CONTEXT } from '../seam/routines/assemble.js';
 import { COMMAND_RING_BYTES } from '../seam/block.js';
 import { readToTerminator } from '../../win32/common/scan-windows.js';
+import { toBase64 } from '../../../system/base64.js';
 
 /** A page: the block and the ring each take pages of their own. */
 const RING_PAGE = 4096;
@@ -2708,7 +2709,7 @@ export function createOpengl(services){
             images: imageDigests.slice(),
             imageTimes: imageTimes.slice(),
             kept: keptImages.images.map(image=>({ index: image.index, width: image.width,
-                height: image.height, rgba: base64Of(image.texels) })),
+                height: image.height, rgba: toBase64(image.texels) })),
         }),
     };
 }
@@ -2747,14 +2748,4 @@ export function heldTextureBytes(contexts){
         }
     }
     return { levels, texels, compressed };
-}
-
-/** @param {Uint8Array} bytes @returns {string} */
-function base64Of(bytes){
-    let text = '';
-    for (let at = 0; at < bytes.length; at += 0x8000)
-    {
-        text += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
-    }
-    return btoa(text);
 }

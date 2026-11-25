@@ -22,6 +22,8 @@ import { formatMessageText } from '../kernel32/format-message.js';
 import { decodeAnsi, decodeOem, downcaseUnit, encodeAnsi, encodeOem, upcaseUnit }
     from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { bytesOfUnits, utf16, utf16z } from '../common/utf16.js';
+import { readGuid } from '../../../system/guid.js';
 
 const SOME_NOT_MAPPED = 0x00000107;
 const NOT_FOUND = 0xc0000225;
@@ -45,16 +47,6 @@ const GUID_TEXT = /^\{([0-9a-f]{8})-([0-9a-f]{4})-([0-9a-f]{4})-([0-9a-f]{4})-([
 /** @param {number} value */
 const u32 = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
     value >>> 24 & 0xff);
-
-/** @param {number[]} units @returns {Uint8Array} */
-const unitsBytes = units=>{
-    const bytes = new Uint8Array(units.length * 2);
-    units.forEach((unit, index)=>{
-        bytes[index * 2] = unit & 0xff;
-        bytes[index * 2 + 1] = unit >> 8;
-    });
-    return bytes;
-};
 
 /** @param {string} text */
 const textUnits = text=>Array.from({ length: text.length }, (_, at)=>text.charCodeAt(at));
@@ -238,7 +230,7 @@ export function createStringOperations(host){
             {
                 return STATUS.BUFFER_OVERFLOW;
             }
-            host.writeMemory(buffer, unitsBytes(units));
+            host.writeMemory(buffer, bytesOfUnits(units));
             writeDescriptor(destination >>> 0, { length, maximumLength, buffer });
             return STATUS.SUCCESS;
         },
@@ -282,8 +274,6 @@ export function createStringOperations(host){
         }
         return text;
     };
-    /** @param {string} text */
-    const wideBytes = text=>unitsBytes(textUnits(text));
     /**
      * What RtlFormatMessage leaves in a buffer its text outgrew: the
      * message's own characters as far as they fit, unterminated; an escape
@@ -297,23 +287,14 @@ export function createStringOperations(host){
     const overflowed = (text, piece, total)=>{
         if (piece.kind === 'insert' && total - 1 > piece.start)
         {
-            return wideBytes(`${text.slice(0, total - 1)}\0`);
+            return utf16z(text.slice(0, total - 1));
         }
-        return wideBytes(text.slice(0, piece.kind === 'character' ? total
+        return utf16(text.slice(0, piece.kind === 'character' ? total
             : Math.min(piece.start, total)));
     };
 
     /** @param {number} address */
-    const guidText = address=>{
-        const bytes = host.readMemory(wholeAddress(address), 16);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, 16);
-        /** @param {number} value @param {number} width */
-        const hex = (value, width)=>value.toString(16).toUpperCase().padStart(width, '0');
-        const tail = [...bytes.subarray(8)].map(byte=>hex(byte, 2));
-        return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-            + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 2).join('')}-`
-            + `${tail.slice(2).join('')}}`;
-    };
+    const guidText = address=>readGuid(host, wholeAddress(address));
 
     return {
         /** NTSTATUS RtlInitUnicodeStringEx(PUNICODE_STRING Destination, PCWSTR Source) */
@@ -360,7 +341,7 @@ export function createStringOperations(host){
             /** @param {number[]} args */
             handler: ([destination, source])=>{
                 const units = source === 0 ? [] : wideUnits(source);
-                copyInto(destination, unitsBytes(units), 2, true);
+                copyInto(destination, bytesOfUnits(units), 2, true);
                 return 0;
             },
         },
@@ -396,7 +377,7 @@ export function createStringOperations(host){
                     return STATUS.SUCCESS;
                 }
                 return append(destination,
-                    wideBytes(host.readWideString(wholeAddress(source), 0x20000)), 2);
+                    utf16(host.readWideString(wholeAddress(source), 0x20000)), 2);
             },
         },
 
@@ -408,7 +389,7 @@ export function createStringOperations(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([destination, source])=>append(destination,
-                unitsBytes(wideUnits(source)), 2),
+                bytesOfUnits(wideUnits(source)), 2),
         },
 
         /** CHAR RtlUpperChar(CHAR Character): ASCII letters only. */
@@ -763,7 +744,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                host.writeMemory(to.buffer, wideBytes(`${text}\0`));
+                host.writeMemory(to.buffer, utf16z(text));
                 writeDescriptor(wholeAddress(string), { ...to, length: text.length * 2 });
                 return STATUS.SUCCESS;
             },
@@ -811,7 +792,7 @@ export function createStringOperations(host){
                 {
                     return STATUS.NO_MEMORY;
                 }
-                host.writeMemory(buffer, wideBytes(`${text}\0`));
+                host.writeMemory(buffer, utf16z(text));
                 writeDescriptor(wholeAddress(string),
                     { length: text.length * 2, maximumLength: (text.length + 1) * 2, buffer });
                 return STATUS.SUCCESS;
@@ -917,7 +898,7 @@ export function createStringOperations(host){
                 if (error === 87)
                 {
                     // What was written before the fault stays, unterminated.
-                    host.writeMemory(wholeAddress(buffer), wideBytes(text.slice(0, total)));
+                    host.writeMemory(wholeAddress(buffer), utf16(text.slice(0, total)));
                     return STATUS.INVALID_PARAMETER;
                 }
                 if (error !== 0 || text.length > room)
@@ -925,7 +906,7 @@ export function createStringOperations(host){
                     host.writeMemory(wholeAddress(buffer), overflowed(text, piece, total));
                     return STATUS.BUFFER_OVERFLOW;
                 }
-                host.writeMemory(wholeAddress(buffer), wideBytes(`${text}\0`));
+                host.writeMemory(wholeAddress(buffer), utf16z(text));
                 if (returned !== 0)
                 {
                     host.writeMemory(wholeAddress(returned), u32((text.length + 1) * 2));
@@ -935,9 +916,9 @@ export function createStringOperations(host){
         },
 
         /** NTSTATUS RtlMultiByteToUnicodeN(PWCH, ULONG, PULONG, const CHAR *, ULONG) */
-        RtlMultiByteToUnicodeN: plain(bytes=>wideBytes(decodeAnsi(bytes)), 1, 2),
+        RtlMultiByteToUnicodeN: plain(bytes=>utf16(decodeAnsi(bytes)), 1, 2),
         /** NTSTATUS RtlOemToUnicodeN(PWCH, ULONG, PULONG, PCCH, ULONG) */
-        RtlOemToUnicodeN: plain(bytes=>wideBytes(decodeOem(bytes)), 1, 2),
+        RtlOemToUnicodeN: plain(bytes=>utf16(decodeOem(bytes)), 1, 2),
         /** NTSTATUS RtlUnicodeToMultiByteN(PCHAR, ULONG, PULONG, PCWCH, ULONG) */
         RtlUnicodeToMultiByteN: plain(bytes=>encodeAnsi(unitsText(bytes)), 2, 1),
         /** NTSTATUS RtlUnicodeToOemN(PCHAR, ULONG, PULONG, PCWCH, ULONG) */

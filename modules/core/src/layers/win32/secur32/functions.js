@@ -25,6 +25,7 @@
 import { COMPUTER_NAME } from '../kernel32/drives.js';
 import { USER_NAME } from '../advapi32/tokens.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const SEC_E_OK = 0;
 const SEC_E_INVALID_HANDLE = 0x80090301 | 0;
@@ -108,7 +109,7 @@ export function createSecur32Functions(host){
                 return 0;
             }
             const text = wide
-                ? new Uint8Array(Uint16Array.from(`${name}\0`, c=>c.charCodeAt(0)).buffer)
+                ? utf16z(name)
                 : Uint8Array.from(`${name}\0`, c=>c.charCodeAt(0));
             host.writeMemory(wholeAddress(buffer), text);
             host.writeMemory(wholeAddress(size), dword(name.length));

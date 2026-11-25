@@ -10,7 +10,7 @@ import { createFilterBase, FORMAT_WAVE_FORMAT_EX, MEDIATYPE_AUDIO } from './filt
 import { CLSID_ACM_WRAPPER, createAcmWrapper } from './acmwrapper.js';
 import { createPassThru } from './passthru.js';
 import { createComObject } from '../ole32/objects.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 
 const IID_IBASE_FILTER = '{56A86895-0AD4-11CE-B03A-0020AF0BA770}';
 const IID_IPERSIST_PROPERTY_BAG = '{37D84F60-42CB-11CE-8135-00AA004BB851}';

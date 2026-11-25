@@ -29,7 +29,7 @@ import assert from 'node:assert/strict';
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DLOCK, D3DMCS,
     D3DPOOL, D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS,
-    D3D_OK, D3DERR_INVALIDCALL, floatToDword,
+    D3D_OK, D3DERR_INVALIDCALL,
 } from './constants.js';
 import { createDirect3D8 } from './device.js';
 import {
@@ -58,7 +58,7 @@ import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 import { formatTraits } from '../webgpu/internal/textures.js';
 import { D3DFMT as D3DFMT9, FORMAT_INFO, isCompressed, sampledOnes } from '../d3d9/constants.js';
-import { toHalf } from '../d3d9/half.js';
+import { floatBits, toHalf } from '../../../system/floats.js';
 
 /**
  * The sampler state of stage zero as the last uniform block on the queue carries it.
@@ -3124,8 +3124,8 @@ test('a screen-space draw is recorded with what fills it', ()=>{
 
     assert.equal(device.SetRenderState(D3DRS.FOGENABLE, 1), D3D_OK);
     assert.equal(device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR), D3D_OK);
-    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatToDword(0)), D3D_OK);
-    assert.equal(device.SetRenderState(D3DRS.FOGEND, floatToDword(7000)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatBits(0)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGEND, floatBits(7000)), D3D_OK);
     assert.equal(device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
     assert.equal(device.BeginScene(), D3D_OK);
     const fvf = FVF.XYZ | FVF.DIFFUSE;
@@ -4292,8 +4292,8 @@ test('fog: range fog is vertex fog over the distance from the eye, and table fog
             device.SetRenderState(D3DRS.LIGHTING, 0);
             device.SetRenderState(D3DRS.FOGENABLE, 1);
             device.SetRenderState(D3DRS.RANGEFOGENABLE, 1);
-            device.SetRenderState(D3DRS.FOGSTART, floatToDword(0.75));
-            device.SetRenderState(D3DRS.FOGEND, floatToDword(0.75001));
+            device.SetRenderState(D3DRS.FOGSTART, floatBits(0.75));
+            device.SetRenderState(D3DRS.FOGEND, floatBits(0.75001));
             device.SetRenderState(D3DRS.FOGTABLEMODE, table);
             device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR);
             assert.equal(device.BeginScene(), D3D_OK);
@@ -4406,7 +4406,7 @@ test('recorded: the fog interpolation scene fogs as Windows does in every mode',
         device.SetRenderState(D3DRS.ZENABLE, 0);
         device.SetRenderState(D3DRS.FOGENABLE, 1);
         device.SetRenderState(D3DRS.FOGCOLOR, 0x0000ff00);
-        device.SetRenderState(D3DRS.FOGDENSITY, floatToDword(5));
+        device.SetRenderState(D3DRS.FOGDENSITY, floatBits(5));
         device.SetRenderState(D3DRS.TEXTUREFACTOR, 0x000000ff);
         device.SetRenderState(D3DRS.SHADEMODE, shade);
         device.SetRenderState(D3DRS.FOGVERTEXMODE, vertexMode);
@@ -4897,8 +4897,8 @@ test('a bump matrix moved draw by draw draws through one pipeline, each matrix i
         assert.equal(device.BeginScene(), D3D_OK);
         for (const scale of [0.25, 0.5, 0.75])
         {
-            device.SetTextureStageState(0, D3DTSS.BUMPENVMAT00, floatToDword(scale));
-            device.SetTextureStageState(0, D3DTSS.BUMPENVLSCALE, floatToDword(scale * 2));
+            device.SetTextureStageState(0, D3DTSS.BUMPENVMAT00, floatBits(scale));
+            device.SetTextureStageState(0, D3DTSS.BUMPENVLSCALE, floatBits(scale * 2));
             assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(36 * 3), 36),
                 D3D_OK);
         }

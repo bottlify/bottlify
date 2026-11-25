@@ -24,6 +24,7 @@
 import { STATUS } from './status.js';
 import { SKIP_THREAD_ATTACH, TEB } from '../kernel32/teb.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** RT_MESSAGETABLE's resource name: a module has one table, and it is number one. */
 const MESSAGE_TABLE_NAME = 1;
@@ -156,9 +157,6 @@ const DOS_DEVICES = '\\??\\';
  *           NtTerminateProcess with no handle begins: no thread is made in it
  *           from then on.
  */
-
-/** @param {string} text @returns {Uint8Array} UTF-16, unterminated. */
-const utf16 = text=>new Uint8Array(Uint16Array.from(text, c=>c.charCodeAt(0)).buffer);
 
 /**
  * @param {ProcessHost} host
@@ -294,8 +292,7 @@ export function createProcessFunctions(host){
 
     /** A terminated wide copy in the process heap, or 0. @param {string} text */
     const heapString = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        bytes.set(utf16(text));
+        const bytes = utf16z(text);
         const at = host.allocate(bytes.length) >>> 0;
         if (at !== 0)
         {

@@ -28,7 +28,7 @@
  *   two IUnknowns is an object that fails that test.
  */
 
-import { canonicalGuid } from './guid.js';
+import { canonicalGuid } from '../../../system/guid.js';
 
 /** IID_IUnknown. Every object answers to it and answers with the same record. */
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';

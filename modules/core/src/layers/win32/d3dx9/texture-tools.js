@@ -11,6 +11,7 @@ import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layo
     from './pixels.js';
 import { D3DXFloat32To16Array } from './inguest-vector.js';
 import { wholeAddress } from '../common/pointers.js';
+import { floatBits } from '../../../system/floats.js';
 
 /**
  * D3DX's textures made empty: D3DXCheckTextureRequirements's corrections of a
@@ -151,7 +152,7 @@ const FLOATS = new Map([[111, [2, 1]], [112, [2, 2]], [113, [2, 4]], [114, [4, 1
 
 /** A float as the library's own conversion makes a half of it. @param {number} value */
 const halfOf = value=>{
-    const bits = new Uint32Array(Float32Array.of(value).buffer)[0];
+    const bits = floatBits(value);
     let half = 0;
     D3DXFloat32To16Array(/** @type {any} */ ({ u32: ()=>bits,
         setU16: (/** @type {number} */ _, /** @type {number} */ v)=>{

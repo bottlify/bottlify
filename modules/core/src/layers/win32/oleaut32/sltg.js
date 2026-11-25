@@ -22,7 +22,7 @@
  * this format become the description's hreftypes.
  */
 
-import { GUID_SIZE, formatGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid } from '../../../system/guid.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { parseTypeLib } from './typelib.js';
 

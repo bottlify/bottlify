@@ -6,6 +6,7 @@
 
 import { isDriven } from './drive.js';
 import { Convention } from './conventions.js';
+import { formatGuid } from '../../../system/guid.js';
 
 /**
  * Putting an interface into guest memory.
@@ -243,10 +244,6 @@ const COUNT_CODE_64 = {
         0x45, 0x31, 0xc9, 0xf0, 0x45, 0x0f, 0xb1, 0x0a, 0x75, 0x03, 0x31, 0xc0, 0xc3, 0xf0,
         0x41, 0xff, 0x00, 0xeb, 0xb1],
 };
-
-/** Each byte as two upper-case hex digits, as a GUID's text spells it. */
-const BYTE_HEX = Array.from({ length: 256 }, (unused, byte)=>
-    byte.toString(16).toUpperCase().padStart(2, '0'));
 
 /**
  * @param {Object} deps
@@ -762,7 +759,7 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
             return 0x80070057; // E_INVALIDARG
         }
 
-        const wanted = readGuid(riid >>> 0);
+        const wanted = formatGuid(memory.readBytes(riid >>> 0, 16));
         // An object may answer QueryInterface for less than it is published
         // as (`queryFor`): an effect is handed out as ID3D10Effect and is
         // asked for it in vain.
@@ -791,28 +788,6 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
         writeWord(ppv >>> 0, pointer);
         const added = object.addRef(record.sharedWith ?? wanted);
         return typeof added?.then === 'function' ? added.then(()=>0) : 0; // S_OK
-    }
-
-    /**
-     * A GUID as the canonical braced string the object model is keyed by. The
-     * byte order is not flat: three little-endian integers and then eight raw
-     * bytes, which is the difference between finding an interface and reporting
-     * that it does not exist.
-     *
-     * @param {number} address
-     */
-    function readGuid(address){
-        const bytes = memory.readBytes(address, 16);
-        /** @param {number} from @param {number} to  bytes, little-endian when `to < from` */
-        const hex = (from, to)=>{
-            let text = '';
-            for (let at = from; at !== to; at += from < to ? 1 : -1)
-            {
-                text += BYTE_HEX[bytes[at]];
-            }
-            return text;
-        };
-        return `{${hex(3, -1)}-${hex(5, 3)}-${hex(7, 5)}-${hex(8, 10)}-${hex(10, 16)}}`;
     }
 
     return {

@@ -38,6 +38,7 @@
 import { decodeAnsi, encodeAnsi } from './locale.js';
 import { createIniMapping } from './ini-mapping.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /** Where a profile file with no directory of its own is. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
@@ -372,17 +373,6 @@ export function createProfileFunctions(host){
         return { start, end };
     };
 
-    /** @param {string} value @returns {Uint8Array} UTF-16LE */
-    const encodeWide = value=>{
-        const out = new Uint8Array(value.length * 2);
-        for (let at = 0; at < value.length; at++)
-        {
-            out[at * 2] = value.charCodeAt(at) & 0xff;
-            out[at * 2 + 1] = value.charCodeAt(at) >>> 8;
-        }
-        return out;
-    };
-
     /**
      * Writes a list of names, NUL-separated and NUL-ended, into a buffer that
      * may be too small for it. Sizes and counts are in characters of the form
@@ -396,7 +386,7 @@ export function createProfileFunctions(host){
      * @returns {number} what the call answers
      */
     const writeList = (buffer, size, names, wide = false, spare = 0)=>{
-        const encode = wide ? encodeWide : encodeAnsi;
+        const encode = wide ? utf16 : encodeAnsi;
         const room = size >>> 0;
         if (room === 0)
         {
@@ -426,7 +416,7 @@ export function createProfileFunctions(host){
             return 0;
         }
         const kept = value.slice(0, room - 1);
-        host.writeMemory(wholeAddress(buffer), (wide ? encodeWide : encodeAnsi)(`${kept}\0`));
+        host.writeMemory(wholeAddress(buffer), (wide ? utf16 : encodeAnsi)(`${kept}\0`));
         return kept.length;
     };
 

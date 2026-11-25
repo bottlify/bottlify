@@ -18,8 +18,9 @@ import { GL } from './constants.js';
 import { SIZED_FORMATS, TEX, modelTexelBytes } from './formats.js';
 import {
     clientBytes, clientLayout, decodeClient, decodeStorage, encodeClient, encodeStorage,
-    fromHalf, packFromStorage, storageLayout, toHalf, transferError, unpackToStorage,
+    packFromStorage, storageLayout, transferError, unpackToStorage,
 } from './texture-transfer.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 /** @type {import('./texture-transfer.js').TransferState} */
 const TIGHT = { alignment: 1, rowLength: 0, skipRows: 0, skipPixels: 0, swapBytes: false };

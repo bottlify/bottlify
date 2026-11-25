@@ -24,6 +24,7 @@
 import { EACCES, EBADF, EEXIST, EINVAL, ENOENT, ENOTEMPTY, ERANGE } from './globals.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The last errors DeleteFile and RemoveDirectory leave. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -270,13 +271,7 @@ export function createPathFunctions(host){
         {
             return;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /**

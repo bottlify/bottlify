@@ -36,6 +36,7 @@ import {
 } from './winevents.js';
 import { notifyWindow } from './notify.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const TAB_CLASS = 'SysTabControl32';
@@ -265,14 +266,7 @@ export function createTabProcedure(host, tk, images){
             host.writeMemory(wholeAddress(address), encodeAnsi(`${clipped}\0`));
             return;
         }
-        const bytes = new Uint8Array((clipped.length + 1) * 2);
-        for (let index = 0; index < clipped.length; index++)
-        {
-            const unit = clipped.charCodeAt(index);
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = unit >>> 8;
-        }
-        host.writeMemory(wholeAddress(address), bytes);
+        host.writeMemory(wholeAddress(address), utf16z(clipped));
     };
 
     /**

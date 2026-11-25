@@ -27,7 +27,7 @@
  */
 
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
-import { readGuid, writeGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../../../system/guid.js';
 import { createAdapter, createTypeLibraryObjects } from './objects.js';
 import { createErrorInfoObjects } from './errorinfo.js';
 import { IID_IPICTURE, IID_IPICTUREDISP, createPictureObjects } from './picture.js';
@@ -63,6 +63,7 @@ import {
 } from './vartypes.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
 import { safeArrayLayout } from '../common/safearray.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** The prefix, in bytes, and where the caller's pointer sits relative to it. */
 const PREFIX_BYTES = 4;
@@ -524,17 +525,6 @@ export function createAutomationFunctions(host){
         return block + PREFIX_BYTES;
     };
 
-    /** @param {string} text @returns {Uint8Array} its UTF-16 code units */
-    const encode = text=>{
-        const bytes = new Uint8Array(text.length * 2);
-        const data = new DataView(bytes.buffer);
-        for (let index = 0; index < text.length; index++)
-        {
-            data.setUint16(index * 2, text.charCodeAt(index), true);
-        }
-        return bytes;
-    };
-
     /** @param {number} bstr @returns {number} the byte count in its prefix */
     const byteLengthOf = bstr=>bstr === 0 ? 0 : readU32(bstr - PREFIX_BYTES);
 
@@ -806,7 +796,7 @@ export function createAutomationFunctions(host){
             {
                 return DISP_E_TYPEMISMATCH;
             }
-            const bstr = allocateBstr(encode(text));
+            const bstr = allocateBstr(utf16(text));
             if (bstr === 0)
             {
                 return E_OUTOFMEMORY;
@@ -1400,7 +1390,7 @@ export function createAutomationFunctions(host){
             }
         },
         readBstr,
-        allocateBstr: text=>allocateBstr(encode(text)),
+        allocateBstr: text=>allocateBstr(utf16(text)),
         freeBstr,
         divergence: report,
     }) : null;
@@ -1436,7 +1426,7 @@ export function createAutomationFunctions(host){
         copyBstr: bstr=>(bstr === 0 ? 0
             : allocateBstr(host.readMemory(bstr, byteLengthOf(bstr)).slice())),
         freeBstr,
-        allocateBstr: text=>allocateBstr(encode(text)),
+        allocateBstr: text=>allocateBstr(utf16(text)),
         divergence: report,
     }) : null;
 
@@ -1444,7 +1434,7 @@ export function createAutomationFunctions(host){
         readMemory: host.readMemory,
         writeMemory: host.writeMemory,
         publish: (object, id)=>host.vtables?.publish(object, id) ?? 0,
-        allocateBstr: text=>allocateBstr(encode(text)),
+        allocateBstr: text=>allocateBstr(utf16(text)),
         adapt: (state, interfaces)=>createAdapter(state, interfaces),
     }) : null;
 
@@ -2217,7 +2207,7 @@ export function createAutomationFunctions(host){
             {
                 return text;
             }
-            const bstr = allocateBstr(encode(text));
+            const bstr = allocateBstr(utf16(text));
             writeU32(out, bstr);
             return bstr === 0 ? E_OUTOFMEMORY : S_OK;
         },
@@ -2348,7 +2338,7 @@ export function createAutomationFunctions(host){
             case VT_NULL:
                 return writeVariant(pvar, type, new Uint8Array(0));
             case VT_BSTR: {
-                const bstr = allocateBstr(encode(String(text)));
+                const bstr = allocateBstr(utf16(String(text)));
                 return bstr === 0 ? writeOutcome(pvar, E_OUTOFMEMORY)
                     : writeVariant(pvar, type, valueBytes(view=>view.setUint32(0, bstr, true)));
             }
@@ -3354,7 +3344,7 @@ export function createAutomationFunctions(host){
             writeU32(out, 0);
             return S_OK;
         }
-        const bstr = allocateBstr(encode(text));
+        const bstr = allocateBstr(utf16(text));
         writeU32(out, bstr);
         return bstr === 0 ? E_OUTOFMEMORY : S_OK;
     };
@@ -3514,7 +3504,7 @@ export function createAutomationFunctions(host){
                 {
                     const strings = [...names, ''].map(name=>{
                         const at = host.heap.allocate(name.length * 2 + 2);
-                        host.writeMemory(at, encode(`${name}\0`));
+                        host.writeMemory(at, utf16z(name));
                         return at;
                     });
                     table = host.heap.allocate(strings.length * 4);
@@ -3547,7 +3537,7 @@ export function createAutomationFunctions(host){
                 const view = new DataView(bytes.buffer);
                 view.setUint16(0, text.length, true);
                 view.setUint16(2, firstDay & 0xffff, true);
-                bytes.set(encode(text), TOKEN_HEADER);
+                bytes.set(utf16(text), TOKEN_HEADER);
                 if (bytes.length > (room | 0))
                 {
                     return 0x80020013 | 0;
@@ -4686,7 +4676,7 @@ export function createAutomationFunctions(host){
                 }
                 const end = value.data.indexOf(0);
                 const path = decodeAnsi(value.data.subarray(0, end < 0 ? value.data.length : end));
-                const bstr = allocateBstr(encode(path));
+                const bstr = allocateBstr(utf16(path));
                 if (bstr === 0)
                 {
                     return E_OUTOFMEMORY;

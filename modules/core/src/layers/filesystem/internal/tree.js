@@ -39,6 +39,7 @@
 import { ErrorCode, fsError } from './errors.js';
 import { foldName, matchName } from './paths.js';
 import { PIECE_SIZE, bytesOf, readFromInto } from './memory-store.js';
+import { fromBase64, toBase64 } from '../../../system/base64.js';
 
 /**
  * A directory's entries in the order NTFS keeps its index and FindNextFile
@@ -158,11 +159,6 @@ export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
 
 /** A mount point's tag: the reparse point every junction is. */
 export const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
-
-/** @param {Uint8Array} bytes */
-const toBase64 = bytes=>btoa(String.fromCharCode(...bytes));
-/** @param {string} text */
-const fromBase64 = text=>Uint8Array.from(atob(text), character=>character.charCodeAt(0));
 
 /** A node's reparse tag: what it was set with, a junction recorded alone a mount point's. */
 const tagOf = (/** @type {Node} */ node)=>node.reparse?.tag

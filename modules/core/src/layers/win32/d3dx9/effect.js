@@ -52,6 +52,7 @@ import { COMPILED as SETTERS_IN_GUEST } from './effect-setters.x86.js';
 import { COMPILED as SETTERS_LONG } from './effect-setters.x64.js';
 import { COMPILED as COMMIT_IN_GUEST } from './effect-commit.x86.js';
 import { wholeAddress } from '../common/pointers.js';
+import { bitsFloat, floatBits } from '../../../system/floats.js';
 
 /** @typedef {import('./effect-model.js').EffectModel} EffectModel */
 /** @typedef {import('./effect-model.js').ParamModel} ParamModel */
@@ -538,19 +539,6 @@ export function createEffects(host, helpers, options = {}){
         putU32(clockAt, now + 1);
         return now;
     };
-    // One word seen both ways, so a conversion allocates nothing.
-    const bitsWord = new Uint32Array(1);
-    const floatWord = new Float32Array(bitsWord.buffer);
-    /** @param {number} value */
-    const asFloat = value=>{
-        bitsWord[0] = value >>> 0;
-        return floatWord[0];
-    };
-    /** @param {number} value */
-    const floatBits = value=>{
-        floatWord[0] = value;
-        return bitsWord[0];
-    };
     /** A NUL-ended string, at most 4 KB. @param {number} at */
     const cString = at=>string(at);
     /** @param {number} at */
@@ -785,7 +773,7 @@ export function createEffects(host, helpers, options = {}){
         {
             return word !== 0 ? 1 : 0;
         }
-        const value = from === PT.FLOAT ? asFloat(word) : from === PT.BOOL
+        const value = from === PT.FLOAT ? bitsFloat(word) : from === PT.BOOL
             ? (word !== 0 ? 1 : 0) : word | 0;
         if (to === PT.FLOAT)
         {
@@ -1170,7 +1158,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 if (isColorVector(p))
                 {
-                    const [r, g, b, a] = wordsOf(p).map(asFloat);
+                    const [r, g, b, a] = wordsOf(p).map(bitsFloat);
                     let n = colorByte(b) + (colorByte(g) << 8) + (colorByte(r) << 16);
                     if (p.model.rows * p.model.columns > 3)
                     {
@@ -1218,7 +1206,7 @@ export function createEffects(host, helpers, options = {}){
                 if (p.model.type === PT.INT && p.model.bytes === 4)
                 {
                     // A vector given to an int: a colour, packed ARGB.
-                    const [r, g, b, a] = v.map(asFloat);
+                    const [r, g, b, a] = v.map(bitsFloat);
                     writeWords(p, [(colorByte(b) + (colorByte(g) << 8) + (colorByte(r) << 16)
                         + (colorByte(a) << 24)) >>> 0]);
                     return D3D_OK;
@@ -2031,7 +2019,7 @@ export function createEffects(host, helpers, options = {}){
      *
      * @param {Param} p @param {number[]} held @returns {number[]}
      */
-    const numbersIn = (p, held)=>held.map(word=>(p.model.type === PT.FLOAT ? asFloat(word)
+    const numbersIn = (p, held)=>held.map(word=>(p.model.type === PT.FLOAT ? bitsFloat(word)
         : p.model.type === PT.BOOL ? (word !== 0 ? 1 : 0) : word | 0));
 
     /** A parameter's numbers in its own type. @param {Param} p @returns {number[]} */
@@ -2372,9 +2360,9 @@ export function createEffects(host, helpers, options = {}){
                 ? (type === PT.FLOAT ? word : floatBits(type === PT.BOOL ? (word !== 0 ? 1 : 0)
                     : word | 0))
                 : constant.set === 1
-                    ? (type === PT.FLOAT ? Math.trunc(asFloat(word)) | 0 : type === PT.BOOL
+                    ? (type === PT.FLOAT ? Math.trunc(bitsFloat(word)) | 0 : type === PT.BOOL
                         ? (word !== 0 ? 1 : 0) : word | 0)
-                    : ((type === PT.FLOAT ? asFloat(word) : word) !== 0 ? 1 : 0);
+                    : ((type === PT.FLOAT ? bitsFloat(word) : word) !== 0 ? 1 : 0);
         }
         const setter = CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0];
         return yield* withBytesStep(new Uint8Array(out.buffer, 0, units * 4), at=>set(effect,

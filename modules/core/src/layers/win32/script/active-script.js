@@ -30,7 +30,7 @@
  * (code parsed for an item runs in the global one, said the same way).
  */
 
-import { GUID_SIZE, formatGuid, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { createComObject } from '../ole32/objects.js';
 import { ScriptAbort, ScriptError } from './engine.js';
 import { DISP_E_UNKNOWNNAME, ExternalError, deferredExternal } from './external.js';

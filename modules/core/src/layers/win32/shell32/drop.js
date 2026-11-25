@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * A drop's HDROP: the global block WM_DROPFILES hands a window, a DROPFILES
@@ -137,13 +138,7 @@ export function createDropFunctions(host, decode, encode){
             const cut = path.slice(0, (room >>> 0) - 1);
             if (wide)
             {
-                const bytes = new Uint8Array((cut.length + 1) * 2);
-                for (let i = 0; i < cut.length; i++)
-                {
-                    bytes[i * 2] = cut.charCodeAt(i) & 0xff;
-                    bytes[i * 2 + 1] = cut.charCodeAt(i) >>> 8;
-                }
-                host.writeMemory(wholeAddress(buffer), bytes);
+                host.writeMemory(wholeAddress(buffer), utf16z(cut));
                 return cut.length;
             }
             const bytes = encode(cut);

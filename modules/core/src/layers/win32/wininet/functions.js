@@ -35,6 +35,7 @@ import { createCacheFunctions } from './cache.js';
 import { createFtpFunctions } from './ftp.js';
 import { createRefusals } from '../common/refusal.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_INVALID_HANDLE = 6;
@@ -605,13 +606,7 @@ export function createWininetFunctions(host){
 
     /** Writes UTF-16 and its terminator. @param {number} pointer @param {string} text */
     const writeWide = (pointer, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at * 2] = text.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
-        host.writeMemory(wholeAddress(pointer), bytes);
+        host.writeMemory(wholeAddress(pointer), utf16z(text));
     };
 
     /** @param {boolean} wide */

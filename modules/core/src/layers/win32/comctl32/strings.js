@@ -12,6 +12,7 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** What a control keeps of one text. */
 export const MAX_TEXT = 1024;
@@ -72,12 +73,6 @@ export function writeText(host, address, text, wide, room){
         host.writeMemory(wholeAddress(address), out);
         return fit.length;
     }
-    const bytes = new Uint8Array((clipped.length + 1) * 2);
-    for (let i = 0; i < clipped.length; i++)
-    {
-        bytes[i * 2] = clipped.charCodeAt(i) & 0xff;
-        bytes[i * 2 + 1] = clipped.charCodeAt(i) >>> 8;
-    }
-    host.writeMemory(wholeAddress(address), bytes);
+    host.writeMemory(wholeAddress(address), utf16z(clipped));
     return clipped.length;
 }

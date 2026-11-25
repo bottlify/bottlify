@@ -41,7 +41,7 @@ import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
     D3DSTENCILOP, D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead,
-    dwordToFloat, isCompressed, surfaceBytes, tightRows,
+    isCompressed, surfaceBytes, tightRows,
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
@@ -62,7 +62,7 @@ import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { depthWriteWords } from '../webgpu/internal/depth.js';
 import { convertTexels } from '../d3d10/blocks.js';
-import { fromHalf, storedToHalves, toHalf } from '../d3d9/half.js';
+import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import { changedSpans, createCompared, pageMarksOf, writtenSpans }
     from '../webgpu/internal/changed.js';
@@ -71,6 +71,8 @@ import {
     readsNormal, tailOf, coordinateTransformOf, vertexTailOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
+import { bitsFloat, fromHalf, toHalf } from '../../../system/floats.js';
+import { toBase64 } from '../../../system/base64.js';
 
 /**
  * Direct3D 7's D3DRENDERSTATE_COLORKEYENABLE. Its number is free in Direct3D
@@ -216,7 +218,6 @@ const variantsKey = variants=>Array.from(variants, variant=>(variant
         + (variant.dimension ? `/${variant.dimension}` : '')
         + (variant.compared ? '/z' : '')
     : '')).join(',');
-
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
 const TEXTURE_DUMP_LIMIT = 96;
@@ -1268,7 +1269,7 @@ function putDword(block, at, dword){
  * @param {RenderModel} model
  */
 function pointLimits(model){
-    const rs = (/** @type {number} */ state)=>dwordToFloat(model.renderStates.get(state) ?? 0);
+    const rs = (/** @type {number} */ state)=>bitsFloat(model.renderStates.get(state) ?? 0);
     return [rs(D3DRS.POINTSIZE), rs(D3DRS.POINTSIZE_MIN), rs(D3DRS.POINTSIZE_MAX), 0];
 }
 
@@ -1465,7 +1466,7 @@ function bumpEnvOf(model){
     {
         const states = model.stageStates(stage);
         const get = (/** @type {number} */ state)=>{
-            const value = dwordToFloat(states.get(state) ?? 0);
+            const value = bitsFloat(states.get(state) ?? 0);
             // A state never set reads as whatever its dword was; one that is
             // no number moves nothing.
             return Number.isFinite(value) ? value : 0;
@@ -1999,9 +2000,9 @@ export function lightingOf(model, layout){
  */
 export function pixelUniformsOf(model, take, mips = true, tail = undefined){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
-    PIXEL_FOG[0] = dwordToFloat(rs('FOGSTART'));
-    PIXEL_FOG[1] = dwordToFloat(rs('FOGEND'));
-    PIXEL_FOG[2] = dwordToFloat(rs('FOGDENSITY'));
+    PIXEL_FOG[0] = bitsFloat(rs('FOGSTART'));
+    PIXEL_FOG[1] = bitsFloat(rs('FOGEND'));
+    PIXEL_FOG[2] = bitsFloat(rs('FOGDENSITY'));
     return uniformBlock({
         worldViewProjection: IDENTITY,
         viewport: model.viewport,
@@ -2047,9 +2048,9 @@ export function uniformsOf(model, lighting, take, mips = true, tail = undefined)
         // picture as no fog at all when the range is huge, and a white frame
         // when it is tiny.
         fogFactors: [
-            dwordToFloat(rs('FOGSTART')),
-            dwordToFloat(rs('FOGEND')),
-            dwordToFloat(rs('FOGDENSITY')),
+            bitsFloat(rs('FOGSTART')),
+            bitsFloat(rs('FOGEND')),
+            bitsFloat(rs('FOGDENSITY')),
         ],
         affineProjection: isAffine(projection),
         alphaRef: rs('ALPHAREF'),
@@ -2064,8 +2065,8 @@ export function uniformsOf(model, lighting, take, mips = true, tail = undefined)
             : {}),
         points: [
             ...pointLimits(model),
-            dwordToFloat(rs('POINTSCALE_A')), dwordToFloat(rs('POINTSCALE_B')),
-            dwordToFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
+            bitsFloat(rs('POINTSCALE_A')), bitsFloat(rs('POINTSCALE_B')),
+            bitsFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
         ],
         // The shader declares an array exactly as long as the lighting state
         // said, so a block that carried lights it does not know about would be
@@ -2516,7 +2517,7 @@ const LOD_BIAS_LIMIT = 16;
  * @returns {number}
  */
 export function lodBiasOf(dword){
-    const bias = dwordToFloat(dword);
+    const bias = bitsFloat(dword);
     return Number.isFinite(bias)
         ? Math.min(LOD_BIAS_LIMIT, Math.max(-LOD_BIAS_LIMIT, bias)) + 0 : 0;
 }
@@ -2537,7 +2538,7 @@ function bumpOf(get){
     }
     return { bump: [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
         D3DTSS.BUMPENVMAT11, D3DTSS.BUMPENVLSCALE, D3DTSS.BUMPENVLOFFSET]
-        .map(state=>dwordToFloat(get(state))) };
+        .map(state=>bitsFloat(get(state))) };
 }
 
 /**
@@ -2683,8 +2684,8 @@ function depthBiasOf(model, depthFormat, topology, diverge){
         return {};
     }
     const zbias = (model.renderStates.get(D3DRS.ZBIAS) ?? 0) & 0xff;
-    const units = dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0);
-    const slope = dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0);
+    const units = bitsFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0);
+    const slope = bitsFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0);
     // WebGPU allows a bias only on triangles.
     if (topology !== undefined && topology !== 'triangle-list'
         && !topology.startsWith('triangle-strip') && topology !== POINT_QUADS)
@@ -3919,16 +3920,6 @@ export function createRenderer(options){
         return (hash >>> 0).toString(16).padStart(8, '0');
     };
 
-    /** @param {Uint8Array} bytes */
-    const bytesToBase64 = bytes=>{
-        let text = '';
-        for (let at = 0; at < bytes.length; at += 4096)
-        {
-            text += String.fromCharCode(...bytes.subarray(at, at + 4096));
-        }
-        return btoa(text);
-    };
-
     /**
      * What is bound to a stage, by format and size.
      *
@@ -4013,9 +4004,9 @@ export function createRenderer(options){
         const rs = (/** @type {number} */ state)=>model.renderStates.get(state) ?? 0;
         return `${rs(D3DRS.FOGTABLEMODE) || rs(D3DRS.FOGVERTEXMODE)}`
             + `/${(rs(D3DRS.FOGCOLOR) >>> 0).toString(16).padStart(8, '0')}`
-            + `/${round(dwordToFloat(rs(D3DRS.FOGSTART)))}`
-            + `..${round(dwordToFloat(rs(D3DRS.FOGEND)))}`
-            + `/${round(dwordToFloat(rs(D3DRS.FOGDENSITY)))}`;
+            + `/${round(bitsFloat(rs(D3DRS.FOGSTART)))}`
+            + `..${round(bitsFloat(rs(D3DRS.FOGEND)))}`
+            + `/${round(bitsFloat(rs(D3DRS.FOGDENSITY)))}`;
     };
 
     /**
@@ -4098,8 +4089,8 @@ export function createRenderer(options){
             const toScreen = multiplyMatrices(
                 multiplyMatrices(transformOf(model, D3DTS.WORLD), transformOf(model, D3DTS.VIEW)),
                 transformOf(model, D3DTS.PROJECTION));
-            const start = dwordToFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0);
-            const end = dwordToFloat(model.renderStates.get(D3DRS.FOGEND) ?? 0);
+            const start = bitsFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0);
+            const end = bitsFloat(model.renderStates.get(D3DRS.FOGEND) ?? 0);
             const depth = toScreen[15];
             const amount = end > start
                 ? Math.max(0, Math.min(1, (end - depth) / (end - start)))
@@ -4138,9 +4129,9 @@ export function createRenderer(options){
             sample(tally.fog.settings, ()=>
                 `colour=${((model.renderStates.get(D3DRS.FOGCOLOR) ?? 0) >>> 0)
                     .toString(16).padStart(8, '0')}`
-                + ` start=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0))}`
-                + ` end=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGEND) ?? 0))}`
-                + ` density=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGDENSITY) ?? 0))}`);
+                + ` start=${round(bitsFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0))}`
+                + ` end=${round(bitsFloat(model.renderStates.get(D3DRS.FOGEND) ?? 0))}`
+                + ` density=${round(bitsFloat(model.renderStates.get(D3DRS.FOGDENSITY) ?? 0))}`);
         }
         if (!lighting)
         {
@@ -4335,13 +4326,13 @@ export function createRenderer(options){
         // field above -- so such a draw carries its bytes and its transform,
         // for a replay of the one draw on its own.
         const geometry64 = box && box.behind > 0 && drawn <= 128
-            ? ` geo=v:${bytesToBase64(vertices)};i:${indices
-                ? bytesToBase64(new Uint8Array(Uint16Array.from(indices).buffer))
+            ? ` geo=v:${toBase64(vertices)};i:${indices
+                ? toBase64(new Uint8Array(Uint16Array.from(indices).buffer))
                 : '-'};m:${Array.from(prepared.uniforms.subarray(
                 UNIFORM_AT.worldViewProjection, UNIFORM_AT.worldViewProjection + 16)).join(',')}`
-                + `;u:${bytesToBase64(new Uint8Array(prepared.uniforms.buffer,
+                + `;u:${toBase64(new Uint8Array(prepared.uniforms.buffer,
                     prepared.uniforms.byteOffset, prepared.uniforms.byteLength))}`
-                + `;s:${bytesToBase64(new TextEncoder().encode(JSON.stringify(state)))}`
+                + `;s:${toBase64(new TextEncoder().encode(JSON.stringify(state)))}`
             : '';
         const cascade = state.stages.map((/** @type {any} */ stage, /** @type {number} */ at)=>
             `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
@@ -4476,8 +4467,8 @@ export function createRenderer(options){
             // lies on, as a fixed-function draw's line says them: two coplanar layers without
             // it take turns as the camera moves.
             + ` z=${state.depthTest ? state.depthFunc : '-'}/${state.depthWrite ? 1 : 0}`
-            + `/bias${dwordToFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)}`
-            + `,${dwordToFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0)}`
+            + `/bias${bitsFloat(model.renderStates.get(D3DRS9.DEPTHBIAS) ?? 0)}`
+            + `,${bitsFloat(model.renderStates.get(D3DRS9.SLOPESCALEDEPTHBIAS) ?? 0)}`
             + ` cull=${model.renderStates.get(D3DRS.CULLMODE) ?? '-'}`
             // As a fixed-function draw's line says them: what a draw under a
             // stencil test reads, and what one made for the stencil writes.
@@ -4532,7 +4523,7 @@ export function createRenderer(options){
         {
             const states = model.stageStates(stage);
             const matrix = [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
-                D3DTSS.BUMPENVMAT11].map(state=>dwordToFloat(states.get(state) ?? 0));
+                D3DTSS.BUMPENVMAT11].map(state=>bitsFloat(states.get(state) ?? 0));
             if (matrix.some(value=>value !== 0))
             {
                 stages.push(`${stage}:${matrix.map(round).join(',')}`);
@@ -7346,7 +7337,7 @@ export function createRenderer(options){
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
             const states = model.stageStates(stage);
-            const read = (/** @type {number} */ state)=>dwordToFloat(states.get(state) ?? 0);
+            const read = (/** @type {number} */ state)=>bitsFloat(states.get(state) ?? 0);
             floats.set([
                 read(D3DTSS.BUMPENVMAT00), read(D3DTSS.BUMPENVMAT01),
                 read(D3DTSS.BUMPENVMAT10), read(D3DTSS.BUMPENVMAT11),
@@ -8011,9 +8002,9 @@ export function createRenderer(options){
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
                 vertex.fogRegister * 4);
             blocks[0].set([
-                dwordToFloat(rs('FOGSTART')),
-                dwordToFloat(rs('FOGEND')),
-                dwordToFloat(rs('FOGDENSITY')),
+                bitsFloat(rs('FOGSTART')),
+                bitsFloat(rs('FOGEND')),
+                bitsFloat(rs('FOGDENSITY')),
                 isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
             ], (vertex.fogRegister + 1) * 4);
         }
@@ -8060,9 +8051,9 @@ export function createRenderer(options){
         // reads.
         const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
         floats.set([
-            dwordToFloat(rs('FOGSTART')),
-            dwordToFloat(rs('FOGEND')),
-            dwordToFloat(rs('FOGDENSITY')),
+            bitsFloat(rs('FOGSTART')),
+            bitsFloat(rs('FOGEND')),
+            bitsFloat(rs('FOGDENSITY')),
             isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
         ], HYBRID_CONSTANTS.FOG * 4);
         const fogColour = colorToFloats(rs('FOGCOLOR'));
@@ -8070,8 +8061,8 @@ export function createRenderer(options){
             HYBRID_CONSTANTS.FOG_COLOR * 4);
         floats.set(pointLimits(model), HYBRID_CONSTANTS.POINT * 4);
         floats.set([
-            dwordToFloat(rs('POINTSCALE_A')), dwordToFloat(rs('POINTSCALE_B')),
-            dwordToFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
+            bitsFloat(rs('POINTSCALE_A')), bitsFloat(rs('POINTSCALE_B')),
+            bitsFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
         ], HYBRID_CONSTANTS.POINT_SCALE * 4);
         // The user planes through the world, into the vertex's own space,
         // where the stage takes their distances.
@@ -9820,7 +9811,6 @@ export function createRenderer(options){
     const INDEX16 = Object.freeze({ gpu: 'uint16', bytes: 2 });
     const INDEX32 = Object.freeze({ gpu: 'uint32', bytes: 4 });
 
-
     /**
      * Counts a buffer draw's shape (`counters.shapes`).
      *
@@ -9894,7 +9884,6 @@ export function createRenderer(options){
         }
         return counts;
     };
-
 
     /**
      * The geometry a draw hands `record`, which copies it at once: one object
@@ -12773,7 +12762,6 @@ export function createRenderer(options){
             frame.present(surface);
         }
     }
-
 
     /** @param {any} command a pass command with a depth target */
     function depthAttachment(command){

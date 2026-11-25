@@ -33,9 +33,10 @@ import { IID_IAUDIO_CLIENT, IID_IAUDIO_SESSION_MANAGER, createAudioClients, guid
     from './audio-client.js';
 import { SOUND_DEVICE_GUID } from '../devices.js';
 import { IID_IUNKNOWN } from './objects.js';
-import { parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IAUDIO_ENDPOINT_VOLUME, createEndpointVolume } from './endpoint-volume.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -220,8 +221,7 @@ export function registerMmDevApiClasses(host){
         const at = host.heap.allocate(text.length * 2 + 2);
         if (at !== 0)
         {
-            host.writeMemory(at, new Uint8Array(Uint16Array.from(`${text}\0`,
-                c=>c.charCodeAt(0)).buffer));
+            host.writeMemory(at, utf16z(text));
         }
         return at;
     };
@@ -270,14 +270,9 @@ export function registerMmDevApiClasses(host){
 
     /** A PROPERTYKEY at an address, as `{fmtid} pid`. @param {number} at */
     const readKey = at=>{
-        const bytes = host.readMemory(wholeAddress(at), 20).slice();
-        const view = new DataView(bytes.buffer);
-        const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
-            value.toString(16).toUpperCase().padStart(width, '0');
-        const tail = [...bytes.subarray(8, 16)].map(byte=>hex(byte, 2)).join('');
-        return `{${hex(view.getUint32(0, true), 8)}-${hex(view.getUint16(4, true), 4)}-`
-            + `${hex(view.getUint16(6, true), 4)}-${tail.slice(0, 4)}-${tail.slice(4)}} `
-            + `${view.getUint32(16, true)}`;
+        const bytes = host.readMemory(wholeAddress(at), 20);
+        return `${formatGuid(bytes)} ${new DataView(bytes.buffer, bytes.byteOffset, 20)
+            .getUint32(16, true)}`;
     };
 
     /**

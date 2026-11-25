@@ -41,6 +41,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -255,14 +256,7 @@ const encode = (text, wide)=>{
     {
         return encodeAnsi(`${text}\0`);
     }
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let index = 0; index < text.length; index++)
-    {
-        const unit = text.charCodeAt(index);
-        bytes[index * 2] = unit & 0xff;
-        bytes[index * 2 + 1] = unit >>> 8;
-    }
-    return bytes;
+    return utf16z(text);
 };
 
 /**

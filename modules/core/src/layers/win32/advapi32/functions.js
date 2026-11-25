@@ -37,6 +37,7 @@ import { createSecurityFunctions } from './security.js';
 import { createLsaFunctions } from './lsa.js';
 import { isTextUnicode } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -418,14 +419,7 @@ export function createRegistryFunctions(host){
      */
     const widened = bytes=>{
         const text = decodeAnsi(bytes);
-        const out = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const unit = text.charCodeAt(at);
-            out[at * 2] = unit & 0xff;
-            out[at * 2 + 1] = unit >>> 8;
-        }
-        return out;
+        return utf16(text);
     };
 
     /** @param {number} pointer @returns {string | null} */
@@ -573,17 +567,6 @@ export function createRegistryFunctions(host){
             const base = match ? hive.root(match[1].toLowerCase() === 'machine'
                 ? HKEY_LOCAL_MACHINE : HKEY_USERS) : null;
             return base ? { base, path: match?.[2] ?? '' } : STATUS.OBJECT_NAME_NOT_FOUND;
-        };
-
-        /** @param {string} text */
-        const utf16 = text=>{
-            const bytes = new Uint8Array(text.length * 2);
-            for (let at = 0; at < text.length; at++)
-            {
-                bytes[at * 2] = text.charCodeAt(at) & 0xff;
-                bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-            }
-            return bytes;
         };
 
         /**

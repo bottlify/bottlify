@@ -32,11 +32,12 @@
  * (dlls/ole32/tests/usrmarshal.c) check them byte for byte.
  */
 
-import { GUID_NULL, formatGuid, readGuid } from './guid.js';
+import { GUID_NULL, formatGuid, readGuid } from '../../../system/guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
 import { readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
@@ -236,16 +237,6 @@ export function createUserMarshalFunctions(host){
             text += String.fromCharCode(bytes[index] | bytes[index + 1] << 8);
         }
         return text;
-    };
-    /** @param {string} text  Written with its terminator. */
-    const wideBytes = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
-        return bytes;
     };
 
     /**
@@ -711,7 +702,7 @@ export function createUserMarshalFunctions(host){
                 }
                 const units = name.length + 1;
                 const end = putWords(at, [WDT_REMOTE_CALL, format, units, 0, units]);
-                host.writeMemory(end, wideBytes(name));
+                host.writeMemory(end, utf16z(name));
                 return end + units * 2;
             },
             unmarshal: (flags, buffer, slot)=>{

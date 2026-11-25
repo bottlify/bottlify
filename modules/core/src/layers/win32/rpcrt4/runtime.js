@@ -31,7 +31,7 @@
  * from the calling thread's own stack rather than from this handler's.
  */
 
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { OBJREF_BYTES, decodeObjref } from '../ole32/objref.js';
 import {
     NDR_LOCAL_DATA_REPRESENTATION, PROXY_PHASE, RPC_MESSAGE, RPC_STATUS, RpcException,

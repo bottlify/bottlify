@@ -26,9 +26,10 @@
 
 import { HashedStates } from '../d3d8/statehash.js';
 import {
-    D3DBLEND, D3DBLENDOP, D3DCMP, D3DCULL, D3DDEGREE, D3DDMT, D3DFILL, D3DFOG, D3DMCS,
-    D3DPATCHEDGE, D3DRS, D3DSHADE, D3DSTENCILOP, D3DVBF, D3DZB, floatToDword,
+    D3DBLEND, D3DBLENDOP, D3DCMP, D3DCULL, D3DDEGREE, D3DDMT, D3DFILL, D3DFOG, D3DMCS, D3DPATCHEDGE,
+    D3DRS, D3DSHADE, D3DSTENCILOP, D3DVBF, D3DZB,
 } from './constants.js';
+import { floatBits } from '../../../system/floats.js';
 
 const TRUE = 1;
 const FALSE = 0;
@@ -73,9 +74,9 @@ export const DEFAULT_RENDER_STATES = Object.freeze([
     { state: D3DRS.SPECULARENABLE, name: 'SPECULARENABLE', value: FALSE },
     { state: D3DRS.FOGCOLOR, name: 'FOGCOLOR', value: 0 },
     { state: D3DRS.FOGTABLEMODE, name: 'FOGTABLEMODE', value: D3DFOG.NONE },
-    { state: D3DRS.FOGSTART, name: 'FOGSTART', value: floatToDword(0.0) },
-    { state: D3DRS.FOGEND, name: 'FOGEND', value: floatToDword(1.0) },
-    { state: D3DRS.FOGDENSITY, name: 'FOGDENSITY', value: floatToDword(1.0) },
+    { state: D3DRS.FOGSTART, name: 'FOGSTART', value: floatBits(0.0) },
+    { state: D3DRS.FOGEND, name: 'FOGEND', value: floatBits(1.0) },
+    { state: D3DRS.FOGDENSITY, name: 'FOGDENSITY', value: floatBits(1.0) },
     { state: D3DRS.RANGEFOGENABLE, name: 'RANGEFOGENABLE', value: FALSE },
     { state: D3DRS.STENCILENABLE, name: 'STENCILENABLE', value: FALSE },
     { state: D3DRS.STENCILFAIL, name: 'STENCILFAIL', value: D3DSTENCILOP.KEEP },
@@ -107,13 +108,13 @@ export const DEFAULT_RENDER_STATES = Object.freeze([
     { state: D3DRS.EMISSIVEMATERIALSOURCE, name: 'EMISSIVEMATERIALSOURCE', value: D3DMCS.MATERIAL },
     { state: D3DRS.VERTEXBLEND, name: 'VERTEXBLEND', value: D3DVBF.DISABLE },
     { state: D3DRS.CLIPPLANEENABLE, name: 'CLIPPLANEENABLE', value: 0 },
-    { state: D3DRS.POINTSIZE, name: 'POINTSIZE', value: floatToDword(1.0), asserted: false },
-    { state: D3DRS.POINTSIZE_MIN, name: 'POINTSIZE_MIN', value: floatToDword(1.0) },
+    { state: D3DRS.POINTSIZE, name: 'POINTSIZE', value: floatBits(1.0), asserted: false },
+    { state: D3DRS.POINTSIZE_MIN, name: 'POINTSIZE_MIN', value: floatBits(1.0) },
     { state: D3DRS.POINTSPRITEENABLE, name: 'POINTSPRITEENABLE', value: FALSE },
     { state: D3DRS.POINTSCALEENABLE, name: 'POINTSCALEENABLE', value: FALSE },
-    { state: D3DRS.POINTSCALE_A, name: 'POINTSCALE_A', value: floatToDword(1.0) },
-    { state: D3DRS.POINTSCALE_B, name: 'POINTSCALE_B', value: floatToDword(0.0) },
-    { state: D3DRS.POINTSCALE_C, name: 'POINTSCALE_C', value: floatToDword(0.0) },
+    { state: D3DRS.POINTSCALE_A, name: 'POINTSCALE_A', value: floatBits(1.0) },
+    { state: D3DRS.POINTSCALE_B, name: 'POINTSCALE_B', value: floatBits(0.0) },
+    { state: D3DRS.POINTSCALE_C, name: 'POINTSCALE_C', value: floatBits(0.0) },
     { state: D3DRS.MULTISAMPLEANTIALIAS, name: 'MULTISAMPLEANTIALIAS', value: TRUE },
     { state: D3DRS.MULTISAMPLEMASK, name: 'MULTISAMPLEMASK', value: 0xffffffff },
     { state: D3DRS.PATCHEDGESTYLE, name: 'PATCHEDGESTYLE', value: D3DPATCHEDGE.DISCRETE },
@@ -127,24 +128,24 @@ export const DEFAULT_RENDER_STATES = Object.freeze([
     {
         state: D3DRS.POINTSIZE_MAX,
         name: 'POINTSIZE_MAX',
-        value: floatToDword(64.0),
+        value: floatBits(64.0),
         dependsOn: 'maxPointSize',
     },
     { state: D3DRS.INDEXEDVERTEXBLENDENABLE, name: 'INDEXEDVERTEXBLENDENABLE', value: FALSE },
     { state: D3DRS.COLORWRITEENABLE, name: 'COLORWRITEENABLE', value: 0x0000000f },
-    { state: D3DRS.TWEENFACTOR, name: 'TWEENFACTOR', value: floatToDword(0.0) },
+    { state: D3DRS.TWEENFACTOR, name: 'TWEENFACTOR', value: floatBits(0.0) },
     { state: D3DRS.BLENDOP, name: 'BLENDOP', value: D3DBLENDOP.ADD },
     { state: D3DRS.POSITIONDEGREE, name: 'POSITIONDEGREE', value: D3DDEGREE.CUBIC },
     { state: D3DRS.NORMALDEGREE, name: 'NORMALDEGREE', value: D3DDEGREE.LINEAR },
     { state: D3DRS.SCISSORTESTENABLE, name: 'SCISSORTESTENABLE', value: FALSE },
-    { state: D3DRS.SLOPESCALEDEPTHBIAS, name: 'SLOPESCALEDEPTHBIAS', value: floatToDword(0.0) },
+    { state: D3DRS.SLOPESCALEDEPTHBIAS, name: 'SLOPESCALEDEPTHBIAS', value: floatBits(0.0) },
     { state: D3DRS.ANTIALIASEDLINEENABLE, name: 'ANTIALIASEDLINEENABLE', value: FALSE },
-    { state: D3DRS.MINTESSELLATIONLEVEL, name: 'MINTESSELLATIONLEVEL', value: floatToDword(1.0) },
-    { state: D3DRS.MAXTESSELLATIONLEVEL, name: 'MAXTESSELLATIONLEVEL', value: floatToDword(1.0) },
-    { state: D3DRS.ADAPTIVETESS_X, name: 'ADAPTIVETESS_X', value: floatToDword(0.0) },
-    { state: D3DRS.ADAPTIVETESS_Y, name: 'ADAPTIVETESS_Y', value: floatToDword(0.0) },
-    { state: D3DRS.ADAPTIVETESS_Z, name: 'ADAPTIVETESS_Z', value: floatToDword(1.0) },
-    { state: D3DRS.ADAPTIVETESS_W, name: 'ADAPTIVETESS_W', value: floatToDword(0.0) },
+    { state: D3DRS.MINTESSELLATIONLEVEL, name: 'MINTESSELLATIONLEVEL', value: floatBits(1.0) },
+    { state: D3DRS.MAXTESSELLATIONLEVEL, name: 'MAXTESSELLATIONLEVEL', value: floatBits(1.0) },
+    { state: D3DRS.ADAPTIVETESS_X, name: 'ADAPTIVETESS_X', value: floatBits(0.0) },
+    { state: D3DRS.ADAPTIVETESS_Y, name: 'ADAPTIVETESS_Y', value: floatBits(0.0) },
+    { state: D3DRS.ADAPTIVETESS_Z, name: 'ADAPTIVETESS_Z', value: floatBits(1.0) },
+    { state: D3DRS.ADAPTIVETESS_W, name: 'ADAPTIVETESS_W', value: floatBits(0.0) },
     {
         state: D3DRS.ENABLEADAPTIVETESSELLATION,
         name: 'ENABLEADAPTIVETESSELLATION',
@@ -160,7 +161,7 @@ export const DEFAULT_RENDER_STATES = Object.freeze([
     { state: D3DRS.COLORWRITEENABLE3, name: 'COLORWRITEENABLE3', value: 0x0000000f },
     { state: D3DRS.BLENDFACTOR, name: 'BLENDFACTOR', value: 0xffffffff },
     { state: D3DRS.SRGBWRITEENABLE, name: 'SRGBWRITEENABLE', value: 0 },
-    { state: D3DRS.DEPTHBIAS, name: 'DEPTHBIAS', value: floatToDword(0.0) },
+    { state: D3DRS.DEPTHBIAS, name: 'DEPTHBIAS', value: floatBits(0.0) },
     { state: D3DRS.WRAP8, name: 'WRAP8', value: 0 },
     { state: D3DRS.WRAP9, name: 'WRAP9', value: 0 },
     { state: D3DRS.WRAP10, name: 'WRAP10', value: 0 },
@@ -188,7 +189,7 @@ export function resolveRenderStateDefault(entry, inputs){
         case 'autoDepthStencil':
             return inputs.enableAutoDepthStencil ? D3DZB.TRUE : D3DZB.FALSE;
         case 'maxPointSize':
-            return floatToDword(inputs.maxPointSize);
+            return floatBits(inputs.maxPointSize);
         default:
             return entry.value;
     }

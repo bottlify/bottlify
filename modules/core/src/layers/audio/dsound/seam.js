@@ -30,7 +30,7 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { readGuid } from '../../win32/ole32/guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { createSoundBuffer, normaliseFormat, DSBSTATUS_PLAYING } from './buffers.js';
 import {
     createSpatial, IDIRECTSOUND3DLISTENER_SLOTS, IDIRECTSOUND3DBUFFER_SLOTS,
@@ -38,7 +38,7 @@ import {
 import {
     SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID, SOUND_DEVICE_INTERFACE,
 } from '../../win32/devices.js';
-import { parseGuid } from '../../win32/ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import {
     FORMAT_WaveFormatEx, IID_IMediaObject, IID_IMediaObjectInPlace, MEDIASUBTYPE_IEEE_FLOAT,
     MEDIASUBTYPE_PCM, MEDIATYPE_Audio,

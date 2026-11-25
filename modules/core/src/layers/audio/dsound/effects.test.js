@@ -10,7 +10,7 @@ import {
     FORMAT_WaveFormatEx, IID_IMediaObject, IID_IMediaObjectInPlace, MEDIASUBTYPE_PCM,
     MEDIATYPE_Audio, STANDARD_EFFECTS, registerStandardEffects,
 } from './effects.js';
-import { parseGuid } from '../../win32/ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
 
 const S_OK = 0;

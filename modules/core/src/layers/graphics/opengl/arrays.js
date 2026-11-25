@@ -25,7 +25,7 @@
  */
 
 import { GL } from './constants.js';
-import { fromHalf } from './texture-transfer.js';
+import { fromHalf } from '../../../system/floats.js';
 
 /**
  * @typedef {Object} ArrayPointer

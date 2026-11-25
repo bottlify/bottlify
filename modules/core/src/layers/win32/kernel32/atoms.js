@@ -22,6 +22,7 @@
 
 import { encodeAnsi } from './locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /** Atoms a caller allocates start here; below it are the integer atoms. */
 const FIRST_ATOM = 0xc000;
@@ -167,17 +168,6 @@ export function createAtomFunctions(host){
         return 0;
     };
 
-    /** @param {string} text @returns {Uint8Array} UTF-16LE */
-    const encodeWide = text=>{
-        const out = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            out[at * 2] = text.charCodeAt(at) & 0xff;
-            out[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
-        return out;
-    };
-
     /**
      * The name, in the ANSI page it was read in or in UTF-16; the size is in
      * characters of the form asked for.
@@ -217,12 +207,12 @@ export function createAtomFunctions(host){
         {
             const kept = text.slice(0, room);
             host.writeMemory(wholeAddress(buffer),
-                encodeWide(kept.length < room ? `${kept}\0` : kept));
+                utf16(kept.length < room ? `${kept}\0` : kept));
             return kept.length;
         }
         const kept = text.slice(0, room - 1);
         host.writeMemory(wholeAddress(buffer),
-            wide ? encodeWide(`${kept}\0`) : encodeAnsi(`${kept}\0`));
+            wide ? utf16z(kept) : encodeAnsi(`${kept}\0`));
         if (kept.length < text.length && (global || kept.length === 0))
         {
             host.setLastError?.(short);

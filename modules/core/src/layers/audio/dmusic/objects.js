@@ -22,13 +22,14 @@
  */
 
 import { createComObject } from '../../win32/ole32/objects.js';
-import { readGuid, writeGuid, GUID_NULL } from '../../win32/ole32/guid.js';
+import { readGuid, writeGuid, GUID_NULL } from '../../../system/guid.js';
 import { parseSegment, parseWave, musicToMs, PPQ } from './riff.js';
 import { createPlayer, volumeToGain } from './player.js';
 import {
     WAVEFORMATEX, IID_IDirectSoundBuffer, IID_IDirectSoundBuffer8, IID_IKsPropertySet,
 } from '../dsound/seam.js';
 import * as ids from './ids.js';
+import { utf16z } from '../../win32/common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -158,12 +159,7 @@ export function createDirectMusic(host){
         {
             return;
         }
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
+        const bytes = utf16z(text);
         memory.writeBytes(address >>> 0, bytes);
     };
     /** @param {number} address @returns {string | null} */

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
 import { createOleFunctions } from '../ole32/functions.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     CLSID_SHELL_LINK, IID_IPERSIST_FILE, IID_ISHELL_LINK_A, IID_ISHELL_LINK_W,

@@ -18,10 +18,9 @@ import { bufferLockFlags, createDirect3D7, d3dFormatOf } from './device.js';
 import {
     D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INBEGINSTATEBLOCK,
     D3DERR_INVALIDSTATEBLOCK, D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK,
-    D3DERR_SCENE_IN_SCENE, D3DERR_SCENE_NOT_IN_SCENE, D3DERR_SURFACENOTINVIDMEM,
-    D3DFMT, D3DRENDERSTATE, D3DRENDERSTATE_MAX, D3DSBT,
-    D3DTRANSFORMSTATE, D3DVBCAPS_OPTIMIZED, D3DZB, D3D_OK, DDERR_INVALIDCAPS, DDERR_INVALIDPARAMS,
-    DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
+    D3DERR_SCENE_IN_SCENE, D3DERR_SCENE_NOT_IN_SCENE, D3DERR_SURFACENOTINVIDMEM, D3DFMT,
+    D3DRENDERSTATE, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DVBCAPS_OPTIMIZED, D3DZB,
+    D3D_OK, DDERR_INVALIDCAPS, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS,
 } from './constants.js';
 import { D3DCLEAR, D3DPT, D3DTA, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
@@ -36,6 +35,7 @@ import {
     DDSCAPS_OFFSCREENPLAIN, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
     DDSD_CAPS, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PIXELFORMAT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
+import { floatBits } from '../../../system/floats.js';
 
 const HWND = 0x00010044;
 const FVF_TL = FVF.XYZRHW | FVF.DIFFUSE;
@@ -222,9 +222,9 @@ test('a fresh device answers every D3D7 render state and nothing newer', ()=>{
     assert.equal(device.SetRenderState(D3DRENDERSTATE.CULLMODE, 2), D3D_OK);
     assert.equal(device.GetRenderState(D3DRENDERSTATE.CULLMODE, out), D3D_OK);
     assert.equal(out.value, 2);
-    assert.equal(device.SetRenderState(D3DRENDERSTATE.FOGSTART, floatToDword(0.25)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRENDERSTATE.FOGSTART, floatBits(0.25)), D3D_OK);
     assert.equal(device.GetRenderState(D3DRENDERSTATE.FOGSTART, out), D3D_OK);
-    assert.equal(out.value, floatToDword(0.25), 'a float state is its bit pattern');
+    assert.equal(out.value, floatBits(0.25), 'a float state is its bit pattern');
 
     releaseAll(f);
 });

@@ -30,6 +30,7 @@ import {
     matrixOf, toBase, vectorOf, withBase, scalarCount,
 } from './hlsl-types.js';
 import { wholeAddress } from '../common/pointers.js';
+import { bitsFloat, floatBits, fromHalf, toHalf } from '../../../system/floats.js';
 
 /** @typedef {import('./hlsl-types.js').Type} Type */
 /** @typedef {import('./hlsl-types.js').Value} Value */
@@ -521,61 +522,8 @@ const LANE = new Map(/** @type {[string, Lane][]} */ ([
     ['isnan', { f: x=>Number.isNaN(x) ? 1 : 0 }],
 ]));
 
-const bitScratch = new DataView(new ArrayBuffer(4));
 /** The bits of a lane of a type, as a uint32. @param {number} x @param {string} from */
-function bitsOf(x, from){
-    if (from === 'float')
-    {
-        bitScratch.setFloat32(0, x, true);
-        return bitScratch.getUint32(0, true);
-    }
-    return x >>> 0;
-}
-/** A float of the bits of a half, in the low sixteen. @param {number} h */
-function halfToFloat(h){
-    const sign = h & 0x8000 ? -1 : 1;
-    const exponent = (h >>> 10) & 0x1f;
-    const mantissa = h & 0x3ff;
-    if (exponent === 0)
-    {
-        return sign * mantissa * hm.exp2(-24);
-    }
-    if (exponent === 31)
-    {
-        return mantissa ? NaN : sign * Infinity;
-    }
-    return sign * (1 + mantissa / 1024) * hm.exp2(exponent - 15);
-}
-/**
- * The half nearest a float, ties to even; a magnitude past the largest half is infinity.
- * @param {number} x
- */
-function floatToHalf(x){
-    const bits = bitsOf(x, 'float');
-    const sign = (bits >>> 16) & 0x8000;
-    const exponent = (bits >>> 23) & 0xff;
-    const mantissa = bits & 0x7fffff;
-    if (exponent === 0xff)
-    {
-        return sign | 0x7c00 | (mantissa ? 0x200 : 0);
-    }
-    const e = exponent - 127 + 15;
-    if (e >= 31)
-    {
-        return sign | 0x7c00;
-    }
-    const full = mantissa | 0x800000;
-    const shift = e <= 0 ? 14 - e : 13;
-    if (shift > 24)
-    {
-        return sign;
-    }
-    const kept = full >>> shift;
-    const rest = full & ((1 << shift) - 1);
-    const half = 1 << (shift - 1);
-    const rounded = kept + (rest > half || (rest === half && (kept & 1)) ? 1 : 0);
-    return sign | (e <= 0 ? rounded : ((e << 10) + (rounded & 0x3ff) + (rounded >> 11 << 10)));
-}
+const bitsOf = (x, from)=>(from === 'float' ? floatBits(x) : x >>> 0);
 /** The functions of a lane's bits, each told the element type the lane is. */
 const BITS = new Map(/** @type {[string, (x: number, from: string) => number][]} */ ([
     ['asuint', (x, from)=>bitsOf(x, from)],
@@ -585,8 +533,7 @@ const BITS = new Map(/** @type {[string, (x: number, from: string) => number][]}
         {
             return x;
         }
-        bitScratch.setUint32(0, x >>> 0, true);
-        return bitScratch.getFloat32(0, true);
+        return bitsFloat(x);
     }],
     ['countbits', x=>{
         let n = 0;
@@ -613,8 +560,8 @@ const BITS = new Map(/** @type {[string, (x: number, from: string) => number][]}
         const v = x >>> 0;
         return v === 0 ? (from === 'int' ? -1 : 4294967295) : 31 - Math.clz32(v & -v);
     }],
-    ['f32tof16', x=>floatToHalf(x)],
-    ['f16tof32', x=>f32(halfToFloat(x & 0xffff))],
+    ['f32tof16', x=>toHalf(x)],
+    ['f16tof32', x=>f32(fromHalf(x & 0xffff))],
 ]));
 
 /** @param {number[]} a @param {number[]} b */

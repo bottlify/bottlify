@@ -27,6 +27,8 @@
 
 import { pathFromFileUrl } from '../shlwapi/path.js';
 import { wholeAddress } from '../common/pointers.js';
+import { guidBytes } from '../../../system/guid.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -123,13 +125,7 @@ export const fileUrlPath = url=>pathFromFileUrl(url, code=>String.fromCharCode(c
 
 /** @param {string} text */
 const wide = text=>{
-    const bytes = new Uint8Array(text.length * 2 + 2);
-    for (let i = 0; i < text.length; i++)
-    {
-        bytes[i * 2] = text.charCodeAt(i) & 0xff;
-        bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
-    }
-    return bytes;
+    return utf16z(text);
 };
 
 /**
@@ -223,20 +219,6 @@ export function createUrlMonikers(host){
     /** The URL monikers made here, by their IMoniker pointer. @type {Map<number, string>} */
     const urls = new Map();
 
-    /** @param {string} iid */
-    const iidBytes = iid=>{
-        const hex = iid.replace(/[{}-]/g, '');
-        const bytes = new Uint8Array(16);
-        const view = new DataView(bytes.buffer);
-        view.setUint32(0, parseInt(hex.slice(0, 8), 16), true);
-        view.setUint16(4, parseInt(hex.slice(8, 12), 16), true);
-        view.setUint16(6, parseInt(hex.slice(12, 16), 16), true);
-        for (let i = 0; i < 8; i++)
-        {
-            bytes[8 + i] = parseInt(hex.slice(16 + i * 2, 18 + i * 2), 16);
-        }
-        return bytes;
-    };
 
     /**
      * The callback a bind context holds, as IBindStatusCallback, holding a
@@ -251,7 +233,7 @@ export function createUrlMonikers(host){
         {
             return 0;
         }
-        const iid = iidBytes(IID_IBINDSTATUSCALLBACK);
+        const iid = guidBytes(IID_IBINDSTATUSCALLBACK);
         const found = await lend(20, async at=>{
             host.writeMemory(at, iid);
             const answer = await callMethod(unknown, SLOT.QUERY_INTERFACE, [at, at + 16], thread);
@@ -393,7 +375,7 @@ export function createUrlMonikers(host){
         const thread = host.callerThread();
         writeU32(out, 0);
         const iid = [...host.readMemory(wholeAddress(iidAt), 16)].join(',');
-        if (iid !== [...iidBytes(IID_ISTREAM)].join(','))
+        if (iid !== [...guidBytes(IID_ISTREAM)].join(','))
         {
             diverge('IMoniker::BindToStorage', 'a URL moniker binds to a stream alone');
             return E_NOINTERFACE;
@@ -448,7 +430,7 @@ export function createUrlMonikers(host){
         });
         return [
             method('GetClassID', 1, ([out])=>{
-                host.writeMemory(wholeAddress(out), iidBytes(CLSID_STD_URL_MONIKER));
+                host.writeMemory(wholeAddress(out), guidBytes(CLSID_STD_URL_MONIKER));
                 return S_OK;
             }),
             method('IsDirty', 0, ()=>S_FALSE),
@@ -656,7 +638,7 @@ export function createUrlMonikers(host){
                 }
                 const thread = host.callerThread();
                 return lend(20, async at=>{
-                    host.writeMemory(at, iidBytes(IID_IASYNCMONIKER));
+                    host.writeMemory(at, guidBytes(IID_IASYNCMONIKER));
                     const answer = await callMethod(moniker, SLOT.QUERY_INTERFACE, [at, at + 16],
                         thread);
                     if (answer < 0)

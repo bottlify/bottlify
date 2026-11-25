@@ -21,7 +21,7 @@
  * refusal is named once.
  */
 
-import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT, REG_SZ } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';

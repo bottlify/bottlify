@@ -45,9 +45,9 @@ import {
     D3DDEVICEDESC, D3DEXECUTEBUFFERDESC, D3DEXECUTEDATA, D3DFINDDEVICERESULT,
     D3DFINDDEVICESEARCH, D3DLIGHT, D3DMATERIAL, D3DSTATS, D3DVIEWPORT, D3DVIEWPORT2,
 } from './structs-legacy.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
 import { DDSURFACEDESC, writeSurfaceDesc } from '../ddraw/structs.js';
-import { guidBytes } from './d3d7.js';
+import { guidBytes } from '../../../system/guid.js';
 import {
     D3DCOLOR_MONO, D3DCOLOR_RGB, D3DDD, D3DDEVCAPS_FLOATTLVERTEX,
     D3DDEB_BUFSIZE, D3DDEB_LPDATA, D3DERR_INVALIDVERTEXTYPE, D3DERR_MATRIX_GETDATA_FAILED,

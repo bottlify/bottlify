@@ -23,7 +23,7 @@
  */
 
 import { createDeviceCalls } from '../d3dx9/device.js';
-import { canonicalGuid, formatGuid, parseGuid } from '../ole32/guid.js';
+import { canonicalGuid, formatGuid, parseGuid } from '../../../system/guid.js';
 import { IID_IUNKNOWN, createComObject } from '../ole32/objects.js';
 import { wholeAddress } from '../common/pointers.js';
 
@@ -151,16 +151,6 @@ export function createMfKit(host){
         new Uint8Array(Uint32Array.from(words.map(w=>w >>> 0)).buffer));
     /** @param {number} at */
     const wideString = at=>string(at >>> 0, true, 1 << 20);
-    /** @param {string} text */
-    const encodeWide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i * 2] = text.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-        }
-        return bytes;
-    };
     /**
      * Task memory holding these bytes, as CoTaskMemAlloc would hand it out:
      * at least one byte, so an empty blob is a pointer all the same.
@@ -375,7 +365,7 @@ export function createMfKit(host){
     };
 
     return { u32, putU32s, u64, putU64, f64, putF64, guidAt, putGuid, wide, double, guidOf,
-        wideString, encodeWide, taskCopy, sayOnce, guest, ownAt, releaseOwn, addRef, release,
+        wideString, taskCopy, sayOnce, guest, ownAt, releaseOwn, addRef, release,
         settle, query, make, give, mine };
 }
 

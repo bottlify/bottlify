@@ -23,7 +23,7 @@
  * the HRESULT, or the EXCEPINFO's code and description for DISP_E_EXCEPTION.
  */
 
-import { GUID_SIZE, parseGuid } from '../ole32/guid.js';
+import { GUID_SIZE, parseGuid } from '../../../system/guid.js';
 import { VT_BYREF, VT_DISPATCH, VT_UNKNOWN, VT_VARIANT } from '../oleaut32/vartypes.js';
 import {
     DISP_E_EXCEPTION, DISP_E_UNKNOWNNAME, ExternalError, ExternalObject,

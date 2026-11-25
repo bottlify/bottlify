@@ -31,7 +31,7 @@
  */
 
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import {
     TKIND_ALIAS, TKIND_COCLASS, TKIND_DISPATCH, TKIND_ENUM, TKIND_INTERFACE, TKIND_RECORD,
     VT_BOOL, VT_BSTR, VT_CARRAY, VT_I1, VT_I2, VT_I4, VT_PTR, VT_R4, VT_R8, VT_SAFEARRAY,

@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { writeGuid, readGuid, formatGuid } from '../../win32/ole32/guid.js';
+import { writeGuid, readGuid, formatGuid } from '../../../system/guid.js';
 import {
     createDirectInput, createPublisher, describe,
     DI_OK, DI_BUFFEROVERFLOW, DI_NOEFFECT, DIENUM_STOP,

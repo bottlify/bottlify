@@ -28,6 +28,7 @@
  */
 
 import { pointerWidth } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** Field offsets in the thread block, and the size a whole one occupies. */
 export const TEB = Object.freeze({
@@ -465,12 +466,7 @@ export function createProcessBlocks(options){
      * @param {string} text
      */
     const writeUnicodeString = (at, text)=>{
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let index = 0; index < text.length; index++)
-        {
-            view.setUint16(index * 2, text.charCodeAt(index), true);
-        }
+        const bytes = utf16z(text);
         writeMemory(strings, bytes);
 
         const descriptor = new Uint8Array(stringSize);
@@ -488,12 +484,7 @@ export function createProcessBlocks(options){
     // parameters rather than in the arena the parameters' strings share.
     // Empty when there is none: a reader copies it without looking first.
     const csdVersion = version.csdVersion ?? '';
-    const csdText = new Uint8Array(csdVersion.length * 2 + 2);
-    for (let index = 0; index < csdVersion.length; index++)
-    {
-        csdText[index * 2] = csdVersion.charCodeAt(index) & 0xff;
-        csdText[index * 2 + 1] = csdVersion.charCodeAt(index) >>> 8;
-    }
+    const csdText = utf16z(csdVersion);
     writeMemory(peb + pebFields.SIZE, csdText);
     write(peb + pebFields.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
     writePointer(peb + pebFields.CSD_VERSION + pointer, peb + pebFields.SIZE);
@@ -586,12 +577,7 @@ export function createProcessBlocks(options){
      * @param {number} descriptorAt @param {number} bufferAt @param {string} text
      */
     const writeEntryString = (descriptorAt, bufferAt, text)=>{
-        const bytes = new Uint8Array(text.length * 2 + 2);
-        const view = new DataView(bytes.buffer);
-        for (let index = 0; index < text.length; index++)
-        {
-            view.setUint16(index * 2, text.charCodeAt(index), true);
-        }
+        const bytes = utf16z(text);
         writeMemory(bufferAt, bytes);
         const descriptor = new Uint8Array(stringSize);
         const fields = new DataView(descriptor.buffer);

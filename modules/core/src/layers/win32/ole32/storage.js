@@ -22,13 +22,14 @@
  * are written against a backing rather than against the tree.
  */
 
-import { GUID_NULL, GUID_SIZE, formatGuid, readGuid, writeGuid } from './guid.js';
+import { GUID_NULL, GUID_SIZE, formatGuid, readGuid, writeGuid } from '../../../system/guid.js';
 import {
     MAX_NAME_LENGTH, createEntry, createRoot, isCompoundFile, nameKey,
     parseCompoundFile, serializeCompoundFile,
 } from './cfb.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The block CreateStreamOnHGlobal makes for itself: GMEM_MOVEABLE | GMEM_NODISCARD | GMEM_SHARE. */
 const GMEM_MOVEABLE = 0x0002;
@@ -336,14 +337,7 @@ export function createStorageFunctions(host){
         {
             return 0;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            const unit = text.charCodeAt(index);
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = unit >>> 8;
-        }
-        host.writeMemory(block, bytes);
+        host.writeMemory(block, utf16z(text));
         return block;
     };
 

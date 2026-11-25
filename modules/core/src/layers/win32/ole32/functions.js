@@ -30,7 +30,7 @@
 import {
     GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, canonicalGuid, formatGuid, parseGuid, readGuid,
     writeGuid,
-} from './guid.js';
+} from '../../../system/guid.js';
 import { HKEY_CLASSES_ROOT, HKEY_LOCAL_MACHINE, REG_EXPAND_SZ } from '../advapi32/registry.js';
 import { createStorageFunctions } from './storage.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
@@ -53,6 +53,7 @@ import {
     OBJREF_BYTES, OBJREF_CUSTOM, OBJREF_CUSTOM_BYTES, OBJREF_HEADER_BYTES, OBJREF_STANDARD,
     SIGNATURE as OBJREF_SIGNATURE, decodeObjref, encodeCustomHeader, encodeObjref,
 } from './objref.js';
+import { utf16z } from '../common/utf16.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -1295,14 +1296,7 @@ export function createOleFunctions(host){
 
     /** @param {number} address @param {string} text  Written with its terminator. */
     const writeOleString = (address, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            const unit = text.charCodeAt(index);
-            bytes[index * 2] = unit & 0xff;
-            bytes[index * 2 + 1] = (unit >>> 8) & 0xff;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16z(text));
     };
 
     /**
@@ -1894,13 +1888,7 @@ export function createOleFunctions(host){
         {
             return 0;
         }
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
-        host.writeMemory(block, bytes);
+        host.writeMemory(block, utf16z(text));
         return block;
     };
 
@@ -1996,12 +1984,7 @@ export function createOleFunctions(host){
         {
             return null;
         }
-        const units = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            units[index * 2] = text.charCodeAt(index) & 0xff;
-            units[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
+        const units = utf16z(text);
         return hexOf(clsid) + hexOf(units);
     };
 

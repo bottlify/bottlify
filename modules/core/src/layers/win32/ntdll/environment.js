@@ -18,6 +18,7 @@
 
 import { STATUS } from './status.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 const STATUS_VARIABLE_NOT_FOUND = 0xc0000100;
 /** The most a block may hold, in UTF-16 units; a walk stops there. */
@@ -54,16 +55,6 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             text += String.fromCharCode(bytes[at] | bytes[at + 1] << 8);
         }
         return text;
-    };
-    /** @param {string} text */
-    const wide = text=>{
-        const bytes = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at * 2] = text.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
-        return bytes;
     };
     /** A UNICODE_STRING's text. @param {number} address */
     const counted = address=>readUnits(u32(address + 4), (readMemory(address, 2)[0]
@@ -169,13 +160,13 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             {
                 if (written + text.length + 1 <= count)
                 {
-                    writeMemory(destination + written * 2, wide(`${text}\0`));
+                    writeMemory(destination + written * 2, utf16z(text));
                     written += text.length;
                     continue;
                 }
                 if (written < count)
                 {
-                    writeMemory(destination + written * 2, wide('\0'));
+                    writeMemory(destination + written * 2, utf16('\0'));
                 }
                 stopped = true;
                 break;
@@ -183,7 +174,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
             const fits = Math.max(0, Math.min(text.length, count - 1 - written));
             if (fits > 0)
             {
-                writeMemory(destination + written * 2, wide(text.slice(0, fits)));
+                writeMemory(destination + written * 2, utf16(text.slice(0, fits)));
                 written += fits;
             }
             if (fits < text.length)
@@ -194,7 +185,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         }
         if (!stopped && written < count)
         {
-            writeMemory(destination + written * 2, wide('\0'));
+            writeMemory(destination + written * 2, utf16('\0'));
         }
         return total;
     };
@@ -204,7 +195,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         const at = allocate(text.length * 2);
         if (at !== 0)
         {
-            writeMemory(at, wide(text));
+            writeMemory(at, utf16(text));
         }
         return at;
     };
@@ -219,7 +210,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         {
             return STATUS.BUFFER_TOO_SMALL;
         }
-        writeMemory(buffer, wide(value.length * 2 + 2 <= room ? `${value}\0` : value));
+        writeMemory(buffer, utf16(value.length * 2 + 2 <= room ? `${value}\0` : value));
         return STATUS.SUCCESS;
     };
 
@@ -447,7 +438,7 @@ export function createEnvironmentFunctions({ readMemory, writeMemory, kernel32, 
         const scratch = allocate((key.length + (value?.length ?? 0) + 2) * 2);
         try
         {
-            writeMemory(scratch, wide(`${key}\0${value ?? ''}\0`));
+            writeMemory(scratch, utf16(`${key}\0${value ?? ''}\0`));
             kernel32.SetEnvironmentVariableW.handler([scratch,
                 value === null ? 0 : scratch + (key.length + 1) * 2]);
         }

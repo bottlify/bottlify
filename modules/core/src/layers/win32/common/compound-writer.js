@@ -24,7 +24,7 @@
  * nothing is copied twice.
  */
 
-import { GUID_NULL, GUID_SIZE, parseGuid } from '../ole32/guid.js';
+import { GUID_NULL, GUID_SIZE, parseGuid } from '../../../system/guid.js';
 
 const SIGNATURE = Object.freeze([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 const SECTOR_SIZE = 512;

@@ -18,7 +18,7 @@
  */
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid, writeGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../../../system/guid.js';
 import {
     isImport, resolveReference, TKIND_DISPATCH, TKIND_INTERFACE, TKIND_RECORD,
 } from './typelib.js';

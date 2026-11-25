@@ -22,6 +22,7 @@
 
 import { encodeAnsi } from './locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -440,13 +441,7 @@ export function createModuleFunctions(host){
         const kept = `${fits ? path : path.slice(0, room - 1)}\0`;
         if (wide)
         {
-            const bytes = new Uint8Array(kept.length * 2);
-            for (let at = 0; at < kept.length; at++)
-            {
-                bytes[at * 2] = kept.charCodeAt(at) & 0xff;
-                bytes[at * 2 + 1] = kept.charCodeAt(at) >> 8;
-            }
-            host.writeMemory(wholeAddress(buffer), bytes);
+            host.writeMemory(wholeAddress(buffer), utf16(kept));
         }
         else
         {
@@ -493,13 +488,7 @@ export function createModuleFunctions(host){
             return writeString(wholeAddress(buffer), size >>> 0, text);
         }
         const kept = text.slice(0, (size >>> 0) - 1);
-        const bytes = new Uint8Array((kept.length + 1) * 2);
-        for (let at = 0; at < kept.length; at++)
-        {
-            bytes[at * 2] = kept.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = kept.charCodeAt(at) >> 8;
-        }
-        host.writeMemory(wholeAddress(buffer), bytes);
+        host.writeMemory(wholeAddress(buffer), utf16z(kept));
         return kept.length;
     };
 
@@ -561,13 +550,7 @@ export function createModuleFunctions(host){
         }
         if (wide)
         {
-            const bytes = new Uint8Array((text.length + 1) * 2);
-            for (let at = 0; at < text.length; at++)
-            {
-                bytes[at * 2] = text.charCodeAt(at) & 0xff;
-                bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-            }
-            host.writeMemory(buffer, bytes);
+            host.writeMemory(buffer, utf16z(text));
         }
         else
         {

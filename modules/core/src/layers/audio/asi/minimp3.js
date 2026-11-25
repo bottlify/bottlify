@@ -14,8 +14,9 @@
  */
 
 import { MINIMP3_WASM } from './minimp3.wasm.js';
+import { fromBase64 } from '../../../system/base64.js';
 
-const module = new WebAssembly.Module(Uint8Array.from(atob(MINIMP3_WASM), c=>c.charCodeAt(0)));
+const module = new WebAssembly.Module(fromBase64(MINIMP3_WASM));
 
 /**
  * A frame that decodes short is padded with silence to its whole length, so

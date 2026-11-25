@@ -21,7 +21,7 @@
  * only while it has a file, and a sample's times are the stream's own clock.
  */
 
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, guidBytes } from '../../../system/guid.js';
 import { describe } from './describe.js';
 import {
     IID_IMEDIA_POSITION, IID_IMEDIA_SEEKING, IMEDIA_POSITION_SLOTS, IMEDIA_SEEKING_SLOTS,
@@ -112,9 +112,6 @@ const WAVE_SAMPLE_FRACTION = 4;
  * @property {Record<string, number>} [units]  The time formats beside media
  *           time its seeking speaks, by GUID: REFERENCE_TIME a unit of each.
  */
-
-/** @param {string} guid */
-const guidBytes = guid=>/** @type {Uint8Array} */ (parseGuid(guid));
 
 /** @param {Uint8Array} bytes @param {number} at */
 const fourcc = (bytes, at)=>String.fromCharCode(...bytes.subarray(at, at + 4));

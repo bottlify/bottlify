@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createComRegistry } from '../ole32/objects.js';
-import { formatGuid } from '../ole32/guid.js';
+import { formatGuid } from '../../../system/guid.js';
 import { registerQuartzClasses } from './graph.js';
 import { packBottomUpRgb24 } from './stream.js';
 import {

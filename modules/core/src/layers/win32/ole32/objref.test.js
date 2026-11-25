@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { OBJREF_BYTES, OBJREF_CUSTOM_BYTES, decodeObjref, encodeCustomHeader, encodeObjref }
     from './objref.js';
-import { parseGuid } from './guid.js';
+import { parseGuid } from '../../../system/guid.js';
 
 const IID = /** @type {Uint8Array} */ (parseGuid('{8C5E2F10-4B1D-4E7A-9A61-3D2F0C9B7E01}'));
 

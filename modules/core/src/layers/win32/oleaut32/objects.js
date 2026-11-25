@@ -24,7 +24,7 @@
  */
 
 import { IID_IUNKNOWN, IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid, writeGuid } from '../ole32/guid.js';
+import { readGuid, writeGuid } from '../../../system/guid.js';
 import {
     TKIND_DISPATCH, TKIND_INTERFACE,
     VT_BSTR, VT_CARRAY, VT_PTR, VT_SAFEARRAY, VT_USERDEFINED,

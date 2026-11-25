@@ -10,7 +10,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatGuid, parseGuid } from './guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { createOle2Functions, decodeCompObj, encodeCompObj } from './ole2.js';
 import { createOleUtil } from './oleutil.js';
 import { createDataCaches } from './datacache.js';

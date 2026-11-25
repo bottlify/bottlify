@@ -31,7 +31,7 @@ import {
     D3DCLIPSTATUS, D3DDEVICEDESC7, D3DLIGHT7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC,
     D3DVIEWPORT7, RECT, createFields, floatsOf,
 } from './structs.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
 import { TEXTURE_FORMATS } from './texture-formats.js';
 import { writePixelFormat } from '../ddraw/structs.js';
 import { depthFormatForDepth } from '../ddraw/objects.js';
@@ -150,6 +150,7 @@ export function withoutStates(device, refused){
 import { loadTexture } from '../d3d7/load.js';
 import { D3DVOP, processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { guidBytes } from '../../../system/guid.js';
 
 /** What an enumeration callback answers to stop. */
 const DDENUMRET_CANCEL = 0;
@@ -169,34 +170,6 @@ const D3DMAXNUMVERTICES = 0xffff;
 const STRIDED_STREAMS = Object.freeze({
     position: [0, 0], blendWeight: [0, 12], normal: [1, 0], diffuse: [2, 0], specular: [3, 0],
 });
-
-/**
- * A GUID as its sixteen bytes, the way a program reads one out of a structure:
- * three little-endian integers and eight raw bytes.
- *
- * @param {string} guid
- * @returns {Uint8Array}
- */
-export function guidBytes(guid){
-    const hex = guid.replace(/[{}-]/g, '');
-    const word = (/** @type {number} */ from, /** @type {number} */ width)=>
-        parseInt(hex.slice(from, from + width), 16);
-    const out = new Uint8Array(16);
-    const data1 = word(0, 8);
-    out[0] = data1 & 0xff;
-    out[1] = (data1 >>> 8) & 0xff;
-    out[2] = (data1 >>> 16) & 0xff;
-    out[3] = data1 >>> 24;
-    out[4] = word(8, 4) & 0xff;
-    out[5] = word(8, 4) >>> 8;
-    out[6] = word(12, 4) & 0xff;
-    out[7] = word(12, 4) >>> 8;
-    for (let index = 0; index < 8; index++)
-    {
-        out[8 + index] = word(16 + index * 2, 2);
-    }
-    return out;
-}
 
 /**
  * @typedef {Object} Direct3D7Deps

@@ -19,7 +19,7 @@
  */
 
 import { IUNKNOWN_METHODS } from '../ole32/objects.js';
-import { readGuid, GUID_NULL } from '../ole32/guid.js';
+import { readGuid, GUID_NULL } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';

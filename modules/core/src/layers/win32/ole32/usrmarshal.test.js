@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeObjref, encodeObjref } from './objref.js';
-import { parseGuid } from './guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createUserMarshalFunctions } from './usrmarshal.js';
 
 const WDT_INPROC_CALL = 0x48746457;

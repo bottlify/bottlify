@@ -48,7 +48,7 @@ const IN_GUEST = { 4: COMPILED, 8: COMPILED_LONG };
 const NARROW = new Set(['ClearDepthStencilView']);
 import { ID3D10DEVICE_SLOTS } from '../d3d10/slots.js';
 import { createEffectSeam } from './d3d10-effect.js';
-import { readGuid } from './ddraw.js';
+import { readGuid } from '../../../system/guid.js';
 import { describeAdapter } from './adapter.js';
 import { createFields } from './structs.js';
 import { SHADER_KIND } from '../d3d10/dxbc.js';

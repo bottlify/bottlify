@@ -74,7 +74,8 @@ import { DISPLAY_DRIVER, REFRESH_HZ, displayModes, refreshRatesOf, registryMode 
 import { scanWindows } from '../../win32/common/scan-windows.js';
 import { functionLength } from '../../win32/common/shader-tokens.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
-import { queryAs, readGuid } from './guid.js';
+import { queryAs } from './guid.js';
+import { readGuid } from '../../../system/guid.js';
 import { cursorMoved } from './d3d8.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {

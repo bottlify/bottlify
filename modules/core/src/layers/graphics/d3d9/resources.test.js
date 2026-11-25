@@ -16,7 +16,7 @@ import {
     rectMoveOf, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
-import { fromHalf, toHalf } from './half.js';
+import { fromHalf, toHalf } from '../../../system/floats.js';
 
 const SIZE = 128;
 const BYTES_PER_PIXEL = 4;

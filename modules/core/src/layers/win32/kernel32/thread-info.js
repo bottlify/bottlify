@@ -18,6 +18,7 @@
 import { TEB, TEB64 } from './teb.js';
 import { THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION, allows } from './access.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** THREADINFOCLASS values answered here. */
 export const THREAD_INFO = Object.freeze({
@@ -543,12 +544,7 @@ export function createThreadInfoFunctions(host){
                 }
                 const name = String(thread.description ?? '');
                 const block = host.allocate((name.length + 1) * 2);
-                const bytes = new Uint8Array((name.length + 1) * 2);
-                const view = new DataView(bytes.buffer);
-                for (let i = 0; i < name.length; i++)
-                {
-                    view.setUint16(i * 2, name.charCodeAt(i), true);
-                }
+                const bytes = utf16z(name);
                 if (block === 0 || !write(block, bytes) || !write(out, dword(block)))
                 {
                     return hresultFromNt(STATUS_ACCESS_VIOLATION);

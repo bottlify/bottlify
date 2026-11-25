@@ -20,8 +20,9 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
-import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -80,10 +81,6 @@ const dword = value=>{
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
 };
-
-/** @param {string} text */
-const wide = text=>new Uint8Array(
-    Uint16Array.from([...text, '\0'], char=>char.charCodeAt(0)).buffer);
 
 /**
  * @typedef {{ type: string, subtype: string }} PartialType
@@ -249,7 +246,7 @@ export function createMsdmoFunctions(host){
                                     /** @type {Uint8Array} */ (parseGuid(clsid)));
                                 if ((namesOut >>> 0) !== 0)
                                 {
-                                    const text = wide(nameOf(clsid) ?? '');
+                                    const text = utf16z(nameOf(clsid) ?? '');
                                     const at = host.allocate(text.length);
                                     if (at === 0)
                                     {
@@ -376,7 +373,7 @@ export function createMsdmoFunctions(host){
                 const key = objectKey(id);
                 host.registry.create(key);
                 // No name is an empty one: the object is still registered.
-                host.registry.set(key, '', wide(wholeAddress(name) === 0 ? ''
+                host.registry.set(key, '', utf16z(wholeAddress(name) === 0 ? ''
                     : host.readWideString(wholeAddress(name), NAME_BYTES * 4)), false);
                 host.registry.set(key, INPUT_TYPES,
                     pairBytes(typesAt(inTypes, inCount >>> 0)), true);
@@ -470,7 +467,7 @@ export function createMsdmoFunctions(host){
                 {
                     return E_FAIL;
                 }
-                host.writeMemory(wholeAddress(out), wide(name.slice(0, NAME_UNITS - 1)));
+                host.writeMemory(wholeAddress(out), utf16z(name.slice(0, NAME_UNITS - 1)));
                 return S_OK;
             },
         },

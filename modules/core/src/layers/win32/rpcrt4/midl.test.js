@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { createClassTable } from '../ole32/remote.js';
 import { composeStringBinding, createMidl, parseStringBinding } from './midl.js';
 

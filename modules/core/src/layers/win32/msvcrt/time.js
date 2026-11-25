@@ -30,6 +30,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL, ERANGE } from './globals.js';
 import { wideStringAt } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** A string's terminator, where a string ends: never itself written. */
 const NUL = new Uint8Array(1);
@@ -604,10 +605,7 @@ export function createTimeFunctions(host){
 
     /** @param {number} pointer @param {string} text */
     const writeWide = (pointer, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        [...text].forEach((c, at)=>new DataView(bytes.buffer).setUint16(at * 2, c.charCodeAt(0),
-            true));
-        host.writeMemory(pointer, bytes);
+        host.writeMemory(pointer, utf16z(text));
     };
 
     /** @param {number} code */

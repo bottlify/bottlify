@@ -47,10 +47,9 @@ import {
     D3DRASTER_STATUS, GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
-import {
-    D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTS, D3DTSS, floatToDword,
-} from '../d3d8/constants.js';
+import { D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { withPointers } from '../../memory/pointers.fixture.js';
+import { floatBits } from '../../../system/floats.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -825,7 +824,7 @@ test('a getter answers a structure as one write of every byte of it', ()=>{
         h.box.services.writeMemory(at, bytes);
         return bytes;
     };
-    const f = (/** @type {number} */ value)=>floatToDword(value);
+    const f = (/** @type {number} */ value)=>floatBits(value);
     const matrix = put(0x8000, Array.from({ length: 16 }, (unused, i)=>f(i * 0.5 - 3)));
     assert.equal(h.device(device, 'SetTransform', [D3DTS.WORLD, 0x8000]), D3D_OK);
     const material = put(0x8100, Array.from({ length: 17 }, (unused, i)=>f(i / 8)));
@@ -1692,7 +1691,7 @@ test('every slot the device declares is there, and counts its own arguments', ()
     const viewport = 0xf000;
     h.fields.writeStruct(viewport, D3DVIEWPORT8, {
         X: 0, Y: 0, Width: 32, Height: 16,
-        MinZ: floatToDword(0.25), MaxZ: floatToDword(0.75),
+        MinZ: floatBits(0.25), MaxZ: floatBits(0.75),
     });
     assert.equal(h.device(device, 'SetViewport', [viewport]), D3D_OK);
     const read = 0xf100;

@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { toHalf } from '../../../../system/floats.js';
+
 /**
  * A recording stand-in for a WebGPU device and queue.
  *
@@ -19,8 +21,6 @@
  * write the queue took in between. A draw puts nothing in a texture; what a draw would paint is the
  * reference rasteriser's to say.
  */
-
-import { toHalf } from '../../d3d9/half.js';
 
 /** Bytes per pixel of the formats whose texels are kept, by name. */
 const KEPT_FORMATS = /** @type {Record<string, number>} */ ({

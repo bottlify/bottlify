@@ -63,6 +63,7 @@ import { createRefusals } from '../common/refusal.js';
 import { afterWait } from './after-wait.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { forwarded, wholeAddress, wholeAnswer, wideOf } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -2010,14 +2011,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
     /** @param {number} address @param {string} text @param {number} limit */
     const writeWideString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
-        const bytes = new Uint8Array((clipped.length + 1) * 2);
-        for (let index = 0; index < clipped.length; index++)
-        {
-            const code = clipped.charCodeAt(index);
-            bytes[index * 2] = code & 0xff;
-            bytes[index * 2 + 1] = code >>> 8;
-        }
-        host.writeMemory(address, bytes);
+        host.writeMemory(address, utf16z(clipped));
         return clipped.length;
     };
 
@@ -5601,14 +5595,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                     return 0;
                 }
                 const kept = text.slice(0, (size | 0) - 1);
-                const bytes = new Uint8Array((kept.length + 1) * 2);
-                for (let at = 0; at < kept.length; at++)
-                {
-                    const code = kept.charCodeAt(at);
-                    bytes[at * 2] = code & 0xff;
-                    bytes[at * 2 + 1] = code >> 8;
-                }
-                host.writeMemory(buffer, bytes);
+                host.writeMemory(buffer, utf16z(kept));
                 return kept.length;
             },
         },

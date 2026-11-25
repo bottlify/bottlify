@@ -38,6 +38,7 @@
 import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { createIphlpapiTables } from './tables.js';
 import { wholeAddress } from '../common/pointers.js';
+import { guidBytes } from '../../../system/guid.js';
 
 const NO_ERROR = 0;
 const ERROR_INVALID_PARAMETER = 87;
@@ -162,20 +163,6 @@ const INTERFACES = 2;
 
 /** @param {number} address */
 const dotted = address=>[24, 16, 8, 0].map(shift=>address >>> shift & 0xff).join('.');
-
-/**
- * A GUID's sixteen bytes from its registry text.
- *
- * @param {string} text
- */
-const guidBytes = text=>{
-    const hex = text.replace(/[{}-]/g, '');
-    const bytes = Uint8Array.from({ length: 16 },
-        (_, at)=>parseInt(hex.slice(at * 2, at * 2 + 2), 16));
-    // The first three fields are little-endian in memory.
-    return Uint8Array.of(bytes[3], bytes[2], bytes[1], bytes[0], bytes[5], bytes[4], bytes[7],
-        bytes[6], ...bytes.subarray(8));
-};
 
 /** @param {string} text */
 const ascii = text=>Uint8Array.from(text, char=>char.charCodeAt(0) & 0x7f);

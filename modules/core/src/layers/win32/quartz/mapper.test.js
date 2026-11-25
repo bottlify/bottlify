@@ -10,7 +10,7 @@ import { createFilterMapper } from './mapper.js';
 import {
     CLSID_LEGACY_AM_FILTER_CATEGORY, createDeviceEnumeration, createFilterStore,
 } from '../devenum/devenum.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 
 const S_OK = 0;
 const S_FALSE = 1;

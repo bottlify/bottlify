@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * setupapi's string tables: a set of strings, each found by its id, with a
@@ -66,17 +67,6 @@ export function createStringTableFunctions(host){
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         host.writeMemory(wholeAddress(address), bytes);
-    };
-
-    /** @param {string} text */
-    const wide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
-        return bytes;
     };
 
     /**
@@ -175,7 +165,7 @@ export function createStringTableFunctions(host){
             writeU32(table + TABLE.ALLOCATED, allocated);
         }
         const entry = new Uint8Array(entrySize);
-        entry.set(wide(text), 4);
+        entry.set(utf16z(text), 4);
         if ((extra >>> 0) !== 0 && maxExtra > 0)
         {
             entry.set(host.readMemory(wholeAddress(extra), Math.min(extraSize >>> 0,

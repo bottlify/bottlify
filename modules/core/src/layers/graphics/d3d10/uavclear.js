@@ -16,6 +16,7 @@
  */
 
 import { DXGI_FORMAT } from './constants.js';
+import { floatBits, fromHalf } from '../../../system/floats.js';
 
 /** Each channel's value, by the channel's letter in the format's name. */
 const VALUE_OF = Object.freeze({ R: 0, G: 1, B: 2, A: 3 });
@@ -47,14 +48,6 @@ export function channelsOf(format){
     return { channels, type: match[2] };
 }
 
-const word = new DataView(new ArrayBuffer(4));
-
-/** @param {number} value @returns {number} the bits of the nearest single */
-const singleBits = value=>{
-    word.setFloat32(0, value, true);
-    return word.getUint32(0, true);
-};
-
 /**
  * A single's bits as a half's, rounded to nearest even; past the range an
  * infinity, below it a denormal or zero.
@@ -62,7 +55,7 @@ const singleBits = value=>{
  * @param {number} value
  */
 export function halfBits(value){
-    const bits = singleBits(value);
+    const bits = floatBits(value);
     const sign = (bits >>> 16) & 0x8000;
     const exponent = (bits >>> 23) & 0xff;
     const mantissa = bits & 0x7fffff;
@@ -120,23 +113,7 @@ export function smallFloatBits(value, mantissa){
 
 /** @param {number} bits @param {number} mantissa @returns {number} the unsigned float */
 export function smallFloatOf(bits, mantissa){
-    return halfOf((bits << (10 - mantissa)) & 0x7fff);
-}
-
-/** @param {number} bits @returns {number} */
-export function halfOf(bits){
-    const sign = bits & 0x8000 ? -1 : 1;
-    const exponent = (bits >>> 10) & 0x1f;
-    const mantissa = bits & 0x3ff;
-    if (exponent === 0)
-    {
-        return sign * mantissa * 2 ** -24;
-    }
-    if (exponent === 0x1f)
-    {
-        return mantissa ? NaN : sign * Infinity;
-    }
-    return sign * (1 + mantissa / 1024) * 2 ** (exponent - 15);
+    return fromHalf((bits << (10 - mantissa)) & 0x7fff);
 }
 
 /**
@@ -149,7 +126,7 @@ function convert(value, bits, type){
     switch (type)
     {
         case 'FLOAT':
-            return bits === 32 ? singleBits(value) : bits === 16 ? halfBits(value)
+            return bits === 32 ? floatBits(value) : bits === 16 ? halfBits(value)
                 : smallFloatBits(value, bits - 5);
         case 'UNORM':
             return Math.round(Math.min(1, Math.max(0, value || 0)) * top);
@@ -233,15 +210,15 @@ export function clearTexel(format, values, float){
         {
             case 'FLOAT':
                 texel[channel.value] = channel.bits === 32 ? bits
-                    : singleBits(channel.bits === 16 ? halfOf(bits)
+                    : floatBits(channel.bits === 16 ? fromHalf(bits)
                         : smallFloatOf(bits, channel.bits - 5));
                 break;
             case 'UNORM':
-                texel[channel.value] = singleBits(bits / top);
+                texel[channel.value] = floatBits(bits / top);
                 break;
             case 'SNORM': {
                 const signed = bits > top / 2 ? bits - top - 1 : bits;
-                texel[channel.value] = singleBits(Math.max(-1, signed / (2 ** (channel.bits - 1)
+                texel[channel.value] = floatBits(Math.max(-1, signed / (2 ** (channel.bits - 1)
                     - 1)));
                 break;
             }

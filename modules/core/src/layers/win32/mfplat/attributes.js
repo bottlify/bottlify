@@ -28,8 +28,9 @@
 
 import { E_INVALIDARG, E_NOT_SUFFICIENT_BUFFER, E_OUTOFMEMORY, E_POINTER, S_OK, drive }
     from './kit.js';
-import { parseGuid } from '../ole32/guid.js';
+import { parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const MF_E_ATTRIBUTENOTFOUND = 0xc00d36e6 | 0;
 export const MF_E_INVALIDTYPE = 0xc00d36bd | 0;
@@ -112,7 +113,7 @@ export function matches(ours, theirs, type){
  * @param {import('./kit.js').MfHost} host
  */
 export function createAttributes(kit, host){
-    const { u32, putU32s, u64, putU64, f64, putF64, guidAt, putGuid, wideString, encodeWide,
+    const { u32, putU32s, u64, putU64, f64, putF64, guidAt, putGuid, wideString,
         taskCopy } = kit;
 
     /**
@@ -175,7 +176,7 @@ export function createAttributes(kit, host){
             case TYPE.GUID:
             case TYPE.STRING: {
                 const copy = taskCopy(item.vt === TYPE.GUID
-                    ? /** @type {Uint8Array} */ (parseGuid(item.value)) : encodeWide(item.value));
+                    ? /** @type {Uint8Array} */ (parseGuid(item.value)) : utf16z(item.value));
                 if (copy === 0)
                 {
                     return E_OUTOFMEMORY;
@@ -472,7 +473,7 @@ export function createAttributes(kit, host){
             {
                 return E_NOT_SUFFICIENT_BUFFER;
             }
-            host.writeMemory(wholeAddress(buffer), encodeWide(item.value));
+            host.writeMemory(wholeAddress(buffer), utf16z(item.value));
             return S_OK;
         } },
         /** HRESULT GetAllocatedString(REFGUID key, LPWSTR *value, UINT32 *length) */
@@ -486,7 +487,7 @@ export function createAttributes(kit, host){
             {
                 return E_POINTER;
             }
-            const copy = taskCopy(encodeWide(item.value));
+            const copy = taskCopy(utf16z(item.value));
             if (copy === 0)
             {
                 return E_OUTOFMEMORY;

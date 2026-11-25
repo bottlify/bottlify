@@ -54,6 +54,7 @@ import { readText, writeText, LPSTR_TEXTCALLBACK } from './strings.js';
 import { CCM_GETVERSION, CCM_SETVERSION, answerVersion } from './version.js';
 import { stripOfBitmapId } from './strips.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const TOOLBAR_CLASS = 'ToolbarWindow32';
@@ -1382,8 +1383,7 @@ export function createToolbarProcedure(host, tk, images, resources = {}){
                 if (lParam !== 0)
                 {
                     host.writeMemory(lParam, id === TB_GETBUTTONTEXTW
-                        ? new Uint8Array(new Uint16Array([...`${text}\0`]
-                            .map(c=>c.charCodeAt(0))).buffer)
+                        ? utf16z(text)
                         : encodeAnsi(`${text}\0`));
                 }
                 return text.length;

@@ -41,6 +41,8 @@ import { isSelfIssued, isSignedBy, parseCertificate, readGeneralNames, readName,
 import { msiSubject, readSubject } from '../wintrust/subject.js';
 import { nameToString, NAME_STR } from './names.js';
 import { wholeAddress } from '../common/pointers.js';
+import { fromBase64 } from '../../../system/base64.js';
+import { utf16z } from '../common/utf16.js';
 
 /** @typedef {import('../crypto/x509.js').Certificate} Certificate */
 
@@ -314,19 +316,7 @@ const fileTime = ms=>{
  *
  * @param {string | null} text
  */
-const wideBytes = text=>{
-    if (text === null)
-    {
-        return new Uint8Array(0);
-    }
-    const out = new Uint8Array(text.length * 2 + 2);
-    for (let i = 0; i < text.length; i++)
-    {
-        out[i * 2] = text.charCodeAt(i) & 0xff;
-        out[i * 2 + 1] = text.charCodeAt(i) >> 8;
-    }
-    return out;
-};
+const wideBytes = text=>(text === null ? new Uint8Array(0) : utf16z(text));
 
 /**
  * Whether `host` is what `pattern` names: case aside, and a wildcard only as
@@ -1293,7 +1283,7 @@ export function createCertificateFunctions(host){
                 const body = (pem ? pem[1] : text).replace(/\s/g, '');
                 if (/^[A-Za-z0-9+/]+={0,2}$/.test(body))
                 {
-                    forms.push({ der: Uint8Array.from(atob(body), ch=>ch.charCodeAt(0)),
+                    forms.push({ der: fromBase64(body),
                         format: FORMAT.BASE64 });
                 }
             }

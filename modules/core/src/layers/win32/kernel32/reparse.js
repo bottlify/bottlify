@@ -14,6 +14,7 @@
  */
 
 import { STATUS } from '../ntdll/status.js';
+import { utf16 } from '../common/utf16.js';
 
 export const FSCTL_SET_REPARSE_POINT = 0x900a4;
 export const FSCTL_GET_REPARSE_POINT = 0x900a8;
@@ -131,9 +132,6 @@ export function namesDirectory(data){
  * @param {string} target  a DOS path
  */
 export function mountPointBuffer(target){
-    /** @param {string} text */
-    const utf16 = text=>Uint8Array.from([...text].flatMap(character=>
-        [character.charCodeAt(0) & 0xff, character.charCodeAt(0) >>> 8]));
     const substitute = utf16(`${NT_PREFIX}${target}`);
     const printed = utf16(target);
     const data = new Uint8Array(HEADER + 8 + substitute.length + 2 + printed.length + 2);

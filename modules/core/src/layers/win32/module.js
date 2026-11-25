@@ -201,7 +201,7 @@ import { longFloatResults } from './msvcrt/float.js';
 import { createComObject, createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
 import { createFilterStore } from './devenum/devenum.js';
-import { parseGuid } from './ole32/guid.js';
+import { parseGuid } from '../../system/guid.js';
 import { createMfplatFunctions } from './mfplat/functions.js';
 import { createUiaFunctions } from './uiautomationcore/functions.js';
 import { createDxva2Functions } from './dxva2/functions.js';
@@ -239,6 +239,8 @@ import { SHARED_RESOURCE_HANDLE } from './ntdll/query.js';
 import { declareAddresses, paramsOf, wholeAddress } from './common/pointers.js';
 import { safeArrayLayout } from './common/safearray.js';
 import { POINTER_ARGUMENTS } from './common/pointer-arguments.js';
+import { utf16z } from './common/utf16.js';
+import { fromBase64 } from '../../system/base64.js';
 
 // MultiByteToWideChar, WideCharToMultiByte and FlushInstructionCache carry x86-64 a
 // 64-bit process places (`withLongCode`), the conversions here and the flush in heap.js.
@@ -1959,9 +1961,8 @@ export function createWin32Module(){
                     writeMemory,
                     allocate: bytes=>heap.allocate(bytes),
                     publish: (object, iid)=>bridge.publishInterface(object, iid),
-                    allocateString: text=>lent(new Uint8Array(Uint16Array.from(
-                        [...text, '\0'].map(char=>char.charCodeAt(0))).buffer),
-                    at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
+                    allocateString: text=>lent(utf16z(text),
+                        at=>libraries['OLEAUT32.dll'].SysAllocString.handler([at])),
                     readMemory: (address, length)=>memory.readBytes(address, length),
                     allocateBytes: byteVector,
                     pointerSize,
@@ -3166,16 +3167,6 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
-            /** @param {string} text  NUL-ended UTF-16LE */
-            const wideText = text=>{
-                const bytes = new Uint8Array((text.length + 1) * 2);
-                for (let i = 0; i < text.length; i++)
-                {
-                    bytes[i * 2] = text.charCodeAt(i) & 0xff;
-                    bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-                }
-                return bytes;
-            };
             // Media Foundation: its objects, and its reader's class factory,
             // which a program reaches through COM as well as through exports.
             /** @param {string} name @param {number[]} args @returns {Promise<number>} */
@@ -3185,7 +3176,7 @@ export function createWin32Module(){
             const mfFiles = ()=>({
                 open: async(path, access, share, disposition, flags)=>{
                     const name = heap.allocate((path.length + 1) * 2);
-                    writeMemory(name, wideText(path));
+                    writeMemory(name, utf16z(path));
                     try
                     {
                         const handle = await kernel32Call('CreateFileW',
@@ -3286,7 +3277,7 @@ export function createWin32Module(){
                 // By the program's own rules for a path: its directory, its drive.
                 exists: async path=>{
                     const name = heap.allocate((path.length + 1) * 2);
-                    writeMemory(name, wideText(path));
+                    writeMemory(name, utf16z(path));
                     try
                     {
                         return (await libraries['KERNEL32.dll'].GetFileAttributesW.handler([name])
@@ -3788,8 +3779,7 @@ export function createWin32Module(){
                 const call = (name, args)=>callAs(thread, name, args);
                 /** @param {string} text */
                 const wide = text=>{
-                    const bytes = new Uint8Array(
-                        Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer);
+                    const bytes = utf16z(text);
                     const at = heap.allocate(bytes.length);
                     writeMemory(at, bytes);
                     return at;
@@ -5313,7 +5303,7 @@ export function createWin32Module(){
                     trustedRoots: ()=>(config?.trustedRoots ?? defaultTrustedRoots()).map((
                         /** @type {Uint8Array | string} */ root)=>
                         (typeof root === 'string'
-                            ? Uint8Array.from(atob(root), ch=>ch.charCodeAt(0)) : root)),
+                            ? fromBase64(root) : root)),
                     divergence: config?.divergence,
                 }),
 
@@ -5967,7 +5957,7 @@ export function createWin32Module(){
                     readMemory, writeMemory, heap,
                     bstr: text=>{
                         const at = heap.allocate((text.length + 1) * 2);
-                        writeMemory(at, wideText(text));
+                        writeMemory(at, utf16z(text));
                         try
                         {
                             return libraries['OLEAUT32.dll'].SysAllocString.handler([at]);

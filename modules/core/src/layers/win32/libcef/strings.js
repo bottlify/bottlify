@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /**
  * The framework's strings, lists and maps.
@@ -84,17 +85,6 @@ export function createCefStrings(host, { utf8 = false } = {}){
         host.writeMemory(str, bytes);
         host.writeMemory(str + bytes.length, new Uint8Array(2));
         words(at, [str, length, dtor()]);
-    };
-
-    /** @param {string} text */
-    const utf16 = text=>{
-        const bytes = new Uint8Array(text.length * 2);
-        const view = new DataView(bytes.buffer);
-        for (let i = 0; i < text.length; i++)
-        {
-            view.setUint16(i * 2, text.charCodeAt(i), true);
-        }
-        return bytes;
     };
 
     /**

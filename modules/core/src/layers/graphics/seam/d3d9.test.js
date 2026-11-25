@@ -46,7 +46,7 @@ import {
     IDIRECT3D9EX_SLOTS, IDIRECT3DDEVICE9EX_SLOTS, IDIRECT3DSWAPCHAIN9EX_SLOTS, IID_IDirect3D9,
     IID_IDirect3D9Ex, IID_IDirect3DDevice9Ex, IID_IDirect3DSwapChain9Ex,
 } from '../d3d9/interfaces.js';
-import { guidBytes } from './d3d7.js';
+import { guidBytes } from '../../../system/guid.js';
 import { D3DCREATE, D3DDEVTYPE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
 import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
