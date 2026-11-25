@@ -2489,12 +2489,18 @@ export function installTextureCalls(context, kernel){
         // device takes no blocks, and not kept: decoded, a level holds four to
         // eight times its blocks for as long as the texture lives (the Doom 3
         // demo's first level, 47 MB of blocks). A processor's rasteriser reads
-        // them every draw and keeps them.
+        // them every draw and keeps them. The blocks are read from the level,
+        // not held apart: the drawing side may move them into the run's cache
+        // while no draw needs them (`gpu.js` `spill`).
         /** @type {Uint8Array | null | undefined} */
         let decoded;
-        const decode = ()=>(kept && width > 0 && height > 0
-            ? decodeS3tc(kept, internal, width, height) : null);
-        return {
+        const decode = ()=>{
+            const blocks = level.compressed?.bytes;
+            return blocks && width > 0 && height > 0
+                ? decodeS3tc(blocks, internal, width, height) : null;
+        };
+        /** @type {import('./objects.js').TextureLevel} */
+        const level = {
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
             get texels(){
@@ -2509,6 +2515,7 @@ export function installTextureCalls(context, kernel){
             compressedBytes: compressedBytes(internal, width, height),
             compressed: kept ? { format: internal, bytes: kept } : null,
         };
+        return level;
     }
 
     /**
