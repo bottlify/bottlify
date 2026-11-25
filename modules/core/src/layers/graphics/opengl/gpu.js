@@ -2064,6 +2064,9 @@ export function createGpuRenderer(services){
                         | BufferUsage.STORAGE | BufferUsage.INDIRECT | BufferUsage.COPY_SRC
                         | BufferUsage.COPY_DST,
                     label: `gl-buffer:${buffer.name}`,
+                    // The store is the one copy: a lock's bytes go from it to
+                    // the queue, with no shadow beside it.
+                    source: ()=>buffer.data,
                 }),
                 size: buffer.size,
                 reads: createBufferReads(isUnflushed),
@@ -2084,10 +2087,8 @@ export function createGpuRenderer(services){
             stats.renames++;
             record.reads.clear();
         }
-        const lock = record.gpu.lock(written.start, written.end - written.start,
-            collides ? backend.LockFlags.RENAME : backend.LockFlags.NOOVERWRITE);
-        lock.data.set(buffer.data.subarray(written.start, written.end));
-        record.gpu.unlock(lock);
+        record.gpu.unlock(record.gpu.lock(written.start, written.end - written.start,
+            collides ? backend.LockFlags.RENAME : backend.LockFlags.NOOVERWRITE));
         return record;
     };
 

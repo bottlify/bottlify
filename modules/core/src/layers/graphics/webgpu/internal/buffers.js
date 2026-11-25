@@ -140,6 +140,11 @@ let nextDynamicId = 1;
  * @param {boolean} [options.gpuOnly]  For a buffer only the GPU writes (a
  *     renderer's buffer between compute passes): no copy is kept on the
  *     processor, and it is never locked.
+ * @param {()=>Uint8Array} [options.source]  The caller's own whole copy of the
+ *     contents (an OpenGL buffer object's store), read where it lies: no
+ *     shadow is kept, a lock's `data` is a view on it, and what an unlock names
+ *     goes to the queue at once - the caller may change its copy after, and
+ *     the queue keeps the bytes as they were at the unlock.
  * @param {{ presents: number, submits: number }} [options.frames]  The frames
  *     presented and submitted, counted once for every buffer of a backend; without
  *     it the buffer counts its own `markPresent` and `endFrame` calls.
@@ -156,7 +161,11 @@ export function createDynamicBuffer(options){
     // The shadow copy is padded so an outward-aligned upload of the tail cannot
     // run past the allocation.
     const capacity = Math.ceil(options.size / alignment) * alignment;
-    const shadow = new Uint8Array(options.gpuOnly ? 0 : capacity);
+    const source = options.source;
+    const shadow = new Uint8Array(options.gpuOnly || source ? 0 : capacity);
+    const content = source ?? (()=>shadow);
+    // A source's last partial word, padded: `writeBuffer` takes whole words.
+    const tail = new Uint8Array(source ? alignment : 0);
 
     /** @type {any[]} */
     const available = [];
@@ -290,8 +299,26 @@ export function createDynamicBuffer(options){
             return 0;
         }
         const range = alignOutward(dirtyStart, dirtyEnd, alignment);
-        const bytes = Math.min(range.end, capacity) - range.start;
-        options.queue.writeBuffer(gpu, range.start, shadow, range.start, bytes);
+        let bytes = Math.min(range.end, capacity) - range.start;
+        const data = content();
+        // Past a source's last whole word: its partial word from the padded
+        // tail, and nothing beyond it, which no draw of the caller's reads.
+        const whole = Math.min(range.start + bytes, data.length - data.length % alignment);
+        if (whole > range.start)
+        {
+            options.queue.writeBuffer(gpu, range.start, data, range.start, whole - range.start);
+        }
+        if (whole < range.start + bytes)
+        {
+            bytes = whole - range.start;
+            if (data.length > whole)
+            {
+                tail.fill(0);
+                tail.set(data.subarray(whole));
+                options.queue.writeBuffer(gpu, whole, tail, 0, alignment);
+                bytes += alignment;
+            }
+        }
         writes++;
         written += bytes;
         carryInto?.written.push({ start: range.start, end: range.start + bytes });
@@ -401,7 +428,7 @@ export function createDynamicBuffer(options){
             {
                 wholeLocks++;
             }
-            held = { data: shadow.subarray(offset, offset + length), offset, length, flags,
+            held = { data: content().subarray(offset, offset + length), offset, length, flags,
                 renamed: renames !== renamesBefore };
             return held;
         },
@@ -432,6 +459,10 @@ export function createDynamicBuffer(options){
             }
             held = null;
             touch();
+            if (source)
+            {
+                flush();
+            }
         },
 
         flush,
@@ -444,6 +475,10 @@ export function createDynamicBuffer(options){
          * @param {number} offset @param {Uint8Array} bytes
          */
         rewrite(offset, bytes){
+            if (source)
+            {
+                throw new Error(`"${label}" reads its bytes from its source`);
+            }
             shadow.set(bytes, offset);
             marked += bytes.length;
             dirtyStart = dirtyStart < 0 ? offset : Math.min(dirtyStart, offset);
@@ -460,7 +495,7 @@ export function createDynamicBuffer(options){
          * @returns {Uint8Array}
          */
         bytes(offset, length){
-            return shadow.subarray(offset, offset + length);
+            return content().subarray(offset, offset + length);
         },
 
         /**
