@@ -151,7 +151,7 @@ test('a deflated block is inflated from the request it came in, not from a copy 
         t.after(()=>app.dispose());
         let copied = 0;
         const slice = Uint8Array.prototype.slice;
-        Uint8Array.prototype.slice = function(...args){
+        Uint8Array.prototype.slice = function(/** @type {any[]} */ ...args){
             copied += answered.has(this.buffer) ? 1 : 0;
             return slice.apply(this, /** @type {any} */ (args));
         };

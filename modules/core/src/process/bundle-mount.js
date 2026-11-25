@@ -438,7 +438,8 @@ export function expectIndex(expected){
     return async stored=>{
         // WebCrypto takes no view of shared memory: a copy only for that.
         const digest = await crypto.subtle.digest('SHA-256',
-            stored.buffer instanceof ArrayBuffer ? stored : stored.slice());
+            /** @type {Uint8Array<ArrayBuffer>} */ (stored.buffer instanceof ArrayBuffer
+                ? stored : stored.slice()));
         const found = Array.from(new Uint8Array(digest),
             byte=>byte.toString(16).padStart(2, '0')).join('');
         return found === expected.toLowerCase()

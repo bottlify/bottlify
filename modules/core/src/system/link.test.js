@@ -334,7 +334,7 @@ test('a record is decoded where it lies in the ring, not copied out of it first'
     /** @type {number[]} */
     const copied = [];
     const slice = Uint8Array.prototype.slice;
-    Uint8Array.prototype.slice = function(...args){
+    Uint8Array.prototype.slice = function(/** @type {any[]} */ ...args){
         if (this.buffer instanceof SharedArrayBuffer)
         {
             copied.push(this.length);
