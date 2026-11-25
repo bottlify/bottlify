@@ -33,7 +33,7 @@ const bytes = text=>Uint8Array.from([...text].map(character=>character.charCodeA
 const text = data=>[...data].map(byte=>String.fromCharCode(byte)).join('');
 
 /**
- * @typedef {{ kind: 'file', data: Uint8Array, locked: boolean }} FileNode
+ * @typedef {{ kind: 'file', data: Uint8Array, locked: boolean, short?: number }} FileNode
  * @typedef {{ kind: 'directory', children: Map<string, FileNode | DirectoryNode> }} DirectoryNode
  */
 
@@ -69,6 +69,8 @@ function fakeAccess(node, name){
         /** @param {Uint8Array} buffer @param {{ at?: number }} [options] */
         write(buffer, options){
             live();
+            // A disk that takes a write in part, where a test asks.
+            buffer = buffer.subarray(0, buffer.length - (node.short ?? 0));
             const at = options?.at ?? 0;
             const end = at + buffer.length;
             if (end > node.data.length)
@@ -269,6 +271,22 @@ test('an opened file reads and writes back without awaiting anything', async()=>
     assert.deepEqual([...store.read('Save\\slot.dat', 99, 4)], [],
         'a read that starts past the end is a length of zero, not a failure');
 });
+
+test('a write the disk takes in part fails, and the size stays what was written whole',
+    async()=>{
+        const root = directoryNode();
+        /** @type {FileNode} */
+        const node = { kind: 'file', data: bytes('head'), locked: false };
+        root.children.set('pack', node);
+        const store = await createOpfsStore({ root: fakeDirectory(root) });
+        await store.open('pack');
+        node.short = 2;
+        assert.throws(()=>store.write('pack', 4, bytes('record')), /4 of 6 bytes/);
+        assert.equal(store.stat('pack')?.size, 4, 'what follows is placed after the head');
+        node.short = 0;
+        store.write('pack', 4, bytes('next'));
+        assert.equal(text(store.read('pack', 0, 32)), 'headnext');
+    });
 
 test('a write past the end grows the file with zeroes', async()=>{
     const store = await createOpfsStore({ root: fakeRoot({ 'a.dat': '' }) });

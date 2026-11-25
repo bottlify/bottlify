@@ -26,6 +26,7 @@
 
 import { ErrorCode, fsError } from './errors.js';
 import { PIECE_SIZE, zeroes } from './memory-store.js';
+import { openSync, writeAll } from '../../../system/opfs-file.js';
 
 /** The first piece of a small file; it doubles as the file grows, up to PIECE_SIZE. */
 const SMALLEST_PIECE = 4096;
@@ -148,11 +149,7 @@ export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFai
         }
         try
         {
-            const wrote = access.write(piece.bytes, { at: piece.at });
-            if (wrote !== piece.length)
-            {
-                throw new Error(`page file: ${wrote} of ${piece.length} bytes written`);
-            }
+            writeAll(access, piece.bytes, piece.at);
         }
         catch (e){
             failed = /** @type {Error} */ (e);
@@ -821,19 +818,9 @@ export async function openPageFile({ root, residentBytes, onFailure } = {}){
             });
         }
         await sweep(folder, locks);
-        const handle = await folder.getFileHandle(name, { create: true });
-        if (typeof handle.createSyncAccessHandle !== 'function')
+        const access = await openSync(await folder.getFileHandle(name, { create: true }));
+        if (access === null)
         {
-            unlock();
-            await folder.removeEntry(name).catch(()=>{});
-            return null;
-        }
-        const access = await handle.createSyncAccessHandle();
-        if (typeof access?.getSize?.()?.then === 'function')
-        {
-            // An early handle whose calls are promises cannot answer a guest's
-            // read synchronously.
-            await access.close();
             unlock();
             await folder.removeEntry(name).catch(()=>{});
             return null;

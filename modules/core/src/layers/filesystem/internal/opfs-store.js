@@ -30,6 +30,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
+import { openSync, writeAll } from '../../../system/opfs-file.js';
 
 /** @typedef {{ create?: boolean }} OpfsGetOptions */
 /** @typedef {{ at?: number }} OpfsAtOptions */
@@ -250,14 +251,11 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
      * @returns {Promise<OpfsAccess>}
      */
     const acquireAccess = async(handle, path)=>{
-        if (typeof handle.createSyncAccessHandle !== 'function')
-        {
-            throw fsError(ErrorCode.ACCESS_DENIED,
-                `No synchronous access to "${path}": this store only works inside a worker`);
-        }
+        /** @type {OpfsAccess | null} */
+        let access;
         try
         {
-            return await handle.createSyncAccessHandle();
+            access = await openSync(handle);
         }
         catch (e){
             // The lock is per origin, so the holder may be another window
@@ -268,6 +266,12 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
             }
             throw e;
         }
+        if (access === null)
+        {
+            throw fsError(ErrorCode.ACCESS_DENIED,
+                `No synchronous access to "${path}": this store only works inside a worker`);
+        }
+        return access;
     };
 
     /**
@@ -395,7 +399,9 @@ export async function createOpfsStore({ root, maxOpenHandles = 16 }){
                 throw fsError(ErrorCode.INVALID_PARAMETER, `Negative offset writing "${path}"`);
             }
             const entry = writableEntry(path);
-            resident(path).write(bytes, { at: offset });
+            // Taken in part, the write throws and the size stays: what follows
+            // is placed by the size the store has, over the part.
+            writeAll(resident(path), bytes, offset);
             entry.size = Math.max(entry.size, offset + bytes.length);
             entry.modified = Date.now();
         },
