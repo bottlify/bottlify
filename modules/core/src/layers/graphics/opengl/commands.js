@@ -180,8 +180,10 @@ const parameter = (leading, type, method, colours)=>({
 });
 
 /**
- * A parameter call's float vector form, as many values copied as its
- * parameter takes: four for the ones named, one for the rest.
+ * A parameter call's float vector form, as many values as its parameter
+ * takes: four for the ones named, one for the rest. They go as the record's
+ * floats were read: every setter copies what it keeps, and a display list
+ * being compiled copies a float vector it records (`enter`).
  *
  * @param {string} method @param {readonly number[]} fours
  * @returns {import('../d3d8/commands.js').CommandEntry}
@@ -189,7 +191,7 @@ const parameter = (leading, type, method, colours)=>({
 const parameterVector = (method, fours)=>({
     args: 3, pointer: 2, choose: { arg: 1, cases: fours.map(name=>[name, 16]), otherwise: 4 },
     make: (context, c)=>context[method](c.arg(0) >>> 0, c.arg(1) >>> 0,
-        [...c.floats.subarray(0, fours.includes(c.arg(1) >>> 0) ? 4 : 1)]),
+        c.floats.subarray(0, fours.includes(c.arg(1) >>> 0) ? 4 : 1)),
 });
 
 /**
@@ -207,7 +209,7 @@ const sizedVector = (leading, method, sizes)=>({
     make: (context, c)=>{
         const head = leading === 1 ? [c.arg(0) >>> 0] : [c.arg(0) >>> 0, c.arg(1) >>> 0];
         return context[method](...head,
-            [...c.floats.subarray(0, sizes.get(c.arg(leading - 1) >>> 0) ?? 1)]);
+            c.floats.subarray(0, sizes.get(c.arg(leading - 1) >>> 0) ?? 1));
     },
 });
 
@@ -376,7 +378,7 @@ const TABLE = {
 TABLE.glTexGenfv = {
     args: 3, pointer: 2, choose: { arg: 1, cases: [[GL.TEXTURE_GEN_MODE, 4]], otherwise: 16 },
     make: (context, c)=>context.glTexGenfv(c.arg(0) >>> 0, c.arg(1) >>> 0,
-        [...c.floats.subarray(0, (c.arg(1) >>> 0) === GL.TEXTURE_GEN_MODE ? 1 : 4)]),
+        c.floats.subarray(0, (c.arg(1) >>> 0) === GL.TEXTURE_GEN_MODE ? 1 : 4)),
 };
 
 // --- OpenGL 1.3 to 2.0 under their core names, and the GLSL program's ---
