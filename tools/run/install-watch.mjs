@@ -951,6 +951,10 @@ setInterval(async()=>{
                     failures: device?.failures, last: last && `#${last.index} ${last.draws}`
                         + ` draws ${last.clears} clears ${last.target}`
                         + (last.fogs ? ` fog ${last.fogs}` : ''),
+                    // The messages to the worker and back, and the calls waited on it.
+                    sent: graphics.worker?.sent, back: graphics.worker?.received,
+                    waited: graphics.worker && Object.entries(graphics.worker.waits ?? {})
+                        .map(([name, one])=>`${name} ${/** @type {any} */ (one).count}`).join(', '),
                 }));
             }
             for (const line of describeWindows(win32.windows ?? []))
