@@ -202,6 +202,11 @@ function start(browser, flags, headed = false, profileDir){
     if (!ownProfile)
     {
         closeLeftBehind(profileRoot);
+        // A browser the harness stopped left its tabs in the profile's session,
+        // and the next launch restores them: each a page of the game running
+        // beside the one measured, its workers, memory and cores included
+        // (five of them, 137 MB each, in one Doom 3 run's renderer count).
+        rmSync(join(profileRoot, 'Default', 'Sessions'), { recursive: true, force: true });
     }
     const proc = spawn(
         browser,
