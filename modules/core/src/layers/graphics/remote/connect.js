@@ -75,7 +75,8 @@ function plainOf(services){
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
- *     sent: { batches: number, bytes: number, ms: number }, shipped: Record<string, number>,
+ *     sent: { batches: number, bytes: number, ms: number },
+ *     received: Record<string, number>, shipped: Record<string, number>,
  *     occlusion: { counted: number, ms: number, maxMs: number, polls: number, asks: number,
  *         beside: number, sentAfterMs: number, tripMs: number, under: number[], trace: any[] },
  *     calls: string, answers: string,
@@ -673,6 +674,15 @@ export function connectGraphicsWorker(options){
                     under: /** @type {number[]} */ ([]),
                     abandoned: { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
                         trace: /** @type {any[]} */ ([]) } }),
+                // Every message the worker's side of a root posted back, by
+                // type: with `sent.batches`, the messages a frame costs both ways.
+                received: senders.reduce((sum, sender)=>{
+                    for (const [type, count] of Object.entries(sender.received()))
+                    {
+                        sum[type] = (sum[type] ?? 0) + count;
+                    }
+                    return sum;
+                }, /** @type {Record<string, number>} */ ({})),
                 sent: senders.reduce((sum, sender)=>{
                     const { batches, bytes, ms, returned } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,
