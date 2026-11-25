@@ -406,7 +406,10 @@ export function engineContractProblem(engineModule, url){
  * Where translations are kept between runs.
  *
  * @typedef {Object} TranslationStore
- * @property {(key: string) => Promise<Uint8Array | null>} get
+ * @property {(key: string, options?: { fixed?: boolean }) => Promise<Uint8Array | null>} get
+ *     `fixed`: the record's bytes never change under its key (a batch's module, named by what
+ *     its bytes hash to), so a store that hands records on to other threads (an executor's,
+ *     through its process) may keep it once where they all read it.
  * @property {(key: string, bytes: Uint8Array, options?: { needs?: string }) => Promise<void>} put
  *     The bytes are the store's from the call on: a directory store hands a record that is the
  *     whole of its buffer to the worker that writes it, and the caller's view of it is then
@@ -414,7 +417,8 @@ export function engineContractProblem(engineModule, url){
  *     the store keeps as long as it keeps this one.
  * @property {(key: string, bytes: Uint8Array) => Promise<void>} [append]  Adds the bytes to
  *     the end of a record, or makes one of them; `get` reads it whole. A map a run adds to
- *     (cork's blocks) is written by its additions, not whole at every flush. Optional.
+ *     (cork's blocks) is written by its additions, not whole at every flush. The bytes are the
+ *     store's from the call on, as `put`'s are. Optional.
  * @property {(key: string) => void} [touch]  Counts a record as used without reading it (a
  *     module whose instance the run holds already). Optional.
  * @property {() => any} [stats]  What the store holds and what its opening kept, for the

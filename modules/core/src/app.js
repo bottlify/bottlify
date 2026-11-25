@@ -4138,7 +4138,8 @@ export async function createApp(options){
         // program runs under WOW64 on it.
         machine: runMachine,
         ...runCache === null ? {}
-            : { cache: { reader: runCache.reader, figures: runCache.figures } },
+            : { cache: { reader: runCache.reader, figures: runCache.figures,
+                join: runCache.join } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,

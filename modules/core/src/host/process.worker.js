@@ -33,7 +33,7 @@ import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
-import { remoteCacheReader } from '../process/run-cache.js';
+import { relayedJoin, remoteCacheReader } from '../process/run-cache.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {
@@ -155,9 +155,15 @@ export async function serveProcess(start){
         ask: (method, args)=>ask('cache', method, args),
         call: (method, args)=>link.call('cache', method, args),
     });
+    // And passed on to the process's executors, each a reader of its own.
+    const cacheRelay = cache === null ? null : relayedJoin(cache);
     if (cacheReader !== null)
     {
         cacheReaders.add(cacheReader);
+    }
+    if (cacheRelay !== null)
+    {
+        cacheReaders.add(cacheRelay);
     }
     const system = remoteSystem(ask, handlers, (target, method, args)=>
         link.call(target, method, args), volume, windowCells);
@@ -271,7 +277,8 @@ export async function serveProcess(start){
             // The translator rings the link's bell after each batch it posts, so
             // the batch is taken at the next turn rather than at the next timed
             // yield, as the engine's thread takes its own.
-            ...cacheReader === null ? {} : { cache: { reader: cacheReader } },
+            ...cacheReader === null ? {}
+                : { cache: { reader: cacheReader, join: cacheRelay?.join ?? null } },
             cork: { ...options.cork, config: { ...options.cork?.config,
                 // The run's store, kept by the system's thread.
                 store: options.cork?.config?.store === 'run'
@@ -287,6 +294,10 @@ export async function serveProcess(start){
     }
     catch (e){
         madeNow();
+        if (cacheRelay !== null)
+        {
+            cacheReaders.delete(cacheRelay);
+        }
         if (cacheReader !== null)
         {
             cacheReaders.delete(cacheReader);
@@ -340,6 +351,10 @@ export async function serveProcess(start){
     finally
     {
         await app.dispose();
+        if (cacheRelay !== null)
+        {
+            cacheReaders.delete(cacheRelay);
+        }
         if (cacheReader !== null)
         {
             cacheReaders.delete(cacheReader);
@@ -382,7 +397,7 @@ const lendings = [];
  */
 let toRun = null;
 
-/** The readers of the run's cache in this worker, each told of the segments the keeper makes and lets go. @type {Set<import('../../vendor/cellar/cellar.js').Reader>} */
+/** The readers of the run's cache in this worker, and what passes it on to its executors, each told of the segments the keeper makes and lets go. @type {Set<{ adopt: (message: any) => void }>} */
 const cacheReaders = new Set();
 
 /**

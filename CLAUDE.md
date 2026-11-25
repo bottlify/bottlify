@@ -99,7 +99,8 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   degrades the system without breaking it. `npm run check:boundaries` enforces the graph:
 
   ```
-  log → nothing          cache, cpu, filesystem, media → log          memory → cpu, log
+  log → nothing          cache, filesystem, media → log          cpu → cache, log
+  memory → cpu, log
   kernel, loader → cpu, memory, log                 bridge → cpu, kernel, memory, log
   win32 → bridge, kernel, memory, loader, filesystem, media, cache, log
   graphics → win32, bridge, memory, log            audio, input → win32, bridge, memory

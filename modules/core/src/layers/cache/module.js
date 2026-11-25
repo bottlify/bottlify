@@ -19,6 +19,8 @@
  * the cache it makes again, as on its first read.
  */
 
+import { createReader } from '../../../vendor/cellar/cellar.js';
+
 /**
  * One layer's names in the cache.
  *
@@ -30,6 +32,21 @@
  * @property {(key: string, bytes: Uint8Array) => boolean} put  a copy kept: false where there
  *     was no room
  * @property {(key: string) => void} drop
+ */
+
+/**
+ * What a thread is handed to read the run's cache through a reader of its
+ * own (`join`): the index and the segments as they are now; the segments made
+ * and let go after come to it as messages, which its reader adopts.
+ *
+ * @typedef {{ shared: any, segments: (SharedArrayBuffer | null)[] }} Joined
+ */
+
+/**
+ * Joins a thread to the run's cache, its messages posted through `post`: what
+ * it makes its reader over, and `leave`, after which it is told nothing more.
+ *
+ * @typedef {(post: (message: any) => void) => (Joined & { leave: () => void }) | null} Join
  */
 
 /** What a space is with no cache under it. @type {CacheSpace} */
@@ -44,7 +61,7 @@ const NOTHING = Object.freeze({
  * The cache's api with no cache under it, as `create` answers without a
  * reader: for a test or a tool that builds a layer alone.
  */
-export const noCache = Object.freeze({ space: ()=>NOTHING });
+export const noCache = Object.freeze({ space: ()=>NOTHING, join: /** @type {Join} */ (()=>null) });
 
 /** @typedef {import('../../../vendor/cellar/cellar.js').Reader} Reader */
 
@@ -97,6 +114,33 @@ export function cacheSpace(reader, name, { onlyCopy = false } = {}){
     };
 }
 
+/**
+ * The names `name/...` of the run's cache, read from a thread that only reads
+ * them (an executor's): a reader over what `join` handed it, which asks the
+ * keeper nothing. A cold body or a name past what it was told is a miss, and
+ * `put` keeps nothing: what such a thread wants kept, it asks of whoever
+ * joined it. `adopt` takes the messages of segments made and let go.
+ *
+ * @param {Joined} joined @param {string} name
+ * @returns {{ space: CacheSpace, adopt: (message: any) => void }}
+ */
+export function joinedSpace(joined, name){
+    const reader = createReader({
+        shared: joined.shared, segments: joined.segments,
+        keeper: {
+            reserve: ()=>null,
+            raise: ()=>false,
+            raiseLater: ()=>{},
+            drop: ()=>{},
+        },
+    });
+    const space = cacheSpace(reader, name);
+    return {
+        space: { ...space, put: ()=>false, drop: ()=>{} },
+        adopt: message=>reader.adopt(message),
+    };
+}
+
 /** The cache layer's module for one graph; see `defaultModules`. */
 export function createCacheModule(){
     /** @type {Reader | null} */
@@ -109,9 +153,11 @@ export function createCacheModule(){
         requires: /** @type {readonly string[]} */ (['log']),
 
         /**
-         * @param {{ reader?: Reader | null } | null} config
+         * @param {{ reader?: Reader | null, join?: Join | null } | null} config
+         *     `join`: how another thread of this process (an executor) is joined to
+         *     the run's cache, to read it in place too
          * @returns {Promise<{ space: (name: string,
-         *     options?: { onlyCopy?: boolean }) => CacheSpace }>}
+         *     options?: { onlyCopy?: boolean }) => CacheSpace, join: Join }>}
          */
         async create(config){
             reader = config?.reader ?? null;
@@ -121,9 +167,11 @@ export function createCacheModule(){
             {
                 return noCache;
             }
+            const join = config?.join ?? null;
             return {
                 /** @param {string} name @param {{ onlyCopy?: boolean }} [options] */
                 space: (name, options)=>cacheSpace(given, name, options),
+                join: post=>join?.(post) ?? null,
             };
         },
 

@@ -1221,3 +1221,17 @@ test('a dword the host stores into data is one word in the RAM: beside translate
     assert.equal(h.readReg32('ebx'), 1, 'the first call ran the code as translated');
     assert.equal(h.readReg32('eax'), 7, 'the second ran the code the host stored');
 });
+
+test('an XMM register read is a copy of its lanes, and lanes written as they come are its bits',
+    ()=>{
+        const made = host();
+        made.writeXmm(1, /** @type {any} */ ([-1, 2, 0x80000000, 4]));
+        const read = made.readXmm(1);
+        assert.deepEqual([...read], [0xffffffff, 2, 0x80000000, 4]);
+        assert.equal(read.buffer.byteLength, 16, 'a buffer of the reader\'s own');
+        read[0] = 9;
+        assert.equal(made.readXmm(1)[0], 0xffffffff, 'not the register itself');
+        made.writeXmm(1, Uint32Array.of(5, 6, 7, 8));
+        assert.deepEqual([...made.readXmm(1)], [5, 6, 7, 8]);
+        assert.deepEqual([...made.readXmm(0)], [0, 0, 0, 0], 'its neighbour untouched');
+    });

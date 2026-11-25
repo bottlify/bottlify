@@ -2984,11 +2984,17 @@ export function createCorkHost(config){
         },
         fpu: ()=>fpu,
 
-        /** One XMM register's four lanes as u32 bit patterns. @param {number} index */
-        readXmm: index=>Uint32Array.from(xmm.subarray(index * 4, index * 4 + 4)),
-        /** @param {number} index @param {Uint32Array} words */
+        /**
+         * One XMM register's four lanes as u32 bit patterns, in a buffer of the caller's own.
+         * @param {number} index
+         */
+        readXmm: index=>xmm.slice(index * 4, index * 4 + 4),
+        /**
+         * Lanes written as they come: a Uint32Array takes a lane's bits modulo 2^32 itself.
+         * @param {number} index @param {Uint32Array} words
+         */
         writeXmm(index, words){
-            xmm.set(Uint32Array.from(words, word=>word >>> 0), index * 4);
+            xmm.set(words, index * 4);
         },
         readMxcsr: ()=>blockView.getUint32(inBlock.mxcsr, true) >>> 0,
         /** @param {number} value */
