@@ -333,6 +333,9 @@ export function engineContractProblem(engineModule, url){
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
  *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
  *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
+ * @property {number} [coldAfter]  Translated instructions after which a module none of whose
+ *     regions ran is let go and brought back from the store when asked for (0: never). Default 0.
+ *     Its diagnostics say what has not run that long (`coldBytes`) and what went (`evictedCold`).
  * @property {{ take(bytes: number): boolean, give(bytes: number): void } | null} [charge]
  *     Where the host bounds what its runtimes hold together (the tab's memory): each
  *     module held is taken by its wasm bytes and given back as it is let go.
@@ -639,7 +642,11 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [heldBytes]  Wasm bytes of the modules some running region is in now
  *     (what translated code holds; `moduleBytes` is all made in the run).
  * @property {number} [heldModules]  How many such modules.
- * @property {number} [evictions]  Modules let go past `cacheBytes`.
+ * @property {number} [evictions]  Modules let go past `cacheBytes` or `coldAfter`.
+ * @property {number} [evictedCold]  Of them, those let go for not having run for `coldAfter`.
+ * @property {number | null} [coldModules]  Held modules that have not run for `coldAfter`
+ *     (null: no age set, not measured).
+ * @property {number | null} [coldBytes]  Their wasm bytes (null: not measured).
  * @property {number} [evictedRegions]  Their regions.
  * @property {number} [broughtBack]  Regions of those published again (from the store).
  * @property {number} [crossingsAll]  Crossings out of placed modules since the start,
