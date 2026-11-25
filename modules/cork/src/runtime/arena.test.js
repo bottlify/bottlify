@@ -78,6 +78,36 @@ test('every view of one arena sees what any of them kept', ()=>{
     assert.equal(one.counts().hits, 1, 'the hits are the arena\'s, every view\'s');
 });
 
+test('a kept function goes into the arena in one copy of its body, and reads back whole over an'
+    + ' older entry\'s bytes', ()=>{
+    const arena = openArena(createArena(64 << 10, { segments: 8 }));
+    // The arena's bytes dirty, as a segment taken over is: what is laid over
+    // them must not keep any of it (the key's pad included).
+    new Uint8Array(arena.buffer).fill(0xee, 1024);
+    const one = kept(9);
+    one.body = new Uint8Array(4096).fill(0x5a);
+    const set = Uint8Array.prototype.set;
+    let bodyCopies = 0;
+    Uint8Array.prototype.set = function(source, offset){
+        if (/** @type {any} */ (source).length >= 4096)
+        {
+            bodyCopies++;
+        }
+        return set.call(this, source, offset);
+    };
+    try
+    {
+        arena.set('k', [3.5, -1], one);
+    }
+    finally
+    {
+        Uint8Array.prototype.set = set;
+    }
+    assert.equal(bodyCopies, 1, 'the body written where it goes, no entry built beside it');
+    assert.deepEqual(arena.get('k', [3.5, -1]), one);
+    assert.equal(arena.get('k', [3.5, 1]), undefined, 'the shape as written');
+});
+
 test('the oldest segment goes when the arena is full, and a hit in the older half stays', ()=>{
     // Eight segments of 8 KB: entries of about 300 bytes, two dozen to a segment.
     const arena = openArena(createArena(64 << 10, { segments: 8 }));
