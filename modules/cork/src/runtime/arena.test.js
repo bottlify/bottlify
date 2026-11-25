@@ -88,13 +88,15 @@ test('a kept function goes into the arena in one copy of its body, and reads bac
     one.body = new Uint8Array(4096).fill(0x5a);
     const set = Uint8Array.prototype.set;
     let bodyCopies = 0;
-    Uint8Array.prototype.set = function(source, offset){
-        if (/** @type {any} */ (source).length >= 4096)
+    /** @type {(this: Uint8Array, source: ArrayLike<number>, offset?: number) => void} */
+    const counted = function(source, offset){
+        if (source.length >= 4096)
         {
             bodyCopies++;
         }
         return set.call(this, source, offset);
     };
+    Uint8Array.prototype.set = /** @type {any} */ (counted);
     try
     {
         arena.set('k', [3.5, -1], one);

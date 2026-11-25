@@ -84,11 +84,13 @@ test('a compressed record is copied once, its pieces straight behind the kind by
     };
     /** @type {ArrayBufferLike[]} */
     const targets = [];
-    Uint8Array.prototype.set = function(source, at){
+    /** @type {(this: Uint8Array, source: ArrayLike<number>, at?: number) => void} */
+    const counted = function(source, at){
         targets.push(this.buffer);
-        copied += /** @type {ArrayLike<number>} */ (source).length;
+        copied += source.length;
         return set.call(this, source, at);
     };
+    Uint8Array.prototype.set = /** @type {any} */ (counted);
     /** @type {Uint8Array} */
     let framed;
     try
