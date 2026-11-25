@@ -15,10 +15,16 @@
 import { ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 
-/** @param {Record<string, unknown>} config */
-export function machine(config = {}){
+/**
+ * @param {Record<string, unknown>} config
+ * @param {{ shared?: boolean }} [options]  `shared`: the memory a run of several
+ *     threads has, which a worker can be given without a copy
+ */
+export function machine(config = {}, { shared = false } = {}){
     const layout = ownLayout({ ramSize: 4 << 20, hashSlots: 1 << 16 });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
+    const pages = pagesFor(layout, tablesSize(layout));
+    const memory = new WebAssembly.Memory(shared
+        ? { initial: pages, maximum: pages, shared: true } : { initial: pages });
     const bytes = ()=>new Uint8Array(memory.buffer);
     const view = ()=>new DataView(memory.buffer);
     view().setUint8(layout.x87Empty, 0xff);
@@ -33,6 +39,7 @@ export function machine(config = {}){
     });
     return {
         runtime,
+        memory,
         /** @param {number} at @param {number[]} code */
         write(at, code){
             bytes().set(code, layout.ramBase + at);

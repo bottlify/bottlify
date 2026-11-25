@@ -137,13 +137,13 @@ function fakeTranslator(){
         say: data=>heard(data),
         terminated: ()=>terminated,
         adapter: {
-            post(message){
+            post(message, transfer){
                 if (message.ready === true)
                 {
                     setTimeout(()=>heard({ ready: true }), 0);
                     return;
                 }
-                batches.push(message);
+                batches.push({ ...message, transfer });
             },
             onMessage(listener){ heard = listener; },
             onLost(){},
@@ -239,3 +239,60 @@ test('a worker gone silent on a region loses its batch and goes; the region is n
             await m.runtime.flush();
         }
     });
+
+test('a relink hands a worker the pages where they lie when the memory is shared, and a copy'
+    + ' of each only when it is not', async()=>{
+    for (const shared of [true, false])
+    {
+        const m = machine({ worker: true, translators: 0, relinkAfter: 1, relinkQuiet: 0 },
+            { shared });
+        const fake = fakeTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(fake.adapter);
+            m.write(0x2000, piece(1, 100, 3).code);
+            m.runtime.noteHot(0x2000, 0, 2);
+            while (fake.batches.length === 0)
+            {
+                await m.runtime.translatePending();
+                await later(5);
+            }
+            const [first] = fake.batches;
+            fake.say({ id: first.id, compiled: null,
+                batch: relinkBatch(first.relink, first.layout, first.features, first.options) });
+            // Its batch module, then the relink that forms it again on its own.
+            while (fake.batches.length === 1)
+            {
+                await m.runtime.translatePending();
+                await later(5);
+            }
+            const asked = fake.batches[1];
+            assert.deepEqual(asked.relink.jobs.map((/** @type {any} */ job)=>job.entry), [0x2000]);
+            if (shared)
+            {
+                assert.equal(asked.relink.ram.buffer, m.memory.buffer,
+                    'the guest\'s memory itself, shared with the worker');
+                assert.equal(asked.relink.pages, undefined, 'and no page copied');
+                assert.deepEqual(asked.transfer, []);
+            }
+            else
+            {
+                assert.equal(asked.relink.ram, undefined);
+                assert.ok(asked.relink.pages.length > 0, 'a copy of each page');
+                assert.equal(asked.transfer.length, asked.relink.pages.length,
+                    'given over, not cloned');
+            }
+            const batch = relinkBatch(asked.relink, asked.layout, asked.features, asked.options);
+            assert.ok(batch.results.every(result=>result.ok), 'formed as the run formed it');
+            fake.say({ id: asked.id, batch, compiled: null });
+            await translateUntil(m, ()=>(m.runtime.diagnostics().relinked ?? 0) >= 1);
+            assert.equal(m.runtime.run(m.runtime.entryOf(0x2000), 1000).kind, 'halt',
+                `shared ${shared}: the relinked region runs`);
+            assert.equal(m.reg(1), 0, 'its loop counted down');
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    }
+});

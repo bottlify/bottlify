@@ -442,6 +442,16 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
 }
 
 /**
+ * The pages a relink forms over, read in place: the guest's memory (a
+ * SharedArrayBuffer when it went to a worker, so it is shared, not cloned),
+ * where its page 0 lies in it, and which pages the regions may read. A page
+ * the guest writes while they are formed fails the region's hash, or drops
+ * the region itself before the relink is applied (`relinkOne`).
+ *
+ * @typedef {{ buffer: ArrayBufferLike, at: number, pages: number[] }} RelinkPages
+ */
+
+/**
  * Regions already running, formed again from a copy of their pages and emitted
  * into one module: the relink that gathers the regions of many small batch
  * modules into a few big ones. A region whose bytes no longer hash as they did
@@ -457,11 +467,11 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  *     ownWindows?: boolean,
  *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
  *         floats?: boolean, targets?: [number, number[]][], formable?: number[] }[],
- *     pages: [number, Uint8Array][], formable?: number[],
+ *     pages?: [number, Uint8Array][], ram?: RelinkPages, formable?: number[],
  *     form: { maxBlocks: number, leafCalls?: boolean,
  *         helpers?: boolean | readonly import('../helpers.js').RuntimeHelper[] } }} relink
- *     `pages` copies of every page forming read,
- *     `formable` the ones a job without its own may span (all of `pages` when absent)
+ *     `pages` copies of every page forming read, or `ram` those pages where they lie,
+ *     `formable` the ones a job without its own may span (all of the given when absent)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean,
  *     armHost?: boolean, wideLanes?: boolean }} features
@@ -469,23 +479,42 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  * @param {EmitCache} [cache]
  * @returns {BuiltBatch}
  */
-export function relinkBatch({ jobs, pages, form, formable }, layout, features, options = {},
+export function relinkBatch({ jobs, pages, ram, form, formable }, layout, features, options = {},
     cache = undefined)
 {
-    const byPage = new Map(pages);
-    // The pages a region may be formed over: its own, else the batch's, else the copies.
-    const batchFormable = formable === undefined ? byPage : new Set(formable);
+    // The pages formed over: copies of them by page, or their numbers, read
+    // where they lie in the guest's memory (`RelinkPages`).
+    const byPage = ram === undefined ? new Map(pages) : null;
+    const given = byPage ?? new Set(/** @type {RelinkPages} */ (ram).pages);
+    const memory = ram === undefined ? null : new Uint8Array(ram.buffer);
+    // The pages a region may be formed over: its own, else the batch's, else the given.
+    const batchFormable = formable === undefined ? given : new Set(formable);
     // The page read last, kept: forming reads a region's bytes in runs.
     let lastPage = -1;
     /** @type {Uint8Array | undefined} */
     let lastBytes;
+    // Where the page read last starts in the guest's memory; -1 when it reads zeros.
+    let lastAt = -1;
     /** @param {number} address */
     const read = address=>{
         const page = address >>> 12;
         if (page !== lastPage)
         {
             lastPage = page;
-            lastBytes = byPage.get(page);
+            if (memory === null)
+            {
+                lastBytes = /** @type {Map<number, Uint8Array>} */ (byPage).get(page);
+            }
+            else
+            {
+                // A page past the memory -- an import slot that names nowhere -- is zeros.
+                const at = /** @type {RelinkPages} */ (ram).at + page * 4096;
+                lastAt = given.has(page) && at + 4096 <= memory.length ? at : -1;
+            }
+        }
+        if (memory !== null)
+        {
+            return lastAt < 0 ? 0 : memory[lastAt + (address & 0xfff)];
         }
         return lastBytes?.[address & 0xfff] ?? 0;
     };
