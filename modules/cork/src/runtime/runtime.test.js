@@ -2459,7 +2459,8 @@ test('a batch the worker forms from a copy of its pages runs as the one formed h
 test('the worker rings the engine\'s doorbell after each answer it posts, its readiness too',
     async()=>{
         const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
-        const bell = { buffer: new SharedArrayBuffer(8), index: 1 };
+        // The bell's count at index 1, its sleepers in the word after.
+        const bell = { buffer: new SharedArrayBuffer(12), index: 1 };
         const m = machine({ worker: true, doorbell: { posted, bell } });
         const count = ()=>Atomics.load(new Int32Array(posted.buffer), 0);
         /**
@@ -2512,7 +2513,7 @@ test('a batch whose answer waits behind a hold of the engine thread past the lim
         const posted = { buffer: new SharedArrayBuffer(4), index: 0 };
         const answered = ()=>Atomics.load(new Int32Array(posted.buffer), 0);
         const m = machine({ worker: true, inFlightMs: 200,
-            doorbell: { posted, bell: { buffer: new SharedArrayBuffer(8), index: 1 } } });
+            doorbell: { posted, bell: { buffer: new SharedArrayBuffer(12), index: 1 } } });
         const OTHER = 0x2000;
         m.write(CODE, COUNTDOWN);
         m.write(OTHER, COUNTDOWN);

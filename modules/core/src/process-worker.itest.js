@@ -302,7 +302,9 @@ test('a tool reads the frames and the memory of a program in a worker of its own
                 most = Math.max(most, Array.isArray(frames) ? frames.length : 0);
                 const bytes = await Promise.resolve(app.debug.readOf(one.id, 0x400000, 2))
                     .catch(()=>null);
-                if (bytes)
+                // A read at the moment the process ends finds nothing: what
+                // counts is that one read it while it ran.
+                if (bytes && bytes.length === 2)
                 {
                     header = String.fromCharCode(...bytes);
                 }
