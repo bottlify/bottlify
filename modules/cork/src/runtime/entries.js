@@ -44,7 +44,8 @@ const REMOVED_TOP = 0xff;
  * @property {number} empty    the block a function that does nothing, as `emptyCode` (region.js)
  *     answers it, or 0
  * @property {number} heat     times the host entered it (`run`), until the runtime reads them
- * @property {{ ran: number, ranAt: number } | null} owner  the mark of the module its function is in, which
+ * @property {{ ran: number, ranAt: number } | null} owner  the mark of the module its function
+ *     is in, which
  *     an entry stamps, or null
  */
 
