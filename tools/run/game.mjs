@@ -946,7 +946,9 @@ function describeCork(cork, say){
             || cork.parkedNow === undefined ? 'not measured (no coldMs)'
             : `${cork.parkedModules} parked, ${cork.unparked} touched again, ${cork.evictedCold}`
                 + ` let go (${mib(cork.evictedColdBytes ?? 0)} MB), ${cork.parkedNow} parked now`}`
-        + `; brought back ${cork.broughtBack ?? 0}`);
+        + `; brought back ${cork.broughtBack ?? 0}; kept for other runtimes`
+        + ` ${cork.sharedHeld ? `${cork.sharedHeld.held} modules, ${mib(cork.sharedHeld.bytes)} MB`
+            : 'none'}`);
     say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
         + `, switched ${cork.precisionSwitches ?? 0} times`);
     if (cork.prediction)

@@ -364,6 +364,7 @@ export function createModules(state){
             return;
         }
         sweptAt = now;
+        sharedModules?.sweep(now, after);
         for (const [instance, since] of parked)
         {
             if (now - since >= after)
@@ -475,7 +476,7 @@ export function createModules(state){
         if (keepsModulesFor !== null && module !== null)
         {
             compiledBytes.set(module, bytes);
-            if (sharedModules?.set(key, module, bytes) && sharedModules.paid)
+            if (sharedModules?.set(key, module, bytes, rt.nowMs()) && sharedModules.paid)
             {
                 keptModules.add(module);
             }
@@ -490,7 +491,7 @@ export function createModules(state){
      * @param {string} key
      */
     const sharedModule = key=>{
-        const one = sharedModules?.get(key);
+        const one = sharedModules?.get(key, rt.nowMs());
         if (one === undefined)
         {
             return undefined;

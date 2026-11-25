@@ -399,6 +399,10 @@ test('the modules of code the engine has not touched for `coldMs` are let go, th
     assert.equal(swept.d.evictedCold, 5, 'the four called once and the code that called them');
     assert.equal(swept.loaded, 0, 'the functions called once no longer have an entry');
     assert.equal(swept.d.heldModules, 2, 'the loop and its callee held');
+    assert.ok(swept.d.sharedHeld, 'the store keeps compiled modules for other runtimes');
+    assert.ok(swept.d.sharedHeld.held <= 2,
+        `kept for other runtimes: ${swept.d.sharedHeld.held}, without the age`
+        + ` ${kept.d.sharedHeld.held}`);
     // Parked is not gone: 10 frames in, nothing has been untouched a whole age.
     const early = await loadThenLoop({ coldMs: 100 }, 10);
     assert.ok(early.d.parkedModules >= 5, `${early.d.parkedModules} parked`);

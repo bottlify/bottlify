@@ -54,8 +54,10 @@ export function sharedStoreOf(store){
 }
 
 /**
- * @typedef {{ get: (key: string) => { module: WebAssembly.Module, bytes: number } | undefined,
- *     set: (key: string, module: WebAssembly.Module, bytes: number) => boolean,
+ * @typedef {{ get: (key: string, now?: number) => { module: WebAssembly.Module, bytes: number }
+ *         | undefined,
+ *     set: (key: string, module: WebAssembly.Module, bytes: number, now?: number) => boolean,
+ *     sweep: (now: number, age: number) => void,
  *     stats: () => { held: number, bytes: number, hits: number, added: number,
  *         dropped: number }, paid: boolean }} SharedModules
  */
@@ -73,14 +75,15 @@ const UNPAID = {};
  * @returns {SharedModules}
  */
 export function createSharedModules(cap, charge = null){
-    /** @type {Map<string, { module: WebAssembly.Module, bytes: number }>} */
+    /** In the order used, each with when it was used last.
+     * @type {Map<string, { module: WebAssembly.Module, bytes: number, at: number }>} */
     const held = new Map();
     let bytes = 0;
     let hits = 0;
     let added = 0;
     let dropped = 0;
     return {
-        get(key){
+        get(key, now = 0){
             const one = held.get(key);
             if (one === undefined)
             {
@@ -88,11 +91,12 @@ export function createSharedModules(cap, charge = null){
             }
             // Used now: the last to go.
             held.delete(key);
+            one.at = now;
             held.set(key, one);
             hits++;
             return one;
         },
-        set(key, module, size){
+        set(key, module, size, now = 0){
             if (held.has(key))
             {
                 return held.get(key)?.module === module;
@@ -101,7 +105,7 @@ export function createSharedModules(cap, charge = null){
             {
                 return false;
             }
-            held.set(key, { module, bytes: size });
+            held.set(key, { module, bytes: size, at: now });
             bytes += size;
             added++;
             for (const [oldest, one] of held)
@@ -116,6 +120,23 @@ export function createSharedModules(cap, charge = null){
                 dropped++;
             }
             return held.has(key);
+        },
+        // The ones no runtime has taken for `age` go, as a runtime lets go
+        // its own modules untouched that long (`coldMs`): kept here, they
+        // held the code a runtime let go alive. In the order used, so the
+        // oldest come first.
+        sweep(now, age){
+            for (const [oldest, one] of held)
+            {
+                if (now - one.at < age)
+                {
+                    break;
+                }
+                held.delete(oldest);
+                bytes -= one.bytes;
+                charge?.give(one.bytes);
+                dropped++;
+            }
         },
         stats: ()=>({ held: held.size, bytes, hits, added, dropped }),
         // Whether what it keeps is paid for here, and so by no runtime running it.
