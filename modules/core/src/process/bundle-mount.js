@@ -436,9 +436,11 @@ export function expectIndex(expected){
         return undefined;
     }
     return async stored=>{
-        const digest = await crypto.subtle.digest('SHA-256', stored.slice());
-        const found = [...new Uint8Array(digest)]
-            .map(byte=>byte.toString(16).padStart(2, '0')).join('');
+        // WebCrypto takes no view of shared memory: a copy only for that.
+        const digest = await crypto.subtle.digest('SHA-256',
+            stored.buffer instanceof ArrayBuffer ? stored : stored.slice());
+        const found = Array.from(new Uint8Array(digest),
+            byte=>byte.toString(16).padStart(2, '0')).join('');
         return found === expected.toLowerCase()
             ? null
             : `its digest is ${found}, not ${expected}`;
@@ -879,10 +881,11 @@ export async function mountOneBundle(deps){
      * group with one bad block is asked for again whole. Damage is rare enough
      * that paying for the neighbours beats tracking which part to re-ask for.
      *
-     * Each block is copied out with `slice`, not viewed with `subarray`: a view
-     * would keep the entire request's buffer alive for as long as any one block
-     * of it is held, which for a 8 MiB request holding one 256 KiB block is
-     * thirty-one blocks of the group nobody wanted.
+     * A block kept as it came is copied out with `slice`, not viewed with
+     * `subarray`: a view would keep the entire request's buffer alive for as
+     * long as any one block of it is held, which for a 8 MiB request holding
+     * one 256 KiB block is thirty-one blocks of the group nobody wanted. A
+     * deflated block is inflated from a view: what is kept is what it inflates to.
      *
      * @param {{ start: number, end: number, blocks: any[] }} group
      */
@@ -920,12 +923,12 @@ export async function mountOneBundle(deps){
         for (const block of group.blocks)
         {
             const at = block.offset - group.start;
-            const raw = whole.slice(at, at + block.packed);
             // Inflated here, once, rather than on every read: this is the only
             // place a deflate block can be decoded at all, since the read side
             // is synchronous and the browser's inflate is not.
-            await cache.put(block.index,
-                bundle.block(block.index).codec === 1 ? await inflateRaw(raw) : raw);
+            await cache.put(block.index, bundle.block(block.index).codec === 1
+                ? await inflateRaw(whole.subarray(at, at + block.packed))
+                : whole.slice(at, at + block.packed));
         }
     };
 
