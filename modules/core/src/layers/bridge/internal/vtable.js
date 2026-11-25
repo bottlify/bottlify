@@ -244,6 +244,10 @@ const COUNT_CODE_64 = {
         0x41, 0xff, 0x00, 0xeb, 0xb1],
 };
 
+/** Each byte as two upper-case hex digits, as a GUID's text spells it. */
+const BYTE_HEX = Array.from({ length: 256 }, (unused, byte)=>
+    byte.toString(16).toUpperCase().padStart(2, '0'));
+
 /**
  * @param {Object} deps
  * @param {any} deps.memory
@@ -799,14 +803,16 @@ export function createVtables({ memory, register, heap, long = ()=>false, unimpl
      */
     function readGuid(address){
         const bytes = memory.readBytes(address, 16);
-        const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
-            value.toString(16).toUpperCase().padStart(width, '0');
-        const data1 = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
-        const data2 = bytes[4] | (bytes[5] << 8);
-        const data3 = bytes[6] | (bytes[7] << 8);
-        const tail = [...bytes.slice(8)].map(byte=>hex(byte, 2)).join('');
-        return `{${hex(data1, 8)}-${hex(data2, 4)}-${hex(data3, 4)}-`
-            + `${tail.slice(0, 4)}-${tail.slice(4)}}`;
+        /** @param {number} from @param {number} to  bytes, little-endian when `to < from` */
+        const hex = (from, to)=>{
+            let text = '';
+            for (let at = from; at !== to; at += from < to ? 1 : -1)
+            {
+                text += BYTE_HEX[bytes[at]];
+            }
+            return text;
+        };
+        return `{${hex(3, -1)}-${hex(5, 3)}-${hex(7, 5)}-${hex(8, 10)}-${hex(10, 16)}}`;
     }
 
     return {

@@ -122,6 +122,52 @@ test('a program reads a file out of a bundle, fetching only what it touches',
             `a handful of requests brought it in (${source.fetched.calls})`);
     });
 
+test('a deflated block is inflated from the request it came in, not from a copy of it',
+    { timeout: 60_000 }, async t=>{
+        const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
+        const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
+        // Compressible all through, so every block of it is written deflated.
+        await writeFile(join(root, 'save.dat'), PLANTED.repeat(40000));
+        const path = join(out, 'bundle.btl');
+        await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
+        const handle = await open(path, 'r');
+        t.after(async()=>{
+            await handle.close();
+            await rm(root, { recursive: true, force: true });
+            await rm(out, { recursive: true, force: true });
+        });
+        /** @type {WeakSet<ArrayBufferLike>} */
+        const answered = new WeakSet();
+        const app = await createApp({
+            executable: new Uint8Array(await readFile(FIXTURE)),
+            bundle: { prefix: '', store: null, fetch: async(offset, length)=>{
+                const buffer = Buffer.alloc(length);
+                await handle.read(buffer, 0, length, offset);
+                const bytes = new Uint8Array(buffer.buffer.slice(0, length));
+                answered.add(bytes.buffer);
+                return bytes;
+            } },
+        });
+        t.after(()=>app.dispose());
+        let copied = 0;
+        const slice = Uint8Array.prototype.slice;
+        Uint8Array.prototype.slice = function(/** @type {any[]} */ ...args){
+            copied += answered.has(this.buffer) ? 1 : 0;
+            return slice.apply(this, /** @type {any} */ (args));
+        };
+        t.after(()=>{
+            Uint8Array.prototype.slice = slice;
+        });
+        let printed = '';
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
+        assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60_000 }), 0);
+        Uint8Array.prototype.slice = slice;
+        assert.ok(printed.startsWith(PLANTED), 'the file came out of the bundle, inflated');
+        assert.equal(copied, 0, 'no block copied out of the request before it was inflated');
+    });
+
 test('what the bundle holds is visible to the program, and stays read-only',
     { timeout: 60_000 }, async t=>{
         const source = await bundleWith(PLANTED);

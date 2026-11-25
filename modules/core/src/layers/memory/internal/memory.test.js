@@ -837,3 +837,38 @@ test('a dword the host stores into data goes as one word, no bytes made; into co
     assert.throws(()=>accessors.writeU32(0x1010, 1), /write/i, 'a read-only region still refuses');
     assert.equal(words.length, 1);
 });
+
+test('a string is decoded where it lies in shared memory, ANSI and UTF-16, with no copy of'
+    + ' its bytes', ()=>{
+    const shared = new Uint8Array(new SharedArrayBuffer(0x10000));
+    let copies = 0;
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>{
+            const view = shared.subarray(address, address + length);
+            // A copy of what was read is what this test is to catch.
+            view.slice = (/** @type {any[]} */ ...args)=>{
+                copies++;
+                return Uint8Array.prototype.slice.apply(view, /** @type {any} */ (args));
+            };
+            return view;
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>shared.set(data, address),
+    };
+    const accessors = createAccessors({ raw, regions: mapWithCode() });
+    // "Café €1" in windows-1252: 0xe9 is Latin-1, 0x80 the euro sign.
+    shared.set([0x43, 0x61, 0x66, 0xe9, 0x20, 0x80, 0x31, 0], 0x2000);
+    assert.equal(accessors.readCString(0x2000), 'Café €1');
+    // A wide string at an odd address and at an even one, a lone surrogate kept.
+    const units = [0x0048, 0xd800, 0x0069, 0];
+    for (const at of [0x2101, 0x2200])
+    {
+        units.forEach((unit, i)=>{
+            shared[at + i * 2] = unit & 0xff;
+            shared[at + i * 2 + 1] = unit >>> 8;
+        });
+        assert.equal(accessors.readWideString(at), 'H\ud800i', `at 0x${at.toString(16)}`);
+    }
+    assert.equal(copies, 0, 'nothing copied out to be decoded');
+});
