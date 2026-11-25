@@ -1211,6 +1211,43 @@ test('a sub-image write after a draw sampled the texture reaches only the draws 
             'once nothing unflushed samples it, a write goes straight to the queue');
     });
 
+test('a write placed among a frame\'s commands copies only rows that are the level\'s own',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        const draw = await definedTexture(r);
+        /** Uint8Array copies made while `body` runs. @param {() => void} body */
+        const copiesIn = body=>{
+            const slice = Uint8Array.prototype.slice;
+            let copies = 0;
+            Uint8Array.prototype.slice = function(...args){
+                copies++;
+                return slice.apply(this, args);
+            };
+            try
+            {
+                body();
+            }
+            finally
+            {
+                Uint8Array.prototype.slice = slice;
+            }
+            return copies;
+        };
+        /** @param {number} x @param {number} width @param {number} value */
+        const write = (x, width, value)=>context.glTexSubImage2D(GL.TEXTURE_2D, 0, x, 0,
+            width, 2, GL.RGBA, GL.UNSIGNED_BYTE, new Uint8Array(width * 2 * 4).fill(value));
+
+        draw();
+        write(1, 3, 5);
+        assert.equal(copiesIn(draw), 0, 'a rectangle packed for the upload is its own already');
+        write(0, 8, 6);
+        assert.equal(copiesIn(draw), 1, 'whole rows are a view of the level: copied once');
+        await r.swap();
+        const staged = r.gpu.of('writeBuffer').map((/** @type {any} */ w)=>w.bytes[0]);
+        assert.ok(staged.includes(5) && staged.includes(6), 'both writes went up, staged');
+    });
+
 test('two overlapping sub-image writes go up in the order written, nothing around them',
     async()=>{
         const r = rig();
