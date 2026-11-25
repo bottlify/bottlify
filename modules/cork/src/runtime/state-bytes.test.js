@@ -10,7 +10,8 @@ import { stateBytesOf } from './diagnostics.js';
 
 /** A region's record with what the estimate counts, of known sizes. */
 const record = (/** @type {any} */ more = {})=>({
-    entry: 0x401000, pages: new Set([0x401]), slots: [3, 4], table: 0, spans: [[0x401000, 0x401010]],
+    entry: 0x401000, pages: new Set([0x401]), slots: [3, 4], table: 0,
+    spans: [[0x401000, 0x401010]],
     extents: new Map([[0x401, [0, 1]]]), entryTop: 0, hash: 'h', labels: 'abcd', ...more,
 });
 
