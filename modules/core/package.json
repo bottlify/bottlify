@@ -158,6 +158,7 @@
     "src/steam/redist.js",
     "src/storage-budget.js",
     "src/storage.js",
+    "src/system/opfs-file.js",
     "src/zstd.js"
   ],
   "dependencies": {
