@@ -64,7 +64,8 @@ const argb = (r, g, b, a = 255)=>((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
  * with nothing reporting a failure.
  *
  * @param {{ width?: number, height?: number, depth?: boolean,
- *     occlusionSamples?: (slot: number) => number }} [options]
+ *     occlusionSamples?: (slot: number) => number, window?: boolean }} [options]
+ *     `window`: the memory also reads in place, each such read kept in `windows`
  */
 function harness(options = {}){
     const gpu = createFakeDevice({ occlusionSamples: options.occlusionSamples });
@@ -80,12 +81,20 @@ function harness(options = {}){
     let next = RAM_BASE;
     /** Every read of guest memory the device made, as [address, length]. @type {number[][]} */
     const reads = [];
+    /** Every read in place, as [address, length]. @type {number[][]} */
+    const windows = [];
     const d3d = createDirect3D9({
         backend,
         readMemory: (address, length)=>{
             reads.push([address, length]);
             return ram.slice(address - RAM_BASE, address - RAM_BASE + length);
         },
+        ...options.window ? {
+            windowMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
+                windows.push([address, length]);
+                return ram.subarray(address - RAM_BASE, address - RAM_BASE + length);
+            },
+        } : {},
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         allocate: bytes=>{
             const address = next;
@@ -107,6 +116,7 @@ function harness(options = {}){
 
     return {
         reads,
+        windows,
         gpu,
         presented,
         device: out.device,
@@ -2224,4 +2234,27 @@ test('a clear clears a target of another size than the first in a pass of its ow
             && one.clearValue.g === 1));
     assert.equal(cleared.length, 1, 'the 8x4 target cleared, alone');
     assert.equal(cleared[0].descriptor.colorAttachments.length, 1);
+});
+
+test('a plain surface a stretch draws from is taken up from where its bytes lie', async()=>{
+    const h = harness({ width: 8, height: 8, window: true });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const plain = {};
+    assert.equal(device.CreateOffscreenPlainSurface(4, 4, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT,
+        plain), D3D_OK);
+    h.write(plain.surface.base, new Uint8Array(64).fill(0x5a));
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    assert.equal(device.StretchRect(plain.surface, null, back.surface, null, D3DTEXF.POINT),
+        D3D_OK);
+    await h.present();
+    const at = plain.surface.base;
+    assert.ok(h.windows.some(([address])=>address === at), 'read in place');
+    assert.ok(!h.reads.some(([address])=>address === at), 'not copied out first');
+    const upload = h.gpu.of('copyBufferToTexture').concat(h.gpu.of('writeTexture'))
+        .find((/** @type {any} */ call)=>call.size?.width === 4 && call.size?.height === 4);
+    assert.ok(upload, 'its texels went up');
+    assert.deepEqual(h.gpu.errors, []);
 });

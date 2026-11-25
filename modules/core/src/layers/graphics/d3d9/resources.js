@@ -1117,8 +1117,12 @@ export function writePixels(surface, pixels, writeMemory){
         if (wide.luminance)
         {
             // Four halves a texel on the GPU, the luminance in red.
-            const halves = new Uint16Array(pixels.slice(0, count * 8).buffer);
-            const red = Uint16Array.from({ length: count }, (_, index)=>halves[index * 4]);
+            const halves = new DataView(pixels.buffer, pixels.byteOffset, count * 8);
+            const red = new Uint16Array(count);
+            for (let index = 0; index < count; index++)
+            {
+                red[index] = halves.getUint16(index * 8, true);
+            }
             writeMemory(surface.base, pitchedRows(halvesToStored(wide.stored,
                 new Uint8Array(red.buffer), count), desc.Format, desc.Width, desc.Height));
             return;
