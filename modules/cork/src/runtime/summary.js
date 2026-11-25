@@ -261,12 +261,19 @@ export function regionOfSummary(entry, hash, summary, { read, bytesOf, formable,
         sources.push({ start, bytes: now.slice() });
     }
     // The hash is taken over the copies: what is kept as read is what was hashed.
+    // The span read last, tried first: the hash reads a span's bytes in a run.
+    let last = sources[0];
     const copied = (/** @type {number} */ address)=>{
-        for (const { start, bytes } of sources)
+        if (last !== undefined && address >= last.start && address < last.start + last.bytes.length)
         {
-            if (address >= start && address < start + bytes.length)
+            return last.bytes[address - last.start];
+        }
+        for (const source of sources)
+        {
+            if (address >= source.start && address < source.start + source.bytes.length)
             {
-                return bytes[address - start];
+                last = source;
+                return source.bytes[address - source.start];
             }
         }
         return read(address);
