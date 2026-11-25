@@ -288,12 +288,14 @@
  *           objects -- for a process that joins another run's rather than making one: a
  *           process in a worker of its own is handed it across a link (`system-link.js`).
  * @property {{ budget?: number, reader?: any, figures?: () => any,
- *           join?: ((post: (message: any) => void) => any) | null }} [cache]  The run's
+ *           join?: ((post: (message: any) => void) => any) | null,
+ *           serve?: (() => SharedArrayBuffer) | null }} [cache]  The run's
  *           cache (Cellar): `budget`, the bytes of shared memory it holds bodies in at most
  *           (`RUN_CACHE_BYTES` by default); `reader`, the reader a process reads it through,
  *           `figures`, its keeper's, where the keeper is on the process's thread, and `join`,
- *           how the process's other threads (its executors) are given readers of their own --
- *           all set by the run, not by its caller.
+ *           how the process's other threads (its executors) are given readers of their own,
+ *           and `serve`, a channel a worker that writes the cache (the graphics worker) calls
+ *           the keeper through -- all set by the run, not by its caller.
  * @property {(name: string, payload: any) => void} [relay]
  *           Told every event this process emits, for a process in a worker of its own
  *           to tell the bus of the run that started it.

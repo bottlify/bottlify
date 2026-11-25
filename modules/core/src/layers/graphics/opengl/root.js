@@ -18,6 +18,9 @@ import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { createModelRenderer } from './gpu-model.js';
 
+/** Swaps between two looks for texels no draw has needed (`spill`): about a second at 60. */
+const SPILL_SWAPS = 60;
+
 /**
  * @typedef {Object} OpenglRootServices
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
@@ -34,6 +37,7 @@ import { createModelRenderer } from './gpu-model.js';
  * @property {boolean} [keepPrimitives]
  * @property {boolean} [compressedTextures]
  * @property {boolean} [astcTextures]
+ * @property {import('./gpu.js').GpuServices['texelCache']} [texelCache]
  * @property {boolean} [dumpDraws]
  * @property {number} [maxDraws]
  * @property {string | null} [skipTexture]
@@ -65,6 +69,7 @@ export function createOpenglRoot(services){
     let gpu;
     /** The share groups of the contexts made here, whose textures the diagnostics count. */
     const groups = new Set();
+    let swaps = 0;
     const renderer = ()=>{
         if (gpu === undefined)
         {
@@ -85,6 +90,7 @@ export function createOpenglRoot(services){
                     compressedTextures: services.compressedTextures,
                     astcTextures: services.astcTextures,
                     liveDump: services.liveDump,
+                    texelCache: services.texelCache,
                 });
             }
             else
@@ -131,7 +137,14 @@ export function createOpenglRoot(services){
          *     null when the context has no drawable on a device
          */
         Swap(context){
-            return renderer()?.present(context) ?? null;
+            const shown = renderer()?.present(context) ?? null;
+            // Now and then, what the contexts' textures hold that no draw has
+            // needed goes to the run's cache (`spill`).
+            if (++swaps % SPILL_SWAPS === 0 && typeof gpu?.spill === 'function')
+            {
+                gpu.spill([...groups].flatMap(group=>[...group.textures.objects.values()]));
+            }
+            return shown;
         },
 
         /**

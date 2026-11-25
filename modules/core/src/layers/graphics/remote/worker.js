@@ -86,6 +86,7 @@ import { playedDirect3D7 } from './d3d7.js';
 import { playedDirect3D10 } from './d3d10.js';
 import { createDirect3D10 } from '../d3d10/root.js';
 import { gpuFeaturesOf, gpuLimitsOf } from '../webgpu/features.js';
+import { channelSpace } from '../../cache/module.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -537,6 +538,10 @@ export function serveGraphics(scope, deps){
         }
         /** @type {(message: any, transfer?: Transferable[]) => void} */
         const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
+        // The run's cache, where the root keeps what it holds of a program's
+        // textures while no draw needs them (`opengl/gpu.js` `spill`).
+        const texelCache = options.cacheLink
+            ? channelSpace(options.cacheLink, options.cacheLink.channel, 'texels') : null;
         /**
          * What the played device wrote outside a call -- a read-back the
          * program waits on -- into guest memory: in place where it is shared,
@@ -611,6 +616,8 @@ export function serveGraphics(scope, deps){
         {
             played = playedOpengl(createOpenglRoot, {
                 ...options,
+                cacheLink: undefined,
+                texelCache,
                 liveDump,
                 backend: ()=>backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
@@ -673,6 +680,7 @@ export function serveGraphics(scope, deps){
             ended = true;
             ends?.delete(end);
             capture?.close(captured);
+            texelCache?.close();
             port.onmessage = null;
             port.close();
             const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
@@ -707,6 +715,11 @@ export function serveGraphics(scope, deps){
                 end();
                 return;
             }
+            if (event.data?.type === 'cache')
+            {
+                texelCache?.adopt(event.data.message);
+                return;
+            }
             if (capture && event.data?.type === 'calls')
             {
                 try
@@ -726,7 +739,8 @@ export function serveGraphics(scope, deps){
     };
 
     /** @param {any} data @param {Set<() => void>} [ends] */
-    const takeRoot = (data, ends)=>root(data.api, data.options ?? {}, data.port,
+    const takeRoot = (data, ends)=>root(data.api,
+        data.cache ? { ...data.options, cacheLink: data.cache } : data.options ?? {}, data.port,
         data.memory ?? null, data.lending ?? null,
         typeof data.source === 'number' ? data.source : undefined,
         typeof data.frameLatency === 'number' ? data.frameLatency : undefined, ends).catch(e=>

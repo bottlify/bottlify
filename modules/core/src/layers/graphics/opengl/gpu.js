@@ -128,6 +128,10 @@ const BOUND_TARGETS = Object.freeze({
 /** @type {readonly UniformBlockBinding[]} */
 const NO_BLOCKS = Object.freeze([]);
 
+/** Bytes of a level's texels below which it is not moved into the run's cache (`spill`): a
+ * name and a record there cost more than a small level's bytes. */
+const SPILL_FROM = 16 * 1024;
+
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
 const DEPTH_FORMAT = 'depth24plus-stencil8';
@@ -260,6 +264,10 @@ const ASTC_FORMATS = Object.freeze({
  * @property {boolean} [compressedTextures]  the device has `texture-compression-bc`:
  *           an S3TC texture whose every level kept its blocks travels as
  *           blocks instead of the texels the context decoded them into
+ * @property {{ space: import('../../cache/module.js').CacheSpace,
+ *     ask: (key: string, length: number) => Promise<boolean>,
+ *     put: (key: string, bytes: Uint8Array) => boolean } | null} [texelCache]  the run's
+ *           cache (`channelSpace`), where texels no draw has needed wait (`spill`)
  * @property {boolean} [astcTextures]  the device has `texture-compression-astc` and
  *           no BC: a DXT1 texture whose every level kept its blocks, none of
  *           them with a texel of the fourth colour, travels as ASTC 4x4 blocks
@@ -520,6 +528,40 @@ export function createGpuRenderer(services){
     const BufferUsage = backend.BufferUsage;
     const TextureUsage = backend.TextureUsage;
     const liveDump = services.liveDump ?? null;
+    /** The run's cache, where texels no draw has needed yet wait (`spill`). */
+    const texelCache = services.texelCache ?? null;
+    /** Levels asked room for and not written yet. @type {WeakSet<object>} */
+    const spilling = new WeakSet();
+    /** The cache name a spilled level's texels wait under. @type {WeakMap<object, string>} */
+    const spilledAs = new WeakMap();
+    let spillNames = 0;
+    const spills = { levels: 0, bytes: 0, back: 0, backBytes: 0, refused: 0, lost: 0 };
+    /** @param {object} image @param {Uint8Array | null} value */
+    const plain = (image, value)=>Object.defineProperty(image, 'texels',
+        { value, writable: true, configurable: true, enumerable: true });
+    /**
+     * A spilled level's texels back from the cache, the level plain again:
+     * brought back from the disk first where they went there.
+     *
+     * @param {object} image @param {string} name @param {number} length
+     */
+    const takeBack = (image, name, length)=>{
+        const body = texelCache?.space.with(name, (/** @type {Uint8Array} */ bytes)=>bytes.slice(), { wait: true });
+        let texels = body ?? null;
+        if (texels === null)
+        {
+            spills.lost++;
+            services.divergence?.('a texture\'s texels kept in the run\'s cache could not be read'
+                + ' back: it draws blank', 'loss');
+            texels = new Uint8Array(length);
+        }
+        plain(image, texels);
+        spilledAs.delete(image);
+        texelCache?.space.drop(name);
+        spills.back++;
+        spills.backBytes += length;
+        return texels;
+    };
     // Whether this frame is written down, and which textures' draws it drops:
     // what the run asked at its start, or what a page asked of the running
     // program since -- changed at a frame's end, never in the middle of one.
@@ -5907,6 +5949,76 @@ export function createGpuRenderer(services){
         settled: ()=>chain,
 
         /**
+         * The texels of the given textures that no draw has needed, moved into
+         * the run's cache: a level waits there under a name, and its first
+         * reader takes it back as it was (the property reads it and is a plain
+         * array again), so a write into it in place, an upload or a read-back
+         * meets the same bytes. Room is asked for without waiting; a level
+         * changed meanwhile stays here. Small levels stay: a name costs more.
+         *
+         * @param {Iterable<any>} all
+         */
+        spill(all){
+            if (texelCache === null)
+            {
+                return;
+            }
+            for (const texture of all)
+            {
+                if (textures.has(texture))
+                {
+                    continue;
+                }
+                for (const image of texture.levels?.values() ?? [])
+                {
+                    const held = Object.getOwnPropertyDescriptor(image, 'texels');
+                    const texels = held && 'value' in held ? held.value : null;
+                    if (!(texels instanceof Uint8Array) || texels.byteLength < SPILL_FROM
+                        || spilling.has(image))
+                    {
+                        continue;
+                    }
+                    spilling.add(image);
+                    const name = String(++spillNames);
+                    texelCache.ask(name, texels.byteLength).then((/** @type {boolean} */ granted)=>{
+                        spilling.delete(image);
+                        if (!granted)
+                        {
+                            spills.refused++;
+                            return;
+                        }
+                        // Granted room is taken whatever happened since, so it is not
+                        // left half made; a level changed or drawn since keeps its own.
+                        texelCache.put(name, texels);
+                        const now = Object.getOwnPropertyDescriptor(image, 'texels');
+                        if (now?.value !== texels || textures.has(texture))
+                        {
+                            texelCache.space.drop(name);
+                            return;
+                        }
+                        spilledAs.set(image, name);
+                        spills.levels++;
+                        spills.bytes += texels.byteLength;
+                        Object.defineProperty(image, 'texels', {
+                            configurable: true, enumerable: true,
+                            get(){
+                                return takeBack(image, name, texels.byteLength);
+                            },
+                            set(value){
+                                plain(image, value);
+                                spilledAs.delete(image);
+                                texelCache.space.drop(name);
+                            },
+                        });
+                    }, ()=>{
+                        spilling.delete(image);
+                        spills.refused++;
+                    });
+                }
+            }
+        },
+
+        /**
          * What the given textures' levels hold of texels and blocks here, by
          * why: a texture never drawn (no copy on the device yet), a level past
          * what its device copy took, and the rest (a dump or probe keeping
@@ -5916,7 +6028,7 @@ export function createGpuRenderer(services){
          */
         heldTexels(all){
             const held = { textures: 0, undrawn: 0, undrawnBytes: 0, pastChainBytes: 0,
-                keptBytes: 0, blockBytes: 0 };
+                keptBytes: 0, blockBytes: 0, cachedLevels: 0 };
             for (const texture of all)
             {
                 held.textures++;
@@ -5926,6 +6038,10 @@ export function createGpuRenderer(services){
                     const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
                     const bytes = texels?.byteLength ?? 0;
                     held.blockBytes += image.compressed?.bytes?.byteLength ?? 0;
+                    if (spilledAs.has(image))
+                    {
+                        held.cachedLevels++;
+                    }
                     if (bytes === 0)
                     {
                         continue;
@@ -5950,6 +6066,8 @@ export function createGpuRenderer(services){
 
         diagnostics: ()=>({
             ...stats,
+            // Texels moved into the run's cache while undrawn, and taken back.
+            spills: texelCache === null ? 'no cache' : { ...spills },
             resident: pipelines.size,
             samplers: samplers.size,
             unflushed: unflushed.size,

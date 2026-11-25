@@ -24,6 +24,7 @@ import { createLogReader } from '../log/reader.js';
 import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from './d3d9/constants.js';
 import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
+import { noCache } from '../cache/module.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -39,6 +40,8 @@ function hostWith(/** @type {any} */ memory){
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },
+        // No run's cache: what the layer would keep there it keeps nowhere.
+        cache: noCache,
         // A log with nowhere to publish: the layer's figures are another test's.
         log: {},
     };

@@ -16,7 +16,8 @@
  * it: nothing is copied from one thread to another.
  */
 
-import { createReader, openKeeper } from '../../vendor/cellar/cellar.js';
+import { createChannel, createReader, openKeeper, openServer } from '../../vendor/cellar/cellar.js';
+import { serveKeeper } from '../layers/cache/module.js';
 
 const MIB = 1024 * 1024;
 
@@ -73,6 +74,8 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
         },
     });
     told.add(message=>reader.adopt(message));
+    /** The channels a worker that writes calls the keeper through, served here. @type {Set<{ close: () => void }>} */
+    const served = new Set();
     const sweeping = setInterval(()=>keeper.sweep(), SWEEP_MS);
     // A run's timer is not what keeps a host's process alive.
     /** @type {any} */ (sweeping).unref?.();
@@ -107,9 +110,26 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
             };
         },
 
+        /**
+         * A channel a worker of this thread's (the graphics worker) calls the
+         * keeper through, served on this thread's event loop: the worker asks
+         * for room without waiting and waits only to bring a cold body back.
+         * Its shared memory, which the worker opens its end over.
+         */
+        serve(){
+            const memory = createChannel();
+            served.add(serveKeeper(openServer(memory), keeper));
+            return memory;
+        },
+
         figures: ()=>keeper.figures(),
 
         close(){
+            for (const one of served)
+            {
+                one.close();
+            }
+            served.clear();
             clearInterval(sweeping);
             told.clear();
             keeper.close();

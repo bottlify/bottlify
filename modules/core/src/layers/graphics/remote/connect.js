@@ -61,8 +61,10 @@ function plainOf(services){
 /**
  * @typedef {Object} GraphicsWorkerEnd
  * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'd3d10' | 'opengl', factory: (services: any) => any,
- *     services: any) => any} root
- *     a root the program is given, whose twin the worker plays
+ *     services: any, cache?: { join: (post: (message: any) => void) => any,
+ *     serve: () => SharedArrayBuffer | null } | null) => any} root
+ *     a root the program is given, whose twin the worker plays; `cache`, the run's,
+ *     which the worker side keeps what no draw needs in
  * @property {() => import('./channel.js').WorkerFrameTimes | null} frameTimes
  *     the worker's frames over every root, summed, as of each one's last present
  * @property {() => import('../figures.js').FrameFigures | null} figures
@@ -504,9 +506,21 @@ export function connectGraphicsWorker(options){
     const leave = join(worker, connection);
 
     return {
-        root(api, factory, services){
+        /**
+         * @param {string} api @param {any} factory @param {any} services
+         * @param {{ join: (post: (message: any) => void) => any,
+         *     serve: () => SharedArrayBuffer | null } | null} [cache]  the run's cache,
+         *     which the root's worker side keeps idle texels in
+         */
+        root(api, factory, services, cache = null){
             const { port1, port2 } = new MessageChannel();
             ports.push(port1);
+            // Joined to the run's cache: the segments made and let go after
+            // reach the worker through the root's own port.
+            const channel = cache?.serve() ?? null;
+            const joined = channel === null ? null
+                : cache?.join((/** @type {any} */ message)=>port1.postMessage({ type: 'cache', message }))
+                    ?? null;
             const memory = sharedMemory?.() ?? null;
             const lending = memory && (api === 'd3d8' || api === 'd3d9')
                 && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
@@ -517,7 +531,9 @@ export function connectGraphicsWorker(options){
             // much garbage again, and a phone's page was killed for it. A root
             // that does not lend has its read-backs written here, as bytes.
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
-                memory: lending ? memory : null, lending, source, frameLatency: maxFrameLatency },
+                memory: lending ? memory : null, lending, source, frameLatency: maxFrameLatency,
+                cache: joined && channel
+                    ? { shared: joined.shared, segments: joined.segments, channel } : null },
             [port2]);
             if (lending)
             {

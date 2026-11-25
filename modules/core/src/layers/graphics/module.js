@@ -469,7 +469,7 @@ export function createGraphicsModule(){
     return {
         name: 'graphics',
         version: '0.1.0',
-        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory', 'log']),
+        requires: /** @type {readonly string[]} */ (['win32', 'bridge', 'memory', 'cache', 'log']),
 
         /**
          * @param {any} config
@@ -491,6 +491,10 @@ export function createGraphicsModule(){
             const win32 = host.requireApi('win32');
             const bridge = host.requireApi('bridge');
             const log = /** @type {any} */ (host.requireApi('log'));
+            // What the graphics worker keeps of a program's textures while no
+            // draw needs them: the run's cache, which lets idle bodies go to the
+            // disk, rather than the worker's own heap.
+            const cache = /** @type {any} */ (host.requireApi('cache'));
             /**
              * Everything this instance owns, and whether it is still open.
              *
@@ -1005,7 +1009,7 @@ export function createGraphicsModule(){
                     // draw there, as Direct3D 8 and 9 devices do.
                     remote: remote
                         ? (/** @type {any} */ factory, /** @type {any} */ rootServices)=>
-                            remote.root('opengl', factory, rootServices)
+                            remote.root('opengl', factory, rootServices, cache)
                         : undefined,
                     ...options,
                 }),

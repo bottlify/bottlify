@@ -4118,7 +4118,7 @@ export async function createApp(options){
         machine: runMachine,
         ...runCache === null ? {}
             : { cache: { reader: runCache.reader, figures: runCache.figures,
-                join: runCache.join } },
+                join: runCache.join, serve: runCache.serve } },
         cork: { ...options.cork, config: { ...options.cork?.config, store: translationStore,
             ...lentConfig } },
         events,
