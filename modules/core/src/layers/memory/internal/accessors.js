@@ -82,16 +82,48 @@ const LATIN1 = new TextDecoder('latin1');
 const C1 = /[\u0080-\u009f]/;
 const C1_ALL = /[\u0080-\u009f]/g;
 
+/** Units given to `String.fromCharCode` at once: well under any engine's argument limit. */
+const TEXT_CHUNK = 0x2000;
+
+/** Units made of bytes that are not them already, a chunk at a time. */
+const unitScratch = new Uint16Array(TEXT_CHUNK);
+
+/**
+ * A string's bytes put where the decoder takes them: `TextDecoder` refuses a
+ * view of shared memory, and a string of guest memory is one. Made once; a
+ * longer string is copied on its own.
+ */
+const ansiScratch = new Uint8Array(4096);
+
+/** Whether this host lays a 16-bit unit out low byte first, as the guest does. */
+const LITTLE_ENDIAN = new Uint8Array(Uint16Array.of(1).buffer)[0] === 1;
+
 /**
  * Bytes of the ANSI page as text. The encoding standard makes 'latin1' a
  * label of windows-1252, and Chrome decodes it so; Node 22 decodes it -- and
  * 'windows-1252' itself -- as ISO-8859-1, reading 0x80 to 0x9F as C1
  * controls, so what those come back as is mapped here and both hosts agree.
+ * A view of shared memory is decoded through one buffer made once, not a
+ * copy of its own: the native decoder over a copy is faster than decoding
+ * the view by code units, and the copy is no allocation.
  *
  * @param {Uint8Array} bytes
  */
 export const decodeAnsiBytes = bytes=>{
-    const text = LATIN1.decode(bytes);
+    let plain = bytes;
+    if (typeof SharedArrayBuffer === 'function' && bytes.buffer instanceof SharedArrayBuffer)
+    {
+        if (bytes.length <= ansiScratch.length)
+        {
+            ansiScratch.set(bytes);
+            plain = ansiScratch.subarray(0, bytes.length);
+        }
+        else
+        {
+            plain = bytes.slice();
+        }
+    }
+    const text = LATIN1.decode(plain);
     return C1.test(text)
         ? text.replace(C1_ALL, c=>String.fromCharCode(CP1252_C1[c.charCodeAt(0) - 0x80]
             || c.charCodeAt(0)))
@@ -183,11 +215,10 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
     };
 
     /**
-     * The bytes in place, for a scan done with them before anything else
-     * runs: the search for a terminator. Each chunk of a string's scan copied
-     * by `read` was most of what reading a string cost a host call. Not for a
-     * decode -- `TextDecoder` refuses a view of shared memory, which a page's
-     * guest memory is.
+     * The bytes in place, for a scan or a decode done with them before
+     * anything else runs: the search for a terminator, the string's text.
+     * Each chunk of a string's scan copied by `read` was most of what reading
+     * a string cost a host call.
      *
      * @param {number} address @param {number} length
      */
@@ -515,7 +546,9 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             }
             else if (!raw.writeData || regions.executable(address))
             {
-                raw.writePhysical(address, raw.readPhysical(address, length).slice());
+                // The bytes written back where they lie: the write copies them
+                // over themselves.
+                raw.writePhysical(address, raw.readPhysical(address, length));
             }
             else
             {
@@ -576,7 +609,8 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             {
                 throw unended('NUL', address, limit, span, 1);
             }
-            return decodeAnsiBytes(read(address, length));
+            // Decoded where it lies: nothing runs between the scan and the decode.
+            return decodeAnsiBytes(view(address, length));
         },
 
         /**
@@ -623,7 +657,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
          */
         readWideString(address, limit = 8192){
             const units = scanWideString(address, limit);
-            return unitsText(read(address, units * 2));
+            return unitsText(view(address, units * 2));
         },
 
         scanWideString,
@@ -639,15 +673,26 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
  * @returns {string}
  */
 export function unitsText(bytes){
-    const units = new Uint16Array(bytes.length >> 1);
-    for (let at = 0; at < units.length; at++)
-    {
-        units[at] = bytes[at * 2] | bytes[at * 2 + 1] << 8;
-    }
+    const count = bytes.length >> 1;
+    // The units themselves where they lie on a unit's boundary and the host
+    // reads them as the guest wrote them; made a chunk at a time otherwise.
+    const units = LITTLE_ENDIAN && (bytes.byteOffset & 1) === 0
+        ? new Uint16Array(bytes.buffer, bytes.byteOffset, count) : null;
     let text = '';
-    for (let at = 0; at < units.length; at += 0x2000)
+    for (let at = 0; at < count; at += TEXT_CHUNK)
     {
-        text += String.fromCharCode(...units.subarray(at, at + 0x2000));
+        const end = Math.min(count, at + TEXT_CHUNK);
+        if (units)
+        {
+            text += String.fromCharCode.apply(null, /** @type {any} */ (units.subarray(at, end)));
+            continue;
+        }
+        for (let i = at; i < end; i++)
+        {
+            unitScratch[i - at] = bytes[i * 2] | bytes[i * 2 + 1] << 8;
+        }
+        text += String.fromCharCode.apply(null,
+            /** @type {any} */ (unitScratch.subarray(0, end - at)));
     }
     return text;
 }
