@@ -417,7 +417,8 @@ export function engineContractProblem(engineModule, url){
  *     the store keeps as long as it keeps this one.
  * @property {(key: string, bytes: Uint8Array) => Promise<void>} [append]  Adds the bytes to
  *     the end of a record, or makes one of them; `get` reads it whole. A map a run adds to
- *     (cork's blocks) is written by its additions, not whole at every flush. Optional.
+ *     (cork's blocks) is written by its additions, not whole at every flush. The bytes are the
+ *     store's from the call on, as `put`'s are. Optional.
  * @property {(key: string) => void} [touch]  Counts a record as used without reading it (a
  *     module whose instance the run holds already). Optional.
  * @property {() => any} [stats]  What the store holds and what its opening kept, for the

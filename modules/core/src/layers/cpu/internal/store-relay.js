@@ -30,6 +30,16 @@ import { joinedSpace } from '../../cache/module.js';
 export const STORE_SPACE = 'translations';
 
 /**
+ * What goes across with bytes the sender no longer needs: their buffer, where
+ * they are the whole of one that is not shared; nothing otherwise, and they
+ * are copied.
+ *
+ * @param {Uint8Array} bytes @returns {ArrayBuffer[]}
+ */
+const handedOver = bytes=>(bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0
+    && bytes.byteLength === bytes.buffer.byteLength ? [bytes.buffer] : []);
+
+/**
  * What an executor's translator asks of the store.
  *
  * @typedef {{ id?: number, method: string, key: string, bytes?: Uint8Array,
@@ -173,17 +183,14 @@ export function storeClient(send){
                     ...fixed ? { fixed: true } : {} });
             });
         },
+        // The bytes of a put or an addition are the store's from the call on
+        // (`TranslationStore`): one that is the whole of its buffer goes without a copy.
         put(key, bytes, options){
-            // The bytes are the store's from the call on (`TranslationStore`):
-            // a record that is the whole of its buffer goes without a copy.
-            const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
-                && bytes.buffer instanceof ArrayBuffer;
-            send({ type: 'store', method: 'put', key, bytes, options },
-                whole ? [bytes.buffer] : []);
+            send({ type: 'store', method: 'put', key, bytes, options }, handedOver(bytes));
             return Promise.resolve();
         },
         append(key, bytes){
-            send({ type: 'store', method: 'append', key, bytes });
+            send({ type: 'store', method: 'append', key, bytes }, handedOver(bytes));
             return Promise.resolve();
         },
         touch: key=>send({ type: 'store', method: 'touch', key }),

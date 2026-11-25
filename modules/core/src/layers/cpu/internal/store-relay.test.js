@@ -102,3 +102,18 @@ test('a module the cache has no room for crosses, and a record the store has not
         assert.equal(first.client.counts.copied, 1);
         assert.equal(await first.client.store.get('m/2', { fixed: true }), null);
     });
+
+test('a put and an addition hand their buffer across, the whole of one; a part of one is copied',
+    ()=>{
+        /** @type {[any, any[] | undefined][]} */
+        const sent = [];
+        const { store } = storeClient((message, transfer)=>sent.push([message, transfer]));
+        const record = new Uint8Array([1, 2, 3]);
+        const blocks = new Uint8Array([4, 5]);
+        const part = new Uint8Array(8).subarray(2, 4);
+        store.put('r/1', record);
+        store.append?.('blocks', blocks);
+        store.append?.('blocks', part);
+        assert.deepEqual(sent.map(([, transfer])=>transfer),
+            [[record.buffer], [blocks.buffer], []]);
+    });
