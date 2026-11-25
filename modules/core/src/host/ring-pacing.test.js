@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createRingMemory, waitDoorbell } from '../system/ring.js';
+import { createRingMemory } from '../../vendor/cellar/cellar.js';
 import { createInboundReader, createInboundWriter } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
 
@@ -40,10 +40,14 @@ test('an idle engine sleeps on the doorbell and a write from another thread wake
         // threads' steps fall.
         const asleep = new Int32Array(new SharedArrayBuffer(4));
         const { memory, pacing, macrotasks } = pacingOver(received, {
-            sleep: (/** @type {Parameters<typeof waitDoorbell>} */ ...args)=>{
+            /**
+             * @param {import('../../vendor/cellar/cellar.js').Doorbell} bell
+             * @param {number} seen @param {number} timeoutMs
+             */
+            sleep: (bell, seen, timeoutMs)=>{
                 Atomics.add(asleep, 0, 1);
                 Atomics.notify(asleep, 0);
-                return waitDoorbell(...args);
+                return bell.wait(seen, timeoutMs, 0);
             },
         });
         const writer = new Worker(`

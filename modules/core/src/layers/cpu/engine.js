@@ -226,6 +226,7 @@ export function engineContractProblem(engineModule, url){
  *     the runtime. Named explicitly by a test process, or a bundler that moves it.
  * @property {{ posted: { buffer: SharedArrayBuffer, index: number },
  *     bell: { buffer: SharedArrayBuffer, index: number } }} [doorbell]
+ *     (the bell's count at `index`, the waits asleep on it in the word after)
  *     Words in shared memory the translation worker rings each time it posts a batch:
  *     the count of answers posted, and the doorbell the engine thread sleeps on. A
  *     thread that is not given its event loop on a timer hears an answer by them

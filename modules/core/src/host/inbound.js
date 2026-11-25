@@ -23,7 +23,7 @@
  * posted message, so the two channels keep the page's order.
  */
 
-import { openRing } from '../system/ring.js';
+import { openRing } from '../../vendor/cellar/cellar.js';
 import { textOf } from '../system/codec.js';
 
 /** The inbound ring's size: input arrives in bursts of a few hundred bytes a message. */
@@ -39,7 +39,7 @@ const encoder = new TextEncoder();
  * until room appears: a post that overtook a queued record would reach the
  * engine before what the page sent first.
  *
- * @param {import('../system/ring.js').RingMemory} memory
+ * @param {import('../../vendor/cellar/cellar.js').RingMemory} memory
  * @param {(retry: () => void) => void} [later]  how a full ring is looked at again
  */
 export function createInboundWriter(memory, later = retry=>setTimeout(retry, 1)){
@@ -87,7 +87,7 @@ export function createInboundWriter(memory, later = retry=>setTimeout(retry, 1))
 /**
  * The engine's side: every message in the ring, handed on in order.
  *
- * @param {import('../system/ring.js').RingMemory} memory
+ * @param {import('../../vendor/cellar/cellar.js').RingMemory} memory
  * @param {(message: any) => void} receive
  */
 export function createInboundReader(memory, receive){

@@ -21,8 +21,9 @@
 import { createCorkHost } from './cork-host.js';
 import { startGcNudge } from './gc-nudge.js';
 import { storeClient } from './store-relay.js';
-import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
+import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor }
     from './executor-channel.js';
+import { deadlineOf, waitFor, waitForAsync } from '../../../../vendor/cellar/cellar.js';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
 /**
@@ -269,7 +270,7 @@ async function serve(
         {
             // The process mostly asks again soon after a slice's end, and a
             // wake through the event loop costs more: a short wait in place first.
-            waitWhile(words, Word.STATE, state, IDLE_MS, look(), Word.SLEEPING);
+            waitFor(words, Word.STATE, state, Word.SLEEPING, deadlineOf(IDLE_MS), look());
             state = Atomics.load(words, 0);
         }
         while (state !== Turn.RUN && state !== Turn.CLOSE)
@@ -277,7 +278,7 @@ async function serve(
             // `waitAsync`: the event loop goes on meanwhile, and the
             // translations the runtime asked for come back through it.
             spent.asyncWaits++;
-            await sleepAsync(words, Word.STATE, state, Infinity, Word.SLEEPING);
+            await waitForAsync(words, Word.STATE, state, Word.SLEEPING);
             state = Atomics.load(words, 0);
             yieldedAt = performance.now();
         }

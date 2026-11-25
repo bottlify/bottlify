@@ -24,13 +24,20 @@
  * Each lend is a slot of two words: its state, and where in the stash its
  * bytes are when they are there. The state moves LENT -> READING -> DONE on
  * the played side, or LENT -> STASHED -> DONE when this side claims first; a
- * compare-exchange on each side decides which.
+ * compare-exchange on each side decides which. A claim that waits for a read
+ * sleeps on the slot's state (Cellar's bell), counted in the word after the
+ * slots, and the played side notifies only when one sleeps.
  */
+
+import { deadlineOf, wake, waitFor } from '../../../../vendor/cellar/cellar.js';
 
 export const LEND = Object.freeze({ FREE: 0, LENT: 1, READING: 2, DONE: 3, STASHED: 4 });
 
 /** How many lends may be outstanding at once; one more is copied as before. */
 export const LEND_SLOTS = 4096;
+
+/** The word after the slots: the claims asleep on a read. */
+const SLEEPS = LEND_SLOTS * 2;
 
 /** The bytes the stash holds: the most the lends outstanding at once may cover. */
 export const STASH_BYTES = 16 << 20;
@@ -55,7 +62,7 @@ const WAIT_LIMIT_MS = 10000;
  * @returns {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer }}
  */
 export function createLendingBuffers(){
-    return { slots: new SharedArrayBuffer(LEND_SLOTS * 8),
+    return { slots: new SharedArrayBuffer(LEND_SLOTS * 8 + 4),
         stash: new SharedArrayBuffer(STASH_BYTES) };
 }
 
@@ -189,14 +196,14 @@ export function createLender(options){
         }
         const started = now();
         counts.waited++;
-        for (;;)
+        const deadline = deadlineOf(WAIT_LIMIT_MS);
+        for (let state = Atomics.load(states, slot * 2); state !== LEND.DONE;
+            state = Atomics.load(states, slot * 2))
         {
-            const state = Atomics.load(states, slot * 2);
-            if (state === LEND.DONE || now() - started > WAIT_LIMIT_MS)
+            if (waitFor(states, slot * 2, state, SLEEPS, deadline) === 'timed-out')
             {
                 break;
             }
-            Atomics.wait(states, slot * 2, state, 50);
         }
         counts.waitedMs += now() - started;
     };
@@ -311,7 +318,7 @@ export function createBorrower({ slots, stash, memory, base = 0 }){
         finally
         {
             Atomics.store(states, slot * 2, LEND.DONE);
-            Atomics.notify(states, slot * 2);
+            wake(states, slot * 2, SLEEPS);
         }
     };
 }

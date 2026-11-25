@@ -23,6 +23,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
+import { wake, waitFor } from '../../../../vendor/cellar/cellar.js';
 
 /** How many files the run may hold open at once, across every process. */
 export const SLOTS = 2048;
@@ -33,6 +34,8 @@ const KEY_UNITS = 300;
 const LOCK = 0;
 const SEQUENCE = 1;
 const HIGH = 2;
+/** The threads asleep on a held lock (Cellar's bell): the holder notifies only when one is. */
+const LOCK_SLEEPS = 3;
 const HEADER = 4;
 
 // A slot: its token (0: free), its terms, its key's length and hashes, its key.
@@ -104,19 +107,19 @@ export function openSharedSharing(memory){
 
     // Held for a scan of the table and a write of one slot: a thread that
     // finds it held tries again, and sleeps only if the holder was put off
-    // its processor in the middle.
+    // its processor in the middle - until the holder lets it go.
     const lock = ()=>{
         for (let tries = 0; Atomics.compareExchange(words, LOCK, 0, 1) !== 0; tries++)
         {
             if (tries > 1000 && canBlock)
             {
-                Atomics.wait(words, LOCK, 1, 1);
+                waitFor(words, LOCK, 1, LOCK_SLEEPS, Infinity, 0);
             }
         }
     };
     const unlock = ()=>{
         Atomics.store(words, LOCK, 0);
-        Atomics.notify(words, LOCK, 1);
+        wake(words, LOCK, LOCK_SLEEPS);
     };
 
     /** @param {string} key */

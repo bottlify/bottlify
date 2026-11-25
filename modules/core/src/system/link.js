@@ -26,7 +26,7 @@
  */
 
 import { decodeValue, encodeValue } from './codec.js';
-import { createRingMemory, doorbellOf, openRing, waitDoorbell } from './ring.js';
+import { createRingMemory, openRing } from '../../vendor/cellar/cellar.js';
 
 /**
  * The records on a link: a call, an answer, and a part of one of them too
@@ -91,8 +91,9 @@ export const SPIN_MS = 0.05;
 
 /**
  * @typedef {Object} LinkEnd
- * @property {import('./ring.js').RingMemory} out  what this side writes
- * @property {import('./ring.js').RingMemory} in   what this side reads; its doorbell this side's
+ * @property {import('../../vendor/cellar/cellar.js').RingMemory} out  what this side writes
+ * @property {import('../../vendor/cellar/cellar.js').RingMemory} in   what this side reads; its
+ *     doorbell this side's
  */
 
 /**
@@ -102,11 +103,11 @@ export const SPIN_MS = 0.05;
  *
  * @param {Object} [options]
  * @param {number} [options.capacity]
- * @param {{ buffer: SharedArrayBuffer, index: number } | null} [options.bellA]
- * @param {{ buffer: SharedArrayBuffer, index: number } | null} [options.bellB]
+ * @param {import('../../vendor/cellar/cellar.js').DoorbellMemory} [options.bellA]
+ * @param {import('../../vendor/cellar/cellar.js').DoorbellMemory} [options.bellB]
  * @returns {{ a: LinkEnd, b: LinkEnd }}
  */
-export function createLinkMemory({ capacity = LINK_BYTES, bellA = null, bellB = null } = {}){
+export function createLinkMemory({ capacity = LINK_BYTES, bellA, bellB } = {}){
     const toA = createRingMemory(capacity, bellA);
     const toB = createRingMemory(capacity, bellB);
     return { a: { out: toB, in: toA }, b: { out: toA, in: toB } };
@@ -312,30 +313,6 @@ export function openLink(end, handlers){
         && (typeof globalThis.window === 'undefined');
 
     /**
-     * Whether the doorbell rang within `SPIN_MS`, looked at without sleeping.
-     * A thread put to sleep on a word is woken tens of microseconds after
-     * the word is raised -- on both sides of a call, so a call across that
-     * sleeps costs several times the work of answering it; the other side
-     * mostly answers within a few.
-     *
-     * @param {number} seen
-     */
-    const rang = seen=>{
-        const until = performance.now() + SPIN_MS;
-        for (;;)
-        {
-            if (doorbellOf(bell) !== seen)
-            {
-                return true;
-            }
-            if (performance.now() >= until)
-            {
-                return false;
-            }
-        }
-    };
-
-    /**
      * What this side asked of the other, by target and method: how often,
      * and how long it was blocked for an answer. What a process spends
      * waiting on the system is read here, not guessed.
@@ -414,7 +391,7 @@ export function openLink(end, handlers){
             const until = Date.now() + timeoutMs;
             for (;;)
             {
-                const seen = doorbellOf(bell);
+                const seen = bell.seen();
                 pump();
                 const got = arrived.get(id);
                 if (got)
@@ -438,10 +415,10 @@ export function openLink(end, handlers){
                     throw new Error(
                         `link: ${target}.${method} was not answered in ${timeoutMs} ms`);
                 }
-                if (!rang(seen))
-                {
-                    waitDoorbell(bell, seen, left);
-                }
+                // A look of SPIN_MS first: a thread put to sleep on a word is
+                // woken tens of microseconds after it is raised, on both sides
+                // of a call, and the other side mostly answers within a few.
+                bell.wait(seen, left, SPIN_MS);
             }
         },
 
@@ -457,10 +434,9 @@ export function openLink(end, handlers){
             }
             state.serving = true;
             state.looping = true;
-            const words = new Int32Array(bell.buffer);
             while (state.serving)
             {
-                const seen = doorbellOf(bell);
+                const seen = bell.seen();
                 const handled = pump();
                 if (!state.serving)
                 {
@@ -468,15 +444,11 @@ export function openLink(end, handlers){
                 }
                 // A process that asked one thing asks the next straight
                 // after; the page's own thread does not spin for it.
-                if (handled > 0 && canBlock && rang(seen))
+                if (handled > 0 && canBlock && bell.wait(seen, SPIN_MS, SPIN_MS) !== 'timed-out')
                 {
                     continue;
                 }
-                const waited = /** @type {any} */ (Atomics).waitAsync(words, bell.index, seen);
-                if (waited.async)
-                {
-                    await waited.value;
-                }
+                await bell.waitAsync(seen);
             }
             // What the other side wrote before it was closed is still its
             // word: the last things a process tells the run as it ends.
@@ -509,8 +481,7 @@ export function openLink(end, handlers){
         close(){
             state.serving = false;
             state.closed = true;
-            Atomics.add(new Int32Array(bell.buffer), bell.index, 1);
-            Atomics.notify(new Int32Array(bell.buffer), bell.index);
+            bell.ring();
             if (!state.looping)
             {
                 failWaiting();

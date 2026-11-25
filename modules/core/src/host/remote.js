@@ -30,7 +30,7 @@
 
 import { createDomInput } from '../layers/input/dom.js';
 import { serveKeeper, MIRROR_CAPACITY } from './keeper.js';
-import { createRingMemory } from '../system/ring.js';
+import { createRingMemory } from '../../vendor/cellar/cellar.js';
 import { frameDrops } from '../frame-drops.js';
 import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
 
@@ -133,8 +133,9 @@ export async function createRemoteApp(wiring){
     /** @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void }>} */
     const pending = new Map();
     // One shared word, added to before every post, so the worker can tell a
-    // message is waiting without yielding to find out.
-    const signal = new Int32Array(new SharedArrayBuffer(4));
+    // message is waiting without yielding to find out; the word after it
+    // counts the waits asleep on it, as a doorbell's does.
+    const signal = new Int32Array(new SharedArrayBuffer(8));
     /** What crossed the port, by kind: the cost of the page's own tooling, counted. */
     const traffic = { input: 0, request: 0, visibility: 0, answer: 0, event: 0, 'log-memory': 0 };
     // With concurrency, the channel processes side by side are fed through:

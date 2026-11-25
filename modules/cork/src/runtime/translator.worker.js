@@ -56,13 +56,20 @@ function connection(send){
     let cache = createEmitCache();
     /** @type {{ posted: Int32Array, postedAt: number, bell: Int32Array, bellAt: number } | null} */
     let doorbell = null;
-    /** Rings the engine's doorbell, after the answer is posted. */
+    /**
+     * Rings the engine's doorbell, after the answer is posted: its count, and a
+     * notify only when the word after it says the engine thread sleeps on it
+     * (the host's doorbell keeps its sleepers there).
+     */
     const ring = ()=>{
         if (doorbell)
         {
             Atomics.add(doorbell.posted, doorbell.postedAt, 1);
             Atomics.add(doorbell.bell, doorbell.bellAt, 1);
-            Atomics.notify(doorbell.bell, doorbell.bellAt);
+            if (Atomics.load(doorbell.bell, doorbell.bellAt + 1) !== 0)
+            {
+                Atomics.notify(doorbell.bell, doorbell.bellAt);
+            }
         }
     };
     /**

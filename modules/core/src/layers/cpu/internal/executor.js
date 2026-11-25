@@ -19,8 +19,9 @@
  * stacks need no carrying.
  */
 
-import { BELL_BYTES, Bell, CHANNEL_BYTES, Said, Turn, Word, channelOf, lookFor, sleepAsync,
-    waitWhile } from './executor-channel.js';
+import { BELL_BYTES, Bell, CHANNEL_BYTES, Said, Turn, Word, channelOf, lookFor }
+    from './executor-channel.js';
+import { deadlineOf, ring as ringWord, waitFor, waitForAsync } from '../../../../vendor/cellar/cellar.js';
 import { answerStoreAsks } from './store-relay.js';
 
 /**
@@ -95,15 +96,14 @@ export function createBell(){
          * rings no more, and the process waiting on its turn would wait for good.
          */
         ring(){
-            Atomics.add(word, Bell.RUNG, 1);
-            Atomics.notify(word, Bell.RUNG);
+            ringWord(word, Bell.RUNG, Bell.SLEEPING);
         },
         /**
          * Waits until the bell rings past `seen`, at most `ms`.
          * @param {number} seen @param {number} [ms]
          */
         wait(seen, ms = Infinity){
-            waitWhile(word, Bell.RUNG, seen, ms, look(), Bell.SLEEPING);
+            waitFor(word, Bell.RUNG, seen, Bell.SLEEPING, deadlineOf(ms), look());
         },
         /**
          * The same wait without blocking: for a caller whose other wake comes
@@ -112,8 +112,8 @@ export function createBell(){
          * @param {number} seen @param {number} ms
          * @returns {Promise<void>}
          */
-        waitAsync(seen, ms){
-            return sleepAsync(word, Bell.RUNG, seen, ms, Bell.SLEEPING);
+        async waitAsync(seen, ms){
+            await waitForAsync(word, Bell.RUNG, seen, Bell.SLEEPING, deadlineOf(ms));
         },
         /**
          * Whether no ready thread waits for an executor: then one whose slice

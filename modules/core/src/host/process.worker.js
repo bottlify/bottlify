@@ -286,7 +286,7 @@ export async function serveProcess(start){
                         call: (method, args)=>link.call('store', method, args),
                         post: toRun ?? undefined })
                     : options.cork?.config?.store,
-                doorbell: { posted, bell: link.bell } } },
+                doorbell: { posted, bell: link.bell.memory } } },
             pacing: ringPacing({ inbound: { bell: link.bell, drain: link.pump },
                 macrotask: createMacrotask(), now: ()=>performance.now(), intervalMs: YIELD_MS,
                 posted }),

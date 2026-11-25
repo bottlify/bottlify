@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRingMemory } from '../system/ring.js';
+import { createRingMemory } from '../../vendor/cellar/cellar.js';
 
 test('the engine reads the page\'s messages out of their shared ring as a browser reads one,'
     + ' which decodes no shared view', async()=>{

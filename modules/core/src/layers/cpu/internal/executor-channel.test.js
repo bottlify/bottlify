@@ -6,7 +6,7 @@
 
 /**
  * The channel's wakes: a side ending its turn notifies only when the other
- * sleeps on the word (`wake`, `Word.SLEEPING`), and no wake is lost for it --
+ * sleeps on the word (Cellar's bell, `Word.SLEEPING`), and no wake is lost for it --
  * two threads hand turns back and forth thousands of times, each always
  * sleeping, each never sleeping, and a mix, and every turn arrives. How long
  * a wait looks first follows the cores the slices out leave free (`lookFor`).
@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { BELL_BYTES, BUSY_BESIDE, Bell, CHANNEL_BYTES, SPARE_SPIN_MS, SPIN_MS, Turn, Word,
-    channelOf, lookFor, sleepAsync, wake } from './executor-channel.js';
+    channelOf, lookFor } from './executor-channel.js';
 
 const CHANNEL_URL = new URL('./executor-channel.js', import.meta.url).href;
 
@@ -107,21 +107,6 @@ test('a turn ended while the other side looks wakes nothing, and one it sleeps t
         const mixed = await handTurns(2000, 5000, 0);
         assertLooksFirst(mixed, 5000, 0);
         assert.ok(mixed.mine.woke > 0, JSON.stringify(mixed));
-    });
-
-test('a wake finds no sleeper and notifies nothing; a wait without blocking is counted while on',
-    async()=>{
-        const words = new Int32Array(new SharedArrayBuffer(CHANNEL_BYTES));
-        assert.equal(wake(words, Word.STATE, Word.SLEEPING), false);
-        const waiting = sleepAsync(words, Word.STATE, 0, Infinity, Word.SLEEPING);
-        assert.equal(Atomics.load(words, Word.SLEEPING), 1);
-        Atomics.store(words, Word.STATE, 1);
-        assert.equal(wake(words, Word.STATE, Word.SLEEPING), true);
-        await waiting;
-        assert.equal(Atomics.load(words, Word.SLEEPING), 0);
-        // A wait whose word already moved resolves at once and counts nothing.
-        await sleepAsync(words, Word.STATE, 0, Infinity, Word.SLEEPING);
-        assert.equal(Atomics.load(words, Word.SLEEPING), 0);
     });
 
 test('a wait looks long while the slices out leave a core free, briefly when they do not', ()=>{

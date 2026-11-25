@@ -66,7 +66,8 @@ export const SETTINGS = {
             + ' executor this runtime is, when other executors share its page flags.' },
     doorbell: { kind: 'host', value: undefined, shown: 'none',
         doc: 'The words a translation worker rings after it answers: the count of answers'
-            + ' posted and the bell the engine thread sleeps on.' },
+            + ' posted and the bell the engine thread sleeps on, its count followed by the'
+            + ' count of the waits asleep on it.' },
     // Whether the host made the tables zero itself -- a memory just made, or one
     // it zeroed where they lie: the entry hash is then left as it is at the start,
     // where clearing it made its 12 MiB resident in a memory nothing had touched.

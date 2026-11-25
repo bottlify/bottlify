@@ -432,10 +432,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      * @param {ReturnType<typeof createInboundReader>} reader
      */
     const watchInbound = reader=>{
-        const word = new Int32Array(reader.bell.buffer);
-        const at = reader.bell.index;
-        const waitAsync = /** @type {any} */ (Atomics).waitAsync;
-        if (typeof waitAsync !== 'function')
+        if (typeof (/** @type {any} */ (Atomics).waitAsync) !== 'function')
         {
             const timer = setInterval(()=>(closed ? clearInterval(timer) : reader.drain()),
                 WORKER_YIELD_MS);
@@ -446,10 +443,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             {
                 return;
             }
-            const seen = Atomics.load(word, at);
+            const seen = reader.bell.seen();
             reader.drain();
-            const waited = waitAsync(word, at, seen);
-            (waited.async ? waited.value : Promise.resolve()).then(look);
+            reader.bell.waitAsync(seen).then(look);
         };
         look();
     };
@@ -668,7 +664,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
              * message the page posted is seen between two turns rather than at
              * the next timed yield.
              *
-             * @param {import('../system/ring.js').RingMemory | undefined} ring
+             * @param {import('../../vendor/cellar/cellar.js').RingMemory | undefined} ring
              */
             const pacingFor = ring=>{
                 if (ring)
@@ -686,7 +682,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             // taken at the next turn rather than at the next timed yield.
             const posted = inbound ? { buffer: new SharedArrayBuffer(4), index: 0 } : null;
             const pacing = pacingFor(inbound);
-            const doorbell = posted && inboundReader ? { posted, bell: inboundReader.bell } : null;
+            const doorbell = posted && inboundReader
+                ? { posted, bell: inboundReader.bell.memory } : null;
             /**
              * A layer read as the bundle is, its preload told as its own: the
              * bundle's (`bundle.layers`) and a run's with no bundle (`layers`).
@@ -1001,7 +998,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             // The ring's watch, woken to see it is over.
             if (inboundReader)
             {
-                Atomics.notify(new Int32Array(inboundReader.bell.buffer), inboundReader.bell.index);
+                inboundReader.bell.ring();
             }
         },
     };
