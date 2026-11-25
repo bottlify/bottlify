@@ -181,10 +181,48 @@ const translationHeld = figures=>(typeof figures?.heldBytes === 'number'
     ? figures.heldBytes : NOT_MEASURED);
 
 /**
+ * The JS heap one record's place in the store's index takes (its name, its
+ * offset, length and session, the map's entry), and one region's module name
+ * there: estimated, from 200 000 such entries weighed by a collected heap
+ * on V8 14.6 (141 and 109 bytes; V8 12.4 213 and 181, Chrome's compressed
+ * pointers fewer).
+ */
+const STORE_PLACE_BYTES = 141;
+const STORE_NEED_BYTES = 109;
+
+/**
+ * What the translations' store holds of the heap, as its figures say: its
+ * index, estimated from its counts, and the compiled modules it keeps alive
+ * for the run's other threads. A store that gives no counts is not measured.
+ *
+ * @param {any} stats  the store's `stats()`, or null
+ * @returns {Record<string, number | string>}
+ */
+export const storeHeld = stats=>({
+    storeIndex: typeof stats?.records === 'number'
+        ? stats.records * STORE_PLACE_BYTES + (stats.regionsWithModule ?? 0) * STORE_NEED_BYTES
+        : NOT_MEASURED,
+    ...typeof stats?.heldModules?.bytes === 'number'
+        ? { storeModules: stats.heldModules.bytes } : {},
+});
+
+/**
+ * The JS heap cork's state of a process takes beside its modules, estimated
+ * from its counts (`stateBytes` of its diagnostics, by kind); a runtime that
+ * does not count it is not measured.
+ *
+ * @param {any} figures  the runtime's diagnostics, or null
+ * @returns {number | string}
+ */
+const translationState = figures=>(typeof figures?.stateBytes?.total === 'number'
+    ? figures.stateBytes.total : NOT_MEASURED);
+
+/**
  * What a process's cpu holds of the tab's memory, by zone (`memory-zones.js`):
  * the translator's tables past the guest's RAM and the modules each
  * executor's runtime holds; of the heaps, the translations' store's index of
- * its records, which nothing here weighs yet. An executor not yet answered is
+ * its records and the modules it keeps, and the state each runtime keeps of
+ * its regions, both estimated from counts. An executor not yet answered is
  * not measured.
  *
  * @param {any} instance
@@ -196,13 +234,16 @@ const bytesHeldOf = (instance, cork)=>{
         tables: instance.host?.engineBytes?.() ?? NOT_MEASURED,
         modules: translationHeld(cork),
     };
+    /** @type {Record<string, number | string>} */
+    const heaps = { translationState: translationState(cork) };
     for (const remote of instance.remotes)
     {
-        translation[`executor ${remote.index}`] = translationHeld(
-            instance.remoteFigures.get(remote.index) ?? null);
+        const figures = instance.remoteFigures.get(remote.index) ?? null;
+        translation[`executor ${remote.index}`] = translationHeld(figures);
+        heaps[`translationState ${remote.index}`] = translationState(figures);
     }
     return { translation,
-        ...instance.store ? { heaps: { storeIndex: NOT_MEASURED } } : {} };
+        heaps: { ...heaps, ...instance.store ? storeHeld(instance.store.stats?.() ?? null) : {} } };
 };
 
 /** The long-mode general registers, in the encoding's order. */

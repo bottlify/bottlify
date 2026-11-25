@@ -345,6 +345,32 @@ test('a frame the worker\'s GPU refused is said, with how often it was', ()=>{
     end.dispose();
 });
 
+test('what each root\'s mirror holds of the program\'s memory is summed, and not measured while'
+    + ' one has not said', async t=>{
+    const worker = fakeWorker();
+    const end = connectGraphicsWorker({ worker });
+    const services = { readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } };
+    const factory = (/** @type {any} */ given)=>({ given });
+    end.root('d3d9', factory, services);
+    end.root('d3d8', factory, services);
+    const ports = worker.posted.filter(posted=>posted.type === 'root').map(posted=>posted.port);
+    // Let go of whatever an assertion leaves: open ports would hold the test's thread.
+    t.after(()=>{
+        for (const port of ports)
+        {
+            port.close();
+        }
+        end.dispose();
+    });
+    assert.equal(end.diagnostics().mirrored, null, 'nothing said yet: not measured');
+    ports[0].postMessage({ type: 'diagnostics', diagnostics: { mirrored: { held: 3 * 65536 } } });
+    await delivered();
+    assert.equal(end.diagnostics().mirrored, null, 'one root has not said: not measured');
+    ports[1].postMessage({ type: 'diagnostics', diagnostics: { mirrored: { held: 65536 } } });
+    await delivered();
+    assert.equal(end.diagnostics().mirrored, 4 * 65536);
+});
+
 test('the worker\'s phase totals are summed over the roots that said them', async()=>{
     const worker = fakeWorker();
     const end = connectGraphicsWorker({ worker });

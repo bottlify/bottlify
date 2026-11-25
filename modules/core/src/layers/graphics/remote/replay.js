@@ -2692,6 +2692,16 @@ export function createPlayer({ root, ship, read, borrow }){
 }
 
 /**
+ * A played root's answer, with what its mirror holds of the program's memory
+ * where the call asked for its diagnostics: only this side can say it.
+ *
+ * @param {{ m?: string }} call @param {any} answer
+ * @param {{ figures: () => object }} mirror
+ */
+export const withMirrored = (call, answer, mirror)=>(call.m === 'diagnostics' && answer
+    ? { ...answer, mirrored: mirror.figures() } : answer);
+
+/**
  * A guest memory of only the bytes sent to it, in 64 KiB pages made as they
  * are written: what a renderer behind a played device reads. It is written
  * only by what is sent, so it says which 4 KiB pages were written since a
@@ -2862,6 +2872,16 @@ export function createMirror({ forget = false } = {}){
         },
         /** The bytes of the 64 KiB pages held. */
         bytes: ()=>pages.size * SIZE,
+        /**
+         * What the mirror holds of the heap, for the memory report: its pages,
+         * the pages kept to be made again, and the stamps; `held` is all of it.
+         */
+        figures: ()=>{
+            const stampBytes = stamps.byteLength + largeStamps.byteLength;
+            return { held: (pages.size + spare.length) * SIZE + stampBytes,
+                pages: pages.size, spare: spare.length, stampBytes,
+                reached: largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0) };
+        },
         /** The bytes of every 64 KiB page ever written: what it holds if it forgets none. */
         reached: ()=>largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0),
         /** @param {number} address @param {number} length @returns {Uint8Array} */

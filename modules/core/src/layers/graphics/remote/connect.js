@@ -79,6 +79,7 @@ function plainOf(services){
  *     calls: string, answers: string,
  *     phases: import('./channel.js').WorkerPhases | null,
  *     latency: import('./channel.js').FrameLatencyState | null,
+ *     mirrored: number | null,
  *     handoff: { frames: number, waitedMs: number, worstWaitedMs: number, thereMs: number,
  *         worstThereMs: number, showMs: number, worstShowMs: number,
  *         back: { count: number, ms: number, maxMs: number } | null } | null }}
@@ -636,6 +637,12 @@ export function connectGraphicsWorker(options){
                 latency: latencyOf(senders),
                 // One device serves the worker's roots: the first that said.
                 gpuMemory: senders.map(sender=>sender.gpuMemory()).find(held=>held) ?? null,
+                // Each root's mirror of the program's memory, as each said it
+                // last; null while one has not said.
+                mirrored: senders.reduce((/** @type {number | null} */ sum, sender)=>{
+                    const held = sender.mirrored();
+                    return sum === null || held === null ? null : sum + held;
+                }, 0),
                 answers: senders.map(sender=>sender.answers()).join(' '),
                 occlusion: senders.reduce((sum, sender)=>{
                     const one = sender.occlusion();

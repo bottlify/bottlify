@@ -22,7 +22,7 @@
  * renderer itself says it did.
  */
 
-import { createMirror, createPlayer, createRecording } from './replay.js';
+import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
 
 /** D3D10_QUERY_OCCLUSION and _OCCLUSION_PREDICATE: the GPU's counts. */
 const QUERY_OCCLUSION = 1;
@@ -187,7 +187,7 @@ export function playedDirect3D10(factory, options){
             playing = true;
             try
             {
-                return live.play(call);
+                return withMirrored(call, live.play(call), mirror);
             }
             finally
             {

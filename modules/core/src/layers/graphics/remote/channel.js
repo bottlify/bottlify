@@ -624,6 +624,14 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         /** What the worker's device held with its last diagnostics, or null. */
         gpuMemory: ()=>gpuMemory,
 
+        /**
+         * The bytes the played root's mirror of the program's memory held
+         * with its last diagnostics (`createMirror`'s figures), or null
+         * before it answered one.
+         */
+        mirrored: ()=>(typeof diagnostics?.mirrored?.held === 'number'
+            ? diagnostics.mirrored.held : null),
+
         /** The played side's frame times as of its last present, or null. */
         frameTimes: ()=>frameTimes,
 
