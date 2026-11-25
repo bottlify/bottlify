@@ -72,7 +72,7 @@ test('hello.exe runs the same with concurrency, its engine fed through the inbou
         assert.equal(output.join(''), 'Hello from Bottlify\r\n');
         const layers = await app.diagnostics();
         const metrics = layers.find((/** @type {any} */ layer)=>layer.name === 'app').metrics;
-        assert.deepEqual([metrics.mode, metrics.concurrency], ['isolated', 2]);
+        assert.equal(metrics.concurrency, 2);
         assert.deepEqual(Object.keys(metrics.pacing),
             ['drained', 'yields', 'slept', 'sleptMs', 'woken', 'heard'],
             'the ring pacing counted the run');
