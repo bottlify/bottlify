@@ -21,23 +21,13 @@
  */
 
 import { TYPE } from './attributes.js';
+import { utf16z } from '../common/utf16.js';
 
 const MAGIC = 0x41464d49; // 'IMFA'
 const HEADER = 8;
 const ITEM = 16 + 4 + 4 + 8;
 
 /** @typedef {import('./attributes.js').Item} Item */
-
-/** @param {string} text @returns {Uint8Array} UTF-16 with its terminator */
-const encodeWide = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    const view = new DataView(bytes.buffer);
-    for (let i = 0; i < text.length; i++)
-    {
-        view.setUint16(i * 2, text.charCodeAt(i), true);
-    }
-    return bytes;
-};
 
 /**
  * The bytes of a variable-length value, or null for a fixed one.
@@ -51,7 +41,7 @@ const variable = (item, guidBytes)=>{
         case TYPE.GUID:
             return guidBytes(item.value);
         case TYPE.STRING:
-            return encodeWide(item.value);
+            return utf16z(item.value);
         case TYPE.BLOB:
             return Uint8Array.from(item.value);
         default:

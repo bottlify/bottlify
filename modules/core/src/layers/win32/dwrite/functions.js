@@ -28,6 +28,7 @@ import { FONT_STYLE, SIMULATION, familiesOf, localized, matching, readFace } fro
 import { FontFormatError, analyzeFile, openTypeTag, tagText } from './sfnt.js';
 import { GLYPH_COUNT, SYSTEM_FAMILIES, UNITS_PER_EM, createSystemFace } from './system.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const E_NOTIMPL = 0x80004001 | 0;
@@ -107,12 +108,7 @@ export function createDwriteFunctions(host){
     };
     /** @param {number} at @param {string} text */
     const putWide = (at, text)=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let i = 0; i < text.length; i++)
-        {
-            bytes[i * 2] = text.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
-        }
+        const bytes = utf16z(text);
         host.writeMemory(wholeAddress(at), bytes);
     };
     /** @param {number} at @param {number} count */

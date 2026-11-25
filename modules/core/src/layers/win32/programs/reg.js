@@ -31,6 +31,7 @@
 import { argumentsOf, splitArguments } from './command-line.js';
 import { ROOTS, importRegEntries, parseRegFile } from './regfile.js';
 import { readText } from './notepad.js';
+import { utf16 } from '../common/utf16.js';
 
 export const REG_EXIT = Object.freeze({ SUCCESS: 0, FAILURE: 1 });
 
@@ -218,12 +219,6 @@ export function parseReg(line){
  * @returns {Uint8Array | null}
  */
 export function valueBytes(type, data, separator){
-    /** @param {string} text */
-    const utf16 = text=>new Uint8Array(new Uint16Array([...text].flatMap(unit=>{
-        const code = unit.codePointAt(0) ?? 0;
-        return code > 0xffff ? [0xd800 + (code - 0x10000 >> 10), 0xdc00 + (code & 0x3ff)]
-            : [code];
-    })).buffer);
     switch (type)
     {
         case REG_TYPES.REG_SZ:

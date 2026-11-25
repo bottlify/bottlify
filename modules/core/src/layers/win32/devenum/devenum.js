@@ -27,6 +27,7 @@ import { formatGuid, parseGuid } from '../ole32/guid.js';
 import { describe } from '../quartz/describe.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
 import { safeArrayLayout } from '../common/safearray.js';
+import { utf16z } from '../common/utf16.js';
 
 export const CLSID_SYSTEM_DEVICE_ENUM = '{62BE5D10-60EB-11D0-BD3B-00A0C911CE86}';
 export const CLSID_DEVICE_MONIKER = '{4315D437-5B8C-11D0-BD3B-00A0C911CE86}';
@@ -245,17 +246,6 @@ export function encodeFilterData({ merit, pins }){
 const dword = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-    return bytes;
-};
-
-/** @param {string} text a wide string with its terminator */
-const wide = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let i = 0; i < text.length; i++)
-    {
-        bytes[i * 2] = text.charCodeAt(i) & 0xff;
-        bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-    }
     return bytes;
 };
 
@@ -480,7 +470,7 @@ export function createDeviceEnumeration(host, store){
             {
                 return E_POINTER;
             }
-            const text = wide(displayName(filter));
+            const text = utf16z(displayName(filter));
             const at = host.allocate(text.length);
             host.writeMemory(at, text);
             host.writeMemory(wholeAddress(out), dword(at));

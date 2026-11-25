@@ -20,6 +20,7 @@ import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, valid
     from './lcmap.js';
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
     from './locale-data.js';
+import { utf16 } from '../common/utf16.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -849,13 +850,7 @@ export function createLocaleFunctions(host){
 
     /** @param {number} address @param {string} text */
     const writeWide = (address, text)=>{
-        const bytes = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
+        const bytes = utf16(text);
         host.writeMemory(address, bytes);
     };
 

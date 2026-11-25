@@ -36,6 +36,7 @@ import { IID_IUNKNOWN } from './objects.js';
 import { parseGuid } from './guid.js';
 import { IID_IAUDIO_ENDPOINT_VOLUME, createEndpointVolume } from './endpoint-volume.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const CLSID_MMDEVICE_ENUMERATOR = '{BCDE0395-E52F-467C-8E3D-C4579291692E}';
 export const IID_IMMDEVICE_ENUMERATOR = '{A95664D2-9614-4F35-A746-DE8DB63617E6}';
@@ -220,8 +221,7 @@ export function registerMmDevApiClasses(host){
         const at = host.heap.allocate(text.length * 2 + 2);
         if (at !== 0)
         {
-            host.writeMemory(at, new Uint8Array(Uint16Array.from(`${text}\0`,
-                c=>c.charCodeAt(0)).buffer));
+            host.writeMemory(at, utf16z(text));
         }
         return at;
     };

@@ -27,6 +27,7 @@
  */
 
 import { decodeAnsi } from '../kernel32/locale.js';
+import { utf16 } from '../common/utf16.js';
 
 /** The registry's roots, by the short name and the long one, as reg and regedit read them. */
 export const ROOTS = Object.freeze({
@@ -53,17 +54,6 @@ const VERSION_5 = 'Windows Registry Editor Version 5.00';
  *     | { kind: 'value', name: string, type: number, data: Uint8Array | null }} RegEntry
  *     A key, or a value of the key before it; `data` null removes the value.
  */
-
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-    }
-    return bytes;
-};
 
 /**
  * A quoted string's text and where it ends, its escapes undone; null for one

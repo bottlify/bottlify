@@ -33,6 +33,7 @@ import {
 import { encodeAnsi } from '../kernel32/locale.js';
 import { readText as readString } from './strings.js';
 import { notifyWindow } from './notify.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The class name a program creates the control by. */
 export const STATUSBAR_CLASS = 'msctls_statusbar32';
@@ -142,7 +143,7 @@ export function createStatusBarProcedure(host, tk){
 
     /** @param {number} address @param {string} text @param {boolean} wide */
     const writeText = (address, text, wide)=>host.writeMemory(address, wide
-        ? new Uint8Array(new Uint16Array([...`${text}\0`].map(c=>c.charCodeAt(0))).buffer)
+        ? utf16z(text)
         : encodeAnsi(`${text}\0`));
 
     /**

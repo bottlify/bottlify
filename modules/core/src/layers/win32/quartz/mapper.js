@@ -24,6 +24,7 @@ import { describe } from './describe.js';
 import { formatGuid } from '../ole32/guid.js';
 import { CLSID_LEGACY_AM_FILTER_CATEGORY, encodeFilterData } from '../devenum/devenum.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -82,17 +83,6 @@ export const IAM_FILTER_DATA_SLOTS = [['ParseFilterData', 3], ['CreateFilterData
 const dword = value=>{
     const bytes = new Uint8Array(4);
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
-    return bytes;
-};
-
-/** @param {string} text a wide string with its terminator */
-const wide = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let i = 0; i < text.length; i++)
-    {
-        bytes[i * 2] = text.charCodeAt(i) & 0xff;
-        bytes[i * 2 + 1] = text.charCodeAt(i) >>> 8;
-    }
     return bytes;
 };
 
@@ -321,7 +311,7 @@ export function createFilterMapper(host, store, devices){
             while (given < (count >>> 0) && state.at < state.reg.length)
             {
                 const filter = state.reg[state.at++];
-                const name = wide(filter.name);
+                const name = utf16z(filter.name);
                 const block = host.allocate(REGFILTER_BYTES + name.length);
                 host.writeMemory(block, guidBytes(filter.clsid));
                 host.writeMemory(block + 16, dword(block + REGFILTER_BYTES));

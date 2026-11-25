@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * dbghelp — the debug help library, on a machine with no symbol files.
@@ -382,7 +383,7 @@ export function createDbghelpFunctions(host){
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
                 host.writeMemory(wholeAddress(out),
-                    new Uint8Array(Uint16Array.from(`${searchPath}\0`, c=>c.charCodeAt(0)).buffer));
+                    utf16z(searchPath));
                 return 1;
             },
         },

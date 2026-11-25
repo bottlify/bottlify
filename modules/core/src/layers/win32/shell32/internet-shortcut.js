@@ -22,6 +22,7 @@
 import { writeGuid } from '../ole32/guid.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
 export const IID_IURL_A = '{FBF23B80-E3F0-101B-8488-00AA003E56F8}';
@@ -89,17 +90,6 @@ const dword = value=>new Uint8Array([
     value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
 ]);
 
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
-
 /**
  * The address a `.url` file holds: `URL=` in its `[InternetShortcut]`
  * section, names and keys without regard to case, as the profile calls read
@@ -158,7 +148,7 @@ export function createInternetShortcut(host){
             host.writeMemory(slot, dword(0));
             return S_FALSE;
         }
-        const bytes = wide ? utf16(text) : encodeAnsi(`${text}\0`);
+        const bytes = wide ? utf16z(text) : encodeAnsi(`${text}\0`);
         const block = host.allocate(bytes.length);
         if (block === 0)
         {

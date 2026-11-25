@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * httpapi - the HTTP Server API's configuration store, which a setup writes
@@ -53,17 +54,6 @@ const MAX_TEXT_BYTES = 0x10000;
  * @property {ReturnType<typeof import('../advapi32/registry-service.js').createRegistryService>} hive
  * @property {(api: string, detail: string) => void} [divergence]
  */
-
-/** @param {string} text */
-const utf16z = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-    }
-    return bytes;
-};
 
 /** @param {Uint8Array} bytes */
 const textOf = bytes=>{

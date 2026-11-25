@@ -11,6 +11,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { verLanguageName } from '../kernel32/languages.js';
 import { DISPLAY_DRIVER } from '../user32/display.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -146,17 +147,6 @@ const VFT_APP = 1;
 
 /** US English in UTF-16, the one translation the block carries. */
 const TRANSLATION = '040904B0';
-
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
 
 /**
  * One node of a version block, laid out as `readNode` walks one: a text value

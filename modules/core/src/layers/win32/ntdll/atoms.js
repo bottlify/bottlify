@@ -25,6 +25,7 @@
 
 import { STATUS } from './status.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /** The first word of a table, as Windows writes it: 'Atom'. */
 const SIGNATURE = 0x6d6f7441;
@@ -60,17 +61,6 @@ const u16 = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff);
 /** @param {number} value @returns {Uint8Array} */
 const u32 = value=>Uint8Array.of(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff,
     value >>> 24 & 0xff);
-
-/** @param {string} text @returns {Uint8Array} UTF-16 without a terminator. */
-const utf16 = text=>{
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-    }
-    return bytes;
-};
 
 /**
  * What a name argument stands for: an integer atom, a name, or the status

@@ -19,6 +19,7 @@
 import { GUID_SIZE, parseGuid } from './guid.js';
 import { wholeAddress } from '../common/pointers.js';
 import { statstgLayout } from '../common/statstg.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 
@@ -132,17 +133,6 @@ export function createOleUtil(env){
     const writeU16 = (address, value)=>env.writeMemory(wholeAddress(address),
         Uint8Array.of(value & 0xff, (value >>> 8) & 0xff));
 
-    /** @param {string} text  With its terminator. */
-    const wideBytes = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let index = 0; index < text.length; index++)
-        {
-            bytes[index * 2] = text.charCodeAt(index) & 0xff;
-            bytes[index * 2 + 1] = text.charCodeAt(index) >>> 8;
-        }
-        return bytes;
-    };
-
     /**
      * A terminated UTF-16 string, read no further than `max` units.
      *
@@ -177,7 +167,7 @@ export function createOleUtil(env){
         return block;
     };
     /** @param {string} text */
-    const lendWide = text=>lend(wideBytes(text));
+    const lendWide = text=>lend(utf16z(text));
     /** @param {string} guid */
     const lendGuid = guid=>lend(/** @type {Uint8Array} */ (parseGuid(guid)));
 
@@ -538,7 +528,7 @@ export function createOleUtil(env){
     };
 
     return {
-        readU32, readU16, writeU32, writeU16, writeWords, wideBytes, readWide, lend, lendWide,
+        readU32, readU16, writeU32, writeU16, writeWords, utf16z, readWide, lend, lendWide,
         lendGuid, system, sayOnce, registerFormat, formatName, withScratch, release, globalBytes,
         storageClass, openStream, readStream, writeStream, readFormat, writeFormat, formatsOf,
         tymedOf, copyGlobal, duplicate,

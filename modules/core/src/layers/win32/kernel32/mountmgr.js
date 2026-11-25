@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { utf16 } from '../common/utf16.js';
+
 /**
  * The mount manager, the one device a program opens by name here.
  *
@@ -31,17 +33,6 @@ const STATUS_INVALID_DEVICE_REQUEST = 0xc0000010;
 /** sizeof(MOUNTMGR_MOUNT_POINT), and the header ahead of the array. */
 const POINT_SIZE = 24;
 const HEADER_SIZE = 8;
-
-/** @param {string} text */
-const utf16 = text=>{
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
 
 /** @param {Uint8Array} a @param {Uint8Array} b @param {boolean} [caseless] */
 const same = (a, b, caseless = false)=>{

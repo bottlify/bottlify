@@ -35,6 +35,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
@@ -321,7 +322,7 @@ export function createCommonDialogFunctions(host){
             return name.length + 1;
         }
         host.writeMemory?.(title >>> 0, wide
-            ? new Uint8Array(Uint16Array.from(`${name}\0`, c=>c.charCodeAt(0)).buffer)
+            ? utf16z(name)
             : encodeAnsi(`${name}\0`));
         return 0;
     };

@@ -23,6 +23,7 @@ import {
 } from './filter.js';
 import { CLSID_ASYNC_READER } from './interfaces.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -422,8 +423,7 @@ export function createFileSource(base, host, files){
                 }
                 return S_OK;
             }
-            const text = new Uint8Array(Uint16Array.from([...source.path, '\0'],
-                char=>char.charCodeAt(0)).buffer);
+            const text = utf16z(source.path);
             const at = host.allocate(text.length);
             host.writeMemory(at, text);
             host.writeMemory(wholeAddress(nameOut), dword(at));

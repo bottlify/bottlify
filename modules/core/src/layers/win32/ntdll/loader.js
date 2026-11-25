@@ -18,6 +18,7 @@
 import { STATUS } from './status.js';
 import { DLL_SEARCH_PATH } from '../kernel32/modules.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const STATUS_PROCEDURE_NOT_FOUND = 0xc000007a;
 const STATUS_ORDINAL_NOT_FOUND = 0xc0000138;
@@ -130,12 +131,7 @@ export function createLoaderFunctions({
      * @param {string} text
      */
     const heapWide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at * 2] = text.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = text.charCodeAt(at) >> 8;
-        }
+        const bytes = utf16z(text);
         const at = allocate(bytes.length);
         writeMemory(at, bytes);
         return at;

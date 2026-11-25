@@ -60,6 +60,7 @@ import {
 } from './archive.js';
 import { parseGuid } from '../ole32/guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 /** MsiEnableLog: the bit that lists the properties at the end, and appending to the file. */
@@ -266,17 +267,6 @@ export function createMsiFunctions(host){
     const reader = wide=>address=>((address >>> 0) === 0 ? null : wide
         ? host.readWideString(wholeAddress(address), MAX_TEXT * 2)
         : host.readCString(wholeAddress(address), MAX_TEXT));
-
-    /** @param {string} text */
-    const utf16 = text=>{
-        const bytes = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            bytes[at * 2] = text.charCodeAt(at) & 0xff;
-            bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-        }
-        return bytes;
-    };
 
     /**
      * A string out, the installer's way.

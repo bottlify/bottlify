@@ -36,6 +36,7 @@ import {
     WELL_KNOWN_SIDS, aceBytes, aclBytes, selfRelativeDescriptor, sidBytes,
 } from './tokens.js';
 import { pointerArg, pointerIo, pointerWidth, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -227,9 +228,6 @@ const dword = value=>{
     new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
 };
-
-/** @param {string} text @returns {Uint8Array} UTF-16 with its terminator */
-const wideBytes = text=>new Uint8Array(Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer);
 
 /**
  * Generic rights turned into the specific ones a mapping gives them.
@@ -595,7 +593,7 @@ export function createServiceFunctions(host){
         });
 
     /** @param {boolean} wide @param {string} words */
-    const encode = (wide, words)=>(wide ? wideBytes(words) : sz(words));
+    const encode = (wide, words)=>(wide ? utf16z(words) : sz(words));
 
     /**
      * OpenService once the name is read, in either width.
@@ -934,7 +932,7 @@ export function createServiceFunctions(host){
             running = { name, state: SERVICE_START_PENDING };
             // argv: the service's name and nothing after it, as the manager
             // hands a service started without arguments.
-            const text = wide ? wideBytes(name) : sz(name);
+            const text = wide ? utf16z(name) : sz(name);
             const list = 2 * pointer.size;
             const argv = wholeAddress(host.allocate(list + text.length));
             host.writeMemory?.(argv, pointer.array([argv + list]));

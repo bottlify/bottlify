@@ -32,16 +32,13 @@ import { overlappedLayout, overlappedResult } from '../common/overlapped.js';
 import { encodeAnsi } from './locale.js';
 import { msToFileTime } from './filetime.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /**
  * How far a name a program hands these is read: whole, as Windows reads it, up to
  * the 32 767 characters a path may have. A name cut shorter names another file.
  */
 const WHOLE_NAME = 32767;
-
-/** @param {string} text @returns {Uint8Array} UTF-16, as a wide string is written. */
-const encodeWide = text=>new Uint8Array(Uint16Array.from(text,
-    character=>character.charCodeAt(0)).buffer);
 
 /** What GetDriveType answers. Only three of the six are ever used here. */
 const DRIVE_NO_ROOT_DIR = 1;
@@ -948,7 +945,7 @@ export function createDriveFunctions(host){
             case FILE_FS_VOLUME_INFORMATION: {
                 // VolumeCreationTime, VolumeSerialNumber, VolumeLabelLength,
                 // SupportsObjects, then the label.
-                const label = encodeWide(facts.label);
+                const label = utf16(facts.label);
                 const bytes = record(VOLUME_FIXED + label.length, view=>{
                     // A disc's descriptor dates are not kept: it says none.
                     view.setBigUint64(0, facts.disc ? 0n : msToFileTime(VOLUME_CREATED_MS), true);
@@ -976,7 +973,7 @@ export function createDriveFunctions(host){
             case FILE_FS_ATTRIBUTE_INFORMATION: {
                 // FileSystemAttributes, MaximumComponentNameLength,
                 // FileSystemNameLength, then the name.
-                const name = encodeWide(facts.system);
+                const name = utf16(facts.system);
                 const bytes = record(ATTRIBUTE_FIXED + name.length, view=>{
                     view.setUint32(0, facts.flags, true);
                     view.setUint32(4, facts.component, true);
@@ -1203,7 +1200,7 @@ export function createDriveFunctions(host){
 
     const ansiVolumes = volumeCalls(address=>host.readCString(address, WHOLE_NAME), encodeAnsi);
     const wideVolumes = volumeCalls(address=>host.readWideString(address, WHOLE_NAME * 2),
-        encodeWide);
+        utf16);
 
     return {
         // The volume calls, each in both widths (`volumeCalls`).
@@ -1252,7 +1249,7 @@ export function createDriveFunctions(host){
 
         /** DWORD QueryDosDeviceW(LPCWSTR lpDeviceName, LPWSTR lpTargetPath, DWORD ucchMax) */
         QueryDosDeviceW: queryDosDevice(address=>host.readWideString(address, WHOLE_NAME * 2),
-            encodeWide),
+            utf16),
 
         /**
          * DWORD GetLogicalDrives(VOID)
@@ -1281,7 +1278,7 @@ export function createDriveFunctions(host){
          *
          * The same block in wide characters; the sizes are in characters too.
          */
-        GetLogicalDriveStringsW: driveStrings(encodeWide),
+        GetLogicalDriveStringsW: driveStrings(utf16),
 
         /** UINT GetDriveTypeA(LPCSTR lpRootPathName) */
         GetDriveTypeA: {
@@ -1339,7 +1336,7 @@ export function createDriveFunctions(host){
 
         /** GetVolumeInformationW: the same answers, the names in UTF-16 and sized in characters. */
         GetVolumeInformationW: volumeInformation(
-            address=>host.readWideString(address, WHOLE_NAME * 2), encodeWide),
+            address=>host.readWideString(address, WHOLE_NAME * 2), utf16),
 
         /**
          * BOOL GetVolumeInformationByHandleW(HANDLE, LPWSTR lpVolumeNameBuffer,
@@ -1375,7 +1372,7 @@ export function createDriveFunctions(host){
                         host.setLastError(ERROR_BAD_LENGTH);
                         return 0;
                     }
-                    host.writeMemory(wholeAddress(buffer), encodeWide(text + '\0'));
+                    host.writeMemory(wholeAddress(buffer), utf16(text + '\0'));
                 }
                 writeDwordIf(wholeAddress(serial), facts.serial);
                 writeDwordIf(wholeAddress(componentLength), facts.component);
@@ -1426,13 +1423,13 @@ export function createDriveFunctions(host){
         GetComputerNameA: computerName(encodeAnsi),
 
         /** BOOL GetComputerNameW(LPWSTR lpBuffer, LPDWORD nSize): the size in characters. */
-        GetComputerNameW: computerName(encodeWide),
+        GetComputerNameW: computerName(utf16),
 
         /**
          * BOOL GetComputerNameExA/W(COMPUTER_NAME_FORMAT NameType, LPTSTR lpBuffer,
          *     LPDWORD nSize)
          */
         GetComputerNameExA: computerNameEx(encodeAnsi),
-        GetComputerNameExW: computerNameEx(encodeWide),
+        GetComputerNameExW: computerNameEx(utf16),
     };
 }

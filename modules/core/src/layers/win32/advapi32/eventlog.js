@@ -29,6 +29,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_LOCAL_MACHINE } from './registry.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -137,7 +138,7 @@ const MAX_NAME = 0x8000;
 
 /** @param {string} text @param {boolean} wide @returns {Uint8Array} with its terminator */
 const textBytes = (text, wide)=>(wide
-    ? new Uint8Array(Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer)
+    ? utf16z(text)
     : encodeAnsi(`${text}\0`));
 
 /** @param {number} value */

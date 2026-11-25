@@ -171,6 +171,17 @@ test('a link names a DOS path, a relative one beside it, a device nothing here',
     assert.equal(reparseTarget(IO_REPARSE_TAG_MOUNT_POINT, kept, at), 'C:\\T\\DIR');
 });
 
+test('a junction kept without its buffer keeps a character past U+FFFF whole', ()=>{
+    // Both of its surrogates, in each name: a buffer made by code point kept
+    // the first alone and read back another path.
+    const target = 'C:\\\u{1F4C1}x';
+    const kept = mountPointBuffer(target);
+    const view = new DataView(kept.buffer);
+    assert.equal(view.getUint16(10, true), (4 + target.length) * 2, 'the substitute name');
+    assert.equal(view.getUint16(14, true), target.length * 2, 'the printed name');
+    assert.equal(reparseTarget(IO_REPARSE_TAG_MOUNT_POINT, kept, 'C:\\T\\LINK'), target);
+});
+
 test('a link names a directory when its substitute name ends in a separator', ()=>{
     assert.equal(namesDirectory(linkBuffer(IO_REPARSE_TAG_SYMLINK, 'testreparse_file\\', 1)), true);
     assert.equal(namesDirectory(linkBuffer(IO_REPARSE_TAG_SYMLINK, 'testreparse_file', 1)), false);

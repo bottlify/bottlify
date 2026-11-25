@@ -5,6 +5,7 @@
  */
 
 import { wholeAddress } from '../common/pointers.js';
+import { utf16, utf16z } from '../common/utf16.js';
 
 /**
  * The credential manager: what a program saves a user name and a password
@@ -539,8 +540,7 @@ export function createCredFunctions(host){
                     {
                         return fail(ERROR_INVALID_PARAMETER);
                     }
-                    const name = new Uint8Array(new Uint16Array([...user]
-                        .map(char=>char.charCodeAt(0))).buffer);
+                    const name = utf16(user);
                     const size = new Uint8Array(4);
                     new DataView(size.buffer).setUint32(0, name.length, true);
                     body = encode(size) + encode(name);
@@ -588,8 +588,7 @@ export function createCredFunctions(host){
                 }
                 if (read.user !== undefined)
                 {
-                    const name = new Uint8Array(new Uint16Array([...read.user, '\0']
-                        .map(char=>char.charCodeAt(0))).buffer);
+                    const name = utf16z(read.user);
                     const block = host.allocate(4 + name.length);
                     const bytes = new Uint8Array(4 + name.length);
                     new DataView(bytes.buffer).setUint32(0, block + 4, true);

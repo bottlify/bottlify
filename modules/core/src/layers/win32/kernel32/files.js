@@ -50,6 +50,7 @@ import {
 } from './reparse.js';
 import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { readSecurityAttributes } from '../common/security-attributes.js';
+import { utf16 } from '../common/utf16.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -1569,18 +1570,6 @@ export function createFileFunctions(host){
         cAlternateFileName: 564,
         SIZE: 592,
     });
-
-    /** @param {string} text @returns {Uint8Array} UTF-16, with no terminator. */
-    const utf16 = text=>{
-        const bytes = new Uint8Array(text.length * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
-        return bytes;
-    };
 
     /**
      * The wide twin of writeStringTo. The two-call protocol is counted in

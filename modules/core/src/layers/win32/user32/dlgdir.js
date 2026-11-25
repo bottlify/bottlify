@@ -21,6 +21,7 @@
 import { encodeAnsi } from '../kernel32/locale.js';
 import { readText } from './unicode.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** DlgDirList's and LB_DIR's kinds of entry. */
 export const DDL_READONLY = 0x0001;
@@ -246,7 +247,7 @@ export function createDirectoryListFunctions({ host, call }){
         }
         const cut = text.slice(0, room - 1);
         host.writeMemory(wholeAddress(address), wide
-            ? new Uint8Array(Uint16Array.from(`${cut}\0`, c=>c.charCodeAt(0)).buffer)
+            ? utf16z(cut)
             : encodeAnsi(`${cut}\0`));
     };
 

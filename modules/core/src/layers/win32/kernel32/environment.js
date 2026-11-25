@@ -27,6 +27,7 @@ import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
@@ -270,13 +271,7 @@ export function createEnvironmentFunctions(host){
 
     /** @param {string} text */
     const writeWideString = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        for (let at = 0; at < text.length; at++)
-        {
-            const code = text.charCodeAt(at);
-            bytes[at * 2] = code & 0xff;
-            bytes[at * 2 + 1] = code >> 8;
-        }
+        const bytes = utf16z(text);
         const address = host.allocate(bytes.length);
         host.writeMemory(address, bytes);
         return address;

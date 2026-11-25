@@ -33,6 +33,7 @@
 
 import { createComObject } from './objects.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 export const IID_IAUDIO_CLIENT = '{1CB9AD4C-DBFA-4C32-B178-C2F568A703B2}';
 const IID_IAUDIO_RENDER_CLIENT = '{F294ACFC-3146-4483-A7BF-ADDCA7C260E2}';
@@ -284,8 +285,7 @@ export function createAudioClients(host, endpoint){
         const at = host.heap.allocate(text.length * 2 + 2);
         if (at !== 0)
         {
-            host.writeMemory(at, new Uint8Array(Uint16Array.from(`${text}\0`,
-                c=>c.charCodeAt(0)).buffer));
+            host.writeMemory(at, utf16z(text));
         }
         return at;
     };

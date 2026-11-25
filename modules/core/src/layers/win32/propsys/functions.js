@@ -20,6 +20,7 @@
 
 import { formatGuid, parseGuid } from '../ole32/guid.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -140,16 +141,6 @@ export function createPropsysFunctions(host){
             address += bytes.length;
         }
         return out;
-    };
-    /** @param {string} value */
-    const wideBytes = value=>{
-        const bytes = new Uint8Array((value.length + 1) * 2);
-        for (let i = 0; i < value.length; i++)
-        {
-            bytes[i * 2] = value.charCodeAt(i) & 0xff;
-            bytes[i * 2 + 1] = value.charCodeAt(i) >>> 8;
-        }
-        return bytes;
     };
     /** Task memory holding the bytes, or 0. @param {Uint8Array} bytes */
     const taskCopy = bytes=>{
@@ -596,7 +587,7 @@ export function createPropsysFunctions(host){
                 return hr;
             }
             const fits = value.length < (cch >>> 0);
-            put(buffer, wideBytes(fits ? value : value.slice(0, (cch >>> 0) - 1)));
+            put(buffer, utf16z(fits ? value : value.slice(0, (cch >>> 0) - 1)));
             return fits ? S_OK : INSUFFICIENT_BUFFER;
         } },
         /** HRESULT PropVariantToStringAlloc(REFPROPVARIANT, PWSTR *) */
@@ -611,7 +602,7 @@ export function createPropsysFunctions(host){
                 putU32s(out, [0]);
                 return hr;
             }
-            const copy = taskCopy(wideBytes(value));
+            const copy = taskCopy(utf16z(value));
             putU32s(out, [copy]);
             return copy === 0 ? E_OUTOFMEMORY : S_OK;
         } },
@@ -624,7 +615,7 @@ export function createPropsysFunctions(host){
                     return E_FAIL;
                 }
                 return recordOf(out, VT.LPWSTR,
-                    taskCopy(wideBytes(formatGuid(host.readMemory(wholeAddress(guid), 16)))));
+                    taskCopy(utf16z(formatGuid(host.readMemory(wholeAddress(guid), 16)))));
             } },
         /** HRESULT InitVariantFromGUIDAsString(REFGUID, VARIANT *) */
         InitVariantFromGUIDAsString: { argBytes: 8,
@@ -669,7 +660,7 @@ export function createPropsysFunctions(host){
                 const copies = [];
                 for (let i = 0; i < n; i++)
                 {
-                    const copy = taskCopy(wideBytes(text(u32(wholeAddress(strings) + i * 4),
+                    const copy = taskCopy(utf16z(text(u32(wholeAddress(strings) + i * 4),
                         true)));
                     if (copy === 0)
                     {

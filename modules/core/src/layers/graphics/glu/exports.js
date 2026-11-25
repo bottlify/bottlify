@@ -42,6 +42,7 @@ import {
 import { GLU, cylinder, newQuadric, partialDisk, sphere } from './quadric.js';
 import { TESS, tessellate } from './tess.js';
 import { createImages } from './images.js';
+import { utf16z } from '../../win32/common/utf16.js';
 
 // The x86-64 of the functions that answer in the guest: gluProject and
 // gluCheckExtension take it as their exports' `long`. The matrix helpers'
@@ -478,7 +479,7 @@ export function createGlu(deps){
             return known;
         }
         const bytes = wide
-            ? new Uint8Array(Uint16Array.from([...text, '\0'].map(c=>c.charCodeAt(0))).buffer)
+            ? utf16z(text)
             : new TextEncoder().encode(`${text}\0`);
         const address = deps.allocate?.(bytes.length) ?? 0;
         if (address === 0)

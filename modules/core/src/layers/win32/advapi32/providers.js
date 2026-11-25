@@ -17,6 +17,7 @@
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_SZ } from './registry.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
@@ -140,7 +141,7 @@ export function createProviderRegistry(host){
     };
     /** @param {string} name @param {boolean} wide @returns {Uint8Array} */
     const encode = (name, wide)=>(wide
-        ? new Uint8Array(Uint16Array.from(`${name}\0`, c=>c.charCodeAt(0)).buffer)
+        ? utf16z(name)
         : encodeAnsi(`${name}\0`));
     /** @param {number} address @param {boolean} wide */
     const readName = (address, wide)=>{

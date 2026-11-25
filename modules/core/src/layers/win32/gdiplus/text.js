@@ -24,6 +24,7 @@ import { invert } from './matrix.js';
 import { CombineMode, combine, rectNode, transformNode } from './region.js';
 import { Unit, pixelsPer } from './graphics.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16 } from '../common/utf16.js';
 
 /** StringFormatFlags. */
 const NoWrap = 0x1000;
@@ -187,7 +188,7 @@ export function createTextFunctions(kit, { host, fonts, graphics, brushes, forma
             }
             try
             {
-                kit.write(at, new Uint8Array(Uint16Array.from(text, c=>c.charCodeAt(0)).buffer));
+                kit.write(at, utf16(text));
                 const dx = at + text.length * 2;
                 if (gdi32?.('GetTextExtentExPointW', [dc, at, text.length, 0, 0, dx,
                     dx + text.length * 4]) === 0)
@@ -372,8 +373,7 @@ export function createTextFunctions(kit, { host, fonts, graphics, brushes, forma
                 for (const run of runs)
                 {
                     const at = host.allocate(run.text.length * 2 + 2);
-                    kit.write(at, new Uint8Array(Uint16Array.from(run.text, c=>c.charCodeAt(0))
-                        .buffer));
+                    kit.write(at, utf16(run.text));
                     gdi32('TextOutW', [dc, Math.round(run.x - left), Math.round(run.y - top), at,
                         run.text.length]);
                     host.free(at);

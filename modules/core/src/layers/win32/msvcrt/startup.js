@@ -34,6 +34,7 @@ import { windowsVersion } from '../kernel32/versions.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 import { EINVAL, createGlobals } from './globals.js';
 import { pointerWidth, wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /** `_XcptFilter`'s answer: this filter handles nothing and passes it on. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -320,12 +321,7 @@ export function createStartupFunctions(host){
 
     /** A wide string in guest memory that outlives this call. @param {string} text */
     const publishWide = text=>{
-        const bytes = new Uint8Array((text.length + 1) * 2);
-        const view = new DataView(bytes.buffer);
-        for (let at = 0; at < text.length; at++)
-        {
-            view.setUint16(at * 2, text.charCodeAt(at), true);
-        }
+        const bytes = utf16z(text);
         const address = host.allocate(bytes.length);
         if (address !== 0)
         {

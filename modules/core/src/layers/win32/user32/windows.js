@@ -69,6 +69,7 @@ import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
 import { forwarded, paramsOf, wholeAddress, wideOf } from '../common/pointers.js';
 import { afterWait } from './after-wait.js';
+import { utf16 } from '../common/utf16.js';
 
 /** @typedef {import('../gdi32/rects.js').Rect} Rect */
 
@@ -4471,8 +4472,7 @@ export function createWindowFunctions(host){
      */
     const nameIn = (text, unicode)=>{
         const encoded = unicode
-            ? new Uint8Array(Uint16Array.from({ length: text.length },
-                (_, i)=>text.charCodeAt(i)).buffer)
+            ? utf16(text)
             : encodeAnsi(text);
         const bytes = new Uint8Array(encoded.length + (unicode ? 2 : 1));
         bytes.set(encoded);

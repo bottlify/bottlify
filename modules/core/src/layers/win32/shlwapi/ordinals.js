@@ -19,6 +19,7 @@ import { encodeAnsi } from '../kernel32/locale.js';
 import { GUID_NULL, parseGuid } from '../ole32/guid.js';
 import { dword, u32 } from './text.js';
 import { wholeAddress } from '../common/pointers.js';
+import { utf16z } from '../common/utf16.js';
 
 /**
  * Each is [ordinal, name]: the number a program imports the function by.
@@ -174,17 +175,6 @@ const SLOT = Object.freeze({
 });
 
 const ACCEPT_LANGUAGE_KEY = 'Software\\Microsoft\\Internet Explorer\\International';
-
-/** @param {string} text */
-const utf16z = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
 
 /** @param {number} value */
 const word = value=>Uint8Array.of(value & 0xff, (value >>> 8) & 0xff);

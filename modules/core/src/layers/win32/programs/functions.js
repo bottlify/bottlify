@@ -20,6 +20,7 @@
 import { PROGRAMS_IN_PLACE, SYSTEM_PROGRAMS } from './table.js';
 import { runOnceAtLogon } from './runonce.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import { utf16z } from '../common/utf16.js';
 
 /** The routine the first process's start calls for the logon's RunOnce pass. */
 export const RUN_ONCE_ROUTINE = 'runonce';
@@ -46,17 +47,6 @@ const MAX_COMMAND_LINE = 32768;
  *     custom action server over this process's standard input and output.
  * @property {(api: string, detail: string) => void} [divergence]
  */
-
-/** @param {string} text */
-const wideBytes = text=>{
-    const bytes = new Uint8Array((text.length + 1) * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        bytes[at * 2] = text.charCodeAt(at) & 0xff;
-        bytes[at * 2 + 1] = text.charCodeAt(at) >>> 8;
-    }
-    return bytes;
-};
 
 /**
  * @param {ProgramsHost} host
@@ -95,7 +85,7 @@ export function createProgramFunctions(host){
             return (await host.answering(thread, ()=>entry.handler(args))) >>> 0;
         };
         /** @param {string} text */
-        const wide = text=>place(wideBytes(text));
+        const wide = text=>place(utf16z(text));
         /**
          * @param {string} commandLine
          * @returns {import('./msiexec.js').ProgramContext}

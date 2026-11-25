@@ -26,6 +26,7 @@
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToDosDateTime, msToFileTime } from '../kernel32/filetime.js';
 import { formatGuid, parseGuid } from '../ole32/guid.js';
+import { utf16 } from './utf16.js';
 
 /** The class a link's header names, and the COM class that reads and writes one. */
 export const CLSID_SHELL_LINK = '{00021401-0000-0000-C000-000000000046}';
@@ -193,18 +194,6 @@ const ansiRoundTrips = text=>decodeAnsi(encodeAnsi(text)) === text;
 
 /** @param {string} text @returns {Uint8Array} */
 const ansiZ = text=>encodeAnsi(`${text}\0`);
-
-/** @param {string} text @returns {Uint8Array} */
-function utf16(text){
-    const bytes = new Uint8Array(text.length * 2);
-    for (let at = 0; at < text.length; at++)
-    {
-        const unit = text.charCodeAt(at);
-        bytes[at * 2] = unit & 0xff;
-        bytes[at * 2 + 1] = unit >>> 8;
-    }
-    return bytes;
-}
 
 /** @param {string} text */
 const utf16Z = text=>utf16(`${text}\0`);

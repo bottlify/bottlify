@@ -30,10 +30,11 @@ import { decodeAnsi } from '../kernel32/locale.js';
 import { EACCES, EBADF, EEXIST, EINVAL, EMFILE, ENOENT, ENOSPC } from './globals.js';
 import { Pipe } from './pipes.js';
 import {
-    O_U16TEXT, O_U8TEXT, O_UNICODE, O_WTEXT, bytesOfUnits, decodeUnits, encodeUnits, encodingOf,
+    O_U16TEXT, O_U8TEXT, O_UNICODE, O_WTEXT, decodeUnits, encodeUnits, encodingOf,
     foldUnits, markIn, markOf, textOfUnits, unitsOf, unmarkedEncodingOf, wideStringAt,
 } from './widetext.js';
 import { wholeAddress } from '../common/pointers.js';
+import { bytesOfUnits } from '../common/utf16.js';
 
 /** `_open` flags, at msvcrt's values (fcntl.h). */
 /** The system error a read or write without the access answers. */

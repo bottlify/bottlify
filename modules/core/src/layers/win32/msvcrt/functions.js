@@ -61,7 +61,8 @@ import { createEnvironment } from './environ.js';
 import { createMultiBytePage } from './mbcs.js';
 import { createLocaleFunctions } from './locale.js';
 import { createProcessFunctions } from './process.js';
-import { O_UNICODE, bytesOfUnits, unitsOfText, wideStringAt } from './widetext.js';
+import { O_UNICODE, unitsOfText, wideStringAt } from './widetext.js';
+import { bytesOfUnits } from '../common/utf16.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
 
