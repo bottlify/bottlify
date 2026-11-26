@@ -5865,6 +5865,8 @@ export function createWin32Module(){
                             memory.writeU32(at, value),
                         divergence: config?.divergence, vtables: comVtables, heap,
                         shaderCompiled: config?.shaderCompiled,
+                        // Compiles done, for every process of the run to answer again.
+                        compiles: host.requireApi('cache').space('d3dx-compiles'),
                         // The font engine GDI draws with, for D3DX's font.
                         fontMetrics: (/** @type {any} */ font)=>
                             config?.graphics?.fontMetrics?.(font) ?? null,

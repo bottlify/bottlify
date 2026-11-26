@@ -70,6 +70,7 @@ import { COMPILED as MATRIX_LONG } from './inguest-matrix.x64.js';
 import { COMPILED as VECTOR_LONG } from './inguest-vector.x64.js';
 import { COMPILED as QUATERNION_LONG } from './inguest-quaternion.x64.js';
 import { wholeAddress } from '../common/pointers.js';
+import { createCompileCache } from './compile-cache.js';
 
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
@@ -183,6 +184,9 @@ withLongCode(QUATERNION, QUATERNION_LONG);
  *           Told of each compile, for a tool that compares the source with what came out.
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *           A file's bytes, for D3DXCreateEffectFromFile and its kin.
+ * @property {import('../../cache/module.js').CacheSpace} [compiles]
+ *           Where shader compiles done are kept: the run's cache, for every process of
+ *           the run. None: a compile asked again is done again.
  * @property {(path: string, bytes: Uint8Array) => Promise<boolean> | boolean} [writeFile]
  *           A file written whole, for D3DXSaveTextureToFile: false when it could not be.
  * @property {(module: number, name: string | number, type: number) =>
@@ -418,16 +422,11 @@ export function createD3dxFunctions(host, options = {}){
 
     /**
      * Compiles already done, by source, entry, profile, flags and macros, each with the files
-     * it included: a program that asks for the same compile again -- every frame, as some do
-     * after a refusal -- is given the same answer once its includes are found the same.
-     *
-     * @type {Map<string, { included: { name: string, system: boolean, parent: string,
-     *     text: string }[],
-     *     result: Awaited<ReturnType<typeof compileShader>> }>}
+     * it included, in the run's cache (`compile-cache.js`): a program that asks for the same
+     * compile again -- every frame, as some do after a refusal -- is given the same answer
+     * once its includes are found the same.
      */
-    const compiles = new Map();
-    /** The most compiles kept; the oldest goes first. */
-    const COMPILES_KEPT = 512;
+    const compiles = createCompileCache(host.compiles);
 
     /** A wide string, at most 1024 characters. @param {number} address */
     const wideAt = address=>charactersOf(readToTerminator(host, address, 2, 1024).bytes, 2);
@@ -644,7 +643,7 @@ export function createD3dxFunctions(host, options = {}){
         const key = JSON.stringify([text, entryName, profile, flags, macros, opener !== undefined]);
         /** The answer of an earlier compile, if its includes are still the same. */
         const earlier = async()=>{
-            const known = compiles.get(key);
+            const known = compiles.find(key);
             if (!known)
             {
                 return null;
@@ -665,12 +664,7 @@ export function createD3dxFunctions(host, options = {}){
             opened.length = 0;
             result = await compileShader(text, { entry: entryName, profile, flags,
                 defines: macros, include: opener && recorded });
-            compiles.delete(key);
-            compiles.set(key, { included: opened.slice(), result });
-            if (compiles.size > COMPILES_KEPT)
-            {
-                compiles.delete(/** @type {string} */ (compiles.keys().next().value));
-            }
+            compiles.keep(key, opened, result);
         }
         host.shaderCompiled?.({ api, profile, entry: entryName, defines: macros, flags,
             source: text, included, messages: result.messages, tokens: result.tokens });
