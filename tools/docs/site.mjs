@@ -377,8 +377,9 @@ const NOT_PARTS = new Set(['internal', 'common', 'testing']);
 
 /**
  * The whole project as points and lines, read from the tree: the packages and
- * what each depends on, the core's layers and what each requires, the folders
- * inside each layer and inside cork, and the workers (`*.worker.js`). A page's
+ * what each depends on (one of the project's own from npm among them), the
+ * core's layers and what each requires, the folders inside each layer and
+ * inside cork, and the workers (`*.worker.js`). A page's
  * `<!-- graph3d -->` block adds the parts outside the code (`node id | label |
  * [path |] about`) and the lines the code does not say (`link a > b`); a line
  * to a part that does not exist fails the build.
@@ -418,6 +419,18 @@ export async function projectGraph(root, block){
             {
                 connect(name, dep.slice('@bottlify/'.length), 'requires');
             }
+        }
+    }
+    // A package of the project's own kept in a repository of its own and taken
+    // from npm (Cellar): a part as a package is, read from where it is installed.
+    for (const { target } of [...links.values()])
+    {
+        if (!nodes.has(target))
+        {
+            const file = join(root, 'node_modules', '@bottlify', target, 'package.json');
+            const pkg = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : {};
+            add({ id: target, label: `@bottlify/${target}`, group: 'package', file: null,
+                about: pkg.description ?? 'A package of the project\'s own, from npm.' });
         }
     }
     for (const layer of await layers(root))
