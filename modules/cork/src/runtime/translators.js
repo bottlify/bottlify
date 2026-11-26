@@ -19,6 +19,7 @@
 import { CallStack } from '../emit/region.js';
 import { arenaEmitCache, createEmitCache } from './emit-built.js';
 import { createArena } from './arena.js';
+import { keptEmitCache, putAll } from './kept.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { spansOf } from './summary.js';
 import { openTranslationWorker } from './translator.js';
@@ -147,11 +148,17 @@ export function createTranslators(state){
     /** The process's translation cache arena, shared with every translator it has; none
      * without a translator or where memory cannot be shared. Its size is `createArena`'s:
      * an arena of 8 MiB rather than 48 bought no memory back (roadmap/negative-results.md). */
-    const arena = settings.arena ?? (workerUrl !== null && typeof SharedArrayBuffer === 'function'
-        ? createArena() : null);
-    /** What emitting inline keeps for a relink to take again: the arena the translators
-     * share, or a cache of this thread's own. */
-    const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
+    /** The run's cache the host gives the functions emitted to (`KeptStore`): every
+     * thread of the run reads them there in place, this one writes them. */
+    const kept = settings.kept ?? null;
+    const arena = kept !== null ? null : settings.arena ?? (workerUrl !== null
+        && typeof SharedArrayBuffer === 'function' ? createArena() : null);
+    /** What emitting inline keeps for a relink to take again: the run's cache, the arena
+     * the translators share, or a cache of this thread's own. */
+    /** The functions translation workers took from the run's cache, and handed over to keep. */
+    const keptCounts = { workerHits: 0, handed: 0 };
+    const emitCache = kept !== null ? keptEmitCache(kept.space)
+        : arena !== null ? arenaEmitCache(arena) : createEmitCache();
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         countTransfers: transfersCounted,
@@ -267,6 +274,8 @@ export function createTranslators(state){
         {
             translators.splice(at, 1);
         }
+        translator.leave?.();
+        translator.leave = null;
         translator.adapter.terminate();
     };
 
@@ -287,10 +296,18 @@ export function createTranslators(state){
             return;
         }
         /** @type {Translator} */
-        const translator = { adapter, ready: false, pending: null, leaving: false };
+        const translator = { adapter, ready: false, pending: null, leaving: false, leave: null };
         awaitingLend = false;
         translators.push(translator);
         adapter.onMessage(data=>{
+            // The functions it emitted, kept here for every thread of the run,
+            // a batch given up or not: each is what its key says.
+            if (kept !== null && data?.kept !== undefined)
+            {
+                putAll(kept.space, data.kept);
+                keptCounts.handed += data.kept.length;
+            }
+            keptCounts.workerHits += data?.keptHits ?? 0;
             if (data?.ready === true)
             {
                 translator.ready = true;
@@ -326,7 +343,13 @@ export function createTranslators(state){
             giveUp(translator);
             dropTranslator(translator);
         });
-        adapter.post({ ready: true, doorbell: settings.doorbell ?? null, arena }, []);
+        // Joined to the run's cache, to read every thread's functions in
+        // place; the segments made and let go after follow it.
+        const joined = kept?.join?.(message=>adapter.post({ cache: message }, [])) ?? null;
+        translator.leave = joined?.leave ?? null;
+        adapter.post({ ready: true, doorbell: settings.doorbell ?? null, arena,
+            kept: joined === null ? null : { shared: joined.shared, segments: joined.segments,
+                prefix: /** @type {import('./kept.js').KeptStore} */ (kept).prefix } }, []);
     };
 
     /** One of the runtime's own workers opened: at the start, and in place of one that
@@ -385,6 +408,8 @@ export function createTranslators(state){
         uncoverKeys,
         coveredIn,
         arena,
+        kept,
+        keptCounts,
         emitCache,
         emitOptions,
         giveUp,

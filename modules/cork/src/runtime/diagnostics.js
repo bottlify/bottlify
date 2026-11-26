@@ -803,6 +803,10 @@ export function createDiagnostics(state){
             translators: rt.translators.length,
             translatorsReady: rt.translators.filter(one=>one.ready).length,
             ...(rt.arena === null ? {} : { arena: openArena(rt.arena).counts() }),
+            // Taken here and by this runtime's workers; the run's cache counts its bytes.
+            ...(rt.kept === null ? {} : { kept: {
+                hits: rt.emitCache.hits + rt.keptCounts.workerHits,
+                inlineHits: rt.emitCache.hits, handed: rt.keptCounts.handed } }),
             batchesOut: rt.translators.filter(one=>one.pending !== null).length,
         };
     };

@@ -304,9 +304,10 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
 /**
  * A translation worker: loaded once it has answered its first message
  * (`ready`), with at most one batch out (`pending`); one asked to go
- * (`leaving`) takes no batch and goes when its last one is back.
+ * (`leaving`) takes no batch and goes when its last one is back; `leave` lets
+ * go of its joining the run's cache (`KeptStore.join`).
  * @typedef {{ adapter: import('./translator.js').WorkerAdapter, ready: boolean,
- *     pending: Pending | null, leaving: boolean }} Translator
+ *     pending: Pending | null, leaving: boolean, leave: (() => void) | null }} Translator
  */
 
 /**

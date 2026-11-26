@@ -59,6 +59,12 @@ export const SETTINGS = {
         shown: 'none',
         doc: 'The translation cache arena (`createArena`) every executor of a process shares;'
             + ' absent, the runtime makes its own.' },
+    // The run's cache the functions emitted are kept in (`kept.js`): every
+    // thread of the run reads them in place; in place of an arena.
+    kept: { kind: 'host',
+        value: /** @type {import('./kept.js').KeptStore | undefined} */ (undefined), shown: 'none',
+        doc: 'The run\'s cache the functions emitted are kept in (`KeptStore`), read in place by'
+            + ' every thread of the run; in place of an arena.' },
     // Null for a process on one executor (`shared-code.js`).
     sharedCode: { kind: 'host',
         value: /** @type {{ at: number, index: number } | null} */ (null), shown: 'none',

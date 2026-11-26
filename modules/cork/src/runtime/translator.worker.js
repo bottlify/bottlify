@@ -21,8 +21,10 @@
  * which differ only in how the scope receives and sends messages.
  */
 
+import { createReader } from '@bottlify/cellar';
 import { moduleDigest, packRegion } from './cache.js';
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
+import { keptEmitCache, readingSpace } from './kept.js';
 
 /**
  * Where this worker adds the time it works, in tenths of a millisecond (a
@@ -54,6 +56,14 @@ const sinceEpoch = (/** @type {number} */ epoch)=>
 function connection(send){
     /** @type {import('./emit-built.js').EmitCache} */
     let cache = createEmitCache();
+    /**
+     * The run's cache as this worker reads it, where its runtime joined it:
+     * the functions every thread of the run kept, read in place; what this
+     * worker keeps goes back with its answer (`readingSpace`).
+     * @type {{ reader: import('@bottlify/cellar').Reader,
+     *     space: ReturnType<typeof readingSpace> } | null}
+     */
+    let kept = null;
     /** @type {{ posted: Int32Array, postedAt: number, bell: Int32Array, bellAt: number } | null} */
     let doorbell = null;
     /**
@@ -79,7 +89,9 @@ function connection(send){
      *
      * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
      *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any,
-     *     arena?: SharedArrayBuffer | null, storeVersion?: number }} data
+     *     arena?: SharedArrayBuffer | null, storeVersion?: number,
+     *     kept?: { shared: any, segments: (SharedArrayBuffer | null)[], prefix: string } | null,
+     *     cache?: any }} data
      */
     return data=>{
         if (data?.ready === true)
@@ -87,7 +99,19 @@ function connection(send){
             const given = data.doorbell;
             // A worker of a page that is not cross-origin isolated has no
             // SharedArrayBuffer to name: there is no arena there either.
-            if (typeof SharedArrayBuffer === 'function' && data.arena instanceof SharedArrayBuffer)
+            if (data.kept)
+            {
+                const { shared, segments, prefix } = data.kept;
+                // A reader that asks the keeper nothing: it reads, and its
+                // runtime's thread writes.
+                const reader = createReader({ shared, segments,
+                    keeper: { reserve: ()=>null, raise: ()=>false, raiseLater(){}, drop(){} } });
+                const space = readingSpace((name, read)=>reader.with(prefix + name, read));
+                kept = { reader, space };
+                cache = keptEmitCache(space);
+            }
+            else if (typeof SharedArrayBuffer === 'function'
+                && data.arena instanceof SharedArrayBuffer)
             {
                 cache = arenaEmitCache(data.arena);
             }
@@ -98,6 +122,12 @@ function connection(send){
             // Loaded: the runtime sends batches from here on.
             send({ ready: true }, []);
             ring();
+            return;
+        }
+        // A segment of the run's cache made or let go, or a larger index.
+        if (data?.cache !== undefined)
+        {
+            kept?.reader.adopt(data.cache);
             return;
         }
         const { id, jobs, relink, layout, features, options, storeVersion } = data;
@@ -112,6 +142,7 @@ function connection(send){
         // worker has said nothing for long, and knows the region it stopped at.
         const telling = { ...options, progress: (/** @type {number} */ index)=>
             send({ id, alive: index }, []) };
+        const hitsBefore = cache.hits;
         try
         {
             const batch = relink
@@ -152,8 +183,13 @@ function connection(send){
                 Atomics.add(busyCell.cells, busyCell.at + 1, batch.results.length);
                 Atomics.store(busyCell.cells, busyCell.at + 2, 0);
             }
-            send({ id, batch, compiled, busyMs, compileMs, packMs }, [batch.module.buffer,
-                ...batch.packed === undefined ? [] : [batch.packed.buffer]]);
+            // The functions this batch emitted, for the runtime's thread to keep.
+            const handed = kept?.space.taken() ?? [];
+            send({ id, batch, compiled, busyMs, compileMs, packMs,
+                keptHits: cache.hits - hitsBefore,
+                ...handed.length > 0 ? { kept: handed } : {} }, [batch.module.buffer,
+                ...batch.packed === undefined ? [] : [batch.packed.buffer],
+                ...handed.map(one=>one.bytes.buffer)]);
         }
         catch (e){
             if (busyCell !== null)

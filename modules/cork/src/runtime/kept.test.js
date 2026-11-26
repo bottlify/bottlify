@@ -13,6 +13,7 @@ import { formRegion } from '../region.js';
 import { createEmitCache, relinkBatch } from './emit-built.js';
 import { entryOf, keptEmitCache, keptName, putAll, readingSpace } from './kept.js';
 import { ownLayout } from './layout.js';
+import { machine, piece, translateUntil, untilTranslatorsLoaded } from '../testing/seeded-pieces.js';
 
 const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
 const OPTIONS = { hash: true, place: true, trapPort: 0xb077, profileCalls: true };
@@ -340,3 +341,37 @@ test('translators on threads of their own read what the writing thread keeps, ne
         }
         run.close();
     });
+
+test('a runtime\'s translation worker hands what it emitted to the run\'s cache, and another'
+    + ' runtime of the run takes it there instead of emitting it', async()=>{
+    const run = await cellarOf();
+    /** @type {import('./kept.js').KeptStore} */
+    const store = { space: run.space, prefix: PREFIX, join: post=>run.join(post) };
+    const first = machine({ worker: true, translators: 1, kept: store });
+    const second = machine({ kept: store });
+    try
+    {
+        await untilTranslatorsLoaded(first, 1);
+        const { code } = piece(3, 50, 5);
+        first.write(0x2000, code);
+        first.runtime.noteHot(0x2000, 0, 2);
+        await translateUntil(first, ()=>first.runtime.entryOf(0x2000) >= 0);
+        const handed = /** @type {any} */ (first.runtime.diagnostics()).kept;
+        assert.ok(handed.handed >= 1, 'the worker handed its function over with its answer');
+        // The other runtime forms the same region and emits it inline: the
+        // function is taken from the run's cache.
+        second.write(0x2000, code);
+        second.runtime.noteHot(0x2000, 0, 2);
+        await translateUntil(second, ()=>second.runtime.entryOf(0x2000) >= 0);
+        const taken = /** @type {any} */ (second.runtime.diagnostics()).kept;
+        assert.ok(taken.inlineHits >= 1, 'taken from the run\'s cache, not emitted again');
+        assert.equal(second.runtime.run(second.runtime.entryOf(0x2000), 1000).kind, 'halt');
+        assert.equal(second.reg(1), 0, 'and it runs as emitted: its loop counted down');
+    }
+    finally
+    {
+        await first.runtime.flush();
+        await second.runtime.flush();
+        run.close();
+    }
+});
