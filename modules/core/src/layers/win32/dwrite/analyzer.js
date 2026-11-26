@@ -36,15 +36,15 @@ const IID_TEXT_ANALYZER = '{B7E6163E-7F46-43B4-84B3-E4E6249C365D}';
 const IID_GLYPH_RUN_ANALYSIS = '{7D97DBF7-E085-42D4-81E3-6A883BDED118}';
 
 /** DWRITE_RENDERING_MODE. */
-export const RENDERING = Object.freeze({ DEFAULT: 0, ALIASED: 1, GDI_CLASSIC: 2,
+const RENDERING = Object.freeze({ DEFAULT: 0, ALIASED: 1, GDI_CLASSIC: 2,
     GDI_NATURAL: 3, NATURAL: 4, NATURAL_SYMMETRIC: 5, OUTLINE: 6 });
 /** DWRITE_TEXTURE_TYPE. */
-export const TEXTURE = Object.freeze({ ALIASED_1x1: 0, CLEARTYPE_3x1: 1 });
+const TEXTURE = Object.freeze({ ALIASED_1x1: 0, CLEARTYPE_3x1: 1 });
 /**
  * The gamma GDI's text is blended with: SPI_GETFONTSMOOTHINGCONTRAST over a
  * thousand, Windows' default 1400.
  */
-export const GDI_GAMMA = 1.4;
+const GDI_GAMMA = 1.4;
 
 
 /** Characters that take no room: zero-width spaces and joiners. @param {number} code */

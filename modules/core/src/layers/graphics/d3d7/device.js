@@ -352,7 +352,7 @@ export function deviceTargetRefusal(surface, hardware, legacy){
  * @param {any} surface
  * @returns {number}
  */
-export function renderTargetRefusal(surface){
+function renderTargetRefusal(surface){
     if ((surface.caps & DDSCAPS_3DDEVICE) === 0
         || (surface.pixelFormat.flags & DDPF_PALETTEINDEXED_ANY) !== 0)
     {

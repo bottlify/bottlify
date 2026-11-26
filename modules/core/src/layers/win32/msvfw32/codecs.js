@@ -24,8 +24,8 @@ import { wholeAddress } from '../common/pointers.js';
 
 export const ICERR_OK = 0;
 export const ICERR_UNSUPPORTED = -1;
-export const ICERR_BADFORMAT = -2;
-export const ICERR_BADPARAM = -6;
+const ICERR_BADFORMAT = -2;
+const ICERR_BADPARAM = -6;
 export const ICERR_BADHANDLE = -8;
 
 export const ICM_GETINFO = 0x5002;
@@ -39,18 +39,18 @@ export const ICM_DECOMPRESS_GET_FORMAT = 0x400a;
 export const ICM_DECOMPRESS_QUERY = 0x400b;
 export const ICM_DECOMPRESS_BEGIN = 0x400c;
 export const ICM_DECOMPRESS = 0x400d;
-export const ICM_DECOMPRESS_END = 0x400e;
+const ICM_DECOMPRESS_END = 0x400e;
 export const ICM_DECOMPRESS_GET_PALETTE = 0x401e;
-export const ICM_DECOMPRESSEX_BEGIN = 0x403c;
-export const ICM_DECOMPRESSEX_QUERY = 0x403d;
-export const ICM_DECOMPRESSEX = 0x403e;
-export const ICM_DECOMPRESSEX_END = 0x403f;
+const ICM_DECOMPRESSEX_BEGIN = 0x403c;
+const ICM_DECOMPRESSEX_QUERY = 0x403d;
+const ICM_DECOMPRESSEX = 0x403e;
+const ICM_DECOMPRESSEX_END = 0x403f;
 export const ICM_GETDEFAULTQUALITY = 0x501e;
 export const ICM_GETDEFAULTKEYFRAMERATE = 0x402a;
 
 export const BI_RGB = 0;
-export const BI_RLE8 = 1;
-export const BI_RLE4 = 2;
+const BI_RLE8 = 1;
+const BI_RLE4 = 2;
 export const BI_BITFIELDS = 3;
 
 /** ICCOMPRESS_KEYFRAME: the frame is to be a key frame. */

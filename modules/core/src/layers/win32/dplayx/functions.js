@@ -32,7 +32,7 @@ export const DPERR_UNAVAILABLE = dpError(250);
 export const DPERR_UNINITIALIZED = dpError(320);
 export const DPERR_NOTLOBBIED = dpError(1070);
 export const DPERR_INVALIDPARAMS = 0x80070057;
-export const DPERR_UNSUPPORTED = 0x80004001;
+const DPERR_UNSUPPORTED = 0x80004001;
 
 /** The numbers dplayx.dll exports these at; a program imports them so. */
 export const DPLAYX_ORDINALS = Object.freeze({

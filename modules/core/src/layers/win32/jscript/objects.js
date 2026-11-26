@@ -162,7 +162,7 @@ export class JSObject
 }
 
 /** @param {string} key @returns {number} the index, or -1 when not one */
-export function arrayIndex(key){
+function arrayIndex(key){
     const length = key.length;
     if (length === 0 || length > 10)
     {

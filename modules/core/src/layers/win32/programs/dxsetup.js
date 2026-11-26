@@ -45,7 +45,7 @@ const FIND_NAME = 44;
  * cabinet that could not be read, a file that could not be written.
  */
 export const DXSETUP_SUCCESS = 0;
-export const DSETUPERR_SOURCEFILENOTFOUND = -2;
+const DSETUPERR_SOURCEFILENOTFOUND = -2;
 export const DSETUPERR_NOCOPY = -5;
 
 /** @param {Uint8Array} bytes  UTF-16, up to its terminator. */

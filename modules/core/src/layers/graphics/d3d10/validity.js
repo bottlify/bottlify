@@ -25,7 +25,7 @@
  */
 
 import {
-    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_RESOURCE_MISC, D3D10_USAGE,
+    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_RESOURCE_MISC, D3D10_USAGE,
     D3D11_BIND_UNORDERED_ACCESS, D3D11_LIMITS, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL,
     DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, S_OK,
 } from './constants.js';
@@ -178,7 +178,7 @@ export const RESOURCE_ACCESS = Object.freeze([
  * @param {number} bindFlags
  * @returns {ResourceAccessRow | null}
  */
-export function resourceAccessRow(usage, bindFlags){
+function resourceAccessRow(usage, bindFlags){
     return RESOURCE_ACCESS.find(row=>row.usage === usage && row.bindFlags === bindFlags) ?? null;
 }
 
@@ -267,7 +267,7 @@ export function resourceAccessResult(usage, bindFlags, cpuAccessFlags, rules = N
  */
 
 /** @type {CreateRules} */
-export const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_LEVEL.LEVEL_10_0 });
+const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_LEVEL.LEVEL_10_0 });
 
 /**
  * D3D11_CENTER_MULTISAMPLE_PATTERN; D3D11_STANDARD_MULTISAMPLE_PATTERN is the
@@ -276,7 +276,7 @@ export const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_
 const MULTISAMPLE_PATTERN_CENTER = 0xfffffffe;
 
 /** The bind flags that only a buffer may carry. */
-export const BUFFER_ONLY_BIND_FLAGS =
+const BUFFER_ONLY_BIND_FLAGS =
     D3D10_BIND.VERTEX_BUFFER | D3D10_BIND.INDEX_BUFFER | D3D10_BIND.CONSTANT_BUFFER;
 
 /**
@@ -286,7 +286,7 @@ export const BUFFER_ONLY_BIND_FLAGS =
  *
  * @type {ReadonlySet<number>}
  */
-export const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .filter(([, info])=>info.kind === FORMAT_KIND.DEPTH)
     .map(([, info])=>info.family));
 
@@ -304,7 +304,7 @@ const STENCIL_FAMILIES = new Set([DXGI_FORMAT.D24_UNORM_S8_UINT,
  *
  * @type {ReadonlySet<number>}
  */
-export const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .filter(([, info])=>info.kind === FORMAT_KIND.COLOUR && info.renderable)
     .map(([, info])=>info.family));
 
@@ -690,15 +690,6 @@ const SRGB_TWINS = new Map([
     [DXGI_FORMAT.B8G8R8X8_UNORM, DXGI_FORMAT.B8G8R8X8_UNORM_SRGB],
 ].flatMap(([plain, srgb])=>[[plain, srgb], [srgb, plain]]));
 
-/**
- * @param {number} requested
- * @param {number} available
- * @returns {number} how many slices a view covers, resolving "all remaining"
- */
-export function resolveSliceCount(requested, available){
-    return requested === ALL_REMAINING ? available : requested;
-}
-
 // --- swap chains ---
 
 /**
@@ -719,7 +710,7 @@ export function resolveSliceCount(requested, available){
  *
  * @type {Readonly<Record<number, SwapEffectRule>>}
  */
-export const SWAP_EFFECT_RULES = Object.freeze({
+const SWAP_EFFECT_RULES = Object.freeze({
     [DXGI_SWAP_EFFECT.DISCARD]: Object.freeze({
         minBuffers: 1, maxBuffers: D3D10_LIMITS.MAX_SWAP_CHAIN_BUFFERS,
         sequentialAccess: false, allowsMultisample: true,

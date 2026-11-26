@@ -55,7 +55,7 @@ export const D3D10_SVT = Object.freeze({
  *
  * @type {Readonly<Record<number, { kind: string, svt: number, streamOutput?: boolean }>>}
  */
-export const FX_OBJECT = Object.freeze({
+const FX_OBJECT = Object.freeze({
     1: { kind: 'string', svt: D3D10_SVT.STRING },
     2: { kind: 'blend', svt: D3D10_SVT.BLEND },
     3: { kind: 'depthstencil', svt: D3D10_SVT.DEPTHSTENCIL },

@@ -192,7 +192,7 @@ const STACK_DEPTH_QUERIES = Object.freeze({
 });
 
 /** @type {Set<number>} */
-export const COMPARE_FUNCTIONS = new Set([
+const COMPARE_FUNCTIONS = new Set([
     GL.NEVER, GL.LESS, GL.EQUAL, GL.LEQUAL, GL.GREATER, GL.NOTEQUAL, GL.GEQUAL, GL.ALWAYS,
 ]);
 

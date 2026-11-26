@@ -32,8 +32,8 @@ const INSTALLSTATE_UNKNOWN = -1;
 const INSTALLSTATE_ADVERTISED = 1;
 const INSTALLSTATE_DEFAULT = 5;
 
-export const ERROR_UNKNOWN_PRODUCT = 1605;
-export const ERROR_UNKNOWN_PROPERTY = 1608;
+const ERROR_UNKNOWN_PRODUCT = 1605;
+const ERROR_UNKNOWN_PROPERTY = 1608;
 export const ERROR_UNKNOWN_COMPONENT = 1607;
 
 /**
@@ -55,7 +55,7 @@ export function squashGuid(guid){
 }
 
 /** @param {string} squashed @returns {string} the braced GUID it was made from */
-export function unsquashGuid(squashed){
+function unsquashGuid(squashed){
     const reverse = (/** @type {string} */ text)=>[...text].reverse().join('');
     const swapped = (/** @type {string} */ text)=>text.replace(/(.)(.)/g, '$2$1');
     const s = squashed.toUpperCase();

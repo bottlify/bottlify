@@ -24,8 +24,8 @@
 
 import { DXGI_ERROR_INVALID_CALL, S_OK } from './constants.js';
 
-export const WAIT_ABANDONED = 0x80;
-export const WAIT_TIMEOUT = 0x102;
+const WAIT_ABANDONED = 0x80;
+const WAIT_TIMEOUT = 0x102;
 const INFINITE = 0xffffffff;
 
 /** Where the legacy handles start: is_kmt_handle in Windows' tests is `h & 0xc0000000`. */

@@ -338,7 +338,7 @@ export function samplerDimension(type){
  * @param {{ type: string, compared?: boolean }} entry
  * @returns {string}
  */
-export const samplerBindingOf = entry=>(entry.compared === true || entry.type === 'shadow'
+const samplerBindingOf = entry=>(entry.compared === true || entry.type === 'shadow'
     ? 'shadow' : samplerDimension(entry.type));
 
 /**

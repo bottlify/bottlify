@@ -193,7 +193,7 @@ export const isPipeName = name=>PREFIXES.some(prefix=>
  * @param {string} name
  * @returns {string | null}
  */
-export const pipeNameOf = name=>{
+const pipeNameOf = name=>{
     const named = /^\\(?:\?\?|DosDevices|GLOBAL\?\?)\\pipe\\|^\\Device\\NamedPipe\\/i
         .exec(name);
     return named && name.length > named[0].length

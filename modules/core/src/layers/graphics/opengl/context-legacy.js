@@ -62,7 +62,7 @@ export const LEGACY_CALLS_IN_BEGIN = Object.freeze([
  * @param {number} width @param {number} height @param {BitmapStore} store
  * @returns {{ stride: number, bytes: number }}
  */
-export function bitmapLayout(width, height, store){
+function bitmapLayout(width, height, store){
     const groups = store.rowLength > 0 ? store.rowLength : width;
     const alignment = Math.max(1, store.alignment);
     const stride = Math.ceil(Math.ceil(groups / 8) / alignment) * alignment;
@@ -89,7 +89,7 @@ function bitAt(x, y, stride, store){
  * @param {Uint8Array} bytes @param {BitmapStore} store
  * @returns {Uint32Array}
  */
-export function readPattern(bytes, store){
+function readPattern(bytes, store){
     const { stride } = bitmapLayout(32, 32, store);
     const words = new Uint32Array(32);
     for (let y = 0; y < 32; y++)
@@ -114,7 +114,7 @@ export function readPattern(bytes, store){
  *
  * @param {Uint32Array} words @param {Uint8Array} bytes @param {BitmapStore} store
  */
-export function writePattern(words, bytes, store){
+function writePattern(words, bytes, store){
     const { stride } = bitmapLayout(32, 32, store);
     for (let y = 0; y < 32; y++)
     {
@@ -133,7 +133,7 @@ export function writePattern(words, bytes, store){
  * @param {Uint32Array} words
  * @returns {string}
  */
-export function patternKey(words){
+function patternKey(words){
     let key = '';
     for (const word of words)
     {

@@ -16,7 +16,7 @@ import { dirname, join, normalize, resolve, sep } from 'node:path';
  * dependency would make an engine loaded by URL a static one, and the
  * boundary checker refuses it.
  */
-export const ENGINE_PACKAGES = Object.freeze(['@bottlify/cork']);
+const ENGINE_PACKAGES = Object.freeze(['@bottlify/cork']);
 
 /**
  * The boundary issue an import specifier raises, or null.
@@ -42,7 +42,7 @@ export function enginePackageIssue(spec){
  * @param {string} code
  * @returns {string}
  */
-export function withoutComments(code){
+function withoutComments(code){
     let out = '';
     let at = 0;
     let previous = '';
@@ -116,7 +116,7 @@ export function withoutComments(code){
  * @param {string} code
  * @returns {{ computed: number, urls: string[] }}
  */
-export function indirectImportsOf(code){
+function indirectImportsOf(code){
     const bare = withoutComments(code);
     let computed = 0;
     for (const match of bare.matchAll(/(?<![\w$.])import\s*\(\s*/g))

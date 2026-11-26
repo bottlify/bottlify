@@ -57,8 +57,8 @@ const REGFILTER_BYTES = 20;
 const NAME_BYTES = 255 * 2;
 
 /** @type {[string, number][]} */
-export const IENUM_REG_FILTERS_SLOTS = [['Next', 3], ['Skip', 1], ['Reset', 0], ['Clone', 1]];
-export const IID_IENUM_REG_FILTERS = '{56A868A4-0AD4-11CE-B03A-0020AF0BA770}';
+const IENUM_REG_FILTERS_SLOTS = [['Next', 3], ['Skip', 1], ['Reset', 0], ['Clone', 1]];
+const IID_IENUM_REG_FILTERS = '{56A868A4-0AD4-11CE-B03A-0020AF0BA770}';
 export const IID_IAM_FILTER_DATA = '{97F7C4D4-547B-4A5F-8332-536430AD2E4D}';
 /** @type {[string, number][]} */
 export const IAM_FILTER_DATA_SLOTS = [['ParseFilterData', 3], ['CreateFilterData', 3]];

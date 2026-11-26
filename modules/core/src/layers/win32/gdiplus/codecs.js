@@ -97,7 +97,7 @@ export const formatOfContainer = name=>
  *
  * @param {number} pointer
  */
-export const codecInfoSize = pointer=>32 + 7 * pointer + 16;
+const codecInfoSize = pointer=>32 + 7 * pointer + 16;
 
 /**
  * The codecs as ImageCodecInfo records, then their strings and signatures,

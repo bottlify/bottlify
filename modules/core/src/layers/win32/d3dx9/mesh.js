@@ -34,7 +34,7 @@ const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 
 /** ID3DXBaseMesh's slots, after IUnknown's three, in d3dx9mesh.h's order. */
-export const MESH = Object.freeze({ GetNumFaces: 4, GetNumVertices: 5, GetDeclaration: 7,
+const MESH = Object.freeze({ GetNumFaces: 4, GetNumVertices: 5, GetDeclaration: 7,
     GetNumBytesPerVertex: 8, GetOptions: 9, GetDevice: 10, LockVertexBuffer: 15,
     UnlockVertexBuffer: 16, LockIndexBuffer: 17, UnlockIndexBuffer: 18, GetAttributeTable: 19,
     ConvertAdjacencyToPointReps: 21 });

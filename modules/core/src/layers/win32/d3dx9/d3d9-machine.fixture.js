@@ -158,13 +158,13 @@ const F32 = new Float32Array(1);
 const U32 = new Uint32Array(F32.buffer);
 
 /** Where a runaway shader is stopped, in executed instructions. */
-export const RUNAWAY_LIMIT = 1000000;
+const RUNAWAY_LIMIT = 1000000;
 /** The deepest loop/rep nesting the models allow. */
 export const MAX_LOOP_NESTING = 4;
 /** The deepest if nesting the models with dynamic flow control allow. */
 export const MAX_IF_NESTING = 24;
 /** A guard of this machine, not a documented limit: runaway recursion. */
-export const MAX_CALL_DEPTH = 64;
+const MAX_CALL_DEPTH = 64;
 /** lit's exponent is clamped to the range an 8.8 fixed-point power can hold. */
 const LIT_POWER_LIMIT = 127.9961;
 
@@ -227,7 +227,7 @@ export const VERSION_LIMITS = Object.freeze({
  * The instruction slots of the ps_1_x models: texture addressing slots and
  * arithmetic slots, per phase. Only ps_1_4 has two phases.
  */
-export const PS1_SLOT_LIMITS = Object.freeze({
+const PS1_SLOT_LIMITS = Object.freeze({
     ps_1_1: Object.freeze({ texture: 4, arithmetic: 8, phases: 1 }),
     ps_1_2: Object.freeze({ texture: 4, arithmetic: 8, phases: 1 }),
     ps_1_3: Object.freeze({ texture: 4, arithmetic: 8, phases: 1 }),
@@ -235,7 +235,7 @@ export const PS1_SLOT_LIMITS = Object.freeze({
 });
 
 /** The range a ps_1_x constant register holds; a read clamps to it. */
-export const PS1_CONSTANT_LIMIT = 1;
+const PS1_CONSTANT_LIMIT = 1;
 
 /** D3DSPR, the register types. */
 const REG = Object.freeze({

@@ -45,7 +45,7 @@ import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
  * made as it was. The budget is charged a unit for every 16 bytes, as a `rep`
  * is (`bulkString`), and a run of this many is a few milliseconds of a slice.
  */
-export const CRT_LIMIT = 16 << 20;
+const CRT_LIMIT = 16 << 20;
 
 /** The budget's unit, in bytes, as `bulkString` charges it. */
 const UNIT_SHIFT = 4;

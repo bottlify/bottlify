@@ -38,14 +38,14 @@ import { floatBits } from '../../../system/floats.js';
 /** @typedef {import('../../win32/d3dx9/hlsl-types.js').Module} Module */
 
 /** D3D10_SHADER_VARIABLE_CLASS. */
-export const SVC = Object.freeze({ SCALAR: 0, VECTOR: 1, MATRIX_ROWS: 2, MATRIX_COLUMNS: 3,
+const SVC = Object.freeze({ SCALAR: 0, VECTOR: 1, MATRIX_ROWS: 2, MATRIX_COLUMNS: 3,
     OBJECT: 4, STRUCT: 5 });
 
 /** D3D10_SHADER_VARIABLE_TYPE, the ones a constant buffer holds. */
-export const SVT = Object.freeze({ VOID: 0, BOOL: 1, INT: 2, FLOAT: 3, UINT: 19 });
+const SVT = Object.freeze({ VOID: 0, BOOL: 1, INT: 2, FLOAT: 3, UINT: 19 });
 
 /** D3D_NAME: the system values of a signature. */
-export const SV = Object.freeze({ UNDEFINED: 0, POSITION: 1, CLIP_DISTANCE: 2,
+const SV = Object.freeze({ UNDEFINED: 0, POSITION: 1, CLIP_DISTANCE: 2,
     CULL_DISTANCE: 3, RENDER_TARGET_ARRAY_INDEX: 4, VIEWPORT_ARRAY_INDEX: 5, VERTEX_ID: 6,
     PRIMITIVE_ID: 7, INSTANCE_ID: 8, IS_FRONT_FACE: 9, SAMPLE_INDEX: 10 });
 

@@ -419,7 +419,7 @@ export const IDXGIFACTORY2_SLOTS = /** @type {[string, number][]} */ ([
     ['UnregisterOcclusionStatus', 1],
     ['CreateSwapChainForComposition', 4],
 ]);
-export const IDXGIFACTORY3_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIFACTORY3_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIFACTORY2_SLOTS,
     ['GetCreationFlags', 0],
 ]);
@@ -433,17 +433,17 @@ export const IDXGIFACTORY5_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIFACTORY4_SLOTS,
     ['CheckFeatureSupport', 3],
 ]);
-export const IDXGIFACTORY6_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIFACTORY6_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIFACTORY5_SLOTS,
     ['EnumAdapterByGpuPreference', 4],
 ]);
-export const IDXGIFACTORY7_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIFACTORY7_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIFACTORY6_SLOTS,
     ['RegisterAdaptersChangedEvent', 2],
     ['UnregisterAdaptersChangedEvent', 1],
 ]);
 
-export const IDXGIADAPTER2_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIADAPTER2_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIADAPTER1_SLOTS,
     ['GetDesc2', 1],
 ]);
@@ -457,35 +457,35 @@ export const IDXGIADAPTER3_SLOTS = /** @type {[string, number][]} */ ([
     ['RegisterVideoMemoryBudgetChangeNotificationEvent', 2],
     ['UnregisterVideoMemoryBudgetChangeNotification', 1],
 ]);
-export const IDXGIADAPTER4_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIADAPTER4_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIADAPTER3_SLOTS,
     ['GetDesc3', 1],
 ]);
 
-export const IDXGIOUTPUT1_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIOUTPUT1_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOUTPUT_SLOTS,
     ['GetDisplayModeList1', 4],
     ['FindClosestMatchingMode1', 3],
     ['GetDisplaySurfaceData1', 1],
     ['DuplicateOutput', 2],
 ]);
-export const IDXGIOUTPUT2_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIOUTPUT2_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOUTPUT1_SLOTS,
     ['SupportsOverlays', 0],
 ]);
-export const IDXGIOUTPUT3_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIOUTPUT3_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOUTPUT2_SLOTS,
     ['CheckOverlaySupport', 3],
 ]);
-export const IDXGIOUTPUT4_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIOUTPUT4_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOUTPUT3_SLOTS,
     ['CheckOverlayColorSpaceSupport', 4],
 ]);
-export const IDXGIOUTPUT5_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIOUTPUT5_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOUTPUT4_SLOTS,
     ['DuplicateOutput1', 5],
 ]);
-export const IDXGIOUTPUT6_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIOUTPUT6_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOUTPUT5_SLOTS,
     ['GetDesc1', 1],
     ['CheckHardwareCompositionSupport', 1],
@@ -505,7 +505,7 @@ export const IDXGISWAPCHAIN1_SLOTS = /** @type {[string, number][]} */ ([
     ['SetRotation', 1],
     ['GetRotation', 1],
 ]);
-export const IDXGISWAPCHAIN2_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGISWAPCHAIN2_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGISWAPCHAIN1_SLOTS,
     ['SetSourceSize', 2],
     ['GetSourceSize', 2],
@@ -522,22 +522,22 @@ export const IDXGISWAPCHAIN3_SLOTS = /** @type {[string, number][]} */ ([
     ['SetColorSpace1', 1],
     ['ResizeBuffers1', 7],
 ]);
-export const IDXGISWAPCHAIN4_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGISWAPCHAIN4_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGISWAPCHAIN3_SLOTS,
     ['SetHDRMetaData', 3],
 ]);
 
-export const IDXGIDEVICE2_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIDEVICE2_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIDEVICE1_SLOTS,
     ['OfferResources', 3],
     ['ReclaimResources', 3],
     ['EnqueueSetEvent', 1],
 ]);
-export const IDXGIDEVICE3_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIDEVICE3_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIDEVICE2_SLOTS,
     ['Trim', 0],
 ]);
-export const IDXGIDEVICE4_SLOTS = /** @type {[string, number][]} */ ([
+const IDXGIDEVICE4_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIDEVICE3_SLOTS,
     ['OfferResources1', 4],
     ['ReclaimResources1', 3],
@@ -550,14 +550,14 @@ export const ID3D10MULTITHREAD_SLOTS = /** @type {[string, number][]} */ ([
     ['GetMultithreadProtected', 0],
 ]);
 
-export const ID3D10DEVICECHILD_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D10DEVICECHILD_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDevice', 1],
     ['GetPrivateData', 3],
     ['SetPrivateData', 3],
     ['SetPrivateDataInterface', 2],
 ]);
 
-export const ID3D10RESOURCE_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D10RESOURCE_SLOTS = /** @type {[string, number][]} */ ([
     ...ID3D10DEVICECHILD_SLOTS,
     ['GetType', 1],
     ['SetEvictionPriority', 1],
@@ -603,7 +603,7 @@ export const ID3D10BLENDSTATE1_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDesc1', 1],
 ]);
 
-export const ID3D10SHADER_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D10SHADER_SLOTS = /** @type {[string, number][]} */ ([
     ...ID3D10DEVICECHILD_SLOTS,
 ]);
 
@@ -677,7 +677,7 @@ export const ID3D11SHADERREFLECTION_SLOTS = /** @type {[string, number][]} */ ([
     ['GetRequiresFlags', 0],
 ]);
 
-export const ID3D11SHADERREFLECTIONCONSTANTBUFFER_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D11SHADERREFLECTIONCONSTANTBUFFER_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDesc', 1],
     ['GetVariableByIndex', 1],
     ['GetVariableByName', 1],

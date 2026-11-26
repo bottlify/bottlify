@@ -43,9 +43,9 @@ export const WRITER_COLUMNS = ['name', 'bytes', 'writes'];
 export const WRITER_ROWS = 256;
 
 /** Writes made with no host call in flight -- the run loop, a device pump. */
-export const NO_CALL = 0;
+const NO_CALL = 0;
 /** Writers past the end of the table, together. */
-export const BEYOND = 1;
+const BEYOND = 1;
 const RESERVED = 2;
 
 /**

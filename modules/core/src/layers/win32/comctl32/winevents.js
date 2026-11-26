@@ -17,7 +17,7 @@ export const EVENT_OBJECT_FOCUS = 0x8005;
 export const EVENT_OBJECT_SELECTION = 0x8006;
 export const EVENT_OBJECT_REORDER = 0x8004;
 export const EVENT_OBJECT_VALUECHANGE = 0x800e;
-export const OBJID_CLIENT = -4;
+const OBJID_CLIENT = -4;
 export const CHILDID_SELF = 0;
 
 /**

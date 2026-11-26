@@ -52,7 +52,7 @@ import { assembleTo } from './code-arena.js';
 export const SMALL_LIMIT = 1024;
 
 /** The cells of each size class, in bytes: at most an eighth of a large one unused. */
-export const CELL_SIZES = Object.freeze([
+const CELL_SIZES = Object.freeze([
     8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256,
     320, 384, 448, 512, 640, 768, 896, 1024,
 ]);

@@ -911,18 +911,6 @@ export const negate = operand=>attempt(()=>{
 });
 
 /**
- * A string as the CY VarCyFromStr makes of it: rounded to the fourth place,
- * an overflow past a CY's range.
- *
- * @param {string} text
- * @returns {bigint | number} the ten-thousandths, or the HRESULT
- */
-export function currencyFromText(text){
-    const outcome = attempt(()=>currencyResult(exactIn(variantValue(VT_BSTR, { text }))));
-    return typeof outcome === 'number' ? outcome : /** @type {Exact} */ (outcome.exact).value;
-}
-
-/**
  * A value converted to another type, as VariantChangeType and the
  * Var<to>From<from> functions convert it: an integral type rounded a half to
  * the even neighbour and refused with an overflow where it does not fit, a

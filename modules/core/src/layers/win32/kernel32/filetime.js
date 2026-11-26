@@ -261,7 +261,7 @@ export function msToFileTime(ms){
  * @param {bigint} units
  * @returns {number | null}
  */
-export function fileTimeToMs(units){
+function fileTimeToMs(units){
     return units < FILETIME_EPOCH ? null : Number((units - FILETIME_EPOCH) / FILETIME_PER_MS);
 }
 /** The DOS calendar runs from 1980 to 2107, in two-second steps. */
@@ -277,7 +277,7 @@ const DOS_LAST_MS = Date.UTC(2107, 11, 31, 23, 59, 58);
  * @param {number} date @param {number} time
  * @returns {number | null}
  */
-export function dosDateTimeToMs(date, time){
+function dosDateTimeToMs(date, time){
     const year = 1980 + (date >>> 9);
     const month = (date >>> 5) & 0xf;
     const day = date & 0x1f;

@@ -23,7 +23,7 @@ import { wholeAddress } from '../common/pointers.js';
  * measures without drawing.
  */
 
-export const IID_ID3DXFONT = '{D79DBB70-5F21-4D36-BBC2-FF525C213CDC}';
+const IID_ID3DXFONT = '{D79DBB70-5F21-4D36-BBC2-FF525C213CDC}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;

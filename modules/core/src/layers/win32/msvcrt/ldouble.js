@@ -13,7 +13,7 @@
  */
 
 /** The size of an `_LDOUBLE`. */
-export const LDOUBLE_SIZE = 10;
+const LDOUBLE_SIZE = 10;
 
 const BIAS = 16383;
 const MAX_EXPONENT = 0x7fff;

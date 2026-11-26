@@ -33,7 +33,7 @@ export const PROGID_VBSCRIPT = 'VBScript';
 export const VBSCRIPT_PROGIDS = Object.freeze(['VBScript', 'VBS']);
 
 /** @type {import('../script/active-script.js').ActiveScriptLanguage<VBScriptEngine>} */
-export const VBSCRIPT_LANGUAGE = Object.freeze({
+const VBSCRIPT_LANGUAGE = Object.freeze({
     clsid: CLSID_VBSCRIPT,
     caseInsensitive: true,
     createEngine: options=>createVBScriptEngine({
@@ -63,6 +63,6 @@ export function registerVBScriptClass(host){
  *
  * @param {ActiveScriptHost} host @returns {ComClassDefinition}
  */
-export function activeScript(host){
+function activeScript(host){
     return hostedScript(host, VBSCRIPT_LANGUAGE);
 }

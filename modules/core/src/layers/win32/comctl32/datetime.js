@@ -53,14 +53,14 @@ export const DATETIMEPICK_CLASS = 'SysDateTimePick32';
 export const DATETIMEPICK_ATOM = 0x801f;
 
 /** Styles. The format is two bits; the time format carries DTS_UPDOWN in it. */
-export const DTS_UPDOWN = 0x0001;
+const DTS_UPDOWN = 0x0001;
 export const DTS_SHOWNONE = 0x0002;
 export const DTS_SHORTDATEFORMAT = 0x0000;
 export const DTS_LONGDATEFORMAT = 0x0004;
 export const DTS_SHORTDATECENTURYFORMAT = 0x000c;
 export const DTS_TIMEFORMAT = 0x0009;
 export const DTS_APPCANPARSE = 0x0010;
-export const DTS_RIGHTALIGN = 0x0020;
+const DTS_RIGHTALIGN = 0x0020;
 const FORMAT_BITS = 0x000c;
 
 /** Messages, off DTM_FIRST as commctrl.h numbers them. */
@@ -75,12 +75,12 @@ export const DTM_GETMCCOLOR = DTM_FIRST + 7;
 export const DTM_GETMONTHCAL = DTM_FIRST + 8;
 export const DTM_SETMCFONT = DTM_FIRST + 9;
 export const DTM_GETMCFONT = DTM_FIRST + 10;
-export const DTM_SETMCSTYLE = DTM_FIRST + 11;
-export const DTM_GETMCSTYLE = DTM_FIRST + 12;
-export const DTM_CLOSEMONTHCAL = DTM_FIRST + 13;
-export const DTM_GETDATETIMEPICKERINFO = DTM_FIRST + 14;
-export const DTM_GETIDEALSIZE = DTM_FIRST + 15;
-export const DTM_SETFORMATW = DTM_FIRST + 50;
+const DTM_SETMCSTYLE = DTM_FIRST + 11;
+const DTM_GETMCSTYLE = DTM_FIRST + 12;
+const DTM_CLOSEMONTHCAL = DTM_FIRST + 13;
+const DTM_GETDATETIMEPICKERINFO = DTM_FIRST + 14;
+const DTM_GETIDEALSIZE = DTM_FIRST + 15;
+const DTM_SETFORMATW = DTM_FIRST + 50;
 
 /** DTM_GETSYSTEMTIME's answers and DTM_SETSYSTEMTIME's flags. */
 export const GDT_ERROR = -1;
@@ -146,7 +146,7 @@ const STEPPED = 'dMyhHmst';
  *
  * @param {Time} time
  */
-export const isDay = time=>time.month >= 1 && time.month <= 12 && time.day >= 1
+const isDay = time=>time.month >= 1 && time.month <= 12 && time.day >= 1
     && time.day <= daysIn(time.year, time.month);
 
 /**

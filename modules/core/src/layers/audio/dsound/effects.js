@@ -162,7 +162,7 @@ const I3DL2_QUALITY_DEFAULT = 2;
  * @param {EffectsHost} host @param {number} at @param {4 | 8} pointerSize
  * @returns {{ tag: number, channels: number, rate: number, block: number, bits: number } | null}
  */
-export function readAudioType(host, at, pointerSize){
+function readAudioType(host, at, pointerSize){
     const guid = (/** @type {number} */ offset)=>formatGuid(host.readMemory(at + offset, 16));
     const long = pointerSize === 8;
     const cbFormat = new DataView(host.readMemory(at + (long ? 72 : 64), 4).slice().buffer)

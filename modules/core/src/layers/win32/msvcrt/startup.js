@@ -62,7 +62,7 @@ export function splitCommandLine(line){
  * @param {string} line
  * @returns {{ text: string, quoted: boolean }[]}
  */
-export function splitCommandLineWords(line){
+function splitCommandLineWords(line){
     /** @type {{ text: string, quoted: boolean }[]} */
     const argv = [];
     let current = '';

@@ -104,11 +104,6 @@ export function declarationEnd(){
     };
 }
 
-/** @param {VertexElement} element */
-export function isDeclarationEnd(element){
-    return element.Stream === D3DDECL_END_STREAM;
-}
-
 /**
  * Whether an array of elements is a declaration a device accepts.
  *
@@ -152,25 +147,6 @@ export function validateElements(elements){
         seen.add(key);
     }
     return D3D_OK;
-}
-
-/**
- * The bytes between one vertex and the next in a stream, as the elements
- * describing that stream imply: the end of the element that reaches furthest.
- *
- * @param {readonly VertexElement[]} elements
- * @param {number} stream
- */
-export function strideOf(elements, stream){
-    let stride = 0;
-    for (const element of elements)
-    {
-        if (element.Stream === stream)
-        {
-            stride = Math.max(stride, element.Offset + DECLTYPE_BYTES[element.Type]);
-        }
-    }
-    return stride;
 }
 
 /**

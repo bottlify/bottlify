@@ -47,7 +47,7 @@ import { LEGACY_ENABLES, LEGACY_STATE } from './legacy-state.js';
  *
  * @type {[number, string, number][]}
  */
-export const GEOMETRY_LIMITS = [
+const GEOMETRY_LIMITS = [
     [GL.MAX_GEOMETRY_TEXTURE_IMAGE_UNITS, 'GL_MAX_GEOMETRY_TEXTURE_IMAGE_UNITS',
         GLSL_LIMITS.textureImageUnits],
     [GL.MAX_GEOMETRY_UNIFORM_COMPONENTS, 'GL_MAX_GEOMETRY_UNIFORM_COMPONENTS',

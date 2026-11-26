@@ -43,7 +43,7 @@ import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
  * @param {{ path: string, size: number, pieces: (Uint8Array | null)[] }} file
  * @returns {{ path: string, size: number, pieces: (Uint8Array | null)[], bytes: Uint8Array }}
  */
-export function wholeOnDemand(file){
+function wholeOnDemand(file){
     /** @type {Uint8Array | null} */
     let whole = null;
     const unit = file.pieces.find(piece=>piece)?.length || file.size || 1;

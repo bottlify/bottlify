@@ -57,7 +57,7 @@ export const LockFlags = {
 const COPY_SRC = 0x0004;
 
 /** `writeBuffer` wants both the destination offset and the size in whole words. */
-export const UPLOAD_ALIGNMENT = 4;
+const UPLOAD_ALIGNMENT = 4;
 
 /**
  * Frames submitted with no rename after which a buffer's spare backings go

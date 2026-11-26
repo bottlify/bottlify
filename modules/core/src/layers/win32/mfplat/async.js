@@ -21,7 +21,7 @@
 import { E_INVALIDARG, E_POINTER, S_OK, drive } from './kit.js';
 import { wholeAddress } from '../common/pointers.js';
 
-export const IID_IMFASYNCRESULT = '{AC6B7889-0740-4D51-8619-905994A55CC6}';
+const IID_IMFASYNCRESULT = '{AC6B7889-0740-4D51-8619-905994A55CC6}';
 
 /** MFASYNCRESULT's offsets in a 32-bit process. */
 const FIELD = Object.freeze({ CALLBACK: 24, STATUS: 28, BYTES: 32, EVENT: 36, SIZE: 40 });

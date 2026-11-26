@@ -64,7 +64,7 @@ function bitsOf(value, bits){
  * @param {any} desc
  * @returns {any | null} the description as the object will report it
  */
-export function normaliseBlendDesc(desc){
+function normaliseBlendDesc(desc){
     if (!desc)
     {
         return null;
@@ -160,7 +160,7 @@ function normaliseTargetBlend(target){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseBlendDesc1(desc){
+function normaliseBlendDesc1(desc){
     if (!desc)
     {
         return null;
@@ -190,7 +190,7 @@ export function normaliseBlendDesc1(desc){
  *
  * @param {any} desc1
  */
-export function blendDescOf(desc1){
+function blendDescOf(desc1){
     const [first] = desc1.RenderTarget;
     return Object.freeze({
         AlphaToCoverageEnable: desc1.AlphaToCoverageEnable,
@@ -213,7 +213,7 @@ export function blendDescOf(desc1){
  *
  * @param {any} desc
  */
-export function blendDesc1Of(desc){
+function blendDesc1Of(desc){
     const targets = desc.BlendEnable.map((/** @type {boolean} */ enabled,
         /** @type {number} */ index)=>normaliseTargetBlend({
         ...desc, BlendEnable: enabled, RenderTargetWriteMask: desc.RenderTargetWriteMask[index],
@@ -266,7 +266,7 @@ function normaliseStencilFace(face){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseDepthStencilDesc(desc){
+function normaliseDepthStencilDesc(desc){
     if (!desc)
     {
         return null;
@@ -323,7 +323,7 @@ export function normaliseDepthStencilDesc(desc){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseRasterizerDesc(desc){
+function normaliseRasterizerDesc(desc){
     if (!desc)
     {
         return null;
@@ -350,7 +350,7 @@ export function normaliseRasterizerDesc(desc){
  * @param {any} desc
  * @returns {any | null}
  */
-export function normaliseSamplerDesc(desc){
+function normaliseSamplerDesc(desc){
     if (!desc || !isMember(D3D10_FILTER, desc.Filter))
     {
         return null;

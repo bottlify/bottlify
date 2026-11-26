@@ -98,7 +98,7 @@ export const CONTEXT = Object.freeze({
 export const SELECTORS = Object.freeze({ CODE: 0x1b, DATA: 0x23, FS: 0x3b, GS: 0 });
 
 /** CONTEXT_FULL: control, integer and segment registers. */
-export const CONTEXT_FULL = 0x00010007;
+const CONTEXT_FULL = 0x00010007;
 
 /** EFLAGS: the trap, direction and alignment-check flags. */
 export const EFLAGS_TF = 0x100;
@@ -145,7 +145,7 @@ export const EH_UNWINDING = 0x02;
 
 /** What a filter answers. */
 export const EXCEPTION_EXECUTE_HANDLER = 1;
-export const EXCEPTION_CONTINUE_SEARCH = 0;
+const EXCEPTION_CONTINUE_SEARCH = 0;
 
 /** Codes raised by the processor rather than by a program. */
 export const STATUS = Object.freeze({
@@ -265,7 +265,7 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
 export const EXCEPTION_EXIT_UNWIND = 0x04;
 
 /** What a filter answers to have the faulting instruction run again. */
-export const EXCEPTION_CONTINUE_EXECUTION = -1;
+const EXCEPTION_CONTINUE_EXECUTION = -1;
 
 /**
  * @param {SehHost} host

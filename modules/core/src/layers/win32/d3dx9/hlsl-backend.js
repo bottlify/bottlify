@@ -83,7 +83,7 @@ function regions(instrs){
 const TEXTURE_OPS = new Set(['texld', 'texldl', 'texldd', 'texkill']);
 
 /** @param {Src} src */
-export const laneCount = src=>('values' in src ? src.values.length
+const laneCount = src=>('values' in src ? src.values.length
     : 'swz' in src ? src.swz.length : 0);
 
 /**
@@ -279,7 +279,7 @@ export function fuseMultiplyAdd(instrs, profile){
 }
 
 /** @param {Src} src @returns {Src} */
-export function negated(src){
+function negated(src){
     if (src.kind === 'imm')
     {
         return { kind: 'imm', values: src.values.map(v=>-v) };
@@ -849,7 +849,7 @@ function packLiterals(instrs, reserved){
  * @param {Src} src
  * @returns {string | null}
  */
-export function constKey(src){
+function constKey(src){
     if (src.kind === 'creg')
     {
         return `${src.file}${src.index}${src.relative ? 'r' : ''}`;

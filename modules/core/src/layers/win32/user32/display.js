@@ -60,7 +60,7 @@ export const refreshRatesOf = screen=>{
  * finding none, falls back to a list of its own; the two rates of the era's
  * displays are both here so either setting finds its mode.
  */
-export const REFRESH_RATES = Object.freeze([REFRESH_HZ, 120]);
+const REFRESH_RATES = Object.freeze([REFRESH_HZ, 120]);
 
 /**
  * A handful of sizes, not a catalogue: the 4:3 and 5:4 ladder a driver of the

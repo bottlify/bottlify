@@ -49,17 +49,17 @@ const SWP_NOZORDER = 0x0004;
 const SWP_NOACTIVATE = 0x0010;
 const SWP_FRAMECHANGED = 0x0020;
 export const PGM_SETCHILD = PGM_FIRST + 1;
-export const PGM_RECALCSIZE = PGM_FIRST + 2;
-export const PGM_FORWARDMOUSE = PGM_FIRST + 3;
-export const PGM_SETBKCOLOR = PGM_FIRST + 4;
-export const PGM_GETBKCOLOR = PGM_FIRST + 5;
-export const PGM_SETBORDER = PGM_FIRST + 6;
-export const PGM_GETBORDER = PGM_FIRST + 7;
+const PGM_RECALCSIZE = PGM_FIRST + 2;
+const PGM_FORWARDMOUSE = PGM_FIRST + 3;
+const PGM_SETBKCOLOR = PGM_FIRST + 4;
+const PGM_GETBKCOLOR = PGM_FIRST + 5;
+const PGM_SETBORDER = PGM_FIRST + 6;
+const PGM_GETBORDER = PGM_FIRST + 7;
 export const PGM_SETPOS = PGM_FIRST + 8;
 export const PGM_GETPOS = PGM_FIRST + 9;
-export const PGM_SETBUTTONSIZE = PGM_FIRST + 10;
-export const PGM_GETBUTTONSIZE = PGM_FIRST + 11;
-export const PGM_GETBUTTONSTATE = PGM_FIRST + 12;
+const PGM_SETBUTTONSIZE = PGM_FIRST + 10;
+const PGM_GETBUTTONSIZE = PGM_FIRST + 11;
+const PGM_GETBUTTONSTATE = PGM_FIRST + 12;
 /**
  * The pager's own message, posted to itself: place the child. Past the
  * pager messages Windows numbers.

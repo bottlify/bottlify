@@ -44,10 +44,10 @@ const EC_COMPLETE = 0x01;
 /** IMediaEventSink::Notify's slot. */
 const NOTIFY = 3;
 
-export const CLSID_VIDEO_RENDERER = '{70E102B0-5556-11CE-97C0-00AA0055595A}';
+const CLSID_VIDEO_RENDERER = '{70E102B0-5556-11CE-97C0-00AA0055595A}';
 export const CLSID_DSOUND_RENDER = '{79376820-07D0-11CF-A24D-0020AFD79767}';
 /** The Audio Renderer that plays through waveOut, which devenum lists as each wave device. */
-export const CLSID_AUDIO_RENDER = '{E30629D1-27E5-11CE-875D-00608CB78066}';
+const CLSID_AUDIO_RENDER = '{E30629D1-27E5-11CE-875D-00608CB78066}';
 export const CLSID_NULL_RENDERER = '{C1F400A4-3F08-11D3-9F0B-006008039E37}';
 
 const MEDIASUBTYPE_PCM = '{00000001-0000-0010-8000-00AA00389B71}';
@@ -65,7 +65,7 @@ const MEDIASUBTYPE_IEEE_FLOAT = '{00000003-0000-0010-8000-00AA00389B71}';
  */
 
 /** @type {RendererSpec[]} */
-export const RENDERERS = [
+const RENDERERS = [
     {
         clsid: CLSID_VIDEO_RENDERER, pin: 'Input', id: 'In', video: true, quality: true,
         accepts: type=>type.major === MEDIATYPE_VIDEO && type.formatType === FORMAT_VIDEO_INFO,

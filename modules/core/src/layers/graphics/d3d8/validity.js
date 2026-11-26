@@ -30,15 +30,14 @@ import {
 import { D3DTA, D3DTOP, argumentsRead } from '../webgpu/internal/fixedfunction.js';
 
 /** ValidateDevice's refusals: MAKE_D3DHRESULT of the codes d3d8.h and d3d9.h give them. */
-export const D3DERR_UNSUPPORTEDCOLOROPERATION = 0x88760819;
-export const D3DERR_UNSUPPORTEDCOLORARG = 0x8876081a;
-export const D3DERR_UNSUPPORTEDALPHAOPERATION = 0x8876081b;
-export const D3DERR_UNSUPPORTEDALPHAARG = 0x8876081c;
-export const D3DERR_UNSUPPORTEDTEXTUREFILTER = 0x88760822;
+const D3DERR_UNSUPPORTEDCOLOROPERATION = 0x88760819;
+const D3DERR_UNSUPPORTEDCOLORARG = 0x8876081a;
+const D3DERR_UNSUPPORTEDALPHAOPERATION = 0x8876081b;
+const D3DERR_UNSUPPORTEDALPHAARG = 0x8876081c;
+const D3DERR_UNSUPPORTEDTEXTUREFILTER = 0x88760822;
 
 export {
-    FORMAT_KIND, RESOURCE_VALIDITY, SURFACE_TYPE, reportedBackBufferCount, surfaceCreateResult,
-    surfaceIsLockable,
+    RESOURCE_VALIDITY, SURFACE_TYPE, reportedBackBufferCount,
 } from '../d3d9/validity.js';
 
 /** The usage bits the validity table has a column for; the rest do not select a row. */
@@ -52,7 +51,7 @@ const TABLE_USAGE = D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL | D3DUSAGE.DYN
  * @param {number} usage
  * @returns {import('../d3d9/validity.js').ResourceValidityRow | undefined}
  */
-export function validityRow(format, pool, usage){
+function validityRow(format, pool, usage){
     const info = FORMAT_INFO[format];
     if (!info)
     {

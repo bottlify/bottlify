@@ -291,7 +291,7 @@ export function surfaceIsLockable(surface){
  *
  * @type {Readonly<Record<number, number>>}
  */
-export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
+const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
     [D3DSWAPEFFECT.DISCARD]: 3,
     [D3DSWAPEFFECT.FLIP]: 3,
     [D3DSWAPEFFECT.COPY]: 1,

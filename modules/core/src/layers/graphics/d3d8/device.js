@@ -108,7 +108,7 @@ export { DEVICE_STATE, LIGHT_ENABLED };
  */
 
 /** @type {DeviceCaps} */
-export const DEFAULT_CAPS = Object.freeze({
+const DEFAULT_CAPS = Object.freeze({
     maxPointSize: 64.0,
     // A shadow map, as Direct3D 8 hardware made one: a depth texture drawn
     // into as the depth buffer and sampled as the comparison of a reference

@@ -81,7 +81,7 @@ const BUILTIN = 4;
 const MISSING = errorValue(0x80020004);
 
 /** Something a value is stored in: a variable, an argument, an array's element. */
-export class Ref
+class Ref
 {
     /** @returns {Value} */
     get value(){
@@ -151,7 +151,7 @@ class ElementRef extends Ref
  */
 
 /** A script's class, ready to make instances of. */
-export class ClassDef
+class ClassDef
 {
     /** @param {ClassDecl} decl */
     constructor(decl){

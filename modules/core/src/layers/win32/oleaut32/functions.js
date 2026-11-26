@@ -5636,7 +5636,7 @@ const isWhite = char=>char === ' ' || char === '\t' || char === '\n' || char ===
  * @returns {{ written: number[], count: number, flags: number, used: number, pwr10: number,
  *     baseShift: number } | null}  null when the string holds no number.
  */
-export function parseNumberText(text, allowed, capacity){
+function parseNumberText(text, allowed, capacity){
     let at = 0;
     let flags = 0;
     const has = (/** @type {number} */ flag)=>(allowed & flag) !== 0;
@@ -5843,7 +5843,7 @@ export function parseNumberText(text, allowed, capacity){
  * @returns {{ type: number, bytes: Uint8Array } | null} the eight value bytes, or
  *     a DECIMAL's sixteen
  */
-export function numberVariant(digits, pwr10, baseShift, negative, vtBits){
+function numberVariant(digits, pwr10, baseShift, negative, vtBits){
     const bytes = new Uint8Array(16);
     const data = new DataView(bytes.buffer);
     const allows = (/** @type {number} */ type)=>(vtBits & (1 << type)) !== 0;

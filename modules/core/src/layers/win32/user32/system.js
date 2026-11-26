@@ -178,7 +178,7 @@ export const HOVER_SIZE = 4;
  *
  * @type {Record<number, number>}
  */
-export const SYS_COLORS = Object.freeze({
+const SYS_COLORS = Object.freeze({
     0: 0x00c0c0c0,
     1: 0x00808080,
     2: 0x00800000,
@@ -912,7 +912,7 @@ const WM_DISPLAYCHANGE = 0x007e;
  * How long the system's WM_DISPLAYCHANGE broadcast waits for each window
  * before going on, as a send with SMTO_ABORTIFHUNG does.
  */
-export const DISPLAY_CHANGE_WAIT_MS = 2000;
+const DISPLAY_CHANGE_WAIT_MS = 2000;
 /** DEVMODE's display orientation field, and the orientation every display here has. */
 const DM_DISPLAYORIENTATION = 0x00000080;
 const DMDO_DEFAULT = 0;

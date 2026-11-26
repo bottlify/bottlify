@@ -19,8 +19,7 @@
 import { D3DRS as D3DRS8, D3DTS as D3DTS8 } from '../d3d8/constants.js';
 
 export {
-    D3DBLEND, D3DBLENDOP, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT, D3DFOG, D3DLIGHTTYPE, D3DPT,
-    D3DSHADE, D3DSTENCILOP, D3DTA, D3DTOP, D3DZB, D3D_OK,
+    D3DFMT, D3DLIGHTTYPE, D3DPT, D3DTA, D3DTOP, D3DZB, D3D_OK,
 } from '../d3d8/constants.js';
 
 /**
@@ -358,7 +357,7 @@ export const D3DFILTER = Object.freeze({
 
 /** D3DVERTEXTYPE, and the vertex formats they are. */
 export const D3DVT = Object.freeze({ VERTEX: 1, LVERTEX: 2, TLVERTEX: 3 });
-export const D3DFVF_RESERVED1 = 0x020;
+const D3DFVF_RESERVED1 = 0x020;
 export const D3DFVF_VERTEX = 0x002 | 0x010 | 0x100;
 export const D3DFVF_LVERTEX = 0x002 | D3DFVF_RESERVED1 | 0x040 | 0x080 | 0x100;
 export const D3DFVF_TLVERTEX = 0x004 | 0x040 | 0x080 | 0x100;

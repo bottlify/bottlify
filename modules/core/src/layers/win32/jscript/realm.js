@@ -81,7 +81,7 @@ const HEX = /^0[xX][0-9a-fA-F]+$/;
  *
  * @param {string} text @returns {number}
  */
-export function stringToNumber(text){
+function stringToNumber(text){
     const trimmed = text.replace(STRING_SPACE, '');
     if (trimmed === '')
     {
@@ -602,7 +602,7 @@ const pad = (n, width)=>String(n).padStart(width, '0');
  *
  * @param {number} oleDate @returns {string}
  */
-export function formatVariantDate(oleDate){
+function formatVariantDate(oleDate){
     const wall = new Date(oleDateToWallTime(oleDate));
     if (Number.isNaN(wall.getTime()))
     {

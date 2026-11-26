@@ -45,7 +45,7 @@ const D3DLOCK_READONLY = 0x10;
 const SURFACE_DESC_BYTES = 32;
 
 export const D3DX_DEFAULT = 0xffffffff;
-export const D3DX_DEFAULT_NONPOW2 = 0xfffffffe;
+const D3DX_DEFAULT_NONPOW2 = 0xfffffffe;
 export const D3DX_FROM_FILE = 0xfffffffd;
 
 const D3DPOOL_DEFAULT = 0;

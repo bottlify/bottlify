@@ -729,7 +729,7 @@ export function sameKeyInputs(a, b){
  *
  * @param {import('./gpu-layout.js').DrawAttribute} attribute
  */
-export function attributeType(attribute){
+function attributeType(attribute){
     const scalar = attribute.scalar;
     return attribute.components === 1 ? scalar : `vec${attribute.components}<${scalar}>`;
 }
@@ -814,7 +814,7 @@ function textureCoordinates(unit, given){
  *
  * @param {{ mode: number }} fog
  */
-export function fogFactorOf(fog){
+function fogFactorOf(fog){
     switch (fog.mode)
     {
         case GL.LINEAR:
@@ -832,7 +832,7 @@ export function fogFactorOf(fog){
  * @param {string} value
  * @param {string} reference
  */
-export function compareExpression(func, value, reference){
+function compareExpression(func, value, reference){
     switch (func)
     {
         case GL.NEVER:

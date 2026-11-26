@@ -105,7 +105,7 @@ export const TESS_DRAW_ENTRIES = Object.freeze([
  * `params`: the patches, then the kind (domain, partitioning, output), the
  * outer levels and the inner.
  */
-export const DEFAULT_PATCHES_WGSL = /* wgsl */ `
+const DEFAULT_PATCHES_WGSL = /* wgsl */ `
 struct Params {
     patches: u32,
     pad0: u32,

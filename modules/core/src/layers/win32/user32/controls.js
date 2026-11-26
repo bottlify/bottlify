@@ -44,12 +44,12 @@ export const WM_SETFOCUS = 0x0007;
 const WM_SIZE = 0x0005;
 export const WM_KILLFOCUS = 0x0008;
 const WM_NCDESTROY = 0x0082;
-export const WM_ENABLE = 0x000a;
+const WM_ENABLE = 0x000a;
 export const WM_SETTEXT = 0x000c;
 export const WM_GETTEXT = 0x000d;
 export const WM_GETTEXTLENGTH = 0x000e;
 export const WM_PAINT = 0x000f;
-export const WM_CLOSE = 0x0010;
+const WM_CLOSE = 0x0010;
 export const WM_ERASEBKGND = 0x0014;
 export const WM_SHOWWINDOW = 0x0018;
 export const WM_SETFONT = 0x0030;
@@ -59,7 +59,7 @@ export const WM_GETDLGCODE = 0x0087;
 export const WM_KEYDOWN = 0x0100;
 export const WM_KEYUP = 0x0101;
 export const WM_CHAR = 0x0102;
-export const WM_INITDIALOG = 0x0110;
+const WM_INITDIALOG = 0x0110;
 export const WM_COMMAND = 0x0111;
 export const WM_SYSCOMMAND = 0x0112;
 export const WM_VSCROLL = 0x0115;
@@ -88,10 +88,10 @@ export const DLGC_WANTTAB = 0x0002;
 export const DLGC_WANTALLKEYS = 0x0004;
 export const DLGC_HASSETSEL = 0x0008;
 export const DLGC_DEFPUSHBUTTON = 0x0010;
-export const DLGC_UNDEFPUSHBUTTON = 0x0020;
-export const DLGC_RADIOBUTTON = 0x0040;
+const DLGC_UNDEFPUSHBUTTON = 0x0020;
+const DLGC_RADIOBUTTON = 0x0040;
 export const DLGC_WANTCHARS = 0x0080;
-export const DLGC_STATIC = 0x0100;
+const DLGC_STATIC = 0x0100;
 export const DLGC_BUTTON = 0x2000;
 
 /** Virtual keys the controls act on. */
@@ -171,7 +171,7 @@ const BST_CHECKED = 1;
 const BST_INDETERMINATE = 2;
 const BST_PUSHED = 4;
 const BST_FOCUS = 8;
-export const BN_CLICKED = 0;
+const BN_CLICKED = 0;
 const BN_SETFOCUS = 6;
 const BN_KILLFOCUS = 7;
 /** The box a check box or radio button draws, and the gap to its text. */
@@ -315,7 +315,7 @@ const DEFAULT_EDIT_LIMIT = 0x7ffffffe;
  * @param {(character: string) => number} advance
  * @returns {{ text: string, start: number }[]}
  */
-export function wrapEditText(text, wrap, room, advance){
+function wrapEditText(text, wrap, room, advance){
     /** @type {{ text: string, start: number }[]} */
     const lines = [];
     let at = 0;
@@ -528,7 +528,7 @@ const ARROW_LENGTH = 16;
 
 /** The dialog class: its messages, its extra bytes and what it answers Enter with. */
 export const DLGWINDOWEXTRA = 30;
-export const DWLP_MSGRESULT = 0;
+const DWLP_MSGRESULT = 0;
 export const DWLP_DLGPROC = 4;
 export const DWLP_USER = 8;
 const DM_GETDEFID = 0x0400;
@@ -547,9 +547,9 @@ const DT_SINGLELINE = 0x0020;
 const DT_NOPREFIX = 0x0800;
 
 /** System colour indices, as GetSysColor numbers them. */
-export const COLOR_SCROLLBAR = 0;
+const COLOR_SCROLLBAR = 0;
 export const COLOR_WINDOW = 5;
-export const COLOR_WINDOWFRAME = 6;
+const COLOR_WINDOWFRAME = 6;
 export const COLOR_WINDOWTEXT = 8;
 export const COLOR_HIGHLIGHT = 13;
 export const COLOR_HIGHLIGHTTEXT = 14;

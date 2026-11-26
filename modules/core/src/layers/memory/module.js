@@ -25,7 +25,7 @@ import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './internal/wri
  * diagnostics says how many there really are.
  */
 export const REGION_COLUMNS = ['name', 'base', 'size', 'access'];
-export const REGION_ROWS = 1024;
+const REGION_ROWS = 1024;
 
 /**
  * What this layer publishes as numbers. Both are the frame's rather than the

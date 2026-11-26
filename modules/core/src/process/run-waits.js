@@ -60,7 +60,7 @@ export async function answeringWhile(pending, bell, answer){
  * again, ms: a look outlives the yield it was for, and one asleep on the bell
  * has each executor's turn wake it.
  */
-export const ANSWERING_LOOK_MS = 2;
+const ANSWERING_LOOK_MS = 2;
 
 /**
  * Consecutive turns retiring no guest instruction at all before the run loop
@@ -79,7 +79,7 @@ export const ANSWERING_LOOK_MS = 2;
  * wrong: a few spare turns cost microseconds and one turn too many on a timer
  * costs milliseconds.
  */
-export const IDLE_SPINS_BEFORE_TIMER = 4;
+const IDLE_SPINS_BEFORE_TIMER = 4;
 
 /**
  * How long the run loop sleeps between looks when nothing can run, unless

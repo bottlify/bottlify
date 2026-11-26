@@ -60,10 +60,10 @@ import { Disposition } from '../kernel32/seh64.js';
 import { pointerIo, wholeAddress } from '../common/pointers.js';
 
 /** The exception code every C++ throw raises: 0xE0 followed by "msc". */
-export const EH_EXCEPTION_NUMBER = 0xe06d7363;
+const EH_EXCEPTION_NUMBER = 0xe06d7363;
 
 /** What the first parameter of such an exception says, one per compiler generation. */
-export const EH_MAGIC = Object.freeze({ V1: 0x19930520, V2: 0x19930521, V3: 0x19930522 });
+const EH_MAGIC = Object.freeze({ V1: 0x19930520, V2: 0x19930521, V3: 0x19930522 });
 
 /** FuncInfo at 64 bits, `__CxxFrameHandler3`'s. */
 const FUNC_INFO = Object.freeze({

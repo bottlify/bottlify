@@ -129,7 +129,7 @@ export function wrappedAddress(address, ramSize){
  * @param {{ ramSize: number, wrap?: number }} layout
  * @param {number} [addr]  the local, the 32-bit emitter's `Local.addr` unless given
  */
-export function wrapIntoRam(b, layout, addr = Local.addr){
+function wrapIntoRam(b, layout, addr = Local.addr){
     const { ramSize } = layout;
     if (layout.wrap !== undefined)
     {
@@ -2618,7 +2618,7 @@ function beyond(e){
  *
  * @param {E} e @param {number} [delta]
  */
-export function pageIndex(e, delta = 0){
+function pageIndex(e, delta = 0){
     const { b } = e;
     b.localGet(Local.addr);
     if (delta !== 0)

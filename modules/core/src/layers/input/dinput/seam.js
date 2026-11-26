@@ -94,7 +94,7 @@ const VERSION_8 = 0x800;
  * @param {boolean} eight   An IDirectInput8 object rather than an earlier one.
  * @returns {number}
  */
-export function versionRefusal(instance, version, eight){
+function versionRefusal(instance, version, eight){
     const asked = version >>> 0;
     // Only the first DirectInput let a program leave out its module handle.
     if ((instance >>> 0) === 0 && (eight || asked !== 0x300))
@@ -191,9 +191,9 @@ export const IID_IDirectInput8W = '{BF798031-483A-4DA2-AA99-5D64ED369700}';
 export const IID_IDirectInputDeviceA = '{5944E680-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDeviceW = '{5944E681-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDevice2A = '{5944E682-C92E-11CF-BFC7-444553540000}';
-export const IID_IDirectInputDevice2W = '{5944E683-C92E-11CF-BFC7-444553540000}';
+const IID_IDirectInputDevice2W = '{5944E683-C92E-11CF-BFC7-444553540000}';
 export const IID_IDirectInputDevice7A = '{57D7C6BC-2356-11D3-8E9D-00C04F6844AE}';
-export const IID_IDirectInputDevice7W = '{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}';
+const IID_IDirectInputDevice7W = '{57D7C6BD-2356-11D3-8E9D-00C04F6844AE}';
 export const IID_IDirectInputDevice8A = '{54D41080-DC15-4833-A41B-748F73A38179}';
 export const IID_IDirectInputDevice8W = '{54D41081-DC15-4833-A41B-748F73A38179}';
 
@@ -481,7 +481,7 @@ const DIDFT_OPTIONAL = 0x80000000;
  *     `centred` is where an optional point-of-view entry no object answered
  *     sits: the state reads it as a POV at rest, all ones.
  */
-export function readFormat(readU32, guidAt, format, objects, refused = ()=>{}, pointer = 4){
+function readFormat(readU32, guidAt, format, objects, refused = ()=>{}, pointer = 4){
     const HEADER = pointer === 8 ? DIDATAFORMAT_LONG : DIDATAFORMAT;
     const ENTRY = pointer === 8 ? DIOBJECTDATAFORMAT_LONG : DIOBJECTDATAFORMAT;
     const dataSize = readU32(format + HEADER.dwDataSize);
@@ -577,7 +577,7 @@ export const IDIRECTINPUT_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** IDirectInput2 appends one; IDirectInput7 another. */
-export const IDIRECTINPUT2_SLOTS = /** @type {[string, number][]} */ ([
+const IDIRECTINPUT2_SLOTS = /** @type {[string, number][]} */ ([
     ...IDIRECTINPUT_SLOTS,
     ['FindDevice', 3],
 ]);

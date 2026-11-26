@@ -83,7 +83,7 @@ const PATTERN_SIZE = 24;
  * @param {import('./formats.js').PixelFormat} f @param {number} channel
  * @returns {Uint8Array | null}
  */
-export function channelMask(f, channel){
+function channelMask(f, channel){
     if (channel >= f.channels)
     {
         return null;

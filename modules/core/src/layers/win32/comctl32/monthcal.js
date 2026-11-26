@@ -53,10 +53,10 @@ export const MONTHCAL_ATOM = 0x801d;
 /** Styles. */
 export const MCS_DAYSTATE = 0x0001;
 export const MCS_MULTISELECT = 0x0002;
-export const MCS_WEEKNUMBERS = 0x0004;
-export const MCS_NOTODAYCIRCLE = 0x0008;
+const MCS_WEEKNUMBERS = 0x0004;
+const MCS_NOTODAYCIRCLE = 0x0008;
 export const MCS_NOTODAY = 0x0010;
-export const MCS_NOTRAILINGDATES = 0x0040;
+const MCS_NOTRAILINGDATES = 0x0040;
 
 /** Messages, off MCM_FIRST as commctrl.h numbers them. */
 const MCM_FIRST = 0x1000;
@@ -80,17 +80,17 @@ export const MCM_GETRANGE = MCM_FIRST + 17;
 export const MCM_SETRANGE = MCM_FIRST + 18;
 export const MCM_GETMONTHDELTA = MCM_FIRST + 19;
 export const MCM_SETMONTHDELTA = MCM_FIRST + 20;
-export const MCM_GETMAXTODAYWIDTH = MCM_FIRST + 21;
-export const MCM_GETCURRENTVIEW = MCM_FIRST + 22;
+const MCM_GETMAXTODAYWIDTH = MCM_FIRST + 21;
+const MCM_GETCURRENTVIEW = MCM_FIRST + 22;
 export const MCM_GETCALENDARCOUNT = MCM_FIRST + 23;
-export const MCM_GETCALID = MCM_FIRST + 27;
-export const MCM_SETCALID = MCM_FIRST + 28;
+const MCM_GETCALID = MCM_FIRST + 27;
+const MCM_SETCALID = MCM_FIRST + 28;
 export const MCM_SIZERECTTOMIN = MCM_FIRST + 29;
 export const MCM_SETCALENDARBORDER = MCM_FIRST + 30;
 export const MCM_GETCALENDARBORDER = MCM_FIRST + 31;
-export const MCM_SETCURRENTVIEW = MCM_FIRST + 32;
-export const MCM_SETUNICODEFORMAT = 0x2005;
-export const MCM_GETUNICODEFORMAT = 0x2006;
+const MCM_SETCURRENTVIEW = MCM_FIRST + 32;
+const MCM_SETUNICODEFORMAT = 0x2005;
+const MCM_GETUNICODEFORMAT = 0x2006;
 
 /** The messages only Common Controls 6's calendar answers. */
 const VERSION_6_MESSAGES = new Set([MCM_GETCURRENTVIEW, MCM_GETCALENDARCOUNT, MCM_GETCALID,
@@ -115,7 +115,7 @@ export const MCSC_TRAILINGTEXT = 5;
 /** What MCM_HITTEST finds. */
 export const MCHT_NOWHERE = 0;
 export const MCHT_TITLE = 0x00010000;
-export const MCHT_CALENDAR = 0x00020000;
+const MCHT_CALENDAR = 0x00020000;
 export const MCHT_TODAYLINK = 0x00030000;
 const MCHT_NEXT = 0x01000000;
 const MCHT_PREV = 0x02000000;
@@ -126,8 +126,8 @@ export const MCHT_TITLEBTNPREV = (MCHT_TITLE | MCHT_PREV | 3) >>> 0;
 export const MCHT_CALENDARDATE = MCHT_CALENDAR | 1;
 export const MCHT_CALENDARDATENEXT = (MCHT_CALENDARDATE | MCHT_NEXT) >>> 0;
 export const MCHT_CALENDARDATEPREV = (MCHT_CALENDARDATE | MCHT_PREV) >>> 0;
-export const MCHT_CALENDARDAY = MCHT_CALENDAR | 2;
-export const MCHT_CALENDARWEEKNUM = MCHT_CALENDAR | 3;
+const MCHT_CALENDARDAY = MCHT_CALENDAR | 2;
+const MCHT_CALENDARWEEKNUM = MCHT_CALENDAR | 3;
 
 /** MCHITTESTINFO: the first version's size, and version 6's with the place found. */
 export const MCHITTESTINFO_V1_SIZE = 32;
@@ -243,7 +243,7 @@ const dateOf = number=>{
 };
 
 /** Sunday 0. @param {number} year @param {number} month @param {number} day */
-export const weekdayOf = (year, month, day)=>new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+const weekdayOf = (year, month, day)=>new Date(Date.UTC(year, month - 1, day)).getUTCDay();
 
 /** The first day the calendar holds, and the last. */
 const FIRST_DATE = dayNumber(1752, 9, 14);

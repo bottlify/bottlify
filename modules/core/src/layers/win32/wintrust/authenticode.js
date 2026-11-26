@@ -139,7 +139,7 @@ const allowsUsage = (chain, usage)=>chain.every(certificate=>
  * @param {number} time
  * @param {string} usage
  */
-export function judgeChain(leaf, pool, roots, time, usage){
+function judgeChain(leaf, pool, roots, time, usage){
     const { chain, status } = buildChain(leaf, pool, roots);
     if (status !== TRUST.OK)
     {

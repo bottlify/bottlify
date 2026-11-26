@@ -120,7 +120,7 @@ const DDS_HEADERS = 148;
  */
 
 /** D3DX 10, over ID3D10Device. @type {D3dxProfile} */
-export const D3DX10_PROFILE = Object.freeze({ prefix: 'D3DX10', sdk: D3D10_SDK_VERSION,
+const D3DX10_PROFILE = Object.freeze({ prefix: 'D3DX10', sdk: D3D10_SDK_VERSION,
     // D3D10_ERROR_FILE_NOT_FOUND.
     fileNotFound: 0x88790002 | 0,
     device: { CreateTexture1D: DEVICE.CreateTexture1D, CreateTexture2D: DEVICE.CreateTexture2D,

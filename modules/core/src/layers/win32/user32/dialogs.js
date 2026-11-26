@@ -256,7 +256,7 @@ const DIALOG_FAILED = -1;
  * @param {string} text @param {boolean} signed
  * @returns {number | null} the value, as the UINT the call answers
  */
-export function dialogInteger(text, signed){
+function dialogInteger(text, signed){
     const found = (signed ? /^ *(-?)(\d+)/ : /^ *()(\d+)/).exec(text);
     if (!found)
     {

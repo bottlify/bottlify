@@ -59,14 +59,14 @@ export const UPDOWN_CLASS = 'msctls_updown32';
 export const UPDOWN_ATOM = 0x8017;
 
 /** Styles. */
-export const UDS_WRAP = 0x0001;
+const UDS_WRAP = 0x0001;
 export const UDS_SETBUDDYINT = 0x0002;
 export const UDS_ALIGNRIGHT = 0x0004;
-export const UDS_ALIGNLEFT = 0x0008;
-export const UDS_AUTOBUDDY = 0x0010;
+const UDS_ALIGNLEFT = 0x0008;
+const UDS_AUTOBUDDY = 0x0010;
 export const UDS_ARROWKEYS = 0x0020;
 export const UDS_HORZ = 0x0040;
-export const UDS_NOTHOUSANDS = 0x0080;
+const UDS_NOTHOUSANDS = 0x0080;
 
 /** Messages, numbered off WM_USER as the header numbers them. */
 const WM_USER = 0x0400;

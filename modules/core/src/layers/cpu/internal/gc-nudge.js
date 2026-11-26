@@ -162,7 +162,7 @@ export function nudgeWhenAsked(scope, clock){
  * roughly 200 MiB of optimised code; a collection of the engine's heap costs
  * milliseconds against that.
  */
-export const CODE_NUDGE = Object.freeze({ afterBytes: 32 * 1024 * 1024, bytes: 64 * 1024 * 1024 });
+const CODE_NUDGE = Object.freeze({ afterBytes: 32 * 1024 * 1024, bytes: 64 * 1024 * 1024 });
 
 /** What this thread let go since its last nudge, and the nudges made for it. */
 let codeLetGo = 0;

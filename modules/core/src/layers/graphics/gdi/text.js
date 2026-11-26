@@ -236,13 +236,3 @@ export function extTextOut(painter, options){
     return { ok: true, width };
 }
 
-/**
- * TextOutA is ExtTextOutA with no flags, no rectangle and no advance array.
- *
- * @param {import("./shapes.js").Painter} painter
- * @param {TextOptions} options
- * @returns {{ ok: boolean, width: number }}
- */
-export function textOut(painter, options){
-    return extTextOut(painter, { ...options, flags: 0, rect: undefined, dx: undefined });
-}

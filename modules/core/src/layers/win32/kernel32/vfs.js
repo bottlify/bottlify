@@ -52,7 +52,7 @@ export const MISS_FETCHES = 4;
  *
  * Up to this many bytes a range: the executable mapped whole again and again.
  */
-export const KEPT_READ_LARGEST = 128 << 20;
+const KEPT_READ_LARGEST = 128 << 20;
 /** A read smaller than this costs less than keeping it. */
 export const KEPT_READ_MIN = 1 << 20;
 /** A range is kept in parts of this many bytes at most, each a body of the cache's. */
@@ -81,11 +81,11 @@ const CHANGE_LAST_WRITE = 0x010;
  * it. A rename is its old name and its new one; seen from a watch that holds
  * only one of the two, it is a name removed or a name added.
  */
-export const FILE_ACTION_ADDED = 1;
-export const FILE_ACTION_REMOVED = 2;
-export const FILE_ACTION_MODIFIED = 3;
-export const FILE_ACTION_RENAMED_OLD_NAME = 4;
-export const FILE_ACTION_RENAMED_NEW_NAME = 5;
+const FILE_ACTION_ADDED = 1;
+const FILE_ACTION_REMOVED = 2;
+const FILE_ACTION_MODIFIED = 3;
+const FILE_ACTION_RENAMED_OLD_NAME = 4;
+const FILE_ACTION_RENAMED_NEW_NAME = 5;
 
 /**
  * One change as a watch is told it: what happened, and to which name, from

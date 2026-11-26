@@ -145,7 +145,7 @@ const WALK_LIMIT = 4096;
  */
 export const UNIVERSAL_EH = Symbol('universal exception state');
 
-export const THREAD_DATA = Object.freeze({
+const THREAD_DATA = Object.freeze({
     TRANSLATOR: 0, CURRENT_EXCEPTION: 8, CURRENT_CONTEXT: 12, PROCESSING_THROW: 16, SIZE: 20,
 });
 

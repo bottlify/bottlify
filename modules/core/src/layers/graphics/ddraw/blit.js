@@ -179,7 +179,7 @@ const rowOf = length=>{
  * @param {number} count
  * @returns {Uint32Array} the pixel values, little-endian words of the surface's width
  */
-export function readRow(memory, surface, y, x, count){
+function readRow(memory, surface, y, x, count){
     const bpp = surface.bytesPerPixel;
     const bytes = memory.readMemory(surface.buffer + y * surface.pitch + x * bpp, count * bpp);
     const out = new Uint32Array(count);
@@ -202,7 +202,7 @@ export function readRow(memory, surface, y, x, count){
  * @param {number} x
  * @param {Uint32Array} values
  */
-export function writeRow(memory, surface, y, x, values){
+function writeRow(memory, surface, y, x, values){
     const bpp = surface.bytesPerPixel;
     const bytes = new Uint8Array(values.length * bpp);
     for (let index = 0; index < values.length; index++)

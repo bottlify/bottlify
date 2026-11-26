@@ -67,7 +67,7 @@ export function inputRecipient(manager, event, cursor = null){
  * Where the translator is, relative to this module: built beside a package,
  * the workspace's own source otherwise.
  */
-export const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).env?.BOTTLIFY_CORK
+const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).env?.BOTTLIFY_CORK
     ?? '../../../cork/src/index.js';
 
 /**
@@ -112,7 +112,7 @@ export async function readProgramImage(filesystem, blocks, path, machine){
     return file ? programInPlaceOf(file) ?? file : systemProgramImage(path, machine);
 }
 
-export const SEVERITY = /** @type {Record<string, string>} */ ({
+const SEVERITY = /** @type {Record<string, string>} */ ({
     error: 'error',
     'bundle-unavailable': 'error',
     'library-missing': 'warn',
@@ -143,7 +143,7 @@ export const SEVERITY = /** @type {Record<string, string>} */ ({
  * it laps everything else out of the ring. Nor `bundle-fetching`, at each start and end
  * of the range requests, which the bundle's own read counts account for.
  */
-export const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching']);
+const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved', 'bundle-fetching']);
 
 /**
  * Every event the run reports also goes to its journal, so that one ordered
@@ -213,7 +213,7 @@ export function journalEvents(events, into, { shaders = false } = {}){
 /**
  * The call areas a run's journal starts with switched off; see `buildApp`.
  */
-export const CALLS_OFF = Object.freeze({
+const CALLS_OFF = Object.freeze({
     'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off', 'call.video': 'off',
     'call.input': 'off', 'call.net': 'off', 'call.com': 'off', 'call.hook': 'off',
 });

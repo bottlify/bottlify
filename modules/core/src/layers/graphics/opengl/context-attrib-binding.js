@@ -38,11 +38,11 @@ import { createBufferObject } from './objects.js';
 import { GENERIC_ATTRIBS } from './context-programs.js';
 
 /** The binding points (GL_MAX_VERTEX_ATTRIB_BINDINGS, the specification's least). */
-export const VERTEX_BINDINGS = 16;
+const VERTEX_BINDINGS = 16;
 /** GL_MAX_VERTEX_ATTRIB_RELATIVE_OFFSET, the least. */
-export const MOST_RELATIVE_OFFSET = 2047;
+const MOST_RELATIVE_OFFSET = 2047;
 /** GL_MAX_VERTEX_ATTRIB_STRIDE (4.4), the least, and WebGPU's most. */
-export const MOST_STRIDE = 2048;
+const MOST_STRIDE = 2048;
 
 /**
  * The types each format call takes (section 10.3.1, table 10.3).

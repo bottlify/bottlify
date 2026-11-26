@@ -24,7 +24,7 @@
  */
 
 /** Marks a host call's answer that is the steps themselves, for the bridge to run. */
-export const DRIVEN = Symbol('driven');
+const DRIVEN = Symbol('driven');
 
 /**
  * One guest call a step asks for.

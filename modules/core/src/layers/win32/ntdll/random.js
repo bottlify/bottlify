@@ -31,7 +31,7 @@ const TABLE = 128;
  */
 
 /** @param {number} seed @returns {number} the next value of the sequence */
-export const uniformStep = seed=>Number((BigInt(seed >>> 0) * MULTIPLIER + INCREMENT) % MODULUS);
+const uniformStep = seed=>Number((BigInt(seed >>> 0) * MULTIPLIER + INCREMENT) % MODULUS);
 
 /**
  * @param {RandomHost} host

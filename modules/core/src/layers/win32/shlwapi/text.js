@@ -25,7 +25,7 @@ import { utf16, utf16z } from '../common/utf16.js';
  * terminator alone, and a cap of its own failed StrChrW on a string of
  * 16 384 characters.
  */
-export const MAX_LENGTH = 0x7fffffff;
+const MAX_LENGTH = 0x7fffffff;
 
 /**
  * @typedef {Object} Width

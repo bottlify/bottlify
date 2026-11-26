@@ -40,9 +40,9 @@ import { fromHalf, toHalf } from '../../../system/floats.js';
  */
 
 /** sRGB to linear, and back, on values of 0 to 1. @param {number} v */
-export const toLinear = v=>(v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+const toLinear = v=>(v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
 /** @param {number} v */
-export const toSrgb = v=>(v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+const toSrgb = v=>(v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
 
 /** @param {number} v */
 const clamp = v=>(Number.isNaN(v) ? 0 : Math.min(1, Math.max(0, v)));

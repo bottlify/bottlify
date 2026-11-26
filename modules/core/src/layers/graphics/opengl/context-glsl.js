@@ -70,7 +70,7 @@ const TESSELLATION_VERSIONS = Object.freeze([400, 410, 420, 430, 440, 450, 460])
  * specification's minimums for the rest, so that a shader sizing an array by
  * gl_MaxDrawBuffers and a program asking GL_MAX_DRAW_BUFFERS agree.
  */
-export const CONTEXT_CONSTANTS = Object.freeze({
+const CONTEXT_CONSTANTS = Object.freeze({
     ...GLSL_CONSTANTS,
     gl_MaxVertexAttribs: GLSL_LIMITS.vertexAttribs,
     gl_MaxVertexUniformComponents: GLSL_LIMITS.vertexUniformComponents,
@@ -2574,7 +2574,7 @@ const BUILTIN_ATTRIBUTE_TYPES = new Map(Object.entries(BUILTIN_VARIABLES.vertex)
     .map(([name, builtin])=>[name, builtin.type]));
 
 /** MAX_DUAL_SOURCE_DRAW_BUFFERS (OpenGL 3.3): the outputs of index 1 there may be. */
-export const MAX_DUAL_SOURCE_DRAW_BUFFERS = 1;
+const MAX_DUAL_SOURCE_DRAW_BUFFERS = 1;
 
 /**
  * The calls of this file a display list does not record (section 5.4): the

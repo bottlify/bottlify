@@ -156,7 +156,7 @@ export function pathOfList(memory, list){
  * @param {number} list
  * @returns {number}
  */
-export function lastItemOf(memory, list){
+function lastItemOf(memory, list){
     let last = wholeAddress(list);
     let at = wholeAddress(list);
     for (let n = 0; at !== 0 && n < 64; n++)

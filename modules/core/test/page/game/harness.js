@@ -111,7 +111,7 @@ const callLog = [];
  * @param {any} call
  * @returns {string}
  */
-export function formatCall(call){
+function formatCall(call){
     const args = (call.args ?? []).map((/** @type {number} */ value,
         /** @type {number} */ index)=>(
         call.strings?.[index]
@@ -132,7 +132,7 @@ export function formatCall(call){
  *
  * @param {string[]} layout
  */
-export function regionsOf(layout){
+function regionsOf(layout){
     return layout.map(entry=>{
         const [name, extent] = entry.split(' ');
         const [base, size] = extent.split('+').map(Number);
@@ -151,7 +151,7 @@ export function regionsOf(layout){
  * @param {string[]} layout  As the memory layer reports it.
  * @returns {(address: number, mask?: number) => string}
  */
-export function symboliser(layout){
+function symboliser(layout){
     const regions = regionsOf(layout);
 
     return (address, mask = 0xffffffff)=>{
@@ -919,7 +919,7 @@ export function schedulePresses(app, request, say = ()=>{}){
  *
  * @param {any} app @param {PresentState} state
  */
-export function keepFrames(app, state){
+function keepFrames(app, state){
     state.frameRecords ??= new Map();
     for (const frame of app.log.frames?.(240) ?? [])
     {
@@ -978,7 +978,7 @@ function countsOf(lines){
  * @param {number} count  frames since the last row
  * @param {number} at     milliseconds since the first present
  */
-export function seriesRow(app, count, at){
+function seriesRow(app, count, at){
     const frames = app.log.profile(0).recentFrames.slice(-count);
     let ms = 0;
     let host = 0;
@@ -1283,7 +1283,7 @@ function codeOf(character){
  *
  * @param {any[]} layers
  */
-export function scalars(layers){
+function scalars(layers){
     return layers.map(layer=>{
         /** @type {Record<string, string | number>} */
         const metrics = {};
@@ -1440,7 +1440,7 @@ function desktopOf(app){
  *
  * @param {Uint8Array} bytes @param {number} tail
  */
-export function textTail(bytes, tail){
+function textTail(bytes, tail){
     const wide = bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe;
     const text = new TextDecoder(wide ? 'utf-16le' : 'latin1')
         .decode(wide ? bytes.subarray(2) : bytes);

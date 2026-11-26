@@ -109,11 +109,11 @@ export const LC_TIME_DATA = Object.freeze({ POINTERS: 43, LCID: 172, CALTYPE: 17
     REFCOUNT: 180, SIZE: 184 });
 
 /** @param {TimeNames} names @returns {string[]} the 43 strings, in the structure's order */
-export const timeNameList = names=>[...names.shortDays, ...names.days, ...names.shortMonths,
+const timeNameList = names=>[...names.shortDays, ...names.days, ...names.shortMonths,
     ...names.months, names.am, names.pm, names.shortDate, names.longDate, names.time];
 
 /** @param {string[]} list @returns {TimeNames} */
-export const timeNamesOf = list=>({
+const timeNamesOf = list=>({
     shortDays: list.slice(0, 7), days: list.slice(7, 14), shortMonths: list.slice(14, 26),
     months: list.slice(26, 38), am: list[38], pm: list[39], shortDate: list[40],
     longDate: list[41], time: list[42],

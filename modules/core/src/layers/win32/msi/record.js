@@ -49,7 +49,7 @@ export const fieldCount = record=>record.fields.length - 1;
  *
  * @param {string} text @returns {number | null}
  */
-export function integerOf(text){
+function integerOf(text){
     if (!/^-?[0-9]*$/.test(text) || text === '')
     {
         return null;
@@ -157,11 +157,6 @@ export function setStream(record, index, stream){
 export function clearRecord(record){
     record.fields.fill(null);
 }
-
-/** @param {Record} record @returns {Record} a copy that shares no stream position */
-export const copyRecord = record=>({ fields: record.fields.map(field=>(
-    field !== null && typeof field === 'object' ? { stream: field.stream, position: 0 } : field)),
-});
 
 /** @param {Uint8Array} bytes @returns {StreamSource} */
 export const bytesStream = bytes=>({

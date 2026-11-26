@@ -40,7 +40,7 @@ import { createPorts } from './ports.js';
  * .NET Framework 4.8's setup in Chrome, five processes standing: 14
  * (`roadmap/decisions.md` A245).
  */
-export const TRANSLATION_WEIGHT = 14;
+const TRANSLATION_WEIGHT = 14;
 
 /** Register names in the state block's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
@@ -87,7 +87,7 @@ const SLICE_MS = 8;
  * The rate the guest's own clock runs at (`clock: 'virtual'`): a millisecond a
  * million instructions retired, a guest of a thousand MIPS.
  */
-export const VIRTUAL_INSTRUCTIONS_PER_MS = 1e6;
+const VIRTUAL_INSTRUCTIONS_PER_MS = 1e6;
 /** The flat 32-bit code selector the segments are implicit at. */
 const FLAT_CS = 0x08;
 /** #UD, the fault an instruction the processor does not know raises. */
@@ -230,7 +230,7 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * between two counts of `SEQUENCE` (odd while it writes); `GUEST_HIGH` is -1 until it
  * is published. The last count any executor read is two words held under `LOCK`.
  */
-export const TscWord = Object.freeze({ LOCK: 0, SEQUENCE: 1, GUEST_HIGH: 2, GUEST_LOW: 3,
+const TscWord = Object.freeze({ LOCK: 0, SEQUENCE: 1, GUEST_HIGH: 2, GUEST_LOW: 3,
     LAST_HIGH: 4, LAST_LOW: 5 });
 const TSC_WORDS = 6;
 const WORD = 2 ** 32;

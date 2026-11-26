@@ -219,7 +219,7 @@ export function mergeContextGroups(into, given){
  * @param {Uint8Array} state
  * @returns {Uint8Array | null}
  */
-export function convertStateChange(state){
+function convertStateChange(state){
     const from = new DataView(state.buffer, state.byteOffset, STATE_CHANGE_SIZE);
     const event = new Uint8Array(DEBUG_EVENT_SIZE);
     const to = new DataView(event.buffer);

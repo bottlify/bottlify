@@ -48,7 +48,7 @@ const UWOP = Object.freeze({
 });
 
 /** RUNTIME_FUNCTION: three RVAs, the function's start and end and its unwind data. */
-export const RUNTIME_FUNCTION_SIZE = 12;
+const RUNTIME_FUNCTION_SIZE = 12;
 
 /** RSP's number, as the codes and the encoding name the registers. */
 const RSP = 4;

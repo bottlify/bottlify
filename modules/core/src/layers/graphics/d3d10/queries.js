@@ -49,7 +49,7 @@ export const D3D10_ASYNC_GETDATA_DONOTFLUSH = 0x1;
  *
  * @type {Readonly<Record<number, number>>}
  */
-export const QUERY_DATA_SIZE = Object.freeze({
+const QUERY_DATA_SIZE = Object.freeze({
     [D3D10_QUERY.EVENT]: 4,
     [D3D10_QUERY.OCCLUSION]: 8,
     [D3D10_QUERY.TIMESTAMP]: 8,
@@ -71,7 +71,7 @@ export const QUERY_DATA_SIZE = Object.freeze({
  * @param {number} kind @param {boolean} eleven
  * @returns {number}
  */
-export function dataSizeOf(kind, eleven){
+function dataSizeOf(kind, eleven){
     if (eleven && kind === D3D10_QUERY.PIPELINE_STATISTICS)
     {
         return 88;
@@ -106,7 +106,7 @@ const TIMESTAMP_FREQUENCY = 1_000_000_000n;
  * @param {number} count  vertices or indices
  * @returns {number} how many primitives the input assembler makes of them
  */
-export function primitivesOf(topology, count){
+function primitivesOf(topology, count){
     switch (topology)
     {
         case D3D10_PRIMITIVE_TOPOLOGY.POINTLIST:

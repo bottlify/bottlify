@@ -424,7 +424,7 @@ const NORMAL_BASE_PRIORITY = 8;
  * @param {(object: any) => number} addressOf @param {boolean} extended
  * @returns {Uint8Array}
  */
-export function systemHandleInformation(handles, owner, addressOf, extended){
+function systemHandleInformation(handles, owner, addressOf, extended){
     const listed = handles.filter(each=>KERNEL_TYPE_OF[each.type] !== undefined);
     const { HEADER, SIZE } = extended ? HANDLE_ENTRY_EX : HANDLE_ENTRY;
     const bytes = new Uint8Array(HEADER + listed.length * SIZE);

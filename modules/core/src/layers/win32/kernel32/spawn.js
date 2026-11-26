@@ -266,7 +266,7 @@ const directoryOf = path=>path.slice(0, Math.max(
  * @param {string | null} named  lpApplicationName, null for NULL.
  * @param {string} line
  */
-export function createRefusal(named, line){
+function createRefusal(named, line){
     if (named !== null)
     {
         return named === '' ? ERROR_PATH_NOT_FOUND : 0;

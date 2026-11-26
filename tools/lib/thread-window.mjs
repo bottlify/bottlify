@@ -85,7 +85,7 @@ export function threadWindow(before, row, frames = row.frames){
  * @param {any} before @param {any} row @param {number} frames
  * @returns {string[]}
  */
-export function waitWindow(before, row, frames){
+function waitWindow(before, row, frames){
     if (typeof row.sync?.waits !== 'string' || typeof before.sync?.waits !== 'string')
     {
         return ['host waits a frame: not measured'];

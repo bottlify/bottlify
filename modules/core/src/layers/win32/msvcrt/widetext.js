@@ -287,31 +287,6 @@ export function wideStringAt(readMemory, pointer, limit = MAX_WIDE){
 }
 
 /**
- * Two strings compared unit by unit, as far as the first two that differ,
- * a terminator, or `limit` units -- read no further, as the n-bounded
- * comparisons stop there: the difference of the first two that differ
- * after `map`, or 0.
- *
- * @param {(address: number, length: number) => Uint8Array} readMemory
- * @param {number} left @param {number} right @param {1 | 2} unit
- * @param {number} limit @param {(value: number) => number} [map]
- */
-export function compareUnitsAt(readMemory, left, right, unit, limit, map = value=>value){
-    const a = unitsAt(readMemory, left, unit, limit);
-    const b = unitsAt(readMemory, right, unit, limit);
-    for (let at = 0; at < limit; at++)
-    {
-        const x = map(a.next().value ?? 0);
-        const y = map(b.next().value ?? 0);
-        if (x !== y || x === 0)
-        {
-            return x - y;
-        }
-    }
-    return 0;
-}
-
-/**
  * A string's UTF-16 units.
  *
  * @param {string} text

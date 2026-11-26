@@ -34,7 +34,7 @@ export const CATEGORIES = {
     bench: "cork's stand: the same work on every machine and browser, and its speed on this one",
     bundles: 'make, inspect and audit bottles, archives and installers',
     gates: 'two paths of the engine compared on a real GPU (npm run cdp:*)',
-    checks: 'the rules of the code check:boundaries holds (and one run by hand)',
+    checks: 'the rules of the code check:boundaries holds, and audits of the code run by hand',
     generators: 'scripts that rewrite a committed file from a specification or a processor',
     ci: "the repository's own jobs in its workflows",
     lib: 'modules the tools share, never run alone',

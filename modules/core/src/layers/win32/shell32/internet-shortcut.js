@@ -24,7 +24,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
 
-export const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
+const CLSID_INTERNET_SHORTCUT = '{FBF23B40-E3F0-101B-8488-00AA003E56F8}';
 export const IID_IURL_A = '{FBF23B80-E3F0-101B-8488-00AA003E56F8}';
 export const IID_IURL_W = '{CABB0DA0-DA57-11CF-9974-0020AFD79762}';
 export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
@@ -123,7 +123,7 @@ export function urlOfShortcut(text){
  *
  * @param {string} url
  */
-export const shortcutText = url=>`[InternetShortcut]\r\nURL=${url}\r\n`;
+const shortcutText = url=>`[InternetShortcut]\r\nURL=${url}\r\n`;
 
 /**
  * The internet shortcut class, ready to be registered.

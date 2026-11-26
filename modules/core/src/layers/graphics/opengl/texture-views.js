@@ -110,7 +110,7 @@ export function viewCompatible(original, internal){
  *
  * @param {number} target @returns {'faces' | 'rows' | 'slices' | 'single'}
  */
-export function layersKept(target){
+function layersKept(target){
     if (target === GL.TEXTURE_CUBE_MAP)
     {
         return 'faces';
@@ -145,7 +145,7 @@ export function layerCount(texture){
  * @param {boolean} rows  a 1D array's layers, which are its rows
  * @returns {import('./objects.js').TextureLevel}
  */
-export function sliceLevel(source, from, count, rows){
+function sliceLevel(source, from, count, rows){
     const width = source.width;
     const height = rows ? count : source.height;
     const depth = rows ? 1 : count;
@@ -196,7 +196,7 @@ export function sliceLevel(source, from, count, rows){
  * @param {import('./objects.js').TextureLevel} source @param {number} internal
  * @returns {import('./objects.js').TextureLevel | null}
  */
-export function reformatLevel(source, internal){
+function reformatLevel(source, internal){
     if (source.internalFormat === internal)
     {
         return source;

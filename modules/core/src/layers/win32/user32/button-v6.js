@@ -24,7 +24,7 @@ export const BCM_SETIMAGELIST = 0x1602;
 export const BCM_GETIMAGELIST = 0x1603;
 export const BCM_SETTEXTMARGIN = 0x1604;
 export const BCM_GETTEXTMARGIN = 0x1605;
-export const BCM_SETDROPDOWNSTATE = 0x1606;
+const BCM_SETDROPDOWNSTATE = 0x1606;
 export const BCM_SETSPLITINFO = 0x1607;
 export const BCM_GETSPLITINFO = 0x1608;
 export const BCM_SETNOTE = 0x1609;
@@ -32,9 +32,9 @@ export const BCM_GETNOTE = 0x160a;
 export const BCM_GETNOTELENGTH = 0x160b;
 
 export const BS_SPLITBUTTON = 0x0c;
-export const BS_DEFSPLITBUTTON = 0x0d;
+const BS_DEFSPLITBUTTON = 0x0d;
 export const BS_COMMANDLINK = 0x0e;
-export const BS_DEFCOMMANDLINK = 0x0f;
+const BS_DEFCOMMANDLINK = 0x0f;
 
 const BS_TYPEMASK = 0x0f;
 const BS_PUSHBUTTON = 0x00;

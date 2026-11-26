@@ -335,7 +335,7 @@ const surfaceRefusal = (key, own)=>(own !== '7' && key !== IID_IDirectDrawColorC
  * @param {string} id
  * @returns {1 | 2 | 4 | 7 | null}
  */
-export function versionOf(id){
+function versionOf(id){
     const found = /** @type {(1 | 2 | 4 | 7)[]} */ ([1, 2, 4, 7]).find(
         version=>GENERATIONS[version].id === id);
     return found ?? null;

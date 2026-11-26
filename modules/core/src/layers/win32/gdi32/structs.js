@@ -186,7 +186,7 @@ export const TEXTMETRICA = Object.freeze({
  * TEXTMETRICW: TEXTMETRICA's LONGs, then the four characters as WCHARs, so
  * everything after them sits four bytes further on and the whole is 60.
  */
-export const TEXTMETRICW = Object.freeze({
+const TEXTMETRICW = Object.freeze({
     tmFirstChar: 44,
     tmLastChar: 46,
     tmDefaultChar: 48,
@@ -245,7 +245,7 @@ export function paletteEntryToPixel(entry){
  * @param {number} address
  * @returns {number} the WORD at that address, unsigned
  */
-export function readU16(memory, address){
+function readU16(memory, address){
     const bytes = memory.readMemory(address, 2);
     return (bytes[0] | (bytes[1] << 8)) & 0xffff;
 }
@@ -268,7 +268,7 @@ export function readU32(memory, address){
  * @param {StructMemory} memory
  * @param {number} address
  */
-export function readI32(memory, address){
+function readI32(memory, address){
     return readU32(memory, address) | 0;
 }
 

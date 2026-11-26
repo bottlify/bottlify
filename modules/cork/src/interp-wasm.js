@@ -63,7 +63,7 @@ export const WasmExit = Object.freeze({
 /** Hot-count slots: a byte for every four bytes of the first sixteen megabytes, wrapping. */
 export const HOT_SLOTS = 1 << 22;
 /** Starts the ring of recent ones holds. */
-export const RING_STARTS = 256;
+const RING_STARTS = 256;
 /** Bytes the tier keeps past the tables: the counts, the ring, the ring's next index and
  * what its runs from translated code have retired. */
 export const WASM_INTERPRETER_AREA = HOT_SLOTS + RING_STARTS * 4 + 8;
@@ -77,7 +77,7 @@ export const WASM_INTERPRETER_STACK = 8192;
 
 /** The transcendentals the module imports: the host's, as the JavaScript
  * interpreter's and translated code's are, so every tier computes the same. */
-export const HOST_MATH = Object.freeze({
+const HOST_MATH = Object.freeze({
     sin: Math.sin, cos: Math.cos, tan: Math.tan, atan2: Math.atan2, expm1: Math.expm1,
     log2: Math.log2, log1p: Math.log1p,
 });

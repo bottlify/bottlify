@@ -33,7 +33,7 @@
 
 import { DIR_BASERELOC, rvaToFileOffset } from './pe.js';
 
-export const DIR_TLS = 9;
+const DIR_TLS = 9;
 
 /**
  * No real image has more than a handful. The cap is not defence against a long

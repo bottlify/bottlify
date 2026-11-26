@@ -63,10 +63,10 @@ const HDS_HIDDEN = 0x0008;
 const HDS_DRAGDROP = 0x0040;
 
 /** Styles. */
-export const LVS_ICON = 0x0000;
+const LVS_ICON = 0x0000;
 export const LVS_REPORT = 0x0001;
-export const LVS_SMALLICON = 0x0002;
-export const LVS_LIST = 0x0003;
+const LVS_SMALLICON = 0x0002;
+const LVS_LIST = 0x0003;
 const LVS_TYPEMASK = 0x0003;
 export const LVS_SINGLESEL = 0x0004;
 const LVS_SORTASCENDING = 0x0010;
@@ -128,10 +128,10 @@ const CCM_GETUNICODEFORMAT = 0x2006;
 export const LVITEM = Object.freeze({ mask: 0, iItem: 4, iSubItem: 8, state: 12, stateMask: 16,
     pszText: 20, cchTextMax: 24, iImage: 28, lParam: 32, iIndent: 36, SIZE: 60 });
 export const LVIF_TEXT = 0x0001;
-export const LVIF_IMAGE = 0x0002;
+const LVIF_IMAGE = 0x0002;
 export const LVIF_PARAM = 0x0004;
 export const LVIF_STATE = 0x0008;
-export const LVIF_INDENT = 0x0010;
+const LVIF_INDENT = 0x0010;
 const LVIF_DI_SETITEM = 0x1000;
 export const LVIS_FOCUSED = 0x0001;
 export const LVIS_SELECTED = 0x0002;
@@ -140,10 +140,10 @@ const I_IMAGECALLBACK = -1;
 /** LVCOLUMN, the same shape in both spellings. */
 export const LVCOLUMN = Object.freeze({ mask: 0, fmt: 4, cx: 8, pszText: 12, cchTextMax: 16,
     iSubItem: 20, iImage: 24, iOrder: 28, cxMin: 32, SIZE: 44 });
-export const LVCF_FMT = 0x0001;
+const LVCF_FMT = 0x0001;
 export const LVCF_WIDTH = 0x0002;
 export const LVCF_TEXT = 0x0004;
-export const LVCF_SUBITEM = 0x0008;
+const LVCF_SUBITEM = 0x0008;
 const LVCF_IMAGE = 0x0010;
 const LVCF_ORDER = 0x0020;
 const LVCF_MINWIDTH = 0x0040;

@@ -115,7 +115,7 @@ const SAMPLER_TYPE = Object.freeze({
 const COMPONENT = 'xyzw';
 
 /** Which bind group each stage's constants live in, and where the samplers go. */
-export const BIND_GROUP = Object.freeze({ VERTEX_CONSTANTS: 0, PIXEL_CONSTANTS: 1, SAMPLERS: 2 });
+const BIND_GROUP = Object.freeze({ VERTEX_CONSTANTS: 0, PIXEL_CONSTANTS: 1, SAMPLERS: 2 });
 
 /**
  * Where a vertex shader's samplers start in the sampler group: past the
@@ -225,7 +225,7 @@ const isCoordinate = location=>location >= varyingLocation(D3DDECLUSAGE.TEXCOORD
  * @param {readonly string[]} sprites  Outputs a sprite's coordinate goes to.
  * @returns {string[]}
  */
-export function pointQuadLines(corner, size, limits, pixel, sprites){
+function pointQuadLines(corner, size, limits, pixel, sprites){
     return [
         '    var pointCorners = array<vec2f, 6>(vec2f(-1.0, -1.0), vec2f(1.0, -1.0),',
         '        vec2f(-1.0, 1.0), vec2f(-1.0, 1.0), vec2f(1.0, -1.0), vec2f(1.0, 1.0));',
@@ -250,7 +250,7 @@ export const FOG_RANGE_LOCATION = 11;
  *
  * @param {number} location @param {boolean | undefined} flat
  */
-export const colourInterpolation = (location, flat)=>
+const colourInterpolation = (location, flat)=>
     (flat && location <= 1 ? ' @interpolate(flat)' : '');
 
 /**

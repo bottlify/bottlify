@@ -64,8 +64,8 @@ import { BUFFER_ROW } from './objects.js';
 
 /** Where the stages' uniform blocks are bound. */
 export const GLSL_VERTEX_BINDING = 17;
-export const GLSL_FRAGMENT_BINDING = 18;
-export const GLSL_FRAGMENT_GROUP = 1;
+const GLSL_FRAGMENT_BINDING = 18;
+const GLSL_FRAGMENT_GROUP = 1;
 export const GLSL_GEOMETRY_BINDING = 19;
 /** Where a compute shader's own uniforms are bound (4.3), in group 0 of its pass. */
 export const GLSL_COMPUTE_BINDING = 20;
@@ -230,7 +230,7 @@ export const vertexPassRegisters = program=>(program.tessEvaluation
  * @param {LinkedProgram} program
  * @returns {{ path: string, type: GlslType }[]}
  */
-export const tessellationInputs = program=>((program.tessControl ? program.controlInputs
+const tessellationInputs = program=>((program.tessControl ? program.controlInputs
     : program.evaluationInputs) ?? []).map(input=>({ path: input.fromPath, type: input.type }));
 
 /**
@@ -539,7 +539,7 @@ ${fields.map((f, k)=>`    @location(${k}) ${f.interpolate ?? (f.flat
 }
 
 /** How many vec4 slots a value takes in a block. @param {GlslType} type @returns {number} */
-export function slotsOf(type){
+function slotsOf(type){
     switch (type.kind)
     {
         case 'matrix':
@@ -4486,6 +4486,6 @@ const CONSTANTS = new Set(Object.entries(BUILTIN_VARIABLES.vertex)
  *
  * @type {Map<string, GlslType>}
  */
-export const STATE_UNIFORMS = new Map(Object.entries(BUILTIN_VARIABLES.vertex)
+const STATE_UNIFORMS = new Map(Object.entries(BUILTIN_VARIABLES.vertex)
     .filter(([, builtin])=>builtin.role === 'uniform').map(([name, builtin])=>[name,
         builtin.type]));

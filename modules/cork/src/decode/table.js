@@ -158,7 +158,7 @@ export class Group {
 }
 
 /** @param {(Entry | ByMod | null | typeof SYS)[]} entries */
-export const G = entries=>new Group(entries);
+const G = entries=>new Group(entries);
 
 /** A `0F` entry whose meaning the mandatory prefix picks. */
 export class Prefixed {
@@ -172,7 +172,7 @@ export class Prefixed {
 }
 
 /** @param {ConstructorParameters<typeof Prefixed>[0]} variants */
-export const S = variants=>new Prefixed(variants);
+const S = variants=>new Prefixed(variants);
 
 /** An encoding a user-mode program has no business executing. */
 export const SYS = Symbol('not user mode');

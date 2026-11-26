@@ -392,7 +392,7 @@ const BLOCK_COPY_FAMILIES = new Set(/** @type {number[]} */ ([DXGI_FORMAT.R32G32
  *
  * @param {number} a @param {number} b
  */
-export function blockCopyable(a, b){
+function blockCopyable(a, b){
     const one = FORMAT_INFO[a];
     const other = FORMAT_INFO[b];
     if (!one || !other || (one.blockEdge === 1) === (other.blockEdge === 1))
@@ -680,7 +680,7 @@ function elementAlignment(format){
  *     [options]  `api` is the version whose entry point made it; `featureLevel` the
  *     level Direct3D 11 made it at
  */
-export function createDevice(options = {}){
+function createDevice(options = {}){
     const multisampleQualityLevels = options.multisampleQualityLevels
         ?? webgpuMultisampleQualityLevels;
     const caps = { multisampleQualityLevels };

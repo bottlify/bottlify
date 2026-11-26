@@ -39,7 +39,7 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * Every serial call, with its arguments' bytes: the ones a program sets a
  * port up with, the ones it reads its state with, and the line controls.
  */
-export const SERIAL_CALLS = Object.freeze({
+const SERIAL_CALLS = Object.freeze({
     GetCommState: 8,
     SetCommState: 8,
     SetupComm: 12,
@@ -65,7 +65,7 @@ export const SERIAL_CALLS = Object.freeze({
  * arguments' bytes: no port by any name is here, so each fails as for a
  * port that does not exist, ERROR_FILE_NOT_FOUND as CreateFile gives for one.
  */
-export const PORT_CALLS = Object.freeze({
+const PORT_CALLS = Object.freeze({
     GetDefaultCommConfigA: 12,
     GetDefaultCommConfigW: 12,
     SetDefaultCommConfigA: 12,

@@ -50,7 +50,7 @@ import { Realm } from './realm.js';
  *
  * @type {Readonly<EngineVersion>}
  */
-export const JSCRIPT_5_6 = Object.freeze({ major: 5, minor: 6, build: 8835 });
+const JSCRIPT_5_6 = Object.freeze({ major: 5, minor: 6, build: 8835 });
 
 /**
  * @typedef {Object} JScriptOptions

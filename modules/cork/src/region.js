@@ -506,7 +506,7 @@ export const SITE = 2 ** 48;
 const SITES = 31;
 
 /** The most blocks the copies of a region's callees come to in all. */
-export const SITE_BLOCKS = 24;
+const SITE_BLOCKS = 24;
 
 /**
  * The guest address of a block's key: the key itself, or a copy's less its

@@ -90,7 +90,7 @@ export const SHARED_MODULE_BYTES = 256 << 20;
  *
  * @param {string} [agent]  the thread's agent string
  */
-export function keepsCodeByBytes(agent = globalThis.navigator?.userAgent ?? ''){
+function keepsCodeByBytes(agent = globalThis.navigator?.userAgent ?? ''){
     return !runsJavaScriptCore(agent);
 }
 

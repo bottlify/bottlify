@@ -72,7 +72,7 @@ export function define(interp, name, min, max, fn, flags = {}){
  *
  * @param {Interpreter} interp @param {string} name @param {Value} value
  */
-export function constant(interp, name, value){
+function constant(interp, name, value){
     interp.builtins.set(name.toLowerCase(), { name, value });
 }
 

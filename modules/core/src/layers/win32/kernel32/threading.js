@@ -261,7 +261,7 @@ const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2;
  *
  * @param {any} kernel @param {any} thread
  */
-export const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
+const threadObjectLives = (kernel, thread)=>thread.state !== 'terminated'
     || kernel.handles?.holds?.(thread) === true;
 
 /**

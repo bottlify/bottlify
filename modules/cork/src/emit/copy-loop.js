@@ -41,7 +41,7 @@ const NOT_EQUAL = 5;
  * lie on at most two pages, so four flag loads test it. A longer copy runs the
  * hoisted loop, whose window test is paid once a page there.
  */
-export const COPY_RUN_LIMIT = 4096;
+const COPY_RUN_LIMIT = 4096;
 
 /**
  * @typedef {object} CopyLoop

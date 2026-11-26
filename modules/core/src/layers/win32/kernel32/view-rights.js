@@ -66,7 +66,7 @@ export function viewProtection(access){
  * @param {number} page  PAGE_*
  * @returns {number}
  */
-export function pageAccess(page){
+function pageAccess(page){
     switch (page & PAGE_MASK)
     {
         case 0x02: case 0x08: return 1;

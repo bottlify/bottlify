@@ -52,7 +52,7 @@ function closeLeftBehind(profileRoot){
  * with memory paged the whole VM until it stopped answering; with a ceiling it
  * is the browser that dies of it, and the run reports that.
  */
-export function memoryLimitMb(){
+function memoryLimitMb(){
     const said = process.env.CDP_TEST_MEMORY_MB;
     return said !== undefined && said !== '' ? Number(said) : 8192;
 }

@@ -35,9 +35,6 @@ const SCRIPT_CODES = ['Zzzz', 'Zyyy', 'Zinh', 'Arab', 'Armi', 'Armn', 'Avst', 'B
 /** @type {Record<string, number>} */
 export const SCRIPT = Object.freeze(Object.fromEntries(SCRIPT_CODES.map((code, i)=>[code, i])));
 
-/** The script's ISO 15924 code. @param {number} script */
-export const scriptCode = script=>SCRIPT_CODES[script] ?? 'Zzzz';
-
 /**
  * Blocks of the Basic Multilingual Plane by script: [first, last, code].
  * What is in none of them is Common.

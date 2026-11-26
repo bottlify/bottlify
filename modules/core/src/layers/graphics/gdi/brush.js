@@ -32,9 +32,9 @@ export const BS_PATTERN = 3;
 export const HS_HORIZONTAL = 0;
 export const HS_VERTICAL = 1;
 export const HS_FDIAGONAL = 2;
-export const HS_BDIAGONAL = 3;
+const HS_BDIAGONAL = 3;
 export const HS_CROSS = 4;
-export const HS_DIAGCROSS = 5;
+const HS_DIAGCROSS = 5;
 
 /** Background modes. */
 export const TRANSPARENT = 1;

@@ -347,7 +347,7 @@ export function restoreFloatImages(context, images){
  *
  * @param {any} context @returns {context is FpuContext}
  */
-export function hasFpuBlock(context){
+function hasFpuBlock(context){
     return context?.block instanceof Uint8Array
         && typeof context.layout?.x87 === 'number' && typeof context.layout?.xmm === 'number';
 }

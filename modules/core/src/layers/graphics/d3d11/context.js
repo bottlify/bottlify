@@ -34,7 +34,7 @@ import { bindingsOf, copyPipeline, createPipelineState } from '../d3d10/pipeline
  * bindings' own setters and getters (`pipeline.js`): what an immediate
  * context hands to the device and a deferred one records.
  */
-export const CONTEXT_COMMANDS = Object.freeze([
+const CONTEXT_COMMANDS = Object.freeze([
     'Draw', 'DrawIndexed', 'DrawInstanced', 'DrawIndexedInstanced', 'DrawAuto',
     'DrawInstancedIndirect', 'DrawIndexedInstancedIndirect', 'Dispatch', 'DispatchIndirect',
     'CopySubresourceRegion', 'CopyResource', 'UpdateSubresource', 'CopyStructureCount',

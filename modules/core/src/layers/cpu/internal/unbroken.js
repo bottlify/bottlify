@@ -17,7 +17,7 @@
  */
 
 /** Ranges the table holds: a routine block per device and per library, and room to spare. */
-export const UNBROKEN_RANGES = 4096;
+const UNBROKEN_RANGES = 4096;
 
 /**
  * How a run that ended inside one goes on: a step at a time, each ending at the

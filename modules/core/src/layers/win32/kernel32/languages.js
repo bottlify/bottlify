@@ -17,7 +17,7 @@
  */
 
 /** @type {ReadonlyMap<number, string>} */
-export const LANGUAGE_NAMES = new Map([
+const LANGUAGE_NAMES = new Map([
     [0x0000, 'Language Neutral'],
     [0x0401, 'Arabic (Saudi Arabia)'],
     [0x0402, 'Bulgarian'],
@@ -103,7 +103,7 @@ export const LOCALE_TAGS = new Map([
 ]);
 
 /** @param {number} language  A LANGID; only its low word is one. */
-export const languageName = language=>LANGUAGE_NAMES.get(language & 0xffff)
+const languageName = language=>LANGUAGE_NAMES.get(language & 0xffff)
     ?? /** @type {string} */ (LANGUAGE_NAMES.get(0));
 
 /**

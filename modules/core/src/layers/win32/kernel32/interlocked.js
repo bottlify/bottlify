@@ -155,7 +155,7 @@ export const INTERLOCKED = Object.freeze({
  *     ret 20
  * At 64 bits: mov rax, r8; lock cmpxchg [rcx], rdx; ret.
  */
-export const COMPARE_EXCHANGE64_CODE = Uint8Array.of(
+const COMPARE_EXCHANGE64_CODE = Uint8Array.of(
     0x53, 0x56,
     0x8b, 0x74, 0x24, 0x0c,
     0x8b, 0x5c, 0x24, 0x10,
@@ -166,7 +166,7 @@ export const COMPARE_EXCHANGE64_CODE = Uint8Array.of(
     0x5e, 0x5b,
     0xc2, 0x14, 0x00,
 );
-export const LONG_COMPARE_EXCHANGE64_CODE = Uint8Array.of(
+const LONG_COMPARE_EXCHANGE64_CODE = Uint8Array.of(
     0x4c, 0x89, 0xc0, 0xf0, 0x48, 0x0f, 0xb1, 0x11, 0xc3);
 
 /**

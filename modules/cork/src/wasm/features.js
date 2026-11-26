@@ -95,8 +95,6 @@ export function features(){
     };
 }
 
-export { ValType };
-
 /** The bytes the lane probe leaves in the window's last page, the same from every probe. */
 const LANE_PATTERN = Uint8Array.from({ length: 16 * 32 }, (_, at)=>(at * 37 + 11) & 255);
 

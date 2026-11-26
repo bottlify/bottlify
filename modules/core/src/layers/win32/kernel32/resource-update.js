@@ -161,7 +161,7 @@ const distinct = keys=>keys
  * @param {Resource[]} resources @param {number} base
  * @returns {Uint8Array}
  */
-export function buildResourceSection(resources, base){
+function buildResourceSection(resources, base){
     const types = distinct(resources.map(resource=>resource.type));
     /** @type {{ type: ResourceKey, names: { name: ResourceKey, items: Resource[] }[] }[]} */
     const tree = types.map(type=>{

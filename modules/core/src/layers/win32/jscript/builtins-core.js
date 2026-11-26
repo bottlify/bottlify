@@ -26,7 +26,7 @@ import { isPrimitive, toBoolean } from './realm.js';
  */
 
 /** @param {number} n @returns {number} ToInt32 (9.5). */
-export const toInt32 = n=>n | 0;
+const toInt32 = n=>n | 0;
 
 /** @param {number} n @returns {number} ToUint32 (9.6). */
 export const toUint32 = n=>n >>> 0;
@@ -38,7 +38,7 @@ export const toUint32 = n=>n >>> 0;
  * @param {Realm} realm @param {any} list
  * @returns {Generator<unknown, any[], unknown>}
  */
-export function* listFromArrayLike(realm, list){
+function* listFromArrayLike(realm, list){
     if (list === null || list === undefined)
     {
         return [];
@@ -117,7 +117,7 @@ const LEADING_SPACE = /^[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\
  *
  * @param {string} input @param {number} radix @returns {number}
  */
-export function parseInteger(input, radix){
+function parseInteger(input, radix){
     let text = input.replace(LEADING_SPACE, '');
     let sign = 1;
     if (text[0] === '-' || text[0] === '+')
@@ -187,7 +187,7 @@ function uriFunction(realm, transform, code){
  *
  * @param {JSFunction} fn @returns {string}
  */
-export function functionText(fn){
+function functionText(fn){
     if (fn.node !== null)
     {
         return fn.node.text;

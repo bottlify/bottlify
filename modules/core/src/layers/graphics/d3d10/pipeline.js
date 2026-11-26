@@ -81,7 +81,7 @@ function readsOutput(view, output, depth){
 }
 
 /** @param {number} count @returns {any[]} */
-export function emptySlots(count){
+function emptySlots(count){
     return new Array(count).fill(null);
 }
 
@@ -95,7 +95,7 @@ export function emptySlots(count){
  * @param {any} object
  * @returns {any | null}
  */
-export function stillAlive(object){
+function stillAlive(object){
     return object && (object.refCount > 0 || object.bound > 0) ? object : null;
 }
 
@@ -140,7 +140,7 @@ function handedOut(object){
 }
 
 /** The six shader stages, by their two-letter prefix. */
-export const STAGES = Object.freeze(/** @type {const} */ (['vs', 'hs', 'ds', 'gs', 'ps', 'cs']));
+const STAGES = Object.freeze(/** @type {const} */ (['vs', 'hs', 'ds', 'gs', 'ps', 'cs']));
 
 /** Every slot a pixel shader and a compute shader may write through a view. */
 const UAV_SLOTS = D3D11_LIMITS.UNORDERED_ACCESS_SLOTS_1;

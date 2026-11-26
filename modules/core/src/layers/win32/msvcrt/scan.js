@@ -91,7 +91,7 @@ function integerWidth(modifier, standard = false, pointerBytes = 4){
  * @param {string} field
  * @returns {{ value: number, end: number, failed?: boolean } | null}
  */
-export function scanStandardFloat(field){
+function scanStandardFloat(field){
     let at = /^[+-]/.test(field) ? 1 : 0;
     /** @param {string} spelt */
     const word = spelt=>{

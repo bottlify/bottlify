@@ -29,7 +29,7 @@
 
 import {
     ByMod, CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, THREE_BYTE_38, THREE_BYTE_3A,
-    TWO_BYTE, X87, conditionReads,
+    TWO_BYTE, X87,
 } from './table.js';
 
 /** The longest an instruction may be; the processor faults past it. */
@@ -40,7 +40,7 @@ export const REGISTERS = Object.freeze(['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp'
 /** The sixteen general registers of long mode by index. */
 export const REGISTERS64 = Object.freeze(['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
     'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']);
-export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
+const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
 
 /**
  * @typedef {Object} Operand
@@ -1061,4 +1061,4 @@ function fixedOperand(form, operandSize, segmentOverride, addressSize){
     }
 }
 
-export { CONDITIONS, conditionReads };
+export { CONDITIONS };

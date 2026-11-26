@@ -619,7 +619,7 @@ const NOTHING = Object.freeze({ held: 0, empty: 0, c1: false });
  * @param {Instruction} instruction @param {StackState} state
  * @returns {StackUse}
  */
-export function stackUse(instruction, state){
+function stackUse(instruction, state){
     const { op, operands } = instruction;
     const [dst, src] = operands;
     const at = (/** @type {number} */ i)=>(state.top + i) & 7;
@@ -768,7 +768,7 @@ export function stackUse(instruction, state){
  * @param {Shape} known @param {StackUse} use @param {StackState} state
  * @returns {Shape}
  */
-export function advance(known, use, state){
+function advance(known, use, state){
     let { held, empty, c1 } = known;
     if (use.pushes)
     {
@@ -833,7 +833,7 @@ const movesMask = instruction=>instruction.op === 'emms'
  * @returns {{ known: Shape[], needs: (Shape | null)[] }}  `known`: at each block's start;
  *     `needs`: what each block the region can be entered at tests, null where it tests nothing
  */
-export function planStack(region, states, cut, speculate, callReturn = false){
+function planStack(region, states, cut, speculate, callReturn = false){
     const blocks = region.blocks;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
     const entryState = states[index.get(region.entry) ?? 0];
@@ -1063,7 +1063,7 @@ export function planStack(region, states, cut, speculate, callReturn = false){
  * @param {boolean} [callReturn]
  * @returns {boolean[]}  by block, whether its start knows the control word
  */
-export function planPrecision(region, states, cut, callReturn = false){
+function planPrecision(region, states, cut, callReturn = false){
     const blocks = region.blocks;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
     const returns = inlineReturns(region);
@@ -1142,7 +1142,7 @@ export function planPrecision(region, states, cut, callReturn = false){
  *     the empty-mask bits it takes on stale, or -1 where it takes nothing, not the top
  *     either; keeps: by block, what its end may leave stale for every block it goes on to
  */
-export function planCarried(region, states, cut, guarded, shapes){
+function planCarried(region, states, cut, guarded, shapes){
     const blocks = region.blocks;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
     const returns = inlineReturns(region);
@@ -1331,7 +1331,7 @@ function floatTempOf(e, n){
  *
  * @param {E} e @param {boolean} commit
  */
-export function x87WriteSingles(e, commit){
+function x87WriteSingles(e, commit){
     const x = e.x87;
     for (let k = 0; k < 8; k++)
     {
@@ -1421,7 +1421,7 @@ export function analyseX87(region, leaveOut, entryTop, checked, callReturn = fal
  * @param {Map<number, number[]>} returns  by `ret` block, the return addresses it jumps to
  * @returns {{ held: number, numeric: number }[]}
  */
-export function planFloats(region, analysis, returns){
+function planFloats(region, analysis, returns){
     const { states, shapes, cut, guarded } = analysis;
     const { blocks } = region;
     const indexOf = new Map(blocks.map((block, index)=>[block.start, index]));

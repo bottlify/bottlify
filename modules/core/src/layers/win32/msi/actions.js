@@ -47,12 +47,9 @@ import {
     schedule, makeDirectories, create, readFile, writeFile, componentOf, installing,
     componentWide, registryPath, registryRoot, registryValue,
 } from './steps.js';
-export { setIniValue } from './ini.js';
 
 export {
-    ERROR_SUCCESS, ERROR_FUNCTION_NOT_CALLED, ERROR_INSTALL_USEREXIT, ERROR_INSTALL_FAILURE,
-    ERROR_INSTALL_SUSPEND, ERROR_NO_MORE_ITEMS, ERROR_INVALID_HANDLE_STATE, INSTALLMESSAGE,
-    message, errorMessage, schedule, makeDirectories, readFile, writeFile, registryValue,
+    INSTALLMESSAGE, readFile, writeFile,
 } from './steps.js';
 
 /** A File row's attributes that change how it is installed. */
@@ -1015,7 +1012,7 @@ async function nothing(engine){
  *
  * @type {Record<string, (engine: Engine) => Promise<number>>}
  */
-export const STANDARD_ACTIONS = {
+const STANDARD_ACTIONS = {
     ...REMOVAL_ACTIONS,
     ...CLASS_ACTIONS,
     ...SYSTEM_ACTIONS,

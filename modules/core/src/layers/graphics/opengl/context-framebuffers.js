@@ -59,7 +59,7 @@ const MIPMAP_TARGETS = new Set([GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_3D, GL.
 import { GLSL_LIMITS } from './glsl-builtins.js';
 
 /** The colour attachment points. */
-export const COLOR_ATTACHMENTS = GLSL_LIMITS.drawBuffers;
+const COLOR_ATTACHMENTS = GLSL_LIMITS.drawBuffers;
 
 /** The cube map faces, in the order a cube's levels are kept. */
 const CUBE_FACES = [0x8515, 0x8516, 0x8517, 0x8518, 0x8519, 0x851a];
@@ -74,7 +74,7 @@ const isColour = point=>point >= GL.COLOR_ATTACHMENT0
  * @param {FramebufferObject} fbo
  * @returns {number} GL_FRAMEBUFFER_COMPLETE or the reason it is not
  */
-export function framebufferStatus(fbo){
+function framebufferStatus(fbo){
     if (fbo.attachments.size === 0)
     {
         // Without attachments, its default size makes it one.

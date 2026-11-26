@@ -11,7 +11,6 @@ import { createReferenceCount } from './resources.js';
 import {
     D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, MAX_DECLARATION_LENGTH,
     createVertexDeclaration, declarationEnd, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
-    strideOf,
     validateElements,
 } from './declaration.js';
 
@@ -52,7 +51,6 @@ test('a format becomes its elements in the order the format lays them out', ()=>
         // The two-bit size code three is one float, not four.
         element(D3DDECLUSAGE.TEXCOORD, D3DDECLTYPE.FLOAT1, 40, { index: 1 }),
     ]);
-    assert.equal(strideOf(elements ?? [], 0), 44);
 });
 
 test('a pre-transformed position is a POSITIONT of four floats', ()=>{

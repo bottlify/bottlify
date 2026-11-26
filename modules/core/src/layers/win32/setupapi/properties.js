@@ -23,11 +23,11 @@ import {
 } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
-export const ERROR_INVALID_DATA = 13;
+const ERROR_INVALID_DATA = 13;
 export const ERROR_INVALID_REG_PROPERTY = 0xe0000209;
 
 /** SPDRP_ENUMERATOR_NAME: worked out from the instance id, not stored. */
-export const SPDRP_ENUMERATOR_NAME = 0x16;
+const SPDRP_ENUMERATOR_NAME = 0x16;
 
 /** SPDRP_MAXIMUM_PROPERTY: the first index past the last property. */
 const SPDRP_MAXIMUM_PROPERTY = 0x25;

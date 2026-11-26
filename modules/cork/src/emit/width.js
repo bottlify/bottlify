@@ -66,7 +66,7 @@ export const WIDTH_32 = Object.freeze({
  * rbp in 6..9, the others (rsi, rdi, r10..r15) past the vector scratch, 40..47.
  * @type {Width}
  */
-export const WIDTH_64 = Object.freeze({
+const WIDTH_64 = Object.freeze({
     bits: 64, regs: 16, slot: 8, regType: ValType.i64,
     carried: Object.freeze([1, 2, 8, 9]),
     regLocal: Object.freeze([6, 2, 3, 7, 8, 9, 40, 41, 4, 5, 42, 43, 44, 45, 46, 47]),

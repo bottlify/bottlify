@@ -54,13 +54,13 @@
  * without a GPU) and a run without a graphics worker leave them 0, which a
  * reader says as "not measured" rather than as zero.
  */
-export const GRAPHICS_COUNTERS = [
+const GRAPHICS_COUNTERS = [
     'shown', 'device', 'draws', 'gpuFrames', 'gpuMs',
     'worker', 'workerBatches', 'workerReadSelfMs', 'workerSweepMs',
 ];
 
 /** The last frame's row (`LastFrame`, in its order). */
-export const LAST_FRAME_COLUMNS = [
+const LAST_FRAME_COLUMNS = [
     'index', 'draws', 'offscreenDraws', 'offscreenTargets', 'clears', 'clearColor',
     'viewportX', 'viewportY', 'viewportWidth', 'viewportHeight', 'targetWidth', 'targetHeight',
 ];

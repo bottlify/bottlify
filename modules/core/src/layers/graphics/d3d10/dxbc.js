@@ -127,7 +127,7 @@ function cString(bytes, at){
  * @param {number} [size]  bytes a row
  * @returns {SignatureElement[]}
  */
-export function parseSignature(chunk, streamed = false, size = 24){
+function parseSignature(chunk, streamed = false, size = 24){
     const count = u32(chunk, 0);
     const rows = u32(chunk, 4);
     /** @type {SignatureElement[]} */

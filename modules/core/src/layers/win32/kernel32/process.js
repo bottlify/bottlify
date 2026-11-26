@@ -397,15 +397,15 @@ export function tlsSetValueCode(at, trap){
 const gs = (/** @type {number} */ offset)=>[0x04, 0x25, ...dword(offset)];
 
 /** GetLastError at 64 bits: mov eax, gs:[0x68]; ret */
-export const getLastErrorLongCode = ()=>Uint8Array.of(
+const getLastErrorLongCode = ()=>Uint8Array.of(
     0x65, 0x8b, ...gs(TEB64.LAST_ERROR), 0xc3);
 
 /** SetLastError at 64 bits: mov gs:[0x68], ecx; ret */
-export const setLastErrorLongCode = ()=>Uint8Array.of(
+const setLastErrorLongCode = ()=>Uint8Array.of(
     0x65, 0x89, 0x0c, 0x25, ...dword(TEB64.LAST_ERROR), 0xc3);
 
 /** GetCurrentThreadId at 64 bits: mov eax, gs:[0x48]; ret */
-export const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
+const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
     0x65, 0x8b, ...gs(TEB64.THREAD_ID), 0xc3);
 
 /**
@@ -416,7 +416,7 @@ export const getCurrentThreadIdLongCode = ()=>Uint8Array.of(
  *     mov dword gs:[0x68], 0; mov rax, gs:[0x1480+rcx*8]; ret
  *     slow: jmp trap
  */
-export function tlsGetValueLongCode(){
+function tlsGetValueLongCode(){
     const slow = 29;
     const code = Uint8Array.of(
         0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,
@@ -435,7 +435,7 @@ export function tlsGetValueLongCode(){
  *     mov gs:[0x1480+rcx*8], rdx; mov eax, 1; ret
  *     slow: jmp trap
  */
-export function tlsSetValueLongCode(){
+function tlsSetValueLongCode(){
     const slow = 22;
     const code = Uint8Array.of(
         0x89, 0xc9, 0x83, 0xf9, TLS_SLOTS_IN_BLOCK, 0x73, slow - 7,

@@ -25,7 +25,7 @@ import { createDeviceCalls } from '../d3dx9/device.js';
 import { createAnalysis } from './analyzer.js';
 import { createRenderTargets } from './render-target.js';
 import { FONT_STYLE, SIMULATION, familiesOf, localized, matching, readFace } from './fonts.js';
-import { FontFormatError, analyzeFile, openTypeTag, tagText } from './sfnt.js';
+import { FontFormatError, analyzeFile, tagText } from './sfnt.js';
 import { GLYPH_COUNT, SYSTEM_FAMILIES, UNITS_PER_EM, createSystemFace } from './system.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
@@ -37,7 +37,7 @@ const E_NOINTERFACE = 0x80004002 | 0;
 const E_FAIL = 0x80004005 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
-export const E_NOT_SUFFICIENT_BUFFER = 0x8007007a | 0;
+const E_NOT_SUFFICIENT_BUFFER = 0x8007007a | 0;
 const DWRITE_E_FILEFORMAT = 0x88985000 | 0;
 const DWRITE_E_NOFONT = 0x88985002 | 0;
 const DWRITE_E_FILENOTFOUND = 0x88985003 | 0;
@@ -1797,4 +1797,4 @@ export function createDwriteFunctions(host){
     }
 }
 
-export { GLYPH_COUNT, UNITS_PER_EM, openTypeTag };
+export { GLYPH_COUNT, UNITS_PER_EM };

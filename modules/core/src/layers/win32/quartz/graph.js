@@ -397,7 +397,7 @@ function newGraphState(){
  *
  * @param {QuartzHost} host
  */
-export function createQuartz(host){
+function createQuartz(host){
     // The mappers' registrations and the device enumerator over them (`mapper.js`).
     const devices = host.devices
         ? createDeviceEnumeration(host.devices, host.devices.store) : null;

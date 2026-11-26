@@ -64,7 +64,7 @@ export function compileName(text){
  * @param {string} key @param {Included[]} included @param {KeptResult} result
  * @returns {Uint8Array}
  */
-export function encodeCompile(key, included, result){
+function encodeCompile(key, included, result){
     const tokens = result.tokens
         ? new Uint8Array(result.tokens.buffer, result.tokens.byteOffset, result.tokens.byteLength)
         : null;
@@ -94,7 +94,7 @@ export function encodeCompile(key, included, result){
  * @param {Uint8Array} body @param {string} key
  * @returns {{ included: Included[], result: KeptResult } | null}
  */
-export function decodeCompile(body, key){
+function decodeCompile(body, key){
     if (body.length < 4)
     {
         return null;

@@ -84,7 +84,7 @@ class HeapFull extends RangeError {}
 const D3DERR_INVALIDCALL = 0x8876086c;
 
 /** D3DXFX_* flags. */
-export const FX = Object.freeze({ DONOTSAVESTATE: 1, DONOTSAVESHADERSTATE: 2,
+const FX = Object.freeze({ DONOTSAVESTATE: 1, DONOTSAVESHADERSTATE: 2,
     DONOTSAVESAMPLERSTATE: 4, NOT_CLONEABLE: 1 << 11, LARGEADDRESSAWARE: 1 << 17 });
 
 /**
@@ -142,7 +142,7 @@ export function nameHash(name){
  * Begin flags that choose one (D3DXFX_DONOTSAVESHADERSTATE and
  * D3DXFX_DONOTSAVESAMPLERSTATE, as a number of words).
  */
-export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
+const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
 
 /**
  * A pass's commit table, which CommitChanges in the guest walks
@@ -156,7 +156,7 @@ export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
  * a kind (`COMMIT_KIND`), the version that says it changed, the device
  * setter's slot, two arguments, the data, a mode and the setter's arity.
  */
-export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
+const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
     TRIGGERS: 16, STALE: 20, HEADER: 24, ENTRY: 32 });
 /**
  * A state expression's cell in guest memory: the word the state was last set
@@ -164,7 +164,7 @@ export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH
  * written since is dated later -- and the expression as a program the guest
  * works out again itself (`EXPRESSION`), zero for one that is the host's.
  */
-export const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
+const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
 /**
  * A state expression as the guest's Evaluate runs it (`effect-commit.js`): how
  * many inputs and instructions, where its registers are (doubles: the
@@ -176,14 +176,14 @@ export const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
  * instruction: opcode, inputs, components, whether the first input is one
  * component, the three inputs' registers and the output's.
  */
-export const EXPRESSION = Object.freeze({ INPUTS: 0, INSTRUCTIONS: 4, REGISTERS: 8, SLOTS: 12,
+const EXPRESSION = Object.freeze({ INPUTS: 0, INSTRUCTIONS: 4, REGISTERS: 8, SLOTS: 12,
     FIRST: 16, RESULT: 20, MODE: 24, HEADER: 28, INPUT: 20, INSTRUCTION: 32 });
 /**
  * How an expression's first output becomes the state's word, as `valueOf`
  * makes it: a float's bits, a bool's as a float, an int's as a float, a bool,
  * an int, a float truncated into a dword.
  */
-export const RESULT = Object.freeze({ FLOAT: 0, BOOL_FLOAT: 1, INT_FLOAT: 2, BOOL: 3, INT: 4,
+const RESULT = Object.freeze({ FLOAT: 0, BOOL_FLOAT: 1, INT_FLOAT: 2, BOOL: 3, INT: 4,
     FLOAT_DWORD: 5 });
 /**
  * The preshader operations the guest works out to the bit, by opcode, and
@@ -201,7 +201,7 @@ const EVALUATED = new Map([[256, 1], [257, 1], [259, 1], [260, 1], [262, 1], [26
  * from an int or bool parameter, or from a float one (mode bit 0 the state a
  * bool, bit 1 the parameter a bool).
  */
-export const COMMIT_KIND = Object.freeze({ WORDS: 1, BOOLS: 2, FLOAT_BOOLS: 3, INT_FLOATS: 4,
+const COMMIT_KIND = Object.freeze({ WORDS: 1, BOOLS: 2, FLOAT_BOOLS: 3, INT_FLOATS: 4,
     BOOL_FLOATS: 5, FLOAT_INTS: 6, STATE: 7, COPIED: 8, COPIED_FLOAT: 9 });
 
 /** The tag of this layer's own compiled effect: 'BTFX'. */

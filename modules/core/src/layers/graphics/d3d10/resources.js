@@ -121,7 +121,7 @@ const DC_FORMATS = new Set([
  * @param {boolean} isBuffer
  * @returns {boolean}
  */
-export function mapAllowed(desc, mapType, isBuffer){
+function mapAllowed(desc, mapType, isBuffer){
     const read = (desc.CPUAccessFlags & D3D10_CPU_ACCESS.READ) !== 0;
     const write = (desc.CPUAccessFlags & D3D10_CPU_ACCESS.WRITE) !== 0;
     const dynamic = desc.Usage === D3D10_USAGE.DYNAMIC;

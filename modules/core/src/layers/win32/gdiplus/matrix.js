@@ -75,7 +75,7 @@ export const invert = m=>{
 };
 
 /** @param {Elements} m */
-export const isIdentity = m=>m.every((value, at)=>value === IDENTITY[at]);
+const isIdentity = m=>m.every((value, at)=>value === IDENTITY[at]);
 
 /** A rotation by `degrees`, counter-clockwise in a y-up sense (GDI+'s). @param {number} degrees */
 export const rotation = degrees=>{

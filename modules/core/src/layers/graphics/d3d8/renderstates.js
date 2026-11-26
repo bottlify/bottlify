@@ -65,7 +65,7 @@ function relabel(entry){
  *
  * @type {readonly RenderStateDefault[]}
  */
-export const D3D8_ONLY_RENDER_STATES = Object.freeze([
+const D3D8_ONLY_RENDER_STATES = Object.freeze([
     { state: D3DRS.LINEPATTERN, name: 'LINEPATTERN', value: 0 },
     { state: D3DRS.ZVISIBLE, name: 'ZVISIBLE', value: FALSE },
     { state: D3DRS.EDGEANTIALIAS, name: 'EDGEANTIALIAS', value: FALSE },

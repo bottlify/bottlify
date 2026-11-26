@@ -67,18 +67,6 @@ export const le32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xf
 export const fitsByte = value=>value >= -128 && value <= 127;
 
 /**
- * The ModRM (and displacement) of `[ebp + disp]` with `reg` in the reg field.
- *
- * @param {number} reg @param {number} disp
- * @returns {number[]}
- */
-export function frame(reg, disp){
-    return fitsByte(disp)
-        ? [0x45 | reg << 3, disp & 0xff]
-        : [0x85 | reg << 3, ...le32(disp)];
-}
-
-/**
  * @typedef {Object} Memory
  * @property {number} base
  * @property {number} [index]  Not esp.

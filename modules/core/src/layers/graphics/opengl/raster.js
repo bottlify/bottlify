@@ -135,7 +135,7 @@ export function wholeOf(target){
  * @param {Framebuffer} target
  * @returns {Box} the part of the box that is on the surface
  */
-export function clipBox(box, target){
+function clipBox(box, target){
     return {
         x0: Math.max(0, Math.min(target.width, Math.floor(box.x0))),
         y0: Math.max(0, Math.min(target.height, Math.floor(box.y0))),

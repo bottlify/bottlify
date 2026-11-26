@@ -63,11 +63,11 @@ export const QUERY_CALLS_NOT_COMPILED = Object.freeze([
 ]);
 
 /** GL_MAX_VERTEX_STREAMS (4.0): the streams a primitive query may count. */
-export const MAX_VERTEX_STREAMS = 4;
+const MAX_VERTEX_STREAMS = 4;
 
 /** GL_QUERY_BUFFER and its binding (4.4). */
 export const QUERY_BUFFER = 0x9192;
-export const QUERY_BUFFER_BINDING = 0x9193;
+const QUERY_BUFFER_BINDING = 0x9193;
 
 /** The targets glBeginQuery takes, and how wide each one's counter is. */
 /** @type {Map<number, number>} */

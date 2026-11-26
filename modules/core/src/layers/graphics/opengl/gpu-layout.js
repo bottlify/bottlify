@@ -34,7 +34,7 @@ import { GL } from './constants.js';
 import { componentBytes, effectiveStride } from './arrays.js';
 
 /** WebGPU allows this many vertex buffer slots. */
-export const MAX_SLOTS = 8;
+const MAX_SLOTS = 8;
 
 /**
  * The attribute names a draw can carry, in the order the canonical layout

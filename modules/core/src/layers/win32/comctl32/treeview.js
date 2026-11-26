@@ -61,8 +61,8 @@ export const TVM_INSERTITEMA = TVM_FIRST + 0;
 export const TVM_DELETEITEM = TVM_FIRST + 1;
 export const TVM_EXPAND = TVM_FIRST + 2;
 export const TVM_GETCOUNT = TVM_FIRST + 5;
-export const TVM_GETINDENT = TVM_FIRST + 6;
-export const TVM_SETINDENT = TVM_FIRST + 7;
+const TVM_GETINDENT = TVM_FIRST + 6;
+const TVM_SETINDENT = TVM_FIRST + 7;
 export const TVM_GETIMAGELIST = TVM_FIRST + 8;
 export const TVM_SETIMAGELIST = TVM_FIRST + 9;
 export const TVM_GETNEXTITEM = TVM_FIRST + 10;
@@ -73,17 +73,17 @@ export const TVM_GETVISIBLECOUNT = TVM_FIRST + 16;
 export const TVM_HITTEST = TVM_FIRST + 17;
 export const TVM_SORTCHILDREN = TVM_FIRST + 19;
 export const TVM_ENSUREVISIBLE = TVM_FIRST + 20;
-export const TVM_SORTCHILDRENCB = TVM_FIRST + 21;
+const TVM_SORTCHILDRENCB = TVM_FIRST + 21;
 export const TVM_SETBKCOLOR = TVM_FIRST + 29;
 export const TVM_SETTEXTCOLOR = TVM_FIRST + 30;
 export const TVM_GETBKCOLOR = TVM_FIRST + 31;
 export const TVM_GETTEXTCOLOR = TVM_FIRST + 32;
 export const TVM_SETSCROLLTIME = TVM_FIRST + 33;
 export const TVM_GETSCROLLTIME = TVM_FIRST + 34;
-export const TVM_SETINSERTMARKCOLOR = TVM_FIRST + 37;
-export const TVM_GETINSERTMARKCOLOR = TVM_FIRST + 38;
+const TVM_SETINSERTMARKCOLOR = TVM_FIRST + 37;
+const TVM_GETINSERTMARKCOLOR = TVM_FIRST + 38;
 export const TVM_GETITEMSTATE = TVM_FIRST + 39;
-export const TVM_SETLINECOLOR = TVM_FIRST + 40;
+const TVM_SETLINECOLOR = TVM_FIRST + 40;
 export const TVM_GETLINECOLOR = TVM_FIRST + 41;
 /** A colour the tree takes from the system: -1 for text and background. */
 const SYSTEM_COLOR = 0xffffffff;
@@ -91,16 +91,16 @@ const CLR_DEFAULT = 0xff000000;
 
 /** TVITEM masks. */
 export const TVIF_TEXT = 0x0001;
-export const TVIF_IMAGE = 0x0002;
+const TVIF_IMAGE = 0x0002;
 export const TVIF_PARAM = 0x0004;
 export const TVIF_STATE = 0x0008;
-export const TVIF_SELECTEDIMAGE = 0x0020;
+const TVIF_SELECTEDIMAGE = 0x0020;
 export const TVIF_CHILDREN = 0x0040;
 
 /** TVITEM state bits. */
 export const TVIS_SELECTED = 0x0002;
 export const TVIS_EXPANDED = 0x0020;
-export const TVIS_EXPANDEDONCE = 0x0040;
+const TVIS_EXPANDEDONCE = 0x0040;
 export const TVIS_STATEIMAGEMASK = 0xf000;
 
 /** The "ask the parent" sentinel for a text. */
@@ -162,7 +162,7 @@ export const TVITEM = Object.freeze({
 export const TVINSERTSTRUCT = Object.freeze({
     hParent: 0, hInsertAfter: 4, item: 8, SIZE: 48,
 });
-export const NMHDR = Object.freeze({ hwndFrom: 0, idFrom: 4, code: 8, SIZE: 12 });
+const NMHDR = Object.freeze({ hwndFrom: 0, idFrom: 4, code: 8, SIZE: 12 });
 const NMTVDISPINFO = Object.freeze({ hdr: 0, item: 12, SIZE: 52 });
 // NMTREEVIEW carries an `action` word between the header and the two items;
 // leaving it out puts both items four bytes early, and a parent reading a

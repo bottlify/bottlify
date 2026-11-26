@@ -17,7 +17,7 @@
 /* eslint-disable max-len */
 
 /** @type {Record<string, { source: string, binary: string }>} */
-export const SPIRV_FIXTURES = {
+const SPIRV_FIXTURES = {
     // glslangValidator -G
     vertex: {
         source: `#version 460

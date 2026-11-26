@@ -49,7 +49,7 @@ const LICENCE_LANGUAGES = new Map([
  * @param {Uint8Array} library @param {number} language
  * @returns {Uint8Array | null}
  */
-export function licenceIn(library, language){
+function licenceIn(library, language){
     const suffix = language === 0 ? 'ENG'
         : LICENCE_LANGUAGES.get(language) ?? LICENCE_LANGUAGES.get(language & 0x3ff);
     if (!suffix)
@@ -74,7 +74,7 @@ export function licenceIn(library, language){
  * other, each the decimal number the dotted form spells, as a file version's
  * words are -- `4.09.00.0904` is 0x00040009 and 0x00000388.
  */
-export const versionWords = (version = DIRECTX_VERSION)=>{
+const versionWords = (version = DIRECTX_VERSION)=>{
     const [major, minor, release, build] = version.split('.').map(Number);
     return { version: (major << 16 | minor) >>> 0, revision: (release << 16 | build) >>> 0 };
 };

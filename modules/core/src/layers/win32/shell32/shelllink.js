@@ -40,7 +40,7 @@ export { CLSID_SHELL_LINK };
 export const IID_ISHELL_LINK_A = '{000214EE-0000-0000-C000-000000000046}';
 export const IID_ISHELL_LINK_W = '{000214F9-0000-0000-C000-000000000046}';
 export const IID_IPERSIST_FILE = '{0000010B-0000-0000-C000-000000000046}';
-export const IID_ISHELL_LINK_DATA_LIST = '{45E2B4AE-B1C3-11D0-B92F-00A0C90312E1}';
+const IID_ISHELL_LINK_DATA_LIST = '{45E2B4AE-B1C3-11D0-B92F-00A0C90312E1}';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -359,7 +359,7 @@ function describe(id, slots, implemented = {}){
  * @param {ShellLinkHost} host
  * @returns {() => import('../ole32/objects.js').ComClassDefinition}
  */
-export function createShellLink(host){
+function createShellLink(host){
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>host.divergence?.(api, detail);
 

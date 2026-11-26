@@ -23,10 +23,10 @@ import { SOUND_ADAPTER_NAME, SOUND_DEVICE_GUID } from '../devices.js';
 import { CLSID_ASYNC_READER } from './interfaces.js';
 
 /** CLSID_AudioRendererCategory: where a program finds the machine's audio outputs. */
-export const CLSID_AUDIO_RENDERER_CATEGORY = '{E0F158E1-CB04-11D0-BD4E-00A0C911CE86}';
+const CLSID_AUDIO_RENDERER_CATEGORY = '{E0F158E1-CB04-11D0-BD4E-00A0C911CE86}';
 
 /** The merits the SDK names. */
-export const MERIT = {
+const MERIT = {
     PREFERRED: 0x800000, NORMAL: 0x600000, UNLIKELY: 0x400000, DO_NOT_USE: 0x200000,
 };
 

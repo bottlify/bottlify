@@ -84,7 +84,7 @@ const doubles = (...words)=>Object.fromEntries(words.map(word=>[word, /** @type 
  *
  * @type {Readonly<Record<string, Record<number, 'f32' | 'f64'>>>}
  */
-export const GLU_FLOATS = Object.freeze({
+const GLU_FLOATS = Object.freeze({
     gluPerspective: doubles(0, 2, 4, 6),
     gluOrtho2D: doubles(0, 2, 4, 6),
     gluLookAt: doubles(0, 2, 4, 6, 8, 10, 12, 14, 16),

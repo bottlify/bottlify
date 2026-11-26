@@ -63,7 +63,7 @@
  */
 
 /** The versions a 2.1 implementation compiles. */
-export const GLSL_VERSIONS = Object.freeze([110, 120]);
+const GLSL_VERSIONS = Object.freeze([110, 120]);
 
 /** Every desktop version of the language, 1.10 to 4.60. */
 export const ALL_GLSL_VERSIONS = Object.freeze([110, 120, 130, 140, 150, 330, 400, 410, 420,

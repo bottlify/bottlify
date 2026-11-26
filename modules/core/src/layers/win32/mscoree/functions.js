@@ -266,7 +266,7 @@ const FAIL_AT_64 = 51;
  * @param {number} at @param {number} slot @param {number} resolve @param {number} failed
  * @returns {Uint8Array}
  */
-export function forwardingStub64(at, slot, resolve, failed){
+function forwardingStub64(at, slot, resolve, failed){
     const code = Uint8Array.of(
         0x48, 0x8b, 0x05, 0, 0, 0, 0,          // mov rax, [rip+slot]
         0x48, 0x85, 0xc0,                      // test rax, rax

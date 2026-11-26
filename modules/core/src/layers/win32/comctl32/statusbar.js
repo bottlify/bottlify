@@ -43,9 +43,9 @@ export const STATUSBAR_ATOM = 0x8016;
 
 /** Styles. */
 export const CCS_TOP = 0x0001;
-export const CCS_NOMOVEY = 0x0002;
+const CCS_NOMOVEY = 0x0002;
 export const CCS_NORESIZE = 0x0004;
-export const CCS_NOPARENTALIGN = 0x0008;
+const CCS_NOPARENTALIGN = 0x0008;
 
 /** How a part's text is drawn, in SB_SETTEXT's wParam beside the part. */
 export const SBT_NOBORDERS = 0x0100;
@@ -82,10 +82,10 @@ export const SB_SETMINHEIGHT = WM_USER + 8;
 export const SB_SIMPLE = WM_USER + 9;
 export const SB_GETRECT = WM_USER + 10;
 export const SB_SETTEXTW = WM_USER + 11;
-export const SB_GETTEXTLENGTHW = WM_USER + 12;
+const SB_GETTEXTLENGTHW = WM_USER + 12;
 export const SB_GETTEXTW = WM_USER + 13;
 export const SB_ISSIMPLE = WM_USER + 14;
-export const SB_SETBKCOLOR = 0x2001;
+const SB_SETBKCOLOR = 0x2001;
 
 const WM_SIZE = 0x0005;
 /** The borders SB_GETBORDERS reports: across, up and down, and between parts. */

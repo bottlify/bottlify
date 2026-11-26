@@ -23,8 +23,8 @@ import { wholeAddress } from '../common/pointers.js';
  * chosen.
  */
 
-export const VER_PLATFORM_WIN32_NT = 2;
-export const VER_NT_WORKSTATION = 1;
+const VER_PLATFORM_WIN32_NT = 2;
+const VER_NT_WORKSTATION = 1;
 
 /**
  * Remote Desktop with one interactive session, which OSVERSIONINFOEX

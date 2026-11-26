@@ -31,12 +31,12 @@
 export const NORM_IGNORECASE = 0x00000001;
 export const NORM_IGNORENONSPACE = 0x00000002;
 export const NORM_IGNORESYMBOLS = 0x00000004;
-export const LINGUISTIC_IGNORECASE = 0x00000010;
-export const LINGUISTIC_IGNOREDIACRITIC = 0x00000020;
+const LINGUISTIC_IGNORECASE = 0x00000010;
+const LINGUISTIC_IGNOREDIACRITIC = 0x00000020;
 export const SORT_STRINGSORT = 0x00001000;
 export const SORT_DIGITSASNUMBERS = 0x00000008;
-export const NORM_IGNOREKANATYPE = 0x00010000;
-export const NORM_IGNOREWIDTH = 0x00020000;
+const NORM_IGNOREKANATYPE = 0x00010000;
+const NORM_IGNOREWIDTH = 0x00020000;
 
 /** The primary weights' bands. */
 const CONTROL = 1 << 16;
@@ -131,7 +131,7 @@ const toHiragana = code=>((code >= 0x30a1 && code <= 0x30f6) || code === 0x30fd 
  * @param {string} text @param {number} flags
  * @returns {Weights}
  */
-export function weigh(text, flags){
+function weigh(text, flags){
     const stringSort = (flags & SORT_STRINGSORT) !== 0;
     const ignoreSymbols = (flags & NORM_IGNORESYMBOLS) !== 0;
     const ignoreMarks = (flags & (NORM_IGNORENONSPACE | LINGUISTIC_IGNOREDIACRITIC)) !== 0;

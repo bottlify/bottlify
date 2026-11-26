@@ -40,7 +40,7 @@ export const WM_QUIT = 0x0012;
  * every frame, working through positions the pointer left long ago. From the
  * outside the game stops responding to the mouse entirely.
  */
-export const WM_MOUSEMOVE = 0x0200;
+const WM_MOUSEMOVE = 0x0200;
 
 /** A filter that accepts messages for any window, and thread messages besides. */
 export const ANY_WINDOW = null;
@@ -101,10 +101,10 @@ export const QS_MOUSEBUTTON = 0x0004;
 export const QS_POSTMESSAGE = 0x0008;
 export const QS_TIMER = 0x0010;
 export const QS_PAINT = 0x0020;
-export const QS_SENDMESSAGE = 0x0040;
-export const QS_HOTKEY = 0x0080;
-export const QS_ALLPOSTMESSAGE = 0x0100;
-export const QS_RAWINPUT = 0x0400;
+const QS_SENDMESSAGE = 0x0040;
+const QS_HOTKEY = 0x0080;
+const QS_ALLPOSTMESSAGE = 0x0100;
+const QS_RAWINPUT = 0x0400;
 
 /** Raw input's one message, a class of its own. */
 const WM_INPUT = 0x00ff;
@@ -210,7 +210,7 @@ const EXTENDED_KEY = 1 << 24;
  * @param {number} message @param {number} wParam
  * @returns {{ keys: number[], down: boolean } | null}
  */
-export function inputChange(message, wParam){
+function inputChange(message, wParam){
     // WM_LBUTTONDOWN and WM_NCLBUTTONDOWN on, each button's down, up and
     // double click; WM_XBUTTON* name their button in the high word.
     switch (message){

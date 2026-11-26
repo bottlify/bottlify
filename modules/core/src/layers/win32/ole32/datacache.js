@@ -61,7 +61,7 @@ const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 /** What a cache that is not aggregated answers with one pointer. */
 const SHARED = new Set([IID_IUNKNOWN, IID_IOLECACHE, IID_IOLECACHE2]);
 
-export const CLSID_DATA_CACHE = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b003e}';
+const CLSID_DATA_CACHE = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b003e}';
 const CLSID_CACHE_SINK = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b003f}';
 const CLSID_CACHE_ENUMERATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0040}';
 
