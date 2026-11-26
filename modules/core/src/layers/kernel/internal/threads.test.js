@@ -1264,6 +1264,44 @@ function twoExecutors(){
     };
 }
 
+test('a parked thread woken onto another executor has what its call owes done first, there',
+    ()=>{
+    // GetOverlappedResult's count and answer: placed on another executor, the
+    // thread runs there from its first instruction, so the work is done on
+    // this thread before that executor is handed it, and its answer is the
+    // call's.
+        const { cpu } = twoExecutors();
+        /** @type {any} */ (cpu).resumeContextAt = ()=>{};
+        /** @type {string[]} */
+        const order = [];
+        const onExecutor = cpu.onExecutor;
+        cpu.onExecutor = (index, work)=>{
+            order.push(`executor ${index}`);
+            onExecutor(index, work);
+        };
+        /** @type {number[]} */
+        const answers = [];
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            onResume: (thread, reason, value)=>answers.push(value) });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+        sched.block(worker, 'an event');
+        worker.parkedReturn = 0x401000;
+        worker.waitResult = 1;
+        worker.whenResumed = (/** @type {number} */ answer)=>{
+            order.push(`owed ${answer}`);
+            return 0;
+        };
+        assert.equal(sched.runOnce().ran, main);
+        sched.wake(worker);
+        sched.runOnce();
+        assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+        assert.deepEqual(order.filter(step=>step === 'owed 1' || step === 'executor 1').slice(0, 2),
+            ['owed 1', 'executor 1'], 'the work before the executor is handed the thread');
+        assert.deepEqual(answers, [0], 'the work\'s answer is the call\'s');
+        assert.equal(worker.whenResumed, null, 'done once');
+    });
+
 test('a turn with nothing to run here leaves at once while a host call is still to answer', ()=>{
     // The answer comes through the event loop, which a wait for the other
     // executor holds back: with a game's sound thread on the other one, its
