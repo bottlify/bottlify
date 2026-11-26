@@ -261,6 +261,34 @@ test('what is held in memory stays within the bound being written; the rest are 
     assert.ok(keeper.figures().cooled > 40, 'past the budget the cache sent them to its disk');
     assert.deepEqual([...store.read('setup.cab', 5 * PIECE_SIZE + 32 * 1024 - 1, 2)],
         [(5 * 32 + 0) & 0xff, (5 * 32 + 1) & 0xff]);
+    // Written again, pieces the cache holds come back into memory: each piece
+    // is in one place, never both, so every byte of the file is held once.
+    for (let index = 0; index < 64; index += 3)
+    {
+        store.write('setup.cab', index * PIECE_SIZE + 7, Uint8Array.of(1));
+        assert.equal(keeper.under('pages/').bytes + pageFile.workingBytes(), 64 * PIECE_SIZE,
+            `piece ${index} written again: held once`);
+    }
+});
+
+test('once the cache has no room, a piece written again is held in memory alone, not beside its '
+    + 'body', async()=>{
+    const { keeper, space } = await pieceSpace(cacheSpace,
+        { budget: 2 * PIECE_SIZE, quota: PIECE_SIZE + 65536 });
+    const pageFile = createPageFile(space, { workingBytes: PIECE_SIZE });
+    const store = createPageFileStore(pageFile);
+    for (let index = 0; index < 6; index++)
+    {
+        store.write('big.bin', index * PIECE_SIZE, new Uint8Array(PIECE_SIZE).fill(index + 1));
+    }
+    assert.ok(pageFile.diagnostics().failed);
+    for (let index = 0; index < 6; index++)
+    {
+        store.write('big.bin', index * PIECE_SIZE + 1, Uint8Array.of(9));
+    }
+    const kept = keeper.under('pages/');
+    assert.equal(kept.bodies, 0, 'every piece in memory now, its body let go');
+    assert.equal(pageFile.workingBytes(), 6 * PIECE_SIZE);
 });
 
 test('a file removed lets its bodies go, and the cache holds nothing of it', async()=>{

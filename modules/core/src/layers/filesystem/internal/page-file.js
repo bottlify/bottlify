@@ -233,8 +233,10 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
         read,
 
         /**
-         * A piece's bytes to change, in memory: held until `trim` puts it, its
-         * body in the cache then replaced.
+         * A piece's bytes to change, in memory: held until `trim` puts it. Its
+         * body in the cache is let go of as it is brought in: a piece is in
+         * one place, so every byte written is held once, and a body is never
+         * stale.
          *
          * @param {Piece} piece @returns {Uint8Array}
          */
@@ -243,6 +245,7 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
             {
                 const bytes = new Uint8Array(piece.length);
                 read(piece, 0, piece.length, part=>bytes.set(part));
+                forget(piece);
                 piece.bytes = bytes;
                 workingTotal += piece.length;
                 counts.loaded++;
@@ -273,14 +276,13 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
 
         /**
          * Makes a piece of one holder longer, its bytes kept and the rest
-         * zeroes: in memory, its body in the cache let go of until it is put.
+         * zeroes, in memory (`change`).
          *
          * @param {Piece} piece @param {number} length
          */
         grow(piece, length){
             const bytes = new Uint8Array(length);
             bytes.set(pageFile.change(piece));
-            forget(piece);
             workingTotal += length - piece.length;
             piece.bytes = bytes;
             piece.length = length;
