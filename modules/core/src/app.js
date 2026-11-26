@@ -48,6 +48,7 @@ import {
     createSharingMemory, openSharedSharing,
 } from './layers/filesystem/internal/shared-sharing.js';
 import { openPageFile } from './layers/filesystem/internal/page-file.js';
+import { openRunFolder } from './layers/filesystem/internal/run-folder.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { remoteClassTable } from './com-link.js';
@@ -1299,20 +1300,29 @@ export function areaOf(call, cache){
 }
 
 /**
- * The run's page file (`page-file.js`): the disk its volume's writable layers
- * keep what they let go of from memory, or null to keep it all in memory.
- * A write to it that fails is said once, and the files stay in memory.
+ * The run's own folder in the origin's file system (`run-folder.js`), where it
+ * keeps what it lets go of from memory and no later run reads, or null to
+ * keep it all in memory.
  *
- * @param {AppOptions} options @param {any} events
+ * @param {AppOptions} options
  */
-async function openRunPageFile(options, events){
+async function openRunFolderOf(options){
     const spec = options.pageFile ?? 'local';
-    if (spec === false)
-    {
-        return null;
-    }
+    return spec === false ? null
+        : openRunFolder({ root: spec === 'local' ? undefined : spec.root });
+}
+
+/**
+ * The run's page file (`page-file.js`): the disk its volume's writable layers
+ * keep what they let go of from memory, in the run's folder, or null to keep
+ * it all in memory. A write to it that fails is said once, and the files stay
+ * in memory.
+ *
+ * @param {any} events @param {import('./layers/filesystem/internal/run-folder.js').RunFolder | null} runFolder
+ */
+async function openRunPageFile(events, runFolder){
     return openPageFile({
-        root: spec === 'local' ? undefined : spec.root,
+        runFolder,
         residentBytes: HEAP_POOLS.writableFiles,
         onFailure: error=>events.emit('divergence', { api: 'filesystem',
             detail: `the page file refused a write (${error.message}); what the program `
@@ -4048,13 +4058,15 @@ export async function createApp(options){
     // here reads it through the reader made with it, one in a worker of its own
     // through a reader there (`processesBeside`). A process joined to a run
     // across a link is handed the run's reader (`options.cache`).
-    const runCache = options.system ? null : await openRunCache(options.cache);
+    // Both keep what they let go of from memory in the run's own folder.
+    const runFolder = options.system ? null : await openRunFolderOf(options);
+    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder });
 
     // The disk under the run's writable layers is the run's, as its volume is:
     // a process in a worker of its own writes through the run's.
     if (!options.system)
     {
-        system.volume.pageFile = await openRunPageFile(options, events);
+        system.volume.pageFile = await openRunPageFile(events, runFolder);
     }
 
     const translationPool = await openTranslationPool(options);

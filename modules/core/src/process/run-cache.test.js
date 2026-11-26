@@ -56,3 +56,36 @@ test('a thread joined after the index grew finds every name, the ones put before
             run.close();
         }
     });
+
+test('with a run\'s folder, a body that is the only copy for the run goes to its disk for room '
+    + 'and comes back; one that can be made again goes away, and nothing stays past the run',
+async()=>{
+    const { fakeOpfs } = await import('../layers/filesystem/internal/opfs.fixture.js');
+    const { openRunFolder } = await import('../layers/filesystem/internal/run-folder.js');
+    const { cacheSpace } = await import('../layers/cache/module.js');
+    const opfs = fakeOpfs();
+    const runFolder = await openRunFolder({ root: opfs.root });
+    assert.ok(runFolder);
+    // One segment: what is put past it makes room by the least recently used.
+    const run = await openRunCache({ budget: 16 << 20, runFolder });
+    // The keeper's first pack opens behind a promise, as every file on OPFS.
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    const MIB = 1 << 20;
+    const texels = new Uint8Array(6 * MIB).map((_, i)=>i * 7);
+    assert.ok(run.reader.put('texels/1', texels, { onlyCopy: true, disk: 'run' }));
+    const reads = cacheSpace(run.reader, 'reads');
+    assert.ok(reads.put('a', new Uint8Array(6 * MIB)));
+    assert.ok(reads.put('b', new Uint8Array(6 * MIB)), 'room made');
+    assert.ok(reads.put('c', new Uint8Array(6 * MIB)), 'and again');
+    const figures = run.figures();
+    assert.equal(figures.written, 1, 'the texels written, the reads not');
+    assert.ok(figures.gone >= 1, 'a read that can be made again went away');
+    assert.equal(run.reader.look('texels/1'), 'cold');
+    assert.equal(run.reader.with('texels/1', (/** @type {Uint8Array} */ body)=>
+        body.every((byte, i)=>byte === texels[i]), { wait: true }), true, 'back as it was');
+    const [name] = opfs.names('bottlify-runs');
+    assert.ok(opfs.names(`bottlify-runs/${name}/cache`).some(file=>file.startsWith('pack')));
+    run.close();
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.deepEqual(opfs.names('bottlify-runs'), [], 'the run\'s folder goes with it');
+});

@@ -767,108 +767,37 @@ export function createPageFileStore(pageFile){
     };
 }
 
-/** The folder of the origin's file system the page files are kept in. */
-const FOLDER = 'bottlify-pages';
+/** The page file's name in its run's folder. */
+const FILE = 'pages';
 
 /**
- * Opens a page file of its own for a run in the origin's private file system,
- * or answers null where there is none to be had synchronously: no origin file
- * system, a thread with no synchronous access handles (a page's own thread),
- * or a browser whose handles answer with promises (WebKit before 16.4).
+ * Opens a run's page file in the run's own folder (`run-folder.js`), or
+ * answers null where it cannot be had synchronously: no folder, or a browser
+ * whose handles answer with promises (WebKit before 16.4). The file holds
+ * nothing a later run reads: what is kept across runs is the session.
  *
- * The file is the run's alone and holds nothing a later run reads: what is
- * kept across runs is the session. Page files left behind by a run that
- * ended without closing -- a tab that was killed -- are taken away here,
- * except those a running run holds (its lock, where the browser has locks;
- * otherwise the open handle refuses the removal).
- *
- * @param {{ root?: any, residentBytes?: number, onFailure?: (error: Error) => void }} [options]
- *     `root`: the origin's file system by default; a test hands in its own
+ * @param {{ runFolder?: import('./run-folder.js').RunFolder | null, residentBytes?: number,
+ *     onFailure?: (error: Error) => void }} [options]
  * @returns {Promise<PageFile | null>}
  */
-export async function openPageFile({ root, residentBytes, onFailure } = {}){
-    const nav = /** @type {any} */ (globalThis).navigator;
-    let base = root;
-    if (!base)
+export async function openPageFile({ runFolder = null, residentBytes, onFailure } = {}){
+    if (runFolder === null)
     {
-        // A page's own thread has the folders and no synchronous handles; the
-        // check costs a folder opened for nothing, so it is made first.
-        const Handle = /** @type {any} */ (globalThis).FileSystemFileHandle;
-        if (typeof nav?.storage?.getDirectory !== 'function'
-            || typeof Handle?.prototype?.createSyncAccessHandle !== 'function')
-        {
-            return null;
-        }
-        base = await nav.storage.getDirectory();
-    }
-    const locks = nav?.locks;
-    const name = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}.pages`;
-    /** @type {() => void} */
-    let unlock = ()=>{};
-    try
-    {
-        const folder = await base.getDirectoryHandle(FOLDER, { create: true });
-        if (typeof locks?.request === 'function')
-        {
-            await new Promise(held=>{
-                locks.request(`bottlify-pages:${name}`, ()=>new Promise(done=>{
-                    unlock = ()=>done(undefined);
-                    held(undefined);
-                })).catch(()=>held(undefined));
-            });
-        }
-        await sweep(folder, locks);
-        const access = await openSync(await folder.getFileHandle(name, { create: true }));
-        if (access === null)
-        {
-            unlock();
-            await folder.removeEntry(name).catch(()=>{});
-            return null;
-        }
-        return createPageFile(access, {
-            residentBytes,
-            onFailure,
-            onClosed: ()=>{
-                folder.removeEntry(name).catch(()=>{}).finally(unlock);
-            },
-        });
-    }
-    catch {
-        unlock();
         return null;
     }
-}
-
-/**
- * Takes away the page files of runs that are gone.
- *
- * @param {any} folder @param {any} locks
- */
-async function sweep(folder, locks){
-    /** @type {Set<string> | null} */
-    let held = null;
-    if (typeof locks?.query === 'function')
+    const letGo = runFolder.use();
+    try
     {
-        const state = await locks.query().catch(()=>null);
-        held = state ? new Set([...state.held ?? [], ...state.pending ?? []]
-            .map((/** @type {any} */ lock)=>lock.name)) : null;
-    }
-    /** @type {string[]} */
-    const names = [];
-    for await (const [entryName] of folder.entries())
-    {
-        names.push(entryName);
-    }
-    for (const entryName of names)
-    {
-        if (held && held.has(`bottlify-pages:${entryName}`))
+        const access = await openSync(await runFolder.folder.getFileHandle(FILE, { create: true }));
+        if (access === null)
         {
-            continue;
+            letGo();
+            return null;
         }
-        if (!held && locks)
-        {
-            continue;
-        }
-        await folder.removeEntry(entryName).catch(()=>{});
+        return createPageFile(access, { residentBytes, onFailure, onClosed: letGo });
+    }
+    catch {
+        letGo();
+        return null;
     }
 }

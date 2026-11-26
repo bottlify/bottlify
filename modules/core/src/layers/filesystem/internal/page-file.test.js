@@ -372,40 +372,13 @@ test('the file closes once the contents a save still reads are released', ()=>{
     assert.ok(access.closed);
 });
 
-test('a page file is opened in a folder of its own, and one left behind is taken away', async()=>{
-    /** @type {Map<string, any>} */
-    const files = new Map();
-    const folder = {
-        /** @param {string} name */
-        getFileHandle: async name=>{
-            const access = fakeAccess();
-            files.set(name, access);
-            return { createSyncAccessHandle: async()=>access };
-        },
-        async* entries(){
-            yield* files;
-        },
-        /** @param {string} name */
-        removeEntry: async name=>{
-            files.delete(name);
-        },
-    };
-    files.set('old.pages', fakeAccess());
-    const root = { getDirectoryHandle: async()=>folder };
-    const pageFile = await openPageFile({ root, residentBytes: 0 });
-    assert.ok(pageFile);
-    assert.ok(!files.has('old.pages'), 'a run that is gone left it');
-    assert.equal(files.size, 1);
-    pageFile.close();
-    await new Promise(resolve=>setTimeout(resolve, 0));
-    assert.equal(files.size, 0, 'the run\'s own file goes with it');
-});
-
-test('there is no page file where nothing answers synchronously', async()=>{
-    const folder = {
-        getFileHandle: async()=>({}),
-        async* entries(){},
-        removeEntry: async()=>{},
-    };
-    assert.equal(await openPageFile({ root: { getDirectoryHandle: async()=>folder } }), null);
-});
+test('there is no page file where nothing answers synchronously, and the folder is let go',
+    async()=>{
+        let released = 0;
+        const runFolder = {
+            folder: { getFileHandle: async()=>({}) },
+            use: ()=>()=>released++,
+        };
+        assert.equal(await openPageFile({ runFolder }), null);
+        assert.equal(released, 1);
+    });

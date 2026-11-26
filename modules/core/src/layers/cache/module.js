@@ -76,11 +76,13 @@ const NAMES_KEPT = 1 << 16;
  * hands its own.
  *
  * @param {Reader | null | undefined} reader @param {string} name
- * @param {{ onlyCopy?: boolean }} [options]  `onlyCopy`: bodies that cannot be
- *     made again, which go to the disk and never away
+ * @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }} [options]
+ *     `onlyCopy`: bodies that cannot be made again, which never go away; `disk`:
+ *     where a body may go on the disk (Cellar's `DiskPolicy`), never by default:
+ *     a body the run's cache can make again is not worth a write
  * @returns {CacheSpace}
  */
-export function cacheSpace(reader, name, { onlyCopy = false } = {}){
+export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never' } = {}){
     if (!reader)
     {
         return NOTHING;
@@ -110,7 +112,7 @@ export function cacheSpace(reader, name, { onlyCopy = false } = {}){
     return {
         look: key=>reader.look(named(key)),
         with: (key, read, options)=>reader.with(named(key), read, options),
-        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy }),
+        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy, disk }),
         drop: key=>reader.drop(named(key)),
     };
 }
@@ -219,9 +221,9 @@ export function channelSpace(joined, channel, name){
             },
         },
     });
-    // Bodies a worker hands over are the only copy of them: to the disk when
-    // idle, never away.
-    const space = cacheSpace(reader, name, { onlyCopy: true });
+    // Bodies a worker hands over are the only copy of them for this run: to
+    // the disk when idle, never away, and nothing the next run reads.
+    const space = cacheSpace(reader, name, { onlyCopy: true, disk: 'run' });
     return {
         space,
         /**
@@ -234,7 +236,7 @@ export function channelSpace(joined, channel, name){
         ask: async(key, length)=>{
             const whole = `${name}/${key}`;
             const place = await askLater({ op: 'reserve', name: whole, length,
-                options: { known, onlyCopy: true } });
+                options: { known, onlyCopy: true, disk: 'run' } });
             if (place === null || place === undefined)
             {
                 return false;
@@ -273,7 +275,8 @@ export function createCacheModule(){
          *     the run's cache, to read it in place too; `serve`: a channel a worker
          *     that writes the cache calls the keeper through (`channelSpace`)
          * @returns {Promise<{ space: (name: string,
-         *     options?: { onlyCopy?: boolean }) => CacheSpace, join: Join,
+         *     options?: { onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }) => CacheSpace,
+         *     join: Join,
          *     serve: () => SharedArrayBuffer | null }>}
          */
         async create(config){
@@ -287,7 +290,7 @@ export function createCacheModule(){
             const join = config?.join ?? null;
             const serve = config?.serve ?? null;
             return {
-                /** @param {string} name @param {{ onlyCopy?: boolean }} [options] */
+                /** @param {string} name @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }} [options] */
                 space: (name, options)=>cacheSpace(given, name, options),
                 join: post=>join?.(post) ?? null,
                 serve: ()=>serve?.() ?? null,

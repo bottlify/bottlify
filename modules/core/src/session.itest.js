@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { opfsSession, packSession, unpackSession } from './storage.js';
+import { fakeOpfs } from './layers/filesystem/internal/opfs.fixture.js';
 
 const FIXTURE = new URL('../test/fixtures/session.exe', import.meta.url);
 
@@ -229,44 +230,52 @@ function originDirectory(){
     return { files, written, read, root: { getDirectoryHandle: async()=>folder } };
 }
 
-test('on a page file, what the program wrote is saved, counted, and the file goes with the run',
-    { timeout: 30000 }, async()=>{
-        const exe = await readFile(FIXTURE);
-        const origin = originDirectory();
+test('on a page file, what the program wrote is saved, counted, and the run\'s folder goes with '
+    + 'the run',
+{ timeout: 30000 }, async()=>{
+    const exe = await readFile(FIXTURE);
+    const origin = fakeOpfs();
+    const folder = ()=>{
+        const [run] = origin.names('bottlify-runs');
+        return run === undefined ? [] : origin.names(`bottlify-runs/${run}`);
+    };
         /** @type {any[]} */
-        let saved = [];
-        const app = await createApp({
-            executable: new Uint8Array(exe),
-            pageFile: { root: origin.root },
-            storage: {
-                load: async()=>[],
-                readsWithinSave: true,
-                /** @param {{ files: any[] }} session */
-                save: session=>{
-                    saved = session.files.map(file=>({ path: file.path,
-                        bytes: file.bytes.slice() }));
-                },
+    let saved = [];
+    const app = await createApp({
+        executable: new Uint8Array(exe),
+        pageFile: { root: origin.root },
+        storage: {
+            load: async()=>[],
+            readsWithinSave: true,
+            /** @param {{ files: any[] }} session */
+            save: session=>{
+                saved = session.files.map(file=>({ path: file.path,
+                    bytes: file.bytes.slice() }));
             },
-        });
-        try
-        {
-            assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 20000 }), 0);
-            const filesystem = app.diagnostics().find((/** @type {any} */ table)=>
-                table.name === 'filesystem');
-            assert.equal(filesystem.metrics.pageFile?.disk, true,
-                'the run stands on its page file');
-            assert.ok(filesystem.metrics.bytesHeld.heaps.writable >= PAYLOAD.length);
-            assert.equal(typeof filesystem.metrics.bytesHeld.disk.pageFile, 'number');
-            assert.equal(origin.files.size, 1);
-        }
-        finally
-        {
-            await app.dispose();
-        }
-        assert.deepEqual(saved.map(file=>[file.path, String.fromCharCode(...file.bytes)]),
-            [['C:\\save.dat', PAYLOAD]]);
-        assert.equal(origin.files.size, 0, 'the run\'s page file is taken away with it');
+        },
     });
+    try
+    {
+        assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 20000 }), 0);
+        const filesystem = app.diagnostics().find((/** @type {any} */ table)=>
+            table.name === 'filesystem');
+        assert.equal(filesystem.metrics.pageFile?.disk, true,
+            'the run stands on its page file');
+        assert.ok(filesystem.metrics.bytesHeld.heaps.writable >= PAYLOAD.length);
+        assert.equal(typeof filesystem.metrics.bytesHeld.disk.pageFile, 'number');
+        assert.deepEqual(folder(), ['cache', 'pages'],
+            'the page file and the run cache\'s disk, in the run\'s own folder');
+    }
+    finally
+    {
+        await app.dispose();
+    }
+    assert.deepEqual(saved.map(file=>[file.path, String.fromCharCode(...file.bytes)]),
+        [['C:\\save.dat', PAYLOAD]]);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    assert.deepEqual(origin.names('bottlify-runs'), [],
+        'the run\'s folder is taken away with it');
+});
 
 test("a session kept in the origin's storage is read where the program reads it, announced"
     + ' nowhere, and saved where the program changed it', { timeout: 30000 }, async()=>{

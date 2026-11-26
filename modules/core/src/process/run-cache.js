@@ -14,10 +14,16 @@
  * calls come across its link (`handlers`), and the segments made and let go
  * after reach it as messages. Every thread reads a body where the keeper put
  * it: nothing is copied from one thread to another.
+ *
+ * Its disk is a folder in the run's own (`run-folder.js`), for the bodies that
+ * are the only copy for this run (texels the GPU was given, `disk: 'run'`): a
+ * body that can be made again is never written there (`disk: 'never'`, the
+ * cache layer's default), and the next run finds nothing in it.
  */
 
 import { createChannel, createReader, openKeeper, openServer } from '../../vendor/cellar/cellar.js';
 import { serveKeeper } from '../layers/cache/module.js';
+import { opfsDisk } from '../layers/filesystem/internal/opfs-disk.js';
 
 const MIB = 1024 * 1024;
 
@@ -35,13 +41,16 @@ const IDLE_MS = 30_000;
 const SWEEP_MS = 1000;
 
 /**
- * @param {{ budget?: number }} [options]
+ * @param {{ budget?: number,
+ *     runFolder?: import('../layers/filesystem/internal/run-folder.js').RunFolder | null }} [options]
+ *     `runFolder`: where the cache's disk is made; none, a cache in memory alone
  */
-export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
+export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null } = {}){
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
-    const keeper = await openKeeper({
-        budget, segmentBytes: 16 * MIB, coldAfterMs: IDLE_MS,
+    /** @param {import('../../vendor/cellar/cellar.js').Disk | null} disk */
+    const open = disk=>openKeeper({
+        budget, segmentBytes: 16 * MIB, coldAfterMs: IDLE_MS, disk,
         announce: message=>{
             for (const tell of told)
             {
@@ -49,6 +58,25 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
             }
         },
     });
+    let letGo = ()=>{};
+    let keeper;
+    try
+    {
+        if (runFolder === null)
+        {
+            throw new Error('no folder');
+        }
+        letGo = runFolder.use();
+        keeper = await open(opfsDisk(await runFolder.folder.getDirectoryHandle('cache',
+            { create: true })));
+    }
+    catch {
+        // A folder whose files do not open (a thread with no synchronous
+        // handle) leaves the cache in memory, as without a folder.
+        letGo();
+        letGo = ()=>{};
+        keeper = await open(null);
+    }
     const reader = createReader({
         shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
@@ -123,6 +151,7 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES } = {}){
             clearInterval(sweeping);
             told.clear();
             keeper.close();
+            letGo();
         },
     };
 }
