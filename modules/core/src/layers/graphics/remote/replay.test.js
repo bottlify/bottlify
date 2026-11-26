@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopbackDirect3D } from './loopback.js';
-import { SWEEP_SLICE, createMirror, withMirrored } from './replay.js';
+import { SWEEP_SLICE, createMirror, createPlayer, withMirrored } from './replay.js';
+import { OP, SECTION, WAIT, createWriter } from './wire.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
 import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
@@ -1598,4 +1599,61 @@ test('a mirror says what it holds of the heap: its pages, the pages kept to be m
         { device: 'played', mirrored: mirror.figures() });
     assert.equal(withMirrored({ m: 'GetData' }, answer, mirror), answer, 'another call: as it was');
     assert.equal(withMirrored({ m: 'diagnostics' }, null, mirror), null);
+});
+
+test('a played call takes the recorded call\'s addresses and its services\' answers in order,'
+    + ' and one that takes more or fewer says so', ()=>{
+    /** @type {any} */
+    let player = null;
+    /** @type {any[]} */
+    const seen = [];
+    const root = {
+        refCount: 1,
+        /** @param {number} count @param {any} service */
+        Make(count, service){
+            const taken = [];
+            for (let index = 0; index < count; index++)
+            {
+                taken.push(player.allocate());
+            }
+            seen.push({ taken, answers: [service.ask(), service.ask(), service.ask()] });
+            return 0;
+        },
+    };
+    player = createPlayer({ root, ship: ()=>{}, read: ()=>new Uint8Array(0) });
+    const writer = createWriter();
+    /** @param {number} count @param {number[]} allocs @param {any[]} replies */
+    const make = (count, allocs, replies)=>{
+        writer.u8(OP.CALL);
+        writer.u32(0);
+        writer.string('Make');
+        writer.u8(2);
+        writer.value(count, ()=>undefined);
+        writer.value({ ask(){} }, ()=>undefined);
+        writer.u8((allocs.length ? SECTION.ALLOCS : 0) | (replies.length ? SECTION.REPLIES : 0));
+        if (allocs.length)
+        {
+            writer.u32(allocs.length);
+            allocs.forEach(writer.u32);
+        }
+        if (replies.length)
+        {
+            writer.u32(replies.length);
+            replies.forEach(reply=>writer.value(reply, ()=>undefined));
+        }
+        writer.u8(WAIT.NONE);
+        const { buffer, length } = writer.give();
+        player.read(buffer, (/** @type {any} */ call)=>{
+            player.play(call);
+        }, length);
+    };
+    make(2, [0x1000, 0x2000], [7, 'eight']);
+    make(0, [], []);
+    assert.deepEqual(seen, [
+        { taken: [0x1000, 0x2000], answers: [7, 'eight', undefined] },
+        { taken: [], answers: [undefined, undefined, undefined] },
+    ], 'each call its own, from the first');
+    assert.throws(()=>make(2, [0x3000], []), /allocated more than the recorded one in Make/);
+    assert.throws(()=>make(1, [0x4000, 0x5000, 0x6000], []),
+        /Make allocated less on the played device: it answered 0x0, 2 of the recording's objects/);
 });

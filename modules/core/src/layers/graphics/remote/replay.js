@@ -65,11 +65,26 @@ const PURE_GETTERS = new Set([
 /**
  * Whether a method may hand out one of the device's objects through a
  * structure it is given -- what makes one, gets one or asks for one -- so
- * that the structures are looked through after it. Both sides ask this.
+ * that the structures are looked through after it. Both sides ask this, of
+ * every call: the answer is kept by name, the names being few.
  *
  * @param {string} name
  */
 function handsOut(name){
+    let hands = HANDS_OUT.get(name);
+    if (hands === undefined)
+    {
+        hands = handsOutByName(name);
+        HANDS_OUT.set(name, hands);
+    }
+    return hands;
+}
+
+/** `handsOut`'s answers so far. @type {Map<string, boolean>} */
+const HANDS_OUT = new Map();
+
+/** @param {string} name */
+function handsOutByName(name){
     return name.startsWith('Create') || name.startsWith('Get') || name.startsWith('Query')
         || name === 'EndStateBlock'
         // DXGI's enumerations, and Direct3D 10's getters of a stage's bindings:
@@ -2372,8 +2387,14 @@ export function createPlayer({ root, ship, read, borrow }){
     };
     /** @type {WeakSet<object>} */
     const known = new WeakSet([root]);
-    /** @type {number[]} */
-    let allocs = [];
+    /**
+     * The guest addresses the recorded call's allocations got, and how many
+     * of them the played call has taken (`allocate`).
+     *
+     * @type {readonly unknown[]}
+     */
+    let allocs = NOTHING;
+    let allocated = 0;
     /** The call being played, for what a failure says. @type {string} */
     let playing = '';
     /**
@@ -2418,14 +2439,15 @@ export function createPlayer({ root, ship, read, borrow }){
      * @type {Map<number, number>}
      */
     const sentCounts = new Map();
-    /** @type {any[]} */
-    let replies = [];
+    /** What the caller's services answered in the recorded call, and how many were asked. */
+    let replies = NOTHING;
+    let replied = 0;
     /**
      * Every service of the caller's, played: whatever is asked of it, the
      * answer the caller's gave in the recorded call.
      */
     const standIn = new Proxy({}, {
-        get: (_, key)=>(typeof key === 'string' ? ()=>replies.shift() : undefined),
+        get: (_, key)=>(typeof key === 'string' ? ()=>replies[replied++] : undefined),
     });
     const reader = createReader({ ref: objectAt, service: ()=>standIn });
 
@@ -2468,7 +2490,12 @@ export function createPlayer({ root, ship, read, borrow }){
     const move = args=>{
         for (const arg of args)
         {
-            for (const one of Array.isArray(arg?.moves) ? arg.moves : [])
+            const moves = arg?.moves;
+            if (!Array.isArray(moves))
+            {
+                continue;
+            }
+            for (const one of moves)
             {
                 for (let row = 0; row < one.rows; row++)
                 {
@@ -2507,7 +2534,7 @@ export function createPlayer({ root, ship, read, borrow }){
                 {
                     throw new Error('remote: guest memory lent to a side that cannot read it');
                 }
-                for (const { address, length, slot } of call.lent ?? [])
+                for (const { address, length, slot } of call.lent ?? NOTHING)
                 {
                     borrow(slot, address, length, bytes=>ship(address, bytes));
                 }
@@ -2515,18 +2542,20 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             if (call.op !== OP.CALL)
             {
-                for (const { address, bytes } of call.wrote ?? [])
+                for (const { address, bytes } of call.wrote ?? NOTHING)
                 {
                     ship(address, bytes);
                 }
                 return undefined;
             }
-            for (const { address, bytes } of call.ship ?? [])
+            for (const { address, bytes } of call.ship ?? NOTHING)
             {
                 ship(address, bytes);
             }
-            allocs = call.allocs ?? [];
-            replies = call.replies ?? [];
+            allocs = call.allocs ?? NOTHING;
+            allocated = 0;
+            replies = call.replies ?? NOTHING;
+            replied = 0;
             playing = /** @type {string} */ (call.m);
             if (playing === 'Present')
             {
@@ -2564,10 +2593,10 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 occlusionEnds.set(call.t, (occlusionEnds.get(call.t) ?? 0) + 1);
             }
-            /** What goes beside an answer: for an occlusion count, the others held. */
-            const beside = occlusion && playing === 'GetData' && call.wait === WAIT.ANSWER
-                ? ()=>({ counts: heldCounts(call.t) }) : ()=>({});
-            if (allocs.length > 0)
+            /** Whether an answer goes with the other occlusion counts held beside it. */
+            const beside = occlusion && playing === 'GetData' && call.wait === WAIT.ANSWER;
+            const asked = call.t;
+            if (allocated < allocs.length)
             {
                 // What the played device answered says which way it went: a
                 // refusal (a Reset the device took as lost, with resources it
@@ -2575,14 +2604,15 @@ export function createPlayer({ root, ship, read, borrow }){
                 const said = typeof answer === 'number' ? `0x${(answer >>> 0).toString(16)}`
                     : answer instanceof Promise ? 'a promise' : typeof answer;
                 throw new Error(`remote: ${playing} allocated less on the played device: it`
-                    + ` answered ${said}, ${allocs.length} of the recording's objects not made`);
+                    + ` answered ${said}, ${allocs.length - allocated} of the recording's objects`
+                    + ' not made');
             }
             const later = answer instanceof Promise;
             if (!later)
             {
                 move(args);
             }
-            for (const { address, bytes } of call.wrote ?? [])
+            for (const { address, bytes } of call.wrote ?? NOTHING)
             {
                 ship(address, bytes);
             }
@@ -2590,7 +2620,8 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 const settled = answer.then(value=>{
                     move(args);
-                    return { answer: value, outs: args, ...beside() };
+                    return beside ? { answer: value, outs: args, counts: heldCounts(asked) }
+                        : { answer: value, outs: args };
                 });
                 if (reading && viewsInto(args, reading))
                 {
@@ -2604,7 +2635,12 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             // An unwaited call's answer is what a carrier that is asked for
             // it after the call -- what a device says of itself -- passes on.
-            return call.wait === WAIT.ANSWER ? { answer, outs: args, ...beside() } : answer;
+            if (call.wait !== WAIT.ANSWER)
+            {
+                return answer;
+            }
+            return beside ? { answer, outs: args, counts: heldCounts(asked) }
+                : { answer, outs: args };
         },
         object: objectAt,
         /**
@@ -2622,13 +2658,12 @@ export function createPlayer({ root, ship, read, borrow }){
             return fresh;
         },
         allocate(){
-            const address = allocs.shift();
-            if (address === undefined)
+            if (allocated >= allocs.length)
             {
                 throw new Error('remote: the played device allocated more than the recorded one'
                     + ` in ${playing}`);
             }
-            return address;
+            return /** @type {number} */ (allocs[allocated++]);
         },
         /**
          * Gives a batch's buffer back once nothing played from it needs it:
