@@ -418,5 +418,12 @@ export function createTranslators(state){
         openTranslator,
         detachTranslator,
         closeTranslators,
+        /** @param {{ name: string, bytes: Uint8Array }[]} entries */
+        keepHanded: entries=>{
+            if (kept !== null)
+            {
+                putAll(kept.space, entries);
+            }
+        },
     };
 }
