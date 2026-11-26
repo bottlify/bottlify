@@ -68,7 +68,7 @@ export const RUN_HOLDER = 0;
 
 /**
  * What the machine's memory is held for: the guests' memories; the engine's
- * own (each worker's runtime, each process's state and arena); the
+ * own (each worker's runtime, each process's state); the
  * translator's modules and what compiling them costs; and the heaps' pools
  * (files, caches). The kinds share one limit; their sums are each other's
  * room.

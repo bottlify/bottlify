@@ -84,13 +84,15 @@ const NAMES_KEPT = 1 << 16;
  * hands its own.
  *
  * @param {Reader | null | undefined} reader @param {string} name
- * @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }} [options]
+ * @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }} [options]
  *     `onlyCopy`: bodies that cannot be made again, which never go away; `disk`:
  *     where a body may go on the disk (Cellar's `DiskPolicy`), never by default:
- *     a body the run's cache can make again is not worth a write
+ *     a body the run's cache can make again is not worth a write; `idle`: `stay`
+ *     for bodies read again only long after they were written (a translator's
+ *     functions, at a relink), which leave only when their room is wanted
  * @returns {CacheSpace}
  */
-export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never' } = {}){
+export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never', idle = 'go' } = {}){
     if (!reader)
     {
         return NOTHING;
@@ -120,7 +122,7 @@ export function cacheSpace(reader, name, { onlyCopy = false, disk = 'never' } = 
     return {
         look: key=>reader.look(named(key)),
         with: (key, read, options)=>reader.with(named(key), read, options),
-        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy, disk }),
+        put: (key, bytes)=>reader.put(named(key), bytes, { onlyCopy, disk, idle }),
         drop: key=>reader.drop(named(key)),
     };
 }
@@ -149,6 +151,51 @@ export function joinedSpace(joined, name){
     return {
         space: { ...space, put: ()=>false, drop: ()=>{} },
         adopt: message=>reader.adopt(message),
+    };
+}
+
+/**
+ * The run's cache passed on by a thread that was joined to it (a process in a
+ * worker of its own) to threads of its own (its executors): `adopt` takes each
+ * message the thread is told, keeps what a thread joining later is handed and
+ * tells it to every thread joined here; `join` is the run's `join` as seen from
+ * here.
+ *
+ * @param {{ shared: any, segments: (SharedArrayBuffer | null)[] }} joined
+ */
+export function relayedJoin(joined){
+    let table = joined.shared.table;
+    const segments = [...joined.segments];
+    /** @type {Set<(message: any) => void>} */
+    const told = new Set();
+    return {
+        /** @param {{ segment?: number, buffer?: SharedArrayBuffer | null, table?: SharedArrayBuffer }} message */
+        adopt(message){
+            if (message.table !== undefined && message.table.byteLength > table.byteLength)
+            {
+                table = message.table;
+            }
+            if (message.segment !== undefined)
+            {
+                while (segments.length <= message.segment)
+                {
+                    segments.push(null);
+                }
+                segments[message.segment] = message.buffer ?? null;
+            }
+            for (const tell of told)
+            {
+                tell(message);
+            }
+        },
+        /** @param {(message: any) => void} post */
+        join(post){
+            told.add(post);
+            return {
+                shared: { ...joined.shared, table }, segments: [...segments],
+                leave: ()=>told.delete(post),
+            };
+        },
     };
 }
 
@@ -408,8 +455,8 @@ export function createCacheModule(){
          *     `join`: how another thread of this process (an executor) is joined to
          *     the run's cache, to read it in place too; `serve`: a channel a worker
          *     that writes the cache calls the keeper through (`channelSpace`)
-         * @returns {Promise<{ space: (name: string,
-         *     options?: { onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }) => CacheSpace,
+         * @returns {Promise<{ space: (name: string, options?: { onlyCopy?: boolean,
+         *     disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }) => CacheSpace,
          *     join: Join,
          *     serve: Serve }>}
          */
@@ -424,7 +471,8 @@ export function createCacheModule(){
             const join = config?.join ?? null;
             const serve = config?.serve ?? null;
             return {
-                /** @param {string} name @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }} [options] */
+                /** @param {string} name @param {{ onlyCopy?: boolean,
+                 *     disk?: 'kept' | 'run' | 'never', idle?: 'go' | 'stay' }} [options] */
                 space: (name, options)=>cacheSpace(given, name, options),
                 join: post=>join?.(post) ?? null,
                 serve: name=>serve?.(name) ?? null,

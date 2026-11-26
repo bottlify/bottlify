@@ -21,13 +21,22 @@
 
 import { readPieces } from './translation-store.js';
 import { unframe } from './record-frame.js';
-import { joinedSpace } from '../../cache/module.js';
+import { joinedSpace, relayedJoin } from '../../cache/module.js';
 
 /**
  * The names of the run's cache the process puts those records under, read by
  * every executor of the process.
  */
 export const STORE_SPACE = 'translations';
+
+/**
+ * The names of the run's cache the translator's emitted functions are kept
+ * under (`KeptStore`), and how: they stay however long idle - one is read
+ * again only at a relink, long after it was written - and leave when their
+ * room is wanted, never to a disk, since one is made again by emitting it.
+ */
+export const KEPT_SPACE = 'cork';
+export const KEPT_OPTIONS = Object.freeze({ idle: /** @type {const} */ ('stay') });
 
 /**
  * What goes across with bytes the sender no longer needs: their buffer, where
@@ -137,6 +146,13 @@ export function storeClient(send){
     let asks = 0;
     /** @type {ReturnType<typeof joinedSpace> | null} */
     let cache = null;
+    /**
+     * The translator's emitted functions as this executor reads them, and the
+     * run's cache passed on to its translation workers (`kept`).
+     * @type {{ read: ReturnType<typeof joinedSpace>,
+     *     relay: ReturnType<typeof relayedJoin> } | null}
+     */
+    let functions = null;
     /** @type {any[]} */
     const early = [];
     /**
@@ -152,6 +168,12 @@ export function storeClient(send){
     /** A record read from the cache, a copy of this thread's own (the translator keeps it).
      * @param {string} key */
     const fromCache = key=>cache?.space.with(key, body=>body.slice()) ?? null;
+    /** A segment of the run's cache made or let go, told to every reader here. @param {any} message */
+    const adopt = message=>{
+        cache?.adopt(message);
+        functions?.read.adopt(message);
+        functions?.relay.adopt(message);
+    };
 
     /**
      * The run's translation store as this executor reaches it: through the
@@ -206,10 +228,37 @@ export function storeClient(send){
                 return;
             }
             cache = joinedSpace(joined, STORE_SPACE);
+            functions = { read: joinedSpace(joined, KEPT_SPACE), relay: relayedJoin(joined) };
             for (const message of early.splice(0))
             {
-                cache.adopt(message);
+                adopt(message);
             }
+        },
+        /**
+         * The run's cache as this executor's translator keeps its functions in
+         * it (`KeptStore`): read here in place, a function emitted here sent to
+         * the process to put, which writes the run's cache; null before the
+         * executor is joined, or where it is not.
+         *
+         * @returns {import('../engine.js').KeptStore | null}
+         */
+        kept(){
+            if (functions === null)
+            {
+                return null;
+            }
+            const { read, relay } = functions;
+            return {
+                space: {
+                    with: (name, take)=>read.space.with(name, take),
+                    put(name, bytes){
+                        send({ type: 'kept', entries: [{ name, bytes }] }, handedOver(bytes));
+                        return true;
+                    },
+                },
+                prefix: `${KEPT_SPACE}/`,
+                join: post=>relay.join(post),
+            };
         },
         /** @param {any} handle  a synchronous handle on the records file */
         holdRecords(handle){
@@ -230,7 +279,7 @@ export function storeClient(send){
                 }
                 else
                 {
-                    cache.adopt(data.message);
+                    adopt(data.message);
                 }
                 return true;
             }

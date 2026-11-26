@@ -52,13 +52,12 @@ export const SETTINGS = {
     // pool lends them (`attachTranslator`).
     translators: { kind: 'host', value: 1,
         doc: 'Workers the runtime opens itself; 0 when a host\'s pool lends them.' },
-    // The translation cache arena, made by the host for every executor of a
-    // process (`createArena`), so what one executor's translators emitted the
-    // others take; absent, the runtime makes its own.
-    arena: { kind: 'host', value: /** @type {SharedArrayBuffer | undefined} */ (undefined),
-        shown: 'none',
-        doc: 'The translation cache arena (`createArena`) every executor of a process shares;'
-            + ' absent, the runtime makes its own.' },
+    // The run's cache the functions emitted are kept in (`kept.js`): every
+    // thread of the run reads them in place; absent, each thread keeps its own.
+    kept: { kind: 'host',
+        value: /** @type {import('./kept.js').KeptStore | undefined} */ (undefined), shown: 'none',
+        doc: 'The run\'s cache the functions emitted are kept in (`KeptStore`), read in place by'
+            + ' every thread of the run; absent, each thread keeps its own.' },
     // Null for a process on one executor (`shared-code.js`).
     sharedCode: { kind: 'host',
         value: /** @type {{ at: number, index: number } | null} */ (null), shown: 'none',

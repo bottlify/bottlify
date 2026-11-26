@@ -21,7 +21,6 @@
 import { emitRegion, finishModule, prepareModule } from '../emit/region.js';
 import { formRegion, formShared } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
-import { openArena } from './arena.js';
 
 /**
  * @typedef {Object} BuiltRegion
@@ -67,14 +66,14 @@ import { openArena } from './arena.js';
  */
 
 /**
- * @typedef {import('./arena.js').KeptFunction} KeptFunction
+ * @typedef {import('./kept.js').KeptFunction} KeptFunction
  */
 
 /**
  * Region functions already emitted, kept by the module's context, the region's
  * entry and hash, and what its job asked of the emitter (`jobKey`); a hit must
  * also match the region's `shapeOf`. Kept in this thread (`createEmitCache`) or
- * in the arena a process's translators share (`arenaEmitCache`).
+ * in the run's cache every thread of the run shares (`keptEmitCache`).
  *
  * @typedef {Object} EmitCache
  * @property {(signature: string) => string} context  what keys name a module's context by
@@ -150,33 +149,6 @@ export function createEmitCache(limit = 48 << 20){
                 cache.bytes -= one.size;
             }
         },
-    };
-    return cache;
-}
-
-/**
- * The functions a process's translators keep in its arena: what any of them
- * emitted, every other takes. The context goes into the key whole, as every
- * worker must name it alike.
- *
- * @param {SharedArrayBuffer} buffer  `createArena`'s
- * @returns {EmitCache & { arena: ReturnType<typeof openArena> }}
- */
-export function arenaEmitCache(buffer){
-    const arena = openArena(buffer);
-    /** @type {EmitCache & { arena: ReturnType<typeof openArena> }} */
-    const cache = {
-        arena, hits: 0,
-        context: signature=>signature,
-        take(key, shape){
-            const kept = arena.get(key, shape);
-            if (kept !== undefined)
-            {
-                cache.hits++;
-            }
-            return kept;
-        },
-        keep: (key, shape, kept)=>arena.set(key, shape, kept),
     };
     return cache;
 }

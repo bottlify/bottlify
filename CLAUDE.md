@@ -92,7 +92,8 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   slot (`bridge/internal/vtable.js`). Measure crossings first (`trap`, `drive` in the phase
   profile), and gate the guest path against the host one.
 - **No runtime dependencies** in `@bottlify/core` but the project's own (`@bottlify/cork`, loaded by
-  URL, and `@bottlify/cellar`, imported by name); nothing in the product fetches its own code.
+  URL, and `@bottlify/cellar`, imported by name), and in `@bottlify/cork` but Cellar; nothing in the
+  product fetches its own code.
 - **Modules are standalone libraries.** Each `src/layers/<name>/module.js` declares `name`,
   `requires`, `create(config, host)`, `diagnostics()`, `dispose()`; a module reaches another only
   through `host.requireApi(name)` for a name in its own `requires` — no direct imports, no shared

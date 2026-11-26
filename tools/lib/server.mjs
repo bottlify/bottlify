@@ -30,9 +30,13 @@ const MIME = {
     '.svg': 'image/svg+xml',
 };
 
+/** The packages whose sources are served and import libraries by name: core, and cork,
+ * which core loads by URL. */
+const SERVED_PACKAGES = ['core', 'cork'];
+
 /**
- * The libraries core imports by name (its `dependencies`), each as a route of
- * this server and the path its entry is served at. The browser resolves no
+ * The libraries the served packages import by name (their `dependencies`),
+ * each as a route of this server and the path its entry is served at. The browser resolves no
  * bare name, and the sources are served as they are, unbundled: a module that
  * names a library is served with the name replaced by that path, and the
  * library's own files, which import one another relatively, from its route.
@@ -40,10 +44,11 @@ const MIME = {
  *
  * @returns {{ prefix: string, root: string, name: string, entry: string }[]}
  */
-function libraries(){
-    const manifest = fileURLToPath(new URL('../../modules/core/package.json', import.meta.url));
-    const names = Object.keys(JSON.parse(readFileSync(manifest, 'utf8')).dependencies ?? {});
-    return names.flatMap(name=>{
+export function libraries(){
+    const names = new Set(SERVED_PACKAGES.flatMap(one=>Object.keys(JSON.parse(readFileSync(
+        fileURLToPath(new URL(`../../modules/${one}/package.json`, import.meta.url)), 'utf8'))
+        .dependencies ?? {})));
+    return [...names].flatMap(name=>{
         let entry;
         try {
             entry = fileURLToPath(import.meta.resolve(name));

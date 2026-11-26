@@ -97,7 +97,7 @@ export function createCorkRuntime(env){
         codeWritten,
         takeWrites, markWritten, takeCodeWrites, noteStack } = join(rt, createCodeWrites(rt));
     const { openTranslator, coveredOut, coveredIn, attachTranslator, detachTranslator,
-        closeTranslators
+        closeTranslators, keepHanded
     } = join(rt, createTranslators(rt));
     const { flushStore } = join(rt, createStore(rt));
     join(rt, createPublish(rt));
@@ -452,6 +452,12 @@ export function createCorkRuntime(env){
         },
         seedRecords,
         attachTranslator,
+        /**
+         * Functions another thread of the run emitted and handed here to keep
+         * (an executor's): kept in the run's cache this runtime writes.
+         * Nothing where it keeps none there.
+         */
+        keepHanded,
         /** The milliseconds emitted on this thread, ever: work no worker took. */
         translatedHere: ()=>rt.emittedHereMs,
         detachTranslator,

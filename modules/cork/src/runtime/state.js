@@ -118,7 +118,7 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
     // The layout translations are made for: the process's shared one where it
     // has several executors, whose bytes every executor instantiates over its
     // own state block and tables, given as the instance's bases -- so a
-    // translation's key and its arena entries are the same on every executor;
+    // translation's key and its kept function are the same on every executor;
     // this executor's own otherwise. Whatever reads or writes the state from
     // here, the helpers included, keeps to the executor's own (`layout`).
     const emitLayout = sharedLayout ?? layout;
@@ -304,9 +304,10 @@ export function baseState({ memory, ram, layout, sharedLayout = undefined, confi
 /**
  * A translation worker: loaded once it has answered its first message
  * (`ready`), with at most one batch out (`pending`); one asked to go
- * (`leaving`) takes no batch and goes when its last one is back.
+ * (`leaving`) takes no batch and goes when its last one is back; `leave` lets
+ * go of its joining the run's cache (`KeptStore.join`).
  * @typedef {{ adapter: import('./translator.js').WorkerAdapter, ready: boolean,
- *     pending: Pending | null, leaving: boolean }} Translator
+ *     pending: Pending | null, leaving: boolean, leave: (() => void) | null }} Translator
  */
 
 /**

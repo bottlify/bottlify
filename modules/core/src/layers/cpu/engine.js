@@ -164,6 +164,21 @@ export function engineContractProblem(engineModule, url){
  */
 
 /**
+ * The run's cache as the cpu layer gives it to the translator (`EngineConfig.kept`): the
+ * space of names its functions are kept under on this thread, the prefix that space puts
+ * before a name, and how a worker of this thread's is joined to the run's cache to read the
+ * same names in place. A space a thread that does not write the run's cache keeps through
+ * hands each body on to the thread that does.
+ *
+ * @typedef {Object} KeptStore
+ * @property {{ with: <T>(name: string, read: (body: Uint8Array) => T) => T | undefined,
+ *     put: (name: string, bytes: Uint8Array) => boolean }} space
+ * @property {string} prefix
+ * @property {((post: (message: any) => void) => ({ shared: any,
+ *     segments: (SharedArrayBuffer | null)[], leave?: () => void } | null)) | null} [join]
+ */
+
+/**
  * The engine's own configuration, the `cork` object of the cpu layer's.
  *
  * @typedef {Object} EngineConfig
@@ -327,8 +342,9 @@ export function engineContractProblem(engineModule, url){
  *     translated code lies on a stack. Default true.
  * @property {number} [translators]  Translation workers the runtime opens itself (0: a host's
  *     pool lends them). Default 1.
- * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
- *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
+ * @property {KeptStore} [kept]  The run's cache the functions emitted are kept in: what any
+ *     thread of the run emitted - an executor, a translation worker - the others take, read
+ *     in place. None: the runtime keeps its own.
  * @property {number} [cacheBytes]  Wasm bytes of the modules running regions are in, past
  *     which those gone longest without running are let go and brought back from the store
  *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
@@ -701,6 +717,9 @@ export function engineContractProblem(engineModule, url){
  *     by the host's pool: it takes batches of its own once it has answered its first message.
  * @property {(adapter: TranslatorPort) => void} [detachTranslator]  The same worker asked
  *     back: it takes no batch from then on, and goes once the one it holds is answered.
+ * @property {(entries: { name: string, bytes: Uint8Array }[]) => void} [keepHanded]
+ *     Functions another thread of the run emitted (an executor's), kept in the run's cache
+ *     this runtime writes (`EngineConfig.kept`).
  * @property {() => number} [translatedHere]  The milliseconds emitted on the
  *     machine's own thread, ever: what a pool reads as a process wanting a worker
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.

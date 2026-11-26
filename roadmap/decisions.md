@@ -2804,3 +2804,9 @@ plain committed read-write memory, so only a span holding a page of its own prot
 slow answer. That work lands the probe for both calls and removes this entry. *2026-11-19,
 recorded here 2026-11-26.*
 
+**A243 revisited: the executors' shared arena is no longer one of the engine's own costs.** The
+translator's emitted functions, which a process of several executors kept in a 48 MiB arena
+charged to the machine's memory as the engine's, are bodies of the run's cache (`cork/`), counted
+under its budget beside the rest of it, and shared by every process of the run rather than one
+process's executors. The run cache's budget is not yet inside the machine's (board U6); until it is,
+the machine's memory no longer counts those functions. *2026-11-26.*

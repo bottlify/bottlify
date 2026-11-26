@@ -255,6 +255,12 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             {
                 storeAsks.answer(data);
             }
+            else if (data?.type === 'kept')
+            {
+                // Functions its translator emitted, kept by the process's translator,
+                // which writes the run's cache, for every thread of the run.
+                host.cork().keepHanded?.(data.entries);
+            }
         });
         worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
             unbroken, store: store !== null, emittedHere: emittedHere.buffer,
