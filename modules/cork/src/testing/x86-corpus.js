@@ -53,7 +53,7 @@ export const CORPUS_LAYOUT = Object.freeze({
 });
 
 /** The vectors a case can end with, by name. */
-export const VECTOR_NAMES = Object.freeze({ 0: 'DE', 6: 'UD', 13: 'GP', 14: 'PF' });
+const VECTOR_NAMES = Object.freeze({ 0: 'DE', 6: 'UD', 13: 'GP', 14: 'PF' });
 
 const C0 = 0x100;
 const C1 = 0x200;
@@ -62,13 +62,13 @@ const C3 = 0x4000;
 const CONDITION = C0 | C1 | C2 | C3;
 
 /** CF PF AF ZF SF OF and DF: the flags a case is compared on. */
-export const COMPARED_FLAGS = 0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x800 | 0x400;
+const COMPARED_FLAGS = 0x1 | 0x4 | 0x10 | 0x40 | 0x80 | 0x800 | 0x400;
 /** The x87 exceptions the model does not keep: denormal operand, overflow, underflow, precision. */
-export const UNMODELLED_STATUS = 0x2 | 0x8 | 0x10 | 0x20;
+const UNMODELLED_STATUS = 0x2 | 0x8 | 0x10 | 0x20;
 /** MXCSR's control bits; the six exception flags below them are not kept. */
-export const MXCSR_CONTROL = 0xffc0;
+const MXCSR_CONTROL = 0xffc0;
 /** How far from the processor's a transcendental result may be, in units in the last place. */
-export const TRANSCENDENTAL_ULPS = 2;
+const TRANSCENDENTAL_ULPS = 2;
 
 /**
  * What each x87 instruction leaves of the condition codes, from the SDM's
@@ -575,7 +575,7 @@ export function diffCase(one, actual){
 }
 
 /** One line for a failing case. @param {X86Case} one @param {ReturnType<typeof diffCase>} divergences */
-export function describe(one, divergences){
+function describe(one, divergences){
     const bytes = Buffer.from(one.code.subarray(0, -1)).toString('hex');
     return `${one.name} [${bytes}]: ${divergences.slice(0, 6)
         .map(d=>`${d.name} expected ${d.expected} got ${d.actual}`).join('; ')}`;

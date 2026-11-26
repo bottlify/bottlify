@@ -40,7 +40,7 @@ export const REGISTERS = Object.freeze(['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp'
 /** The sixteen general registers of long mode by index. */
 export const REGISTERS64 = Object.freeze(['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi',
     'r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15']);
-export const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
+const SEGMENTS = Object.freeze(['es', 'cs', 'ss', 'ds', 'fs', 'gs']);
 
 /**
  * @typedef {Object} Operand

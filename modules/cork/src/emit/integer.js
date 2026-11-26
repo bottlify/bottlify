@@ -163,7 +163,7 @@ export const TRAP_END_TURN = 2;
  *
  * @param {import('../decode/decoder.js').Instruction} instruction
  */
-export function classOf(instruction){
+function classOf(instruction){
     if (isX87(instruction))
     {
         return 'x87';
@@ -2917,7 +2917,7 @@ export function mask(e, size){
  *
  * @param {E} e @param {number} size @param {() => void} pushValue
  */
-export function push(e, size, pushValue){
+function push(e, size, pushValue){
     const { b } = e;
     if (isLong(e))
     {

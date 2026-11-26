@@ -88,7 +88,7 @@ import {
  * The host functions a module imports for the transcendentals, by name; an
  * instantiation supplies each (`mathImports()`), from `Math`.
  */
-export const MATH_IMPORTS = Object.freeze([
+const MATH_IMPORTS = Object.freeze([
     'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p', 'libm',
 ]);
 
@@ -291,7 +291,7 @@ export const BLOCK_MARK_ARM = 0xf;
  * Where in the state page a block's mark is stored: short of `nanFirst` and in no
  * field, past the 32-bit state block, in the 64-bit one's unused tail.
  */
-export const BLOCK_MARK_AT = 1020;
+const BLOCK_MARK_AT = 1020;
 
 /**
  * A block's mark as a diagnostic build stores it (`markBlocks`): a constant no
@@ -300,9 +300,9 @@ export const BLOCK_MARK_AT = 1020;
  *
  * @param {number} index @param {number} copy
  */
-export const blockMark = (index, copy)=>(0x6b5a0000 | (copy & 0xf) << 12 | index & 0xfff) >>> 0;
+const blockMark = (index, copy)=>(0x6b5a0000 | (copy & 0xf) << 12 | index & 0xfff) >>> 0;
 /** The registers among the parameters: eax, ecx, edx, ebx. */
-export const CARRIED_REGS = STATE_PARAMS - 2;
+const CARRIED_REGS = STATE_PARAMS - 2;
 /**
  * A region's record fields as the state block keeps them between regions:
  * each local, its offset in the record (`recordOffsets`) and whether long
@@ -5906,7 +5906,7 @@ export function planStructure(region, returns, callReturn = false){
  * @param {(at: number) => number | undefined} fallOf  the block `at` falls through into, if any
  * @returns {{ order: number[], loops: Map<number, number> }}  as `planStructure`'s
  */
-export function structureOf(successors, roots, fallOf){
+function structureOf(successors, roots, fallOf){
     const count = successors.length;
     // With no jump back in address order but a block's onto itself there is
     // no loop of more than one block, and the address order is one the jumps

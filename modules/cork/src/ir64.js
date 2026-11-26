@@ -133,7 +133,7 @@ function resultFlags(result, size){
  *
  * @param {bigint} a @param {bigint} b @param {number} carry @param {number} size
  */
-export function addFlags64(a, b, carry, size){
+function addFlags64(a, b, carry, size){
     const mask = maskOf(size);
     const sum = (a & mask) + (b & mask) + BigInt(carry);
     const result = sum & mask;
@@ -149,7 +149,7 @@ export function addFlags64(a, b, carry, size){
  *
  * @param {bigint} a @param {bigint} b @param {number} borrow @param {number} size
  */
-export function subFlags64(a, b, borrow, size){
+function subFlags64(a, b, borrow, size){
     const mask = maskOf(size);
     const difference = (a & mask) - (b & mask) - BigInt(borrow);
     const result = difference & mask;
@@ -166,7 +166,7 @@ export function subFlags64(a, b, borrow, size){
  *
  * @param {State64} state @param {import('./decode/decoder.js').Operand} operand
  */
-export function operandAddress64(state, operand){
+function operandAddress64(state, operand){
     let value;
     if (operand.rip)
     {
@@ -865,7 +865,7 @@ function writeWide(state, size, low, high){
  * @param {number} size
  * @returns {{ result: bigint, flags: number, written: number } | null}
  */
-export function shift64(op, value, count, rflags, size){
+function shift64(op, value, count, rflags, size){
     const bits = size * 8;
     const mask = maskOf(size);
     const sign = signOf(size);

@@ -34,7 +34,7 @@ const FSTP1_EMPTY = 'FSTP1 (D9 D8+i) on an empty ST(0): the processor only pops'
 const EVERY_TIER = ['interpreter', 'wasm', 'translated'];
 
 /** @type {readonly KnownFailure[]} */
-export const KNOWN_FAILURES = Object.freeze(/** @type {KnownFailure[]} */ ([
+const KNOWN_FAILURES = Object.freeze(/** @type {KnownFailure[]} */ ([
     { index: 1983, code: 'c746c817adfc19db46c8dbe3d9d9', tiers: EVERY_TIER, reason: FSTP1_EMPTY },
     { index: 5867, code: 'ddddd9eed9f7d9d8c7843dc80000005488ee16c7843dcc000000ee1ea93bdfac3dc8'
         + '000000d9f7', tiers: EVERY_TIER, reason: FSTP1_EMPTY },

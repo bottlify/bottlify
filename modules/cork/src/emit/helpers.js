@@ -44,7 +44,7 @@ export const HELPER_NAMES = Object.freeze([
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {boolean} [shared]  whether the memory is shared
  */
-export function defineHelpers(m, layout, shared = false){
+function defineHelpers(m, layout, shared = false){
     const materialise = addMaterialiseHelper(m, layout.bits === 64);
     const { f80ToF64, f64ToF80 } = addF80Helpers(m, layout.ramMemory);
     const round = addRoundHelper(m);
