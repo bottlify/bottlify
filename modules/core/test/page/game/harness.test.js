@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     listen, scheduleKeyTimes, schedulePresses, presentFrame, recordSample, resetSamples, profile,
-    byModule, guestSamples, seedFiles, bundleStoreOptions, drainTable,
+    byModule, guestSamples, seedFiles, bundleStoreOptions, drainTable, presentingProcess,
 } from './harness.js';
 import { createMixer } from '../../../src/layers/audio/output/mixer.js';
 
@@ -363,3 +363,27 @@ test('the table drain captures each block as mixed, not added onto the one befor
     assert.ok(samples.every(value=>Math.abs(value - level) <= 1),
         `every sample at the level written: ${Math.min(...samples)}..${Math.max(...samples)}`);
 });
+
+test('a report is of the process that presented the most frames, not of the one started last',
+    ()=>{
+        /** @param {string} image @param {number | undefined} frames @param {boolean} [worker] */
+        const one = (image, frames, worker)=>({ image, worker,
+            diagnostics: [{ name: 'graphics', metrics: { of: image } },
+                ...frames === undefined ? [] : [{ name: 'log', metrics: { frames } }]] });
+        // A benchmark, then the system scanners it started, the facade's the last.
+        const found = [one('3DMark06.exe', 4200), one('FMSISvc.exe', 0, true),
+            one('fmsiscan.exe', undefined, true)];
+        const chosen = presentingProcess(found, 0);
+        assert.equal(chosen.diagnostics, found[0].diagnostics, 'the benchmark\'s tables');
+        assert.deepEqual(chosen.processes.map(each=>[each.image, each.frames, each.worker,
+            each.chosen]), [['3DMark06.exe', 4200, false, true], ['FMSISvc.exe', 0, true, false],
+            ['fmsiscan.exe', null, true, false]]);
+
+        // The facade's own process presenting as much keeps its report.
+        assert.equal(presentingProcess(found, 4200).diagnostics, null);
+        // Of two that presented, the one with more.
+        const three = [one('a.exe', 10), one('b.exe', 30), one('c.exe', 20)];
+        assert.equal(presentingProcess(three, 0).diagnostics, three[1].diagnostics);
+        // Nothing presented anywhere: the facade's.
+        assert.equal(presentingProcess([one('a.exe', 0)], 0).diagnostics, null);
+    });

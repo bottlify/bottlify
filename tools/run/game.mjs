@@ -58,6 +58,7 @@ import { pausedStack, reportTimeout } from '../lib/timeout-report.mjs';
 import { serveStatic } from '../lib/server.mjs';
 import { describeProfile, profileWorkers, summarise, summariseAllocations } from '../lib/profile.mjs';
 import { describeDevice, watchDevice } from '../lib/device-lag.mjs';
+import { describeProcesses, describeRunCache } from '../lib/run-report.mjs';
 import { openBundle } from '../lib/btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
@@ -1308,6 +1309,11 @@ function describe(result, context, calls, symbols){
             say(`    ${entry}`);
         }
     }
+    for (const line of describeProcesses(result.processes))
+    {
+        say(`  ${line}`);
+    }
+    say(`  ${describeRunCache(result.runCache)}`);
     for (const layer of result.layers ?? [])
     {
         // A metric that is a structure prints as its own JSON rather than as

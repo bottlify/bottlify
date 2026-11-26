@@ -35,6 +35,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openBundle } from '../lib/btl.mjs';
 import { diskDirectory } from '../lib/disk-directory.mjs';
 import { createApp } from '../../modules/core/src/app.js';
+import { describeRunCache } from '../lib/run-report.mjs';
 import { createDirectoryTranslationStore }
     from '../../modules/core/src/layers/cpu/internal/translation-store.js';
 import { peekBytes } from '../../modules/core/src/trace.js';
@@ -793,6 +794,8 @@ async function main(){
     }
 
     console.log(`stopped: ${stopped}`);
+    // The run's, read once: what its cache held at most is what its budget is weighed against.
+    console.log(`  ${describeRunCache(app.runCache())}`);
 
     // What the program wrote. A game of this age keeps its own log, and it
     // says in plain words what it thought went wrong -- which is a better
