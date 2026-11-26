@@ -174,7 +174,7 @@ export async function openSession(deps){
  * @param {{ files: any[], links?: any[] | null }} seeded
  * @returns {{ blocks: any, eager: any[] }}
  */
-export function sessionUnder(blocks, seeded){
+function sessionUnder(blocks, seeded){
     // A file a further name is given: the record of a file's number or
     // attributes alone gives none, and its file stays lazy.
     const linked = new Set((seeded.links ?? [])

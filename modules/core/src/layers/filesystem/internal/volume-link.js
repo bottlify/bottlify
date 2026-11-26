@@ -95,7 +95,7 @@ const READS = new Set(['stat', 'list', 'size']);
 export const CHUNK = 64 << 10;
 
 /** What a process keeps of a drive's files, in chunks, before it drops the oldest. */
-export const KEPT = 8 << 20;
+const KEPT = 8 << 20;
 
 /** A read at least this long goes across as it is, and is not kept. */
 const LONG_READ = 1 << 20;

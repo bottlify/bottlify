@@ -672,7 +672,7 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
  * @param {Uint8Array} bytes  little-endian, an even count
  * @returns {string}
  */
-export function unitsText(bytes){
+function unitsText(bytes){
     const count = bytes.length >> 1;
     // The units themselves where they lie on a unit's boundary and the host
     // reads them as the guest wrote them; made a chunk at a time otherwise.

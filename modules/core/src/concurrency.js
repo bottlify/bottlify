@@ -22,16 +22,16 @@
  */
 
 /** How many processes may run at once. */
-export const CONCURRENCY = Object.freeze([1, 2, 4]);
+const CONCURRENCY = Object.freeze([1, 2, 4]);
 
 /** Whether this thread can share memory with another. */
-export function canShareMemory(){
+function canShareMemory(){
     return typeof SharedArrayBuffer === 'function'
         && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
 }
 
 /** What a page that cannot share memory is told it needs. */
-export const NEEDS_SHARED_MEMORY = 'the engine needs shared memory (SharedArrayBuffer), and this'
+const NEEDS_SHARED_MEMORY = 'the engine needs shared memory (SharedArrayBuffer), and this'
     + ' page has none: it is not cross-origin isolated. Serve the page with the headers'
     + ' Cross-Origin-Opener-Policy: same-origin and Cross-Origin-Embedder-Policy: require-corp'
     + ' (or credentialless)';

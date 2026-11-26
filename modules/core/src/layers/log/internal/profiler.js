@@ -100,7 +100,7 @@ export const FRAME_DELTAS = /* @__PURE__ */ Object.freeze([
  *
  * @type {readonly MirroredCounter[]}
  */
-export const FRAME_VALUES = /* @__PURE__ */ Object.freeze([
+const FRAME_VALUES = /* @__PURE__ */ Object.freeze([
     { column: 'thread', layer: 'kernel', counter: 'frameThread' },
     { column: 'threadInstructions', layer: 'kernel', counter: 'frameThreadInstructions' },
     { column: 'threadAt', layer: 'kernel', counter: 'frameAt' },

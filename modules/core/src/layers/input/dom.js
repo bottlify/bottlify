@@ -78,14 +78,14 @@ const BUTTON_BITS = Object.freeze([[1, 'left'], [2, 'right'], [4, 'middle'], [8,
  * as right Option and a game of the era all but never binds, where Control is
  * a crouch or a fire button.
  */
-export const RELEASE_KEY = 'AltRight';
+const RELEASE_KEY = 'AltRight';
 /**
  * Whether a key event is RELEASE_KEY: by its code, or as the right-hand Alt
  * where a layout names the key otherwise (AltGraph, Option under another code).
  *
  * @param {{ code?: string, key?: string, location?: number }} e
  */
-export const isReleaseKey = e=>e.code === RELEASE_KEY
+const isReleaseKey = e=>e.code === RELEASE_KEY
     || ((e.key === 'Alt' || e.key === 'AltGraph') && e.location === 2);
 /** A wheel event this long after the last one is a notch of its own, however small. */
 const WHEEL_GAP_MS = 120;

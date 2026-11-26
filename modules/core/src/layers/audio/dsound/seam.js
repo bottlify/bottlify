@@ -269,7 +269,7 @@ const ZEROED_CAPS = Object.freeze([
  *
  * @type {Readonly<Record<number, string>>}
  */
-export const DSOUND_ORDINALS = Object.freeze({
+const DSOUND_ORDINALS = Object.freeze({
     1: 'DirectSoundCreate',
     2: 'DirectSoundEnumerateA',
     3: 'DirectSoundEnumerateW',
@@ -371,7 +371,7 @@ export const IDIRECTSOUNDBUFFER8_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** IKsPropertySet, after IUnknown's three. */
-export const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
+const IKSPROPERTYSET_SLOTS = /** @type {[string, number][]} */ ([
     ['Get', 7],
     ['Set', 6],
     ['QuerySupport', 3],
@@ -424,32 +424,32 @@ const DATAFLOW_CAPTURE = 1;
 /** DIRECTSOUNDDEVICE_TYPE_WDM: Windows NT has no VxD, so every device it lists is WDM. */
 const DEVICE_TYPE_WDM = 2;
 /** ..._WAVEDEVICEMAPPING_A/W_DATA: the wave device's name and flow in, its GUID out. */
-export const WAVEDEVICEMAPPING = Object.freeze({
+const WAVEDEVICEMAPPING = Object.freeze({
     DeviceName: 0, DataFlow: 4, DeviceId: 8, SIZE: 24,
 });
-export const WAVEDEVICEMAPPING_64 = Object.freeze({
+const WAVEDEVICEMAPPING_64 = Object.freeze({
     DeviceName: 0, DataFlow: 8, DeviceId: 12, SIZE: 32,
 });
 /** ..._DESCRIPTION_1_DATA: no pointer in it, one layout in either width. */
-export const DESCRIPTION_1 = Object.freeze({
+const DESCRIPTION_1 = Object.freeze({
     DeviceId: 0, DescriptionA: 16, DescriptionW: 272, ModuleA: 784, ModuleW: 1044,
     Type: 1564, DataFlow: 1568, WaveDeviceId: 1572, Devnode: 1576, SIZE: 1580,
 });
 /** ..._DESCRIPTION_A/W_DATA: the strings are pointers to text the library keeps. */
-export const DESCRIPTION = Object.freeze({
+const DESCRIPTION = Object.freeze({
     Type: 0, DataFlow: 4, DeviceId: 8, Description: 24, Module: 28, Interface: 32,
     WaveDeviceId: 36, SIZE: 40,
 });
-export const DESCRIPTION_64 = Object.freeze({
+const DESCRIPTION_64 = Object.freeze({
     Type: 0, DataFlow: 4, DeviceId: 8, Description: 24, Module: 32, Interface: 40,
     WaveDeviceId: 48, SIZE: 56,
 });
 /** ..._ENUMERATE_1/A/W_DATA: the program's callback and its context. */
-export const ENUMERATE = Object.freeze({ Callback: 0, Context: 4, SIZE: 8 });
-export const ENUMERATE_64 = Object.freeze({ Callback: 0, Context: 8, SIZE: 16 });
+const ENUMERATE = Object.freeze({ Callback: 0, Context: 4, SIZE: 8 });
+const ENUMERATE_64 = Object.freeze({ Callback: 0, Context: 8, SIZE: 16 });
 
 /** IDirectSoundNotify, after IUnknown's three. */
-export const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
+const IDIRECTSOUNDNOTIFY_SLOTS = /** @type {[string, number][]} */ ([
     ['SetNotificationPositions', 2],
 ]);
 

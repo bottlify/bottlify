@@ -48,7 +48,7 @@ export const call = (iat, name, words = [])=>[...pushArgs(words), 0xff, 0x15, ..
 export const storeEax = address=>[0xa3, ...u32(address)];
 
 /** What a program that makes a context imports for it. */
-export const SETUP_IMPORTS = {
+const SETUP_IMPORTS = {
     'USER32.dll': ['RegisterClassA', 'CreateWindowExA', 'DefWindowProcA', 'GetDC'],
     'GDI32.dll': ['ChoosePixelFormat', 'SetPixelFormat', 'SwapBuffers'],
     'OPENGL32.dll': ['wglCreateContext', 'wglMakeCurrent'],

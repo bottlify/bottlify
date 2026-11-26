@@ -216,7 +216,7 @@ export function createMissingImports({ register, events, journal, classify, faul
  *
  * @type {[RegExp, string][]}
  */
-export const API_SETS = [
+const API_SETS = [
     [/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase'],
     [/^api-ms-win-(core-(localregistry|registry)|eventing|security)-[a-z0-9-]+$/, 'advapi32'],
     [/^api-ms-win-core-winrt-[a-z0-9-]+$/, 'combase'],
@@ -466,7 +466,7 @@ export const LDR_DLL_NOTIFICATION_REASON_UNLOADED = 2;
 /** LoadLibraryEx's flags: mapped with nothing resolved or run, or loaded as data. */
 export const DONT_RESOLVE_DLL_REFERENCES = 0x1;
 
-export const LOAD_LIBRARY_AS_DATAFILE = 0x2;
+const LOAD_LIBRARY_AS_DATAFILE = 0x2;
 
 export const LOAD_LIBRARY_AS_IMAGE_RESOURCE = 0x20;
 

@@ -52,7 +52,7 @@ import { fromBase64, toBase64 } from '../../../system/base64.js';
  * @param {T[]} entries
  * @returns {T[]}
  */
-export function inIndexOrder(entries){
+function inIndexOrder(entries){
     /** @param {string} name */
     const key = name=>Array.from(name, one=>{
         const upper = one.toUpperCase();
@@ -155,10 +155,10 @@ export function inIndexOrder(entries){
  * dates has to find it older than anything it writes itself. The start of
  * the DOS calendar is the oldest date every convention can still express.
  */
-export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
+const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
 
 /** A mount point's tag: the reparse point every junction is. */
-export const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
+const IO_REPARSE_TAG_MOUNT_POINT = 0xa0000003;
 
 /** A node's reparse tag: what it was set with, a junction recorded alone a mount point's. */
 const tagOf = (/** @type {Node} */ node)=>node.reparse?.tag

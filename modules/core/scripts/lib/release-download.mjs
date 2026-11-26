@@ -87,7 +87,7 @@ export async function downloadViaApi({ repo, tag, name, token, fetchImpl = fetch
 }
 
 /** @param {Asset} asset @returns {Promise<Uint8Array>} */
-export async function downloadViaUrl({ repo, tag, name, fetchImpl = fetch }){
+async function downloadViaUrl({ repo, tag, name, fetchImpl = fetch }){
     const response = await fetchOk(fetchImpl, releaseUrl(repo, tag, name));
     return new Uint8Array(await response.arrayBuffer());
 }
@@ -96,7 +96,7 @@ export async function downloadViaUrl({ repo, tag, name, fetchImpl = fetch }){
  * `gh release download` writes a single asset to stdout with `--output -`.
  * @param {Asset} asset @returns {Uint8Array}
  */
-export function downloadViaGh({ repo, tag, name }){
+function downloadViaGh({ repo, tag, name }){
     const result = spawnSync('gh',
         ['release', 'download', tag, '--repo', repo, '--pattern', name, '--output', '-'],
         { maxBuffer: 256 * 1024 * 1024 });

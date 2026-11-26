@@ -35,7 +35,7 @@ const GL = {
     COLOR_BUFFER_BIT: 0x4000, DEPTH_BUFFER_BIT: 0x100, TRIANGLE_FAN: 6,
 };
 
-export const VS = `#version 120
+const VS = `#version 120
 uniform mat4 projection;
 uniform mat4 modelview;
 attribute vec2 vTex;
@@ -50,7 +50,7 @@ void main()
   gl_Position = projection * modelview * vec4(vPosition, 1.0);
 }
 `;
-export const FS = `#version 120
+const FS = `#version 120
 uniform sampler2D texture;
 uniform bool useTexture;
 varying vec4 color;

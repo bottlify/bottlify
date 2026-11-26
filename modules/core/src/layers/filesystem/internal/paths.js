@@ -25,7 +25,7 @@ import { ErrorCode, fsError } from './errors.js';
  * Names NT reserves for devices, recognised in every directory rather than only
  * at a root -- `C:\Game\nul` is the null device, not a file called `nul`.
  */
-export const DEVICE_NAMES = new Set([
+const DEVICE_NAMES = new Set([
     'CON', 'PRN', 'AUX', 'NUL',
     ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap(index=>[`COM${index}`, `LPT${index}`]),
 ]);
@@ -52,7 +52,7 @@ const usableName = name=>name.length > 0
 export const foldName = name=>name.toLowerCase();
 
 /** @param {string} name */
-export const hasWildcard = name=>name.includes('*') || name.includes('?');
+const hasWildcard = name=>name.includes('*') || name.includes('?');
 
 /**
  * Strips what Win32 strips from a component before looking it up: trailing dots

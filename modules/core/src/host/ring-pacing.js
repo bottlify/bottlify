@@ -19,7 +19,7 @@ import { pacedYield } from '../app.js';
  * but a frame to compose or a session to save does, and this bounds how long
  * they wait behind an idle machine.
  */
-export const IDLE_SLEEP_MS = 50;
+const IDLE_SLEEP_MS = 50;
 
 /**
  * The pacing of an engine fed through a ring: what the page says is read at

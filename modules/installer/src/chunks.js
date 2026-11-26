@@ -39,7 +39,7 @@ export const sizeOf = file=>(file.pieces ? file.size ?? 0
     : file.contents ? file.contents.size : file.bytes.length);
 
 /** @param {ChunkedFile} file @returns {(Uint8Array | null | undefined)[]} */
-export const piecesOf = file=>file.pieces ?? (file.contents
+const piecesOf = file=>file.pieces ?? (file.contents
     ? (file.contents.flat ? [file.contents.flat] : file.contents.pieces) : [file.bytes]);
 
 /**

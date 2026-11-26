@@ -153,7 +153,7 @@ export function summariseAllocations(profile){
  * worker's performance.now() as it begins: the profile's samples in it say
  * where that moment is on the profile's own clock.
  */
-export const ANCHOR = '(function __bottlifyAnchor__(){const at=performance.now();'
+const ANCHOR = '(function __bottlifyAnchor__(){const at=performance.now();'
     + 'while(performance.now()-at<4){}return at;})()';
 
 /**

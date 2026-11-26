@@ -33,7 +33,7 @@
 
 import { readMapped } from './pe.js';
 
-export const DIR_DELAY_IMPORT = 13;
+const DIR_DELAY_IMPORT = 13;
 
 /** Attributes bit 0: the addresses in this descriptor are RVAs, not VAs. */
 const DELAY_ATTR_RVA_BASED = 1;

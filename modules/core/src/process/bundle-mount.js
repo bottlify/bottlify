@@ -124,28 +124,28 @@ export function retryingFetch({ fetch, events, retry }){
  * behind bytes it did not ask for. The cap is for the background filler and for
  * reads that genuinely span that much.
  */
-export const MAX_REQUEST_BYTES = 16 << 20;
+const MAX_REQUEST_BYTES = 16 << 20;
 
 /**
  * Blocks that are already here, between two that are not, are downloaded again
  * rather than split the request in two. A round trip costs more than this many
  * bytes on any connection worth having.
  */
-export const MAX_BRIDGED_GAP = 128 << 10;
+const MAX_BRIDGED_GAP = 128 << 10;
 
 /**
  * Requests in flight at once. Six is what a browser will open to one host over
  * HTTP/1.1; over HTTP/2 it is one connection and the limit stops mattering, but
  * asking for more would only queue behind this on the worse of the two.
  */
-export const MAX_CONCURRENT_REQUESTS = 6;
+const MAX_CONCURRENT_REQUESTS = 6;
 
 /**
  * How often the background filler looks up to see whether a read is parked.
  * Short enough that a demand fetch is never held up by much, long enough that
  * an idle session is not a timer running hot.
  */
-export const IDLE_CHECK_MS = 50;
+const IDLE_CHECK_MS = 50;
 
 /**
  * Turns blocks into range requests.
@@ -209,7 +209,7 @@ export const READ_AHEAD_BYTES = 2 << 20;
  */
 export const NEAR_ROUND_TRIP_MS = 50;
 
-export const MAX_WINDOW_SCALE = 8;
+const MAX_WINDOW_SCALE = 8;
 
 /**
  * How much a miss brings in, by how far away the bundle is.
@@ -353,7 +353,7 @@ export function withReadAhead(absent, bundle, resident, expected, bytes = READ_A
 }
 
 /** The system directory, on the volume, without its drive or a trailing separator. */
-export const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
+const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
 
 /**
  * Runs `work` over `items`, at most `limit` at a time.
@@ -387,7 +387,7 @@ export async function inParallel(items, limit, work){
  * the root those two places coincide, so a wrong answer to that question still
  * works and stays hidden until something depends on it being right.
  */
-export const BUNDLE_DIRECTORY = 'App';
+const BUNDLE_DIRECTORY = 'App';
 
 /**
  * Where in a bottle the registry its installation left is kept: beside the
@@ -428,7 +428,7 @@ export const BOTTLE_DRIVE_PATH = '.bottlify\\drive_c';
  * @param {string | undefined} expected
  * @returns {((stored: Uint8Array) => Promise<string | null>) | undefined}
  */
-export function expectIndex(expected){
+function expectIndex(expected){
     if (!expected)
     {
         return undefined;
@@ -591,7 +591,7 @@ export async function mountBundle({ options, events, translationStore }){
  *
  * @type {MountedBundle}
  */
-export const NO_BOTTLE = Object.freeze({
+const NO_BOTTLE = Object.freeze({
     source: Object.freeze({
         list: ()=>[],
         stat: ()=>null,
@@ -615,7 +615,7 @@ export const NO_BOTTLE = Object.freeze({
  *
  * @param {any} source @param {number} layer
  */
-export function missesNamed(source, layer){
+function missesNamed(source, layer){
     return {
         list: ()=>source.list(),
         /** @param {string} path */
@@ -667,7 +667,7 @@ export function missesNamed(source, layer){
  *     name once its index is read, and waited on before the cache is opened.
  * @returns {Promise<MountedBundle>}
  */
-export async function mountOneBundle(deps){
+async function mountOneBundle(deps){
     const { spec, id, layer, events, translationStore, held, opened } = deps;
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.

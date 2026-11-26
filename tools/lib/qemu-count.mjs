@@ -27,12 +27,12 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 /** node's flags under the count. */
-export const COUNT_NODE_FLAGS = Object.freeze(['--single-threaded', '--predictable',
+const COUNT_NODE_FLAGS = Object.freeze(['--single-threaded', '--predictable',
     '--no-flush-bytecode', '--min-semi-space-size=64', '--max-semi-space-size=64',
     '--initial-old-space-size=4096']);
 
 /** The plugin's kinds of code, in the order it prints them. */
-export const KINDS = /** @type {const} */ (['js', 'compile', 'gc', 'other']);
+const KINDS = /** @type {const} */ (['js', 'compile', 'gc', 'other']);
 
 /** @typedef {{ js: number, compile: number, gc: number, other: number }} Kinds */
 
@@ -100,7 +100,7 @@ export function takeTarget(target, argv, i){
  *     and `qemu-plugin.h`
  * @param {'x86_64' | 'aarch64'} [machine]
  */
-export function countPlugin(dir, machine = 'x86_64'){
+function countPlugin(dir, machine = 'x86_64'){
     const source = fileURLToPath(new URL('qemu-count.c', import.meta.url));
     const built = `${dir}/qemu-count${machine === 'x86_64' ? '' : `-${machine}`}.so`;
     if (!existsSync(`${dir}/qemu-${machine}`) || !existsSync(`${dir}/qemu-plugin.h`))

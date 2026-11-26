@@ -134,7 +134,7 @@ const SECTION_TERMS = Object.freeze({
  *
  * @param {OpenTerms} terms
  */
-export const holdsAccess = terms=>Boolean(terms.access.read || terms.access.write
+const holdsAccess = terms=>Boolean(terms.access.read || terms.access.write
     || terms.access.delete || terms.access.image);
 
 /**

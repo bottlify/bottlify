@@ -141,7 +141,7 @@ export const STORE_VERSION = 4;
  *
  * @returns {RecordsWriter | null}
  */
-export function openRecordsWriter(){
+function openRecordsWriter(){
     if (typeof globalThis.Worker !== 'function')
     {
         return null;
@@ -246,7 +246,7 @@ const RECORD_NAME = /^([0-9a-f]{8})([0-9a-f]{8})\.cork$/;
  * @param {Iterable<[string, Uint8Array]>} records  name and bytes
  * @returns {Uint8Array}
  */
-export function packSeed(records){
+function packSeed(records){
     const sorted = [...new Map(records)].filter(([name])=>RECORD_NAME.test(name))
         .sort((a, b)=>(a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     const body = sorted.reduce((sum, [, bytes])=>sum + bytes.length, 0);

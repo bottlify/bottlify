@@ -77,7 +77,7 @@ const isReturning = value=>typeof value === 'object' && value !== null
  * @param {unknown} thrown @param {string} call
  * @returns {Error}
  */
-export const named = (thrown, call)=>{
+const named = (thrown, call)=>{
     const error = thrown instanceof Error ? thrown : new Error(String(thrown));
     if (/** @type {any} */ (error).hostCall === undefined)
     {
