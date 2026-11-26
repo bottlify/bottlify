@@ -231,3 +231,46 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     assert.ok(texelsBack, 'the texels read back as they were');
     assert.ok(blocksBack, 'the blocks come back as they were');
 });
+
+test('a level of the cache\'s unit of room moves, one below it stays', async()=>{
+    const fake = createFakeDevice({});
+    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const runCache = await openRunCache({ budget: 64 << 20 });
+    /** @type {ReturnType<typeof channelSpace> | null} */
+    let texels = null;
+    const joined = runCache.join(message=>texels?.adopt(message));
+    texels = channelSpace(joined, runCache.serve(), 'texels');
+    const renderer = createGpuRenderer({
+        backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        texelCache: texels,
+    });
+    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    gl.glGenTextures(1);
+    gl.glBindTexture(GL.TEXTURE_2D, 1);
+    // A 32x32 chain: 4 KiB on top, then 1 KiB, 256 bytes and on.
+    for (let level = 0, side = 32; side >= 1; level++, side >>= 1)
+    {
+        gl.glTexImage2D(GL.TEXTURE_2D, level, GL.RGBA, side, side, 0, GL.RGBA,
+            GL.UNSIGNED_BYTE, new Uint8Array(side * side * 4).fill(level + 1));
+    }
+    const all = [...gl.shareGroup.textures.objects.values()];
+    renderer.spill(all);
+    const figures = ()=>/** @type {any} */ (renderer.diagnostics()).spills;
+    for (let turns = 0; turns < 1000 && figures().levels + figures().refused < 1; turns++)
+    {
+        await turn();
+    }
+    for (let turns = 0; turns < 20; turns++)
+    {
+        await turn();
+    }
+    const moved = { levels: figures().levels, bytes: figures().bytes };
+    const back = gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE)
+        .every((/** @type {number} */ byte)=>byte === 1);
+    runCache.close();
+    texels.close();
+    assert.deepEqual(moved, { levels: 1, bytes: 4096 }, 'the top level alone moved');
+    assert.ok(back, 'and reads back as it was');
+});

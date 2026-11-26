@@ -128,9 +128,16 @@ const BOUND_TARGETS = Object.freeze({
 /** @type {readonly UniformBlockBinding[]} */
 const NO_BLOCKS = Object.freeze([]);
 
-/** Bytes of a level's texels or blocks below which they are not moved into the run's cache
- * (`spill`): a name and a record there cost more than a small level's bytes. */
-const SPILL_FROM = 16 * 1024;
+/**
+ * Bytes of a level's texels or blocks below which they are not moved into the
+ * run's cache (`spill`): the cache's unit of room. A body there holds at least
+ * a unit while it is hot (4 KiB, Cellar's buddy block), and costs about 0.6 KB
+ * here for its name and accessor and 90 bytes of the cache's index: a smaller
+ * level would hold more of the cache than it lets go of here. A mip chain's
+ * levels are each a quarter of the one above, so its one level from a unit up
+ * to four holds three quarters of the bytes of its levels under four units.
+ */
+const SPILL_FROM = 4 * 1024;
 
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
