@@ -6,13 +6,15 @@
 
 /**
  * The program's thread's end of the graphics worker (`worker.js`): each
- * Direct3D 7, 8 or 9 root and each OpenGL root made here is a recorded one
- * whose twin the worker plays, over a port of its own, and each frame the worker presents comes
- * back as a picture that is copied into a texture of this thread's device
- * and presented as a frame drawn here would be.
+ * Direct3D 7, 8, 9 and 10 root and each OpenGL root made here is a recorded
+ * one whose twin the worker plays, over two rings of its own (`ring.js`), and
+ * each frame the worker presents comes back as a picture that is copied into
+ * a texture of this thread's device and presented as a frame drawn here would
+ * be.
  */
 
 import { createSender, sharedNow } from './channel.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { mayWait } from '../../../system/may-wait.js';
 import { createLendingBuffers } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
@@ -75,8 +77,9 @@ function plainOf(services){
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
- *     sent: { batches: number, bytes: number, ms: number, returned: number, made: number,
- *         grown: number, copied: number },
+ *     sent: { batches: number, bytes: number, ms: number, made: number, grown: number,
+ *         copied: number, spilled: number, inPlace: number, copiedIn: number, parts: number,
+ *         waited: number, waiting: number },
  *     received: Record<string, number>, shipped: Record<string, number>,
  *     occlusion: { counted: number, ms: number, maxMs: number, polls: number, asks: number,
  *         beside: number, sentAfterMs: number, tripMs: number, under: number[], trace: any[] },
@@ -99,8 +102,9 @@ function plainOf(services){
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
- *     batches of calls posted to the worker, their bytes, copied guest memory included, and
- *     the milliseconds taking and posting them cost this thread;
+ *     batches of calls sent to the worker, their bytes, copied guest memory included, the
+ *     milliseconds publishing them cost this thread, and the paths their records took
+ *     through the ring (built in place, spilled, copied in, as parts, waiting for room);
  *     `shipped`: that guest memory by what copied it -- buffers' unlocks, surfaces' (lent ones
  *     aside), what calls read out of guest memory and what they wrote into it, and the bytes
  *     of dynamic buffers draws compared to find what to send (`compared`); `calls`: the
@@ -231,6 +235,9 @@ export function portEnd(port){
  * @type {WeakMap<object, { connections: Connection[], listener: (event: { data: any }) => void }>}
  */
 const onWorker = new WeakMap();
+
+/** The roots made on this thread, over every connection: the number each is named by. */
+let rootsMade = 0;
 
 /**
  * Who shows a frame: the newest connection that draws there -- a child that
@@ -375,8 +382,8 @@ export function connectGraphicsWorker(options){
     let mayBlock = /** @type {boolean | null} */ (null);
     /** @type {{ texture: any, view: any, width: number, height: number, format: string } | null} */
     let surface = null;
-    /** @type {MessagePort[]} */
-    const ports = [];
+    /** The roots made, numbered as the worker is told of them. */
+    let roots = 0;
     /** Each OpenGL root's join to the run's cache, let go of with the process. @type {(() => void)[]} */
     const leaves = [];
     /** @type {ReturnType<typeof createSender>[]} */
@@ -485,7 +492,7 @@ export function connectGraphicsWorker(options){
 
     /** @type {Connection} */
     const connection = {
-        drew: ()=>ports.length > 0,
+        drew: ()=>roots > 0,
         /** @param {any} data */
         frame: data=>{
             const arrived = sharedNow();
@@ -517,15 +524,20 @@ export function connectGraphicsWorker(options){
          *     which an OpenGL root's worker side keeps idle texels in, names of its own
          */
         root(api, factory, services, cache = null){
-            const { port1, port2 } = new MessageChannel();
-            ports.push(port1);
+            // Numbered across every connection on this thread's worker, as
+            // its messages name the root.
+            const id = ++rootsMade;
+            roots++;
+            const rings = { calls: createRingMemory(CALLS_BYTES),
+                replies: createRingMemory(REPLIES_BYTES) };
             // Joined to the run's cache: the segments made and let go after
-            // reach the worker through the root's own port. The root is the
-            // owner of its texels' names, let go of when it goes.
+            // reach the worker's side of the root by message, which carries
+            // memory as a ring cannot. The root is the owner of its texels'
+            // names, let go of when it goes.
             const served = api === 'opengl' ? cache?.serve('texels') ?? null : null;
             const joined = served === null ? null
-                : cache?.join((/** @type {any} */ message)=>port1.postMessage({ type: 'cache', message }))
-                    ?? null;
+                : cache?.join((/** @type {any} */ message)=>worker.postMessage({ type: 'cache',
+                    root: id, message })) ?? null;
             if (joined)
             {
                 leaves.push(joined.leave);
@@ -539,23 +551,12 @@ export function connectGraphicsWorker(options){
             // graphics worker of a run with 512 MB of guest memory held as
             // much garbage again, and a phone's page was killed for it. A root
             // that does not lend has its read-backs written here, as bytes.
-            worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
+            worker.postMessage({ type: 'root', id, api, options: plainOf(services), rings,
                 memory: lending ? memory : null, lending, source, frameLatency: maxFrameLatency,
                 cache: joined && served
-                    ? { shared: joined.shared, segments: joined.segments, ...served } : null },
-            [port2]);
-            if (lending)
-            {
-                memoryGrown?.(()=>{
-                    const now = sharedMemory?.() ?? null;
-                    if (now !== null)
-                    {
-                        port1.postMessage({ type: 'memory', memory: now });
-                    }
-                });
-            }
+                    ? { shared: joined.shared, segments: joined.segments, ...served } : null });
             const sender = createSender({
-                post: (message, transfer)=>port1.postMessage(message, transfer),
+                rings,
                 on: {
                     wrote: (address, bytes)=>{
                         readBack.sent += bytes.length;
@@ -578,7 +579,20 @@ export function connectGraphicsWorker(options){
                 gapMs: BATCH_GAP_MS,
                 lending: lending && memory && { ...lending, memory },
             });
-            port1.onmessage = event=>sender.receive(event.data);
+            if (lending)
+            {
+                let grown = 0;
+                memoryGrown?.(()=>{
+                    const now = sharedMemory?.() ?? null;
+                    if (now !== null && !sender.closed())
+                    {
+                        grown++;
+                        worker.postMessage({ type: 'memory', root: id, memory: now,
+                            number: grown });
+                        sender.grew(grown);
+                    }
+                });
+            }
             senders.push(sender);
             switch (api)
             {
@@ -638,7 +652,7 @@ export function connectGraphicsWorker(options){
                     sum.backMs += held.backMs ?? 0;
                 }
             }
-            return { roots: ports.length, frames, dropped, waits,
+            return { roots, frames, dropped, waits,
                 handoff: handoff.frames === 0 ? null : {
                     frames: handoff.frames,
                     waitedMs: rounded(handoff.waitedMs),
@@ -682,8 +696,8 @@ export function connectGraphicsWorker(options){
                     under: /** @type {number[]} */ ([]),
                     abandoned: { count: 0, ms: 0, maxMs: 0, polls: 0, asks: 0,
                         trace: /** @type {any[]} */ ([]) } }),
-                // Every message the worker's side of a root posted back, by
-                // type: with `sent.batches`, the messages a frame costs both ways.
+                // Everything the worker's side of a root said back, by type:
+                // with `sent.batches`, the records a frame costs both ways.
                 received: senders.reduce((sum, sender)=>{
                     for (const [type, count] of Object.entries(sender.received()))
                     {
@@ -692,12 +706,18 @@ export function connectGraphicsWorker(options){
                     return sum;
                 }, /** @type {Record<string, number>} */ ({})),
                 sent: senders.reduce((sum, sender)=>{
-                    const { batches, bytes, ms, returned, made, grown, copied } = sender.sent();
-                    return { batches: sum.batches + batches, bytes: sum.bytes + bytes,
-                        ms: Math.round(sum.ms + ms), returned: sum.returned + returned,
-                        made: sum.made + made, grown: sum.grown + grown,
-                        copied: sum.copied + copied };
-                }, { batches: 0, bytes: 0, ms: 0, returned: 0, made: 0, grown: 0, copied: 0 }),
+                    /** @type {Record<string, number>} */
+                    const one = sender.sent();
+                    /** @type {Record<string, number>} */
+                    const out = {};
+                    for (const [key, value] of Object.entries(sum))
+                    {
+                        out[key] = value + (one[key] ?? 0);
+                    }
+                    out.ms = Math.round(out.ms);
+                    return /** @type {typeof sum} */ (out);
+                }, { batches: 0, bytes: 0, ms: 0, made: 0, grown: 0, copied: 0, spilled: 0,
+                    inPlace: 0, copiedIn: 0, parts: 0, waited: 0, waiting: 0 }),
                 // The guest bytes copied into those batches, by what copied
                 // them: what lending buffers would have left in place.
                 // A diagnostic's (`checkDraws`): draws whose bytes the played
@@ -742,10 +762,10 @@ export function connectGraphicsWorker(options){
             {
                 leaveCache();
             }
-            for (const port of ports.splice(0))
+            // Their rings closed, the worker's side of each root ends.
+            for (const sender of senders)
             {
-                port.postMessage({ type: 'close' });
-                port.close();
+                sender.close();
             }
             surface?.texture.destroy();
             surface = null;

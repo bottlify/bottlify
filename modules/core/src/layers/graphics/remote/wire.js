@@ -5,9 +5,10 @@
  */
 
 /**
- * Recorded calls as bytes: one buffer a batch, written as the calls are made
- * and read where they are played, so that a frame of thousands of calls
- * crosses as one transfer rather than as thousands of objects to clone.
+ * Recorded calls as bytes: one record a batch, written as the calls are made
+ * where the played side reads them -- a root's ring (`ring.js`) -- so that a
+ * frame of thousands of calls crosses as a few records rather than as
+ * thousands of objects to clone.
  *
  * A value is a tag and what it holds: a number as a 32-bit integer or a
  * double, a string by its number in a table both ends build -- its text
@@ -105,7 +106,7 @@ const UNPLACED = new Uint8Array(0);
  * the batch.
  *
  * @param {Object} [options]
- * @param {(least: number) => Uint8Array | null} [options.place]  room for at least
+ * @param {((least: number) => Uint8Array | null) | null} [options.place]  room for at least
  *     `least` bytes, at a multiple of eight in its buffer, or null where there is none now
  * @param {() => void} [options.unplaced]  the room `place` gave goes back unused: the
  *     batch outgrew it
@@ -116,7 +117,9 @@ const UNPLACED = new Uint8Array(0);
 export function createWriter({ place = null, unplaced = ()=>{}, intern = true } = {}){
     /** This side's own buffer, written on when nothing is placed. */
     let own = new ArrayBuffer(1 << 16);
+    /** @type {Uint8Array} */
     let bytes = place ? UNPLACED : new Uint8Array(own);
+    /** @type {DataView} */
     let view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let at = 0;
     /** Whether the batch is being built in the room `place` gave. */
@@ -539,13 +542,13 @@ export function createWriter({ place = null, unplaced = ()=>{}, intern = true } 
             u32(address);
             typed(data);
         },
-        /** Whether anything has been written since the last `give`. */
+        /** Whether anything has been written since the last `give` or `published`. */
         empty: ()=>at === 0,
         /**
-         * The buffer written on itself, and how much of it is written: what
-         * is sent away and comes back (`reuse`), where a buffer of its own
-         * for every batch would be hundreds of fresh ones a second, whose
-         * memory outside the heap drives the receiving thread's full
+         * This side's own buffer written on, and how much of it is written:
+         * what is copied or read elsewhere and comes back (`reuse`), where a
+         * buffer of its own for every batch would be hundreds of fresh ones
+         * a second, whose memory outside the heap drives a thread's full
          * collections. Writing goes on in one given back, or a fresh one.
          *
          * @returns {{ buffer: ArrayBuffer, length: number }}
@@ -653,8 +656,11 @@ export function createReader({ ref, service, owned = false }){
      */
     const shapes = [];
     /** The batch being read and where in it: `read`'s, the one before put back after it. */
+    /** @type {ArrayBufferLike} */
     let buffer = NO_BATCH;
+    /** @type {DataView} */
     let view = new DataView(NO_BATCH);
+    /** @type {Uint8Array} */
     let bytes = new Uint8Array(NO_BATCH);
     let at = 0;
     /** Where in `buffer` the batch begins. */
@@ -686,7 +692,8 @@ export function createReader({ ref, service, owned = false }){
         const length = view.getUint32(at + 1, true);
         at = (at + 12) & ~7;
         const type = ARRAYS[kind];
-        const array = new type(buffer, base + at, length / type.BYTES_PER_ELEMENT);
+        const array = new type(/** @type {ArrayBuffer} */ (buffer), base + at,
+            length / type.BYTES_PER_ELEMENT);
         at += length;
         return owned ? array.slice() : array;
     };

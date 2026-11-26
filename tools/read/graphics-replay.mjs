@@ -40,6 +40,9 @@
  * checkouts that play a capture into the same lines handed the GPU the same
  * work, and the first line that differs is where they parted. The device then
  * keeps its log, so the times are not a measurement.
+ *
+ * `--root DIR` names a checkout whose graphics worker takes each root's calls
+ * through its rings (`remote/ring.js`), as this one's does.
  */
 
 import { createReadStream, writeFileSync } from 'node:fs';
@@ -74,6 +77,9 @@ const graphics = `${root}modules/core/src/layers/graphics/`;
 const { serveGraphics } = await import(`${graphics}remote/worker.js`);
 const { createFakeDevice } = await import(`${graphics}webgpu/internal/fake-device.js`);
 const { LEND, LEND_SLOTS, createLendingBuffers } = await import(`${graphics}remote/lending.js`);
+const { CALLS_BYTES, KIND, REPLIES_BYTES, createRingMemory, openRingIn, openRingOut } =
+    await import(`${graphics}remote/ring.js`);
+const { createReader } = await import(`${graphics}remote/wire.js`);
 
 /**
  * The capture's records as they are decompressed: zeros keep their places, so
@@ -220,7 +226,9 @@ const play = async profiled=>{
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
     /** @type {any} */
     const scope = { postMessage: ()=>{}, onmessage: null };
-    serveGraphics(scope, {
+    // Driven: each batch is played here, when it is put in, and timed so.
+    const served = serveGraphics(scope, {
+        driven: true,
         gpu: { requestAdapter: async()=>({ features: new Set(), info: { vendor: 'fake' },
             requestDevice: async()=>gpu.device }) },
         canvas: (/** @type {number} */ width, /** @type {number} */ height)=>
@@ -229,8 +237,14 @@ const play = async profiled=>{
     });
     scope.onmessage({ data: { type: 'open', frames: 'count' } });
     await settle();
-    /** @type {Map<number, MessagePort>} */
-    const ports = new Map();
+    /**
+     * Each root's rings: its calls, which the capture's batches are put in, and
+     * what its played side says, read after each.
+     *
+     * @type {Map<number, { calls: any, replies: any }>}
+     */
+    const roots = new Map();
+    const said = createReader({ ref: ()=>undefined, service: ()=>undefined, owned: true });
     /**
      * A lending root's slots: what the run lent it was read in place, not
      * captured, so each batch finds every slot lent and reads its bytes out
@@ -239,8 +253,6 @@ const play = async profiled=>{
      * @type {Map<number, Int32Array>}
      */
     const lent = new Map();
-    /** @type {MessagePort[]} */
-    const others = [];
     let measuring = all;
     /**
      * The device's diagnostics the run asked for while measuring: the first
@@ -260,44 +272,51 @@ const play = async profiled=>{
     {
         if (record.kind === CAPTURE.ROOT)
         {
-            const { port1, port2 } = new MessageChannel();
+            const rings = { calls: createRingMemory(CALLS_BYTES),
+                replies: createRingMemory(REPLIES_BYTES) };
             // What the played side answers goes nowhere: the capture is what
             // the program did with the answers it had. Its diagnostics are
             // kept, for `--uploads`.
-            port1.onmessage = (/** @type {MessageEvent} */ event)=>{
+            /**
+             * @param {number} kind @param {ArrayBufferLike} buffer @param {number} start
+             * @param {number} length
+             */
+            const hear = (kind, buffer, start, length)=>{
+                const message = kind === KIND.VALUE ? said.value(buffer, length, start) : null;
                 // A call the played side could not play stops its root: said,
                 // and the run fails, rather than measuring frames it never drew.
-                if (event.data?.type === 'failed')
+                if (message?.type === 'failed')
                 {
                     console.error(`root ${record.root} stopped at batch ${batches}:`
-                        + ` ${event.data.message}`);
+                        + ` ${message.message}`);
                     process.exitCode = 1;
                 }
-                if (measuring && event.data?.type === 'diagnostics')
+                if (measuring && message?.type === 'diagnostics')
                 {
-                    told[told.length === 0 ? 0 : 1] = { diagnostics: event.data.diagnostics,
+                    told[told.length === 0 ? 0 : 1] = { diagnostics: message.diagnostics,
                         frames: frames.length };
                 }
             };
-            others.push(port1);
+            const replies = openRingIn(rings.replies, hear);
             const made = record.json;
             const lending = made.lending && made.memory > 0 ? createLendingBuffers() : null;
             if (lending)
             {
                 lent.set(record.root, new Int32Array(lending.slots));
             }
-            scope.onmessage({ data: { type: 'root', api: made.api, options: made.options ?? {},
-                port: port2, lending, source: made.source,
+            const open = served.roots();
+            scope.onmessage({ data: { type: 'root', id: record.root, api: made.api,
+                options: made.options ?? {}, rings, lending, source: made.source,
                 memory: lending ? new Uint8Array(new SharedArrayBuffer(made.memory)) : null } });
-            while (!port2.onmessage)
+            while (served.roots() === open)
             {
                 await settle(1);
             }
-            ports.set(record.root, port2);
+            roots.set(record.root, { calls: openRingOut(rings.calls), replies });
         }
         else if (record.kind === CAPTURE.CALLS)
         {
-            const port = /** @type {any} */ (ports.get(record.root));
+            const ends = /** @type {{ calls: any, replies: any }} */ (roots.get(record.root));
             const states = lent.get(record.root);
             if (states)
             {
@@ -307,7 +326,16 @@ const play = async profiled=>{
                 }
             }
             const began = performance.now();
-            port.onmessage({ data: { type: 'calls', buffer: record.buffer, at: 0 } });
+            ends.calls.put(KIND.BATCH, new Uint8Array(record.buffer), 0);
+            served.take();
+            // A batch longer than the ring holds goes in parts as the played
+            // side makes room.
+            while (ends.calls.waiting() > 0)
+            {
+                await settle(1);
+                served.take();
+            }
+            ends.replies.drain();
             batches++;
             if ((record.presents ?? 0) > 0)
             {
@@ -336,8 +364,9 @@ const play = async profiled=>{
         }
         else if (record.kind === CAPTURE.CLOSE)
         {
-            /** @type {any} */ (ports.get(record.root))?.onmessage({ data: { type: 'close' } });
-            ports.delete(record.root);
+            roots.get(record.root)?.calls.close();
+            served.take();
+            roots.delete(record.root);
         }
         else if (record.kind === CAPTURE.MARK)
         {
@@ -381,12 +410,15 @@ const play = async profiled=>{
         }
         session.disconnect();
     }
-    // Answers posted in the last batches arrive before the ports close.
+    // Answers said in the last batches are read before the rings close.
     await settle(4);
-    for (const port of [...ports.values(), ...others])
+    served.take();
+    for (const ends of roots.values())
     {
-        port.close();
+        ends.replies.drain();
+        ends.calls.close();
     }
+    served.take();
     return { frames, told, digests };
 };
 

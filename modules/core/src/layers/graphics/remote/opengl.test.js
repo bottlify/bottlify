@@ -11,6 +11,7 @@ import { GL } from '../opengl/constants.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { createReceiver, createSender } from './channel.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { playedAtOnce } from './direct3d.js';
 import { playedOpengl, recordedOpengl } from './opengl.js';
 
@@ -363,13 +364,13 @@ test('an occlusion query answers what the device counted, wherever the device is
     assert.equal(await queryThrough(loopback), 7);
     try
     {
-        assert.equal(await queryThrough(acrossAPort), 7);
+        assert.equal(await queryThrough(acrossRings), 7);
     }
     finally
     {
-        for (const port of ports.splice(0))
+        for (const end of ends.splice(0))
         {
-            port.close();
+            end();
         }
     }
 });
@@ -381,13 +382,13 @@ test('glReadPixels on a device writes what was drawn, wherever the device is', a
     assert.deepEqual(await readThrough(loopback), expected);
     try
     {
-        assert.deepEqual(await readThrough(acrossAPort), expected);
+        assert.deepEqual(await readThrough(acrossRings), expected);
     }
     finally
     {
-        for (const port of ports.splice(0))
+        for (const end of ends.splice(0))
         {
-            port.close();
+            end();
         }
     }
 });
@@ -453,49 +454,48 @@ test('a level read back answers what was uploaded, wherever the device is', asyn
     assert.deepEqual(await texelsThrough(loopback), expected);
     try
     {
-        assert.deepEqual(await texelsThrough(acrossAPort), expected);
+        assert.deepEqual(await texelsThrough(acrossRings), expected);
     }
     finally
     {
-        for (const port of ports.splice(0))
+        for (const end of ends.splice(0))
         {
-            port.close();
+            end();
         }
     }
 });
 
 /**
- * A recorded OpenGL root whose calls cross a port to their played twin, as
- * they cross to the graphics worker.
+ * A recorded OpenGL root whose calls cross a root's rings to their played
+ * twin, as they cross to the graphics worker, each side read as its bell rings.
  *
  * @param {any} factory @param {any} services
  */
-const acrossAPort = (factory, services)=>{
-    const { port1, port2 } = new MessageChannel();
+const acrossRings = (factory, services)=>{
+    const rings = { calls: createRingMemory(CALLS_BYTES),
+        replies: createRingMemory(REPLIES_BYTES) };
     const played = playedOpengl(factory, services);
-    const receiver = createReceiver({ played: /** @type {any} */ (played),
-        post: (message, transfer)=>port2.postMessage(message, transfer ?? []) });
-    port2.onmessage = event=>receiver.receive(event.data);
-    const sender = createSender({
-        post: (message, transfer)=>port1.postMessage(message, transfer),
+    const receiver = createReceiver({ played: /** @type {any} */ (played), rings });
+    const sender = createSender({ rings });
+    ends.push(()=>{
+        sender.close();
+        receiver.close();
     });
-    port1.onmessage = event=>sender.receive(event.data);
-    ports.push(port1, port2);
     return recordedOpengl(factory, services, sender);
 };
-/** @type {MessagePort[]} */
-const ports = [];
+/** @type {(() => void)[]} */
+const ends = [];
 
-test('OpenGL frames whose calls cross a port draw as the contexts themselves drew, and the '
-    + 'renderer\'s account of them comes back', async()=>{
+test('OpenGL frames whose calls cross a root\'s rings draw as the contexts themselves drew, and the'
+    + ' renderer\'s account of them comes back', async()=>{
     try
     {
         const direct = await framesThrough();
-        const played = await framesThrough(acrossAPort);
+        const played = await framesThrough(acrossRings);
         played.frames.forEach((frame, index)=>assert.ok(frame === direct.frames[index],
             `frame ${index} asked the same`));
         // The account is the one the played renderer gave when last asked:
-        // it comes back once the question has crossed the port and the answer
+        // it comes back once the question has crossed the ring and the answer
         // crossed back, however long a loaded machine takes to carry them.
         let account = played.opengl.diagnostics();
         while (account.gpu?.frames !== 3)
@@ -507,9 +507,9 @@ test('OpenGL frames whose calls cross a port draw as the contexts themselves dre
     }
     finally
     {
-        for (const port of ports.splice(0))
+        for (const end of ends.splice(0))
         {
-            port.close();
+            end();
         }
     }
 });

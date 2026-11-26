@@ -11,8 +11,9 @@
  * the same bytes, and answer the program the same. Each scenario below runs
  * once on a device of its own and once through each way the recording reaches
  * its twin -- played at each call, held in batches the twin plays only when the
- * program waits on it, across a real port -- with the bytes an unlock let the
- * program write copied into the batch and lent in place. What is compared:
+ * program waits on it, across a root's rings read as their bells ring -- with
+ * the bytes an unlock let the program write copied into the batch and lent in
+ * place. What is compared:
  *
  * - every call's answer, awaited, and what it wrote into the structures it was
  *   given, the device's objects by the order they were first seen;
@@ -37,6 +38,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
+import { carriedTo } from './ring-fixtures.js';
 import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { createBorrower, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from '../d3d9/constants.js';
@@ -71,17 +73,20 @@ const FACE_NEGATIVE_X = 1;
  * The ways a recording reaches its twin.
  *
  * - `at once`: each call played as it is made (`playedAtOnce`);
- * - `held`: batches a sender posts, played only when the program waits on an
- *   answer or a scenario looks -- as late as the twin may play them;
- * - `port`: batches across a MessageChannel, as they cross to the worker;
- * - `lent`: either of the last two with the bytes an unlock let the program
- *   write lent in place out of shared guest memory (`lending.js`);
+ * - `held`: batches a sender sends through a root's rings (`ring.js`), played
+ *   only when the program waits on an answer or a scenario looks -- as late as
+ *   the twin may play them;
+ * - `ring`: the same rings read as their bells ring, as the worker reads them;
+ *   `small` and `parts` with rings whose batches outgrow the room they are
+ *   built in, go as parts and wait for room;
+ * - `lent`: held or ring with the bytes an unlock let the program write lent in
+ *   place out of shared guest memory (`lending.js`);
  * - `watched`: held, with an engine's write watch (`watchWrites`) that says
  *   every page of a range was written at every look -- the most it may say --
  *   so the recording sends pages as they are and compares nothing.
  */
-const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent',
-    'held, watched', 'ring', 'ring, lent', 'ring, small', 'ring, parts']);
+const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'held, watched', 'ring',
+    'ring, lent', 'ring, small', 'ring, parts']);
 
 /**
  * The rings of the ways through them: the engine's own, and small ones whose
@@ -271,24 +276,20 @@ function rig(version, way, caps = {}){
         }
         else if (way.startsWith('held'))
         {
-            /** @type {any[]} */
-            const held = [];
-            const sender = createSender({
-                post: message=>held.push(message),
+            const carried = carriedTo(played, {
+                held: true,
+                served: true,
                 later: ()=>{},
                 now: ()=>0,
                 on: { wrote: memory.writeMemory, adopted: ()=>{} },
                 lending: buffers && { ...buffers, memory: memory.ram, base: RAM_BASE },
             });
-            const receiver = createReceiver({ played, post: message=>sender.receive(message) });
+            const { sender, receiver, pump } = carried;
             counted = ()=>receiver.counted();
-            toSender = message=>sender.receive(message);
+            toSender = message=>receiver.post(message);
             release = ()=>{
                 sender.flush();
-                while (held.length > 0)
-                {
-                    receiver.receive(held.shift());
-                }
+                pump();
             };
             settle = async()=>{
                 for (let round = 0; round < 4; round++)
@@ -297,6 +298,7 @@ function rig(version, way, caps = {}){
                     await turns(2);
                 }
             };
+            close = carried.close;
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
@@ -336,33 +338,6 @@ function rig(version, way, caps = {}){
                 ringPaths.set(way, paths);
                 sender.close();
                 receiver.close();
-            };
-            shipped = ()=>({ ...sender.shippedBytes(),
-                lent: sender.lender?.diagnostics().lentBytes ?? 0 });
-            d3d = recordedDirect3D(factory, services, sender);
-        }
-        else
-        {
-            const { port1, port2 } = new MessageChannel();
-            const sender = createSender({
-                post: (message, transfer)=>port1.postMessage(message, transfer),
-                now: ()=>0,
-                on: { wrote: memory.writeMemory, adopted: ()=>{} },
-                lending: buffers && { ...buffers, memory: memory.ram, base: RAM_BASE },
-            });
-            const receiver = createReceiver({ played,
-                post: (message, transfer)=>port2.postMessage(message, transfer ?? []) });
-            counted = ()=>receiver.counted();
-            toSender = message=>port2.postMessage(message);
-            port2.onmessage = event=>receiver.receive(event.data);
-            port1.onmessage = event=>sender.receive(event.data);
-            settle = async()=>{
-                sender.flush();
-                await turns(12);
-            };
-            close = ()=>{
-                port1.close();
-                port2.close();
             };
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
@@ -3035,7 +3010,7 @@ test('Direct3D 8: a target drawn into every frame and read back the frame after 
 
 test('Direct3D 9: an occlusion count the GPU has given reaches the recording unasked, and the'
     + ' program\'s first poll after it is answered with the count, not S_FALSE', async()=>{
-    for (const way of /** @type {const} */ (['held', 'port']))
+    for (const way of /** @type {const} */ (['held', 'ring']))
     {
         const { d3d, settle, close } = rig(9, way);
         try
@@ -3113,7 +3088,7 @@ test('Direct3D 8: a render target copied into an image surface answers the progr
 
 test('Direct3D 9 and 8: a device let go of with its textures and buffers leaves nothing on the'
     + ' GPU, made directly and played in the worker', async()=>{
-    for (const [version, way] of [9, 8].flatMap(one=>['direct', 'held', 'port']
+    for (const [version, way] of [9, 8].flatMap(one=>['direct', 'held', 'ring']
         .map(each=>/** @type {[9 | 8, string]} */ ([one, each]))))
     {
         const on = rig(version, way);

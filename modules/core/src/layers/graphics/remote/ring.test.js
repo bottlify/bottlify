@@ -180,9 +180,14 @@ test('a record held past its taking keeps its bytes, and nothing after it is rea
 });
 
 test('a close ends the reader\'s serving, once what was written before is read, and the writer\'s'
-    + ' wait for room', async()=>{
+    + ' wait for room', async t=>{
     let held = 0;
     const { out, into, taken } = pair(4 << 10, ()=>held++ > 0);
+    // Open, a ring's waits keep the process alive: closed however the test ends.
+    t.after(()=>{
+        out.close();
+        into.resume();
+    });
     const served = into.serve();
     out.writer.value(bytesOf(1000, 1), NONE);
     out.publish(KIND.BATCH, 1);
@@ -194,6 +199,15 @@ test('a close ends the reader\'s serving, once what was written before is read, 
     await turns();
     assert.equal(taken.length, 1, 'held, the first stops the rest');
     assert.ok(out.waiting() > 0, 'the writer waits for room');
+    const other = openRingOut(createRingMemory(16 << 10));
+    other.writer.value(bytesOf(100, 1), NONE);
+    assert.equal(other.writer.placed(), true);
+    other.close();
+    other.publish(KIND.BATCH, 0);
+    other.writer.value(bytesOf(100, 2), NONE);
+    other.publish(KIND.BATCH, 0);
+    assert.equal(other.figures().records, 0, 'a batch built in place when its ring closed goes'
+        + ' nowhere, and the next with it');
     out.close();
     into.resume();
     await served;

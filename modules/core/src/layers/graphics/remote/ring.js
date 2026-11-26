@@ -76,10 +76,10 @@ const LEAST_ROOM = 4 << 10;
 const bodyAt = room=>((room + 7) & ~7) + HEAD;
 
 /**
- * @typedef {{ kind: number, number: number, at: number, buffer: ArrayBuffer | null,
- *     length: number, sent: number }} Waiting
- *     a record that found no room: its bytes the first `length` of `buffer`, `sent`
- *     of them already gone as parts
+ * @typedef {{ kind: number, number: number, at: number, bytes: Uint8Array | null,
+ *     own: boolean, sent: number }} Waiting
+ *     a record that found no room: its bytes, `sent` of them already gone as
+ *     parts; `own` when they are the writer's buffer, given back once sent
  */
 
 /**
@@ -172,10 +172,11 @@ export function openRingOut(memory, { intern = true } = {}){
      * @param {Waiting} item
      */
     const next = item=>{
-        const whole = item.length <= longest;
-        const length = whole ? item.length : Math.min(longest, item.length - item.sent);
+        const total = item.bytes?.length ?? 0;
+        const whole = total <= longest;
+        const length = whole ? total : Math.min(longest, total - item.sent);
         return { length, kind: whole ? item.kind : KIND.PART | (item.kind << 8),
-            number: whole ? item.number : item.length };
+            number: whole ? item.number : total };
     };
     /**
      * Writes the next record of `item` into the room at `at`; true when that
@@ -185,9 +186,9 @@ export function openRingOut(memory, { intern = true } = {}){
      */
     const fill = (item, at)=>{
         const { length, kind, number } = next(item);
-        if (item.buffer && length > 0)
+        if (item.bytes && length > 0)
         {
-            ring.bytes.set(new Uint8Array(item.buffer, item.sent, length), bodyAt(at));
+            ring.bytes.set(item.bytes.subarray(item.sent, item.sent + length), bodyAt(at));
             figures.copiedIn += length;
         }
         commit(at, kind, number, item.at, length);
@@ -196,7 +197,7 @@ export function openRingOut(memory, { intern = true } = {}){
             figures.parts++;
         }
         item.sent += length;
-        return item.sent >= item.length;
+        return item.sent >= (item.bytes?.length ?? 0);
     };
     /** Writes what waits, in order, as far as there is room; then waits for more. */
     const flushWaiting = ()=>{
@@ -227,9 +228,9 @@ export function openRingOut(memory, { intern = true } = {}){
     };
     /** @param {Waiting} item */
     const done = item=>{
-        if (item.buffer)
+        if (item.own && item.bytes)
         {
-            writer.reuse(item.buffer);
+            writer.reuse(/** @type {ArrayBuffer} */ (item.bytes.buffer));
         }
     };
     /** Waits, on the event loop, for room for the next record of the oldest waiting. */
@@ -293,6 +294,10 @@ export function openRingOut(memory, { intern = true } = {}){
                 const at = room;
                 room = -1;
                 writer.published();
+                if (closed)
+                {
+                    return length;
+                }
                 try
                 {
                     commit(at, kind, 0, time, length);
@@ -304,8 +309,25 @@ export function openRingOut(memory, { intern = true } = {}){
                 return length;
             }
             const { buffer } = writer.give();
-            send({ kind, number: 0, at: time, buffer, length, sent: 0 });
+            send({ kind, number: 0, at: time, bytes: new Uint8Array(buffer, 0, length), own: true,
+                sent: 0 });
             return length;
+        },
+
+        /**
+         * Puts `bytes` in as one record of `kind`, sent at `time`, copied in
+         * now or once there is room: they stay as they are until then. The
+         * writer must hold nothing unpublished. For records made elsewhere --
+         * a capture's, played again.
+         *
+         * @param {number} kind @param {Uint8Array} bytes @param {number} time
+         */
+        put(kind, bytes, time){
+            if (!writer.empty())
+            {
+                throw new Error('remote: a record put in the middle of a batch');
+            }
+            send({ kind, number: 0, at: time, bytes, own: false, sent: 0 });
         },
 
         /**
@@ -320,7 +342,7 @@ export function openRingOut(memory, { intern = true } = {}){
             {
                 throw new Error('remote: a mark in the middle of a batch');
             }
-            send({ kind: KIND.MARK, number, at: 0, buffer: null, length: 0, sent: 0 });
+            send({ kind: KIND.MARK, number, at: 0, bytes: null, own: false, sent: 0 });
         },
 
         /** Records waiting for room now. */
@@ -336,11 +358,8 @@ export function openRingOut(memory, { intern = true } = {}){
         close(){
             closed = true;
             waiting.length = 0;
-            if (room >= 0)
-            {
-                ring.abandon();
-                room = -1;
-            }
+            ring.abandon();
+            room = -1;
             ring.close();
         },
     };

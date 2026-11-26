@@ -11,6 +11,8 @@ import { SWEEP_SLICE, createMirror, createPlayer, withMirrored } from './replay.
 import { OP, SECTION, WAIT, createWriter } from './wire.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
+import { carriedTo } from './ring-fixtures.js';
 import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
@@ -198,20 +200,18 @@ function toyAcross(lend, least = 0){
     /** What each batch's read answered: the look at objects at zero it made, if it made one. */
     const swept = /** @type {(number | undefined)[]} */ ([]);
     /**
-     * @param {ArrayBuffer} buffer
-     * @param {(call: any) => boolean | void} each @param {number} [length]
+     * @param {ArrayBufferLike} buffer
+     * @param {(call: any) => boolean | void} each @param {number} [length] @param {number} [start]
      */
-    const read = (buffer, each, length)=>{
-        const answered = played.read(buffer, each, length);
+    const read = (buffer, each, length, start)=>{
+        const answered = played.read(buffer, each, length, start);
         swept.push(answered);
         return answered;
     };
     const reading = { ...played, read };
-    const receiver = createReceiver({ played: reading, post: message=>said.push(message) });
-    /** @type {any[]} */
-    const sent = [];
-    const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
-        lending: lend ? { ...buffers, memory: ram, least } : null });
+    const { sender, pump } = carriedTo(reading, { later: ()=>{}, held: true,
+        lending: lend ? { ...buffers, memory: ram, least } : null,
+        on: { failed: message=>said.push({ type: 'failed', message }) } });
     const root = recordedDirect3D(toy(sides), services, sender);
     return {
         root, ram, sender, said, swept,
@@ -219,10 +219,7 @@ function toyAcross(lend, least = 0){
         /** The played side plays what was sent. */
         play(){
             sender.flush();
-            for (const message of sent.splice(0))
-            {
-                receiver.receive(message);
-            }
+            pump();
         },
     };
 }
@@ -940,40 +937,35 @@ test('frames played from a record ask of the GPU what the device itself asked', 
 });
 
 /**
- * A Direct3D 9 root whose calls cross a port to their played twin, as they
- * cross to a worker.
+ * A Direct3D 9 root whose calls cross a root's rings to their played twin, as
+ * they cross to a worker, each side read as its bell rings.
  *
  * @param {any} services
  */
-function acrossAPort(services){
-    const { port1, port2 } = new MessageChannel();
+function acrossRings(services){
+    const rings = { calls: createRingMemory(CALLS_BYTES),
+        replies: createRingMemory(REPLIES_BYTES) };
+    /** @type {ReturnType<typeof createReceiver> | null} */
+    let receiver = null;
     const played = playedDirect3D(createDirect3D9, {
         ...services,
         writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
-            port2.postMessage({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] }),
+            receiver?.post({ type: 'wrote', writes: [{ address, bytes }] }),
     });
-    const receiver = createReceiver({
-        played,
-        post: (message, transfer)=>port2.postMessage(message, transfer ?? []),
-    });
-    port2.onmessage = event=>receiver.receive(event.data);
-    const sender = createSender({
-        post: (message, transfer)=>port1.postMessage(message, transfer),
-        on: { wrote: services.writeMemory },
-    });
-    port1.onmessage = event=>sender.receive(event.data);
+    receiver = createReceiver({ played, rings });
+    const sender = createSender({ rings, on: { wrote: services.writeMemory } });
     const root = recordedDirect3D(createDirect3D9, services, sender);
     return Object.assign(root, { close: ()=>{
-        port1.close();
-        port2.close();
+        sender.close();
+        receiver?.close();
     } });
 }
 
-test('frames whose calls cross a port ask of the GPU what the device itself asked', async()=>{
+test('frames whose calls cross a root\'s rings ask of the GPU what the device asked', async()=>{
     const direct = await framesThrough(createDirect3D9);
     /** @type {any} */
     let made = null;
-    const played = await framesThrough(services=>(made = acrossAPort(services)));
+    const played = await framesThrough(services=>(made = acrossRings(services)));
     made.close();
     assert.equal(played.length, direct.length);
     played.forEach((frame, index)=>assert.ok(frame === direct[index],
@@ -1002,17 +994,9 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
                 return at;
             },
         };
-        let sent = 0;
         const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
-        const sender = createSender({
-            post: message=>{
-                sent += message.length;
-                played.read(message.buffer.slice(0, message.length), call=>{
-                    played.play(call);
-                });
-            },
-            later: flush=>flush(),
-        });
+        const { sender } = carriedTo(played);
+        const sentBytes = ()=>sender.sent().bytes;
         const d3d = recordedDirect3D(createDirect3D9, services, sender);
         /** @type {{ device?: any }} */
         const out = {};
@@ -1023,7 +1007,7 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
         const made = {};
         assert.equal(out.device.CreateVertexBuffer(1 << 20, 0x200, 0, D3DPOOL.DEFAULT, made),
             D3D_OK);
-        const before = sent;
+        const before = sentBytes();
         for (let lock = 0; lock < 50; lock++)
         {
             /** @type {{ pBits?: number }} */
@@ -1033,8 +1017,8 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
                 /** @type {number} */ (locked.pBits) - RAM_BASE + 256);
             assert.equal(made.buffer.Unlock(), D3D_OK);
         }
-        assert.ok(sent - before < 50 * 256 * 2,
-            `${sent - before} bytes sent for 50 locks of 256`);
+        assert.ok(sentBytes() - before < 50 * 256 * 2,
+            `${sentBytes() - before} bytes sent for 50 locks of 256`);
     });
 
 test('a dynamic buffer unlocked and drawn from in one pause is compared once; apart, at both',
@@ -1054,14 +1038,7 @@ test('a dynamic buffer unlocked and drawn from in one pause is compared once; ap
             },
         };
         const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
-        const sender = createSender({
-            post: message=>{
-                played.read(message.buffer.slice(0, message.length), call=>{
-                    played.play(call);
-                });
-            },
-            later: flush=>flush(),
-        });
+        const { sender } = carriedTo(played);
         const d3d = recordedDirect3D(createDirect3D9, services, sender);
         /** @param {number} value */
         const ok = value=>assert.equal(value, D3D_OK);
@@ -1117,17 +1094,9 @@ test('an event query answers on the program\'s side; an occlusion query asks the
     // An event is signalled once its end is issued, as the device without a
     // renderer signals it: a round trip only made the program wait for the
     // played side to catch up.
-    let posts = 0;
+
     const played = playedDirect3D(createDirect3D9, {});
-    const sender = createSender({
-        post: message=>{
-            posts++;
-            played.read(message.buffer.slice(0, message.length), call=>{
-                played.play(call);
-            });
-        },
-        later: flush=>flush(),
-    });
+    const { sender } = carriedTo(played);
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -1144,7 +1113,7 @@ test('an event query answers on the program\'s side; an occlusion query asks the
     assert.equal(answer, D3D_OK, 'answered at once, not a promise');
     assert.equal(signalled.value, 1);
     assert.equal(sender.waits().GetData, undefined, 'nothing waited for');
-    assert.ok(posts > 0);
+    assert.ok(sender.sent().batches > 0);
     assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.EVENT }, 'GetData', []), false);
     assert.equal(answeredByRenderer({ type: D3DQUERYTYPE.OCCLUSION }, 'GetData', []), true);
     assert.equal(answeredByRenderer({}, 'GetRenderTargetData', []), true);
@@ -1158,12 +1127,7 @@ test('objects are numbered alike when the recording has a diagnostic the played 
     for (const factory of [createDirect3D8, createDirect3D9])
     {
         const played = playedDirect3D(factory, {});
-        const sender = createSender({
-            post: message=>played.read(message.buffer.slice(0, message.length), call=>{
-                played.play(call);
-            }),
-            later: flush=>flush(),
-        });
+        const { sender } = carriedTo(played);
         const d3d = recordedDirect3D(factory, { checkDraws: ()=>0 }, sender);
         assert.equal(typeof d3d.caps, 'object');
         /** @type {{ device?: any }} */
@@ -1179,17 +1143,10 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     // The shadow block reads states back after a state block is applied, a
     // getter a state: each was recorded and played for an answer the recording
     // device already had.
-    let sent = 0;
+
     const played = playedDirect3D(createDirect3D9, {});
-    const sender = createSender({
-        post: message=>{
-            sent += message.length;
-            played.read(message.buffer.slice(0, message.length), call=>{
-                played.play(call);
-            });
-        },
-        later: flush=>flush(),
-    });
+    const { sender } = carriedTo(played);
+    const sentBytes = ()=>sender.sent().bytes;
     const d3d = recordedDirect3D(createDirect3D9, {}, sender);
     /** @type {{ device?: any }} */
     const out = {};
@@ -1198,7 +1155,7 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     D3D_OK);
     const device = out.device;
     assert.equal(device.SetRenderState(D3DRS.LIGHTING, 0), D3D_OK);
-    const before = sent;
+    const before = sentBytes();
     assert.ok(before > 0);
     /** @type {{ value?: number }} */
     const value = {};
@@ -1212,9 +1169,9 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     assert.equal(device.GetTransform(D3DTS.WORLD, matrix), D3D_OK);
     // What the shadow block mirrors after every entry of the host's.
     assert.equal(typeof device.ringState().drawable, 'number');
-    assert.equal(sent, before, 'nothing sent for the reads');
+    assert.equal(sentBytes(), before, 'nothing sent for the reads');
     assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
-    assert.ok(sent > before, 'a set still is');
+    assert.ok(sentBytes() > before, 'a set still is');
 });
 
 test('a run of the command ring is one call recorded, and the played device makes every call in it',
@@ -1234,15 +1191,11 @@ test('a run of the command ring is one call recorded, and the played device make
         }, {});
         /** @type {string[]} */
         const names = [];
-        const sender = createSender({
-            post: message=>{
-                played.read(message.buffer.slice(0, message.length), call=>{
-                    names.push(String(call.m));
-                    played.play(call);
-                });
-            },
-            later: flush=>flush(),
-        });
+        const { sender } = carriedTo({ ...played,
+            read: (buffer, each, length, start)=>played.read(buffer, call=>{
+                names.push(String(call.m));
+                return each(call);
+            }, length, start) });
         const d3d = recordedDirect3D(createDirect3D9, {}, sender);
         /** @type {{ device?: any }} */
         const out = {};
@@ -1277,7 +1230,7 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         // A driver answers S_FALSE until the GPU has counted and the program
         // polls; waiting for the renderer instead held the program for the
         // replay of everything before the ask, every frame.
-        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        const d3d = acrossRings({ writeMemory: ()=>{} });
         t.after(()=>d3d.close());
         /** @type {{ device?: any }} */
         const out = {};
@@ -1310,7 +1263,7 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
 
 test('a caller is told an occlusion count as it comes, its own and those beside it, so the guest'
     + ' may answer the polls till then', async t=>{
-    const d3d = acrossAPort({ writeMemory: ()=>{} });
+    const d3d = acrossRings({ writeMemory: ()=>{} });
     t.after(()=>d3d.close());
     /** @type {{ device?: any }} */
     const out = {};
@@ -1348,7 +1301,7 @@ test('the counts the renderer holds come beside one query\'s answer, each for it
         // A program that waits on its queries one after another crossed to the
         // played side and back for each, where the GPU had counted them all
         // in one read: two hundred round trips a frame.
-        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        const d3d = acrossRings({ writeMemory: ()=>{} });
         t.after(()=>d3d.close());
         /** @type {{ device?: any }} */
         const out = {};
@@ -1392,7 +1345,7 @@ test('the counts the renderer holds come beside one query\'s answer, each for it
         // A program that waits on its queries one after another crossed to the
         // played side and back for each, where the GPU had counted them all
         // in one read: two hundred round trips a frame.
-        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        const d3d = acrossRings({ writeMemory: ()=>{} });
         t.after(()=>d3d.close());
         /** @type {{ device?: any }} */
         const out = {};
@@ -1471,7 +1424,7 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
                 live.delete(at);
             },
         };
-        const d3d = acrossAPort(services);
+        const d3d = acrossRings(services);
         try
         {
             /** @type {{ device?: any }} */
@@ -1522,56 +1475,6 @@ test('a batch that looks at the objects at zero says how long the look took', ()
     assert.deepEqual(swept.slice(0, 63), new Array(63).fill(undefined));
     assert.equal(typeof swept[63], 'number');
     assert.ok(/** @type {number} */ (swept[63]) >= 0);
-});
-
-test('a batch\'s buffer goes back to the sender once read, moved out of the played side, four '
-    + 'to a message, and is written on again', ()=>{
-    // A fresh buffer for every batch was hundreds a second, whose memory
-    // outside the heap drove the played thread's full collections; a message
-    // for every buffer given back was hundreds more.
-    const { root, play, said, sender, played } = toyAcross(false);
-    for (let batch = 0; batch < 8; batch++)
-    {
-        root.CreateThing({});
-        play();
-    }
-    const spent = said.filter(message=>message.type === 'spent');
-    assert.deepEqual(spent.map(message=>message.spent.length), [4, 4]);
-    assert.ok(spent.every(message=>message.spent.every(
-        (/** @type {ArrayBuffer} */ buffer)=>buffer.byteLength > 0)));
-    for (const message of spent)
-    {
-        sender.receive(message);
-    }
-    assert.equal(sender.sent().returned, 8);
-    assert.equal(played.seen.length, 0, 'nothing played wrong');
-});
-
-test('a batch\'s buffer an answer still to come keeps a view of goes back only once it has '
-    + 'settled and been sent', async()=>{
-    const { root, play, said, played } = toyAcross(false);
-    const back = ()=>said.flatMap(message=>message.spent ?? []).length;
-    root.Fill(new Uint8Array([1, 2, 3, 4]));
-    play();
-    for (let batch = 0; batch < 3; batch++)
-    {
-        root.CreateThing({});
-        play();
-    }
-    assert.equal(back(), 0, 'three given back, the fill\'s held while it is owed: not four yet');
-    root.CreateThing({});
-    play();
-    assert.equal(back(), 4, 'batches with nothing owed go back past it');
-    const fill = played.fills.shift();
-    assert.ok(fill);
-    fill();
-    await new Promise(resolve=>setTimeout(resolve, 0));
-    for (let batch = 0; batch < 3; batch++)
-    {
-        root.CreateThing({});
-        play();
-    }
-    assert.equal(back(), 8, 'the fill\'s too, once settled');
 });
 
 test('a mirror says what it holds of the heap: its pages, the pages kept to be made again and'

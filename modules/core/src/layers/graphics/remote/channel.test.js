@@ -8,12 +8,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createReceiver, createSender } from './channel.js';
 import { createPlayer } from './replay.js';
-import { createRingMemory } from './ring.js';
-import { OP, WAIT } from './wire.js';
+import { KIND, createRingMemory, openRingIn, openRingOut } from './ring.js';
+import { OP, WAIT, createReader } from './wire.js';
+
+/** What a value said back is read with: nothing in it is a device's object. */
+const NONE = ()=>undefined;
 
 /**
  * A sender over a clock and a timer the test moves, the turns' ends run when
- * the test says, and every batch posted kept.
+ * the test says, the length of every batch it sent read off its ring, and
+ * what the played side says put in that side's ring by `tell`.
  *
  * @param {number} gapMs
  */
@@ -24,14 +28,23 @@ function sender(gapMs){
     /** @type {{ send: () => void, at: number }[]} */
     const timers = [];
     /** @type {number[]} */
-    const batches = [];
+    const sent = [];
+    const rings = { calls: createRingMemory(64 << 10), replies: createRingMemory(64 << 10) };
     const made = createSender({
-        post: message=>batches.push(message.length),
+        rings,
+        serve: false,
         later: send=>turnEnds.push(send),
         now: ()=>clock,
         gapMs,
         timer: (send, ms)=>timers.push({ send, at: clock + ms }),
     });
+    const calls = openRingIn(rings.calls, (kind, buffer, start, length)=>{
+        if (kind === KIND.BATCH)
+        {
+            sent.push(length);
+        }
+    });
+    const back = openRingOut(rings.replies, { intern: false });
     /** A call nobody waits for, in a turn of its own that then ends. */
     const turn = ()=>{
         made.writer.u8(0x55);
@@ -42,7 +55,22 @@ function sender(gapMs){
         }
     };
     return {
-        made, batches, timers, turn,
+        made, timers, turn,
+        /** The batches sent so far, by their lengths. */
+        get batches(){
+            calls.drain();
+            return sent;
+        },
+        /**
+         * What the played side says, as its receiver says it, read at once.
+         *
+         * @param {any} message
+         */
+        tell(message){
+            back.writer.value(message, NONE);
+            back.publish(KIND.VALUE, 0);
+            made.take();
+        },
         /** @param {number} ms */
         pass: ms=>{
             clock += ms;
@@ -52,6 +80,35 @@ function sender(gapMs){
                 due.send();
             }
         },
+    };
+}
+
+/**
+ * A receiver of a played side the test makes up, batches sent to it by
+ * `batch` and played at once, and everything it says read off its ring.
+ *
+ * @param {any} played @param {any} [options]  the receiver's own
+ */
+function receiverOf(played, options = {}){
+    const rings = { calls: createRingMemory(64 << 10), replies: createRingMemory(64 << 10) };
+    const receiver = createReceiver({ played, rings, serve: false, ...options });
+    const calls = openRingOut(rings.calls);
+    /** @type {any[]} */
+    const said = [];
+    const reader = createReader({ ref: NONE, service: NONE, owned: true });
+    const back = openRingIn(rings.replies, (kind, buffer, start, length)=>{
+        said.push(reader.value(buffer, length, start));
+    });
+    return {
+        receiver, said,
+        /** A batch, played; then what was said read. */
+        batch(){
+            calls.put(KIND.BATCH, new Uint8Array(8), 0);
+            receiver.take();
+            back.drain();
+        },
+        /** What was said since, read. */
+        hear: ()=>back.drain(),
     };
 }
 
@@ -115,16 +172,16 @@ test('a diagnostics ask settles once the played side has answered it, the first 
     s.made.writer.u8(0x55);
     s.made.called(WAIT.ANSWER, 'diagnostics');
     const both = settled('second');
-    s.made.receive({ type: 'diagnostics', diagnostics: { frames: 1 } });
+    s.tell({ type: 'diagnostics', diagnostics: { frames: 1 } });
     await waiting;
     assert.deepEqual(seen, ['nothing asked', 'first'], 'the second ask is not answered yet');
-    s.made.receive({ type: 'diagnostics', diagnostics: { frames: 2 } });
+    s.tell({ type: 'diagnostics', diagnostics: { frames: 2 } });
     await both;
     assert.deepEqual(seen, ['nothing asked', 'first', 'second']);
     s.made.writer.u8(0x55);
     assert.deepEqual(s.made.called(WAIT.ANSWER, 'diagnostics').answer, { frames: 2 });
     const stopped = settled('stopped');
-    s.made.receive({ type: 'failed', message: 'gone' });
+    s.tell({ type: 'failed', message: 'gone' });
     await stopped;
     assert.equal(seen.at(-1), 'stopped', 'a played side that stopped answers nothing more');
 });
@@ -133,27 +190,24 @@ test('the played side counts its batches\' time and says it with its diagnostics
     // The worker has no phase profiler: where its thread went comes back with
     // the answer to a diagnostics ask, as the batches' read time and the
     // look at objects at zero a batch made inside it.
-    /** @type {any[]} */
-    const said = [];
     /** What each batch's read answers: no look, a look of three milliseconds, no look. */
     const swept = [undefined, 3, undefined];
     let batch = 0;
     const played = {
-        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
         spent: (/** @type {any} */ _buffer, /** @type {() => void} */ give)=>give(),
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
         read: (buffer, each)=>{
             each({ m: batch === 2 ? 'diagnostics' : 'Draw', wait: batch === 2 ? WAIT.ANSWER : 0 });
             return swept[batch++];
         },
         play: (/** @type {any} */ call)=>(call.m === 'diagnostics' ? { frames: 1 } : 0),
     };
-    const receiver = createReceiver({ played: /** @type {any} */ (played),
-        post: message=>said.push(message) });
+    const across = receiverOf(played);
     for (let at = 0; at < 3; at++)
     {
-        receiver.receive({ type: 'calls', buffer: new ArrayBuffer(4) });
+        across.batch();
     }
-    const [told] = said.filter(message=>message.type === 'diagnostics');
+    const [told] = across.said.filter(message=>message.type === 'diagnostics');
     assert.deepEqual(told.diagnostics, { frames: 1 });
     // Asked during the third batch: the two before it are in.
     const read = told.phases['batch-read'];
@@ -165,19 +219,17 @@ test('the played side counts its batches\' time and says it with its diagnostics
 
     const s = sender(0);
     assert.equal(s.made.phases(), null, 'nothing said yet: not measured, never zero');
-    s.made.receive(told);
+    s.tell(told);
     assert.deepEqual(s.made.phases(), told.phases);
 });
 
 test('every present carries what the played device and its thread did, unasked', async()=>{
     // A live view reads these once a second through the log; nobody asks the
     // worker for them, so they ride on the message a present sends anyway.
-    /** @type {any[]} */
-    const said = [];
     const figures = { draws: 30, gpuFrames: 1, gpuMs: 4, last: null };
     const played = {
-        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
         spent: (/** @type {any} */ _buffer, /** @type {() => void} */ give)=>give(),
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
         read: (buffer, each)=>{
             each({ m: 'Present', wait: WAIT.PACED });
             return undefined;
@@ -185,16 +237,17 @@ test('every present carries what the played device and its thread did, unasked',
         play: ()=>undefined,
         figures: ()=>figures,
     };
-    createReceiver({ played: /** @type {any} */ (played), post: message=>said.push(message) })
-        .receive({ type: 'calls', buffer: new ArrayBuffer(4) });
+    const across = receiverOf(played);
+    across.batch();
     await new Promise(resolve=>setImmediate(resolve));
-    const presented = said.find(message=>message.type === 'presented');
+    across.hear();
+    const presented = across.said.find(message=>message.type === 'presented');
     assert.deepEqual(presented.figures, figures);
     assert.equal(presented.phases['batch-read'].count, 1);
 
     const s = sender(0);
     assert.equal(s.made.figures(), null, 'nothing presented yet: not measured, never zero');
-    s.made.receive(presented);
+    s.tell(presented);
     assert.deepEqual(s.made.figures(), figures);
     assert.deepEqual(s.made.phases(), presented.phases);
 });
@@ -206,8 +259,8 @@ test('the played side says how far its GPU ran behind with its diagnostics', ()=
     const bound = { limit: 3, counting: true, inFlight: 2, peak: 4, frames: 120, held: 7,
         heldMs: 35, waiting: 0 };
     const played = {
-        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
         spent: (/** @type {any} */ _buffer, /** @type {() => void} */ give)=>give(),
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
         read: (buffer, each)=>{
             each({ m: 'diagnostics', wait: WAIT.ANSWER });
             return undefined;
@@ -216,96 +269,30 @@ test('the played side says how far its GPU ran behind with its diagnostics', ()=
     };
     /** @param {(() => any) | undefined} latency */
     const toldBy = latency=>{
-        /** @type {any[]} */
-        const said = [];
-        createReceiver({ played: /** @type {any} */ (played), post: message=>said.push(message),
-            latency }).receive({ type: 'calls', buffer: new ArrayBuffer(4) });
-        return said.find(message=>message.type === 'diagnostics');
+        const across = receiverOf(played, { latency });
+        across.batch();
+        return across.said.find(message=>message.type === 'diagnostics');
     };
 
     const told = toldBy(()=>({ ...bound }));
     assert.deepEqual(told.latency, bound);
     const s = sender(0);
     assert.equal(s.made.latency(), null, 'nothing said yet: not measured, never zero');
-    s.made.receive(told);
+    s.tell(told);
     assert.deepEqual(s.made.latency(), bound);
 
     const unbounded = sender(0);
-    unbounded.made.receive(toldBy(undefined));
+    unbounded.tell(toldBy(undefined));
     assert.equal(unbounded.made.latency(), null, 'a played side with no bound says none');
 });
 
-test('the sender counts every message the played side posted back, by type', ()=>{
+test('the sender counts everything the played side said back, by type', ()=>{
     const s = sender(0);
     assert.deepEqual(s.made.received(), {});
-    s.made.receive({ type: 'presented', count: 1 });
-    s.made.receive({ type: 'presented', count: 2 });
-    s.made.receive({ type: 'spent', spent: [new ArrayBuffer(16)] });
-    s.made.receive({ type: 'counts', counts: [] });
-    assert.deepEqual(s.made.received(), { presented: 2, spent: 1, counts: 1 });
-});
-
-/**
- * A played side that reads every batch as one call of `m`, its buffer given
- * back at once, and the messages its receiver posts with what they moved.
- */
-function playedBatches(){
-    /** @type {{ message: any, moved: Transferable[] | undefined }[]} */
-    const said = [];
-    let next = 'Draw';
-    const played = {
-        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
-        read: (buffer, each)=>{
-            each({ m: next, wait: next === 'Present' ? WAIT.PACED : WAIT.NONE });
-            return undefined;
-        },
-        play: ()=>undefined,
-        /** @param {ArrayBuffer} buffer @param {() => void} give */
-        spent: (buffer, give)=>give(),
-    };
-    const receiver = createReceiver({ played: /** @type {any} */ (played),
-        post: (message, moved)=>said.push({ message, moved }) });
-    /** @param {string} m */
-    const batch = m=>{
-        next = m;
-        const buffer = new ArrayBuffer(8);
-        receiver.receive({ type: 'calls', buffer, length: 8 });
-        return buffer;
-    };
-    return { said, batch };
-}
-
-test('batches read go back on the message a present sends anyway, moved with it', async()=>{
-    const { said, batch } = playedBatches();
-    batch('Draw');
-    batch('Draw');
-    assert.equal(said.length, 0, 'two buffers wait for a message to ride on');
-    batch('Present');
-    await new Promise(resolve=>setImmediate(resolve));
-    assert.deepEqual(said.map(({ message })=>message.type), ['presented'],
-        'one message: no `spent` of its own');
-    const [{ message, moved }] = said;
-    assert.equal(message.spent.length, 3, 'the present\'s own batch with them');
-    assert.deepEqual(moved, message.spent, 'moved, not copied');
-});
-
-test('with no other message to ride on, buffers go back four at a time', ()=>{
-    const { said, batch } = playedBatches();
-    for (let n = 0; n < 9; n++)
-    {
-        batch('Draw');
-    }
-    assert.deepEqual(said.map(({ message })=>[message.type, message.spent.length]),
-        [['spent', 4], ['spent', 4]], 'the ninth waits');
-});
-
-test('the sender writes again on buffers any message brings back', ()=>{
-    const s = sender(0);
-    s.made.receive({ type: 'presented', count: 1,
-        spent: [new ArrayBuffer(16), new ArrayBuffer(16)] });
-    s.made.receive({ type: 'spent', spent: [new ArrayBuffer(16)] });
-    s.made.receive({ type: 'answer', id: 0, spent: [new ArrayBuffer(16)] });
-    assert.equal(s.made.sent().returned, 4);
+    s.tell({ type: 'presented', count: 1 });
+    s.tell({ type: 'presented', count: 2 });
+    s.tell({ type: 'counts', counts: [] });
+    assert.deepEqual(s.made.received(), { presented: 2, counts: 1 });
 });
 
 /** Turns of the event loop: what crosses a ring is read on one. */
