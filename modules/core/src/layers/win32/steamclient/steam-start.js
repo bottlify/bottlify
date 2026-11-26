@@ -38,7 +38,7 @@ export const STEAM_START = Object.freeze({
 });
 
 /** The same at 32 bits: the event a dword, the fields after it four bytes earlier. */
-export const STEAM_START_32 = Object.freeze({
+const STEAM_START_32 = Object.freeze({
     ...STEAM_START,
     EVENT: 0x9c,
     APP: 0xa0,

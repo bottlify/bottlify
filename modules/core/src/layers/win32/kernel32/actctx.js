@@ -2366,4 +2366,4 @@ export function createActivationContexts(host){
     return { functions, loaderApi };
 }
 
-export { ISOLATIONAWARE_MANIFEST_RESOURCE_ID, CREATEPROCESS_MANIFEST_RESOURCE_ID, RT_MANIFEST };
+export { ISOLATIONAWARE_MANIFEST_RESOURCE_ID };

@@ -117,7 +117,7 @@ const leadingInteger = (text, flags)=>{
  * @param {[number, number, number, number]} version  major, minor, build, QFE
  * @returns {number} an HRESULT
  */
-export function answerDllVersion(memory, info, [major, minor, build, qfe]){
+function answerDllVersion(memory, info, [major, minor, build, qfe]){
     if (info === 0 || !memory.readMemory)
     {
         return E_INVALIDARG;

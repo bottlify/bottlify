@@ -24,7 +24,7 @@ import { numberToString, toInteger } from './realm.js';
  *
  * @param {number} value @returns {string}
  */
-export function localeNumber(value){
+function localeNumber(value){
     if (!Number.isFinite(value))
     {
         return numberToString(value);

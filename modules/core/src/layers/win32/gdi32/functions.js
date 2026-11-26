@@ -183,7 +183,7 @@ const CMAP_TAG = 0x70616d63;
  * @param {number} first @param {number} last
  * @returns {Uint8Array}
  */
-export function characterMap(first, last){
+function characterMap(first, last){
     const end = Math.min(last, 0xfffe);
     const segments = 2;
     const subtable = 16 + segments * 8;

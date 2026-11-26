@@ -172,7 +172,7 @@ export function poolLoopCode(fetch, at){
  * @param {number} wait @param {number} after @param {number} at
  * @returns {Uint8Array}
  */
-export function waitLoopCode(wait, after, at){
+function waitLoopCode(wait, after, at){
     /** @param {number} value */
     const dword = value=>
         [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];

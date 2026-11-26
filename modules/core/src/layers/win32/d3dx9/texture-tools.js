@@ -168,7 +168,7 @@ const halfOf = value=>{
  * @param {number} format @param {Float32Array} rgba @param {number} width @param {number} height
  * @returns {Uint8Array | null}
  */
-export function packFilled(format, rgba, width, height){
+function packFilled(format, rgba, width, height){
     const floats = FLOATS.get(format);
     if (floats)
     {

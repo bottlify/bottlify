@@ -120,7 +120,7 @@ const SEEK_SET = 0;
 const SEEK_CUR = 1;
 const SEEK_END = 2;
 
-export const CR = 0x0d;
+const CR = 0x0d;
 export const LF = 0x0a;
 const CTRL_Z = 0x1a;
 

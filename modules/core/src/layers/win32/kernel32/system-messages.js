@@ -13,7 +13,7 @@
  *
  * @type {ReadonlyMap<number, string>}
  */
-export const SYSTEM_MESSAGES = new Map(/** @type {[number, string][]} */ ([
+const SYSTEM_MESSAGES = new Map(/** @type {[number, string][]} */ ([
     [0, 'The operation completed successfully.'],
     [1, 'Incorrect function.'],
     [2, 'The system cannot find the file specified.'],

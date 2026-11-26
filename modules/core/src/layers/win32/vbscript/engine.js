@@ -56,7 +56,7 @@ import { FunctionRef, fromHost, toHost } from './values.js';
  *
  * @type {Readonly<EngineVersion>}
  */
-export const VBSCRIPT_5_7 = Object.freeze({ major: 5, minor: 7, build: 18066 });
+const VBSCRIPT_5_7 = Object.freeze({ major: 5, minor: 7, build: 18066 });
 
 /**
  * The shared options (`script/engine.js`), and VBScript's own. `random` is

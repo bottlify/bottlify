@@ -527,7 +527,7 @@ export const SDDL_ACE_FLAGS = Object.freeze({
     SA: SUCCESSFUL_ACCESS_ACE_FLAG, FA: FAILED_ACCESS_ACE_FLAG,
 });
 /** The ACE types SDDL names that this builds: the ones naming one trustee. */
-export const SDDL_ACE_TYPES = Object.freeze({
+const SDDL_ACE_TYPES = Object.freeze({
     A: ACCESS_ALLOWED_ACE_TYPE, D: ACCESS_DENIED_ACE_TYPE, AU: SYSTEM_AUDIT_ACE_TYPE,
     AL: SYSTEM_ALARM_ACE_TYPE,
 });
@@ -632,7 +632,7 @@ const sddlAcl = (text, which)=>{
  *
  * @param {string} text @returns {Uint8Array | null}
  */
-export const parseSddl = text=>{
+const parseSddl = text=>{
     /** @type {{ owner?: Uint8Array, group?: Uint8Array, dacl?: Uint8Array | null,
      *           sacl?: Uint8Array | null }} */
     const parts = {};

@@ -38,8 +38,8 @@ import { wholeAddress } from '../common/pointers.js';
  * component 1, the others 0) and colours to and from four floats.
  */
 
-export const IID_ID3DXBASEMESH = '{7ED943DD-52E8-40B5-A8D8-76685C406330}';
-export const IID_ID3DXMESH = '{4020E5C2-1403-4929-883F-E2E849FAC195}';
+const IID_ID3DXBASEMESH = '{7ED943DD-52E8-40B5-A8D8-76685C406330}';
+const IID_ID3DXMESH = '{4020E5C2-1403-4929-883F-E2E849FAC195}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -59,7 +59,7 @@ const MESHOPT_BITS = 0x3f400000;
  *
  * @param {number} options
  */
-export function vertexBufferOf(options){
+function vertexBufferOf(options){
     /** @type {[number, number][]} */
     const usages = [[0x2, 0x20], [0x4, 0x40], [0x8, 0x80], [0x4000, 0x100], [0x40, 0x8],
         [0x80, 0x200], [0x8000, 0x10]];

@@ -410,7 +410,7 @@ export const DIRECTX_VERSION = '4.09.00.0904';
  * DxDiag reports: an installer that asks it compares the letter too, since
  * 9.0, 9.0b and 9.0c share a major and a minor.
  */
-export const DIRECTX_RELEASE = Object.freeze({ major: 9, minor: 0, letter: 'c' });
+const DIRECTX_RELEASE = Object.freeze({ major: 9, minor: 0, letter: 'c' });
 
 /**
  * @typedef {Object} DirectXRelease
@@ -440,7 +440,7 @@ export const DIRECTX_RELEASES = Object.freeze({
  * @param {string} version
  * @returns {Uint8Array}
  */
-export function installedVersionOf(version){
+function installedVersionOf(version){
     const [, minor, release, build] = version.split('.');
     return Uint8Array.of(0, 0, 0, Number(minor), 0, Number(release),
         parseInt(build.slice(0, 2), 16), parseInt(build.slice(2), 16));

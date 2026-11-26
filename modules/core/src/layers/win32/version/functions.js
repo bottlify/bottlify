@@ -335,7 +335,7 @@ function find(block, path){
  *
  * @param {Uint8Array | null} block
  */
-export function fileVersionOf(block){
+function fileVersionOf(block){
     const root = block ? readNode(block, 0) : null;
     if (!block || !root || root.value + FIXED_FILE_INFO_SIZE > block.length)
     {

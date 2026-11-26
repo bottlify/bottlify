@@ -62,7 +62,7 @@ const NO_CLASS = 0;
  *
  * @param {number} unit
  */
-export function wideClassOf(unit){
+function wideClassOf(unit){
     if (unit < WIDE_CTYPE.length)
     {
         return WIDE_CTYPE[unit];

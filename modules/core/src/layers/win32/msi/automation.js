@@ -69,7 +69,7 @@ const records = new WeakMap();
  * @param {(record: import('./record.js').Record) => string} format
  * @returns {ExternalObject}
  */
-export function recordObject(record, format){
+function recordObject(record, format){
     const object = hostObject({
         typeName: 'Record',
         members: {
@@ -103,7 +103,7 @@ export function recordObject(record, format){
  *
  * @param {unknown} value @returns {import('./record.js').Record | null}
  */
-export const recordOf = value=>(value && typeof value === 'object'
+const recordOf = value=>(value && typeof value === 'object'
     ? records.get(value) ?? null : null);
 
 /**

@@ -24,10 +24,10 @@ import { boundsOf, figures } from './path.js';
 
 /** BrushType. */
 export const BrushTypeSolidColor = 0;
-export const BrushTypeHatchFill = 1;
-export const BrushTypeTextureFill = 2;
-export const BrushTypePathGradient = 3;
-export const BrushTypeLinearGradient = 4;
+const BrushTypeHatchFill = 1;
+const BrushTypeTextureFill = 2;
+const BrushTypePathGradient = 3;
+const BrushTypeLinearGradient = 4;
 
 /** WrapMode. */
 const WrapModeTile = 0;

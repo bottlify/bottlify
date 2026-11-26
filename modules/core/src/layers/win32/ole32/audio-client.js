@@ -99,7 +99,7 @@ const BUFFERFLAGS_SILENT = 0x2;
 const NAME_BYTES = 1024 * 2;
 
 /** The engine's period, in 100 ns units: 10 ms, the default Windows reports; and its least. */
-export const DEFAULT_PERIOD = 100000;
+const DEFAULT_PERIOD = 100000;
 const MINIMUM_PERIOD = 30000;
 /**
  * The least buffer a shared stream is given, in periods. Chosen: a stream that

@@ -23,8 +23,8 @@
 import { fontFaces } from './faces.js';
 
 /** AddFontResourceEx's flags: private to the process, and kept out of enumeration. */
-export const FR_PRIVATE = 0x10;
-export const FR_NOT_ENUM = 0x20;
+const FR_PRIVATE = 0x10;
+const FR_NOT_ENUM = 0x20;
 
 /** Where a bare file name is looked for when it is not where the program stands. */
 const FONTS_FOLDER = 'C:\\WINDOWS\\Fonts\\';

@@ -124,7 +124,7 @@ export const VOID = Object.freeze(/** @type {Type} */ ({ kind: 'void' }));
 /** The type of an expression that already produced a diagnostic; it silences the follow-ons. */
 export const ERROR = Object.freeze(/** @type {Type} */ ({ kind: 'error' }));
 export const STRING = Object.freeze(/** @type {Type} */ ({ kind: 'string' }));
-export const SHADER = Object.freeze(/** @type {Type} */ ({ kind: 'shader' }));
+const SHADER = Object.freeze(/** @type {Type} */ ({ kind: 'shader' }));
 export const BOOL = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'bool' }));
 export const INT = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'int' }));
 export const UINT = Object.freeze(/** @type {Type} */ ({ kind: 'scalar', base: 'uint' }));

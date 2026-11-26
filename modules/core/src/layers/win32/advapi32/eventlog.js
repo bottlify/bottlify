@@ -150,7 +150,7 @@ const align4 = value=>value + 3 & ~3;
  *
  * @param {EventRecord} record @param {boolean} wide
  */
-export const recordBytes = (record, wide)=>{
+const recordBytes = (record, wide)=>{
     const source = textBytes(record.source, wide);
     const computer = textBytes(record.computer, wide);
     // The SID, or the strings where there is none, start on an eight-byte boundary.

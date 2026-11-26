@@ -20,7 +20,7 @@ import { wholeAddress } from '../common/pointers.js';
  * drawn in screen space.
  */
 
-export const IID_ID3DXSPRITE = '{BA0B762D-7D28-43EC-B9DC-2F84443B0614}';
+const IID_ID3DXSPRITE = '{BA0B762D-7D28-43EC-B9DC-2F84443B0614}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;

@@ -830,7 +830,7 @@ function evaluateTexture(name, args, argTypes, hooks){
  * @param {Value} value @param {Type} type @param {IntrinsicHooks} hooks
  * @returns {Value}
  */
-export function evaluateDerivative(name, value, type, hooks){
+function evaluateDerivative(name, value, type, hooks){
     if (!hooks.derivative)
     {
         throw new Error('no derivatives are available');

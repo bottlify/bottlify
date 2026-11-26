@@ -42,9 +42,9 @@ export const FILE_IMPLIED = SYNCHRONIZE | 0x0080;
 
 /** A thread's own rights, and the ones a query or a change of its information needs. */
 const THREAD_RIGHTS = 0xffff;
-export const THREAD_SET_INFORMATION = 0x0020;
+const THREAD_SET_INFORMATION = 0x0020;
 export const THREAD_QUERY_INFORMATION = 0x0040;
-export const THREAD_SET_LIMITED_INFORMATION = 0x0400;
+const THREAD_SET_LIMITED_INFORMATION = 0x0400;
 export const THREAD_QUERY_LIMITED_INFORMATION = 0x0800;
 
 const ERROR_ACCESS_DENIED = 5;

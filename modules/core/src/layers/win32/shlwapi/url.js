@@ -85,7 +85,7 @@ const escapeOf = char=>`%${char.charCodeAt(0).toString(16).toUpperCase().padStar
  *
  * @param {string} url @param {boolean} extraInfo @param {(code: number) => string} char
  */
-export const unescapeUrl = (url, extraInfo, char)=>{
+const unescapeUrl = (url, extraInfo, char)=>{
     let out = '';
     let escaping = true;
     for (let at = 0; at < url.length; at++)
@@ -145,7 +145,7 @@ const isDosPath = text=>/^[A-Za-z]:/.test(text) || text.startsWith('\\\\');
  * @param {string} url
  * @returns {{ scheme: string, rest: string } | null}
  */
-export const parseScheme = url=>{
+const parseScheme = url=>{
     if (!hasScheme(url))
     {
         return null;
@@ -162,7 +162,7 @@ export const parseScheme = url=>{
  *
  * @param {string} path @param {boolean} escape
  */
-export const fileUrlOf = (path, escape)=>{
+const fileUrlOf = (path, escape)=>{
     const slashed = path.replace(/\\/g, '/');
     const body = escape ? escapeWhere(slashed, unsafeOrPercent) : slashed;
     if (/^[A-Za-z]:/.test(path))
@@ -779,7 +779,7 @@ export const combineUrl = (base, relative, flags, char)=>{
  * @param {string} url @param {number} question
  * @returns {boolean | null} null for a question this does not answer
  */
-export const urlIs = (url, question)=>{
+const urlIs = (url, question)=>{
     const parsed = parseScheme(url);
     switch (question){
         case URLIS_URL:
@@ -807,7 +807,7 @@ export const urlIs = (url, question)=>{
  * @param {string} url
  * @returns {number | null}
  */
-export const locationIndex = url=>{
+const locationIndex = url=>{
     const parsed = parseScheme(url);
     if (!parsed)
     {

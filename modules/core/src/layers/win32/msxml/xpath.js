@@ -178,7 +178,7 @@ function nodeTest(test, axis){
  * @param {string} source
  * @returns {Evaluator}
  */
-export function compileXPath(source){
+function compileXPath(source){
     const tokens = tokenize(source);
     let at = 0;
     const peek = (offset = 0)=>tokens[at + offset];

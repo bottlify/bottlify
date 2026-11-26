@@ -21,7 +21,7 @@ import { wholeAddress } from '../common/pointers.js';
  */
 
 /** COMPRESSION_FORMAT_LZNT1. */
-export const COMPRESSION_FORMAT_LZNT1 = 2;
+const COMPRESSION_FORMAT_LZNT1 = 2;
 /** The bytes a chunk holds once it is decompressed. */
 const CHUNK = 4096;
 const SIGNATURE = 0x3000;

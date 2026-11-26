@@ -77,7 +77,7 @@ const VARIANT_TRUE = 0xffff;
  */
 
 /** Little-endian reads and writes of guest memory. @param {GuestCom} com */
-export function guestMemory(com){
+function guestMemory(com){
     /** @param {number} address @param {number} length */
     const view = (address, length)=>new DataView(com.readMemory(wholeAddress(address),
         length).slice()

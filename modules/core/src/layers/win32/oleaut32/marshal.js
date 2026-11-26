@@ -869,7 +869,7 @@ export function createInterfaceCatalog(host){
  *
  * @param {MarshalSide} side
  */
-export function createWire(side){
+function createWire(side){
     const layout = layoutOf(side.pointerSize);
     /** @param {WireType} type */
     const size = type=>sizeOf(type, layout);
@@ -1445,7 +1445,7 @@ export const unsupportedAt = (method, width)=>{
  * @param {Uint8Array} frame @param {Layout} width
  * @returns {(number | bigint)[]}
  */
-export function argumentsOf(frame, width){
+function argumentsOf(frame, width){
     if (width.slot === 4)
     {
         return wordsOfBytes(frame);

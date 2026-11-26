@@ -329,7 +329,7 @@ const pathBytes = path=>{
  * @param {Node} node
  * @returns {Uint8Array}
  */
-export const regionData = node=>{
+const regionData = node=>{
     /** @type {number[]} */
     const body = [];
     /** @param {number} value */
@@ -391,7 +391,7 @@ const crc32 = bytes=>{
  * @param {Uint8Array} bytes
  * @returns {Node | null | 'empty-path'}
  */
-export const parseRegionData = bytes=>{
+const parseRegionData = bytes=>{
     if (bytes.length < 20)
     {
         return null;

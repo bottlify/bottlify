@@ -123,7 +123,7 @@ export function pointerIo(host, size = 4){
 }
 
 /** The highest address a program may hold on 32-bit Windows, or one not large-address aware. */
-export const LOW_USER_TOP = 0x7ffeffff;
+const LOW_USER_TOP = 0x7ffeffff;
 
 /**
  * The highest address a process's program may hold, as GetSystemInfo's

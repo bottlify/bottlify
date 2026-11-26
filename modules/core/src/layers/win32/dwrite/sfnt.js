@@ -17,7 +17,7 @@
  */
 
 /** A tag as the big-endian word a directory holds and TryGetFontTable's little-endian one. */
-export const tagOf = (/** @type {string} */ text)=>[...text].reduce((word, c)=>word * 256
+const tagOf = (/** @type {string} */ text)=>[...text].reduce((word, c)=>word * 256
     + c.charCodeAt(0), 0) >>> 0;
 /** DWRITE_MAKE_OPENTYPE_TAG: the four characters little-endian, as a program passes them. */
 export const openTypeTag = (/** @type {string} */ text)=>[...text].reduce((word, c, i)=>word
@@ -218,7 +218,7 @@ export function characterMapOf(cmap){
 }
 
 /** DWRITE_FONT_WEIGHT, STYLE and STRETCH values a face's tables say. */
-export const STYLE = Object.freeze({ NORMAL: 0, OBLIQUE: 1, ITALIC: 2 });
+const STYLE = Object.freeze({ NORMAL: 0, OBLIQUE: 1, ITALIC: 2 });
 
 /**
  * DWRITE_FONT_METRICS (with DWRITE_FONT_METRICS1's extra fields) as the tables

@@ -28,7 +28,7 @@ export const ERROR_SUCCESS = 0;
 export const ERROR_INVALID_PARAMETER = 87;
 export const ERROR_NO_MORE_ITEMS = 259;
 export const ERROR_FUNCTION_FAILED = 1627;
-export const ERROR_INVALID_DATA = 13;
+const ERROR_INVALID_DATA = 13;
 export const ERROR_BAD_QUERY_SYNTAX = 1615;
 export const ERROR_INVALID_FIELD = 1616;
 

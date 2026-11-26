@@ -33,7 +33,7 @@ const LOCALES = new Map([[0x409, 'en-us'], [0x809, 'en-gb'], [0x407, 'de-de'], [
     [0x42a, 'vi-vn'], [0x429, 'fa-ir'], [0x439, 'hi-in'], [0x421, 'id-id']]);
 
 /** A name record's language as a locale name, or null for one not known. @param {number} language */
-export const localeOf = language=>LOCALES.get(language) ?? null;
+const localeOf = language=>LOCALES.get(language) ?? null;
 
 /**
  * Localized strings: [locale, text], en-us first where it is one of them.

@@ -210,7 +210,7 @@ export function machineProperties(machine){
  *
  * @param {string} defaultDir
  */
-export function splitDefaultDir(defaultDir){
+function splitDefaultDir(defaultDir){
     const [target, source = null] = defaultDir.split(/:(.*)/s, 2);
     /** @param {string} half */
     const names = half=>{

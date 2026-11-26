@@ -165,7 +165,7 @@ const NAN_BITS = new DataView(new ArrayBuffer(8));
  *
  * @param {number} nan
  */
-export function quieted(nan){
+function quieted(nan){
     NAN_BITS.setFloat64(0, nan, true);
     NAN_BITS.setUint8(6, NAN_BITS.getUint8(6) | 0x08);
     return NAN_BITS.getFloat64(0, true);

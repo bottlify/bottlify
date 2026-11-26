@@ -39,7 +39,7 @@ export const CLASS_KEY = 'SYSTEM\\CurrentControlSet\\Control\\Class';
 export const DEVICE_CLASSES_KEY = 'SYSTEM\\CurrentControlSet\\Control\\DeviceClasses';
 
 /** The longest instance id, its terminator included. */
-export const MAX_DEVICE_ID_LEN = 200;
+const MAX_DEVICE_ID_LEN = 200;
 
 /** The device tree's root: its device node and its instance id. */
 export const ROOT_DEVNODE = 1;

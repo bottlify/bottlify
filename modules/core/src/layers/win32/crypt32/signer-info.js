@@ -28,7 +28,7 @@ import { encoding } from '../crypto/der.js';
 
 /** @typedef {import('../crypto/pkcs7.js').SignerInfo} SignerInfo */
 
-export const SIGNER_INFO_SIZE = 68;
+const SIGNER_INFO_SIZE = 68;
 const NULL_PARAMETERS = Uint8Array.of(0x05, 0x00);
 
 /**

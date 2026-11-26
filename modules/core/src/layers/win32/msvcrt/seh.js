@@ -72,8 +72,8 @@ export const NO_TRY_LEVEL = 0xffffffff;
  * table opens with four words of the GS and EH cookies' offsets before its
  * entries, and no block entered is -2.
  */
-export const EH4_TABLE_HEADER = 0x10;
-export const EH4_NO_TRY_LEVEL = 0xfffffffe;
+const EH4_TABLE_HEADER = 0x10;
+const EH4_NO_TRY_LEVEL = 0xfffffffe;
 
 /**
  * How a frame's scope table is found and read: where its entries start, and

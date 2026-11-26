@@ -433,5 +433,3 @@ export async function bgraOf(source, thread){
     return convertedSource(source, target, null).copy(thread,
         { x: 0, y: 0, width: d.width, height: d.height });
 }
-
-export { u32 };

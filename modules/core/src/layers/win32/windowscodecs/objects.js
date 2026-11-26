@@ -48,7 +48,7 @@ const CLSID = Object.freeze({
 });
 
 /** CLSID_WICImagingFactory2, which wincodec.h's IDL names beside the first. */
-export const CLSID_IMAGING_FACTORY2 = '{317D06E8-5F24-433D-BDF7-79CE68D8ABC2}';
+const CLSID_IMAGING_FACTORY2 = '{317D06E8-5F24-433D-BDF7-79CE68D8ABC2}';
 
 const STREAM_SEEK = Object.freeze({ SET: 0, CUR: 1, END: 2 });
 const STG_E_INVALIDFUNCTION = 0x80030001 | 0;

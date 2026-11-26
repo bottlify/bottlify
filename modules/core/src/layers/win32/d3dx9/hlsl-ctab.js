@@ -45,7 +45,7 @@ const SET = { f: RS.FLOAT4, i: RS.INT4, b: RS.BOOL, s: RS.SAMPLER };
  * @param {ConstantTableOptions} options
  * @returns {Uint8Array}
  */
-export function buildConstantTable(options){
+function buildConstantTable(options){
     const { constants } = options;
     /** @type {Map<string, number>} */
     const strings = new Map();

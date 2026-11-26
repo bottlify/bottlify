@@ -47,7 +47,7 @@ export const TBS_VERT = 0x0002;
 export const TBS_NOTICKS = 0x0010;
 export const TBS_ENABLESELRANGE = 0x0020;
 export const TBS_FIXEDLENGTH = 0x0040;
-export const TBS_NOTHUMB = 0x0080;
+const TBS_NOTHUMB = 0x0080;
 
 /** Messages, numbered off WM_USER as the header numbers them. */
 const WM_USER = 0x0400;
@@ -79,13 +79,13 @@ export const TBM_GETTHUMBRECT = WM_USER + 25;
 export const TBM_GETCHANNELRECT = WM_USER + 26;
 export const TBM_SETTHUMBLENGTH = WM_USER + 27;
 export const TBM_GETTHUMBLENGTH = WM_USER + 28;
-export const TBM_SETTOOLTIPS = WM_USER + 29;
-export const TBM_GETTOOLTIPS = WM_USER + 30;
-export const TBM_SETTIPSIDE = WM_USER + 31;
+const TBM_SETTOOLTIPS = WM_USER + 29;
+const TBM_GETTOOLTIPS = WM_USER + 30;
+const TBM_SETTIPSIDE = WM_USER + 31;
 export const TBM_SETBUDDY = WM_USER + 32;
 export const TBM_GETBUDDY = WM_USER + 33;
-export const TBM_SETUNICODEFORMAT = 0x2005;
-export const TBM_GETUNICODEFORMAT = 0x2006;
+const TBM_SETUNICODEFORMAT = 0x2005;
+const TBM_GETUNICODEFORMAT = 0x2006;
 const WM_SIZE = 0x0005;
 /** The page TBM_SETPAGESIZE sets to have a fifth of the range again. */
 const PAGE_DEFAULT = -1;
@@ -93,7 +93,7 @@ const PAGE_DEFAULT = -1;
 /** The codes a WM_HSCROLL from a trackbar carries in its low word. */
 export const TB_LINEUP = 0;
 export const TB_LINEDOWN = 1;
-export const TB_PAGEUP = 2;
+const TB_PAGEUP = 2;
 export const TB_PAGEDOWN = 3;
 export const TB_THUMBPOSITION = 4;
 export const TB_THUMBTRACK = 5;

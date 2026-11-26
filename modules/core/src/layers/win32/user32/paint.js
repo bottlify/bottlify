@@ -250,11 +250,11 @@ const MOST_UPDATE_PIECES = 64;
  *
  * @param {Rect[]} area @param {Rect} rect @returns {Rect[]}
  */
-export const addToArea = (area, rect)=>(isEmpty(rect)
+const addToArea = (area, rect)=>(isEmpty(rect)
     ? area : [...area, ...area.reduce(subtractFromArea, [rect])]);
 
 /** @param {Rect[]} area @param {Rect[]} more @returns {Rect[]} */
-export const unionAreas = (area, more)=>more.reduce(addToArea, area);
+const unionAreas = (area, more)=>more.reduce(addToArea, area);
 
 /** @param {Rect[]} area @param {Rect[]} taken @returns {Rect[]} */
 export const subtractAreas = (area, taken)=>taken.reduce(subtractFromArea, area);
@@ -273,7 +273,7 @@ export const offsetArea = (area, dx, dy)=>area.map(piece=>({ left: piece.left + 
  *
  * @param {Rect} rect @returns {Rect}
  */
-export const ordered = rect=>({ left: Math.min(rect.left, rect.right),
+const ordered = rect=>({ left: Math.min(rect.left, rect.right),
     top: Math.min(rect.top, rect.bottom), right: Math.max(rect.left, rect.right),
     bottom: Math.max(rect.top, rect.bottom) });
 

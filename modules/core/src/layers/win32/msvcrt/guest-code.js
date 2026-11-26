@@ -861,7 +861,7 @@ const SCRATCH = new DataView(new ArrayBuffer(8));
  *
  * @param {number | bigint} value  a bigint (`int64`) as it is
  */
-export function toInt64(value){
+function toInt64(value){
     if (typeof value === 'bigint')
     {
         return BigInt.asIntN(64, value);

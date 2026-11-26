@@ -18,20 +18,20 @@ import { guidBytes } from '../../../system/guid.js';
 
 /** dplay.h: MAKE_HRESULT(1, _FACDP = 0x877, code). */
 const dpError = (/** @type {number} */ code)=>(0x88770000 | code) >>> 0;
-export const DP_OK = 0;
-export const DPERR_ALREADYINITIALIZED = dpError(5);
+const DP_OK = 0;
+const DPERR_ALREADYINITIALIZED = dpError(5);
 export const DPERR_BUFFERTOOSMALL = dpError(30);
-export const DPERR_INVALIDPLAYER = dpError(150);
+const DPERR_INVALIDPLAYER = dpError(150);
 export const DPERR_NOMESSAGES = dpError(190);
 export const DPERR_NOSESSIONS = dpError(220);
-export const DPERR_UNAVAILABLE = dpError(250);
-export const DPERR_UNINITIALIZED = dpError(320);
-export const DPERR_INVALIDPARAMS = 0x80070057;
-export const DPERR_UNSUPPORTED = 0x80004001;
+const DPERR_UNAVAILABLE = dpError(250);
+const DPERR_UNINITIALIZED = dpError(320);
+const DPERR_INVALIDPARAMS = 0x80070057;
+const DPERR_UNSUPPORTED = 0x80004001;
 
 /** dpaddr.h / dplay.h: the one provider, and the address chunk naming it. */
 export const DPSPGUID_TCPIP = '{36E95EE0-8577-11CF-960C-0080C7534E82}';
-export const DPAID_SERVICEPROVIDER = '{07D916C0-E0AF-11CF-9C4E-00A0C905425E}';
+const DPAID_SERVICEPROVIDER = '{07D916C0-E0AF-11CF-9C4E-00A0C905425E}';
 const TCPIP_NAME = 'Internet TCP/IP Connection For DirectPlay';
 const DPOPEN_CREATE = 2;
 const DPRECEIVE_TOPLAYER = 2;

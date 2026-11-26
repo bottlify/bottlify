@@ -124,7 +124,7 @@ export const isSrgb = format=>Boolean(LAYOUTS.get(format)?.srgb) || SRGB_BLOCKS.
  * @param {number} channels @param {boolean} encode  texels into blocks
  * @returns {Uint8Array}
  */
-export function channelBlocks(data, width, height, channels, encode){
+function channelBlocks(data, width, height, channels, encode){
     const across = Math.max(1, Math.ceil(width / 4));
     const down = Math.max(1, Math.ceil(height / 4));
     const out = new Uint8Array(encode ? across * down * channels * 8 : width * height * channels);

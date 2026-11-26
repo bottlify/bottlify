@@ -67,7 +67,7 @@ export const DEBUG_BREAK = '<debug break>';
 export const VIRTUAL_READ = '<read virtual memory>';
 export const VIRTUAL_WRITE = '<write virtual memory>';
 
-export const CROSS_CALLS = new Set([
+const CROSS_CALLS = new Set([
     'VirtualAlloc', 'VirtualFree', 'VirtualProtect', 'VirtualQuery',
     VIRTUAL_READ, VIRTUAL_WRITE,
     'SuspendThread', 'ResumeThread', 'GetThreadContext', 'SetThreadContext',

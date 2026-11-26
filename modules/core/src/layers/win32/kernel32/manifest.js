@@ -319,7 +319,7 @@ export function parseXml(text){
  *
  * @param {string | undefined} text
  */
-export function parseVersion(text){
+function parseVersion(text){
     if (text === undefined)
     {
         return null;

@@ -48,26 +48,26 @@ export const COMBOBOXEX_ATOM = 0x801e;
 
 const WM_USER = 0x0400;
 export const CBEM_INSERTITEMA = WM_USER + 1;
-export const CBEM_SETIMAGELIST = WM_USER + 2;
-export const CBEM_GETIMAGELIST = WM_USER + 3;
+const CBEM_SETIMAGELIST = WM_USER + 2;
+const CBEM_GETIMAGELIST = WM_USER + 3;
 export const CBEM_GETITEMA = WM_USER + 4;
 export const CBEM_SETITEMA = WM_USER + 5;
 export const CBEM_GETCOMBOCONTROL = WM_USER + 6;
 export const CBEM_GETEDITCONTROL = WM_USER + 7;
 export const CBEM_SETEXSTYLE = WM_USER + 8;
 export const CBEM_GETEXTENDEDSTYLE = WM_USER + 9;
-export const CBEM_HASEDITCHANGED = WM_USER + 10;
-export const CBEM_INSERTITEMW = WM_USER + 11;
-export const CBEM_SETITEMW = WM_USER + 12;
-export const CBEM_GETITEMW = WM_USER + 13;
+const CBEM_HASEDITCHANGED = WM_USER + 10;
+const CBEM_INSERTITEMW = WM_USER + 11;
+const CBEM_SETITEMW = WM_USER + 12;
+const CBEM_GETITEMW = WM_USER + 13;
 export const CBEM_SETEXTENDEDSTYLE = WM_USER + 14;
-export const CBEM_SETUNICODEFORMAT = 0x2005;
-export const CBEM_GETUNICODEFORMAT = 0x2006;
+const CBEM_SETUNICODEFORMAT = 0x2005;
+const CBEM_GETUNICODEFORMAT = 0x2006;
 const CBEM_SETWINDOWTHEME = 0x200b;
 
 /** The combo box's messages: the ones the extended box answers itself, and its range. */
 const CB_GETEDITSEL = 0x0140;
-export const CB_DELETESTRING = 0x0144;
+const CB_DELETESTRING = 0x0144;
 export const CBEM_DELETEITEM = CB_DELETESTRING;
 export const CB_GETCURSEL = 0x0147;
 export const CB_GETLBTEXT = 0x0148;
@@ -85,28 +85,28 @@ const CB_ERR = -1;
 /** COMBOBOXEXITEM's mask. */
 export const CBEIF_TEXT = 0x01;
 export const CBEIF_IMAGE = 0x02;
-export const CBEIF_SELECTEDIMAGE = 0x04;
-export const CBEIF_OVERLAY = 0x08;
+const CBEIF_SELECTEDIMAGE = 0x04;
+const CBEIF_OVERLAY = 0x08;
 export const CBEIF_INDENT = 0x10;
 export const CBEIF_LPARAM = 0x20;
 export const CBEIF_DI_SETITEM = 0x10000000;
 
 /** The extended styles. */
-export const CBES_EX_NOEDITIMAGE = 0x01;
+const CBES_EX_NOEDITIMAGE = 0x01;
 export const CBES_EX_CASESENSITIVE = 0x10;
 
 /** The notifications, off CBEN_FIRST (-800). */
 export const CBEN_GETDISPINFOA = -800 >>> 0;
 export const CBEN_INSERTITEM = -801 >>> 0;
 export const CBEN_DELETEITEM = -802 >>> 0;
-export const CBEN_BEGINEDIT = -804 >>> 0;
+const CBEN_BEGINEDIT = -804 >>> 0;
 export const CBEN_ENDEDITA = -805 >>> 0;
-export const CBEN_ENDEDITW = -806 >>> 0;
-export const CBEN_GETDISPINFOW = -807 >>> 0;
+const CBEN_ENDEDITW = -806 >>> 0;
+const CBEN_GETDISPINFOW = -807 >>> 0;
 /** Why an edit ended. */
-export const CBENF_KILLFOCUS = 1;
-export const CBENF_RETURN = 2;
-export const CBENF_ESCAPE = 3;
+const CBENF_KILLFOCUS = 1;
+const CBENF_RETURN = 2;
+const CBENF_ESCAPE = 3;
 export const CBENF_DROPDOWN = 4;
 /** The longest text CBEN_ENDEDIT carries. */
 const CBEMAXSTRLEN = 260;

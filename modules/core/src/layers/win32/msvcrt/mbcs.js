@@ -28,21 +28,21 @@ import { EILSEQ, EINVAL, ERANGE } from './globals.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /** The `_mbctype` bits, at the values msvcrt's `<mbctype.h>` gives them. */
-export const MB_SYMBOL = 0x01;
-export const MB_PUNCT = 0x02;
-export const MB_LEAD = 0x04;
-export const MB_TRAIL = 0x08;
-export const SB_UPPER = 0x10;
-export const SB_LOWER = 0x20;
+const MB_SYMBOL = 0x01;
+const MB_PUNCT = 0x02;
+const MB_LEAD = 0x04;
+const MB_TRAIL = 0x08;
+const SB_UPPER = 0x10;
+const SB_LOWER = 0x20;
 
 /** What a comparison answers for no string: _NLSCMPERROR, INT_MAX. */
 const NLS_COMPARE_ERROR = 0x7fffffff;
 
 /** `_mbbtype` and `_mbsbtype`'s answers. */
-export const MBC_SINGLE = 0;
-export const MBC_LEAD = 1;
-export const MBC_TRAIL = 2;
-export const MBC_ILLEGAL = -1;
+const MBC_SINGLE = 0;
+const MBC_LEAD = 1;
+const MBC_TRAIL = 2;
+const MBC_ILLEGAL = -1;
 
 /** The selectors `_setmbcp` takes besides a page number. */
 const MB_CP_SBCS = 0;
@@ -105,7 +105,7 @@ const SINGLE_BYTE_PAGES = new Set([437, 720, 737, 775, 850, 852, 855, 857, 858, 
  * @param {DoubleBytePage | null} layout
  * @returns {Uint8Array}
  */
-export function mbctypeOf(layout){
+function mbctypeOf(layout){
     const table = new Uint8Array(257);
     /** @param {[number, number][] | undefined} ranges @param {number} bit */
     const mark = (ranges, bit)=>{
@@ -183,7 +183,7 @@ function charactersOf(number){
  *
  * @param {number} number  The page. @param {number} pair @param {boolean} upper
  */
-export function pairCase(number, pair, upper){
+function pairCase(number, pair, upper){
     const { decode, pairOf } = charactersOf(number);
     const character = decode(pair);
     if (character.length !== 1)

@@ -22,17 +22,16 @@ import { createJScriptEngine } from './engine.js';
  */
 
 export {
-    IID_IACTIVESCRIPT, IID_IACTIVESCRIPTERROR, IID_IACTIVESCRIPTPARSE32, IID_IACTIVESCRIPTSITE,
-    IID_IOBJECTSAFETY, SCRIPTITEM_GLOBALMEMBERS, SCRIPTITEM_ISVISIBLE, SCRIPTSTATE_CLOSED,
-    SCRIPTSTATE_CONNECTED, SCRIPTSTATE_DISCONNECTED, SCRIPTSTATE_INITIALIZED, SCRIPTSTATE_STARTED,
-    SCRIPTSTATE_UNINITIALIZED, SCRIPTTEXT_ISEXPRESSION, SCRIPT_E_REPORTED,
+    IID_IACTIVESCRIPT, IID_IACTIVESCRIPTPARSE32, IID_IOBJECTSAFETY, SCRIPTITEM_GLOBALMEMBERS,
+    SCRIPTITEM_ISVISIBLE, SCRIPTSTATE_CLOSED, SCRIPTSTATE_INITIALIZED, SCRIPTSTATE_STARTED,
+    SCRIPTTEXT_ISEXPRESSION, SCRIPT_E_REPORTED,
 } from '../script/active-script.js';
 
 export const CLSID_JSCRIPT = '{F414C260-6AC0-11CF-B6D1-00AA00BBBB58}';
 export const PROGID_JSCRIPT = 'JScript';
 
 /** @type {import('../script/active-script.js').ActiveScriptLanguage<JScriptEngine>} */
-export const JSCRIPT_LANGUAGE = Object.freeze({
+const JSCRIPT_LANGUAGE = Object.freeze({
     clsid: CLSID_JSCRIPT,
     createEngine: options=>createJScriptEngine({
         version: options.version,
@@ -63,6 +62,6 @@ export function registerJScriptClass(host){
  *
  * @param {ActiveScriptHost} host @returns {ComClassDefinition}
  */
-export function activeScript(host){
+function activeScript(host){
     return hostedScript(host, JSCRIPT_LANGUAGE);
 }

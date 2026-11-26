@@ -30,7 +30,7 @@ import { wholeAddress } from '../common/pointers.js';
 export const S_OK = 0;
 export const S_FALSE = 1;
 export const E_NOTIMPL = 0x80004001 | 0;
-export const E_NOINTERFACE = 0x80004002 | 0;
+const E_NOINTERFACE = 0x80004002 | 0;
 export const E_POINTER = 0x80004003 | 0;
 export const E_FAIL = 0x80004005 | 0;
 export const E_UNEXPECTED = 0x8000ffff | 0;
@@ -40,7 +40,7 @@ export const E_INVALIDARG = 0x80070057 | 0;
 export const E_NOT_SUFFICIENT_BUFFER = 0x8007007a | 0;
 
 /** IUnknown's slots, which every interface starts with. */
-export const SLOT = Object.freeze({ QueryInterface: 0, AddRef: 1, Release: 2 });
+const SLOT = Object.freeze({ QueryInterface: 0, AddRef: 1, Release: 2 });
 
 /**
  * @typedef {Object} MfHost

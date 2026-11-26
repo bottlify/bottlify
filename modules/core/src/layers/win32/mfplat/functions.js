@@ -26,7 +26,7 @@ import { createAsync } from './async.js';
 import { formatGuid, parseGuid } from '../../../system/guid.js';
 import { wholeAddress } from '../common/pointers.js';
 
-export const MF_E_BAD_STARTUP_VERSION = 0xc00d36e3 | 0;
+const MF_E_BAD_STARTUP_VERSION = 0xc00d36e3 | 0;
 const MF_E_BUFFERTOOSMALL = 0xc00d36b1 | 0;
 /** What a work queue answers before MFStartup and after the last MFShutdown. */
 const MF_E_SHUTDOWN = 0xc00d3e85 | 0;

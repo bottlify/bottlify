@@ -105,7 +105,7 @@ const PROPERTY = /^[A-Za-z_][A-Za-z0-9_.]*=/;
  */
 
 /** @param {string} text */
-export const isProductCode = text=>PRODUCT_CODE.test(text);
+const isProductCode = text=>PRODUCT_CODE.test(text);
 
 /**
  * The letters of a /q option as an interface level, or null when they are

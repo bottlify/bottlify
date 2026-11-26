@@ -141,7 +141,7 @@ function splitArguments(text){
  * @param {Set<string>} [hidden]
  * @returns {string}
  */
-export function expand(text, macros, hidden = new Set()){
+function expand(text, macros, hidden = new Set()){
     let out = '';
     let i = 0;
     while (i < text.length)

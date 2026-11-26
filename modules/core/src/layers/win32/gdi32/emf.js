@@ -59,13 +59,13 @@ export const META = Object.freeze({
 });
 
 /** ' EMF', the header's signature. */
-export const ENHMETA_SIGNATURE = 0x464d4520;
+const ENHMETA_SIGNATURE = 0x464d4520;
 /** The header Windows XP writes: ENHMETAHEADER through szlMicrometers. */
-export const EMF_HEADER_SIZE = 108;
+const EMF_HEADER_SIZE = 108;
 /** The least a header can be: through szlMillimeters. */
 const EMF_HEADER_LEAST = 88;
 /** A METAHEADER, in bytes and in the words its own field counts. */
-export const WMF_HEADER_SIZE = 18;
+const WMF_HEADER_SIZE = 18;
 const WMF_HEADER_WORDS = 9;
 /** The escape that carries a comment, and the 'WMFC' an EMF inside one starts with. */
 const MFCOMMENT = 15;
@@ -78,7 +78,7 @@ export const ETO_OPAQUE = 0x0002;
 export const ETO_CLIPPED = 0x0004;
 
 /** The mapping modes. */
-export const MM_TEXT = 1;
+const MM_TEXT = 1;
 export const MM_LOMETRIC = 2;
 export const MM_ISOTROPIC = 7;
 export const MM_ANISOTROPIC = 8;
@@ -117,7 +117,7 @@ export const compose = (a, b)=>[
  * @param {readonly number[]} xform @param {{ x: number, y: number }} point
  * @returns {{ x: number, y: number }}
  */
-export const apply = (xform, point)=>({
+const apply = (xform, point)=>({
     x: xform[0] * point.x + xform[2] * point.y + xform[4],
     y: xform[1] * point.x + xform[3] * point.y + xform[5],
 });
@@ -463,7 +463,7 @@ export function createPage(device, millimeters){
 }
 
 /** @param {DataView} view @param {number} at @returns {Xform} */
-export const xformAt = (view, at)=>Array.from({ length: 6 }, (_, index)=>
+const xformAt = (view, at)=>Array.from({ length: 6 }, (_, index)=>
     view.getFloat32(at + index * 4, true));
 
 /**
@@ -483,7 +483,7 @@ export const pointsIn = (view, at, count, short)=>Array.from({ length: count }, 
  * @param {Uint8Array[]} records @param {number} objects  The most object slots in use.
  * @returns {Uint8Array}
  */
-export function buildWmf(records, objects){
+function buildWmf(records, objects){
     const eof = Uint8Array.of(3, 0, 0, 0, 0, 0);
     const all = [...records, eof];
     const total = WMF_HEADER_SIZE + all.reduce((sum, record)=>sum + record.length, 0);
@@ -514,7 +514,7 @@ export const blankWmf = ()=>buildWmf([], 0);
  * @param {number} func @param {number[]} words  Each taken as 16 bits.
  * @param {Uint8Array} [tail]  Bytes after the words, padded to a word.
  */
-export function wmfRecord(func, words, tail){
+function wmfRecord(func, words, tail){
     const tailBytes = tail ? (tail.length + 1) & ~1 : 0;
     const bytes = new Uint8Array(6 + words.length * 2 + tailBytes);
     const view = viewOf(bytes);

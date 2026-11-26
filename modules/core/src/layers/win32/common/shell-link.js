@@ -69,7 +69,7 @@ export const BLOCK_SIGNATURES = Object.freeze({
 /** The three show commands a header may hold; any other reads as the first. */
 export const SW_SHOWNORMAL = 1;
 export const SW_SHOWMAXIMIZED = 3;
-export const SW_SHOWMINNOACTIVE = 7;
+const SW_SHOWMINNOACTIVE = 7;
 
 /** LinkInfoFlags. */
 const VOLUME_ID_AND_LOCAL_BASE_PATH = 0x1;

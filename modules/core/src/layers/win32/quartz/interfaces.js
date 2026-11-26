@@ -59,7 +59,7 @@ export const IID_IFILTER_MAPPER2 = '{B79BB0B0-33C1-11D1-ABE1-00A0C905F375}';
  *
  * @type {import('./describe.js').Slot[]}
  */
-export const IDISPATCH_SLOTS = [
+const IDISPATCH_SLOTS = [
     ['GetTypeInfoCount', 1],
     ['GetTypeInfo', 3],
     ['GetIDsOfNames', 5],

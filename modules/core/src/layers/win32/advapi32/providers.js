@@ -32,15 +32,15 @@ const CRYPT_MACHINE_DEFAULT = 0x1;
 const CRYPT_USER_DEFAULT = 0x2;
 const CRYPT_DELETE_DEFAULT = 0x4;
 
-export const PROVIDERS_PATH = 'SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider';
-export const PROVIDER_TYPES_PATH = 'SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider Types';
+const PROVIDERS_PATH = 'SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider';
+const PROVIDER_TYPES_PATH = 'SOFTWARE\\Microsoft\\Cryptography\\Defaults\\Provider Types';
 const USER_TYPES_PATH = 'SOFTWARE\\Microsoft\\Cryptography\\Provider Type';
 
 /** The longest provider name read out of the guest. */
 const MAX_NAME = 1024;
 
 /** @param {number} type @returns {string} the key a type's default is under: Type 001 */
-export const typeKeyName = type=>`Type ${String(type).padStart(3, '0')}`;
+const typeKeyName = type=>`Type ${String(type).padStart(3, '0')}`;
 
 /**
  * @typedef {Object} ProviderHost

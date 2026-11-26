@@ -29,10 +29,10 @@ import { E_INVALIDARG, E_OUTOFMEMORY, E_POINTER, E_UNEXPECTED, S_FALSE, S_OK, dr
     from './kit.js';
 import { wholeAddress } from '../common/pointers.js';
 
-export const MF_E_BUFFERTOOSMALL = 0xc00d36b1 | 0;
-export const MF_E_UNSUPPORTED_REPRESENTATION = 0xc00d36b7 | 0;
-export const MF_E_NO_SAMPLE_TIMESTAMP = 0xc00d36c8 | 0;
-export const MF_E_NO_SAMPLE_DURATION = 0xc00d36c9 | 0;
+const MF_E_BUFFERTOOSMALL = 0xc00d36b1 | 0;
+const MF_E_UNSUPPORTED_REPRESENTATION = 0xc00d36b7 | 0;
+const MF_E_NO_SAMPLE_TIMESTAMP = 0xc00d36c8 | 0;
+const MF_E_NO_SAMPLE_DURATION = 0xc00d36c9 | 0;
 
 export const IID = Object.freeze({
     ATTRIBUTES: IID_IMFATTRIBUTES,
@@ -78,7 +78,7 @@ export const REPRESENTATION = Object.freeze({
 });
 
 /** MF_MEDIATYPE_EQUAL_*. */
-export const EQUAL = Object.freeze({ MAJOR_TYPES: 1, FORMAT_TYPES: 2, FORMAT_DATA: 4,
+const EQUAL = Object.freeze({ MAJOR_TYPES: 1, FORMAT_TYPES: 2, FORMAT_DATA: 4,
     FORMAT_USER_DATA: 8 });
 
 /** Keys IsEqual's format data leaves out, as the documentation of IsEqual names them. */
@@ -107,7 +107,7 @@ const BUFFER_SLOT = Object.freeze({ Lock: 3, Unlock: 4, GetCurrentLength: 5, Set
  * @param {Map<string, import('./attributes.js').Item>} items
  * @returns {Uint8Array | null}
  */
-export function waveFormatOf(items){
+function waveFormatOf(items){
     const subtype = items.get(KEY.SUBTYPE);
     if (subtype?.vt !== TYPE.GUID || !subtype.value.endsWith(FORMAT_TAG_TAIL)
         || !subtype.value.startsWith('{0000'))
@@ -159,7 +159,7 @@ export function waveFormatOf(items){
  * @param {Map<string, import('./attributes.js').Item>} ours
  * @param {Map<string, import('./attributes.js').Item>} theirs
  */
-export function equalFlags(ours, theirs){
+function equalFlags(ours, theirs){
     if (!ours.has(KEY.MAJOR_TYPE) || !theirs.has(KEY.MAJOR_TYPE))
     {
         return null;

@@ -234,7 +234,7 @@ const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
  *
  * @param {{ base: number, size: number }} arena
  */
-export const userSpaceTop = arena=>Math.max(USER_ADDRESS_SPACE_TOP,
+const userSpaceTop = arena=>Math.max(USER_ADDRESS_SPACE_TOP,
     arena.base + arena.size + 0x10000);
 
 /**

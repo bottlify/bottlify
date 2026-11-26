@@ -37,7 +37,7 @@ const PAGE = 4096;
 const GRANULE = 0x10000;
 
 /** The owner a frame's block carries in the arena's allocator. */
-export const FAR_FRAME = 'far frame';
+const FAR_FRAME = 'far frame';
 
 /**
  * @typedef {{ base: number, span: number, protect: number, pages: Uint16Array,

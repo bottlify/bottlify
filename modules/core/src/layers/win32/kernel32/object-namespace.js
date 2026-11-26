@@ -39,7 +39,7 @@ import { STATUS } from '../ntdll/status.js';
 import { OBJ_CASE_INSENSITIVE, OBJ_OPENLINK } from './object-attributes.js';
 
 /** A name that is not a path where one is wanted, or one where it is not. */
-export const STATUS_OBJECT_PATH_SYNTAX_BAD = 0xc000003b;
+const STATUS_OBJECT_PATH_SYNTAX_BAD = 0xc000003b;
 
 /** A walk that keeps meeting links ends, as the object manager ends one. */
 const MOST_LINKS = 32;
@@ -92,7 +92,7 @@ const BOOT = [
  * @param {string} directory  the directory's path
  * @param {string} name
  */
-export const keyIn = (directory, name)=>(WIN32_DIRECTORY.test(directory) ? name
+const keyIn = (directory, name)=>(WIN32_DIRECTORY.test(directory) ? name
     : directory === '\\' ? `\\${name}` : `${directory}\\${name}`);
 
 /**

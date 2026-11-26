@@ -48,12 +48,12 @@ const DRV_CLOSE = 4;
 const DRV_DISABLE = 5;
 const DRV_FREE = 6;
 
-export const ICMODE_COMPRESS = 1;
+const ICMODE_COMPRESS = 1;
 export const ICMODE_DECOMPRESS = 2;
 export const ICMODE_FASTDECOMPRESS = 3;
 export const ICMODE_QUERY = 4;
-export const ICMODE_FASTCOMPRESS = 5;
-export const ICMODE_DRAW = 8;
+const ICMODE_FASTCOMPRESS = 5;
+const ICMODE_DRAW = 8;
 const ICM_DRAW_QUERY = 0x401f;
 
 const ICINSTALL_FUNCTION = 0x0001;

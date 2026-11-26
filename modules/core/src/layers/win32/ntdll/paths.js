@@ -50,7 +50,7 @@ const isSeparator = c=>c === '\\' || c === '/';
  * @param {string} path
  * @returns {number}
  */
-export function dosPathType(path){
+function dosPathType(path){
     if (isSeparator(path[0]))
     {
         if (!isSeparator(path[1]))
@@ -86,7 +86,7 @@ const DOS_DEVICE = /^(con|prn|aux|nul|com[1-9]|lpt[1-9]|conin\$|conout\$)$/i;
  * @param {string} path
  * @returns {{ offset: number, length: number } | null}
  */
-export function dosDeviceName(path){
+function dosDeviceName(path){
     const type = dosPathType(path);
     if (type === 1 || type === 6 || type === 7 || path.startsWith('\\??\\'))
     {
@@ -196,7 +196,7 @@ const hasControl = name=>[...name].some(c=>c.charCodeAt(0) < 0x20);
  * @param {string} name
  * @returns {{ legal: boolean, spaces: boolean }}
  */
-export function shortNameLegality(name){
+function shortNameLegality(name){
     if (name === '.' || name === '..')
     {
         return { legal: true, spaces: false };

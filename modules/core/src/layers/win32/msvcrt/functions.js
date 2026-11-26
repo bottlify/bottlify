@@ -106,7 +106,7 @@ const MIN_STDIO = 20;
 const MAX_STDIO = 2048;
 
 /** The variable `srand` and `rand` keep the generator in, and where it starts. */
-export const RAND_SEED = '_holdrand';
+const RAND_SEED = '_holdrand';
 
 /**
  * int rand(void), as the guest runs it: the generator below on the library's
@@ -160,7 +160,7 @@ export const SRAND_CODE = Object.freeze({
  *     and eax, RAND_MAX
  *     ret
  */
-export const RAND_LONG = Object.freeze({
+const RAND_LONG = Object.freeze({
     code: new Uint8Array([
         0x8b, 0x04, 0x25, 0, 0, 0, 0,
         0x69, 0xc0, 0xfd, 0x43, 0x03, 0x00,
@@ -172,7 +172,7 @@ export const RAND_LONG = Object.freeze({
     ]),
     seedAt: [3, 21],
 });
-export const SRAND_LONG = Object.freeze({
+const SRAND_LONG = Object.freeze({
     code: new Uint8Array([0x89, 0x0c, 0x25, 0, 0, 0, 0, 0xc3]),
     seedAt: [3],
 });

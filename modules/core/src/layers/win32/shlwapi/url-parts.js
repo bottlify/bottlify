@@ -20,7 +20,7 @@
 const SCHEME = /^([A-Za-z0-9+.-]{2,}):/;
 
 /** URL_SCHEME_*: the schemes ParseURL numbers; any other is URL_SCHEME_UNKNOWN. */
-export const SCHEME_NUMBERS = Object.freeze({
+const SCHEME_NUMBERS = Object.freeze({
     ftp: 1, http: 2, gopher: 3, mailto: 4, news: 5, nntp: 6, telnet: 7, wais: 8, file: 9,
     mk: 10, https: 11, shell: 12, snews: 13, local: 14, javascript: 15, vbscript: 16,
     about: 17, res: 18, 'ms-shell-rooted': 19, 'ms-shell-idlist': 20, hcp: 21,
@@ -39,23 +39,23 @@ const SLASHED = new Set(['gopher', 'http', 'https', 'news', 'nntp', 'snews', 'te
 /** The marks UrlEscape escapes besides the control characters and the space. */
 const UNSAFE = new Set([...'"#<>[\\]^`{|}&']);
 
-export const URL_ESCAPE_PERCENT = 0x00001000;
-export const URL_ESCAPE_SEGMENT_ONLY = 0x00002000;
+const URL_ESCAPE_PERCENT = 0x00001000;
+const URL_ESCAPE_SEGMENT_ONLY = 0x00002000;
 export const URL_ESCAPE_AS_UTF8 = 0x00040000;
-export const URL_ESCAPE_SPACES_ONLY = 0x04000000;
+const URL_ESCAPE_SPACES_ONLY = 0x04000000;
 
-export const URL_APPLY_DEFAULT = 0x1;
-export const URL_APPLY_GUESSSCHEME = 0x2;
-export const URL_APPLY_GUESSFILE = 0x4;
-export const URL_APPLY_FORCEAPPLY = 0x8;
+const URL_APPLY_DEFAULT = 0x1;
+const URL_APPLY_GUESSSCHEME = 0x2;
+const URL_APPLY_GUESSFILE = 0x4;
+const URL_APPLY_FORCEAPPLY = 0x8;
 
-export const URL_PART_SCHEME = 1;
-export const URL_PART_HOSTNAME = 2;
-export const URL_PART_USERNAME = 3;
-export const URL_PART_PASSWORD = 4;
-export const URL_PART_PORT = 5;
-export const URL_PART_QUERY = 6;
-export const URL_PARTFLAG_KEEPSCHEME = 0x1;
+const URL_PART_SCHEME = 1;
+const URL_PART_HOSTNAME = 2;
+const URL_PART_USERNAME = 3;
+const URL_PART_PASSWORD = 4;
+const URL_PART_PORT = 5;
+const URL_PART_QUERY = 6;
+const URL_PARTFLAG_KEEPSCHEME = 0x1;
 
 /**
  * The prefixes UrlApplyScheme guesses a scheme from, as Windows installs them
@@ -72,7 +72,7 @@ const DEFAULT_PREFIX = 'http://';
  *
  * @param {string} url
  */
-export const schemeOf = url=>{
+const schemeOf = url=>{
     const match = SCHEME.exec(url);
     return match ? { scheme: match[1].toLowerCase(), rest: match[0].length } : null;
 };

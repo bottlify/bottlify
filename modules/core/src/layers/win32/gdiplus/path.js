@@ -82,7 +82,7 @@ const push = (path, [x, y], type)=>{
 };
 
 /** Closes the figure being drawn. @param {Path} path */
-export const closeFigure = path=>{
+const closeFigure = path=>{
     if (path.types.length > 0)
     {
         path.types[path.types.length - 1] |= PathPointTypeCloseSubpath;
@@ -91,7 +91,7 @@ export const closeFigure = path=>{
 };
 
 /** @param {Path} path @param {[number, number][]} points */
-export const addLines = (path, points)=>{
+const addLines = (path, points)=>{
     begin(path, points[0]);
     for (const point of points.slice(1))
     {
@@ -104,7 +104,7 @@ export const addLines = (path, points)=>{
  *
  * @param {Path} path @param {[number, number][]} points
  */
-export const addBeziers = (path, points)=>{
+const addBeziers = (path, points)=>{
     begin(path, points[0]);
     for (const point of points.slice(1))
     {
@@ -144,7 +144,7 @@ const unstretch = (degrees, rx, ry)=>{
  * @param {number} start @param {number} sweep  degrees, sweep clamped to a turn
  * @returns {[number, number][]}
  */
-export const arcBeziers = (x, y, width, height, start, sweep)=>{
+const arcBeziers = (x, y, width, height, start, sweep)=>{
     const rx = width / 2;
     const ry = height / 2;
     const cx = x + rx;
@@ -192,7 +192,7 @@ export const arcBeziers = (x, y, width, height, start, sweep)=>{
  * @param {boolean} closed @param {number} [first] @param {number} [segments]
  * @returns {[number, number][]}
  */
-export const splineBeziers = (points, tension, closed, first = 0, segments = -1)=>{
+const splineBeziers = (points, tension, closed, first = 0, segments = -1)=>{
     const n = points.length;
     const count = segments >= 0 ? segments : closed ? n : n - 1;
     const t = tension / 3;
@@ -498,7 +498,7 @@ const offsetSide = (line, half, closed)=>{
  * @param {number[]} dashes @param {number} flatness
  * @returns {Path}
  */
-export const widen = (path, width, dashStyle, dashes, flatness)=>{
+const widen = (path, width, dashStyle, dashes, flatness)=>{
     const half = width / 2;
     const out = emptyPath(FillModeWinding);
     const flat = flatten(path, flatness);
@@ -548,7 +548,7 @@ export const widen = (path, width, dashStyle, dashes, flatness)=>{
  * @param {[number, number][]} corners @param {number[]} source @param {boolean} bilinear
  * @returns {(point: [number, number]) => [number, number]}
  */
-export const warp = (corners, [sx, sy, sw, sh], bilinear)=>{
+const warp = (corners, [sx, sy, sw, sh], bilinear)=>{
     const [p0, p1, p2] = corners;
     const p3 = corners[3] ?? [p1[0] + p2[0] - p0[0], p1[1] + p2[1] - p0[1]];
     if (bilinear || corners.length < 4)

@@ -36,7 +36,7 @@ const OP_DEF = 81;
 const REG = { TEMP: 0, INPUT: 1, TEXTURE: 3, RASTOUT: 4, ATTROUT: 5, OUTPUT: 6, DEPTHOUT: 9 };
 
 /** D3DDECLUSAGE. */
-export const USAGE = { POSITION: 0, PSIZE: 4, TEXCOORD: 5, COLOR: 10, FOG: 11, DEPTH: 12 };
+const USAGE = { POSITION: 0, PSIZE: 4, TEXCOORD: 5, COLOR: 10, FOG: 11, DEPTH: 12 };
 
 /** oPos, oFog, oPts: the RASTOUT registers by number. */
 const RASTOUT_USAGE = [USAGE.POSITION, USAGE.FOG, USAGE.PSIZE];
@@ -51,7 +51,7 @@ const registerType = token=>((token >>> 28) & 7) | ((token >>> 8) & 0x18);
  * @param {boolean} output  the semantics it writes, rather than those it reads
  * @returns {{ usage: number, index: number }[] | null}  null for a stream that is no shader
  */
-export function shaderSemantics(token, output){
+function shaderSemantics(token, output){
     const version = token(0);
     const kind = version >>> 16;
     if (kind !== 0xfffe && kind !== 0xffff)

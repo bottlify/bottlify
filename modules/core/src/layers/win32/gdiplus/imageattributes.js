@@ -49,7 +49,7 @@ const isSet = a=>a.noop || a.matrix !== null || a.threshold !== null || a.gamma 
  * @param {Adjustment} a @param {number[]} colour
  * @returns {number[]}
  */
-export function adjust(a, colour){
+function adjust(a, colour){
     if (a.noop)
     {
         return colour;

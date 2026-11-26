@@ -49,7 +49,7 @@ export const fieldCount = record=>record.fields.length - 1;
  *
  * @param {string} text @returns {number | null}
  */
-export function integerOf(text){
+function integerOf(text){
     if (!/^-?[0-9]*$/.test(text) || text === '')
     {
         return null;

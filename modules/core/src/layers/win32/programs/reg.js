@@ -33,7 +33,7 @@ import { ROOTS, importRegEntries, parseRegFile } from './regfile.js';
 import { readText } from './notepad.js';
 import { utf16, utf16z } from '../common/utf16.js';
 
-export const REG_EXIT = Object.freeze({ SUCCESS: 0, FAILURE: 1 });
+const REG_EXIT = Object.freeze({ SUCCESS: 0, FAILURE: 1 });
 
 /** @type {Readonly<Record<number, string>>} */
 const LONG_NAMES = Object.freeze({ 0x80000002: 'HKEY_LOCAL_MACHINE',

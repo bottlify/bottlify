@@ -39,7 +39,7 @@ const ALPHABET = 'abcdefghijklmnopqrstuvwxyz012345';
 /** Characters in a name made of an FMTID: 128 bits, five at a time. */
 const ENCODED_LENGTH = 26;
 /** CCH_MAX_PROPSTG_NAME, the longest name a caller's buffer is sized for. */
-export const MAX_NAME_LENGTH = 31;
+const MAX_NAME_LENGTH = 31;
 
 /**
  * The name a property set of `fmtid` is stored under, the 0x05 included.
@@ -141,15 +141,15 @@ const FIXED_SIZE = new Map([
 /** @type {Set<number>} */
 const STRING_TYPES = new Set([VT.LPSTR, VT.BSTR, VT.LPWSTR]);
 
-export const PID_DICTIONARY = 0;
-export const PID_CODEPAGE = 1;
+const PID_DICTIONARY = 0;
+const PID_CODEPAGE = 1;
 export const PID_FIRST_USABLE = 2;
-export const PID_LOCALE = 0x80000000;
-export const PID_BEHAVIOR = 0x80000003;
+const PID_LOCALE = 0x80000000;
+const PID_BEHAVIOR = 0x80000003;
 /** From here up the identifiers are the set's own, written by no caller. */
 const PID_MIN_READONLY = 0x80000000;
 
-export const CP_UNICODE = 1200;
+const CP_UNICODE = 1200;
 
 /**
  * One property's value: a number for the small types, the eight raw bytes
@@ -191,7 +191,7 @@ const SECTION_ENTRY_BYTES = 20;
 const pad4 = length=>(length + 3) & ~3;
 
 /** @param {string} fmtid @param {number} codepage @returns {Section} */
-export const emptySection = (fmtid, codepage)=>({
+const emptySection = (fmtid, codepage)=>({
     fmtid, codepage, locale: null, caseSensitive: false, properties: new Map(), names: new Map(),
 });
 
@@ -253,7 +253,7 @@ const join = parts=>{
  * @param {PropertyValue} property @param {number} codepage
  * @returns {Uint8Array}
  */
-export function encodeValue(property, codepage){
+function encodeValue(property, codepage){
     const { vt, value } = property;
     /** @type {Uint8Array} */
     let data;
@@ -328,7 +328,7 @@ const u32 = value=>{
  * @param {DataView} view @param {number} at @param {number} codepage
  * @returns {PropertyValue | null}
  */
-export function decodeValue(view, at, codepage){
+function decodeValue(view, at, codepage){
     const vt = view.getUint16(at, true);
     const start = at + 4;
     const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
@@ -392,7 +392,7 @@ export function decodeValue(view, at, codepage){
  * @param {Section} section
  * @returns {Uint8Array}
  */
-export function encodeSection(section){
+function encodeSection(section){
     /** @type {[number, Uint8Array][]} */
     const entries = [[PID_CODEPAGE, encodeValue({ vt: VT.I2, value: section.codepage },
         section.codepage)]];
@@ -460,7 +460,7 @@ const encodeDictionary = section=>{
  * @param {string} fmtid
  * @returns {Section | null}
  */
-export function decodeSection(bytes, at, fmtid){
+function decodeSection(bytes, at, fmtid){
     if (at + 8 > bytes.length)
     {
         return null;
@@ -542,7 +542,7 @@ const decodeDictionary = (view, at, section)=>{
  * @param {PropertySet} set
  * @returns {Uint8Array}
  */
-export function encodePropertySet(set){
+function encodePropertySet(set){
     const sections = set.sections.map(encodeSection);
     const header = new Uint8Array(HEADER_BYTES + sections.length * SECTION_ENTRY_BYTES);
     const view = new DataView(header.buffer);
@@ -606,8 +606,8 @@ const STG_E_INVALIDPARAMETER = 0x80030057 | 0;
 const STG_E_INVALIDFLAG = 0x800300ff | 0;
 const STG_E_INVALIDHEADER = 0x800300fb | 0;
 
-export const IID_IPROPERTYSTORAGE = '{00000138-0000-0000-C000-000000000046}';
-export const IID_IPROPERTYSETSTORAGE = '{0000013A-0000-0000-C000-000000000046}';
+const IID_IPROPERTYSTORAGE = '{00000138-0000-0000-C000-000000000046}';
+const IID_IPROPERTYSETSTORAGE = '{0000013A-0000-0000-C000-000000000046}';
 const IID_IENUMSTATPROPSTG = '{00000139-0000-0000-C000-000000000046}';
 const IID_IENUMSTATPROPSETSTG = '{0000013B-0000-0000-C000-000000000046}';
 const IID_ISTREAM = '{0000000C-0000-0000-C000-000000000046}';

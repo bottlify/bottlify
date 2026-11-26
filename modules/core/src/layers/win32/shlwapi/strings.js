@@ -117,7 +117,7 @@ const SIZE_UNITS = Object.freeze(['KB', 'MB', 'GB', 'TB', 'PB', 'EB']);
  *
  * @param {string} a @param {string} b @returns {-1 | 0 | 1}
  */
-export function logicalOrder(a, b){
+function logicalOrder(a, b){
     /** @param {string} text @param {number} at */
     const run = (text, at)=>{
         let end = at;

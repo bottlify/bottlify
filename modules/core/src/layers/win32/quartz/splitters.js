@@ -41,11 +41,11 @@ const E_FAIL = 0x80004005 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const VFW_E_INVALID_FILE_FORMAT = 0x8004022f | 0;
 
-export const CLSID_WAVE_PARSER = '{D51BD5A1-7548-11CF-A520-0080C77EF58A}';
-export const CLSID_AVI_SPLITTER = '{1B544C20-FD0B-11CE-8C63-00AA0044B51E}';
+const CLSID_WAVE_PARSER = '{D51BD5A1-7548-11CF-A520-0080C77EF58A}';
+const CLSID_AVI_SPLITTER = '{1B544C20-FD0B-11CE-8C63-00AA0044B51E}';
 
-export const MEDIASUBTYPE_WAVE = '{E436EB8B-524F-11CE-9F53-0020AF0BA770}';
-export const MEDIASUBTYPE_AVI = '{E436EB88-524F-11CE-9F53-0020AF0BA770}';
+const MEDIASUBTYPE_WAVE = '{E436EB8B-524F-11CE-9F53-0020AF0BA770}';
+const MEDIASUBTYPE_AVI = '{E436EB88-524F-11CE-9F53-0020AF0BA770}';
 
 const IID_IASYNC_READER = '{56A868AA-0AD4-11CE-B03A-0020AF0BA770}';
 /** IPin::Disconnect's slot. */
@@ -263,7 +263,7 @@ export async function parseWave(read, size){
  * @param {number} [sampleSize]  The image's size where absent.
  * @returns {import('./filter.js').MediaType}
  */
-export function videoType(bitmap, frameTime, bitRate, sampleSize){
+function videoType(bitmap, frameTime, bitRate, sampleSize){
     const format = new Uint8Array(0x30 + bitmap.length);
     const view = viewOf(format);
     format.set(bitmap, 0x30);
@@ -469,7 +469,7 @@ export async function parseAvi(read, size){
  */
 
 /** @type {ParserSpec[]} */
-export const PARSERS = [
+const PARSERS = [
     { clsid: CLSID_WAVE_PARSER, subtype: MEDIASUBTYPE_WAVE, parse: parseWave },
     { clsid: CLSID_AVI_SPLITTER, subtype: MEDIASUBTYPE_AVI, parse: parseAvi },
 ];

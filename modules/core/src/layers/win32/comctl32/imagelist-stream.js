@@ -115,7 +115,7 @@ const bitmapFile = dib=>{
  * @param {import('./imagelist.js').ImageListHost} host
  * @param {ReturnType<typeof import('./imagelist.js').createImageLists>} lists
  */
-export function createImageListStreams(host, lists){
+function createImageListStreams(host, lists){
     /**
      * Whether everything a stream is used through is here: guest memory to
      * hold its bytes, and a way to call its methods.

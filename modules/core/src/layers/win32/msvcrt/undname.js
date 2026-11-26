@@ -21,7 +21,7 @@
  */
 
 /** `__unDName`'s flags. */
-export const UNDNAME = Object.freeze({
+const UNDNAME = Object.freeze({
     NO_LEADING_UNDERSCORES: 0x0001,
     NO_MS_KEYWORDS: 0x0002,
     NO_FUNCTION_RETURNS: 0x0004,

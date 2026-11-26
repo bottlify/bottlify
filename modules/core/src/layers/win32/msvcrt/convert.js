@@ -193,7 +193,7 @@ const isWideSpace = character=>character !== undefined && (WHITESPACE.includes(c
  *        own rule asks (`WIDE_READINGS`).
  * @returns {{ magnitude: bigint, negative: boolean, end: number } | null}
  */
-export function scanWideInteger(text, requestedBase, isSpace = isWideSpace){
+function scanWideInteger(text, requestedBase, isSpace = isWideSpace){
     let at = 0;
     while (isSpace(text[at]))
     {
@@ -242,7 +242,7 @@ export function scanWideInteger(text, requestedBase, isSpace = isWideSpace){
  * @param {string} text
  * @param {(character: string | undefined) => boolean} isSpace
  */
-export function wideAtoi(text, isSpace){
+function wideAtoi(text, isSpace){
     let at = 0;
     while (isSpace(text[at]))
     {

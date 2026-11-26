@@ -291,7 +291,7 @@ const operatorError = hr=>new VBRuntimeError(HRESULT_ERRORS.get(hr | 0) ?? 5);
  *
  * @param {Value} value @returns {Operand}
  */
-export function operandOf(value){
+function operandOf(value){
     switch (typeof value)
     {
         case 'undefined': return variantValue(VT_EMPTY);
@@ -343,7 +343,7 @@ export function operandOf(value){
  * @param {Operand | number} outcome  An HRESULT for a refusal.
  * @returns {Value}
  */
-export function valueOf(outcome){
+function valueOf(outcome){
     if (typeof outcome === 'number')
     {
         throw operatorError(outcome);
@@ -615,7 +615,7 @@ export function compare(a, b, text){
  * @param {number} n @param {number} precision  15 for a Double, 7 for a Single.
  * @returns {string}
  */
-export function formatReal(n, precision){
+function formatReal(n, precision){
     if (n === 0)
     {
         return '0';
@@ -747,7 +747,7 @@ export function toDouble(value){
  *
  * @param {Value} value @param {number} low @param {number} high @returns {number}
  */
-export function toWhole(value, low, high){
+function toWhole(value, low, high){
     const n = nearest(toDouble(value));
     if (!(n >= low && n <= high))
     {
@@ -760,7 +760,7 @@ export function toWhole(value, low, high){
 export const toLong = value=>toWhole(value, -2147483648, 2147483647);
 
 /** @param {Value} value @returns {number} CInt's number */
-export const toInteger = value=>toWhole(value, -32768, 32767);
+const toInteger = value=>toWhole(value, -32768, 32767);
 
 /**
  * CBool: Empty is False, text is True or False or a number, a number is

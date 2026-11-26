@@ -27,7 +27,7 @@ import { floatBits } from '../../../system/floats.js';
  * through D3DRS_ANTIALIASEDLINEENABLE, which reaches a one-pixel line only.
  */
 
-export const IID_ID3DXLINE = '{D379BA7F-9042-4AC4-9F5E-58192A4C6BD8}';
+const IID_ID3DXLINE = '{D379BA7F-9042-4AC4-9F5E-58192A4C6BD8}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;

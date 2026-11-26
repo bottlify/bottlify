@@ -41,10 +41,8 @@ import { EXCEPTION_NONCONTINUABLE, STATUS } from './seh.js';
 import { UNW_FLAG, copyContext, stackOf } from './unwind.js';
 import { wholeAddress } from '../common/pointers.js';
 
-export { STATUS };
-
 /** EXCEPTION_RECORD at 64 bits: the code and flags, then quadword fields. */
-export const RECORD64 = Object.freeze({
+const RECORD64 = Object.freeze({
     CODE: 0x00,
     FLAGS: 0x04,
     NESTED: 0x08,
@@ -55,9 +53,9 @@ export const RECORD64 = Object.freeze({
 });
 
 /** EH_UNWINDING, EH_EXIT_UNWIND and EH_TARGET_UNWIND, as winnt.h names them. */
-export const EH_UNWINDING = 0x02;
-export const EH_EXIT_UNWIND = 0x04;
-export const EH_TARGET_UNWIND = 0x20;
+const EH_UNWINDING = 0x02;
+const EH_EXIT_UNWIND = 0x04;
+const EH_TARGET_UNWIND = 0x20;
 
 /** What a filter answers. */
 const EXCEPTION_CONTINUE_SEARCH = 0;
@@ -77,7 +75,7 @@ export const Disposition = Object.freeze({
  * writes: the integer registers, RIP, the flags, MXCSR and the XMM registers.
  * The offsets are winnt.h's.
  */
-export const CONTEXT64 = Object.freeze({
+const CONTEXT64 = Object.freeze({
     FLAGS: 0x30,
     MXCSR: 0x34,
     EFLAGS: 0x44,
@@ -91,7 +89,7 @@ export const CONTEXT64 = Object.freeze({
  * DISPATCHER_CONTEXT, what the dispatcher hands a language handler beside
  * the frame: quadwords but for the scope index.
  */
-export const DISPATCHER64 = Object.freeze({
+const DISPATCHER64 = Object.freeze({
     CONTROL_PC: 0x00,
     IMAGE_BASE: 0x08,
     FUNCTION_ENTRY: 0x10,
@@ -112,14 +110,14 @@ const CONTEXT_FULL64 = 0x0010000b;
 const WALK_LIMIT = 4096;
 
 /** What the x64 runtime's longjmp names its unwind: the record's first parameter is the buffer. */
-export const STATUS_LONGJUMP = 0x80000026;
+const STATUS_LONGJUMP = 0x80000026;
 
 /**
  * An unwind that ends in a call: at the target, the record's first parameter
  * is called with the record and answers where the thread goes on. The x64
  * C++ runtime enters a catch block this way.
  */
-export const STATUS_UNWIND_CONSOLIDATE = 0x80000029;
+const STATUS_UNWIND_CONSOLIDATE = 0x80000029;
 
 /**
  * The x64 runtime's _JUMP_BUFFER: the establisher frame setjmp was called

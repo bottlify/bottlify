@@ -203,7 +203,7 @@ export function coverage(polygons, fill, box, antialias, offset){
 export const LineCap = Object.freeze({ Flat: 0, Square: 1, Round: 2, Triangle: 3,
     NoAnchor: 0x10, SquareAnchor: 0x11, RoundAnchor: 0x12, DiamondAnchor: 0x13,
     ArrowAnchor: 0x14, Custom: 0xff });
-export const LineJoin = Object.freeze({ Miter: 0, Bevel: 1, Round: 2, MiterClipped: 3 });
+const LineJoin = Object.freeze({ Miter: 0, Bevel: 1, Round: 2, MiterClipped: 3 });
 
 /** The sides a circle is drawn with. @param {number} radius */
 const circleSides = radius=>Math.max(8, Math.min(64, Math.ceil(radius * 2)));
@@ -405,7 +405,7 @@ const wrapped = (value, size, flip, clamp)=>{
 };
 
 /** An ARGB colour as [b, g, r, a] numbers. @param {number} argb */
-export const bgraOf = argb=>[argb & 0xff, argb >>> 8 & 0xff, argb >>> 16 & 0xff, argb >>> 24];
+const bgraOf = argb=>[argb & 0xff, argb >>> 8 & 0xff, argb >>> 16 & 0xff, argb >>> 24];
 
 /**
  * The blend's factor at `t` (0 to 1): GDI+'s blend positions and factors,
@@ -753,5 +753,3 @@ export const hatchPattern = style=>{
     return rows ? rows.map(row=>Array.from({ length: 8 }, (_, x)=>
         HATCH_LEVELS[row >> (2 * (7 - x)) & 3])) : null;
 };
-
-export { WrapModeTile, WrapModeClamp };

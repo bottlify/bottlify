@@ -53,7 +53,7 @@ const COMPLEX = Symbol('complex');
  */
 
 /** The execution context (10.2): its scope chain, `this`, and where vars go. */
-export class Context
+class Context
 {
     /**
      * @param {Scope} scope @param {any} thisValue

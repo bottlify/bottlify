@@ -13,8 +13,8 @@
 /** @typedef {{ value: bigint, scale: number }} Exact  value / 10^scale */
 
 const LIMIT = (1n << 96n) - 1n;
-export const DECIMAL_NEG = 0x80;
-export const MAX_SCALE = 28;
+const DECIMAL_NEG = 0x80;
+const MAX_SCALE = 28;
 
 /**
  * A DECIMAL's sixteen bytes; the first two are the variant's type or reserved.

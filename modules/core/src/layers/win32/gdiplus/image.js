@@ -31,7 +31,7 @@ import {
 import { wholeAddress } from '../common/pointers.js';
 
 /** PixelFormat (gdipluspixelformats.h). */
-export const PixelFormat = Object.freeze({
+const PixelFormat = Object.freeze({
     Indexed1: 0x30101, Indexed4: 0x30402, Indexed8: 0x30803, Gray16: 0x101004,
     RGB555: 0x21005, RGB565: 0x21006, ARGB1555: 0x61007, RGB24: 0x21808, RGB32: 0x22009,
     ARGB32: 0x26200a, PARGB32: 0xe200b, RGB48: 0x10300c, ARGB64: 0x34400d, PARGB64: 0x1a400e,

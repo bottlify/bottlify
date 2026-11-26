@@ -481,7 +481,7 @@ function wordsOf(numbers, bases){
  * @param {ValueKind} kind
  * @returns {number[]}
  */
-export function stateWords(numbers, float, kind){
+function stateWords(numbers, float, kind){
     const first = numbers[0] ?? 0;
     switch (kind)
     {
@@ -516,7 +516,7 @@ export function stateWords(numbers, float, kind){
  * @param {string} name @param {string | null} semantic @param {number} flags
  * @returns {ParamModel}
  */
-export function shapeOf(type, ref, name, semantic, flags){
+function shapeOf(type, ref, name, semantic, flags){
     /** @type {ParamModel} */
     const model = { name, semantic, cls: PC.OBJECT, type: PT.VOID, rows: 0, columns: 0,
         elements: 0, flags, bytes: 0, members: [], annotations: [], init: [], samplers: [],

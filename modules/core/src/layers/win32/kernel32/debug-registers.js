@@ -36,7 +36,7 @@ const clear = ()=>({ dr0: 0, dr1: 0, dr2: 0, dr3: 0, dr6: 0, dr7: 0 });
  *
  * @param {number} flags
  */
-export const hasDebugRegisters = flags=>
+const hasDebugRegisters = flags=>
     (flags & CONTEXT_DEBUG_REGISTERS) === CONTEXT_DEBUG_REGISTERS;
 
 /**
@@ -45,7 +45,7 @@ export const hasDebugRegisters = flags=>
  * @param {any} thread
  * @returns {DebugRegisters}
  */
-export const debugRegistersOf = thread=>({ ...thread?.debugRegisters ?? clear() });
+const debugRegistersOf = thread=>({ ...thread?.debugRegisters ?? clear() });
 
 /**
  * Lays a thread's debug registers into a record's bytes, when its flags name them.

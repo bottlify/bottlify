@@ -34,7 +34,7 @@ import { COMPILED } from './constants-setters.x86.js';
 import { COMPILED as COMPILED_LONG } from './constants-setters.x64.js';
 import { wholeAddress } from '../common/pointers.js';
 
-export const IID_ID3DXCONSTANTTABLE = '{AB3C758F-093E-4356-B762-4DB18F1B3A01}';
+const IID_ID3DXCONSTANTTABLE = '{AB3C758F-093E-4356-B762-4DB18F1B3A01}';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;

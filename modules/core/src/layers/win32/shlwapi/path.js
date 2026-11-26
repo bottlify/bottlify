@@ -118,7 +118,7 @@ export const canonical = path=>{
  *
  * @param {string} path
  */
-export const isRoot = path=>{
+const isRoot = path=>{
     if (path === '\\' || /^[^\\]:\\$/.test(path))
     {
         return true;
@@ -135,7 +135,7 @@ export const isRoot = path=>{
  * @param {string} path
  * @returns {number | null}
  */
-export const skipRoot = path=>{
+const skipRoot = path=>{
     if (path.startsWith('\\\\'))
     {
         const server = path.indexOf('\\', 2);
@@ -177,7 +177,7 @@ const argumentsAt = path=>{
  * @param {string} path
  * @returns {number | null}
  */
-export const fileSpecCut = path=>{
+const fileSpecCut = path=>{
     let cut = 0;
     let at = 0;
     while (at < 2 && path[at] === '\\')
@@ -212,7 +212,7 @@ export const fileSpecCut = path=>{
  * @param {string} first @param {string} second
  * @returns {number}
  */
-export const commonPrefixLength = (first, second)=>{
+const commonPrefixLength = (first, second)=>{
     const unc = (/** @type {string} */ path)=>path.startsWith('\\\\');
     if (unc(first) !== unc(second))
     {
@@ -246,7 +246,7 @@ export const commonPrefixLength = (first, second)=>{
  * @param {string} to @param {boolean} toIsDirectory
  * @returns {string | null}
  */
-export const relativePath = (from, fromIsDirectory, to, toIsDirectory)=>{
+const relativePath = (from, fromIsDirectory, to, toIsDirectory)=>{
     const directory = (/** @type {string} */ path, /** @type {boolean} */ is)=>{
         const cut = is ? null : fileSpecCut(path);
         return cut === null ? path : path.slice(0, cut);
@@ -1598,7 +1598,7 @@ export function createPathFunctions(host, { A, W }){
  *
  * @param {string} char
  */
-export const charType = char=>{
+const charType = char=>{
     const code = char.charCodeAt(0);
     if (code < 0x20 || '<>"|/'.includes(char))
     {

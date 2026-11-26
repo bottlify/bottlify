@@ -38,7 +38,7 @@ import { TEB, TEB64 } from './teb.js';
 import { wholeAddress } from '../common/pointers.js';
 
 /** FLS_MAXIMUM_AVAILABLE: indexes 1 to 127, 0 being none. */
-export const FLS_SLOTS = 128;
+const FLS_SLOTS = 128;
 const FLS_OUT_OF_INDEXES = 0xffffffff;
 const ERROR_SUCCESS = 0;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
@@ -119,7 +119,7 @@ export function flsGetValueLongCode(){
  *     mov [r8+rax*8+24], rdx; mov eax, 1; ret
  *     slow: jmp trap
  */
-export function flsSetValueLongCode(){
+function flsSetValueLongCode(){
     const slow = 33;
     const code = Uint8Array.of(
         0x8d, 0x41, 0xff, 0x83, 0xf8, FLS_SLOTS - 1, 0x73, slow - 8,

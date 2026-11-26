@@ -67,8 +67,8 @@ const ERROR_FILE_EXISTS = 80;
 const ERROR_DIRECTORY = 267;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NO_SUCH_DEVINST = 0xe000020b;
-export const ERROR_SECTION_NOT_FOUND = 0xe0000101;
-export const ERROR_LINE_NOT_FOUND = 0xe0000102;
+const ERROR_SECTION_NOT_FOUND = 0xe0000101;
+const ERROR_LINE_NOT_FOUND = 0xe0000102;
 const ERROR_CLASS_MISMATCH = 0xe0000201;
 const ERROR_INVALID_DEVINST_NAME = 0xe0000205;
 const ERROR_DEVINST_ALREADY_EXISTS = 0xe0000207;
@@ -365,7 +365,7 @@ const directoryOf = path=>{
 };
 
 /** @param {...string} parts  Joined with single separators, empty ones dropped. */
-export const joinPath = (...parts)=>parts.filter(part=>part !== '').reduce((path, part)=>(
+const joinPath = (...parts)=>parts.filter(part=>part !== '').reduce((path, part)=>(
     path === '' ? part : `${path.replace(/[\\/]+$/, '')}\\${part.replace(/^[\\/]+/, '')}`), '');
 
 /**
@@ -6721,4 +6721,4 @@ export function createSetupapiFunctions(host){
     };
 }
 
-export { INF_STYLE_OLDNT, INF_STYLE_WIN4 };
+export { INF_STYLE_OLDNT };
