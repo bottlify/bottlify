@@ -33,8 +33,33 @@ export function describeRunCache(figures){
         + ` (${mib(figures.coldBytes)} MiB), written ${figures.written}`
         + ` (${mib(figures.writtenBytes)} MiB), cooled ${figures.cooled ?? 0},`
         + ` raised ${figures.raised ?? 0}, gone ${figures.gone},`
-        + ` refused for room ${figures.refusedRoom ?? 0}, too large ${figures.refusedLarge ?? 0}`;
+        + ` refused for room ${figures.refusedRoom ?? 0}, too large ${figures.refusedLarge ?? 0}`
+        + describeSpaces(figures.spaces);
 }
+
+/** What rounding to blocks costs a space: a share of the blocks it holds. */
+const roundingOf = (/** @type {{ hotBytes: number, placedBytes: number }} */ one)=>(
+    one.placedBytes > 0
+        ? `${Math.round((one.placedBytes - one.hotBytes) / one.placedBytes * 100)} %` : 'none');
+
+/**
+ * Each space of the run's cache, by the part of a name before its first '/':
+ * its bodies, those in memory and the blocks they take, and what rounding to
+ * blocks costs it.
+ *
+ * @param {Record<string, { bodies: number, bytes: number, hotBytes: number,
+ *     placedBytes: number }> | undefined} spaces
+ */
+const describeSpaces = spaces=>{
+    if (spaces === undefined)
+    {
+        return '; spaces not measured';
+    }
+    return Object.entries(spaces).map(([name, one])=>`; ${name}: ${one.bodies} bodies`
+        + ` (${mib(one.bytes)} MiB), in memory ${mib(one.hotBytes)} MiB in blocks of`
+        + ` ${mib(one.placedBytes)} MiB, rounding ${roundingOf(one)}`)
+        .join('');
+};
 
 /**
  * Which process the report is of, with the frames every process presented:

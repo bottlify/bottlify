@@ -22,6 +22,20 @@ test('the run cache line carries the budget, what the keeper holds now and at mo
     }
 });
 
+test('the run cache line weighs each space: its bodies, their blocks, what rounding costs', ()=>{
+    const figures = { budget: 160 * MIB, segments: 1, segmentBytes: 32 * MIB,
+        peakSegmentBytes: 32 * MIB, placedBytes: 12288, peakPlacedBytes: 12288, hot: 3,
+        hotBytes: 5000, cold: 0, coldBytes: 0, written: 0, writtenBytes: 0, gone: 0 };
+    const line = describeRunCache({ ...figures, spaces: {
+        reads: { bodies: 2, bytes: 1000, hotBytes: 1000, placedBytes: 8192 },
+        texels: { bodies: 1, bytes: 4096, hotBytes: 4096, placedBytes: 4096 } } });
+    assert.ok(line.includes('; reads: 2 bodies (0.0 MiB), in memory 0.0 MiB in blocks of 0.0 MiB,'
+        + ' rounding 88 %'), line);
+    assert.ok(line.includes('; texels: 1 bodies'), line);
+    assert.ok(line.includes('rounding 0 %'), line);
+    assert.ok(describeRunCache(figures).endsWith('; spaces not measured'));
+});
+
 test('a run cache that did not answer says so, never a zero', ()=>{
     assert.equal(describeRunCache(undefined), 'run cache: not measured');
     assert.equal(describeRunCache('not measured: kept elsewhere'),
