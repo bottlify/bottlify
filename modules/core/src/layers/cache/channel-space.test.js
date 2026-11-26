@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createChannel, openClient, openKeeper, openServer } from '../../../vendor/cellar/cellar.js';
+import { createChannel, openClient, openKeeper, openServer } from '@bottlify/cellar';
 import { serveKeeper } from './module.js';
 import { openRunCache } from '../../process/run-cache.js';
 

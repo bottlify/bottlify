@@ -6,7 +6,7 @@
 
 /**
  * Where a fetched block lives between the network and a guest read: a body of
- * a Cellar keeper (`vendor/cellar/`) of the bundle's own, by the block's
+ * a Cellar keeper (`@bottlify/cellar`) of the bundle's own, by the block's
  * index, read where it lies.
  *
  * A body is the block as a read hands it out -- decoded, a deflate block
@@ -37,11 +37,11 @@
  * read within one go oldest-made first.
  */
 
-import { createReader, openKeeper } from '../../../../../vendor/cellar/cellar.js';
+import { createReader, openKeeper } from '@bottlify/cellar';
 import { opfsDisk } from '../opfs-disk.js';
 import { BLOCK_DIRECTORY, fileNameOf } from './saved.js';
 
-/** @typedef {import('../../../../../vendor/cellar/cellar.js').Disk} Disk */
+/** @typedef {import('@bottlify/cellar').Disk} Disk */
 
 /**
  * Turns what a caller asked for into where blocks are kept: a directory of
@@ -222,7 +222,7 @@ export async function createBlockCache(options){
             opened.drop(body);
         },
     } });
-    const blocks = /** @type {import('../../../../../vendor/cellar/cellar.js').Reader} */ (reader);
+    const blocks = /** @type {import('@bottlify/cellar').Reader} */ (reader);
     const sweeping = setInterval(()=>opened.sweep(), SWEEP_MS);
     // A run's timer is not what keeps a host's process alive.
     /** @type {any} */ (sweeping).unref?.();

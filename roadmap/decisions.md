@@ -2781,3 +2781,13 @@ removes, and every one of them needed a gate of its own. One mechanism over shar
 cheaper in memory, in speed and in code; the price is an embedding page that serves the isolation
 headers (`credentialless` lets other origins' resources load). The engine's modules still load
 where there is no `SharedArrayBuffer`, so the refusal can be said. *2026-11-25.*
+
+**A291. Cellar is a dependency from npm, not a release fetched into the tree.** `@bottlify/core`
+depends on `@bottlify/cellar` (`~1.0.0`) and imports it by its name; the script that fetched a
+GitHub release into `vendor/cellar/` as a lock file pinned it, and the install hook that ran it,
+are gone. Cellar is the project's own, published from its repository's CI only once its checks
+pass there, arm64 among them, with provenance: npm and the lock file give the same pin and the
+same checked bytes the fetch did, without a mechanism of our own to keep. Core's dependencies are
+two packages of this project, `@bottlify/cork` (loaded by URL, never imported) and Cellar (a
+library, bundled into core's build); `check:boundaries` lets a file import a package only by the
+name of a library among them. *2026-11-26.*

@@ -6,7 +6,7 @@
 
 /**
  * The graphics worker's transport: a root's calls go to the worker through a
- * Cellar ring (`vendor/cellar`) and what the played side says comes back
+ * Cellar ring (`@bottlify/cellar`) and what the played side says comes back
  * through another, every record read where it lies.
  *
  * A record is a head -- what it is (`KIND`), a number it carries, the time it
@@ -32,10 +32,10 @@
  * are played in the order they were sent.
  */
 
-import { RingClosed, openRing } from '../../../../vendor/cellar/cellar.js';
+import { RingClosed, openRing } from '@bottlify/cellar';
 import { createWriter } from './wire.js';
 
-export { createRingMemory } from '../../../../vendor/cellar/cellar.js';
+export { createRingMemory } from '@bottlify/cellar';
 
 /** What a record is. */
 export const KIND = Object.freeze({
@@ -122,7 +122,7 @@ const bodyAt = room=>((room + 7) & ~7) + HEAD;
 /**
  * The writing side of a ring.
  *
- * @param {import('../../../../vendor/cellar/cellar.js').RingMemory} memory
+ * @param {import('@bottlify/cellar').RingMemory} memory
  * @param {{ strings?: number }} [options]  as `createWriter`'s
  */
 export function openRingOut(memory, { strings = Infinity } = {}){
@@ -412,7 +412,7 @@ export function openRingOut(memory, { strings = Infinity } = {}){
  * stays as it is -- and then `resume` gives it back; nothing after it is
  * taken meanwhile.
  *
- * @param {import('../../../../vendor/cellar/cellar.js').RingMemory} memory
+ * @param {import('@bottlify/cellar').RingMemory} memory
  * @param {(kind: number, buffer: ArrayBufferLike, start: number, length: number,
  *     number: number, time: number) => boolean | void} take
  */

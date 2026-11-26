@@ -26,7 +26,7 @@
  */
 
 import { decodeValue, encodeValue } from './codec.js';
-import { RingClosed, createRingMemory, openRing } from '../../vendor/cellar/cellar.js';
+import { RingClosed, createRingMemory, openRing } from '@bottlify/cellar';
 
 /**
  * The records on a link: a call, an answer, and a part of one of them too
@@ -91,8 +91,8 @@ export const SPIN_MS = 0.05;
 
 /**
  * @typedef {Object} LinkEnd
- * @property {import('../../vendor/cellar/cellar.js').RingMemory} out  what this side writes
- * @property {import('../../vendor/cellar/cellar.js').RingMemory} in   what this side reads; its
+ * @property {import('@bottlify/cellar').RingMemory} out  what this side writes
+ * @property {import('@bottlify/cellar').RingMemory} in   what this side reads; its
  *     doorbell this side's
  */
 
@@ -103,8 +103,8 @@ export const SPIN_MS = 0.05;
  *
  * @param {Object} [options]
  * @param {number} [options.capacity]
- * @param {import('../../vendor/cellar/cellar.js').DoorbellMemory} [options.bellA]
- * @param {import('../../vendor/cellar/cellar.js').DoorbellMemory} [options.bellB]
+ * @param {import('@bottlify/cellar').DoorbellMemory} [options.bellA]
+ * @param {import('@bottlify/cellar').DoorbellMemory} [options.bellB]
  * @returns {{ a: LinkEnd, b: LinkEnd }}
  */
 export function createLinkMemory({ capacity = LINK_BYTES, bellA, bellB } = {}){

@@ -5,7 +5,7 @@
  */
 
 /**
- * A Cellar keeper's disk (`vendor/cellar/`, `Disk`) over a directory of the
+ * A Cellar keeper's disk (`@bottlify/cellar`, `Disk`) over a directory of the
  * origin's file system: each file the keeper names (its packs, its two
  * indexes) a file of the directory, made where it is missing, through a
  * synchronous handle taken by `system/opfs-file.js`, as every writer of the
@@ -27,7 +27,7 @@
 
 import { isQuota, openSync } from '../../../system/opfs-file.js';
 
-/** @typedef {import('../../../../vendor/cellar/cellar.js').Disk} Disk */
+/** @typedef {import('@bottlify/cellar').Disk} Disk */
 
 /**
  * @param {any} directory  a `FileSystemDirectoryHandle`, or one shaped as it
@@ -44,7 +44,7 @@ export function opfsDisk(directory, { onQuota = ()=>{} } = {}){
         {
             throw new Error('no synchronous file handle on this thread');
         }
-        /** @type {import('../../../../vendor/cellar/cellar.js').DiskFile} */
+        /** @type {import('@bottlify/cellar').DiskFile} */
         const file = {
             read: (view, where)=>access.read(view, where),
             write(view, where){

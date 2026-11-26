@@ -24,7 +24,7 @@ import { storeClient } from './store-relay.js';
 import { openSync } from '../../../system/opfs-file.js';
 import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor }
     from './executor-channel.js';
-import { deadlineOf, waitFor, waitForAsync } from '../../../../vendor/cellar/cellar.js';
+import { deadlineOf, waitFor, waitForAsync } from '@bottlify/cellar';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
 /**

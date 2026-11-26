@@ -22,7 +22,7 @@ import { createBundleSource, BLOCK_MISS } from './source.js';
 import { createBlockCache } from './cache.js';
 import { cachedBundle } from './saved.js';
 import { fakeOpfs } from '../opfs.fixture.js';
-import { INDEX_FILES, readSaved } from '../../../../../vendor/cellar/cellar.js';
+import { INDEX_FILES, readSaved } from '@bottlify/cellar';
 
 const BLOCK_SIZE = 1024;
 

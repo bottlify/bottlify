@@ -664,7 +664,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
              * message the page posted is seen between two turns rather than at
              * the next timed yield.
              *
-             * @param {import('../../vendor/cellar/cellar.js').RingMemory | undefined} ring
+             * @param {import('@bottlify/cellar').RingMemory | undefined} ring
              */
             const pacingFor = ring=>{
                 if (ring)

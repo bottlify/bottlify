@@ -29,7 +29,7 @@
  * slots, and the played side notifies only when one sleeps.
  */
 
-import { deadlineOf, wake, waitFor } from '../../../../vendor/cellar/cellar.js';
+import { deadlineOf, wake, waitFor } from '@bottlify/cellar';
 
 export const LEND = Object.freeze({ FREE: 0, LENT: 1, READING: 2, DONE: 3, STASHED: 4 });
 

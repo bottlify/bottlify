@@ -23,7 +23,7 @@
  */
 
 import { ErrorCode, fsError } from './errors.js';
-import { wake, waitFor } from '../../../../vendor/cellar/cellar.js';
+import { wake, waitFor } from '@bottlify/cellar';
 
 /** How many files the run may hold open at once, across every process. */
 export const SLOTS = 2048;

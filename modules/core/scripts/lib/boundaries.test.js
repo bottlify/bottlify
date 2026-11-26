@@ -29,8 +29,9 @@ test('anything else passes, including a name that merely starts alike', ()=>{
  * written into it; the issues the checker finds there.
  *
  * @param {Record<string, string>} extra  path under src → contents
+ * @param {string[]} [dependencies]  the package's dependencies
  */
-function issuesWith(extra){
+function issuesWith(extra, dependencies = []){
     const root = mkdtempSync(join(tmpdir(), 'boundaries-'));
     const src = join(root, 'src');
     const vendor = join(root, 'vendor');
@@ -51,7 +52,7 @@ function issuesWith(extra){
     const requires = new Map([['a', new Set()], ['b', new Set()], ['cpu', new Set()]]);
     try
     {
-        return findBoundaryIssues({ src, vendor, requires }).issues;
+        return findBoundaryIssues({ src, vendor, requires, dependencies: new Set(dependencies) }).issues;
     }
     finally
     {
@@ -118,4 +119,17 @@ test('what the design allows stays allowed', ()=>{
         // A JSDoc type import is a dependency, of a layer this one may reach.
         'layers/a/types.js': '/** @type {import(\'./module.js\').aModule} */\nexport let t;\n',
     }), []);
+});
+
+test('a library the package depends on is imported by its name; no other package, no engine, '
+    + 'and nothing of vendor', ()=>{
+    const cellar = { 'layers/a/x.js': 'import { openRing } from \'@bottlify/cellar\'; export { openRing };' };
+    assert.deepEqual(issuesWith(cellar, ['@bottlify/cellar']), [], 'a dependency');
+    assert.equal(issuesWith(cellar).length, 1, 'the same name, not a dependency');
+    assert.equal(issuesWith({ 'layers/a/x.js': 'import x from \'@bottlify/cellar/src/ring.js\'; export default x;' },
+        ['@bottlify/cellar']).length, 1, 'a file inside it, past what it exports');
+    assert.equal(issuesWith({ 'layers/a/x.js': 'import * as c from \'@bottlify/cork\'; export { c };' },
+        ['@bottlify/cork']).length, 1, 'an engine, though the package depends on it');
+    assert.equal(issuesWith({ 'layers/a/x.js': 'import v from \'../../../vendor/cellar/cellar.js\';' },
+        ['@bottlify/cellar']).length, 1, 'vendor/cellar is vendor like the rest');
 });

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { createRingMemory } from '../../vendor/cellar/cellar.js';
+import { createRingMemory } from '@bottlify/cellar';
 import { createInboundReader, createInboundWriter } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
 
@@ -41,7 +41,7 @@ test('an idle engine sleeps on the doorbell and a write from another thread wake
         const asleep = new Int32Array(new SharedArrayBuffer(4));
         const { memory, pacing, macrotasks } = pacingOver(received, {
             /**
-             * @param {import('../../vendor/cellar/cellar.js').Doorbell} bell
+             * @param {import('@bottlify/cellar').Doorbell} bell
              * @param {number} seen @param {number} timeoutMs
              */
             sleep: (bell, seen, timeoutMs)=>{

@@ -188,7 +188,7 @@ let sessionsLaid = 0;
  *
  * @param {any} blocks  The run's bundle, or null.
  * @param {{ files: any[], links?: any[] | null }} seeded
- * @param {import('../../vendor/cellar/cellar.js').Reader | null} reader  the run's
+ * @param {import('@bottlify/cellar').Reader | null} reader  the run's
  *     cache, or null: pieces held only from their fetch to the next
  * @returns {{ blocks: any, eager: any[] }}
  */
@@ -245,7 +245,7 @@ function sessionUnder(blocks, seeded, reader){
  * registry the installation wrote into `registry`, when there is one to fill.
  *
  * @param {{ options: import('../app-options.js').AppOptions, events: any, filesystem: any,
- *     blocks: any, reader?: import('../../vendor/cellar/cellar.js').Reader | null,
+ *     blocks: any, reader?: import('@bottlify/cellar').Reader | null,
  *     seeded: { files: any[], registry?: any, links?: any[] | null }, registry: any }} deps
  *     `reader`: the run's cache, where the session's pieces are kept (`sessionUnder`)
  * @returns {Promise<any>}  The run's read-only half, the session's files in it

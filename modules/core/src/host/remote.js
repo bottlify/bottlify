@@ -30,7 +30,7 @@
 
 import { createDomInput } from '../layers/input/dom.js';
 import { serveKeeper, MIRROR_CAPACITY } from './keeper.js';
-import { createRingMemory } from '../../vendor/cellar/cellar.js';
+import { createRingMemory } from '@bottlify/cellar';
 import { frameDrops } from '../frame-drops.js';
 import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
 

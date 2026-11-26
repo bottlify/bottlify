@@ -16,14 +16,14 @@
  * the asking, and one fed by the profiler's per-frame sampler read zero where
  * frames came through the graphics worker.
  *
- * The times are a Cellar journal (`vendor/cellar/`) of one Float64 a frame
+ * The times are a Cellar journal (`@bottlify/cellar`) of one Float64 a frame
  * (`performance.now()` of the presenting thread, which shares its time origin
  * with nothing - only the gaps between them mean anything): the presenter
  * never waits for a reader, and a reader on the page is never handed a time
  * being written over.
  */
 
-import { createJournalMemory, openJournal } from '../../vendor/cellar/cellar.js';
+import { createJournalMemory, openJournal } from '@bottlify/cellar';
 
 /** Frames the clock keeps, the one being written next included: a little over 17 s at 60 fps. */
 export const SLOTS = 1024;

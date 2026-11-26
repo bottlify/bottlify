@@ -17,7 +17,7 @@
  * instructions it retired in `VALUE`.
  */
 
-import { waitFor, wake } from '../../../../vendor/cellar/cellar.js';
+import { waitFor, wake } from '@bottlify/cellar';
 
 /**
  * Where each word lies, as indices into the channel's `Int32Array`. `EPOCH`

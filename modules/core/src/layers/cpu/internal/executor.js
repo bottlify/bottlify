@@ -21,7 +21,7 @@
 
 import { BELL_BYTES, Bell, CHANNEL_BYTES, Said, Turn, Word, channelOf, lookFor }
     from './executor-channel.js';
-import { deadlineOf, ring as ringWord, waitFor, waitForAsync } from '../../../../vendor/cellar/cellar.js';
+import { deadlineOf, ring as ringWord, waitFor, waitForAsync } from '@bottlify/cellar';
 import { answerStoreAsks } from './store-relay.js';
 
 /**

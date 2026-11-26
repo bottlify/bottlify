@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReader } from '../../vendor/cellar/cellar.js';
+import { createReader } from '@bottlify/cellar';
 import { openRunCache, relayedJoin } from './run-cache.js';
 
 /** A reader over what `join` handed a thread, told what the keeper says after. */

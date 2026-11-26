@@ -29,13 +29,13 @@ const IDLE_SLEEP_MS = 50;
  * nothing to run and nothing outstanding sleeps on the doorbell.
  *
  * @param {Object} deps
- * @param {{ bell: import('../../vendor/cellar/cellar.js').Doorbell, drain: () => number }}
+ * @param {{ bell: import('@bottlify/cellar').Doorbell, drain: () => number }}
  *     deps.inbound
  * @param {() => Promise<void>} deps.macrotask
  * @param {() => number} deps.now
  * @param {number} deps.intervalMs
- * @param {(bell: import('../../vendor/cellar/cellar.js').Doorbell, seen: number,
- *     timeoutMs: number) => import('../../vendor/cellar/cellar.js').WaitEnd} [deps.sleep]
+ * @param {(bell: import('@bottlify/cellar').Doorbell, seen: number,
+ *     timeoutMs: number) => import('@bottlify/cellar').WaitEnd} [deps.sleep]
  *     a blocking wait, with no look first; the doorbell's own unless a test says
  * @param {{ buffer: SharedArrayBuffer, index: number } | null} [deps.posted]
  *     A count the threads that post to this one -- the translation worker --

@@ -8,7 +8,7 @@
  * cache -- the run's one cache, as this process's layers see it: spaces of
  * names whose bodies every thread of the run reads in place.
  *
- * The cache itself is Cellar (`vendor/cellar/`): its keeper is the run's, on
+ * The cache itself is Cellar (`@bottlify/cellar`): its keeper is the run's, on
  * the thread that holds the run's stores, and each process reads through a
  * reader of its own, handed in by whoever builds the process
  * (`config.reader`). A layer asks for a space by name and keeps its keys
@@ -19,7 +19,7 @@
  * the cache it makes again, as on its first read.
  */
 
-import { createReader, openClient } from '../../../vendor/cellar/cellar.js';
+import { createReader, openClient } from '@bottlify/cellar';
 
 /**
  * One layer's names in the cache.
@@ -64,7 +64,7 @@ const NOTHING = Object.freeze({
 export const noCache = Object.freeze({ space: ()=>NOTHING, join: /** @type {Join} */ (()=>null),
     serve: /** @type {Serve} */ (()=>null) });
 
-/** @typedef {import('../../../vendor/cellar/cellar.js').Reader} Reader */
+/** @typedef {import('@bottlify/cellar').Reader} Reader */
 
 /**
  * A channel one owner on a worker calls the run's keeper through, and the
@@ -174,7 +174,7 @@ const parsed = bytes=>(bytes.length === 0 ? undefined : JSON.parse(decoder.decod
  * where it never said so, when its end closes the channel; what it left past
  * what it held is a tail (`onTail`).
  *
- * @param {ReturnType<typeof import('../../../vendor/cellar/cellar.js').openServer>} server
+ * @param {ReturnType<typeof import('@bottlify/cellar').openServer>} server
  * @param {{ reserve: (name: string, length: number, options?: any) => any,
  *     raise: (name: string, options?: { known?: number }) => boolean,
  *     drop: (name: string) => void,

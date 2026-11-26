@@ -12,7 +12,7 @@
  * has no use for.
  */
 
-import { INDEX_FILES, packFile, readSaved } from '../../../../../vendor/cellar/cellar.js';
+import { INDEX_FILES, packFile, readSaved } from '@bottlify/cellar';
 import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
 /** The directory of the origin's file system every bundle's blocks are kept under. */

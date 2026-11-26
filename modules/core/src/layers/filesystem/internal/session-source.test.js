@@ -10,7 +10,7 @@ import { PIECE_SIZE, createMemoryStore } from './memory-store.js';
 import { createOverlay } from './tree.js';
 import { createUnionSource } from './union-source.js';
 import { SESSION_LAYER, createSessionSource } from './session-source.js';
-import { createReader, openKeeper } from '../../../../vendor/cellar/cellar.js';
+import { createReader, openKeeper } from '@bottlify/cellar';
 
 /**
  * A session's files as a store hands them out lazily, every read counted.
@@ -96,7 +96,7 @@ test('a session is listed whole and nothing of it is read until a read asks', as
 });
 
 /**
- * A session source over a Cellar keeper (`vendor/cellar/`) of `room` bytes,
+ * A session source over a Cellar keeper (`@bottlify/cellar`) of `room` bytes,
  * as the run's cache keeps its pieces (`process/session.js`): a space of names
  * of its own, read in place, let go of for room. Closed when the test ends.
  *

@@ -230,7 +230,7 @@ const CALLS_OFF = Object.freeze({
  * goes to a child the moment it starts.
  *
  * @param {{ options: import('../app-options.js').AppOptions, events: any, system: any,
- *     translationStore: any, reader: import('../../vendor/cellar/cellar.js').Reader | null,
+ *     translationStore: any, reader: import('@bottlify/cellar').Reader | null,
  *     now: () => number,
  *     across: () => { image: string, id: number,
  *         link: ReturnType<typeof import('../system/link.js').openLink> }[],

@@ -63,11 +63,11 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   Win32, graphics, sound, networking, storage); `docs/core/` is `@bottlify/core`'s public
   contract (API, configuration, limits), written for someone outside the project;
   `docs/cork/` is the translator. A module's own `README.md` is its npm page and stays short.
-- `modules/core/vendor/cellar/` — Cellar (https://github.com/bottlify/cellar), the run's one
-  cache (shared memory read in place, one keeper, idle bodies on OPFS), a project of its own:
-  its release fetched by `npm run fetch:cellar` (run by `npm install`) as `cellar-lock.json`
-  pins it, checked by `check:boundaries`. Changed there, not here; a new release comes in
-  by `node modules/core/scripts/fetch-cellar.mjs --update TAG`.
+- `@bottlify/cellar` — Cellar (https://github.com/bottlify/cellar), the run's one cache (shared
+  memory read in place, one keeper, idle bodies on OPFS), a project of its own and core's
+  dependency from npm (`roadmap/decisions.md` A291). Changed there, not here: work goes to its
+  `dev` branch, and only a critical or important fix goes to its `main`, whose CI publishes the
+  version to npm once its checks pass; core takes it by its `package.json` range.
 - `roadmap/README.md` — the index of the plans, `decisions.md` (behaviour chosen rather than
   derived from a specification) and `negative-results.md` (what was measured and did not pay).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these):
@@ -91,7 +91,8 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   the handler and the reference. A COM method takes it through its `guest`
   slot (`bridge/internal/vtable.js`). Measure crossings first (`trap`, `drive` in the phase
   profile), and gate the guest path against the host one.
-- **Zero runtime dependencies** in `@bottlify/core`; nothing in the product fetches its own code.
+- **No runtime dependencies** in `@bottlify/core` but the project's own (`@bottlify/cork`, loaded by
+  URL, and `@bottlify/cellar`, imported by name); nothing in the product fetches its own code.
 - **Modules are standalone libraries.** Each `src/layers/<name>/module.js` declares `name`,
   `requires`, `create(config, host)`, `diagnostics()`, `dispose()`; a module reaches another only
   through `host.requireApi(name)` for a name in its own `requires` — no direct imports, no shared

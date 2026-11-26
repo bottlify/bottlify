@@ -11,7 +11,7 @@
  * let go when idle or short of room.
  */
 
-import { createReader, openKeeper } from '../../../vendor/cellar/cellar.js';
+import { createReader, openKeeper } from '@bottlify/cellar';
 import { cacheSpace } from './module.js';
 
 /**

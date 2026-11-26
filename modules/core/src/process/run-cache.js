@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's cache: one Cellar keeper (`vendor/cellar/`) on the thread that
+ * The run's cache: one Cellar keeper (`@bottlify/cellar`) on the thread that
  * holds the run's stores, and what each process reads it through.
  *
  * A process on this thread reads through the reader made here, its calls to
@@ -21,7 +21,7 @@
  * cache layer's default), and the next run finds nothing in it.
  */
 
-import { createChannel, createReader, openKeeper, openServer } from '../../vendor/cellar/cellar.js';
+import { createChannel, createReader, openKeeper, openServer } from '@bottlify/cellar';
 import { serveKeeper } from '../layers/cache/module.js';
 import { opfsDisk } from '../layers/filesystem/internal/opfs-disk.js';
 
@@ -68,7 +68,7 @@ export async function openRunCache(opened = {}){
          */
         roundingBytes: 0, spaces: /** @type {Record<string, { bodies: number, bytes: number,
             hotBytes: number, placedBytes: number }>} */ ({}) };
-    /** @param {import('../../vendor/cellar/cellar.js').Disk | null} disk */
+    /** @param {import('@bottlify/cellar').Disk | null} disk */
     const open = disk=>openKeeper({
         budget, segmentBytes: SEGMENT_BYTES, coldAfterMs: IDLE_MS, disk,
         announce: message=>{

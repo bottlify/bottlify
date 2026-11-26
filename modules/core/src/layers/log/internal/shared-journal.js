@@ -17,7 +17,7 @@
  *
  * Two parts, handed over as one object:
  *
- *  - the records, a Cellar journal (`vendor/cellar/`): one writer, readers by
+ *  - the records, a Cellar journal (`@bottlify/cellar`): one writer, readers by
  *    sequence, the oldest written over and a reader lapped mid-read told so;
  *  - a dictionary of strings written once each -- templates, categories, and
  *    any name a table wants to refer to by number -- so that a record carries
@@ -29,7 +29,7 @@
  * `Atomics.store` of its count, after its bytes.
  */
 
-import { createJournalMemory as createRecords, openJournal } from '../../../../vendor/cellar/cellar.js';
+import { createJournalMemory as createRecords, openJournal } from '@bottlify/cellar';
 
 /** Dictionary control words, at the start of its buffer. */
 const DICT_COUNT = 0;
@@ -51,14 +51,14 @@ const RECORD_HEADER = 16;
 /**
  * What a journal's memory is handed over as: its records and its dictionary.
  *
- * @typedef {{ records: import('../../../../vendor/cellar/cellar.js').JournalMemory,
+ * @typedef {{ records: import('@bottlify/cellar').JournalMemory,
  *     dictionary: ArrayBufferLike }} JournalBuffers
  */
 
 /**
  * @typedef {Object} JournalViews
  * @property {JournalBuffers} buffer  what is handed to a reader
- * @property {import('../../../../vendor/cellar/cellar.js').Journal} journal
+ * @property {import('@bottlify/cellar').Journal} journal
  * @property {Int32Array} dictControl
  * @property {DataView} dictView
  * @property {number} records

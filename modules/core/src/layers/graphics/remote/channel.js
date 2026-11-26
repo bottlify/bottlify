@@ -62,8 +62,8 @@ export const SAID_STRINGS = 1024;
  * A root's two rings (`ring.js`): its calls to the played side, and what that
  * side says back.
  *
- * @typedef {{ calls: import('../../../../vendor/cellar/cellar.js').RingMemory,
- *     replies: import('../../../../vendor/cellar/cellar.js').RingMemory }} RootRings
+ * @typedef {{ calls: import('@bottlify/cellar').RingMemory,
+ *     replies: import('@bottlify/cellar').RingMemory }} RootRings
  */
 
 /** How many calls go between two readings of the clock for a batch the turn has kept too long. */

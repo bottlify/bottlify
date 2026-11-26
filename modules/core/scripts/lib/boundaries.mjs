@@ -203,9 +203,11 @@ function walk(dir){
  * @param {string} tree.vendor  Its `vendor/`: binaries the root of src reaches by URL, and
  *     that nothing imports.
  * @param {Map<string, Set<string>>} tree.requires  Each layer's declared `requires`.
+ * @param {Set<string>} tree.dependencies  The package's `dependencies`: a library
+ *     among them is imported by its name; an engine among them never is.
  * @returns {{ files: string[], issues: string[] }}
  */
-export function findBoundaryIssues({ src, vendor, requires }){
+export function findBoundaryIssues({ src, vendor, requires, dependencies }){
     /** @param {string} file */
     const classify = file=>{
         const rel = normalize(file).slice(src.length + 1).split(sep);
@@ -254,9 +256,9 @@ export function findBoundaryIssues({ src, vendor, requires }){
         for (const spec of statementSpecifiersOf(code))
         {
             if (!spec.startsWith('.') && !spec.startsWith('node:')
-                && enginePackageIssue(spec) === null)
+                && enginePackageIssue(spec) === null && !dependencies.has(spec))
             {
-                issues.push(`${file} imports a package (${spec}): the core has no dependencies`);
+                issues.push(`${file} imports a package (${spec}): not one the core depends on`);
             }
         }
 
@@ -274,12 +276,6 @@ export function findBoundaryIssues({ src, vendor, requires }){
             }
 
             const target = resolve(dirname(file), spec);
-            // The one library core carries in vendor/, the build of its own
-            // project fetched by `scripts/fetch-cellar.mjs`: imported as src is.
-            if (target.startsWith(join(vendor, 'cellar') + sep))
-            {
-                continue;
-            }
             if (target.startsWith(vendor + sep))
             {
                 issues.push(`${file} imports vendor (${spec}): vendor holds binaries the `

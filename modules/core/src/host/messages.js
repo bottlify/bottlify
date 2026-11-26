@@ -50,7 +50,7 @@
  *     hooks?: HookSpec[],
  *     collectOnExit?: boolean,
  *     signal?: SharedArrayBuffer,
- *     inbound?: import('../../vendor/cellar/cellar.js').RingMemory,
+ *     inbound?: import('@bottlify/cellar').RingMemory,
  *     network?: { module: string, url: string, room: string, token?: string },
  *     files?: { path: string, bytes: Uint8Array }[],
  *     discs?: { image: Blob | Uint8Array, letter?: string }[],

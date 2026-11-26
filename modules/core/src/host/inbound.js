@@ -23,7 +23,7 @@
  * posted message, so the two channels keep the page's order.
  */
 
-import { RingClosed, openRing } from '../../vendor/cellar/cellar.js';
+import { RingClosed, openRing } from '@bottlify/cellar';
 import { textOf } from '../system/codec.js';
 
 /** The inbound ring's size: input arrives in bursts of a few hundred bytes a message. */
@@ -40,7 +40,7 @@ const encoder = new TextEncoder();
  * engine before what the page sent first. The wait is the ring's own on the
  * event loop (`writeWaitingAsync`), woken when the engine reads.
  *
- * @param {import('../../vendor/cellar/cellar.js').RingMemory} memory
+ * @param {import('@bottlify/cellar').RingMemory} memory
  */
 export function createInboundWriter(memory){
     const ring = openRing(memory);
@@ -107,7 +107,7 @@ export function createInboundWriter(memory){
 /**
  * The engine's side: every message in the ring, handed on in order.
  *
- * @param {import('../../vendor/cellar/cellar.js').RingMemory} memory
+ * @param {import('@bottlify/cellar').RingMemory} memory
  * @param {(message: any) => void} receive
  */
 export function createInboundReader(memory, receive){
