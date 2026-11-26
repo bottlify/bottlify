@@ -220,9 +220,10 @@ export function pool(){
             }
             const { op, operands } = instruction;
             // Both operands of an exchange are written, and leave writes rsp and rbp.
-            const writesKept = op === 'leave' || operands.some(operand=>operand.kind === 'reg'
-                && kept.has(/** @type {number} */ (operand.reg))
-                && (operand === operands[0] || op === 'xchg' || op === 'xadd'))
+            // By place, not identity: a register's operand is one record wherever it is named.
+            const writesKept = op === 'leave' || operands.some((operand, place)=>
+                operand.kind === 'reg' && kept.has(/** @type {number} */ (operand.reg))
+                && (place === 0 || op === 'xchg' || op === 'xadd'))
                 && op !== 'cmp' && op !== 'test' && op !== 'bt';
             if (translatesLong(instruction) && !endsBlock(op) && op !== 'push' && op !== 'pop'
                 && !writesKept && !operands.some(operand=>operand.kind === 'mem' && operand.rip))

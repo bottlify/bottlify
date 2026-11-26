@@ -1,0 +1,96 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * What translating makes of garbage, a byte count an instruction: a game's level load
+ * forms and emits thousands of regions, and what each leaves behind is collected on the
+ * thread that runs the program or on the translator's. Measured on the benchmark's own
+ * images, the 32-bit and the 64-bit build, every function a direct call names formed
+ * from its entry, with V8's sampling heap profiler (`tools/fixtures/allocation.mjs`);
+ * each bound sits above what the stage makes now with room for the sampler, and below
+ * what it made before its records were shared or reused. Decoding: an instruction's
+ * record, its operands and prefixes.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { bytesPerCall } from '../../../tools/fixtures/allocation.mjs';
+import { decode, MODE_64 } from './decode/decoder.js';
+import { formRegion } from './region.js';
+
+const BASE = 0x400000;
+
+/**
+ * A benchmark image loaded at its base: its bytes, its code's span, and the entries of
+ * the functions its direct calls name (aligned as its compiler aligns a function).
+ *
+ * @param {'x87' | 'x64'} variant
+ */
+function imageOf(variant){
+    const file = readFileSync(new URL(`../bench/bin/bench-${variant}.exe`, import.meta.url));
+    const header = file.readUInt32LE(0x3c);
+    const sections = file.readUInt16LE(header + 6);
+    const image = new Uint8Array(0x40000);
+    let text = [0, 0];
+    for (let at = header + 24 + file.readUInt16LE(header + 20), i = 0; i < sections;
+        i++, at += 40)
+    {
+        const address = file.readUInt32LE(at + 12);
+        const raw = file.readUInt32LE(at + 20);
+        const size = file.readUInt32LE(at + 16);
+        if (address + size <= image.length)
+        {
+            image.set(file.subarray(raw, raw + size), address);
+        }
+        if (file.toString('latin1', at, at + 5) === '.text')
+        {
+            text = [BASE + address, BASE + address + file.readUInt32LE(at + 8)];
+        }
+    }
+    const read = (/** @type {number} */ address)=>image[address - BASE] ?? 0;
+    /** @type {Set<number>} */
+    const entries = new Set();
+    for (let at = text[0]; at < text[1] - 5; at++)
+    {
+        const target = (at + 5 + (read(at + 1) | read(at + 2) << 8 | read(at + 3) << 16
+            | read(at + 4) << 24)) >>> 0;
+        if (read(at) === 0xe8 && target >= text[0] && target < text[1] && (target & 15) === 0)
+        {
+            entries.add(target);
+        }
+    }
+    const translatable = (/** @type {number} */ address)=>address >= text[0] && address < text[1];
+    const wide = variant === 'x64';
+    const mode = wide ? MODE_64 : undefined;
+    const regions = [...entries].sort((a, b)=>a - b)
+        .map(entry=>formRegion(read, entry, { translatable, mode }));
+    let instructions = 0;
+    for (const { blocks } of regions)
+    {
+        for (const block of blocks)
+        {
+            instructions += block.instructions.length;
+        }
+    }
+    return { read, translatable, mode, wide, regions, instructions };
+}
+
+for (const variant of /** @type {const} */ (['x87', 'x64']))
+{
+    const { read, mode, regions } = imageOf(variant);
+
+    test(`decoding an instruction of the ${variant} image makes at most 260 bytes`, async()=>{
+        const at = regions.flatMap(({ blocks })=>blocks.flatMap(block=>block.instructions
+            .filter(instruction=>instruction.op !== 'crt').map(instruction=>instruction.eip)));
+        let next = 0;
+        const bytes = await bytesPerCall(()=>{
+            decode(read, at[next], mode);
+            next = next + 1 === at.length ? 0 : next + 1;
+        }, { calls: at.length });
+        assert.ok(bytes < 260, `${bytes.toFixed(0)} bytes an instruction`);
+    });
+}
