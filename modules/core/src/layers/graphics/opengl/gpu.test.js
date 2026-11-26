@@ -2227,25 +2227,6 @@ test('on a device a DXT level is decoded for each read and a sub-image on it is 
     assert.deepEqual(r.divergences.filter(d=>/let go|lost/.test(d)), []);
 });
 
-test('a read-back of a level the device holds alone says what it answered', async()=>{
-    const r = rig();
-    const { context } = r;
-    context.glGenTextures(1);
-    context.glBindTexture(GL.TEXTURE_2D, 1);
-    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
-    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array(64).fill(7));
-    const before = context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
-    assert.ok(before.every((/** @type {number} */ byte)=>byte === 7), 'read here, as made');
-    assert.deepEqual(r.divergences.filter(d=>/glGetTexImage/.test(d)), []);
-    context.glEnable(GL.TEXTURE_2D);
-    drawUnswapped(context);
-    await r.swap();
-    context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
-    assert.equal(r.divergences.filter(d=>/glGetTexImage of a level the device holds/.test(d))
-        .length, 1, 'its texels let go on the device, the read-back is a loss, said');
-});
-
 test('a context whose twin draws keeps no texture data, only its shapes', ()=>{
     /** @type {string[]} */
     const divergences = [];

@@ -2005,36 +2005,6 @@ export function createOpengl(services){
             a[0] >>> 0, a[1] | 0, a[2] | 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] | 0, a[7] | 0)),
         glCopyTexSubImage1D: a=>answer(current()?.glCopyTexSubImage2D(
             a[0] >>> 0, a[1] | 0, a[2] | 0, 0, a[3] | 0, a[4] | 0, a[5] | 0, 1)),
-        glGetTexImage: ([target, level, format, type, out])=>call(context=>{
-            const texels = context.glGetTexImage(target >>> 0, level | 0, format >>> 0, type >>> 0);
-            // A level kept as a sized format comes back packed already.
-            if (texels && !(texels instanceof Uint8Array))
-            {
-                if ((out >>> 0) !== 0)
-                {
-                    services.writeMemory(out >>> 0, texels.packed);
-                }
-                return;
-            }
-            const shape = texels && context.glGetTexLevelParameteriv(
-                target >>> 0, level | 0, GL.TEXTURE_WIDTH);
-            const height = texels && context.glGetTexLevelParameteriv(
-                target >>> 0, level | 0, GL.TEXTURE_HEIGHT);
-            if (texels && shape && height && (out >>> 0) !== 0)
-            {
-                const packed = packImage(texels, shape[0], height[0], format >>> 0, type >>> 0, {
-                    alignment: context.glGetIntegerv(GL.PACK_ALIGNMENT)[0],
-                    rowLength: context.glGetIntegerv(GL.PACK_ROW_LENGTH)[0],
-                    skipRows: context.glGetIntegerv(GL.PACK_SKIP_ROWS)[0],
-                    skipPixels: context.glGetIntegerv(GL.PACK_SKIP_PIXELS)[0],
-                });
-                if (packed)
-                {
-                    services.writeMemory(out >>> 0, packed);
-                }
-            }
-        }),
-
         // --- GL_ARB_multitexture and the rest of the texture extensions ---
 
         glActiveTextureARB: ([unit])=>answer(current()?.glActiveTextureARB(unit >>> 0)),
@@ -2501,35 +2471,108 @@ export function createOpengl(services){
     swaps.glReadnPixelsARB = swaps.glReadnPixels;
 
     /**
-     * Bytes a read of a buffer object answers into guest memory: at once, or
-     * once the device has given back a buffer a shader wrote.
+     * What a read-back answers, done with once it is here: at once, or once
+     * the device has given it back - a buffer a shader wrote, a level whose
+     * texels the device holds alone. Zero to the guest either way.
      *
+     * @template T
+     * @param {T | Promise<T>} read @param {(value: T) => void} then
+     * @returns {number | Promise<number>}
+     */
+    const whenRead = (read, then)=>{
+        if (read instanceof Promise)
+        {
+            return read.then(value=>{
+                then(value);
+                return 0;
+            });
+        }
+        then(read);
+        return 0;
+    };
+    /**
+     * Bytes a read-back answers, written into guest memory at `out`.
+     *
+     * @param {number} out @returns {(bytes: Uint8Array | null) => void}
+     */
+    const writeAt = out=>bytes=>{
+        if (bytes && (out >>> 0) !== 0)
+        {
+            services.writeMemory(out >>> 0, bytes);
+        }
+    };
+    /**
      * @param {number} out @param {Uint8Array | Promise<Uint8Array | null> | null} bytes
      * @returns {number | Promise<number>}
      */
-    const deliverBuffer = (out, bytes)=>{
-        /** @param {Uint8Array | null} got */
-        const write = got=>{
-            if (got && (out >>> 0) !== 0)
-            {
-                services.writeMemory(out >>> 0, got);
-            }
-            return 0;
-        };
-        return bytes instanceof Promise ? bytes.then(write) : write(bytes);
+    const deliverRead = (out, bytes)=>whenRead(bytes, writeAt(out));
+    /**
+     * A read-back made on the current context, delivered: nothing without one.
+     *
+     * @param {(context: any) => any} read
+     * @param {(value: any) => void} then
+     * @returns {number | Promise<number>}
+     */
+    const readBack = (read, then)=>{
+        const context = current();
+        return context ? whenRead(read(context), then) : 0;
     };
     Object.assign(swaps, {
         glGetBufferSubDataARB: (/** @type {number[]} */ [target, offset, size, out])=>{
             const context = current();
-            return context ? deliverBuffer(out, context.glGetBufferSubDataARB(target >>> 0,
+            return context ? deliverRead(out, context.glGetBufferSubDataARB(target >>> 0,
                 offset | 0, size | 0)) : 0;
         },
         glGetNamedBufferSubData: (/** @type {number[]} */ [buffer, offset, size, out])=>{
             const context = current();
-            return context ? deliverBuffer(out, context.namedBuffer('glGetBufferSubDataARB',
+            return context ? deliverRead(out, context.namedBuffer('glGetBufferSubDataARB',
                 buffer >>> 0, [offset | 0, size | 0])) : 0;
         },
+        // A level's image: the device answers a level whose texels it holds alone.
+        glGetTexImage: (/** @type {number[]} */ [target, level, format, type, out])=>readBack(
+            context=>context.glGetTexImage(target >>> 0, level | 0, format >>> 0, type >>> 0),
+            texels=>{
+                const context = current();
+                // A level kept as a sized format comes back packed already.
+                if (texels && !(texels instanceof Uint8Array))
+                {
+                    if ((out >>> 0) !== 0)
+                    {
+                        services.writeMemory(out >>> 0, texels.packed);
+                    }
+                    return;
+                }
+                const shape = texels && context.glGetTexLevelParameteriv(
+                    target >>> 0, level | 0, GL.TEXTURE_WIDTH);
+                const height = texels && context.glGetTexLevelParameteriv(
+                    target >>> 0, level | 0, GL.TEXTURE_HEIGHT);
+                if (texels && shape && height && (out >>> 0) !== 0)
+                {
+                    const packed = packImage(texels, shape[0], height[0], format >>> 0,
+                        type >>> 0, {
+                            alignment: context.glGetIntegerv(GL.PACK_ALIGNMENT)[0],
+                            rowLength: context.glGetIntegerv(GL.PACK_ROW_LENGTH)[0],
+                            skipRows: context.glGetIntegerv(GL.PACK_SKIP_ROWS)[0],
+                            skipPixels: context.glGetIntegerv(GL.PACK_SKIP_PIXELS)[0],
+                        });
+                    if (packed)
+                    {
+                        services.writeMemory(out >>> 0, packed);
+                    }
+                }
+            }),
+        glGetnTexImage: (/** @type {number[]} */ [target, level, format, type, size, out])=>
+            readBack(context=>context.getnTexImage(false, target >>> 0, level | 0, format >>> 0,
+                type >>> 0, size | 0), writeAt(out)),
+        glGetTextureImage: (/** @type {number[]} */ [texture, level, format, type, size, out])=>
+            readBack(context=>context.glGetTextureImage(texture >>> 0, level | 0, format >>> 0,
+                type >>> 0, size | 0), writeAt(out)),
+        glGetTextureSubImage: (/** @type {number[]} */ a)=>readBack(context=>
+            context.glGetTextureSubImage(a[0] >>> 0, a[1] | 0, { x: a[2] | 0, y: a[3] | 0,
+                z: a[4] | 0, width: a[5] | 0, height: a[6] | 0, depth: a[7] | 0 }, a[8] >>> 0,
+            a[9] >>> 0, a[10] | 0), writeAt(a[11])),
     });
+    swaps.glGetnTexImageARB = swaps.glGetnTexImage;
     swaps.glGetBufferSubData = swaps.glGetBufferSubDataARB;
 
     /** @param {number} address @returns {import('./pixelformat.js').PixelFormat} */

@@ -261,6 +261,13 @@ function forgetRgba(level){
  * @typedef {{ stored: Uint8Array }} StoredPixels
  */
 
+/**
+ * What glGetTexImage answers: a level's RGBA texels for the caller to pack,
+ * the client image packed already, or nothing.
+ *
+ * @typedef {Uint8Array | { packed: Uint8Array } | null} GetTexImageAnswer
+ */
+
 const GEN_COORDS = Object.freeze({
     [GL.TEXTURE_GEN_S]: 0, [GL.TEXTURE_GEN_T]: 1, [GL.TEXTURE_GEN_R]: 2, [GL.TEXTURE_GEN_Q]: 3,
 });
@@ -1781,24 +1788,93 @@ export function installTextureCalls(context, kernel){
      * @returns {Uint8Array}
      */
     function readBack(stored){
-        const texels = transferredCopy(stored.texels
-            ?? new Uint8Array(stored.width * stored.height * 4));
-        return returnedTexels(texels, stored.baseFormat, texels !== stored.texels);
+        const own = texelsOf(stored);
+        const texels = transferredCopy(own ?? new Uint8Array(stored.width * stored.height * 4));
+        return returnedTexels(texels, stored.baseFormat,
+            texels !== own || deviceTexels.has(stored));
     }
 
     /**
-     * A read-back answered from this side's bytes of a level whose content
-     * the device holds alone (let go once uploaded, or written there) does
-     * not answer what the device holds: a loss, said.
+     * Levels' texels read back from the device for the read-back being
+     * answered (`fromDevice`), held only while its answer is made.
      *
-     * @param {import('./objects.js').TextureLevel} stored
+     * @type {WeakMap<object, Uint8Array>}
      */
-    function readsOwn(stored){
-        if (kernel.gpuBacked() && kernel.deviceHolds?.(stored))
+    const deviceTexels = new WeakMap();
+
+    /**
+     * A legacy level's texels as a read-back takes them: the device's where
+     * they were read back for it, else this side's.
+     *
+     * @param {any} level @returns {Uint8Array | null}
+     */
+    function texelsOf(level){
+        return deviceTexels.get(level) ?? level.texels ?? null;
+    }
+
+    /**
+     * A read-back's answer, made from the device's texels of the levels it
+     * reads where the device holds them alone (let go here once uploaded, or
+     * written there): they are read back first, once what the context
+     * recorded before has run, and the answer comes when they are here - the
+     * caller's thread waits, as for glReadPixels. Nothing of them stays here
+     * after the answer. A level the device cannot hand back (a sized one, a
+     * copy of another shape) is answered from this side's bytes, a loss said.
+     *
+     * @template T
+     * @param {string} name @param {import('./objects.js').TextureObject} texture
+     * @param {readonly number[]} keys  the levels the answer reads (`levelKey`)
+     * @param {() => T} answer
+     * @returns {T | Promise<T>}
+     */
+    function fromDevice(name, texture, keys, answer){
+        const holds = kernel.gpuBacked() ? kernel.deviceHolds : null;
+        if (!holds)
         {
-            lose('glGetTexImage of a level the device holds alone answered this side\'s bytes'
-                + ' of it, zeros where they were let go');
+            return answer();
         }
+        /** @type {{ level: any, reading: Promise<Uint8Array | null> | null }[]} */
+        const held = [];
+        for (const key of keys)
+        {
+            const level = texture.levels.get(key);
+            if (level && holds(level))
+            {
+                held.push({ level, reading: level.sized ? null
+                    : kernel.readLevel?.(texture, key) ?? null });
+            }
+        }
+        if (held.length === 0)
+        {
+            return answer();
+        }
+        if (held.some(({ reading })=>reading === null))
+        {
+            lose(`${name} of a level the device holds alone answered this side's bytes of it,`
+                + ' zeros where they were let go');
+            return answer();
+        }
+        return Promise.all(held.map(({ reading })=>reading)).then(read=>{
+            held.forEach(({ level }, k)=>{
+                const texels = read[k];
+                if (!texels)
+                {
+                    lose(`${name} could not read a level back from the device: it reads zeros`);
+                }
+                deviceTexels.set(level, texels ?? new Uint8Array(level.width * level.height * 4));
+            });
+            try
+            {
+                return answer();
+            }
+            finally
+            {
+                for (const { level } of held)
+                {
+                    deviceTexels.delete(level);
+                }
+            }
+        });
     }
 
     /**
@@ -3219,7 +3295,8 @@ export function installTextureCalls(context, kernel){
      * @param {import('./texture-levels.js').Box | null} box  null: the whole level
      * @param {number} format @param {number} type @param {number} bufSize
      * @param {number} [missing]  the error for a name that is no texture
-     * @returns {Uint8Array | null}
+     * @returns {Uint8Array | null | Promise<Uint8Array | null>}  a promise where
+     *     the device holds the level alone (`fromDevice`)
      */
     function getTextureSubImage(name, textureName, level, box, format, type, bufSize,
         missing = GL.INVALID_VALUE)
@@ -3266,28 +3343,29 @@ export function installTextureCalls(context, kernel){
                 + ' that draws, in the graphics worker, and are not read back');
         }
         const image = { texture: found.texture, level, cube: found.cube };
-        const slices = found.cube ? whole.depth : 1;
+        const slices = Array.from({ length: found.cube ? whole.depth : 1 }, (_, k)=>
+            /** @type {NonNullable<ReturnType<typeof sliceOf>>} */ (sliceOf(image, whole.z + k)));
         const depth = found.cube ? 1 : whole.depth;
         const sliceBytes = storageBytes(kept, whole.width, whole.height, depth);
-        const stored = new Uint8Array(sliceBytes * slices);
-        for (let k = 0; k < slices; k++)
-        {
-            const slice = /** @type {NonNullable<ReturnType<typeof sliceOf>>} */ (
-                sliceOf(image, whole.z + k));
-            const source = kept === slice.level.sized ? slice.level.data : slice.level.texels;
-            const into = stored.subarray(k * sliceBytes, (k + 1) * sliceBytes);
-            if (source)
-            {
-                copyBox(source, kept, slice.level.width, slice.level.height,
-                    { ...whole, z: slice.z, depth }, into, 'read');
-            }
-            else
-            {
-                into.set(blankStorage(kept, whole.width, whole.height, depth));
-            }
-        }
-        return packFromStorage(stored, whole.width, whole.height, whole.depth, format, type,
-            state, kept);
+        return fromDevice(name, found.texture, slices.map(slice=>slice.key), ()=>{
+            const stored = new Uint8Array(sliceBytes * slices.length);
+            slices.forEach((slice, k)=>{
+                const source = kept === slice.level.sized ? slice.level.data
+                    : texelsOf(slice.level);
+                const into = stored.subarray(k * sliceBytes, (k + 1) * sliceBytes);
+                if (source)
+                {
+                    copyBox(source, kept, slice.level.width, slice.level.height,
+                        { ...whole, z: slice.z, depth }, into, 'read');
+                }
+                else
+                {
+                    into.set(blankStorage(kept, whole.width, whole.height, depth));
+                }
+            });
+            return packFromStorage(stored, whole.width, whole.height, whole.depth, format, type,
+                state, kept);
+        });
     }
 
     /**
@@ -3895,7 +3973,7 @@ export function installTextureCalls(context, kernel){
          * @param {number} texture @param {number} level
          * @param {import('./texture-levels.js').Box} box
          * @param {number} format @param {number} type @param {number} bufSize
-         * @returns {Uint8Array | null} the client image
+         * @returns {Uint8Array | null | Promise<Uint8Array | null>} the client image
          */
         glGetTextureSubImage(texture, level, box, format, type, bufSize){
             return getTextureSubImage('glGetTextureSubImage', texture, level, box, format, type,
@@ -4429,10 +4507,11 @@ export function installTextureCalls(context, kernel){
          * @param {number} level
          * @param {number} format
          * @param {number} type
-         * @returns {Uint8Array | { packed: Uint8Array } | null} the level's texels
-         *          as RGBA bytes, which the caller packs into the format asked
-         *          for; or, for a level kept as a sized format, the client
-         *          image itself, packed here from the format's own values
+         * @returns {GetTexImageAnswer | Promise<GetTexImageAnswer>} the level's
+         *          texels as RGBA bytes, which the caller packs into the format
+         *          asked for; or, for a level kept as a sized format, the client
+         *          image itself, packed here from the format's own values; a
+         *          promise of it where the device holds the level alone
          */
         glGetTexImage(target, level, format, type){
             if (!enter('glGetTexImage', [target, level, format, type]))
@@ -4453,13 +4532,28 @@ export function installTextureCalls(context, kernel){
                     diverge('glGetTexImage was accepted and read zeros: the texels live with'
                         + ' the context that draws, in the graphics worker, and are not read back');
                 }
-                readsOwn(stored);
-                const packed = stored.sized ? packSized(stored, format, type)
-                    : checkTransfer(RGBA8, format, type)
-                        ? packFromStorage(readBack(stored), stored.width, stored.height, 1,
-                            format, type, transferState(true), RGBA8)
-                        : null;
-                return packed ? { packed } : null;
+                if (stored.sized)
+                {
+                    // A sized level is kept here whole; the device hands back
+                    // RGBA alone, so one it wrote is not read back.
+                    if (kernel.gpuBacked() && kernel.deviceHolds?.(stored))
+                    {
+                        lose('glGetTexImage of a level the device holds alone answered this'
+                            + ' side\'s bytes of it');
+                    }
+                    const packed = packSized(stored, format, type);
+                    return packed ? { packed } : null;
+                }
+                if (!checkTransfer(RGBA8, format, type))
+                {
+                    return null;
+                }
+                return fromDevice('glGetTexImage', image.texture, [levelKey(level, image.face)],
+                    ()=>{
+                        const packed = packFromStorage(readBack(stored), stored.width,
+                            stored.height, 1, format, type, transferState(true), RGBA8);
+                        return packed ? { packed } : null;
+                    });
             }
             if (!checkPixelFormat(format, type))
             {
@@ -4475,8 +4569,8 @@ export function installTextureCalls(context, kernel){
                 diverge('glGetTexImage was accepted and read black: the texels live with'
                     + ' the context that draws, in the graphics worker, and are not read back');
             }
-            readsOwn(stored);
-            return readBack(stored);
+            return fromDevice('glGetTexImage', image.texture, [levelKey(level, image.face)],
+                ()=>readBack(stored));
         },
 
         /** @param {number} target @param {number} parameter @param {number} value */

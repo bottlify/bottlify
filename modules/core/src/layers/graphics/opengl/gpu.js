@@ -5706,6 +5706,46 @@ export function createGpuRenderer(services){
             return chain.then(()=>bytes);
         },
         /**
+         * A level's texels as the device holds them, once every command the
+         * context recorded so far has run: what a read-back of a level whose
+         * texels were let go here, or which the device wrote, answers. RGBA,
+         * its rows in the level's order. Null where the device holds the level
+         * in no RGBA copy of its shape.
+         *
+         * @param {object} context @param {import('./objects.js').TextureObject} texture
+         * @param {number} key  the level's key (`levelKey`)
+         * @returns {Promise<Uint8Array | null> | null}
+         */
+        readLevel(context, texture, key){
+            const copy = textures.get(texture);
+            const image = texture.levels.get(key);
+            const level = key % FACE_STRIDE;
+            const face = (key - level) / FACE_STRIDE;
+            if (texture.view || !copy || !image || copy.format !== TEXTURE_FORMAT
+                || level >= copy.levels || face >= (copy.cube ? 6 : 1)
+                || image.width !== Math.max(1, copy.width >> level)
+                || image.height !== Math.max(1, copy.height >> level))
+            {
+                return null;
+            }
+            const surfaces = drawables.get(context);
+            const recorded = surfaces && recordings.has(context)
+                ? flush(context, surfaces, null) : chain;
+            /** @type {Uint8Array | null} */
+            let bytes = null;
+            chain = recorded.then(async()=>{
+                const frame = backend.beginFrame();
+                const read = frame.snapshot({ texture: copy.gpu.texture, width: image.width,
+                    height: image.height, format: TEXTURE_FORMAT, mipLevel: level, layer: face });
+                frame.end();
+                bytes = (await read()).data;
+            }).catch(error=>{
+                lose(error instanceof Error ? error.message : String(error));
+            });
+            return chain.then(()=>bytes);
+        },
+
+        /**
          * A buffer object the program deleted: its GPU copy goes back once the
          * frames that drew from it are submitted.
          *
