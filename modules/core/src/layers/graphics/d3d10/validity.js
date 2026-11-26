@@ -25,7 +25,7 @@
  */
 
 import {
-    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_RESOURCE_MISC, D3D10_USAGE,
+    D3D10_BIND, D3D10_CPU_ACCESS, D3D10_LIMITS, D3D10_RESOURCE_MISC, D3D10_USAGE,
     D3D11_BIND_UNORDERED_ACCESS, D3D11_LIMITS, D3D11_RESOURCE_MISC, D3D_FEATURE_LEVEL,
     DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, S_OK,
 } from './constants.js';
@@ -689,15 +689,6 @@ const SRGB_TWINS = new Map([
     [DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB],
     [DXGI_FORMAT.B8G8R8X8_UNORM, DXGI_FORMAT.B8G8R8X8_UNORM_SRGB],
 ].flatMap(([plain, srgb])=>[[plain, srgb], [srgb, plain]]));
-
-/**
- * @param {number} requested
- * @param {number} available
- * @returns {number} how many slices a view covers, resolving "all remaining"
- */
-export function resolveSliceCount(requested, available){
-    return requested === ALL_REMAINING ? available : requested;
-}
 
 // --- swap chains ---
 

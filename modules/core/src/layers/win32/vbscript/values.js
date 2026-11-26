@@ -94,15 +94,6 @@ export const currency = n=>new ForeignValue(VT_CY, Math.round(n * 10000) / 10000
 /** @param {number} oleDate @returns {ForeignValue} a Date */
 export const date = oleDate=>dateValue(oleDate);
 
-/**
- * An Integer when the number is one, a Long when it is not and fits one,
- * a Double past both: the type a whole-number answer takes.
- *
- * @param {number} n @returns {Value}
- */
-export const smallestInteger = n=>(n >= -32768 && n <= 32767 ? integer(n)
-    : n >= -2147483648 && n <= 2147483647 ? long(n) : n);
-
 /** A VBScript array: its bounds, first dimension first, and its elements, the first index fastest. */
 export class VBArray
 {

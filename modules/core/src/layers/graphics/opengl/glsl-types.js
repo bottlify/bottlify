@@ -189,12 +189,6 @@ export function arrayOf(element, length){
     return made;
 }
 
-/** @param {GlslType} type */
-export const isScalar = type=>type.kind === 'scalar';
-/** @param {GlslType} type */
-export const isNumeric = type=>(type.kind === 'scalar' || type.kind === 'vector')
-    && type.base !== 'bool' || type.kind === 'matrix';
-
 /**
  * The scalar a scalar, vector or matrix is made of, or null.
  *

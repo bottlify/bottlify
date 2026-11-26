@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { parsePe, readImports, relocateImage, rvaToFileOffset } from './pe.js';
+import { parsePe, readImports, relocateImage } from './pe.js';
 
 /**
  * Turning a parsed PE into a laid-out image.
@@ -227,5 +227,3 @@ export function bindImports({ bytes, file, image }, resolveImport, missing){
     }
     return unresolved;
 }
-
-export { parsePe, readImports, rvaToFileOffset };

@@ -158,11 +158,6 @@ export function clearRecord(record){
     record.fields.fill(null);
 }
 
-/** @param {Record} record @returns {Record} a copy that shares no stream position */
-export const copyRecord = record=>({ fields: record.fields.map(field=>(
-    field !== null && typeof field === 'object' ? { stream: field.stream, position: 0 } : field)),
-});
-
 /** @param {Uint8Array} bytes @returns {StreamSource} */
 export const bytesStream = bytes=>({
     size: bytes.length,

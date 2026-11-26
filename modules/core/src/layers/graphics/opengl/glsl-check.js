@@ -187,9 +187,6 @@ const fail = (at, message)=>{
 /** The swizzle sets, each spelling the same four components. */
 const SWIZZLE_SETS = ['xyzw', 'rgba', 'stpq'];
 
-/** @param {GlslType} a @param {GlslType} b */
-export const sameType = (a, b)=>a === b;
-
 /**
  * How good a conversion of one scalar base to another is, as section 6.1
  * ranks them: 0 none needed, 1 float to double, 2 an integer to float, 3 an

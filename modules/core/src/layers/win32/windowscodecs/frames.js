@@ -32,7 +32,7 @@ import { decodeGifFrames, isGif } from '../../media/internal/gif.js';
 import { decodeTiff, isTiff } from '../../media/internal/tiff.js';
 import { decodeJpeg, readJpegHeader } from '../../media/internal/jpeg.js';
 import { GUID } from './layout.js';
-import { convertRow, formatOf, rowBytes } from './formats.js';
+import { convertRow, formatOf } from './formats.js';
 
 /** WINCODEC_ERR_* and the HRESULTs the decoders answer with. */
 export const WINCODEC = Object.freeze({
@@ -655,5 +655,3 @@ export function cropRows(pixels, stride, bpp, rect){
     }
     return out;
 }
-
-export { rowBytes };

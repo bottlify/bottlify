@@ -104,11 +104,6 @@ export function declarationEnd(){
     };
 }
 
-/** @param {VertexElement} element */
-export function isDeclarationEnd(element){
-    return element.Stream === D3DDECL_END_STREAM;
-}
-
 /**
  * Whether an array of elements is a declaration a device accepts.
  *

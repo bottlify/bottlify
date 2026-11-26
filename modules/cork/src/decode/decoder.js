@@ -29,7 +29,7 @@
 
 import {
     ByMod, CONDITIONS, DF, Group, I, ONE_BYTE, Prefixed, SYS, THREE_BYTE_38, THREE_BYTE_3A,
-    TWO_BYTE, X87, conditionReads,
+    TWO_BYTE, X87,
 } from './table.js';
 
 /** The longest an instruction may be; the processor faults past it. */
@@ -1061,4 +1061,4 @@ function fixedOperand(form, operandSize, segmentOverride, addressSize){
     }
 }
 
-export { CONDITIONS, conditionReads };
+export { CONDITIONS };

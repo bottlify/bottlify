@@ -286,9 +286,6 @@ export function languageOf(version, profile = null, extensions = []){
     return language;
 }
 
-/** The version a feature came with. @param {Feature} feature */
-export const featureSince = feature=>FEATURES[feature];
-
 /**
  * The stages a version compiles: tessellation from 4.00, geometry from 1.50,
  * compute from 4.30.

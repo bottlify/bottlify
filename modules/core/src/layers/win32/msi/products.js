@@ -20,7 +20,7 @@
  */
 
 import { INSTALLSTATE } from './session.js';
-import { squashGuid, unsquashGuid, valueText } from './registration.js';
+import { squashGuid, valueText } from './registration.js';
 import { decodeShellLink } from '../common/shell-link.js';
 import { createMd5 } from '../crypto/digest.js';
 import { formatGuid } from '../../../system/guid.js';
@@ -1711,4 +1711,4 @@ export function createProductFunctions(context){
 /** MsiSourceListGetInfo and SetInfo for a property they do not know. */
 const ERROR_UNKNOWN_PROPERTY_SOURCE = 1608;
 
-export { unsquashGuid, GUID_CHARS };
+export { GUID_CHARS };

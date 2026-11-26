@@ -20,7 +20,7 @@
  * Integer instructions in this step; x87 and SIMD follow with their own.
  */
 
-import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
+import { AF, CF, DF, OF, PF, SF, ZF } from './decode/table.js';
 import { SYSTEM_TABLES, cpuidLeaf, topologyOf } from './cpuid.js';
 import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
@@ -1454,4 +1454,4 @@ function stringInstruction(op, instruction, state, read, write, setFlags, addres
     }
 }
 
-export { REGISTERS, MASK, conditionReads };
+export { REGISTERS, MASK };
