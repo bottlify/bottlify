@@ -8,9 +8,9 @@
  * How many bytes a function allocates a call, for a test that holds a hot
  * path to making no garbage: V8's sampling heap profiler, the objects
  * collected meanwhile included, over many calls, less what the same loop
- * makes around an empty function. A sampled estimate: a test bounds it with
- * room for the sampler's noise (a few bytes a call over thousands of calls),
- * never asks it for an exact zero.
+ * makes around an empty function, the least of three samples. A sampled
+ * estimate: a test bounds it with room for the sampler's noise (a few bytes a
+ * call over thousands of calls), never asks it for an exact zero.
  */
 
 import { Session } from 'node:inspector/promises';
@@ -62,8 +62,15 @@ export async function bytesPerCall(body, { calls = 20000 } = {}){
             body();
             empty();
         }
-        const around = await sampled(session, empty, calls);
-        const made = await sampled(session, body, calls);
+        // The least of three: the sampler counts every allocation of the
+        // thread, and work another test left running only ever adds to it.
+        let around = Infinity;
+        let made = Infinity;
+        for (let round = 0; round < 3; round++)
+        {
+            around = Math.min(around, await sampled(session, empty, calls));
+            made = Math.min(made, await sampled(session, body, calls));
+        }
         return Math.max(0, made - around) / calls;
     }
     finally
