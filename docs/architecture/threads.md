@@ -62,7 +62,7 @@ flowchart LR
   P -->|"postMessage ⇄"| K["Log keeper"]
   E -->|"SAB: journal ring"| K
   E -->|"two rings in SAB a root ⇄<br/>postMessage: frames, memory"| G["Graphics thread"]
-  E -->|"MessagePort ⇄<br/>SAB: cache arena, busy cells"| T["Translation threads"]
+  E -->|"MessagePort ⇄<br/>SAB: the run's cache, busy cells"| T["Translation threads"]
   E -->|"SAB: voice table<br/>or MessagePort: the mix"| A["AudioWorklet"]
   E -->|"link: two rings in SAB"| R["Process threads"]
   E -->|"SAB: the program's memory,<br/>channel words"| X["Executors"]

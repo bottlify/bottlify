@@ -17,7 +17,6 @@
 import { formRegion } from '../region.js';
 import { decode } from '../decode/decoder.js';
 import { emitBatch } from './emit-built.js';
-import { openArena } from './arena.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { PageFlag } from './pages.js';
 import { Tables } from './layout.js';
@@ -802,7 +801,6 @@ export function createDiagnostics(state){
                 : rt.translatorLoading() ? 'loading' : 'none'),
             translators: rt.translators.length,
             translatorsReady: rt.translators.filter(one=>one.ready).length,
-            ...(rt.arena === null ? {} : { arena: openArena(rt.arena).counts() }),
             // Taken here and by this runtime's workers; the run's cache counts its bytes.
             ...(rt.kept === null ? {} : { kept: {
                 hits: rt.emitCache.hits + rt.keptCounts.workerHits,

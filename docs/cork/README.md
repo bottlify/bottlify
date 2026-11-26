@@ -15,7 +15,8 @@ In [Bottlify](../../README.md) cork is the processor. It knows nothing about Win
 call, a port write or a fault stops it and hands control back to
 [`@bottlify/core`](../../modules/core/README.md), home of the Windows API, DirectX and sound.
 
-Cork is written in plain JavaScript and WebAssembly, with no dependencies, and runs in a browser
+Cork is written in plain JavaScript and WebAssembly, with one dependency, the project's own Cellar
+(`@bottlify/cellar`, the shared memory its threads keep emitted functions in), and runs in a browser
 and in Node.
 
 ## What it runs

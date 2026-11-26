@@ -90,20 +90,20 @@ Each rep times the first iteration (`coldMs`) and the best of `--iters` steady o
 ## The emitted functions' keepers
 
 A relink or a merge emits running regions again, and takes each one's function as it was emitted
-before from a keeper: the thread's own LRU (`createEmitCache`) or the process's arena
-(`arena.js`), shared by its executors and translation workers.
-[`emit-cache.mjs`](emit-cache.mjs) runs each micro workload with an arena, the relink brought
-forward so that a short run reaches it, prints the run's lookups and hits, and then gives the
-functions the run emitted to each keeper - the two above and a candidate kept as bodies of a
-Cellar cache, the cache the run's other caches are kept in - timing a keep, a hit and a miss
-(microseconds an op, median and range over the reps). A keeper that hands back anything other
-than what was kept stops the bench.
+before from a keeper: the thread's own LRU (`createEmitCache`) or the run's cache (`kept.js`),
+shared by its executors and translation workers.
+[`emit-cache.mjs`](emit-cache.mjs) runs each micro workload keeping its functions in a run's
+cache, the relink brought forward so that a short run reaches it, prints the run's hits, and then
+gives the functions the run kept to each keeper - timing a keep, a hit and a miss (microseconds an
+op, median and range over the reps). A keeper that hands back anything other than what was kept
+stops the bench.
 
     node modules/cork/bench/emit-cache.mjs lua calls512            # 32-bit
     node modules/cork/bench/emit-cache.mjs --bits 64 --reps 15     # the x86-64 twins
 
-The candidate is not the product's keeper yet, for two reasons the bench cannot answer: the run's
-Cellar keeper lets a body idle for 30 s go (`coldAfterMs`, one for every name), and a function is
-read again only at a relink or a merge, typically long after it was written - Cellar would need a
-body that goes only when its room is wanted; and cork, a package of its own with no dependencies,
-has no Cellar of its own for its translation workers to read with.
+Against the arena it replaced (Node 22.23.5, 4-core x86 VM, load average 11.6-14.7 from other
+work, 60 iterations, 15 reps after 3, all 22 32-bit and 18 64-bit workloads; the run's cache over
+the arena, geometric mean of the workloads' median ratios): 32-bit hit 1.14, miss 1.42, keep 1.37;
+64-bit hit 1.17, miss 1.50, keep 1.48. In microseconds: a hit 3.7-18.5, a miss 0.7-1.8, a keep
+5-41, against an emission of milliseconds. The noise floor measured before on this machine was a
+geometric mean of 0.88-1.17.

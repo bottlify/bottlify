@@ -2791,3 +2791,10 @@ same checked bytes the fetch did, without a mechanism of our own to keep. Core's
 two packages of this project, `@bottlify/cork` (loaded by URL, never imported) and Cellar (a
 library, bundled into core's build); `check:boundaries` lets a file import a package only by the
 name of a library among them. *2026-11-26.*
+
+**A243 revisited: the executors' shared arena is no longer one of the engine's own costs.** The
+translator's emitted functions, which a process of several executors kept in a 48 MiB arena
+charged to the machine's memory as the engine's, are bodies of the run's cache (`cork/`), counted
+under its budget beside the rest of it, and shared by every process of the run rather than one
+process's executors. The run cache's budget is not yet inside the machine's (board U6); until it is,
+the machine's memory no longer counts those functions. *2026-11-26.*

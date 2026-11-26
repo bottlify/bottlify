@@ -290,13 +290,20 @@ test('translators on threads of their own read what the writing thread keeps, ne
                 // Ready: the writer starts once both readers are.
                 Atomics.add(progress, 1, 1);
                 let torn = 0, found = 0;
-                const until = Date.now() + 3000;
-                while (Date.now() < until && Atomics.load(progress, 0) < 3000)
+                // Read while the writer writes, and some after: a thread the
+                // machine schedules late still reads the newest.
+                let after = 0;
+                const until = Date.now() + 10000;
+                while (Date.now() < until && after < 200)
                 {
                     const done = Atomics.load(progress, 0);
                     if (done === 0)
                     {
                         continue;
+                    }
+                    if (done === 3000)
+                    {
+                        after++;
                     }
                     const n = done - 1 - Math.floor(Math.random() * Math.min(done, 64));
                     const got = cache.take('k' + n, [n]);

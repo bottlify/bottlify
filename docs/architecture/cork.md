@@ -42,13 +42,18 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
 
 ## Translation in Bottlify
 
-- **Several translation threads, one arena.** A process can have several translation threads, each
-  with a batch of its own out. A relink, a merge, and a region formed again take over running
-  regions, so they go out alone. The functions already emitted, which a relink or merge takes again
-  rather than emitting them anew, belong to the process, not to a thread: they are kept in its
-  arena, 48 MB of shared memory that every translation thread of the process reads and adds to
-  under one lock, the oldest segment going first. Without it a relink emits again what was
-  emitted: a translation thread was busy 23.3 s instead of 14.6 s while a game loaded.
+- **Several translation threads, one store of functions.** A process can have several translation
+  threads, each with a batch of its own out. A relink, a merge, and a region formed again take over
+  running regions, so they go out alone. The functions already emitted, which a relink or merge
+  takes again rather than emitting them anew, belong to the run, not to a thread: they are bodies
+  of the run's cache (Cellar) under `cork/`
+  ([`runtime/kept.js`](../../modules/cork/src/runtime/kept.js)), named by a hash of their key,
+  read in place by every thread and handed back only under their own key and shape. They stay
+  however long idle and leave when the cache's room is wanted, under its one budget. The thread
+  that writes the run's cache keeps them; a translation thread or an executor in a worker reads
+  them in place and hands what it emitted to that thread with its answer. Without them a relink
+  emits again what was emitted: a translation thread was busy 23.3 s instead of 14.6 s while a
+  game loaded.
 - **The pool's driver.** Every 500 ms it reads from shared memory how long each translation thread
   worked and how many regions it emitted (the threads write it there). One more joins a process
   when the median load of those already working for it reaches 80 %, at most `hardwareConcurrency`
@@ -198,8 +203,8 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     over the process's memory ([`core/src/layers/cpu/internal/executor.worker.js`](../../modules/core/src/layers/cpu/internal/executor.worker.js)), with its own state
     page, entry hash and instances of translations. Their translations are shared: made for the
     process's shared layout (`sharedLayout`), which addresses the state block and the tables from
-    two bases each instance is given, their bytes are the same on each of them, and one arena of
-    emitted functions serves them all and their translators. The process's own executor translates
+    two bases each instance is given, their bytes are the same on each of them, and the run's
+    cache of emitted functions serves them all and their translators. The process's own executor translates
     for a layout of its own, the state and the tables at constant addresses, as with one executor:
     the shared layout's bases cost a sixth more machine code in a small function and 7 % of the
     benchmark, and the process's executor runs the first thread and any thread alone. So code run

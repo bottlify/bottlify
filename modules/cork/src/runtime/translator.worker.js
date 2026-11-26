@@ -23,7 +23,7 @@
 
 import { createReader } from '@bottlify/cellar';
 import { moduleDigest, packRegion } from './cache.js';
-import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
+import { createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 import { keptEmitCache, readingSpace } from './kept.js';
 
 /**
@@ -44,10 +44,10 @@ const sinceEpoch = (/** @type {number} */ epoch)=>
 /**
  * One runtime this worker serves: the worker's own scope, when a runtime
  * opened it, or a port a pool handed it, when the pool lends it to a process.
- * Each keeps what its runtime gave: the functions emitted before (the
- * process's arena, or a cache of the connection's own where the runtime has
- * none), whose layout, features and options key them, and the doorbell to
- * ring once an answer is posted -- an engine thread that is never handed its
+ * Each keeps what its runtime gave: the functions emitted before (the run's
+ * cache, or a cache of the connection's own where the runtime has none),
+ * whose layout, features and options key them, and the doorbell to ring once
+ * an answer is posted -- an engine thread that is never handed its
  * event loop on a timer hears the answer by it at its next turn, rather than
  * at its next yield.
  *
@@ -89,7 +89,7 @@ function connection(send){
      *
      * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
      *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any,
-     *     arena?: SharedArrayBuffer | null, storeVersion?: number,
+     *     storeVersion?: number,
      *     kept?: { shared: any, segments: (SharedArrayBuffer | null)[], prefix: string } | null,
      *     cache?: any }} data
      */
@@ -97,8 +97,7 @@ function connection(send){
         if (data?.ready === true)
         {
             const given = data.doorbell;
-            // A worker of a page that is not cross-origin isolated has no
-            // SharedArrayBuffer to name: there is no arena there either.
+            // Joined to the run's cache where its runtime keeps its functions there.
             if (data.kept)
             {
                 const { shared, segments, prefix } = data.kept;
@@ -109,11 +108,6 @@ function connection(send){
                 const space = readingSpace((name, read)=>reader.with(prefix + name, read));
                 kept = { reader, space };
                 cache = keptEmitCache(space);
-            }
-            else if (typeof SharedArrayBuffer === 'function'
-                && data.arena instanceof SharedArrayBuffer)
-            {
-                cache = arenaEmitCache(data.arena);
             }
             doorbell = given ? {
                 posted: new Int32Array(given.posted.buffer), postedAt: given.posted.index,

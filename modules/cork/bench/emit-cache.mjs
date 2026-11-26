@@ -6,9 +6,9 @@
 
 /**
  * What keeping the emitted region functions costs and pays, by keeper: the
- * thread's own LRU (`createEmitCache`), the process's arena (`arenaEmitCache`)
- * and the run's Cellar cache (`keptEmitCache`), its functions kept as bodies
- * under `cork/` as the cpu layer keeps them.
+ * thread's own LRU (`createEmitCache`) and the run's Cellar cache
+ * (`keptEmitCache`), its functions kept as bodies under `cork/` as the cpu
+ * layer keeps them.
  *
  *   node modules/cork/bench/emit-cache.mjs [name...] [--bits 64] [--iters N] [--reps N]
  *       [--json]
@@ -32,8 +32,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { createCorkHost } from '../../core/src/layers/cpu/internal/cork-host.js';
 import { createReader, openKeeper } from '@bottlify/cellar';
 import * as engine from '../src/index.js';
-import { createArena } from '../src/runtime/arena.js';
-import { arenaEmitCache, createEmitCache } from '../src/runtime/emit-built.js';
+import { createEmitCache } from '../src/runtime/emit-built.js';
 import { keptEmitCache, readEntry } from '../src/runtime/kept.js';
 import { median, option } from '../../../tools/lib/common.mjs';
 
@@ -74,8 +73,8 @@ async function runCacheOf(budget, onPut = ()=>{}){
             },
         } });
     told.push(message=>reader.adopt(message));
-    // Its first segment and the spare it keeps made now, as an arena's memory
-    // is made before it is timed: a run's keeper makes them once.
+    // Its first segment and the spare it keeps made now, before it is timed:
+    // a run's keeper makes them once.
     reader.put('warm', new Uint8Array(8), { disk: 'never' });
     /** @type {import('../src/runtime/kept.js').KeptSpace} */
     const space = {
@@ -99,7 +98,6 @@ async function runCacheOf(budget, onPut = ()=>{}){
 /** @type {Record<string, () => Promise<{ cache: any, close: () => void }>>} */
 const keepers = {
     local: async()=>({ cache: createEmitCache(), close: ()=>{} }),
-    arena: async()=>({ cache: arenaEmitCache(createArena()), close: ()=>{} }),
     // As the run's cache is read on the keeper's own thread: its calls plain calls.
     cellar: async()=>{
         const { space, close } = await runCacheOf(48 << 20);

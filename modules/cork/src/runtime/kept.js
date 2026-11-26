@@ -233,12 +233,24 @@ export function readEntry(bytes){
  * @returns {import('./emit-built.js').EmitCache}
  */
 export function keptEmitCache(space){
+    // The last key's name: the emitter keeps under the key it just missed.
+    let lastKey = '';
+    let lastName = '';
+    /** @param {string} key */
+    const nameOf = key=>{
+        if (key !== lastKey)
+        {
+            lastKey = key;
+            lastName = keptName(key);
+        }
+        return lastName;
+    };
     /** @type {import('./emit-built.js').EmitCache} */
     const cache = {
         hits: 0,
         context: signature=>signature,
         take(key, shape){
-            const kept = space.with(keptName(key), bytes=>takeEntry(bytes, key, shape));
+            const kept = space.with(nameOf(key), bytes=>takeEntry(bytes, key, shape));
             if (kept !== undefined)
             {
                 cache.hits++;
@@ -249,7 +261,7 @@ export function keptEmitCache(space){
             const entry = entryOf(key, shape, kept);
             const bytes = new Uint8Array(entry.length);
             entry.write(bytes, 0);
-            putNew(space, keptName(key), bytes);
+            putNew(space, nameOf(key), bytes);
         },
     };
     return cache;

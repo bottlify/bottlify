@@ -7,8 +7,8 @@
 /**
  * The translation workers: which one takes a batch (`freeTranslator`), what
  * a batch out covers until it is published (`coveredOut`), the options the
- * emitter is given here and on a worker (`emitOptions`), the arena their
- * emit cache shares, and a worker's whole life - attached when it loads or a
+ * emitter is given here and on a worker (`emitOptions`), the run's cache
+ * their functions are kept in, and a worker's whole life - attached when it loads or a
  * host's pool lends it, its answers taken (`onWorkerResults`), given up on
  * when overdue, detached when the pool takes it back. Forming and the store's
  * lookups stay on the engine thread, where the memory and the store are; the
@@ -17,8 +17,7 @@
  */
 
 import { CallStack } from '../emit/region.js';
-import { arenaEmitCache, createEmitCache } from './emit-built.js';
-import { createArena } from './arena.js';
+import { createEmitCache } from './emit-built.js';
 import { keptEmitCache, putAll } from './kept.js';
 import { ANY_TOP, keyOf } from './entries.js';
 import { spansOf } from './summary.js';
@@ -145,20 +144,14 @@ export function createTranslators(state){
     /** Whether a region formed and not published will have an entry at an address and top.
      * @param {Set<number> | Map<number, number>} keys @param {number} eip @param {number} top */
     const coveredIn = (keys, eip, top)=>keys.has(keyOf(eip, ANY_TOP)) || keys.has(keyOf(eip, top));
-    /** The process's translation cache arena, shared with every translator it has; none
-     * without a translator or where memory cannot be shared. Its size is `createArena`'s:
-     * an arena of 8 MiB rather than 48 bought no memory back (roadmap/negative-results.md). */
     /** The run's cache the host gives the functions emitted to (`KeptStore`): every
      * thread of the run reads them there in place, this one writes them. */
     const kept = settings.kept ?? null;
-    const arena = kept !== null ? null : settings.arena ?? (workerUrl !== null
-        && typeof SharedArrayBuffer === 'function' ? createArena() : null);
-    /** What emitting inline keeps for a relink to take again: the run's cache, the arena
-     * the translators share, or a cache of this thread's own. */
+    /** What emitting inline keeps for a relink to take again: the run's cache, or a cache
+     * of this thread's own where there is none (a worker keeps its own then too). */
     /** The functions translation workers took from the run's cache, and handed over to keep. */
     const keptCounts = { workerHits: 0, handed: 0 };
-    const emitCache = kept !== null ? keptEmitCache(kept.space)
-        : arena !== null ? arenaEmitCache(arena) : createEmitCache();
+    const emitCache = kept !== null ? keptEmitCache(kept.space) : createEmitCache();
     /** The options both the inline emitter and the worker's take. */
     const emitOptions = ()=>({
         countTransfers: transfersCounted,
@@ -347,7 +340,7 @@ export function createTranslators(state){
         // place; the segments made and let go after follow it.
         const joined = kept?.join?.(message=>adapter.post({ cache: message }, [])) ?? null;
         translator.leave = joined?.leave ?? null;
-        adapter.post({ ready: true, doorbell: settings.doorbell ?? null, arena,
+        adapter.post({ ready: true, doorbell: settings.doorbell ?? null,
             kept: joined === null ? null : { shared: joined.shared, segments: joined.segments,
                 prefix: /** @type {import('./kept.js').KeptStore} */ (kept).prefix } }, []);
     };
@@ -407,7 +400,6 @@ export function createTranslators(state){
         cover,
         uncoverKeys,
         coveredIn,
-        arena,
         kept,
         keptCounts,
         emitCache,
