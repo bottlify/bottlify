@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { noCache } from '../cache/module.js';
 import { CPU_COUNTERS, cpuModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
@@ -30,7 +31,7 @@ test('the cpu registers its counters with the log layer and samples them once a 
 
 test('a build without a log registry still creates', async()=>{
     const api = await cpuModule.create({}, /** @type {any} */ ({
-        requireApi: ()=>({}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}),
         provide: ()=>{},
     }));
     assert.equal(typeof api.boot, 'function');
@@ -41,7 +42,7 @@ test('a build without a log registry still creates', async()=>{
 /** A cpu instance with no log registry, for tests that never boot the machine. */
 async function open(){
     return cpuModule.create({}, /** @type {any} */ ({
-        requireApi: ()=>({}),
+        requireApi: (/** @type {string} */ name)=>(name === 'cache' ? noCache : {}),
         provide: ()=>{},
     }));
 }
