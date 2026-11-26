@@ -12,7 +12,8 @@
  * from its entry, with V8's sampling heap profiler (`tools/fixtures/allocation.mjs`);
  * each bound sits above what the stage makes now with room for the sampler, and below
  * what it made before its records were shared or reused. Decoding: an instruction's
- * record, its operands and prefixes.
+ * record, its operands and prefixes; forming: the regions, sharing what forming found
+ * (`formShared`) as a batch's regions do.
  */
 
 import { test } from 'node:test';
@@ -20,7 +21,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { bytesPerCall } from '../../../tools/fixtures/allocation.mjs';
 import { decode, MODE_64 } from './decode/decoder.js';
-import { formRegion } from './region.js';
+import { formRegion, formShared } from './region.js';
 
 const BASE = 0x400000;
 
@@ -81,7 +82,9 @@ function imageOf(variant){
 
 for (const variant of /** @type {const} */ (['x87', 'x64']))
 {
-    const { read, mode, regions } = imageOf(variant);
+    const { read, translatable, mode, regions, instructions } = imageOf(variant);
+    const perInstruction = (/** @type {number} */ perRegion)=>perRegion * regions.length
+        / instructions;
 
     test(`decoding an instruction of the ${variant} image makes at most 260 bytes`, async()=>{
         const at = regions.flatMap(({ blocks })=>blocks.flatMap(block=>block.instructions
@@ -93,4 +96,21 @@ for (const variant of /** @type {const} */ (['x87', 'x64']))
         }, { calls: at.length });
         assert.ok(bytes < 260, `${bytes.toFixed(0)} bytes an instruction`);
     });
+
+    test(`forming the ${variant} image's regions makes at most 700 bytes an instruction`,
+        async()=>{
+            let next = 0;
+            /** @type {ReturnType<typeof formShared>} */
+            let shared = formShared();
+            const bytes = await bytesPerCall(()=>{
+                if (next === 0)
+                {
+                    shared = formShared();
+                }
+                formRegion(read, regions[next].entry, { translatable, mode, shared });
+                next = next + 1 === regions.length ? 0 : next + 1;
+            }, { calls: regions.length });
+            assert.ok(perInstruction(bytes) < 700,
+                `${perInstruction(bytes).toFixed(0)} bytes an instruction`);
+        });
 }

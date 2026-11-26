@@ -290,7 +290,7 @@ function thunkCall(decodeAt, translatable, call){
     {
         return null;
     }
-    const [operand] = jump.operands;
+    const operand = jump.operands[0];
     if (operand.kind !== 'mem' || operand.size !== 4 || (operand.base ?? -1) >= 0
         || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
         || operand.addressSize === 16)
@@ -315,10 +315,12 @@ function thunkCall(decodeAt, translatable, call){
  *
  * @param {import('./decode/decoder.js').Instruction} call
  * @param {boolean} [wide]  long-mode code
+ * @param {boolean} [jump]  a `jmp [address]` too: a thunk's jump through the slot
  */
-function importSlot(call, wide = false){
-    const [operand] = call.operands;
-    if (call.op !== 'call' || call.prefixes.operand || operand?.kind !== 'mem'
+function importSlot(call, wide = false, jump = false){
+    const operand = call.operands[0];
+    if (call.op !== 'call' && !(jump && call.op === 'jmp') || call.prefixes.operand
+        || operand?.kind !== 'mem'
         || operand.size !== (wide ? 8 : 4) || (operand.base ?? -1) >= 0
         || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
         || operand.addressSize === 16 || wide && operand.addressSize !== 64)
@@ -345,7 +347,7 @@ function importSlot(call, wide = false){
  * @returns {number[] | undefined}
  */
 function slotCallee(read, call, leafAt, wide = false){
-    const [operand] = call.operands;
+    const operand = call.operands[0];
     if (operand.kind !== 'mem' || operand.size !== (wide ? 8 : 4) || (operand.base ?? -1) >= 0
         || (operand.index ?? -1) >= 0 || operand.segment === 4 || operand.segment === 5
         || operand.addressSize === 16 || wide && operand.addressSize !== 64)
@@ -365,6 +367,15 @@ function slotCallee(read, call, leafAt, wide = false){
     const target = dword(slot);
     return target !== 0 && leafAt(target, false) === null ? [target] : undefined;
 }
+
+/**
+ * A block's exit, every one of one shape: a function of its own, where a closure over
+ * `next` that `exitOf` made was one object more for every instruction it was asked of.
+ *
+ * @param {ExitKind} kind @param {number[]} targets @param {number} next
+ * @returns {Block['exit']}
+ */
+const exitRecord = (kind, targets, next)=>({ kind, targets, next, backEdge: false });
 
 /**
  * The callees a call block may go to inside the region: a direct call's, or
@@ -410,7 +421,7 @@ export function emptyCode(blockAt, start){
                 ? /** @type {number} */ (instruction.operands[0].value) : 0;
             return popped % 4 === 0 && popped <= 248 ? jumps << 6 | (popped / 4 + 1) : 0;
         }
-        const [operand] = instruction.operands;
+        const operand = instruction.operands[0];
         if (instruction.op !== 'jmp' || operand?.kind !== 'rel')
         {
             return 0;
@@ -873,7 +884,7 @@ const sameOperand = (a, b)=>a.kind === b.kind && a.size === b.size && a.reg === 
 function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
     const { instructions } = block;
     const jump = instructions[instructions.length - 1];
-    const [operand] = jump.operands;
+    const operand = jump.operands[0];
     if (jump.op !== 'jmp' || operand.kind !== 'mem' || operand.size !== 4
         || (operand.base ?? -1) >= 0 || (operand.index ?? -1) < 0 || operand.scale !== 4
         || operand.addressSize === 16 || operand.segment === 4 || operand.segment === 5)
@@ -1155,6 +1166,9 @@ export function formRegion(read, entry,
             }
             return decoded;
         };
+    /** @param {number} at */
+    const dword = at=>(read(at) | read(at + 1) << 8 | read(at + 2) << 16
+        | read(at + 3) << 24) >>> 0;
     /** @type {Map<number, Block>} by start */
     const blocks = new Map();
     /** The starts still to decode, by how many callees deep they were reached:
@@ -1296,7 +1310,14 @@ export function formRegion(read, entry,
     };
     /** @param {number} at */
     const addStart = at=>{
-        sorted.splice(place(at), 0, at);
+        // Moved up by hand: `splice` answers an array of what it removed, every call.
+        let i = sorted.length;
+        const to = place(at);
+        for (; i > to; i--)
+        {
+            sorted[i] = sorted[i - 1];
+        }
+        sorted[to] = at;
     };
     // Whether two blocks share a byte: a target inside an instruction another
     // block decoded, or an instruction running into a block after it. Until
@@ -1378,8 +1399,8 @@ export function formRegion(read, entry,
         const room = inPredicted ? predictedRoom : depth === 0 ? ownRoom : NO_ROOM;
         // What counts against the caps and the room: a predicted callee's blocks all
         // of the region, the others' those that are not a predicted callee's.
-        const blocksNow = ()=>(inPredicted ? blocks.size : blocks.size - predictedBlocks);
-        if (blocksNow() >= maxBlocks + room.blocks || !translatable(start))
+        const blocksNow = inPredicted ? blocks.size : blocks.size - predictedBlocks;
+        if (blocksNow >= maxBlocks + room.blocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.
             continue;
@@ -1399,8 +1420,12 @@ export function formRegion(read, entry,
                     // A predicted callee's promise is on its own room, as its blocks are.
                     owed += blocks.has(at) || (!inPredicted && predictedHeld.has(at)) ? 0 : 1;
                 }
-                const more = found.filter(at=>!blocks.has(at) && !promised.has(at)).length;
-                if (blocksNow() + owed + more > maxBlocks + room.blocks)
+                let more = 0;
+                for (const at of found)
+                {
+                    more += blocks.has(at) || promised.has(at) ? 0 : 1;
+                }
+                if (blocksNow + owed + more > maxBlocks + room.blocks)
                 {
                     continue;
                 }
@@ -1462,11 +1487,8 @@ export function formRegion(read, entry,
                 && (!wide || slotHelpers) && !('refused' in decoded) && translatable(called)
                 ? decodeAt(called) : null;
             const thunkSlot = thunk !== null && !('refused' in thunk)
-                ? importSlot({ ...thunk, op: thunk.op === 'jmp' ? 'call' : thunk.op }, wide) : -1;
+                ? importSlot(thunk, wide, true) : -1;
             const slot = direct >= 0 ? direct : thunkSlot;
-            /** @param {number} at */
-            const dword = at=>(read(at) | read(at + 1) << 8 | read(at + 2) << 16
-                | read(at + 3) << 24) >>> 0;
             // A long-mode slot holds a quadword: a function past 4 GiB is none formed.
             const slotted = slot < 0 || wide && dword(slot + 4) !== 0 ? -1 : dword(slot);
             const through = slotted > 0 && translatable(slotted)
@@ -1478,10 +1500,14 @@ export function formRegion(read, entry,
             {
                 const stub = thunkSlot >= 0 && thunk !== null && !('refused' in thunk)
                     ? { name: 'thunk', address: called, length: thunk.length } : undefined;
-                block.instructions.push(...helperInstructions(through, decoded, slotted, read)
-                    .map(one=>(one.op === 'crt' ? { ...one, crtSlot: slot, crtTarget: slotted,
-                        crtSlotBytes: wide ? 8 : 4,
-                        ...stub ? { stub } : {} } : one)));
+                // A loop rather than a closure over `slot`: one would put this block's
+                // variables in a context made for every instruction decoded.
+                for (const one of helperInstructions(through, decoded, slotted, read))
+                {
+                    block.instructions.push(one.op === 'crt' ? { ...one, crtSlot: slot,
+                        crtTarget: slotted, crtSlotBytes: wide ? 8 : 4,
+                        ...stub ? { stub } : {} } : one);
+                }
                 took(decoded.length);
                 eip = wide ? eip + decoded.length : (eip + decoded.length) >>> 0;
                 block.end = eip;
@@ -1576,8 +1602,9 @@ export function formRegion(read, entry,
                 // The fall-through first, so a capped region keeps the code
                 // that follows in address order rather than a far target. A
                 // callee's branch to cold code is a way out (`coldBranch`).
-                for (const target of [...exit.targets].reverse())
+                for (let at = exit.targets.length - 1; at >= 0; at--)
                 {
+                    const target = exit.targets[at];
                     if (depth === 0 || !coldBranch(exit, decoded.eip, target, coldReach, hot))
                     {
                         follow(target, depth);
@@ -1923,27 +1950,25 @@ export function hashOfPlan(read, { spans, named, tables, helpers }){
  */
 function exitOf(instruction, next){
     const { op, operands, cc, faults } = instruction;
-    /** @param {ExitKind} kind @param {number[]} targets */
-    const exit = (kind, targets)=>({ kind, targets, next, backEdge: false });
     if (faults === 'halt')
     {
-        return exit('hlt', []);
+        return exitRecord('hlt', [], next);
     }
     if (faults === 'invalid')
     {
-        return exit('fault', []);
+        return exitRecord('fault', [], next);
     }
     if (faults === 'trap')
     {
-        return exit('trap', []);
+        return exitRecord('trap', [], next);
     }
     const target = operands[0]?.target ?? 0;
     switch (op)
     {
         case 'jmp':
             return operands[0].kind === 'rel'
-                ? exit('jump', [target])
-                : exit('indirect', []);
+                ? exitRecord('jump', [target], next)
+                : exitRecord('indirect', [], next);
         case 'call':
             // `call $+5` pushes its own return address and goes on to it: a
             // push, not a call -- a program's way to find its own address,
@@ -1956,16 +1981,16 @@ function exitOf(instruction, next){
                 return null;
             }
             return operands[0].kind === 'rel'
-                ? exit('call', [target])
-                : exit('indirect', []);
+                ? exitRecord('call', [target], next)
+                : exitRecord('indirect', [], next);
         case 'ret':
-            return exit('ret', []);
+            return exitRecord('ret', [], next);
         case 'loop': case 'loope': case 'loopne': case 'jecxz':
-            return exit('loop', [target, next]);
+            return exitRecord('loop', [target, next], next);
         default:
             if (cc !== undefined && op.startsWith('j'))
             {
-                return exit('jcc', [target, next]);
+                return exitRecord('jcc', [target, next], next);
             }
             return null;
     }
