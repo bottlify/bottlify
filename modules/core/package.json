@@ -71,13 +71,12 @@
     "src/layers/cpu/internal/record-frame.js",
     "src/layers/cpu/internal/translation-store.js",
     "src/layers/cpu/internal/translation-store.writer.js",
-    "src/layers/filesystem/internal/bundle/cache.js",
+    "src/layers/filesystem/internal/bundle/saved.js",
     "src/layers/filesystem/internal/bundle/crc32.js",
     "src/layers/filesystem/internal/bundle/format.js",
     "src/layers/filesystem/internal/errors.js",
     "src/layers/filesystem/internal/iso/build.js",
     "src/layers/filesystem/internal/iso/iso9660.js",
-    "src/layers/filesystem/internal/opfs-store.js",
     "src/layers/filesystem/internal/paths.js",
     "src/layers/loader/internal/pe.js",
     "src/layers/loader/internal/resources.js",
@@ -160,7 +159,8 @@
     "src/storage.js",
     "src/system/guid.js",
     "src/system/opfs-file.js",
-    "src/zstd.js"
+    "src/zstd.js",
+    "vendor/cellar/cellar.js"
   ],
   "dependencies": {
     "@bottlify/cork": "~1.1.0"

@@ -1,16 +1,17 @@
 {
   "repo": "bottlify/cellar",
-  "tag": "v0.6.0",
+  "tag": "v0.8.0",
   "files": {
-    "cellar.js": "755775988424b854242d66eeecc043bc709e6f7b9c49bbcba47c616579e9969f",
-    "types/bell.d.ts": "1be21a060e78a2d749ecec263f9067e966c6d67d7e68683603360ab2b5ac17af",
+    "cellar.js": "90a60cd4b1464397b3f57b67f6c11bdbc1d0492f9a625fbdeb9ff7b48d4ebc20",
+    "types/bell.d.ts": "7f32db0ccc7969a36ea672d8ed472c760874c6207c4688d318ef37ff6900eb0b",
     "types/buddy.d.ts": "12799e4e9fca4a89aa19ae6e32668a2420c7d9365b1342f473a1eb54871c8eec",
     "types/bytes.d.ts": "fd87a8ca6bcb4e80876d8e1bf303fd6ea7dcf215ffff5a653c825fdc70e09a13",
     "types/channel.d.ts": "1e5447fa5e138176d2cbdfd39c860292324831084d4934445d19e3d804f9ac7f",
-    "types/index.d.ts": "76383d82dd9aedf086b286e3cac4d25223ba930e52de3afe23f926ff23f18838",
+    "types/index.d.ts": "70cfe0ae0d1d3bb46326451b5f115e5890714856c7b3234b39c1b23fb93caf2d",
+    "types/journal.d.ts": "704f70df01b2ca8314194342233a69a6e9f559b69b3ccd7cd4962e737f37da7e",
     "types/keeper.d.ts": "ddab41a7b8c66190b877bc2ad548b8233109fa440c1287a4621330f9bba4618d",
     "types/reader.d.ts": "159b4b61706287469108bd0e1e5025d445924501eee282a7000112a26ee38189",
-    "types/ring.d.ts": "1a0f36c740e314b54e7a53084acfa4edd6b30de9fb43ae2e42d19418241cffbb",
+    "types/ring.d.ts": "2bb88d17b500b8ec8c1f8cfcb40f95f8c7bdfcb1b0a039aae13c9bb92205a71f",
     "types/shared.d.ts": "7b30e34dc6bfdaf74170bc64b54aad8658a8d2c324e8016f79c748c3bcfa9275"
   }
 }
