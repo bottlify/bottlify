@@ -228,10 +228,19 @@ test('a resumed thread reports what it waited for and what it was answered', ()=
 test('what a parked call owes once its wait ends is done as the thread resumes, once', ()=>{
     // GetOverlappedResult's count: only the end of the wait knows it.
     const cpu = { ...fakeCpu(), resumeContextAt: ()=>{} };
-    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    /** @type {number[]} */
+    const resumes = [];
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        onResume: (thread, reason, value)=>resumes.push(value) });
     const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
     let owed = 0;
-    a.whenResumed = ()=>owed++;
+    /** @type {number[]} */
+    const answered = [];
+    a.whenResumed = (/** @type {number} */ answer)=>{
+        owed++;
+        answered.push(answer);
+        return 7;
+    };
     sched.block(a, 'an event');
     sched.runOnce();
     assert.equal(owed, 0, 'not while it waits');
@@ -240,6 +249,8 @@ test('what a parked call owes once its wait ends is done as the thread resumes, 
     a.waitResult = 1;
     sched.runOnce();
     assert.equal(owed, 1, 'as it resumes');
+    assert.deepEqual(answered, [1], 'given what the wait answered');
+    assert.equal(resumes.at(-1), 7, 'and its answer is the call\'s');
     a.parkedReturn = 0x401000;
     sched.block(a, 'an event');
     sched.wake(a);

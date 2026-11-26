@@ -1152,7 +1152,8 @@ export function createThreadingFunctions(host){
          * low bit is a flag, not part of the handle), or the file's handle
          * when there is none, and then answers TRUE with the count even if
          * Internal still says pending (Wine's kernel32 file tests,
-         * test_overlapped); a wait that parks reads the count as it ends.
+         * test_overlapped); a wait that parks reads the count and the
+         * status as it ends.
          */
         GetOverlappedResult: {
             argBytes: 16,
@@ -1192,9 +1193,22 @@ export function createThreadingFunctions(host){
                         host.currentThread());
                     if (answered === null)
                     {
-                        // The count is the one the I/O leaves when the wait
-                        // ends, not the one there now.
-                        kernel.whenResumed(host.currentThread(), count);
+                        // The count and the answer are the ones the I/O
+                        // leaves when the wait ends, not the ones there now:
+                        // an operation that ended in an error (a message
+                        // longer than the buffer, a cancel, a broken pipe)
+                        // answers FALSE with its error.
+                        const thread = host.currentThread();
+                        kernel.whenResumed(thread, (/** @type {number | bigint} */ answer)=>{
+                            count();
+                            const ended = field(overlappedFields.internal);
+                            if (ended === STATUS.SUCCESS || ended === STATUS.PENDING)
+                            {
+                                return answer;
+                            }
+                            host.setLastErrorFor?.(thread, toDosError(ended));
+                            return 0;
+                        });
                         return host.park();
                     }
                     status = field(overlappedFields.internal);

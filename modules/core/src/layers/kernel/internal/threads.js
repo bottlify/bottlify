@@ -860,18 +860,20 @@ export function createScheduler(options){
         if (next.parkedReturn !== null && next.parkedReturn !== undefined)
         {
             // What the call that parked owes once its wait has ended (an
-            // out-parameter only the end of the wait can fill), done before
-            // the thread runs again.
+            // out-parameter only the end of the wait can fill, or an answer),
+            // done before the thread runs again; it answers the call, given
+            // what the wait answered.
             const owed = next.whenResumed;
+            let returnValue = next.waitResult ?? 0;
             if (owed)
             {
                 next.whenResumed = null;
-                owed();
+                returnValue = owed(returnValue);
             }
             resume = {
                 eip: next.parkedReturn,
                 esp: next.resumeStack ?? null,
-                returnValue: next.waitResult ?? 0,
+                returnValue,
                 ...next.parkedInStub === true ? { inStub: true } : {},
                 // Only a thread sent into code that reads more than its
                 // stack carries these: an exception handler's block.

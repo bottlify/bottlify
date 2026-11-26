@@ -896,12 +896,16 @@ export function createKernelModule(){
                 /**
                  * Runs `work` when `thread`, about to park in a host call, is
                  * resumed, before it runs again: what the call writes only once
-                 * its wait has ended (GetOverlappedResult's count). One at a
-                 * time; a thread that parks again sets its own.
+                 * its wait has ended (GetOverlappedResult's count), and what
+                 * the call answers then: `work` is given the wait's answer and
+                 * returns the call's. One at a time; a thread that parks again
+                 * sets its own.
                  *
-                 * @param {any} thread @param {() => void} work
+                 * @param {any} thread @param {(answer: number | bigint) => number | bigint} work
                  */
-                whenResumed: (/** @type {any} */ thread, /** @type {() => void} */ work)=>{
+                whenResumed: (/** @type {any} */ thread,
+                    /** @type {(answer: number | bigint) => number | bigint} */ work)=>
+                {
                     thread.whenResumed = work;
                 },
 

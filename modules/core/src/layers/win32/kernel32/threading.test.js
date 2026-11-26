@@ -1461,8 +1461,24 @@ test('an operation still pending is incomplete without bWait, and waited for wit
     // The read finishes while the caller sleeps; the count is the one it left.
     pending.view.setUint32(0x20, 0, true);
     pending.view.setUint32(0x24, 4, true);
-    current.whenResumed();
+    assert.equal(current.whenResumed(1), 1, 'TRUE, as the wait answered');
     assert.equal(pending.count(), 4, 'the count the I/O left, written as the wait ends');
+
+    // One that ends in an error while the caller sleeps: FALSE and its error,
+    // set on the caller, whichever thread is running as it resumes.
+    /** @type {any[]} */
+    const errorsFor = [];
+    parts.host.setLastErrorFor = (/** @type {any} */ thread, /** @type {number} */ code)=>
+        errorsFor.push([thread, code]);
+    pending.view.setUint32(0x20, STATUS_PENDING, true);
+    assert.equal(fns.GetOverlappedResult.handler([0, 0x20, 0x40, 1]), PARKED);
+    const STATUS_BUFFER_OVERFLOW = 0x80000005;
+    const ERROR_MORE_DATA = 234;
+    pending.view.setUint32(0x20, STATUS_BUFFER_OVERFLOW, true);
+    pending.view.setUint32(0x24, 8, true);
+    assert.equal(current.whenResumed(1), 0, 'FALSE: the operation failed');
+    assert.deepEqual(errorsFor, [[current, ERROR_MORE_DATA]]);
+    assert.equal(pending.count(), 8, 'with the count it left');
     pending.view.setUint32(0x20, STATUS_PENDING, true);
 
     pending.view.setUint32(0x30, 0, true);
