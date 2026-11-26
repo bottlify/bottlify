@@ -46,7 +46,7 @@ const SWEEP_MS = 1000;
 /**
  * @param {{ budget?: number,
  *     runFolder?: import('../layers/filesystem/internal/run-folder.js').RunFolder | null,
- *     onTail?: (tail: import('../layers/cache/module.js').OwnerTail) => void }} [options]
+ *     onTail?: (tail: import('../layers/cache/module.js').OwnerTail) => void }} [opened]
  *     `runFolder`: where the cache's disk is made; none, a cache in memory alone;
  *     `onTail`: an owner that went left bodies under its names past what it held
  */
