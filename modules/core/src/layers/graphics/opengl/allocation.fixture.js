@@ -13,11 +13,12 @@ import { Session } from 'node:inspector/promises';
  * figure is a multiple of about `interval`; a path that allocates nothing
  * comes out at nothing or a sample or two.
  *
- * @param {() => void} work
- * @param {{ interval?: number }} [options]
+ * @param {() => unknown} work  awaited where it answers a promise
+ * @param {{ interval?: number, within?: string }} [options]  `within`: only what
+ *     functions of files whose URL holds it made themselves
  * @returns {Promise<number>}
  */
-export async function bytesAllocatedBy(work, { interval = 1024 } = {}){
+export async function bytesAllocatedBy(work, { interval = 1024, within = '' } = {}){
     const session = new Session();
     session.connect();
     try
@@ -25,13 +26,18 @@ export async function bytesAllocatedBy(work, { interval = 1024 } = {}){
         await session.post('HeapProfiler.enable');
         await session.post('HeapProfiler.startSampling', { samplingInterval: interval,
             includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true });
-        work();
+        await work();
         const { profile } = await session.post('HeapProfiler.stopSampling');
         let bytes = 0;
-        for (const sample of profile.samples)
-        {
-            bytes += sample.size;
-        }
+        /** @param {any} node */
+        const walk = node=>{
+            if (node.callFrame.url.includes(within))
+            {
+                bytes += node.selfSize;
+            }
+            node.children.forEach(walk);
+        };
+        walk(profile.head);
         return bytes;
     }
     finally
