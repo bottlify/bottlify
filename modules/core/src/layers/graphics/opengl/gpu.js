@@ -1989,14 +1989,17 @@ export function createGpuRenderer(services){
         // refused, and with it every frame that samples the texture. A level
         // below GL_TEXTURE_BASE_LEVEL is in it where it fits, and else left out.
         const chain = Math.floor(Math.log2(Math.max(1, base.width, base.height))) + 1;
-        /** @param {import('./objects.js').TextureLevel | undefined} level @param {number} at */
-        const fits = (level, at)=>!!level && level.width === Math.max(1, base.width >> at)
-            && level.height === Math.max(1, base.height >> at);
         const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
+        // Asked for every sampled texture on every draw: no closure made for it.
         let levels = 0;
-        while (levels < chain && (levels < first || fits(texture.levels.get(levelKey(levels)),
-            levels)))
+        while (levels < chain)
         {
+            const level = levels < first ? null : texture.levels.get(levelKey(levels));
+            if (levels >= first && (!level || level.width !== Math.max(1, base.width >> levels)
+                || level.height !== Math.max(1, base.height >> levels)))
+            {
+                break;
+            }
             levels++;
         }
         const bcFormat = bcFormatOf(texture, levels, cube);
@@ -2091,7 +2094,9 @@ export function createGpuRenderer(services){
             const level = key % FACE_STRIDE;
             const face = (key - level) / FACE_STRIDE;
             const image = texture.levels.get(key);
-            if (!image || level >= levels || face >= (cube ? 6 : 1) || !fits(image, level))
+            if (!image || level >= levels || face >= (cube ? 6 : 1)
+                || image.width !== Math.max(1, base.width >> level)
+                || image.height !== Math.max(1, base.height >> level))
             {
                 continue;
             }

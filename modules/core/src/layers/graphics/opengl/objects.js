@@ -403,47 +403,46 @@ export function createBufferObject(name){
  * @returns {boolean}
  */
 export function isTextureComplete(texture){
-    const faces = texture.target === GL.TEXTURE_CUBE_MAP ? 6 : 1;
+    const target = texture.target;
+    const faces = target === GL.TEXTURE_CUBE_MAP ? 6 : 1;
     const first = texture.parameters.get(GL.TEXTURE_BASE_LEVEL) ?? 0;
     const base = texture.levels.get(levelKey(first));
     if (!base || base.width === 0 || base.height === 0)
     {
         return false;
     }
-    const [width, height, depth] = interiorOf(texture.target, base);
+    const width = interiorWidth(base);
+    const height = interiorHeight(target, base);
+    const depth = interiorDepth(target, base);
     const mipmapped = MIPMAP_FILTERS.has(texture.parameters.get(GL.TEXTURE_MIN_FILTER) ?? 0);
     const last = texture.parameters.get(GL.TEXTURE_MAX_LEVEL) ?? 1000;
     if (mipmapped && first > last)
     {
         return false;
     }
+    if (faces > 1 && width !== height)
+    {
+        return false;
+    }
     // A 3D texture's depth halves with its levels; an array's layers do not.
-    const solid = texture.target === GL.TEXTURE_3D;
-    const layeredRows = texture.target === 0x8c18;
-    /** @param {TextureLevel | undefined} image @param {number[]} size */
-    const matches = (image, size)=>!!image && image.internalFormat === base.internalFormat
-        && (image.border ?? 0) === (base.border ?? 0)
-        && interiorOf(texture.target, image).every((extent, k)=>extent === size[k]);
+    const solid = target === GL.TEXTURE_3D;
+    const layeredRows = target === 0x8c18;
+    // The chain ends at 1 on every axis that halves, or at MAX_LEVEL.
+    const steps = mipmapped ? Math.max(0, Math.min(Math.floor(Math.log2(Math.max(width,
+        layeredRows ? 1 : height, solid ? depth : 1))), last - first)) : 0;
+    // Asked of every bound texture on every draw: scalars only, nothing made.
     for (let face = 0; face < faces; face++)
     {
-        if (!matches(texture.levels.get(levelKey(first, face)), [width, height, depth])
-            || (faces > 1 && width !== height))
+        for (let step = 0; step <= steps; step++)
         {
-            return false;
-        }
-        if (!mipmapped)
-        {
-            continue;
-        }
-        // The chain ends at 1 on every axis that halves, or at MAX_LEVEL.
-        const levels = Math.floor(Math.log2(Math.max(width, layeredRows ? 1 : height,
-            solid ? depth : 1)));
-        for (let step = 1; step <= Math.min(levels, last - first); step++)
-        {
-            const size = [Math.max(1, width >> step),
-                layeredRows ? height : Math.max(1, height >> step),
-                solid ? Math.max(1, depth >> step) : depth];
-            if (!matches(texture.levels.get(levelKey(first + step, face)), size))
+            const image = texture.levels.get(levelKey(first + step, face));
+            if (!image || image.internalFormat !== base.internalFormat
+                || (image.border ?? 0) !== (base.border ?? 0)
+                || interiorWidth(image) !== (step === 0 ? width : Math.max(1, width >> step))
+                || interiorHeight(target, image) !== (layeredRows || step === 0 ? height
+                    : Math.max(1, height >> step))
+                || interiorDepth(target, image) !== (solid && step > 0
+                    ? Math.max(1, depth >> step) : depth))
             {
                 return false;
             }
@@ -467,14 +466,21 @@ export function baseLevelOf(texture, face = 0){
  * on both sides of each dimension the target has, so a 1D image's height
  * and an array's layers carry none.
  *
- * @param {number} target @param {TextureLevel} image
- * @returns {number[]} width, height and depth
+ * @param {TextureLevel} image
  */
-function interiorOf(target, image){
-    const border = image.border ?? 0;
+function interiorWidth(image){
+    return image.width - 2 * (image.border ?? 0);
+}
+
+/** @param {number} target @param {TextureLevel} image */
+function interiorHeight(target, image){
     const flat = target === GL.TEXTURE_1D || target === 0x8c18;
-    return [image.width - 2 * border, image.height - (flat ? 0 : 2 * border),
-        (image.depth ?? 1) - (target === GL.TEXTURE_3D ? 2 * border : 0)];
+    return image.height - (flat ? 0 : 2 * (image.border ?? 0));
+}
+
+/** @param {number} target @param {TextureLevel} image */
+function interiorDepth(target, image){
+    return (image.depth ?? 1) - (target === GL.TEXTURE_3D ? 2 * (image.border ?? 0) : 0);
 }
 
 /**

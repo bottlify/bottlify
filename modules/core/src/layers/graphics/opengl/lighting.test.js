@@ -13,7 +13,7 @@ import { inverseTransposeOf } from './context-textures.js';
 
 const MODEL = { ambient: [0, 0, 0, 1], localViewer: false, separateSpecular: false };
 
-/** @param {number[]} values @returns {number[]} */
+/** @param {readonly number[]} values @returns {number[]} */
 const rounded = values=>values.map(value=>Math.round(value * 1000) / 1000 + 0);
 
 test('the normal matrix is the inverse transpose, which only a non-uniform scale shows', ()=>{
