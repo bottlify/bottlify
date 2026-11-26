@@ -63,13 +63,13 @@ const handedOut = (tree, components, path)=>{
 };
 
 /**
- * What the drives' writable layers hold of the tab's memory, and of its disk:
- * each store's own pieces, and those of the page file they stand on, once
- * however many drives share it.
+ * What the drives' writable layers hold of the tab's memory: each store's
+ * own pieces, and the pieces being written of the page file they stand on,
+ * once however many drives share it. The rest of the page file's pieces are
+ * the run's cache's bodies, which it counts (`runCache().spaces.pages`).
  *
  * @param {Iterable<any>} writables
- * @returns {{ heaps: { writable: number }, disk?: { pageFile: number },
- *     pageFile?: Record<string, any> }}
+ * @returns {{ heaps: { writable: number }, pageFile?: Record<string, any> }}
  */
 const writableHeld = writables=>{
     let memory = 0;
@@ -86,17 +86,14 @@ const writableHeld = writables=>{
             memory += store?.heldBytes?.() ?? 0;
         }
     }
-    let disk = 0;
     /** @type {Record<string, any> | undefined} */
     let described;
     for (const pageFile of pageFiles)
     {
         described = pageFile.diagnostics();
-        memory += described?.residentBytes ?? 0;
-        disk += described?.fileBytes ?? 0;
+        memory += described?.workingBytes ?? 0;
     }
-    return { heaps: { writable: memory }, ...described ? { disk: { pageFile: disk } } : {},
-        ...described ? { pageFile: described } : {} };
+    return { heaps: { writable: memory }, ...described ? { pageFile: described } : {} };
 };
 
 /**
@@ -222,7 +219,8 @@ export function createFilesystemModule(){
             const shared = config?.volume ?? null;
             /**
              * Where a writable layer made here keeps its pieces: the run's page
-             * file on the disk, or this thread's memory where there is none.
+             * file, in the run's cache, or this thread's memory where there is
+             * none (a machine built alone).
              *
              * @type {import('./internal/page-file.js').PageFile | null}
              */
@@ -1479,8 +1477,8 @@ export function createFilesystemModule(){
                 version: '0.1.0',
                 status: 'ready',
                 metrics: {
-                    // The writable layers' pieces in memory (`memory-zones.js`);
-                    // the disk is no zone of the tab's, reported beside them.
+                    // The writable layers' pieces in memory of their own
+                    // (`memory-zones.js`); the page file's, beside them.
                     bytesHeld,
                     ...pageFile ? { pageFile } : {},
                     volumes,

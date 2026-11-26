@@ -8,7 +8,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fakeOpfs } from './opfs.fixture.js';
 import { openRunFolder } from './run-folder.js';
-import { openPageFile } from './page-file.js';
 
 /** Lets the removals a release starts without waiting run. */
 const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
@@ -37,18 +36,3 @@ test('a run\'s folder takes away what runs that are gone left, and goes once its
     await settle();
     assert.deepEqual(opfs.names('bottlify-runs'), [], 'gone with its last user');
 });
-
-test('a page file is a file of its run\'s folder, let go with it; none without a folder',
-    async()=>{
-        const opfs = fakeOpfs();
-        const run = await openRunFolder({ root: opfs.root });
-        assert.ok(run);
-        const pageFile = await openPageFile({ runFolder: run, residentBytes: 0 });
-        assert.ok(pageFile);
-        const [name] = opfs.names('bottlify-runs');
-        assert.deepEqual(opfs.names(`bottlify-runs/${name}`), ['pages']);
-        pageFile.close();
-        await settle();
-        assert.deepEqual(opfs.names('bottlify-runs'), []);
-        assert.equal(await openPageFile({ runFolder: null }), null);
-    });

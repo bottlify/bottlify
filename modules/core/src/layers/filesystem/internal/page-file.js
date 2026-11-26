@@ -5,52 +5,56 @@
  */
 
 /**
- * The writable layer on a disk, as a system keeps its file cache: what a
- * program writes goes into pieces held in memory, the least recently used of
- * them written out to one file and let go of once the pieces held pass a
- * bound, and read back when the program reaches them again.
+ * The writable layer of a run's volume, its pieces kept in the run's cache:
+ * what a program writes is held in memory only while it is being written,
+ * then put in the cache as a body of its own, the only copy (the cache keeps
+ * it in shared memory and writes it to the run's folder for room or when
+ * idle, never letting it go), and read from there in place.
  *
  * An installer writes gigabytes -- its own setup files unpacked, then what it
  * installs -- and a writable layer in memory held every byte of it on the
- * engine's thread until the tab was ended. The disk is the origin's private
- * file system through one synchronous access handle (a worker has one, and
- * the engine runs in one), because a guest's ReadFile and WriteFile answer
- * synchronously and so must the store under them.
+ * engine's thread until the tab was ended. A store of its own beside the
+ * cache, a pool of pieces and a file on the disk, was a second budget and a
+ * second disk neither of which the run's memory saw. A guest's ReadFile and
+ * WriteFile answer synchronously, and so does the cache on the thread that
+ * holds its keeper, which is the thread that holds the volume: a process in a
+ * worker of its own reaches the volume across its link.
  *
- * Two parts: the page file (`createPageFile`), which knows pieces and the
- * extents of its file and nothing of paths, shared by every drive of a run;
- * and a store over it (`createPageFileStore`), which keeps the same contract,
- * answer for answer, as the store in memory (`memory-store.js`) -- the
- * differential gate holds the two to that.
+ * Two parts: the page file (`createPageFile`), which knows pieces and nothing
+ * of paths, shared by every drive of a run; and a store over it
+ * (`createPageFileStore`), which keeps the same contract, answer for answer,
+ * as the store in memory (`memory-store.js`) -- the differential gate holds
+ * the two to that.
  */
 
 import { ErrorCode, fsError } from './errors.js';
 import { PIECE_SIZE, zeroes } from './memory-store.js';
-import { openSync, writeAll } from '../../../system/opfs-file.js';
 
 /** The first piece of a small file; it doubles as the file grows, up to PIECE_SIZE. */
 const SMALLEST_PIECE = 4096;
 
 /**
- * The synchronous access handle's surface this uses
- * (FileSystemSyncAccessHandle).
+ * Where the pieces are kept: one space of the run's cache, its bodies only
+ * copies (`cacheSpace` with `onlyCopy` and `disk: 'run'`). `with` reads a body
+ * in place, brought back from the disk first where it is cold (`wait`); `put`
+ * replaces a body whole, false where the cache has no room for it.
  *
- * @typedef {Object} SyncAccess
- * @property {(into: Uint8Array, where: { at: number }) => number} read
- * @property {(from: Uint8Array, where: { at: number }) => number} write
- * @property {() => number} getSize
- * @property {() => void} [flush]
- * @property {() => void} close
+ * @typedef {Object} PieceSpace
+ * @property {<T>(key: string, read: (body: Uint8Array) => T,
+ *     options?: { wait?: boolean }) => T | undefined} with
+ * @property {(key: string, bytes: Uint8Array) => boolean} put
+ * @property {(key: string) => void} drop
+ * @property {(key: string) => 'hot' | 'cold' | null} look
  */
 
 /**
- * A piece of a file: its bytes while it is held, and where they are on the
- * disk once written out. Shared by reference between a file and what a
+ * A piece of a file: its bytes while it is being written (`bytes`), else the
+ * cache's body of it (`kept`). Shared by reference between a file and what a
  * `contents` handed out (`refs`), and copied before it is changed while more
  * than one holds it.
  *
- * @typedef {{ length: number, bytes: Uint8Array | null, at: number, room: number,
- *     dirty: boolean, refs: number }} Piece
+ * @typedef {{ key: string, length: number, bytes: Uint8Array | null, kept: boolean,
+ *     refs: number }} Piece
  */
 
 /**
@@ -58,145 +62,159 @@ const SMALLEST_PIECE = 4096;
  */
 
 /**
- * A page file over `access`, holding at most `residentBytes` of pieces in
- * memory; with no `access`, a pool that never writes out, which a test of the
- * store can stand on.
- *
- * A write out that fails -- the origin's quota reached, the disk full -- is
- * said once through `onFailure`, and from then on nothing more is written
- * out: the pieces stay in memory, as they would in a store with no disk, and
- * nothing the program wrote is lost.
- *
- * @param {SyncAccess | null} access
- * @param {{ residentBytes?: number, onFailure?: (error: Error) => void,
- *     onClosed?: () => void }} [options]
- *     `onClosed`: the file is let go of, after `close` and the last
- *     contents handed out were released
+ * The bytes of pieces being written held in memory at most: an installer's
+ * writes of a few kilobytes each fill a piece before it is put, so a piece is
+ * put once, not once a write; past this the least recently written are put.
  */
-export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFailure,
+export const WORKING_BYTES = 8 * 1024 * 1024;
+
+/**
+ * A page file over `space`, holding at most `workingBytes` of pieces being
+ * written in memory.
+ *
+ * A put the cache refuses -- no room left in it, its disk refusing too -- is
+ * said once through `onFailure`, and from then on nothing more is put: the
+ * pieces stay in memory, as they would in a store with no disk, and nothing
+ * the program wrote is lost. A piece the cache sent to its disk is brought
+ * back to be read; where its memory is all only copies its full disk will
+ * not take, this file's own pieces in it are taken into memory and let go
+ * of there, until it has room.
+ *
+ * @param {PieceSpace} space
+ * @param {{ workingBytes?: number, onFailure?: (error: Error) => void,
+ *     onClosed?: () => void }} [options]
+ *     `onClosed`: the page file is done, after `close` and the last contents
+ *     handed out were released
+ */
+export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
     onClosed } = {})
 {
-    /** The pieces held in memory, least recently used first. @type {Set<Piece>} */
-    const resident = new Set();
-    let residentTotal = 0;
-    /** Extents given back, by length, for the next piece of that length. @type {Map<number, number[]>} */
-    const free = new Map();
-    /** Where the file ends: a new extent is taken here when none of its length is free. */
-    let end = 0;
-    /** The bytes of extents pieces hold on the disk. */
-    let onDisk = 0;
+    /** The pieces being written, held in memory, least recently written first. @type {Set<Piece>} */
+    const working = new Set();
+    let workingTotal = 0;
+    /** The number the next piece's body is named by. */
+    let next = 0;
+    /** The pieces the cache holds a body of, and their bytes. @type {Set<Piece>} */
+    const kept = new Set();
+    let keptBytes = 0;
     /** @type {Error | null} */
     let failed = null;
     let closing = false;
     let closed = false;
-    /** Contents handed out and not yet released, which keep the file open past `close`. */
+    /** Contents handed out and not yet released, which keep the page file past `close`. */
     let outstanding = 0;
-    const counts = { written: 0, writtenBytes: 0, readBytes: 0, evicted: 0, copied: 0 };
+    const counts = { put: 0, putBytes: 0, readBytes: 0, loaded: 0, copied: 0, takenOut: 0 };
 
-    /** @param {Piece} piece */
-    const touch = piece=>{
-        resident.delete(piece);
-        resident.add(piece);
-    };
-
-    /** @param {number} length @returns {number} */
-    const extent = length=>{
-        const reused = free.get(length)?.pop();
-        if (reused !== undefined)
+    /** The cache's body of `piece` let go of, where it has one. @param {Piece} piece */
+    const forget = piece=>{
+        if (piece.kept)
         {
-            return reused;
+            space.drop(piece.key);
+            piece.kept = false;
+            kept.delete(piece);
+            keptBytes -= piece.length;
         }
-        const at = end;
-        end += length;
-        return at;
-    };
-
-    /** @param {Piece} piece */
-    const giveBack = piece=>{
-        if (piece.at < 0)
-        {
-            return;
-        }
-        let list = free.get(piece.room);
-        if (!list)
-        {
-            list = [];
-            free.set(piece.room, list);
-        }
-        list.push(piece.at);
-        onDisk -= piece.room;
-        piece.at = -1;
-        piece.room = 0;
     };
 
     /**
-     * Writes a piece's bytes to its extent, a larger one taken first when it
-     * grew past the one it had. False when the write failed: the piece stays.
-     *
-     * @param {Piece} piece @returns {boolean}
+     * Takes one of this file's pieces the cache holds in memory into memory
+     * of its own and lets its body go, for room to bring another back; false
+     * where none is left there. Nothing is put from then on: the cache has no
+     * room for it.
      */
-    const writeOut = piece=>{
-        if (!access || failed || !piece.bytes)
+    const takeOut = ()=>{
+        for (const piece of kept)
         {
-            return false;
+            if (space.look(piece.key) !== 'hot')
+            {
+                continue;
+            }
+            const bytes = new Uint8Array(piece.length);
+            if (space.with(piece.key, body=>{
+                bytes.set(body);
+                return true;
+            }) !== true)
+            {
+                continue;
+            }
+            forget(piece);
+            piece.bytes = bytes;
+            working.add(piece);
+            workingTotal += piece.length;
+            counts.takenOut++;
+            if (!failed)
+            {
+                failed = new Error('the run\'s cache has no room for what the program wrote');
+                onFailure?.(failed);
+            }
+            return true;
         }
-        if (piece.room < piece.length)
-        {
-            giveBack(piece);
-            piece.at = extent(piece.length);
-            piece.room = piece.length;
-            onDisk += piece.room;
-        }
-        try
-        {
-            writeAll(access, piece.bytes, piece.at);
-        }
-        catch (e){
-            failed = /** @type {Error} */ (e);
-            onFailure?.(failed);
-            return false;
-        }
-        piece.dirty = false;
-        counts.written++;
-        counts.writtenBytes += piece.length;
-        return true;
+        return false;
     };
 
-    /** Lets go of the least recently used pieces until those held fit. */
+    /**
+     * Puts the least recently written pieces in the cache until those held
+     * fit: each replaces the body it had there.
+     */
     const trim = ()=>{
-        if (!access || failed)
+        for (const piece of working)
         {
+            if (workingTotal <= workingBytes || failed)
+            {
+                return;
+            }
+            const bytes = /** @type {Uint8Array} */ (piece.bytes);
+            if (!space.put(piece.key, bytes))
+            {
+                failed = new Error('the run\'s cache has no room for what the program wrote');
+                onFailure?.(failed);
+                return;
+            }
+            if (!piece.kept)
+            {
+                piece.kept = true;
+                kept.add(piece);
+                keptBytes += piece.length;
+            }
+            working.delete(piece);
+            workingTotal -= piece.length;
+            piece.bytes = null;
+            counts.put++;
+            counts.putBytes += bytes.length;
+        }
+    };
+
+    /**
+     * Hands `length` bytes of `piece` from `within` to `put`, a view of where
+     * they lie, valid inside the call.
+     *
+     * @param {Piece} piece @param {number} within @param {number} length
+     * @param {(bytes: Uint8Array) => void} put
+     */
+    const read = (piece, within, length, put)=>{
+        if (piece.bytes)
+        {
+            put(piece.bytes.subarray(within, within + length));
             return;
         }
-        for (const piece of resident)
+        const part = (/** @type {Uint8Array} */ body)=>{
+            put(body.subarray(within, within + length));
+            return true;
+        };
+        while (space.with(piece.key, part, { wait: true }) !== true)
         {
-            if (residentTotal <= residentBytes)
+            if (space.look(piece.key) !== 'cold' || !takeOut())
             {
-                return;
+                throw new Error(`page file: the run's cache lost a piece of ${piece.length} bytes`);
             }
-            if (piece.dirty && !writeOut(piece))
-            {
-                return;
-            }
-            resident.delete(piece);
-            residentTotal -= piece.length;
-            piece.bytes = null;
-            counts.evicted++;
         }
+        counts.readBytes += length;
     };
 
     const finishClose = ()=>{
-        if (closed)
+        if (!closed)
         {
-            return;
-        }
-        closed = true;
-        try
-        {
-            access?.close();
-        }
-        finally
-        {
+            closed = true;
             onClosed?.();
         }
     };
@@ -205,40 +223,33 @@ export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFai
         /** @param {number} length @returns {Piece} */
         make(length){
             /** @type {Piece} */
-            const piece = { length, bytes: new Uint8Array(length), at: -1, room: 0,
-                dirty: true, refs: 1 };
-            resident.add(piece);
-            residentTotal += length;
+            const piece = { key: String(next++), length, bytes: new Uint8Array(length),
+                kept: false, refs: 1 };
+            working.add(piece);
+            workingTotal += length;
             return piece;
         },
 
+        read,
+
         /**
-         * A piece's bytes, read back from the disk if it was let go of. Used
-         * at once: the next `trim` may let go of them again.
+         * A piece's bytes to change, in memory: held until `trim` puts it, its
+         * body in the cache then replaced.
          *
          * @param {Piece} piece @returns {Uint8Array}
          */
-        bytesOf(piece){
-            if (piece.bytes)
+        change(piece){
+            if (!piece.bytes)
             {
-                touch(piece);
-                return piece.bytes;
+                const bytes = new Uint8Array(piece.length);
+                read(piece, 0, piece.length, part=>bytes.set(part));
+                piece.bytes = bytes;
+                workingTotal += piece.length;
+                counts.loaded++;
             }
-            if (!access || closed)
-            {
-                throw new Error('page file: a piece was let go of and the file is closed');
-            }
-            const bytes = new Uint8Array(piece.length);
-            const got = access.read(bytes, { at: piece.at });
-            if (got !== piece.length)
-            {
-                throw new Error(`page file: ${got} of ${piece.length} bytes read back`);
-            }
-            counts.readBytes += got;
-            piece.bytes = bytes;
-            resident.add(piece);
-            residentTotal += piece.length;
-            return bytes;
+            working.delete(piece);
+            working.add(piece);
+            return piece.bytes;
         },
 
         /**
@@ -253,24 +264,26 @@ export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFai
                 return piece;
             }
             const copy = pageFile.make(piece.length);
-            /** @type {Uint8Array} */ (copy.bytes).set(pageFile.bytesOf(piece));
+            const bytes = /** @type {Uint8Array} */ (copy.bytes);
+            read(piece, 0, piece.length, part=>bytes.set(part));
             pageFile.release(piece);
             counts.copied++;
             return copy;
         },
 
         /**
-         * Makes a piece of one holder longer, its bytes kept and the rest zeroes.
+         * Makes a piece of one holder longer, its bytes kept and the rest
+         * zeroes: in memory, its body in the cache let go of until it is put.
          *
          * @param {Piece} piece @param {number} length
          */
         grow(piece, length){
             const bytes = new Uint8Array(length);
-            bytes.set(pageFile.bytesOf(piece));
-            residentTotal += length - piece.length;
+            bytes.set(pageFile.change(piece));
+            forget(piece);
+            workingTotal += length - piece.length;
             piece.bytes = bytes;
             piece.length = length;
-            piece.dirty = true;
         },
 
         /** @param {Piece} piece */
@@ -285,17 +298,17 @@ export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFai
             {
                 return;
             }
-            if (resident.delete(piece))
+            if (working.delete(piece))
             {
-                residentTotal -= piece.length;
+                workingTotal -= piece.length;
             }
             piece.bytes = null;
-            giveBack(piece);
+            forget(piece);
         },
 
         trim,
 
-        /** Counts contents handed out, which keep the file open until released. */
+        /** Counts contents handed out, which keep the page file until released. */
         lend(){
             outstanding++;
         },
@@ -309,8 +322,8 @@ export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFai
         },
 
         /**
-         * Closes the file once nothing handed out still reads from it: a save
-         * under way when the run ends reads its files to the end.
+         * Done once nothing handed out still reads from it: a save under way
+         * when the run ends reads its files to the end.
          */
         close(){
             closing = true;
@@ -320,18 +333,17 @@ export function createPageFile(access, { residentBytes = 64 * 1024 * 1024, onFai
             }
         },
 
-        /** Bytes of pieces held in memory. */
-        residentBytes: ()=>residentTotal,
+        /** Bytes of pieces being written held in memory. */
+        workingBytes: ()=>workingTotal,
 
         diagnostics(){
             return {
-                disk: access !== null,
                 ...failed ? { failed: failed.message } : {},
-                residentBytes: residentTotal,
-                residentPieces: resident.size,
-                residentLimit: residentBytes,
-                onDisk,
-                fileBytes: end,
+                workingBytes: workingTotal,
+                workingPieces: working.size,
+                workingLimit: workingBytes,
+                keptPieces: kept.size,
+                keptBytes,
                 ...counts,
                 outstanding,
                 closed,
@@ -432,9 +444,9 @@ export function createPageFileStore(pageFile){
 
     /**
      * Hands `length` bytes of `pieces` from `offset` to `put`, at `into`
-     * onward, each piece's part where it lies; the page file may let a piece's
-     * bytes go once `put` is done with them (`trim`). Past a piece, and in one
-     * never written, they are zeroes, handed too unless `zeroed` says the
+     * onward, each piece's part where it lies: in memory while it is being
+     * written, else in the cache's body of it. Past a piece, and in one never
+     * written, they are zeroes, handed too unless `zeroed` says the
      * destination holds them already.
      *
      * @param {(Piece | undefined)[]} pieces @param {number} offset @param {number} length
@@ -450,8 +462,8 @@ export function createPageFileStore(pageFile){
             const held = piece ? Math.max(0, Math.min(span, piece.length - within)) : 0;
             if (held > 0)
             {
-                put(pageFile.bytesOf(/** @type {Piece} */ (piece)).subarray(within, within + held), into + done);
-                pageFile.trim();
+                const to = into + done;
+                pageFile.read(/** @type {Piece} */ (piece), within, held, bytes=>put(bytes, to));
             }
             if (held < span && !zeroed)
             {
@@ -474,7 +486,7 @@ export function createPageFileStore(pageFile){
 
     /**
      * The bytes of the piece at `index`, this file's own and able to hold
-     * `needed`, marked changed: the store in memory's rule for its length
+     * `needed`, held to change: the store in memory's rule for its length
      * (`memory-store.js` `pieceFor`).
      *
      * @param {PagedFile} entry @param {number} index @param {number} needed
@@ -505,8 +517,7 @@ export function createPageFileStore(pageFile){
                 entry.pieces[index] = piece;
             }
         }
-        piece.dirty = true;
-        return pageFile.bytesOf(piece);
+        return pageFile.change(piece);
     };
 
     /**
@@ -763,41 +774,6 @@ export function createPageFileStore(pageFile){
         },
 
         /** The page file's pieces held in memory, every store on it together. */
-        heldBytes: ()=>pageFile.residentBytes(),
+        heldBytes: ()=>pageFile.workingBytes(),
     };
-}
-
-/** The page file's name in its run's folder. */
-const FILE = 'pages';
-
-/**
- * Opens a run's page file in the run's own folder (`run-folder.js`), or
- * answers null where it cannot be had synchronously: no folder, or a browser
- * whose handles answer with promises (WebKit before 16.4). The file holds
- * nothing a later run reads: what is kept across runs is the session.
- *
- * @param {{ runFolder?: import('./run-folder.js').RunFolder | null, residentBytes?: number,
- *     onFailure?: (error: Error) => void }} [options]
- * @returns {Promise<PageFile | null>}
- */
-export async function openPageFile({ runFolder = null, residentBytes, onFailure } = {}){
-    if (runFolder === null)
-    {
-        return null;
-    }
-    const letGo = runFolder.use();
-    try
-    {
-        const access = await openSync(await runFolder.folder.getFileHandle(FILE, { create: true }));
-        if (access === null)
-        {
-            letGo();
-            return null;
-        }
-        return createPageFile(access, { residentBytes, onFailure, onClosed: letGo });
-    }
-    catch {
-        letGo();
-        return null;
-    }
 }

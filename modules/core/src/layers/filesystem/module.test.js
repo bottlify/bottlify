@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import { createFilesystemModule, filesystemModule } from './module.js';
 import { PIECE_SIZE, createMemoryStore } from './internal/memory-store.js';
 import { createPageFile } from './internal/page-file.js';
+import { pieceSpace } from './internal/page-space.fixture.js';
+import { cacheSpace } from '../cache/module.js';
 import { buildIso } from './internal/iso/build.js';
 import { openIso } from './internal/iso/iso9660.js';
 import { createIsoSource } from './internal/iso/source.js';
@@ -736,25 +738,10 @@ test('the writable layer says what it holds, and on a page file holds no more th
             { heaps: { writable: 3 * PIECE_SIZE } });
         await inMemory.dispose();
 
-        /** @type {Map<number, Uint8Array>} */
-        const disk = new Map();
-        const access = {
-            /** @param {Uint8Array} into @param {{ at: number }} where */
-            read: (into, { at: offset })=>{
-                into.set(/** @type {Uint8Array} */ (disk.get(offset)));
-                return into.length;
-            },
-            /** @param {Uint8Array} from @param {{ at: number }} where */
-            write: (from, { at: offset })=>{
-                disk.set(offset, from.slice());
-                return from.length;
-            },
-            getSize: ()=>0,
-            close: ()=>{},
-        };
+        const { keeper, space } = await pieceSpace(cacheSpace, { budget: 4 * PIECE_SIZE });
         const paged = createFilesystemModule();
-        const fs = await paged.create({ pageFile: createPageFile(access,
-            { residentBytes: PIECE_SIZE }) });
+        const fs = await paged.create({ pageFile: createPageFile(space,
+            { workingBytes: PIECE_SIZE }) });
         const handle = fs.open(at('setup.tmp'),
             { write: true, disposition: fs.Disposition.CREATE_NEW });
         for (let index = 0; index < 8; index++)
@@ -763,12 +750,13 @@ test('the writable layer says what it holds, and on a page file holds no more th
         }
         fs.close(handle);
         const report = /** @type {any} */ (paged.diagnostics()).metrics;
-        assert.deepEqual(report.bytesHeld, { heaps: { writable: PIECE_SIZE },
-            disk: { pageFile: 7 * PIECE_SIZE } });
-        assert.equal(report.pageFile.evicted, 7);
+        assert.deepEqual(report.bytesHeld, { heaps: { writable: PIECE_SIZE } });
+        assert.equal(report.pageFile.put, 7);
+        assert.equal(report.pageFile.keptBytes, 7 * PIECE_SIZE, 'the rest are the cache\'s bodies');
+        assert.ok(keeper.figures().cooled > 0, 'past its budget, on its disk');
         const reading = fs.open(at('setup.tmp'));
         fs.seek(reading, 3 * PIECE_SIZE + 10);
-        assert.deepEqual([...fs.read(reading, 1)], [4], 'read back from the disk');
+        assert.deepEqual([...fs.read(reading, 1)], [4], 'read back from the cache\'s disk');
         fs.close(reading);
         await paged.dispose();
     });
