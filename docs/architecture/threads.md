@@ -61,7 +61,7 @@ flowchart LR
   P["Page"] -->|"postMessage ⇄<br/>OffscreenCanvas"| E["Engine thread"]
   P -->|"postMessage ⇄"| K["Log keeper"]
   E -->|"SAB: journal ring"| K
-  E -->|"MessageChannel ⇄"| G["Graphics thread"]
+  E -->|"two rings in SAB a root ⇄<br/>postMessage: frames, memory"| G["Graphics thread"]
   E -->|"MessagePort ⇄<br/>SAB: cache arena, busy cells"| T["Translation threads"]
   E -->|"SAB: voice table<br/>or MessagePort: the mix"| A["AudioWorklet"]
   E -->|"link: two rings in SAB"| R["Process threads"]
@@ -77,9 +77,13 @@ flowchart LR
   from then on only the engine draws into it.
 - **Engine → log keeper.** Shared memory only: the keeper looks into the ring every 200 ms. Without
   `SharedArrayBuffer` the page forwards the records to it as messages.
-- **Engine ⇄ graphics.** Direct3D 7, 8, 9, 10 (with 11, which shares its device) and OpenGL each have a `MessageChannel` of their own. Calls go into one
-  buffer per batch, and the buffer is transferred without a copy. Back come the frame as an
-  `ImageBitmap` and the answers to calls only the renderer knows.
+- **Engine ⇄ graphics.** Each Direct3D 7, 8, 9, 10 (with 11, which shares its device) and OpenGL
+  root has two rings in shared memory of its own, one each way (`remote/ring.js`). Calls are
+  written into the ring as they are made, a batch a record, and read there by the graphics thread;
+  back come the answers to calls only the renderer knows, the presents it played and what it says
+  of itself. Neither side ever waits for room: what finds none waits on its side in order. Messages
+  carry only what a ring cannot: the frame as an `ImageBitmap`, the guest's memory grown, the run
+  cache's segments, and a root's making.
 - **Engine ⇄ translation.** Regions missing from the store go one way; module bytes and an already
   compiled `WebAssembly.Module` come back.
 - **Engine → AudioWorklet.** No messages at all. The voice table lives in shared memory: the page
@@ -161,14 +165,14 @@ process thread blocks on its doorbell for each answer and answers what it is ask
 engine asks it about its windows); a message longer than a ring holds goes in parts. Each side
 looks at its doorbell for a few microseconds before it sleeps on it, since a thread woken from
 sleep costs far more than the answer. The rings and every wait between two threads of a run - the
-link, the page's input ring, the executors' channel, the graphics worker's lends, the sharing
-table's lock - are one mechanism, Cellar's bell: a wait looks, then sleeps counted beside its word,
+link, the page's input ring, the executors' channel, the graphics worker's rings and lends, the
+sharing table's lock - are one mechanism, Cellar's bell: a wait looks, then sleeps counted beside its word,
 and whoever moves the word notifies only when one sleeps. When a process ends, however it ends, its link is closed:
 every call still waiting on it fails (a COM call into it answers `RPC_E_SERVER_DIED`), a call made
 after fails at once, and the run detaches the windows the process answered for, so nothing asks a
 gone process again. The translation workers lent to it and the graphics thread let go of what they
-kept for it (the port each served it, its Direct3D roots and their view of its memory), whether it
-said goodbye or failed.
+kept for it (the port each served it, its graphics roots, their rings closed, and their view of
+its memory), whether it said goodbye or failed.
 
 A process thread seldom asks the volume: every change to a drive moves that drive's word in shared
 memory (one word per drive letter), and the process thread keeps what it read of a drive (64 KB

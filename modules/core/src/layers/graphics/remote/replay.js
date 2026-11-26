@@ -2264,7 +2264,7 @@ export function createRecording(options){
  * makes them, typed arrays in arrays and plain objects, not a played object's
  * members.
  *
- * @param {unknown} value @param {ArrayBuffer} buffer @returns {boolean}
+ * @param {unknown} value @param {ArrayBufferLike} buffer @returns {boolean}
  */
 const viewsInto = (value, buffer)=>{
     if (ArrayBuffer.isView(value))
@@ -2298,16 +2298,16 @@ const viewsInto = (value, buffer)=>{
  *     the guest memory a recording lent, read in place
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
  *     object: (number: number) => any, counts: () => OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
- *         length?: number)
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
  *         => number | undefined,
- *     spent: (buffer: ArrayBuffer, give: () => void) => void }}
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
  *     one), a paced one with the promise its device holds the caller on, and
  *     any other with what the call answered;
  *     `allocate` is the played device's, the next address its recorded call
- *     was given; `read` reads a batch of calls (the first `length` bytes of the
- *     buffer, all of them by default), and answers how long the look
+ *     was given; `read` reads a batch of calls (the `length` bytes at `start` of
+ *     the buffer, all of it by default), and answers how long the look
  *     at the objects at a count of zero took when the batch made one;
  *     `spent` gives a read batch's buffer back once nothing played from it needs it
  */
@@ -2348,14 +2348,14 @@ export function createPlayer({ root, ship, read, borrow }){
     /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
     let presentedSinceSweep = false;
     let batchesSinceSweep = 0;
-    /** The batch being read. @type {ArrayBuffer | null} */
+    /** The batch being read. @type {ArrayBufferLike | null} */
     let reading = null;
     /**
      * The batches an answer still to come keeps a view of, as its arguments
      * a device fills when it settles: how many such answers, and what gives
      * the buffer back once the last one has (`spent`).
      *
-     * @type {Map<ArrayBuffer, { owed: number, give: (() => void) | null }>}
+     * @type {Map<ArrayBufferLike, { owed: number, give: (() => void) | null }>}
      */
     const kept = new Map();
     /** Where the last look stopped (`SWEEP_SLICE`); a set's iterator follows its changes. */
@@ -2469,7 +2469,7 @@ export function createPlayer({ root, ship, read, borrow }){
      * settled and sent: the receiver sends it on `settled`, after this, so the
      * buffer goes back a microtask later still.
      *
-     * @param {ArrayBuffer} buffer @param {Promise<unknown>} settled
+     * @param {ArrayBufferLike} buffer @param {Promise<unknown>} settled
      */
     const keep = (buffer, settled)=>{
         const entry = kept.get(buffer) ?? { owed: 0, give: null };
@@ -2674,7 +2674,7 @@ export function createPlayer({ root, ship, read, borrow }){
          * at once, or when the last answer still to come that keeps a view of
          * it has settled and been sent.
          *
-         * @param {ArrayBuffer} buffer @param {() => void} give
+         * @param {ArrayBufferLike} buffer @param {() => void} give
          */
         spent(buffer, give){
             const entry = kept.get(buffer);
@@ -2687,11 +2687,11 @@ export function createPlayer({ root, ship, read, borrow }){
                 give();
             }
         },
-        read: (buffer, each, length = buffer.byteLength)=>{
+        read: (buffer, each, length = undefined, start = 0)=>{
             reading = buffer;
             try
             {
-                reader.read(buffer, each, length);
+                reader.read(buffer, each, length, start);
             }
             finally
             {

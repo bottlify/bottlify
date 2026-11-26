@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { connectGraphicsWorker } from './connect.js';
-import { createSender, sharedNow } from './channel.js';
+import { SAID_STRINGS, createSender, sharedNow } from './channel.js';
+import { KIND, createRingMemory, openRingIn, openRingOut } from './ring.js';
 import { WAIT } from './wire.js';
 import { openGraphicsWorker } from '../../../host/graphics-worker.js';
 import { openRunCache } from '../../../process/run-cache.js';
@@ -24,6 +25,17 @@ async function delivered(){
     {
         await new Promise(resolve=>setImmediate(resolve));
     }
+}
+
+/**
+ * Says `message` on a root's ring back, as its played side in the worker would.
+ *
+ * @param {any} root  the `root` message the worker was sent @param {any} message
+ */
+function tell(root, message){
+    const back = openRingOut(root.rings.replies, { strings: SAID_STRINGS });
+    back.writer.value(message, ()=>undefined);
+    back.publish(KIND.VALUE, 0);
 }
 
 function fakeWorker(){
@@ -247,7 +259,7 @@ test('a process that drew on the worker shows its frames over one that did not',
     }
 });
 
-test('the worker\'s GPU going away is told, and a root is made over a port of its own', ()=>{
+test('the worker\'s GPU going away is told, and a root is made over two rings of its own', ()=>{
     const worker = fakeWorker();
     let lost = 0;
     const end = connectGraphicsWorker({ worker, lost: ()=>lost++ });
@@ -261,15 +273,16 @@ test('the worker\'s GPU going away is told, and a root is made over a port of it
     assert.equal(root.Hello(), 0);
     const message = worker.posted.find(posted=>posted.type === 'root');
     assert.equal(message.api, 'd3d9');
+    assert.ok(message.rings.calls.data instanceof SharedArrayBuffer
+        && message.rings.replies.data instanceof SharedArrayBuffer);
     assert.deepEqual(message.options, { vertexShaderVersion: { major: 2, minor: 0 },
         gamma: true }, 'what crosses is the plain part, and whether the ramp shows');
     end.dispose();
 });
 
 test('a present waits only once the played side owes more than its bound', async()=>{
-    /** @type {any[]} */
-    const posted = [];
-    const sender = createSender({ post: message=>posted.push(message), framesAhead: 1 });
+    const sender = createSender({ rings: { calls: createRingMemory(1 << 16),
+        replies: createRingMemory(1 << 16) }, serve: false, framesAhead: 1 });
     assert.equal(sender.called(WAIT.PACED, 'Present'), undefined);
     const held = sender.called(WAIT.PACED, 'Present');
     assert.ok(held instanceof Promise, 'the second present waits for the first');
@@ -282,7 +295,7 @@ test('a present waits only once the played side owes more than its bound', async
     sender.receive({ type: 'presented', count: 1 });
     await held;
     assert.ok(released);
-    assert.equal(posted.length, 2, 'each present sends what was written before it');
+    assert.equal(sender.sent().batches, 2, 'each present sends what was written before it');
 });
 
 test('a graphics worker is used once it has a device, and given up when it has none', async()=>{
@@ -327,20 +340,14 @@ test('what each root\'s mirror holds of the program\'s memory is summed, and not
     const factory = (/** @type {any} */ given)=>({ given });
     end.root('d3d9', factory, services);
     end.root('d3d8', factory, services);
-    const ports = worker.posted.filter(posted=>posted.type === 'root').map(posted=>posted.port);
-    // Let go of whatever an assertion leaves: open ports would hold the test's thread.
-    t.after(()=>{
-        for (const port of ports)
-        {
-            port.close();
-        }
-        end.dispose();
-    });
+    const roots = worker.posted.filter(posted=>posted.type === 'root');
+    // Let go of whatever an assertion leaves: open rings would hold the test's thread.
+    t.after(()=>end.dispose());
     assert.equal(end.diagnostics().mirrored, null, 'nothing said yet: not measured');
-    ports[0].postMessage({ type: 'diagnostics', diagnostics: { mirrored: { held: 3 * 65536 } } });
+    tell(roots[0], { type: 'diagnostics', diagnostics: { mirrored: { held: 3 * 65536 } } });
     await delivered();
     assert.equal(end.diagnostics().mirrored, null, 'one root has not said: not measured');
-    ports[1].postMessage({ type: 'diagnostics', diagnostics: { mirrored: { held: 65536 } } });
+    tell(roots[1], { type: 'diagnostics', diagnostics: { mirrored: { held: 65536 } } });
     await delivered();
     assert.equal(end.diagnostics().mirrored, 4 * 65536);
 });
@@ -355,24 +362,20 @@ test('the worker\'s phase totals are summed over the roots that said them', asyn
     end.root('d3d9', factory, services);
     assert.equal(end.diagnostics().phases, null, 'nothing said yet: not measured');
 
-    const ports = worker.posted.filter(posted=>posted.type === 'root').map(posted=>posted.port);
+    const roots = worker.posted.filter(posted=>posted.type === 'root');
     /** @param {number} read @param {number} sweep */
     const phases = (read, sweep)=>({ 'batch-read': { count: 2, ms: read, selfMs: read - sweep },
         'batch-sweep': { count: 1, ms: sweep } });
-    ports[0].postMessage({ type: 'diagnostics', diagnostics: {}, phases: phases(10, 4) });
-    ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, phases: phases(6, 1) });
+    tell(roots[0], { type: 'diagnostics', diagnostics: {}, phases: phases(10, 4) });
+    tell(roots[1], { type: 'diagnostics', diagnostics: {}, phases: phases(6, 1) });
     // The third root's played side times nothing: it is left out of the sum.
-    ports[2].postMessage({ type: 'diagnostics', diagnostics: {} });
+    tell(roots[2], { type: 'diagnostics', diagnostics: {} });
     await delivered();
 
     assert.deepEqual(end.diagnostics().phases, {
         'batch-read': { count: 4, ms: 16, selfMs: 11 },
         'batch-sweep': { count: 2, ms: 5 },
     });
-    for (const port of ports)
-    {
-        port.close();
-    }
     end.dispose();
 });
 
@@ -385,7 +388,6 @@ test('each root goes with the run\'s frame bound, and the roots\' holds are summ
     end.root('d3d9', factory, services);
     end.root('d3d9', factory, services);
     const roots = worker.posted.filter(posted=>posted.type === 'root');
-    const ports = roots.map(posted=>posted.port);
     try
     {
         assert.deepEqual(roots.map(root=>root.frameLatency), [6, 6, 6]);
@@ -394,8 +396,8 @@ test('each root goes with the run\'s frame bound, and the roots\' holds are summ
         const bound = (/** @type {number} */ frames, /** @type {number} */ held,
             /** @type {number} */ peak)=>({ limit: 6, counting: true, inFlight: 1, peak, frames,
             held, heldMs: held * 8, waiting: 0 });
-        ports[0].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound(300, 12, 7) });
-        ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound(40, 1, 3) });
+        tell(roots[0], { type: 'diagnostics', diagnostics: {}, latency: bound(300, 12, 7) });
+        tell(roots[1], { type: 'diagnostics', diagnostics: {}, latency: bound(40, 1, 3) });
         // The third root has said nothing: it is left out.
         await delivered();
 
@@ -405,10 +407,6 @@ test('each root goes with the run\'s frame bound, and the roots\' holds are summ
     }
     finally
     {
-        for (const port of ports)
-        {
-            port.close();
-        }
         end.dispose();
     }
 });
@@ -425,7 +423,6 @@ test('a root goes without a frame bound where the run named none', ()=>{
     }
     finally
     {
-        root.port.close();
         end.dispose();
     }
 });
@@ -491,4 +488,44 @@ test('an OpenGL root owns names of its own in the run\'s cache and lets go of it
     {
         run.close();
     }
+});
+
+test('a lending root is told of the guest\'s memory grown by message and marked among its batches;'
+    + ' the process gone, every root\'s rings are closed', t=>{
+    const worker = fakeWorker();
+    let ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    /** @type {(() => void)[]} */
+    const growth = [];
+    const end = connectGraphicsWorker({ worker, sharedMemory: ()=>ram,
+        memoryGrown: listener=>growth.push(listener) });
+    // Open rings would hold the test's thread, whatever an assertion leaves.
+    t.after(()=>worker.posted.filter(posted=>posted.type === 'root').forEach(root=>{
+        openRingOut(root.rings.calls).close();
+        openRingOut(root.rings.replies).close();
+    }));
+    const services = { vertexShaderVersion: { major: 2, minor: 0 },
+        readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } };
+    end.root('d3d9', ()=>({}), services);
+    end.root('opengl', ()=>({}), services);
+    const roots = worker.posted.filter(posted=>posted.type === 'root');
+    assert.notEqual(roots[0].id, roots[1].id, 'each root its own number');
+    ram = new Uint8Array(new SharedArrayBuffer(1 << 17));
+    for (const grew of growth)
+    {
+        grew();
+    }
+    const told = worker.posted.filter(posted=>posted.type === 'memory');
+    assert.deepEqual(told.map(({ root, memory, number })=>({ root, memory, number })),
+        [{ root: roots[0].id, memory: ram, number: 1 }], 'the lending root, the longer view');
+    /** @type {number[][]} */
+    const records = [];
+    const calls = openRingIn(roots[0].rings.calls, (kind, buffer, start, length, number)=>{
+        records.push([kind, number]);
+    });
+    calls.drain();
+    assert.deepEqual(records.at(-1), [KIND.MARK, 1], 'its mark after what was sent before');
+    end.dispose();
+    assert.ok(calls.closed(), 'gone, its rings are closed');
+    const other = openRingIn(roots[1].rings.calls, ()=>{});
+    assert.ok(other.closed());
 });

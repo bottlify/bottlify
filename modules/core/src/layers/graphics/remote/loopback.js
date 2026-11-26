@@ -11,7 +11,7 @@
  * memory of only the bytes the recording sent. What a renderer draws through
  * it is what the replay carries, so a scene that draws the same through this
  * as through a device of its own is one the replay misses nothing of -- the
- * test of the replay without a port between the two.
+ * test of the replay without a ring between the two.
  */
 
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';

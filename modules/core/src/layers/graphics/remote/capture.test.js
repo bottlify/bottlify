@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { gunzipSync } from 'node:zlib';
 import { serveGraphics } from './worker.js';
 import { createSender } from './channel.js';
+import { CALLS_BYTES, KIND, REPLIES_BYTES, createRingMemory, openRingOut } from './ring.js';
 import { recordedDirect3D } from './direct3d.js';
 import { CAPTURE, ZEROED_FROM, captureRecords, createCapture } from './capture.js';
 import { OP, SECTION, WAIT, createReader, createWriter } from './wire.js';
@@ -93,11 +94,10 @@ const asked = calls=>calls.map(call=>[call.op,
 test('a capture played again asks of the GPU what the run asked, with the program\'s bytes zeroed',
     async()=>{
         const run = await worker(true);
-        const { port1, port2 } = new MessageChannel();
-        run.scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
-        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
-            transfer), framesAhead: 100 });
-        port1.onmessage = event=>sender.receive(event.data);
+        const rings = { calls: createRingMemory(CALLS_BYTES),
+            replies: createRingMemory(REPLIES_BYTES) };
+        run.scope.onmessage({ data: { type: 'root', id: 1, api: 'd3d9', options: {}, rings } });
+        const sender = createSender({ rings, framesAhead: 100 });
         const ram = new Uint8Array(4 << 20);
         let next = RAM_BASE + (1 << 20);
         const d3d = recordedDirect3D(createDirect3D9, {
@@ -172,8 +172,7 @@ test('a capture played again asks of the GPU what the run asked, with the progra
         }
         finally
         {
-            port1.close();
-            port2.close();
+            sender.close();
         }
         const handed = run.next('captured');
         run.scope.onmessage({ data: { type: 'debug', captured: true } });
@@ -195,32 +194,29 @@ test('a capture played again asks of the GPU what the run asked, with the progra
 
         // The capture played on a worker of its own, as tools/read/graphics-replay.mjs plays it.
         const again = await worker(false);
-        /** @type {Map<number, MessagePort>} */
-        const ports = new Map();
-        /** @type {MessagePort[]} */
-        const others = [];
+        /** @type {Map<number, ReturnType<typeof openRingOut>>} */
+        const roots = new Map();
         for (const record of records)
         {
             if (record.kind === CAPTURE.ROOT)
             {
-                const channel = new MessageChannel();
-                channel.port1.onmessage = ()=>{};
-                others.push(channel.port1);
-                again.scope.onmessage({ data: { type: 'root', api: record.json.api,
-                    options: record.json.options, port: channel.port2 } });
+                const made = { calls: createRingMemory(CALLS_BYTES),
+                    replies: createRingMemory(REPLIES_BYTES) };
+                again.scope.onmessage({ data: { type: 'root', id: record.root,
+                    api: record.json.api, options: record.json.options, rings: made } });
                 await settle();
-                ports.set(record.root, channel.port2);
+                roots.set(record.root, openRingOut(made.calls));
             }
             else if (record.kind === CAPTURE.CALLS)
             {
-                /** @type {any} */ (ports.get(record.root)).onmessage({ data: { type: 'calls',
-                    buffer: record.buffer, at: 0 } });
+                roots.get(record.root)?.put(KIND.BATCH,
+                    new Uint8Array(/** @type {ArrayBuffer} */ (record.buffer)), 0);
                 await settle();
             }
         }
-        for (const port of [...ports.values(), ...others])
+        for (const calls of roots.values())
         {
-            port.close();
+            calls.close();
         }
         assert.deepEqual(asked(again.gpu.calls), ran, 'the same calls asked of the GPU');
         assert.ok(!again.gpu.calls.some(vertexBytes), 'with zeros where the program\'s bytes were');

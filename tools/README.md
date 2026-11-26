@@ -88,6 +88,28 @@ run -> 1
 
 From `node tools/run/install-watch.mjs --bundle wine-d3d8 --args stateblock --every 5 --minutes 1`. Each line is seconds since the start and what happened: OUT is what the program printed, divergence a call answered otherwise than Windows would, then how each process ended. Here Wine's stateblock test ran 9283 checks and one failed (render state 0x9b read back 1.0, expected 0).
 
+### What do a Direct3D 9 program's frames cost the program's thread and the graphics worker's in Node, through this checkout's transport or another's?
+
+[`run/graphics-worker.mjs`](run/graphics-worker.mjs): `node tools/run/graphics-worker.mjs [--root DIR] [--frames N] [--draws N] [--queries N]`
+
+```
+{"root":"file:///home/user/wt-gring/","code":0,"frames":600,"draws":300,"queries":1,"divergences":[],"wallMs":9583,"mainCpuMs":9358,"workerCpuMs":4896,"sent":{"batches":1250,"bytes":32800358,"ms":30,"made":1,"grown":0,"copied":0,"spilled":0,"inPlace":1250,"copiedIn":0,"parts":0,"waited":0,"waiting":0},"received":{"answer":600,"presented":600},"waits":{"GetData":{"count":600,"ms":4911,"maxMs":59,"queuedMs":492,"heldMs":988,"backMs":384}}}
+```
+
+From `node tools/run/graphics-worker.mjs --frames 600 --draws 300 --queries 1 on branch c22-graphics-ring2 (rings), Node 22.23, a 4-core Xeon VM at 2.10 GHz under load 3.1, 2026-11-26`. mainCpuMs and workerCpuMs are each thread's processor time over the run (wallMs): in Node the program's thread is mostly the guest, so the transport shows in sent.ms (what publishing the batches cost that thread) and in the worker's time. sent says where the batches' records went (inPlace: built where they were read; spilled, copiedIn, parts, waited: the ring's other paths); waits.GetData is the waited occlusion count, queuedMs its way there, heldMs the worker holding it, backMs its way back. With --root DIR the same program runs on another checkout's engine, for an A/B alternated by hand; Node posts a transferred buffer at a cost of its size, which a browser does not, so a browser A/B (game.mjs --graphics-worker) is the one to judge by.
+
+### What does handing a batch to an idle worker cost in the browser: a post with its buffer transferred, or bytes in shared memory and Atomics.notify to an Atomics.waitAsync?
+
+[`run/wake-latency.mjs`](run/wake-latency.mjs): `node tools/run/wake-latency.mjs [--n 400] [--rounds 6]`
+
+```
+post: medians of runs: send 50.0 50.0 50.0 55.0; arrival 179.9 199.7 220.2 215.1
+post64: medians of runs: send 50.0 50.0 55.0 55.0; arrival 200.2 189.9 195.1 204.8
+ring: medians of runs: send 25.0 25.0 25.0 30.0; arrival 154.8 149.9 150.1 145.0
+```
+
+From `node tools/run/wake-latency.mjs --n 400 --rounds 4, headless Chromium 1243, a 4-core Xeon VM at 2.10 GHz under load ~2, 2026-11-26`. Microseconds, each run's median over 400 batches, the runs in the order they ran: send is the sender's cost of handing one batch over, arrival the time until the reader had it on the clock both read. A transferred buffer costs the same at 2 and 64 KiB; the ring's notify costs half the post and arrives some 50 us sooner. The clock's resolution in a cross-origin-isolated page is 5 us, so the send figures are steps of it.
+
 ### Play a bottle from this checkout, with nothing else set up
 
 [`run/play.mjs`](run/play.mjs): `node tools/run/play.mjs <bundle-id> (then open the page it prints)`
@@ -543,6 +565,7 @@ From `node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-2
 - [`fixtures/sound-delivery-run.mjs`](fixtures/sound-delivery-run.mjs) - One run of the sound delivery test in a worker of its own: the engine, the real audio worklet on its own clock, and what it played measured
 - [`fixtures/managed-exe.mjs`](fixtures/managed-exe.mjs) - A managed (.NET) program image for the packages' tests
 - [`fixtures/d3d9-program.mjs`](fixtures/d3d9-program.mjs) - A Direct3D 9 test program
+- [`fixtures/d3d9-frames-program.mjs`](fixtures/d3d9-frames-program.mjs) - A Direct3D 9 program shaped like a game's frame: draws, a waited occlusion query and a present a frame, for measuring the graphics worker's transport (`node tools/fixtures/d3d9-frames-program.mjs OUT.exe [FRAMES] [DRAWS] [QUERIES] [immediate]`)
 - [`fixtures/gl-program.mjs`](fixtures/gl-program.mjs) - The pieces of an OpenGL test program
 - [`fixtures/gl-glsl-program.mjs`](fixtures/gl-glsl-program.mjs) - An OpenGL 2.0 GLSL test program (also triangle.mjs --glsl)
 - [`fixtures/spawn-program.mjs`](fixtures/spawn-program.mjs) - A parent-process test program

@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { playedDirect3D, recordedDirect3D } from './direct3d.js';
-import { createSender } from './channel.js';
+import { carriedTo } from './ring-fixtures.js';
 import { D3D_OK } from '../d3d9/constants.js';
 
 /** A seeded generator. @param {number} seed */
@@ -151,14 +151,7 @@ function run(seed, watched, dynamic = true, checking = null){
     const seen = [];
     const played = playedDirect3D(toy(seen, dynamic),
         { ...services, backend: {}, readMemory: true });
-    const sender = createSender({
-        post: message=>{
-            played.read(message.buffer.slice(0, message.length), call=>{
-                played.play(call);
-            });
-        },
-        later: flush=>flush(),
-    });
+    const { sender } = carriedTo(played);
     const root = recordedDirect3D(toy(seen, dynamic), services, sender);
     const buffers = [0x1800, 0x1800, 0x900, 0x5000].map(length=>{
         /** @type {{ buffer?: any }} */
@@ -324,12 +317,7 @@ test('a buffer moved between storages of its own is sent whole once a storage, t
         },
     });
     const played = playedDirect3D(twoStorages, { ...services, backend: {}, readMemory: true });
-    const sender = createSender({
-        post: message=>played.read(message.buffer.slice(0, message.length), call=>{
-            played.play(call);
-        }),
-        later: flush=>flush(),
-    });
+    const { sender } = carriedTo(played);
     const root = recordedDirect3D(twoStorages, services, sender);
     /** @type {{ buffer?: any }} */
     const out = {};
@@ -386,14 +374,7 @@ test('a watched buffer\'s first draw sends all of it read where it lies, not cop
             const seen = [[]];
             const played = playedDirect3D(toy(seen), { ...services, backend: {},
                 readMemory: true });
-            const sender = createSender({
-                post: message=>{
-                    played.read(message.buffer.slice(0, message.length), call=>{
-                        played.play(call);
-                    });
-                },
-                later: flush=>flush(),
-            });
+            const { sender } = carriedTo(played);
             const root = recordedDirect3D(toy(seen), services, sender);
             /** @type {{ buffer?: any }} */
             const out = {};

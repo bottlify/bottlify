@@ -150,19 +150,21 @@ export function createCapture(deps = {}){
         },
 
         /**
-         * A batch as it came, before it is played: copied, since its buffer
-         * goes back to be written again once the played side has read it.
+         * A batch as it came, before it is played: copied, since where it lies
+         * is written again once the played side has read it.
          *
-         * @param {number} id @param {ArrayBuffer} buffer
+         * @param {number} id @param {ArrayBufferLike} buffer
          * @param {number} [length]  how much of the buffer the batch is, all of it by default
+         * @param {number} [start]  where in the buffer it begins
          */
-        calls(id, buffer, length = buffer.byteLength){
+        calls(id, buffer, length = undefined, start = 0){
             const reader = readers.get(id);
             if (stopped || !reader)
             {
                 return;
             }
-            const copy = buffer.slice(0, length);
+            const copy = new Uint8Array(buffer, start, length ?? buffer.byteLength - start)
+                .slice().buffer;
             let presents = 0;
             reader.read(copy, call=>{
                 counts.zeroed += zeroMemory(call.ship) + zeroMemory(call.wrote);
@@ -176,7 +178,7 @@ export function createCapture(deps = {}){
             put(CAPTURE.CALLS, id, [count, new Uint8Array(copy)]);
             counts.batches++;
             counts.presents += presents;
-            counts.sent += buffer.byteLength;
+            counts.sent += copy.byteLength;
             if (left >= 0)
             {
                 left -= presents;
