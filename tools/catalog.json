@@ -1111,6 +1111,15 @@
    "tests": []
   },
   {
+   "path": "tools/fixtures/allocation.mjs",
+   "category": "fixtures",
+   "kind": "fixture",
+   "browser": false,
+   "question": "How many bytes a function allocates a call, for the tests that hold a hot path to making no garbage",
+   "command": "",
+   "tests": []
+  },
+  {
    "path": "tools/fixtures/make-pe.mjs",
    "category": "fixtures",
    "kind": "fixture",
