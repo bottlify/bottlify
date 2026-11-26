@@ -892,7 +892,7 @@ test('an occlusion count that lands in its query\'s block is not sent to the pro
         await measure(true);
         assert.equal(words[(block + QUERY.STATE) >> 2],
             (1 << COUNT_STATE.SHIFT) | COUNT_STATE.BACK, 'the count landed in the block');
-        assert.deepEqual(told, [], 'and nothing more was sent for it');
+        assert.equal(told.length, 0, 'and nothing more was sent for it');
         await measure(false);
         assert.equal(told.length, 1, 'a count the guest does not read goes to the program');
         assert.equal(told[0].length, 2, 'with every count held not sent before');

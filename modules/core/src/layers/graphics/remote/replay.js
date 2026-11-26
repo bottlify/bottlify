@@ -2450,6 +2450,10 @@ export function createPlayer({ root, ship, read, borrow }){
         get: (_, key)=>(typeof key === 'string' ? ()=>replies[replied++] : undefined),
     });
     const reader = createReader({ ref: objectAt, service: ()=>standIn });
+    /** What a call carries none of: guest memory, lent or sent. */
+    const NO_MEMORY = /** @type {readonly { address: number, bytes: Uint8Array }[]} */ (NOTHING);
+    const NO_LENDS = /** @type {readonly { address: number, length: number, slot: number }[]} */ (
+        NOTHING);
 
     /** @param {object} object */
     const bind = object=>{
@@ -2534,7 +2538,7 @@ export function createPlayer({ root, ship, read, borrow }){
                 {
                     throw new Error('remote: guest memory lent to a side that cannot read it');
                 }
-                for (const { address, length, slot } of call.lent ?? NOTHING)
+                for (const { address, length, slot } of call.lent ?? NO_LENDS)
                 {
                     borrow(slot, address, length, bytes=>ship(address, bytes));
                 }
@@ -2542,13 +2546,13 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             if (call.op !== OP.CALL)
             {
-                for (const { address, bytes } of call.wrote ?? NOTHING)
+                for (const { address, bytes } of call.wrote ?? NO_MEMORY)
                 {
                     ship(address, bytes);
                 }
                 return undefined;
             }
-            for (const { address, bytes } of call.ship ?? NOTHING)
+            for (const { address, bytes } of call.ship ?? NO_MEMORY)
             {
                 ship(address, bytes);
             }
@@ -2612,7 +2616,7 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 move(args);
             }
-            for (const { address, bytes } of call.wrote ?? NOTHING)
+            for (const { address, bytes } of call.wrote ?? NO_MEMORY)
             {
                 ship(address, bytes);
             }
