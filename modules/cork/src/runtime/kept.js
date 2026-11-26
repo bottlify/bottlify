@@ -207,6 +207,24 @@ export function takeEntry(bytes, key, shape){
 }
 
 /**
+ * An entry read whole, its key included: what a store holds, listed (the
+ * bench that weighs keepers on the functions a run emitted).
+ *
+ * @param {Uint8Array} bytes
+ * @returns {{ key: string, shape: number[], kept: KeptFunction }}
+ */
+export function readEntry(bytes){
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
+    const keyLength = view.getUint32(4, true);
+    const shapeCount = view.getUint32(8, true);
+    const shapeAt = (ENTRY_WORDS * 4 + keyLength + 7) & ~7;
+    const key = decoder.decode(bytes.subarray(ENTRY_WORDS * 4, ENTRY_WORDS * 4 + keyLength));
+    const shape = Array.from({ length: shapeCount },
+        (_, i)=>view.getFloat64(shapeAt + i * 8, true));
+    return { key, shape, kept: /** @type {KeptFunction} */ (takeEntry(bytes, key, shape)) };
+}
+
+/**
  * The functions kept in `space`: what any thread of the run kept under a
  * key, every other takes. The context goes into the key whole, as every
  * thread must name it alike.

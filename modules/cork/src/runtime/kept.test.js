@@ -11,7 +11,7 @@ import { Worker } from 'node:worker_threads';
 import { createReader, openKeeper } from '@bottlify/cellar';
 import { formRegion } from '../region.js';
 import { createEmitCache, relinkBatch } from './emit-built.js';
-import { entryOf, keptEmitCache, keptName, putAll, readingSpace } from './kept.js';
+import { entryOf, keptEmitCache, keptName, putAll, readEntry, readingSpace } from './kept.js';
 import { ownLayout } from './layout.js';
 import { machine, piece, translateUntil, untilTranslatorsLoaded } from '../testing/seeded-pieces.js';
 
@@ -99,7 +99,15 @@ test('a kept function is handed back under its key and shape only, from any read
         run.close();
     });
 
-test('two keys of one name are two misses, never one\'s function for the other\'s', async()=>{
+test('an entry read whole is the key, the shape and the function kept', ()=>{
+    const entry = entryOf('cl\u00e9:4198400', [2 ** 31 + 4, -1.5], kept(6));
+    const bytes = new Uint8Array(entry.length);
+    entry.write(bytes, 0);
+    assert.deepEqual(readEntry(bytes), { key: 'cl\u00e9:4198400', shape: [2 ** 31 + 4, -1.5],
+        kept: kept(6) });
+});
+
+test('two keys of one name, never one\'s function for the other\'s', async()=>{
     const run = await cellarOf();
     const cache = keptEmitCache(run.space);
     // The body under 'a's name holds another key's entry, as a name two keys
