@@ -43,7 +43,9 @@ flowchart TB
   to the disk; nothing on the graphics thread holds them meanwhile. The first reader of the level
   (a draw, a decode, a write in place, a read-back) takes them back as they were. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
-  2132 textures held 88.5 MB this way.
+  2132 textures held 88.5 MB this way. Once uploaded, they are let go; a read of the level's
+  image (`glGetTexImage`) by the context that draws copies it back from the device, once what
+  the context recorded before it has run (`opengl/gpu.js` `readLevel`).
 - **The Direct3D 8 and 9 command ring.** A program sets states, transforms and textures hundreds
   of times a frame and locks a buffer around every draw. Those setters and draws, a buffer's
   `Lock` and `Unlock`, and the getters of render states, transforms, texture stage states and

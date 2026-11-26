@@ -524,14 +524,6 @@ export function laterEntryPoints(h){
                 internal >>> 0, width | 0, height | 0, 1, fixed & 0xff)),
         glTextureStorage3DMultisample: a=>answer(current()?.glTextureStorageMultisample(
             a[0] >>> 0, a[1] | 0, a[2] >>> 0, a[3] | 0, a[4] | 0, a[5] | 0, a[6] & 0xff)),
-        glGetnTexImage: ([target, level, format, type, size, out])=>call(context=>{
-            const bytes = context.getnTexImage(false, target >>> 0, level | 0, format >>> 0,
-                type >>> 0, size | 0);
-            if (bytes && (out >>> 0) !== 0)
-            {
-                h.writeMemory(out >>> 0, bytes);
-            }
-        }),
         glGetnCompressedTexImage: ([target, level, size, out])=>call(context=>{
             const bytes = context.getnTexImage(true, target >>> 0, level | 0, 0, 0, size | 0);
             if (bytes && (out >>> 0) !== 0)
@@ -1375,8 +1367,6 @@ function storageAndNamedEntryPoints(h){
 
         // --- GL_ARB_get_texture_sub_image (4.5) ---
 
-        glGetTextureSubImage: a=>call(context=>deliver(a[11], context.glGetTextureSubImage(
-            a[0] >>> 0, a[1] | 0, boxAt(a, 2), a[8] >>> 0, a[9] >>> 0, a[10] | 0))),
         glGetCompressedTextureSubImage: a=>call(context=>deliver(a[9],
             context.glGetCompressedTextureSubImage(a[0] >>> 0, a[1] | 0, boxAt(a, 2), a[8] | 0))),
 
@@ -1450,9 +1440,6 @@ function storageAndNamedEntryPoints(h){
             current()?.glGenerateTextureMipmap(texture >>> 0)),
         glBindTextureUnit: ([unit, texture])=>answer(
             current()?.glBindTextureUnit(unit >>> 0, texture >>> 0)),
-        glGetTextureImage: ([texture, level, format, type, size, out])=>call(context=>deliver(
-            out, context.glGetTextureImage(texture >>> 0, level | 0, format >>> 0, type >>> 0,
-                size | 0))),
         glGetCompressedTextureImage: ([texture, level, size, out])=>call(context=>deliver(out,
             context.glGetCompressedTextureImage(texture >>> 0, level | 0, size | 0))),
 

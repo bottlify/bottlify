@@ -539,7 +539,7 @@ export function installDirectStateCalls(context, kernel){
         /**
          * @param {number} name @param {number} level @param {number} format
          * @param {number} type @param {number} bufSize
-         * @returns {Uint8Array | null} the client image
+         * @returns {Uint8Array | null | Promise<Uint8Array | null>} the client image
          */
         glGetTextureImage(name, level, format, type, bufSize){
             if (!enter('glGetTextureImage', [name, level, format, type, bufSize]))
@@ -570,7 +570,7 @@ export function installDirectStateCalls(context, kernel){
          *
          * @param {boolean} compressed @param {number} target @param {number} level
          * @param {number} format @param {number} type @param {number} bufSize
-         * @returns {Uint8Array | null}
+         * @returns {Uint8Array | null | Promise<Uint8Array | null>}
          */
         getnTexImage(compressed, target, level, format, type, bufSize){
             if (!enter('getnTexImage', [compressed, target, level, format, type, bufSize]))

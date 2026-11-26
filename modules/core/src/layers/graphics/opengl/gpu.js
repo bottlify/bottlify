@@ -128,9 +128,16 @@ const BOUND_TARGETS = Object.freeze({
 /** @type {readonly UniformBlockBinding[]} */
 const NO_BLOCKS = Object.freeze([]);
 
-/** Bytes of a level's texels or blocks below which they are not moved into the run's cache
- * (`spill`): a name and a record there cost more than a small level's bytes. */
-const SPILL_FROM = 16 * 1024;
+/**
+ * Bytes of a level's texels or blocks below which they are not moved into the
+ * run's cache (`spill`): the cache's unit of room. A body there holds at least
+ * a unit while it is hot (4 KiB, Cellar's buddy block), and costs about 0.6 KB
+ * here for its name and accessor and 90 bytes of the cache's index: a smaller
+ * level would hold more of the cache than it lets go of here. A mip chain's
+ * levels are each a quarter of the one above, so its one level from a unit up
+ * to four holds three quarters of the bytes of its levels under four units.
+ */
+const SPILL_FROM = 4 * 1024;
 
 /** The formats every drawable is backed by. */
 const COLOUR_FORMAT = 'bgra8unorm';
@@ -5705,6 +5712,46 @@ export function createGpuRenderer(services){
             });
             return chain.then(()=>bytes);
         },
+        /**
+         * A level's texels as the device holds them, once every command the
+         * context recorded so far has run: what a read-back of a level whose
+         * texels were let go here, or which the device wrote, answers. RGBA,
+         * its rows in the level's order. Null where the device holds the level
+         * in no RGBA copy of its shape.
+         *
+         * @param {object} context @param {import('./objects.js').TextureObject} texture
+         * @param {number} key  the level's key (`levelKey`)
+         * @returns {Promise<Uint8Array | null> | null}
+         */
+        readLevel(context, texture, key){
+            const copy = textures.get(texture);
+            const image = texture.levels.get(key);
+            const level = key % FACE_STRIDE;
+            const face = (key - level) / FACE_STRIDE;
+            if (texture.view || !copy || !image || copy.format !== TEXTURE_FORMAT
+                || level >= copy.levels || face >= (copy.cube ? 6 : 1)
+                || image.width !== Math.max(1, copy.width >> level)
+                || image.height !== Math.max(1, copy.height >> level))
+            {
+                return null;
+            }
+            const surfaces = drawables.get(context);
+            const recorded = surfaces && recordings.has(context)
+                ? flush(context, surfaces, null) : chain;
+            /** @type {Uint8Array | null} */
+            let bytes = null;
+            chain = recorded.then(async()=>{
+                const frame = backend.beginFrame();
+                const read = frame.snapshot({ texture: copy.gpu.texture, width: image.width,
+                    height: image.height, format: TEXTURE_FORMAT, mipLevel: level, layer: face });
+                frame.end();
+                bytes = (await read()).data;
+            }).catch(error=>{
+                lose(error instanceof Error ? error.message : String(error));
+            });
+            return chain.then(()=>bytes);
+        },
+
         /**
          * A buffer object the program deleted: its GPU copy goes back once the
          * frames that drew from it are submitted.

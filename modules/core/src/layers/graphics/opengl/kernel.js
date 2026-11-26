@@ -70,6 +70,11 @@
  *           let go once uploaded, or written there): a read-back from this
  *           side's bytes would not answer it. Null in a build that draws on the
  *           processor.
+ * @property {((texture: import('./objects.js').TextureObject, key: number)
+ *             => Promise<Uint8Array | null> | null) | null} [readLevel]
+ *           A level's RGBA texels read back from the device once what was
+ *           recorded before has run (`gpu.js` readLevel): null where the device
+ *           holds no such copy of it. Null in a build that draws on the processor.
  * @property {((texture: import('./objects.js').TextureObject, face?: number) => void)
  *             | null} [generateMipmap]
  *           the levels below the base level made on the device from it, of
