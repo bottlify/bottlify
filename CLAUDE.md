@@ -210,7 +210,8 @@ attribution are first-class.
   one store under our control (hot in Cellar, cold on OPFS: one budget, one eviction, one report,
   read in place); a private heap, buffer or LRU is outside it. Such a move is done for that, its
   cost measured and said, and is never judged by whether RSS drops nor written down as a negative
-  result.
+  result. It is in question only where its measured effect is negative and significant (a clear
+  loss of speed or memory, or a correctness problem); then it is brought to the owner, not dropped.
 - **What did not pay is kept.** An idea measured without a positive signal goes into
   [`roadmap/negative-results.md`](roadmap/negative-results.md) as one dated line: the idea, one
   number with its conditions, its status, and when it is worth trying again; the full write-up is
