@@ -70,7 +70,7 @@ export function createRegistryService(hive){
     /** @param {number} id */
     const keyOf = id=>keys.get(id) ?? null;
 
-    return {
+    const service = {
         /** @param {number} root @returns {number | null} */
         root: root=>numberOf(hive.root(root)),
 
@@ -215,6 +215,20 @@ export function createRegistryService(hive){
          * @returns {T}
          */
         asMachine: write=>hive.asMachine(write),
+        /**
+         * One write, `create` or `setValue`, made as the machine laying its own
+         * keys: what a process across a link sends for a write inside its
+         * `asMachine`, whose function cannot cross.
+         *
+         * @param {'create' | 'setValue'} method @param {any[]} args
+         */
+        machineWrite(method, args){
+            if (method !== 'create' && method !== 'setValue')
+            {
+                throw new Error(`registry: ${String(method)} is no write the machine makes`);
+            }
+            return hive.asMachine(()=>/** @type {any} */ (service)[method](...args));
+        },
         /** @param {() => void} listener */
         onChanged: listener=>hive.onChanged(listener),
         toJSON: ()=>hive.toJSON(),
@@ -224,4 +238,5 @@ export function createRegistryService(hive){
         /** @param {any} stored @param {boolean} [over] */
         fillFromJSON: (stored, over)=>hive.fillFromJSON(stored, over),
     };
+    return service;
 }

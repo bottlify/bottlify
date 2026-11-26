@@ -86,11 +86,43 @@ test('a process across a link writes the run\'s registry, takes the run\'s ids, 
 test('every registry call a process makes reaches the run\'s registry from a worker', ()=>{
     // RegQueryInfoKey asks the key's class: a process in a worker (ngen under
     // concurrency) that could not ask it ended in a TypeError.
-    const systemOnly = new Set(['onChanged', 'toJSON', 'fromJSON', 'fillFromJSON']);
+    // `asMachine` is the remote's own: its function cannot cross, its writes do
+    // (`machineWrite`).
+    const systemOnly = new Set(['onChanged', 'toJSON', 'fromJSON', 'fillFromJSON', 'asMachine']);
     const service = createRegistryService(createHive());
     assert.deepEqual(Object.keys(service).filter(name=>!systemOnly.has(name)).sort(),
         [...REGISTRY].sort());
 });
+
+test('what a process across a link lays as the machine\'s is furnished and announces nothing',
+    async()=>{
+        const system = {
+            registry: createRegistryService(createHive()),
+            ids: { thread: 1, process: 0x2008 },
+            volume: { drives: new Map(), volumes: new Map(), writables: new Map(),
+                watchers: new Set() },
+            windows: createWindowDirectory(),
+        };
+        let announced = 0;
+        system.registry.onChanged(()=>announced++);
+        const engine = /** @type {Record<string, any>} */ (systemHandlers(system));
+        const remote = /** @type {any} */ (remoteSystem((target, method, args)=>
+            engine[target][method](...args), {}));
+        const HKEY_CURRENT_USER = 0x80000001;
+        const REG_SZ = 1;
+        const root = remote.registry.root(HKEY_CURRENT_USER);
+        const key = remote.registry.asMachine(()=>{
+            const made = remote.registry.create(root, 'Control Panel\\Desktop').key;
+            remote.registry.setValue(made, 'Wallpaper', REG_SZ, Uint8Array.of(0));
+            return made;
+        });
+        await Promise.resolve();
+        assert.equal(announced, 0, 'the machine\'s own keys, laid from a worker, are no change');
+        assert.equal(system.registry.getValue(key, 'Wallpaper')?.furnished, true);
+        remote.registry.setValue(key, 'Wallpaper', REG_SZ, Uint8Array.of(65, 0));
+        await Promise.resolve();
+        assert.equal(announced, 1, 'the program\'s write from a worker is');
+    });
 
 test('two processes on one link (a child beside its parent in a worker) each answer for their'
     + ' own windows', ()=>{

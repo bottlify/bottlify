@@ -29,7 +29,7 @@ import { WINDOW_CELLS } from './layers/win32/user32/manager.js';
 /** What a process asks of the registry; the rest -- saving, loading -- is the system's. */
 export const REGISTRY = ['root', 'open', 'create', 'remove', 'subkeys', 'classOf',
     'maxSubkeyClassLength', 'values', 'getValue', 'setValue', 'rename', 'deleteValue', 'placeOf',
-    'throughClasses', 'detached', 'forget', 'revision'];
+    'throughClasses', 'detached', 'forget', 'revision', 'machineWrite'];
 
 /** What a process asks of the window directory. */
 const WINDOWS = ['open', 'close', 'ownerOf', 'describe', 'find', 'register', 'registeredName',
@@ -52,6 +52,45 @@ const ENDPOINT = ['find', 'describe', 'post', 'send', 'answer', 'withdraw', 'los
  */
 const answering = (service, names)=>Object.fromEntries(names.map(name=>
     [name, (/** @type {any[]} */ ...args)=>service[name](...args)]));
+
+/**
+ * The run's registry as a process across a link asks it. `asMachine` cannot
+ * send its function across: while it runs, each `create` and `setValue` goes
+ * as one `machineWrite`, which the run's registry makes as the machine laying
+ * its own keys - the mark travels with the write, so another process's write
+ * arriving between them is not taken for the machine's.
+ *
+ * @param {Record<string, (...args: any[]) => any>} asked
+ */
+const remoteRegistry = asked=>{
+    let machine = 0;
+    /** @param {'create' | 'setValue'} method */
+    const writing = method=>(/** @type {any[]} */ ...args)=>(machine > 0
+        ? asked.machineWrite(method, args) : asked[method](...args));
+    return {
+        ...asked,
+        create: writing('create'),
+        setValue: writing('setValue'),
+        /**
+         * @template T
+         * @param {() => T} write
+         * @returns {T}
+         */
+        asMachine(write){
+            machine++;
+            try
+            {
+                return write();
+            }
+            finally
+            {
+                machine--;
+            }
+        },
+        // A change is the system's to save; nothing here listens for one.
+        onChanged: ()=>()=>{},
+    };
+};
 
 /**
  * The link's handlers that answer for the run's system.
@@ -131,11 +170,7 @@ export function remoteSystem(ask, handlers = {}, call, volume = null, windowCell
         // The run's named objects are asked there (`objects`); this table is
         // not consulted.
         namedObjects: new Map(),
-        registry: {
-            ...asking('registry', REGISTRY),
-            // A change is the system's to save; nothing here listens for one.
-            onChanged: ()=>()=>{},
-        },
+        registry: remoteRegistry(asking('registry', REGISTRY)),
         ids: { take: (/** @type {string} */ name, /** @type {number} */ step)=>
             ask('ids', 'take', [name, step]) },
         volume: remoteVolume((method, args)=>ask('volume', method, args), volume,
