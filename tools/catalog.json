@@ -433,6 +433,20 @@
    "kind": "instrument"
   },
   {
+   "path": "tools/checks/duplicate-code.mjs",
+   "category": "checks",
+   "browser": false,
+   "question": "Which functions are written more than once, the same up to their names, in more than one file?",
+   "command": "node tools/checks/duplicate-code.mjs [--top N] [--tokens 25] [--tests] [--json]",
+   "tests": [
+    "tools/checks/duplicate-code.test.js"
+   ],
+   "sample": "525 clusters of functions alike in more than one file; one of each kept, 5886 lines would go\n156 lines: 2 copies of 156 lines (864 tokens)\n  modules/core/src/layers/audio/output/mix.js:289 resampleInto\n  modules/core/src/layers/audio/output/worklet.js:281 resampleInto\n145 lines: 30 copies of 5 lines (48 tokens)\n  modules/core/src/layers/win32/advapi32/cred.js:190 writeDword\n  modules/core/src/layers/win32/advapi32/lsa.js:208 writeDword\n  modules/core/src/layers/win32/advapi32/named-security.js:233 writeDword\n  ...\n128 lines: 2 copies of 128 lines (826 tokens)\n  modules/core/src/layers/audio/output/mix.js:459 playVoice\n  modules/core/src/layers/audio/output/worklet.js:451 playVoice\n124 lines: 32 copies of 4 lines (50 tokens)\n  modules/core/src/layers/win32/advapi32/cred.js:185 readDword\n  modules/core/src/layers/win32/advapi32/lsa.js:203 readDword\n  modules/core/src/layers/win32/advapi32/perf.js:84 readDword\n  ...",
+   "source": "node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-26 (copies cut to three a cluster)",
+   "read": "Each cluster is one body, its names renamed to the order they appear in and its literals kept, found in more than one file: the first line is the lines one shared function would save (a copy's lines times the copies past the first), then where each copy is and what it is called. A copy inside a larger listed copy is left to it. Two copies kept apart on purpose say so where they are (mix.js and worklet.js: the build checks that the worklet's copy is the mixer's); the rest are candidates for one mechanism. Alike but not equal is not seen.",
+   "kind": "instrument"
+  },
+  {
    "path": "tools/gates/probe.mjs",
    "category": "gates",
    "kind": "gate",

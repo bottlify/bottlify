@@ -427,6 +427,32 @@ cannot see: 88 places that name a file at run time, or a file that is not here (
 
 From `node tools/checks/unused-code.mjs on this repository, 2026-11-26, before the removals it led to (rows cut to three a section)`. "reached by nothing" is code no entry point, page, script, bench, tool or test loads: read each and delete it. "reached only by types" is needed by the typecheck alone; "declares types alone" is a typedef module, "holds code nothing runs" is code to remove from it. "reached only from tests" is a test helper (named so) or code that only its own tests run, or, "a width built, not wired", a guest-code output the product does not load. Of the exports, one used in its own file loses `export`, one used nowhere goes; "cannot see" counts the places a file is named at run time (import(name), a URL from parts): read them before deleting what they could load.
 
+### Which functions are written more than once, the same up to their names, in more than one file?
+
+[`checks/duplicate-code.mjs`](checks/duplicate-code.mjs): `node tools/checks/duplicate-code.mjs [--top N] [--tokens 25] [--tests] [--json]`
+
+```
+525 clusters of functions alike in more than one file; one of each kept, 5886 lines would go
+156 lines: 2 copies of 156 lines (864 tokens)
+  modules/core/src/layers/audio/output/mix.js:289 resampleInto
+  modules/core/src/layers/audio/output/worklet.js:281 resampleInto
+145 lines: 30 copies of 5 lines (48 tokens)
+  modules/core/src/layers/win32/advapi32/cred.js:190 writeDword
+  modules/core/src/layers/win32/advapi32/lsa.js:208 writeDword
+  modules/core/src/layers/win32/advapi32/named-security.js:233 writeDword
+  ...
+128 lines: 2 copies of 128 lines (826 tokens)
+  modules/core/src/layers/audio/output/mix.js:459 playVoice
+  modules/core/src/layers/audio/output/worklet.js:451 playVoice
+124 lines: 32 copies of 4 lines (50 tokens)
+  modules/core/src/layers/win32/advapi32/cred.js:185 readDword
+  modules/core/src/layers/win32/advapi32/lsa.js:203 readDword
+  modules/core/src/layers/win32/advapi32/perf.js:84 readDword
+  ...
+```
+
+From `node tools/checks/duplicate-code.mjs --top 4 on this repository, 2026-11-26 (copies cut to three a cluster)`. Each cluster is one body, its names renamed to the order they appear in and its literals kept, found in more than one file: the first line is the lines one shared function would save (a copy's lines times the copies past the first), then where each copy is and what it is called. A copy inside a larger listed copy is left to it. Two copies kept apart on purpose say so where they are (mix.js and worklet.js: the build checks that the worklet's copy is the mixer's); the rest are candidates for one mechanism. Alike but not equal is not seen.
+
 ## Everything else
 
 ### `bench/`
