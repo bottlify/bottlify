@@ -492,8 +492,19 @@ export function createWriter(){
  * @property {number} [serial]     a waited call's number, which its answer comes back under
  */
 
+/** What a reader looks at between batches. */
+const NO_BATCH = new ArrayBuffer(0);
+
 /**
  * The reading end: its string table outlives every batch.
+ *
+ * Reading is the largest part of what a batch costs the played side's
+ * thread, and what it costs is objects and calls, not bytes. So the batch
+ * and the place in it are the reader's own, set by `read` rather than held
+ * by functions made again for every batch; every call is one object of one
+ * layout, all its fields there from the start, rather than one that grows a
+ * field at a time into a layout of its own for each kind of record; and an
+ * integer argument, most of them, is read where the arguments are.
  *
  * @param {Object} options
  * @param {(number: number) => any} options.ref      a device object by its number
@@ -509,6 +520,250 @@ export function createReader({ ref, service }){
      * @type {{ keys: string[], kinds: number[] | null }[]}
      */
     const shapes = [];
+    /** The batch being read and where in it: `read`'s, the one before put back after it. */
+    let buffer = NO_BATCH;
+    let view = new DataView(NO_BATCH);
+    let bytes = new Uint8Array(NO_BATCH);
+    let at = 0;
+
+    const u32 = ()=>{
+        const value = view.getUint32(at, true);
+        at += 4;
+        return value;
+    };
+    const string = ()=>{
+        const id = u32();
+        if (id !== NEW_STRING)
+        {
+            return strings[id];
+        }
+        const length = u32();
+        const text = decoder.decode(bytes.subarray(at, at + length));
+        at += length;
+        strings.push(text);
+        return text;
+    };
+    const typed = ()=>{
+        const kind = bytes[at];
+        const length = view.getUint32(at + 1, true);
+        at = (at + 12) & ~7;
+        const type = ARRAYS[kind];
+        const array = new type(buffer, at, length / type.BYTES_PER_ELEMENT);
+        at += length;
+        return array;
+    };
+    /**
+     * @param {{ keys: string[], kinds: number[] | null }} shape
+     * @returns {Record<string, any>}
+     */
+    const flat = shape=>{
+        const kinds = /** @type {number[]} */ (shape.kinds);
+        const keys = shape.keys;
+        /** @type {Record<string, any>} */
+        const out = {};
+        for (let index = 0; index < kinds.length; index++)
+        {
+            if (kinds[index] < 0)
+            {
+                out[keys[index]] = view.getFloat64(at, true);
+                at += 8;
+            }
+            else
+            {
+                out[keys[index]] = flat(shapes[kinds[index]]);
+            }
+        }
+        return out;
+    };
+    /** @returns {any} */
+    const value = ()=>{
+        const tag = bytes[at++];
+        switch (tag)
+        {
+            case TAG.INT:
+            {
+                const read = view.getInt32(at, true);
+                at += 4;
+                return read;
+            }
+            case TAG.DOUBLE:
+            {
+                const read = view.getFloat64(at, true);
+                at += 8;
+                return read;
+            }
+            case TAG.UNDEFINED: return undefined;
+            case TAG.NULL: return null;
+            case TAG.FALSE: return false;
+            case TAG.TRUE: return true;
+            case TAG.STRING: return string();
+            case TAG.BYTES: return typed();
+            case TAG.REF: return ref(u32());
+            case TAG.SERVICE: return service();
+            case TAG.FLAT: return flat(shapes[u32()]);
+            case TAG.ARRAY:
+            {
+                const length = u32();
+                const out = new Array(length);
+                for (let index = 0; index < length; index++)
+                {
+                    out[index] = value();
+                }
+                return out;
+            }
+            case TAG.OBJECT:
+            case TAG.NEW_SHAPE:
+            {
+                const count = u32();
+                const known = shapes.length;
+                /** @type {Record<string, any>} */
+                const out = {};
+                /** @type {string[]} */
+                const keys = [];
+                /** @type {number[] | null} */
+                let kinds = [];
+                for (let index = 0; index < count; index++)
+                {
+                    const key = string();
+                    keys.push(key);
+                    const kind = bytes[at];
+                    out[key] = value();
+                    if (kind === TAG.INT || kind === TAG.DOUBLE)
+                    {
+                        kinds?.push(-1);
+                    }
+                    else if (kind === TAG.NEW_SHAPE && shapes.length > known
+                        && shapes[shapes.length - 1].kinds)
+                    {
+                        kinds?.push(shapes.length - 1);
+                    }
+                    else
+                    {
+                        kinds = null;
+                    }
+                }
+                if (tag === TAG.NEW_SHAPE)
+                {
+                    shapes.push({ keys, kinds });
+                }
+                return out;
+            }
+            case TAG.SHAPE:
+            {
+                const { keys } = shapes[u32()];
+                /** @type {Record<string, any>} */
+                const out = {};
+                for (let index = 0; index < keys.length; index++)
+                {
+                    out[keys[index]] = value();
+                }
+                return out;
+            }
+            default:
+                throw new Error(`remote: a value of tag ${tag} on the wire`);
+        }
+    };
+    /** @returns {{ address: number, bytes: Uint8Array }[]} */
+    const memories = ()=>{
+        const count = u32();
+        const out = new Array(count);
+        for (let index = 0; index < count; index++)
+        {
+            const address = u32();
+            at++;
+            out[index] = { address, bytes: /** @type {Uint8Array} */ (typed()) };
+        }
+        return out;
+    };
+    /** @returns {ReadCall} */
+    const record = ()=>{
+        const op = bytes[at++];
+        /** @type {ReadCall} */
+        const call = { op, t: 0, m: undefined, a: undefined, v: undefined, allocs: undefined,
+            replies: undefined, ship: undefined, wrote: undefined, lent: undefined,
+            wait: undefined, serial: undefined };
+        if (op === OP.LENT)
+        {
+            const count = u32();
+            const lent = call.lent = new Array(count);
+            for (let index = 0; index < count; index++)
+            {
+                lent[index] = { address: u32(), length: u32(), slot: u32() };
+            }
+            return call;
+        }
+        if (op === OP.WROTE)
+        {
+            call.wrote = memories();
+            return call;
+        }
+        call.t = view.getUint32(at, true);
+        const name = view.getUint32(at + 4, true);
+        if (name === NEW_STRING)
+        {
+            at += 4;
+            call.m = string();
+        }
+        else
+        {
+            at += 8;
+            call.m = strings[name];
+        }
+        if (op === OP.SET)
+        {
+            call.v = value();
+            return call;
+        }
+        if (op !== OP.CALL)
+        {
+            return call;
+        }
+        const count = bytes[at++];
+        const args = call.a = new Array(count);
+        for (let index = 0; index < count; index++)
+        {
+            if (bytes[at] === TAG.INT)
+            {
+                args[index] = view.getInt32(at + 1, true);
+                at += 5;
+            }
+            else
+            {
+                args[index] = value();
+            }
+        }
+        const sections = bytes[at++];
+        if (sections & SECTION.ALLOCS)
+        {
+            const allocs = call.allocs = new Array(u32());
+            for (let index = 0; index < allocs.length; index++)
+            {
+                allocs[index] = u32();
+            }
+        }
+        if (sections & SECTION.REPLIES)
+        {
+            const replies = call.replies = new Array(u32());
+            for (let index = 0; index < replies.length; index++)
+            {
+                replies[index] = value();
+            }
+        }
+        if (sections & SECTION.SHIP)
+        {
+            call.ship = memories();
+        }
+        if (sections & SECTION.WROTE)
+        {
+            call.wrote = memories();
+        }
+        const wait = call.wait = bytes[at++];
+        if (wait === WAIT.ANSWER)
+        {
+            call.serial = u32();
+        }
+        return call;
+    };
     return {
         /**
          * Every record of a batch, in order. What a record holds of the
@@ -516,243 +771,27 @@ export function createReader({ ref, service }){
          * the buffer is then given back to be written again (`give`), so
          * what is kept of it past `each` is copied.
          *
-         * @param {ArrayBuffer} buffer
+         * @param {ArrayBuffer} batch
          * @param {(call: ReadCall) => boolean | void} each  false stops the reading
          * @param {number} [size]  how much of the buffer the batch is, all of it by default
          */
-        read(buffer, each, size = buffer.byteLength){
-            const view = new DataView(buffer, 0, size);
-            const bytes = new Uint8Array(buffer, 0, size);
-            let at = 0;
-            const u8 = ()=>bytes[at++];
-            const u32 = ()=>{
-                const value = view.getUint32(at, true);
-                at += 4;
-                return value;
-            };
-            const string = ()=>{
-                const id = u32();
-                if (id !== NEW_STRING)
-                {
-                    return strings[id];
-                }
-                const length = u32();
-                const text = decoder.decode(bytes.subarray(at, at + length));
-                at += length;
-                strings.push(text);
-                return text;
-            };
-            const typed = ()=>{
-                const kind = u8();
-                const length = u32();
-                at = (at + 7) & ~7;
-                const type = ARRAYS[kind];
-                const array = new type(buffer, at, length / type.BYTES_PER_ELEMENT);
-                at += length;
-                return array;
-            };
-            /**
-             * @param {{ keys: string[], kinds: number[] | null }} shape
-             * @returns {Record<string, any>}
-             */
-            const flat = shape=>{
-                const kinds = /** @type {number[]} */ (shape.kinds);
-                /** @type {Record<string, any>} */
-                const out = {};
-                for (let index = 0; index < kinds.length; index++)
-                {
-                    if (kinds[index] < 0)
-                    {
-                        out[shape.keys[index]] = view.getFloat64(at, true);
-                        at += 8;
-                    }
-                    else
-                    {
-                        out[shape.keys[index]] = flat(shapes[kinds[index]]);
-                    }
-                }
-                return out;
-            };
-            /** @returns {any} */
-            const value = ()=>{
-                const tag = u8();
-                switch (tag)
-                {
-                    case TAG.UNDEFINED: return undefined;
-                    case TAG.NULL: return null;
-                    case TAG.FALSE: return false;
-                    case TAG.TRUE: return true;
-                    case TAG.INT:
-                    {
-                        const read = view.getInt32(at, true);
-                        at += 4;
-                        return read;
-                    }
-                    case TAG.DOUBLE:
-                    {
-                        const read = view.getFloat64(at, true);
-                        at += 8;
-                        return read;
-                    }
-                    case TAG.STRING: return string();
-                    case TAG.BYTES: return typed();
-                    case TAG.REF: return ref(u32());
-                    case TAG.SERVICE: return service();
-                    case TAG.ARRAY:
-                    {
-                        const length = u32();
-                        const out = new Array(length);
-                        for (let index = 0; index < length; index++)
-                        {
-                            out[index] = value();
-                        }
-                        return out;
-                    }
-                    case TAG.OBJECT:
-                    case TAG.NEW_SHAPE:
-                    {
-                        const count = u32();
-                        const known = shapes.length;
-                        /** @type {Record<string, any>} */
-                        const out = {};
-                        /** @type {string[]} */
-                        const keys = [];
-                        /** @type {number[] | null} */
-                        let kinds = [];
-                        for (let index = 0; index < count; index++)
-                        {
-                            const key = string();
-                            keys.push(key);
-                            const kind = bytes[at];
-                            out[key] = value();
-                            if (kind === TAG.INT || kind === TAG.DOUBLE)
-                            {
-                                kinds?.push(-1);
-                            }
-                            else if (kind === TAG.NEW_SHAPE && shapes.length > known
-                                && shapes[shapes.length - 1].kinds)
-                            {
-                                kinds?.push(shapes.length - 1);
-                            }
-                            else
-                            {
-                                kinds = null;
-                            }
-                        }
-                        if (tag === TAG.NEW_SHAPE)
-                        {
-                            shapes.push({ keys, kinds });
-                        }
-                        return out;
-                    }
-                    case TAG.SHAPE:
-                    {
-                        const { keys } = shapes[u32()];
-                        /** @type {Record<string, any>} */
-                        const out = {};
-                        for (let index = 0; index < keys.length; index++)
-                        {
-                            out[keys[index]] = value();
-                        }
-                        return out;
-                    }
-                    case TAG.FLAT: return flat(shapes[u32()]);
-                    default:
-                        throw new Error(`remote: a value of tag ${tag} on the wire`);
-                }
-            };
-            const memory = ()=>{
-                const address = u32();
-                at++;
-                return { address, bytes: /** @type {Uint8Array} */ (typed()) };
-            };
-            while (at < bytes.length)
+        read(batch, each, size = batch.byteLength){
+            const outer = { buffer, view, bytes, at };
+            buffer = batch;
+            view = new DataView(batch, 0, size);
+            bytes = new Uint8Array(batch, 0, size);
+            at = 0;
+            try
             {
-                const op = u8();
-                /** @type {ReadCall} */
-                const call = { op, t: 0 };
-                if (op === OP.LENT)
+                let more = at < size;
+                while (more)
                 {
-                    const count = u32();
-                    call.lent = [];
-                    for (let index = 0; index < count; index++)
-                    {
-                        call.lent.push({ address: u32(), length: u32(), slot: u32() });
-                    }
+                    more = each(record()) !== false && at < size;
                 }
-                else if (op === OP.WROTE)
-                {
-                    const count = u32();
-                    call.wrote = [];
-                    for (let index = 0; index < count; index++)
-                    {
-                        call.wrote.push(memory());
-                    }
-                }
-                else
-                {
-                    call.t = u32();
-                    call.m = string();
-                    if (op === OP.SET)
-                    {
-                        call.v = value();
-                    }
-                    else if (op === OP.CALL)
-                    {
-                        const count = u8();
-                        call.a = new Array(count);
-                        for (let index = 0; index < count; index++)
-                        {
-                            call.a[index] = value();
-                        }
-                        const sections = u8();
-                        if (sections & SECTION.ALLOCS)
-                        {
-                            const allocs = u32();
-                            call.allocs = [];
-                            for (let index = 0; index < allocs; index++)
-                            {
-                                call.allocs.push(u32());
-                            }
-                        }
-                        if (sections & SECTION.REPLIES)
-                        {
-                            const replies = u32();
-                            call.replies = [];
-                            for (let index = 0; index < replies; index++)
-                            {
-                                call.replies.push(value());
-                            }
-                        }
-                        if (sections & SECTION.SHIP)
-                        {
-                            const ships = u32();
-                            call.ship = [];
-                            for (let index = 0; index < ships; index++)
-                            {
-                                call.ship.push(memory());
-                            }
-                        }
-                        if (sections & SECTION.WROTE)
-                        {
-                            const wrote = u32();
-                            call.wrote = [];
-                            for (let index = 0; index < wrote; index++)
-                            {
-                                call.wrote.push(memory());
-                            }
-                        }
-                        call.wait = u8();
-                        if (call.wait === WAIT.ANSWER)
-                        {
-                            call.serial = u32();
-                        }
-                    }
-                }
-                if (each(call) === false)
-                {
-                    return;
-                }
+            }
+            finally
+            {
+                ({ buffer, view, bytes, at } = outer);
             }
         },
     };
