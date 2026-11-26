@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import { createD3dxFunctions } from './functions.js';
 import { parseShader } from '../../graphics/d3d9/shader.js';
 import { translateShader } from '../../graphics/d3d9/wgsl.js';
+import { testCache } from '../../cache/testing.fixture.js';
+import { compileName } from './compile-cache.js';
 
 const E_FAIL = 0x80004005;
 const D3DERR_INVALIDCALL = 0x8876086c;
@@ -22,8 +24,9 @@ const CLOSE = 0x2222;
  *
  * @param {Record<string, string>} [files]
  * @param {Record<string, string>} [disk]  By path, and resources by `module:name`.
+ * @param {import('../../cache/module.js').CacheSpace} [compiles]  Where compiles are kept.
  */
-function guest(files = {}, disk = {}){
+function guest(files = {}, disk = {}, compiles = undefined){
     const memory = new Uint8Array(0x100000);
     const view = new DataView(memory.buffer);
     let free = 0x20000;
@@ -38,6 +41,7 @@ function guest(files = {}, disk = {}){
     const fns = /** @type {any} */ (createD3dxFunctions({
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        compiles,
         readFile: async path=>{
             opened.push(`disk:${path}`);
             return path in disk ? Uint8Array.from(disk[path], c=>c.charCodeAt(0)) : null;
@@ -364,7 +368,8 @@ test('D3DXDisassembleShader lists what D3DXAssembleShader wrote, and refuses wha
 test('a compile asked again answers as before, until a file it included changes', async()=>{
     /** @type {Record<string, string>} */
     const files = { 'k.h': '#define K 0.25' };
-    const g = guest(files);
+    const cache = await testCache();
+    const g = guest(files, {}, cache.space('d3dx-compiles'));
     const source = '#include "k.h"\nfloat4 main() : COLOR { return K; }';
     const bytes = async()=>{
         const { answer, shader } = await g.compile(source, 'main', 'ps_2_0', { include: true });
@@ -384,3 +389,74 @@ test('a compile asked again answers as before, until a file it included changes'
         assert.match(String(g.text(refused.errors)), /X3004: undeclared identifier 'x'/);
     }
 });
+
+/**
+ * The key D3DXCompileShader keeps a compile of `source`'s `main` for ps_2_0 under, with
+ * no flags, macros or includer.
+ *
+ * @param {string} source
+ */
+const keyOf = source=>JSON.stringify([source, 'main', 'ps_2_0', 0, [], false]);
+
+test('a compile one process did is answered from the run\'s cache in another, its errors too',
+    async()=>{
+        const cache = await testCache();
+        const space = cache.space('d3dx-compiles');
+        const first = guest({}, {}, space);
+        const second = guest({}, {}, space);
+        const done = await first.compile(PIXEL, 'main', 'ps_2_0');
+        assert.equal(done.answer, 0);
+        const shader = [...words(first.buffer(done.shader), first.memory)];
+        const refused = await first.compile('float4 main() : COLOR { return y; }', 'main',
+            'ps_2_0');
+        assert.equal(refused.answer, E_FAIL);
+        const before = cache.reader.figures().hits;
+        const again = await second.compile(PIXEL, 'main', 'ps_2_0');
+        assert.equal(again.answer, 0);
+        assert.deepEqual([...words(second.buffer(again.shader), second.memory)], shader);
+        assert.ok(second.buffer(again.table), 'the constant table comes with the kept compile');
+        const refusedAgain = await second.compile('float4 main() : COLOR { return y; }', 'main',
+            'ps_2_0');
+        assert.equal(refusedAgain.answer, E_FAIL);
+        assert.equal(second.text(refusedAgain.errors), first.text(refused.errors));
+        assert.equal(cache.reader.figures().hits - before, 2, 'both answered from the cache');
+    });
+
+test('a compile nobody asked for in a while goes from the cache, and is done again when asked',
+    async()=>{
+        const cache = await testCache({ coldAfterMs: 1000 });
+        const g = guest({}, {}, cache.space('d3dx-compiles'));
+        const done = await g.compile(PIXEL, 'main', 'ps_2_0');
+        const bytes = [...words(g.buffer(done.shader), g.memory)];
+        const kept = ()=>cache.space('d3dx-compiles').look(compileName(keyOf(PIXEL)));
+        assert.equal(kept(), 'hot', 'the compile is a body of the run\'s cache');
+        for (let i = 0; i < 4; i++)
+        {
+            cache.clock.time += 60_000;
+            cache.keeper.sweep();
+        }
+        assert.equal(kept(), null, 'idle, it went');
+        const again = await g.compile(PIXEL, 'main', 'ps_2_0');
+        assert.deepEqual([...words(g.buffer(again.shader), g.memory)], bytes);
+        assert.equal(kept(), 'hot', 'compiled again, it is kept again');
+    });
+
+test('a compile kept under a name another key\'s digest also gives is not that key\'s answer',
+    async()=>{
+        const cache = await testCache();
+        const space = cache.space('d3dx-compiles');
+        const g = guest({}, {}, space);
+        const done = await g.compile(PIXEL, 'main', 'ps_2_0');
+        assert.equal(done.answer, 0);
+        const shader = [...words(g.buffer(done.shader), g.memory)];
+        // The same body, under the name the next compile's key gives: as if the two
+        // digests met.
+        const other = 'float4 main() : COLOR { return 0.5; }';
+        const body = space.with(compileName(keyOf(PIXEL)), bytes=>bytes.slice());
+        assert.ok(body, 'the compile is kept under its digest');
+        assert.ok(space.put(compileName(keyOf(other)), /** @type {Uint8Array} */ (body)));
+        const answered = await g.compile(other, 'main', 'ps_2_0');
+        assert.equal(answered.answer, 0);
+        assert.notDeepEqual([...words(g.buffer(answered.shader), g.memory)], shader,
+            'compiled for itself');
+    });
