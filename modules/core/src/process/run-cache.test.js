@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createReader } from '@bottlify/cellar';
-import { openRunCache, relayedJoin } from './run-cache.js';
+import { openRunCache } from './run-cache.js';
+import { relayedJoin } from '../layers/cache/module.js';
 
 /** A reader over what `join` handed a thread, told what the keeper says after. */
 const joinedReader = (/** @type {{ join: (post: (message: any) => void) => any }} */ run)=>{

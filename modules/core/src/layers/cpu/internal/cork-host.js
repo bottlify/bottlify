@@ -1232,7 +1232,7 @@ export function createCorkHost(config){
         layout,
         ...(features === undefined ? {} : { features }),
         // One translation for every other executor of the process: made for
-        // the shared layout, it is the same on each, so the arena and the
+        // the shared layout, it is the same on each, so the run's cache and the
         // store keep it once whichever of them asked for it first. The
         // process's own keeps its own layout, the state and the tables at
         // constant addresses: under the shared one each access adds a base, a

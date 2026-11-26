@@ -33,7 +33,8 @@ import { traceOpfsRejections } from './opfs-trace.js';
 import { portEnd } from '../layers/graphics/remote/connect.js';
 import { plainEvent } from '../system/events-across.js';
 import { handedFiles } from '../system/inherited-files.js';
-import { relayedJoin, remoteCacheReader } from '../process/run-cache.js';
+import { remoteCacheReader } from '../process/run-cache.js';
+import { relayedJoin } from '../layers/cache/module.js';
 
 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
 {

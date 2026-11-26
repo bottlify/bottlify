@@ -22,9 +22,14 @@ export async function testCache(made = {}){
     const clock = { time: 0 };
     /** @type {import('./module.js').Reader | null} */
     let reader = null;
+    /** Threads joined (`join`), told of each segment made or let go. @type {Set<(message: any) => void>} */
+    const told = new Set();
     const keeper = await openKeeper({
         budget, segmentBytes, coldAfterMs, now: ()=>clock.time,
-        announce: message=>reader?.adopt(message),
+        announce: message=>{
+            reader?.adopt(message);
+            told.forEach(tell=>tell(message));
+        },
     });
     const opened = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
@@ -38,7 +43,21 @@ export async function testCache(made = {}){
     reader = opened;
     return {
         keeper, clock, reader: opened,
-        /** @param {string} name @param {{ onlyCopy?: boolean }} [options] */
+        /** @param {string} name @param {{ onlyCopy?: boolean, idle?: 'go' | 'stay' }} [options] */
         space: (name, options)=>cacheSpace(opened, name, options),
+        /**
+         * Another thread joined, as the run's `join` joins one.
+         * @type {import('./module.js').Join}
+         */
+        join: post=>{
+            told.add(post);
+            return { shared: keeper.shared, segments: keeper.segmentBuffers(),
+                leave: ()=>told.delete(post) };
+        },
+        /** The clock moved and the keeper's idle sweep run. @param {number} ms */
+        idle(ms){
+            clock.time += ms;
+            keeper.sweep();
+        },
     };
 }

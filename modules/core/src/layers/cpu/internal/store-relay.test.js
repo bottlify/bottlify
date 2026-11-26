@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { STORE_SPACE, answerStoreAsks, storeClient } from './store-relay.js';
+import { KEPT_OPTIONS, KEPT_SPACE, STORE_SPACE, answerStoreAsks, storeClient }
+    from './store-relay.js';
 import { testCache } from '../../cache/testing.fixture.js';
 
 /** A store holding `records`, counting its lookups. @param {Record<string, Uint8Array>} records */
@@ -117,3 +118,42 @@ test('a put and an addition hand their buffer across, the whole of one; a part o
         assert.deepEqual(sent.map(([, transfer])=>transfer),
             [[record.buffer], [blocks.buffer], []]);
     });
+
+test('the translator\'s functions stay in the run\'s cache however long idle; others go', async()=>{
+    const made = await testCache({ coldAfterMs: 1000 });
+    const kept = made.space(KEPT_SPACE, KEPT_OPTIONS);
+    const other = made.space('reads');
+    assert.equal(kept.put('f', new Uint8Array(64).fill(7)), true);
+    assert.equal(other.put('r', new Uint8Array(64).fill(8)), true);
+    made.idle(5000);
+    assert.equal(other.look('r'), null, 'a body of another space idle past coldAfterMs: gone');
+    assert.equal(kept.with('f', body=>body[0]), 7, 'a function idle as long: still there');
+});
+
+test('an executor reads the functions the run kept in place, and sends each it keeps to the'
+    + ' process; its translation workers are joined through it, told of every segment', async()=>{
+    const made = await testCache();
+    const keeper = /** @type {any} */ (made.keeper);
+    /** @type {any[]} */
+    const sent = [];
+    const client = storeClient((message, transfer)=>sent.push({ message, transfer }));
+    assert.equal(client.kept(), null, 'none before the executor is joined');
+    client.join({ shared: keeper.shared, segments: keeper.segmentBuffers() });
+    const kept = /** @type {import('../engine.js').KeptStore} */ (client.kept());
+    assert.equal(kept.prefix, `${KEPT_SPACE}/`);
+    made.space(KEPT_SPACE, KEPT_OPTIONS).put('f1', Uint8Array.of(1, 2, 3));
+    assert.deepEqual(kept.space.with('f1', body=>[...body]), [1, 2, 3], 'read in place');
+    const bytes = Uint8Array.of(9, 9);
+    assert.equal(kept.space.put('f2', bytes), true);
+    assert.deepEqual(sent.map(one=>one.message), [{ type: 'kept',
+        entries: [{ name: 'f2', bytes }] }], 'sent to the process, not put here');
+    assert.deepEqual(sent[0].transfer, [bytes.buffer], 'its buffer handed over');
+    // A worker joined through the executor hears what the executor is told.
+    /** @type {any[]} */
+    const told = [];
+    const joined = /** @type {any} */ (kept.join?.(message=>told.push(message)));
+    assert.ok(joined.shared && Array.isArray(joined.segments));
+    const message = { segment: 7, buffer: new SharedArrayBuffer(8) };
+    assert.equal(client.take({ type: 'cache', message }), true);
+    assert.deepEqual(told, [message]);
+});

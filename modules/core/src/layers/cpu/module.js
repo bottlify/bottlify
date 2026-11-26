@@ -9,7 +9,7 @@ import { openMemoryBudget } from './internal/memory-budget.js';
 import { mayWait } from '../../system/may-wait.js';
 import { codeNudgesMade, gcNudgeOf, releasedCode, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
-import { STORE_SPACE } from './internal/store-relay.js';
+import { KEPT_OPTIONS, KEPT_SPACE, STORE_SPACE } from './internal/store-relay.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
 import { engineContractProblem } from './engine.js';
@@ -35,27 +35,39 @@ export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 
 /**
  * The translator's zone of the tab's memory: its modules and their compiled
- * code, the arena they are emitted into, and the tables past the guest's RAM
- * (entry hash, call stacks, page flags) every executor keeps. Cork is given
+ * code, and the tables past the guest's RAM (entry hash, call stacks, page
+ * flags) every executor keeps; the functions it emitted are the run's cache's,
+ * counted under its budget. Cork is given
  * what is left of it after the tables (`cacheBytes`) and lets its coldest
  * modules go to stay under that.
  */
 export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
 
 /**
- * The bytes of the arena a process's executors share their emitted functions
- * through, which fills as they translate.
- */
-const ARENA_BYTES = 48 << 20;
-
-/**
- * Whether the machine's memory has room for a process's arena, taken on its
- * holder where it has: without one each executor emits for itself.
+ * The run's cache as the translator is given it (`KeptStore`): its emitted
+ * functions under `cork/`, bodies that stay however long idle - one is read
+ * again only at a relink, long after it was written - and leave when their
+ * room is wanted, never to a disk (one is made again by emitting it). None
+ * without a run's cache (a machine built alone): the translator keeps its own.
  *
- * @param {{ memoryBudget?: SharedArrayBuffer | ArrayBuffer, memoryHolder?: number }} settings
+ * @param {any} cache  the cache layer's api, or null
+ * @returns {{ kept?: import('./engine.js').KeptStore }}
  */
-const arenaRoom = settings=>settings.memoryBudget === undefined
-    || openMemoryBudget(settings.memoryBudget, settings.memoryHolder).take(ARENA_BYTES, 'engine');
+const keptStore = cache=>{
+    if (cache === null)
+    {
+        return {};
+    }
+    const space = cache.space(KEPT_SPACE, KEPT_OPTIONS);
+    // A cache layer with no reader under it keeps nothing and joins no one.
+    const probe = cache.join(()=>{});
+    if (probe === null)
+    {
+        return {};
+    }
+    probe.leave?.();
+    return { kept: { space, prefix: `${KEPT_SPACE}/`, join: cache.join } };
+};
 
 /**
  * What an executor's worker costs the tab while it stands: its JavaScript
@@ -807,17 +819,17 @@ export function createCpuModule(){
                         entryVector: settings.entryVector,
                         initialStack: settings.initialStack,
                         thunkBase: settings.thunkBase,
-                        // Several executors share one arena, as they share one layout
-                        // for their translations (`sharedLayout`): what any of them
-                        // emitted, every other takes rather than emitting again.
-                        // The translator stops forming while another executor
-                        // waits for this one's answer (`awaitedBy`).
-                        cork: several ? { ...settings.cork, atomic: true,
-                            awaited: ()=>state.awaited?.() === true,
-                            ...(typeof engineModule.createArena === 'function'
-                                && arenaRoom(settings)
-                                ? { arena: engineModule.createArena(ARENA_BYTES) }
-                                : {}) } : settings.cork,
+                        // The functions the translator emitted kept in the run's
+                        // cache (`KEPT_SPACE`): every thread of the run - each
+                        // executor, every translation worker - takes what any of
+                        // them emitted rather than emitting it again; this thread
+                        // writes them, the others hand theirs here. The translator
+                        // stops forming while another executor waits for this
+                        // one's answer (`awaitedBy`).
+                        cork: { ...settings.cork,
+                            ...keptStore(cache),
+                            ...several ? { atomic: true,
+                                awaited: ()=>state.awaited?.() === true } : {} },
                         closedBelow: settings.closedBelow,
                         readThrough: settings.readThrough,
                         noExecuteBelow: settings.noExecuteBelow,
@@ -865,7 +877,7 @@ export function createCpuModule(){
                         // opens a translator of its own.
                         const cork = Object.fromEntries(Object.entries(hostConfig.cork)
                             .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
-                                && typeof value !== 'function'));
+                                && key !== 'kept' && typeof value !== 'function'));
                         // Where the pool lends this process's executors workers
                         // too (`executorTranslators`), each waits for its lend,
                         // emitting on its own thread meanwhile, as the process's

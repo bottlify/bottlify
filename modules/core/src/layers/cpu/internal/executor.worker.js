@@ -140,9 +140,12 @@ async function serve(
 {
     storeRelay?.join(cache);
     const engine = await import(engineUrl);
+    // The run's cache the translator keeps its functions in, read here in place.
+    const kept = storeRelay?.kept() ?? null;
     const host = createCorkHost({ ...config, engine, memory,
-        ...(store === true && storeRelay !== null
-            ? { cork: { ...config.cork, store: storeRelay.store } } : {}) });
+        cork: { ...config.cork,
+            ...store === true && storeRelay !== null ? { store: storeRelay.store } : {},
+            ...kept === null ? {} : { kept } } });
     running = host;
     emitted = emittedHere ? new Int32Array(emittedHere) : null;
     for (const adapter of lentWaiting.splice(0))
