@@ -143,14 +143,6 @@ export function argify(template, file, raw){
 }
 
 /**
- * Whether a template names the file itself; one that does not has it put at
- * its end.
- *
- * @param {string} template
- */
-export const namesFile = template=>/%[1lL*~2-9]/.test(template);
-
-/**
  * The path a `file:` URL names -- its slashes backslashes, a `|` after a
  * drive its colon, its escapes undone -- and anything else as it is.
  * Up to four slashes may lead the drive, or `//localhost/`; five, or

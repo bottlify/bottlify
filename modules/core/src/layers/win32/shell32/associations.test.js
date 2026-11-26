@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    argify, createAssociations, namesFile, pathOfFileUrl, splitParameters,
+    argify, createAssociations, pathOfFileUrl, splitParameters,
 } from './associations.js';
 
 test('the shell splits parameters at spaces alone, halving runs of quotes', ()=>{
@@ -41,9 +41,6 @@ test('a command template is filled in with the file and the parameters', ()=>{
     {
         assert.equal(argify(template, 'C:\\f.txt', raw), expected, template);
     }
-    assert.equal(namesFile('notepad.exe'), false);
-    assert.equal(namesFile('notepad.exe "%1"'), true);
-    assert.equal(namesFile('x %*'), true);
 });
 
 test('a file: URL names its path when it has up to four slashes, or localhost', ()=>{

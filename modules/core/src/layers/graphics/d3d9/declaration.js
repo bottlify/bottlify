@@ -150,25 +150,6 @@ export function validateElements(elements){
 }
 
 /**
- * The bytes between one vertex and the next in a stream, as the elements
- * describing that stream imply: the end of the element that reaches furthest.
- *
- * @param {readonly VertexElement[]} elements
- * @param {number} stream
- */
-export function strideOf(elements, stream){
-    let stride = 0;
-    for (const element of elements)
-    {
-        if (element.Stream === stream)
-        {
-            stride = Math.max(stride, element.Offset + DECLTYPE_BYTES[element.Type]);
-        }
-    }
-    return stride;
-}
-
-/**
  * The two bits from bit 16 up that give a coordinate set's size, as a type.
  *
  * @type {readonly number[]}
