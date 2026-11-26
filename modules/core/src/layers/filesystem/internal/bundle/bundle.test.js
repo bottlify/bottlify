@@ -22,6 +22,7 @@ import { createBundleSource, BLOCK_MISS } from './source.js';
 import { createBlockCache } from './cache.js';
 import { cachedBundle } from './saved.js';
 import { fakeOpfs } from '../opfs.fixture.js';
+import { INDEX_FILES, readSaved } from '../../../../../vendor/cellar/cellar.js';
 
 const BLOCK_SIZE = 1024;
 
@@ -542,21 +543,18 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     const swapped = fakeOpfs();
     (await cacheOf(bundle, { store: swapped.root })).close();
     const ramp = /** @type {any} */ (bundle.find('Game\\Ramp.dat'));
-    for (const file of ['index-a', 'index-b'])
-    {
-        const index = swapped.node(`${home}/${file}`);
-        if (index === undefined || index.data.length === 0)
-        {
-            continue;
-        }
-        const saved = JSON.parse(new TextDecoder().decode(index.data));
-        for (const record of saved.records)
-        {
-            record[0] = record[0] === String(ramp.firstBlock) ? String(ramp.firstBlock + 2)
-                : record[0] === String(ramp.firstBlock + 2) ? String(ramp.firstBlock) : record[0];
-        }
-        index.data = new TextEncoder().encode(JSON.stringify(saved));
-    }
+    // Written as an index of Cellar 0.9.0 (JSON), which Cellar still reads.
+    const files = INDEX_FILES.map(file=>swapped.node(`${home}/${file}`)?.data ?? null);
+    const saved = /** @type {NonNullable<ReturnType<typeof readSaved>>} */ (readSaved(files));
+    const rename = (/** @type {string} */ name)=>(name === String(ramp.firstBlock)
+        ? String(ramp.firstBlock + 2) : name === String(ramp.firstBlock + 2)
+            ? String(ramp.firstBlock) : name);
+    const records = [...saved.bodies].map(([name, body])=>[rename(name), body.pack, body.offset,
+        body.length, 0]);
+    /** @type {any} */ (swapped.node(`${home}/index-a`)).data = new TextEncoder().encode(
+        JSON.stringify({ version: 1, generation: 1, packs: Math.max(...saved.packs) + 1,
+            records }));
+    /** @type {any} */ (swapped.node(`${home}/index-b`)).data = new Uint8Array(0);
     assert.equal(await written(swapped.root), null, 'a body of another length: nothing');
 });
 

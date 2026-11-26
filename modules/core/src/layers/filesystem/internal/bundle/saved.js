@@ -12,6 +12,7 @@
  * has no use for.
  */
 
+import { INDEX_FILES, packFile, readSaved } from '../../../../../vendor/cellar/cellar.js';
 import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
 /** The directory of the origin's file system every bundle's blocks are kept under. */
@@ -39,11 +40,8 @@ export const fileNameOf = name=>name.replace(/[^A-Za-z0-9._-]/g, '_');
  * each body's pack and place, by name, those past their pack's end left out.
  * Null where the bundle has no directory or no index.
  *
- * Cellar's saved index, read here because Cellar has no reader of it without
- * a keeper: the newer whole one of `index-a` and `index-b`, a JSON of
- * `{ version: 1, generation, packs, records: [[name, pack, offset, length,
- * flags]] }`, the packs `pack-<n>`. `cache.test.js` saves one with Cellar's
- * own keeper and reads it back here.
+ * Cellar reads its index (`readSaved`); `cache.test.js` saves one with
+ * Cellar's own keeper and reads it back here.
  *
  * @param {any} root  the origin's file system
  * @param {string} name  the cache's (`blockCacheName`)
@@ -70,48 +68,37 @@ export async function savedBlocks(root, name){
     catch {
         return null;
     }
-    let saved = null;
-    for (const file of ['index-a', 'index-b'])
+    /** @type {(Uint8Array | null)[]} */
+    const files = [];
+    for (const file of INDEX_FILES)
     {
         const blob = await fileOf(directory, file);
-        try
-        {
-            const one = blob === null ? null : JSON.parse(await blob.text());
-            if (one?.version === 1 && Number.isSafeInteger(one.generation)
-                && Number.isInteger(one.packs) && Array.isArray(one.records)
-                && (saved === null || one.generation > saved.generation))
-            {
-                saved = one;
-            }
-        }
-        catch {
-            // Torn: the other one is the index.
-        }
+        files.push(blob === null ? null : new Uint8Array(await blob.arrayBuffer()));
     }
+    const saved = readSaved(files);
     if (saved === null)
     {
         return null;
     }
-    /** @type {(Blob | null)[]} */
-    const packs = [];
-    for (let at = 0; at < saved.packs; at++)
+    /** @type {Map<number, Blob | null>} */
+    const packs = new Map();
+    for (const number of saved.packs)
     {
-        packs.push(await fileOf(directory, `pack-${at}`));
+        packs.set(number, await fileOf(directory, packFile(number)));
     }
     /** @type {Map<string, { pack: number, offset: number, length: number }>} */
     const bodies = new Map();
-    for (const entry of saved.records)
+    for (const [body, place] of saved.bodies)
     {
-        const [body, pack, offset, length] = Array.isArray(entry) ? entry : [];
-        const blob = packs[pack];
-        if (typeof body === 'string' && blob && Number.isInteger(offset)
-            && Number.isInteger(length) && offset >= 0 && length > 0
-            && offset + length <= blob.size)
+        // The index is true of the disk as of its save: a pack cut since is
+        // no body.
+        const blob = packs.get(place.pack);
+        if (blob && place.length > 0 && place.offset + place.length <= blob.size)
         {
-            bodies.set(body, { pack, offset, length });
+            bodies.set(body, place);
         }
     }
-    return { bodies, slice: ({ pack, offset, length })=>/** @type {Blob} */ (packs[pack])
+    return { bodies, slice: ({ pack, offset, length })=>/** @type {Blob} */ (packs.get(pack))
         .slice(offset, offset + length) };
 }
 
