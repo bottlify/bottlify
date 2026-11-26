@@ -530,21 +530,6 @@ export function createMessageQueue(options = {}){
     };
 
     /**
-     * Every timer something could still be handed, dropping those whose
-     * thread has ended: a wait that woke for one of those would wake for ever.
-     */
-    const livingTimers = ()=>{
-        for (const [key, timer] of timers)
-        {
-            if (timer.thread?.state === 'terminated')
-            {
-                timers.delete(key);
-            }
-        }
-        return timers.values();
-    };
-
-    /**
      * The timer that is due, as the message it becomes.
      *
      * Its due time moves on only when the caller takes the message. A look that
@@ -644,22 +629,36 @@ export function createMessageQueue(options = {}){
      * both are what a thread waiting on an empty queue can be woken by.
      */
     const soonestDue = ()=>{
-        let soonest = null;
-        for (const timer of livingTimers())
+        // Asked every turn: the timers and the messages for later walked in
+        // place, the soonest kept in a cell, not a variable a closure boxes.
+        soonestCell[0] = Infinity;
+        timers.forEach(seeTimer);
+        later.forEach(seeLater);
+        return soonestCell[0] === Infinity ? null : soonestCell[0];
+    };
+    const soonestCell = new Float64Array(1);
+    /**
+     * A timer something could still be handed; one whose thread has ended is
+     * dropped: a wait that woke for it would wake for ever.
+     *
+     * @param {any} timer @param {any} key
+     */
+    const seeTimer = (timer, key)=>{
+        if (timer.thread?.state === 'terminated')
         {
-            if (soonest === null || timer.due < soonest)
-            {
-                soonest = timer.due;
-            }
+            timers.delete(key);
         }
-        for (const entry of later.values())
+        else if (timer.due < soonestCell[0])
         {
-            if (soonest === null || entry.due < soonest)
-            {
-                soonest = entry.due;
-            }
+            soonestCell[0] = timer.due;
         }
-        return soonest;
+    };
+    /** @param {{ due: number }} entry */
+    const seeLater = entry=>{
+        if (entry.due < soonestCell[0])
+        {
+            soonestCell[0] = entry.due;
+        }
     };
 
     /** @param {MessageFilter} filter */

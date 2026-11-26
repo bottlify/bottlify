@@ -69,9 +69,13 @@ export const FACES = Object.freeze([
  * @returns {Face | null}
  */
 export function faceNamed(name){
-    const wanted = name.toLowerCase();
-    return FACES.find(entry=>entry.name.toLowerCase() === wanted) ?? null;
+    // As the face is spelled first, which is how programs ask: no string made.
+    return BY_NAME.get(name) ?? BY_LOWER_NAME.get(name.toLowerCase()) ?? null;
 }
+
+/** The faces by their names as spelled, and lowered. */
+const BY_NAME = new Map(FACES.map(entry=>[entry.name, entry]));
+const BY_LOWER_NAME = new Map(FACES.map(entry=>[entry.name.toLowerCase(), entry]));
 
 /**
  * What Windows measures for the faces dialogs are laid out in, at the sizes

@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { Convention } from './conventions.js';
 import { createParking, isParkedCall } from './parking.js';
 import { createDispatcher } from './dispatch.js';
@@ -2302,4 +2303,26 @@ test('an address in a span named by asking is named when a report asks, and only
     assert.equal(dispatcher.symbolize(0x20000), 'Y!Two');
     assert.equal(dispatcher.symbolize(0x11000), null, 'past the span');
     assert.equal(asked, 2);
+});
+
+test('the second a crossing closes weighs every function without making a thing per '
+    + 'function', async()=>{
+    // Run once a second, the weighing stays in the interpreter, where walking
+    // the table of functions -- tens of thousands of ids, most of them holes
+    // -- by an iterator made a result object for every one of them.
+    const clock = { at: 0 };
+    const { dispatcher } = machine({ now: ()=>clock.at });
+    for (let id = 1; id <= 20000; id += 3)
+    {
+        dispatcher.register(id, { name: `USER32.dll!F${id}`, ...STDCALL, argBytes: 0,
+            handler: ()=>0 });
+        // A function joins the table at its first call.
+        dispatcher.dispatch(id);
+    }
+    const bytes = await bytesPerCall(()=>{
+        clock.at += 1000;
+        dispatcher.measureRates();
+        // As few as a game makes in a minute: it is never compiled hot.
+    }, { calls: 8 });
+    assert.ok(bytes < 2048, `${bytes} bytes a second weighed`);
 });

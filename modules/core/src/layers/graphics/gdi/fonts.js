@@ -214,8 +214,21 @@ export function createFontEngine(options = {}){
      * @type {Map<string, { css: string, em: number, metrics: FontMetrics }>}
      */
     const faces = new Map();
-    /** @type {Map<string, Glyph>} */
-    const glyphs = new Map();
+    /** Each request object already measured, to its face: no key made again. */
+    let facesOf = /** @type {WeakMap<FontRequest, { css: string, em: number, metrics: FontMetrics }>} */ (
+        new WeakMap());
+    /**
+     * Each distinct request's glyphs by code, and the request objects already
+     * seen, each to its key's glyphs: a font a program selected is one object
+     * for as long as it lives, so measuring and drawing with it again make no
+     * key string a character.
+     *
+     * @type {Map<string, Map<number, Glyph>>}
+     */
+    let glyphs = new Map();
+    /** @type {WeakMap<FontRequest, Map<number, Glyph>>} */
+    let glyphsOf = new WeakMap();
+    let glyphCount = 0;
 
     // ponytail: lfWidth is not honoured -- a face is drawn at its own
     // proportions; stretch the canvas horizontally if a program depends on it.
@@ -229,10 +242,16 @@ export function createFontEngine(options = {}){
      * @returns {{ css: string, em: number, metrics: FontMetrics }}
      */
     const faceOf = font=>{
+        const seen = facesOf.get(font);
+        if (seen)
+        {
+            return seen;
+        }
         const key = keyOf(font);
         let face = faces.get(key);
         if (face)
         {
+            facesOf.set(font, face);
             return face;
         }
         const requested = font.height | 0;
@@ -279,6 +298,7 @@ export function createFontEngine(options = {}){
             },
         };
         faces.set(key, face);
+        facesOf.set(font, face);
         return face;
     };
 
@@ -361,24 +381,43 @@ export function createFontEngine(options = {}){
             scope.fonts.add(face);
             // What was measured and drawn of that name was a stand-in's.
             faces.clear();
-            glyphs.clear();
+            facesOf = new WeakMap();
+            glyphs = new Map();
+            glyphsOf = new WeakMap();
+            glyphCount = 0;
             return true;
         },
         metrics: font=>faceOf(font ?? DEFAULT_FONT).metrics,
         glyph(code, font){
             const request = font ?? DEFAULT_FONT;
-            const key = `${keyOf(request)}|${code}`;
-            let glyph = glyphs.get(key);
+            let own = glyphsOf.get(request);
+            if (own === undefined)
+            {
+                const key = keyOf(request);
+                own = glyphs.get(key);
+                if (own === undefined)
+                {
+                    own = new Map();
+                    glyphs.set(key, own);
+                }
+                glyphsOf.set(request, own);
+            }
+            let glyph = own.get(code);
             if (!glyph)
             {
                 // ponytail: emptied wholesale at the limit rather than kept
                 // least-recently-used; a program's dialogs use a few faces.
-                if (glyphs.size >= CACHE_LIMIT)
+                if (glyphCount >= CACHE_LIMIT)
                 {
-                    glyphs.clear();
+                    for (const one of glyphs.values())
+                    {
+                        one.clear();
+                    }
+                    glyphCount = 0;
                 }
                 glyph = rasterise(code, request);
-                glyphs.set(key, glyph);
+                own.set(code, glyph);
+                glyphCount++;
             }
             return glyph;
         },

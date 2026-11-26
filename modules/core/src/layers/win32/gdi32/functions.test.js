@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { createGdiFunctions } from './functions.js';
 import { fontWithNames } from './faces.test.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -3242,4 +3243,48 @@ test('a path keeps an arc as curves, one a quarter of the ellipse', ()=>{
     fns.EndPath.handler([hdc]);
     assert.equal(fns.GetPath.handler([hdc, OUT, STRUCT, 64]), 11);
     assert.deepEqual([point(8), point(9), point(10)], [[200, 300], [200, 300], [200, 300]]);
+});
+
+test('the metrics of the selected font are measured once, not each time text is '
+    + 'measured', async()=>{
+    // Every string a control measures or draws asks for its font's metrics:
+    // building them each time was four objects and their spreads a string.
+    for (const faceName of ['Tahoma', 'MS Sans Serif'])
+    {
+        // MS Sans Serif is a bitmap face, drawn at a size of its own.
+        const { fns, memory, hdc } = withDC();
+        putLogFont(memory, { height: -12, weight: 400, faceName });
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+        const args = [hdc];
+        const charSet = fns.GetTextCharset.handler(args);
+        const bytes = await bytesPerCall(()=>{
+            fns.GetTextCharset.handler(args);
+        });
+        assert.ok(bytes < 16, `${faceName}: ${bytes} bytes a call`);
+        assert.equal(fns.GetTextCharset.handler(args), charSet, `${faceName}: the same answer`);
+    }
+});
+
+test('a string\'s width without an engine is summed off its font\'s table, made once', async()=>{
+    // An edit control lays its text out by characters, and a string is
+    // measured whole: each measure built an array of the string's advances
+    // and looked the face's table up again.
+    const text = 'The quick brown fox jumps over the lazy dog. '.repeat(4);
+    for (const faceName of ['Tahoma', 'MS Sans Serif'])
+    {
+        const { fns, memory, hdc } = withDC();
+        putLogFont(memory, { height: -11, weight: 400, faceName });
+        fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+        memory.putString(FACE_NAME, text);
+        const args = [hdc, FACE_NAME, text.length, OUT];
+        assert.equal(fns.GetTextExtentPoint32A.handler(args), 1);
+        const width = memory.i32(OUT + SIZE.cx);
+        const bytes = await bytesPerCall(()=>{
+            fns.GetTextExtentPoint32A.handler(args);
+        });
+        // What is left is the call's own: the string read and decoded, the
+        // answer written (18.7 KB with the advances built per measure).
+        assert.ok(bytes < 9000, `${faceName}: ${bytes} bytes a measure of ${text.length}`);
+        assert.equal(memory.i32(OUT + SIZE.cx), width, `${faceName}: the same width`);
+    }
 });

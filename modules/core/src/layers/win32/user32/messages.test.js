@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import {
     ANY_WINDOW, QS_KEY, QS_MOUSEBUTTON, QS_MOUSEMOVE, QS_PAINT, QS_POSTMESSAGE, QS_TIMER,
     WM_QUIT, WM_TIMER, createMessageQueue,
@@ -754,4 +755,21 @@ test('a claimed keystroke leaves the queue as WM_HOTKEY, with the id and the com
     // With nothing held, the registration does not fit and the key stands.
     queue.post({ hwnd: 0x99, message: WM_KEYDOWN, wParam: 0x41, lParam: 1, x: 0, y: 0 });
     assert.equal(queue.peek(ALL)?.message, WM_KEYDOWN);
+});
+
+test('the soonest timer is found without making anything, every turn asking', async()=>{
+    // The run loop asks every turn when the guest's next timer is due.
+    const { clock, queue } = timed();
+    clock.at = 100.5;
+    queue.setTimer(0x40, 1, 250, 0);
+    queue.setTimer(0x40, 2, 40, 0);
+    queue.postLater('a', 30.25, ()=>null);
+    // Kept in a typed cell: a fraction kept in a variable is boxed each time.
+    // The answer itself, a fraction handed back, is one number (16 bytes).
+    const due = new Float64Array(1);
+    const bytes = await bytesPerCall(()=>{
+        due[0] = queue.nextTimerDue() ?? -1;
+    });
+    assert.ok(bytes < 24, `${bytes} bytes a turn`);
+    assert.equal(due[0], 130.75);
 });

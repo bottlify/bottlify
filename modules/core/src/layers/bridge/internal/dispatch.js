@@ -154,9 +154,6 @@ import { isDriven } from './drive.js';
  * @property {Set<number> | null} cutSkip  Its dwords that are no address of their own
  *     (`skippedWords`), made at its first watched call.
  * @property {boolean} cutSaid  An address past 4 GiB it took as its low dword was said.
- * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
- * @property {number} [windowMs]     `sampledMs` when it began.
- * @property {number} [windowSampled]  `sampledCalls` when it began.
  */
 
 /**
@@ -673,6 +670,11 @@ class Dispatcher {
          * @type {string[]}
          */
         this.chatty = [];
+        /**
+         * Each function's `calls`, `sampledMs` and `sampledCalls` when the
+         * rate window began, three by id (`measureRates`).
+         */
+        this.windowBegan = new Float64Array(0);
         /** The names already written to the journal as chatty, once each. @type {Set<string>} */
         this.chattyNoted = new Set();
         /**
@@ -2271,18 +2273,34 @@ class Dispatcher {
         this.windowStart = now;
         /** @type {{ name: string, perSecond: number, msPerSecond: number }[]} */
         const over = [];
-        for (const entry of this.functions)
+        // By index: run once a second it stays in the interpreter, where an
+        // iterator over the table - tens of thousands of ids, most of them
+        // holes - made a result object for each.
+        // Where each function's window began, by id in typed arrays: a
+        // fraction stored on an entry whose field holds anything but numbers
+        // is boxed, for every function each second.
+        const functions = this.functions;
+        if (this.windowBegan.length < functions.length * 3)
         {
+            const grown = new Float64Array(functions.length * 3 + 3 * 1024);
+            grown.set(this.windowBegan);
+            this.windowBegan = grown;
+        }
+        const began = this.windowBegan;
+        for (let id = 0; id < functions.length; id++)
+        {
+            const entry = functions[id];
             if (!entry)
             {
                 continue;
             }
-            const calls = entry.calls - (entry.windowCalls ?? 0);
-            const ms = estimatedMs(entry.sampledMs - (entry.windowMs ?? 0),
-                entry.sampledCalls - (entry.windowSampled ?? 0), calls) ?? 0;
-            entry.windowCalls = entry.calls;
-            entry.windowMs = entry.sampledMs;
-            entry.windowSampled = entry.sampledCalls;
+            const at = id * 3;
+            const calls = entry.calls - began[at];
+            const ms = estimatedMs(entry.sampledMs - began[at + 1],
+                entry.sampledCalls - began[at + 2], calls) ?? 0;
+            began[at] = entry.calls;
+            began[at + 1] = entry.sampledMs;
+            began[at + 2] = entry.sampledCalls;
             const perSecond = calls * 1000 / elapsed;
             const msPerSecond = ms * 1000 / elapsed;
             if (perSecond >= CHATTY_CALLS_PER_SECOND || msPerSecond >= CHATTY_MS_PER_SECOND)

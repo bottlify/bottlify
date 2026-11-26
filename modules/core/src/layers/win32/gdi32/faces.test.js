@@ -6,8 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import {
-    fontFaces, fontFamilies, outlineCell, rasterFace, rasterRealization, scaledAdvances,
+    faceNamed, fontFaces, fontFamilies, outlineCell, rasterFace, rasterRealization, scaledAdvances,
     windowsMetrics,
 } from './faces.js';
 
@@ -243,4 +244,21 @@ test('an outline face whose cell is known measures as Windows scales it', ()=>{
     assert.deepEqual(cell(-11), [13, 11, 2, 2], 'the 8-point dialog cell');
     assert.equal(outlineCell({ faceName: 'Tahoma', height: 0 }), null);
     assert.equal(outlineCell({ faceName: 'Arial', height: -12 }), null, 'a cell not known');
+});
+
+test('a face is found by name without making a string of every face to compare', async()=>{
+    // Text is measured for every string an edit control or a static lays out,
+    // and each measure looks its face up: lower-casing each of the faces a
+    // lookup cost hundreds of bytes, 92 MiB in Doom 3's start.
+    /** @type {any} */
+    let found = null;
+    assert.ok(await bytesPerCall(()=>{
+        found = faceNamed('MS Shell Dlg');
+    }) < 8, 'as the face is spelled: nothing made');
+    assert.ok(await bytesPerCall(()=>{
+        found = faceNamed('ms shell dlg');
+    }) < 96, 'spelled otherwise: one name lowered, not every face');
+    assert.equal(found?.name, 'MS Shell Dlg');
+    assert.equal(faceNamed('ARIAL')?.name, 'Arial');
+    assert.equal(faceNamed('No Such Face'), null);
 });

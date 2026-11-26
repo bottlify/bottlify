@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 
 import { createMixer } from './mixer.js';
 import {
@@ -418,4 +419,21 @@ test('a mixer pumps its own fill, once a mix', ()=>{
     mixer.pump();
     mixer.pump();
     assert.equal(fills, 2);
+});
+
+test('the open tracks are counted without building the report', async()=>{
+    // The run loop asks every turn whether a track is open, to look at the
+    // device in time: through diagnostics() that was the whole report,
+    // arrays and a string a track, each turn.
+    const mixer = createMixer();
+    assert.equal(mixer.tracks(), 0);
+    const track = mixer.open(DIRECT);
+    track.write(pcm16([1000, 1000]));
+    assert.equal(mixer.tracks(), 1);
+    assert.equal(mixer.tracks(), mixer.diagnostics().tracks);
+    let open = 0;
+    assert.ok(await bytesPerCall(()=>{
+        open = mixer.tracks();
+    }) < 4);
+    assert.equal(open, 1);
 });
