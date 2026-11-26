@@ -223,6 +223,8 @@ function rig(version, way, caps = {}){
     /** Plays what is held, for an answer the program waits on. */
     let release = ()=>{};
     let close = ()=>{};
+    /** The calls the played device was given, as text, since the last look. @type {string[]} */
+    const given = [];
     /** The guest bytes the batches carried, by what copied them; null where nothing is batched. @type {() => Record<string, number> | null} */
     let shipped = ()=>null;
     /** @type {any} */
@@ -261,6 +263,12 @@ function rig(version, way, caps = {}){
                 toSender({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
             },
         });
+        // Every call the played device is given, as it is given it.
+        const play = played.play;
+        played.play = (/** @type {any} */ call)=>{
+            given.push(JSON.stringify(plain(call)));
+            return play(call);
+        };
         if (way === 'at once')
         {
             toSender = message=>{
@@ -344,7 +352,7 @@ function rig(version, way, caps = {}){
             d3d = recordedDirect3D(factory, services, sender);
         }
     }
-    return { version, way, d3d, gpu, memory, settle, release, close, shipped };
+    return { version, way, d3d, gpu, memory, settle, release, close, shipped, given };
 }
 
 /**
@@ -501,7 +509,7 @@ function asked(calls){
 function runner(on){
     /** What the program saw, a line a call or a look. @type {string[]} */
     const seen = [];
-    /** What the GPU was asked before each look. @type {{ label: string, made: string[], stream: string[] }[]} */
+    /** What the GPU was asked before each look, and the calls the played device was given. @type {{ label: string, made: string[], stream: string[], calls: string[] }[]} */
     const looks = [];
     /** @type {WeakMap<object, string>} */
     const names = new WeakMap();
@@ -588,7 +596,7 @@ function runner(on){
          */
         async look(label){
             await on.settle();
-            looks.push({ label, ...asked(on.gpu.calls) });
+            looks.push({ label, ...asked(on.gpu.calls), calls: on.given.splice(0) });
             on.gpu.reset();
             seen.push(`${label}: memory ${createHash('sha1').update(on.memory.ram).digest('hex')}`);
         },
@@ -628,14 +636,14 @@ function parting(direct, played, what){
  * @param {object} [caps]
  * @param {string} [against]  the run the ways are held to: the device that draws itself,
  *     or one of the ways
- * @param {boolean} [queued]  what the GPU was asked compared as its queue runs it
- *     (`asQueued`), not in the order the calls were made
+ * @param {boolean} [given]  what the played device was given compared, call by call,
+ *     in place of what the GPU was asked: what a transport decides, where the GPU's
+ *     stream also holds the twin's own turns
  * @returns {Promise<string[]>}
  */
 async function divergences(version, scenario, ways = WAYS, caps = {}, against = 'direct',
-    queued = false)
+    given = false)
 {
-    const order = queued ? asQueued : (/** @type {string[]} */ stream)=>stream;
     const direct = runner(rig(version, against, caps));
     try
     {
@@ -677,11 +685,12 @@ async function divergences(version, scenario, ways = WAYS, caps = {}, against = 
         const count = Math.max(direct.looks.length, played.looks.length);
         for (let look = 0; look < count; look++)
         {
-            const one = direct.looks[look] ?? { label: '?', made: [], stream: [] };
-            const other = played.looks[look] ?? { label: '?', made: [], stream: [] };
-            const gpu = parting(one.made, other.made, `the objects the GPU made (${one.label})`)
-                ?? parting(order(one.stream), order(other.stream),
-                    `what the GPU was asked (${one.label})`);
+            const one = direct.looks[look] ?? { label: '?', made: [], stream: [], calls: [] };
+            const other = played.looks[look] ?? { label: '?', made: [], stream: [], calls: [] };
+            const gpu = given
+                ? parting(one.calls, other.calls, `what the played device was given (${one.label})`)
+                : parting(one.made, other.made, `the objects the GPU made (${one.label})`)
+                    ?? parting(one.stream, other.stream, `what the GPU was asked (${one.label})`);
             if (gpu)
             {
                 found.push(`[${way}] ${gpu}`);
@@ -690,45 +699,6 @@ async function divergences(version, scenario, ways = WAYS, caps = {}, against = 
         }
     }
     return found;
-}
-
-/** The writes a queue runs where they are called, ahead of any command buffer submitted after. */
-const QUEUE_WRITES = new Set(['writeBuffer', 'writeTexture']);
-
-/**
- * What the GPU was asked as its queue runs it: between two submits, the
- * queue's own writes ahead of the commands being encoded, each in its order.
- * A write lands before the next submit whether it was called before or after
- * the encoder that submit carries was begun, so a twin that played a
- * texture's upload a turn later than another asked the GPU the same.
- *
- * @param {string[]} stream
- * @returns {string[]}
- */
-function asQueued(stream){
-    /** @type {string[]} */
-    const out = [];
-    /** @type {string[]} */
-    let writes = [];
-    /** @type {string[]} */
-    let encoded = [];
-    for (const line of stream)
-    {
-        const op = /"op":"(\w+)"/.exec(line)?.[1] ?? '';
-        if (QUEUE_WRITES.has(op))
-        {
-            writes.push(line);
-            continue;
-        }
-        encoded.push(line);
-        if (op === 'submit')
-        {
-            out.push(...writes, ...encoded);
-            writes = [];
-            encoded = [];
-        }
-    }
-    return [...out, ...writes, ...encoded];
 }
 
 /**
@@ -3257,11 +3227,7 @@ const randomProgram = (seed, steps)=>async run=>{
             }
             case 2:
             {
-                // Written through the lock a dynamic buffer's draws take, the GPU
-                // idle first: a DISCARD while a frame is drawing renames the buffer
-                // (`carries`), as early or late as that frame's end, which is the
-                // GPU's timing and not what a transport decides.
-                await run.call(`idle before ${label}`, ()=>device.idle());
+                // Written through the lock a dynamic buffer's draws take.
                 const flags = [D3DLOCK.DISCARD, D3DLOCK.NOOVERWRITE, 0][pick(3)];
                 const first = pick(4) * 4;
                 /** @type {{ pBits?: number }} */
@@ -3372,19 +3338,25 @@ const randomProgram = (seed, steps)=>async run=>{
 
 /**
  * The transports' gate: seeded random programs whose twin plays as late as
- * it may (`held`) and through each way across threads, every way held to
- * the first -- what the GPU was asked, with its bytes, every answer and out-
- * structure the program saw, and guest memory at every look. A transport
- * that loses, reorders, cuts or misreads a batch, an answer or a write back
- * parts here, whichever of its paths -- built in place, spilled, in parts,
- * waiting for room -- the record took.
+ * it may (`held`) and as its rings' bells ring, every way held to the first --
+ * every call the played device was given, with its bytes, in its order, every
+ * answer and out-structure the program saw, and guest memory at every look.
+ * A transport that loses, reorders, cuts or misreads a batch, an answer or a
+ * write back parts here, whichever of its paths -- built in place, spilled, in
+ * parts, waiting for room -- the record took. What the GPU was asked is held
+ * to the device that draws itself by the scenarios above: in a program this
+ * free, where among a look's submits an upload lands is the twin's own turns.
  */
-test('seeded random Direct3D 9 programs play the same through every transport, and answer the'
-    + ' program the same', async()=>{
+test('seeded random Direct3D 9 programs give the played device the same through every transport,'
+    + ' and answer the program the same', async()=>{
     for (let seed = 1; seed <= 12; seed++)
     {
-        const found = await divergences(9, randomProgram(seed, 40),
-            ['ring', 'ring, lent', 'ring, parts'], {}, 'held');
+        const found = [
+            ...await divergences(9, randomProgram(seed, 40),
+                ['ring', 'ring, small', 'ring, parts'], {}, 'held', true),
+            ...await divergences(9, randomProgram(seed, 40), ['ring, lent'], {}, 'held, lent',
+                true),
+        ];
         assert.deepEqual(found, [], `seed ${seed}:\n${found.join('\n')}`);
     }
 });

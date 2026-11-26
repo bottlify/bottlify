@@ -475,7 +475,8 @@ test('a writer that numbers only so many strings writes the rest where they stan
 });
 
 test('maps and sets cross as what they are', ()=>{
-    const value = { counts: new Map([[3, 'three'], ['x', [1, 2]]]), seen: new Set(['a', 7]) };
+    const value = { counts: new Map(/** @type {[any, any][]} */ ([[3, 'three'], ['x', [1, 2]]])),
+        seen: new Set(['a', 7]) };
     const { read } = oneValue(value);
     assert.ok(read.counts instanceof Map && read.seen instanceof Set);
     assert.deepEqual([...read.counts], [[3, 'three'], ['x', [1, 2]]]);

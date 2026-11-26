@@ -416,3 +416,19 @@ test('an unwaited call answered later holds its batch, read where it lies, and t
     receiver.close();
     await receiver.served();
 });
+
+test('an answer\'s bytes are the program\'s own: what the played side says after it does not reach'
+    + ' them', async()=>{
+    const s = sender(0);
+    s.made.writer.u8(0x55);
+    const answered = s.made.called(WAIT.ANSWER, 'GetRenderTargetData');
+    const pixels = new Uint8Array(4096).fill(0x11);
+    s.tell({ type: 'answer', serial: 1, answer: 0, outs: [pixels] });
+    // More than its ring back holds since: the answer's record is written over.
+    for (let more = 0; more < 40; more++)
+    {
+        s.tell({ type: 'counts', counts: [[more, new Uint8Array(4096).fill(0x22)]] });
+    }
+    const reply = await answered;
+    assert.deepEqual([...new Set(reply.outs[0])], [0x11]);
+});

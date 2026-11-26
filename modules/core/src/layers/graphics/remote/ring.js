@@ -69,6 +69,43 @@ const SLACK = HEAD + 4;
 const LEAST_ROOM = 4 << 10;
 
 /**
+ * A turn of the thread's event loop, for what waits for one: its other
+ * tasks -- the GPU's answers, a frame to hand on -- run before it ends.
+ * `scheduler.yield` where there is one; a message to the thread itself
+ * elsewhere, over one channel made when first asked for, which keeps a Node
+ * process alive only while a turn is waited for.
+ *
+ * @type {() => Promise<unknown>}
+ */
+const nextTask = typeof (/** @type {any} */ (globalThis).scheduler?.yield) === 'function'
+    ? ()=>/** @type {any} */ (globalThis).scheduler.yield()
+    : (()=>{
+        /** @type {(() => void)[]} */
+        const waiting = [];
+        /** @type {MessageChannel | null} */
+        let channel = null;
+        return ()=>new Promise(resolve=>{
+            if (!channel)
+            {
+                channel = new MessageChannel();
+                const listening = /** @type {any} */ (channel.port1);
+                listening.onmessage = ()=>{
+                    waiting.shift()?.();
+                    // Node keeps a process alive for a port listened to: only
+                    // while a turn is waited for.
+                    if (waiting.length === 0)
+                    {
+                        listening.unref?.();
+                    }
+                };
+            }
+            /** @type {any} */ (channel.port1).ref?.();
+            waiting.push(()=>resolve(undefined));
+            channel.port2.postMessage(0);
+        });
+    })();
+
+/**
  * Where the body of the record whose room the ring gave at `room` begins.
  *
  * @param {number} room
@@ -394,13 +431,15 @@ export function openRingIn(memory, take){
     let serving = false;
 
     /**
-     * Takes every record there is, until one is held: how many.
+     * Takes the records there are, `most` at the most, until one is held:
+     * how many.
      *
+     * @param {number} [most]
      * @returns {number}
      */
-    const drain = ()=>{
+    const drain = (most = Infinity)=>{
         let count = 0;
-        while (!held)
+        while (!held && count < most)
         {
             const record = ring.peek();
             if (!record)
@@ -489,7 +528,20 @@ export function openRingIn(memory, take){
                     continue;
                 }
                 const seen = ring.bell.seen();
-                drain();
+                // A record a task, as a batch a message was: the thread's other
+                // tasks run between two -- the GPU's count of an occlusion query
+                // the program spins on, a present's end -- rather than once a
+                // whole run of batches is played. Played back to back, a
+                // worker-bound program's frames came unevenly (a frame's
+                // present gaps p90 13-14 ms against 9.5-10).
+                if (drain(1) > 0)
+                {
+                    if (!held && ring.held() > 0)
+                    {
+                        await nextTask();
+                    }
+                    continue;
+                }
                 if (held)
                 {
                     continue;

@@ -33,8 +33,9 @@ flowchart TB
   thread, never the engine's. A batch that outgrows the room it was built in (half the 2 MiB
   ring at most) is copied in, one longer than a record goes in parts, and one that finds no room
   waits on the engine's side with everything after it. The graphics thread plays each batch where
-  it lies and gives its room back at once; the arguments of a waited call are copied first, as
-  its answer may fill them later. Resource bytes ride in the same batch. For a Direct3D buffer that is what the program
+  it lies and gives its room back at once, a batch a task of its event loop, so the GPU's answers
+  run between two; the arguments of a waited call are copied first, as its answer may fill them
+  later. Resource bytes ride in the same batch. For a Direct3D buffer that is what the program
   wrote between `Lock` and `Unlock`; for a texture, everything written up to the next call that
   may read it. Where the program's memory is shared, what a Direct3D 8 or 9 texture's or
   surface's unlock let the program write is lent rather than copied: the batch says where the
