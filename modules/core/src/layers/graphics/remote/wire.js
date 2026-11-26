@@ -30,11 +30,13 @@ export const OP = { CALL: 1, GET: 2, SET: 3, WROTE: 4, LENT: 5 };
 
 /** A string's number when it is sent for the first time, its text following. */
 const NEW_STRING = 0xffffffff;
+/** A string sent where it stands, its text following, and not numbered. */
+const INLINE_STRING = 0xfffffffe;
 
 const TAG = {
     UNDEFINED: 0, NULL: 1, FALSE: 2, TRUE: 3, INT: 4, DOUBLE: 5, STRING: 6, ARRAY: 7,
     OBJECT: 8, BYTES: 9, REF: 10, SERVICE: 11, NEW_SHAPE: 12, SHAPE: 13, FLAT: 14,
-    TEXT: 15, MAP: 16, SET: 17,
+    MAP: 15, SET: 16,
 };
 
 /**
@@ -110,11 +112,11 @@ const UNPLACED = new Uint8Array(0);
  *     `least` bytes, at a multiple of eight in its buffer, or null where there is none now
  * @param {() => void} [options.unplaced]  the room `place` gave goes back unused: the
  *     batch outgrew it
- * @param {boolean} [options.intern]  strings among the values are numbered and their
- *     text sent once, as a program's names are; false writes each where it stands,
+ * @param {number} [options.strings]  how many strings are numbered, their text sent once,
+ *     as a program's names are; past that each is written where it stands: a bound
  *     for what says something new every time -- a failure, a divergence
  */
-export function createWriter({ place = null, unplaced = ()=>{}, intern = true } = {}){
+export function createWriter({ place = null, unplaced = ()=>{}, strings: most = Infinity } = {}){
     /** This side's own buffer, written on when nothing is placed. */
     let own = new ArrayBuffer(1 << 16);
     /** @type {Uint8Array} */
@@ -215,26 +217,20 @@ export function createWriter({ place = null, unplaced = ()=>{}, intern = true } 
             u32(id);
             return id;
         }
-        strings.set(text, strings.size);
-        defined.push(text);
+        const numbered = strings.size < most;
+        if (numbered)
+        {
+            strings.set(text, strings.size);
+            defined.push(text);
+        }
         const encoded = encoder.encode(text);
         room(8 + encoded.length);
-        view.setUint32(at, NEW_STRING, true);
+        view.setUint32(at, numbered ? NEW_STRING : INLINE_STRING, true);
         view.setUint32(at + 4, encoded.length, true);
         at += 8;
         bytes.set(encoded, at);
         at += encoded.length;
-        return strings.size - 1;
-    };
-    /** @param {string} item  a string written where it stands, not numbered */
-    const text = item=>{
-        const encoded = encoder.encode(item);
-        room(5 + encoded.length);
-        bytes[at++] = TAG.TEXT;
-        view.setUint32(at, encoded.length, true);
-        at += 4;
-        bytes.set(encoded, at);
-        at += encoded.length;
+        return numbered ? strings.size - 1 : -1;
     };
     /**
      * What was written from `start` is taken back, and the strings and
@@ -305,13 +301,8 @@ export function createWriter({ place = null, unplaced = ()=>{}, intern = true } 
                 u8(TAG.UNDEFINED);
                 return false;
             case 'string':
-                if (intern)
-                {
-                    u8(TAG.STRING);
-                    string(item);
-                    return false;
-                }
-                text(item);
+                u8(TAG.STRING);
+                string(item);
                 return false;
             case 'object':
                 break;
@@ -679,6 +670,10 @@ export function createReader({ ref, service, owned = false }){
     };
     const string = ()=>{
         const id = u32();
+        if (id === INLINE_STRING)
+        {
+            return textAt(u32());
+        }
         if (id !== NEW_STRING)
         {
             return strings[id];
@@ -742,7 +737,6 @@ export function createReader({ ref, service, owned = false }){
             case TAG.FALSE: return false;
             case TAG.TRUE: return true;
             case TAG.STRING: return string();
-            case TAG.TEXT: return textAt(u32());
             case TAG.MAP:
             case TAG.SET:
             {
@@ -866,7 +860,7 @@ export function createReader({ ref, service, owned = false }){
         }
         call.t = view.getUint32(at, true);
         const name = view.getUint32(at + 4, true);
-        if (name === NEW_STRING)
+        if (name === NEW_STRING || name === INLINE_STRING)
         {
             at += 4;
             call.m = string();

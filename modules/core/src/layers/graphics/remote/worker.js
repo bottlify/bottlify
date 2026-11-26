@@ -89,7 +89,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
 import { trackDevice } from '../webgpu/ledger.js';
 import { createCapture } from './capture.js';
-import { createReceiver, sharedNow } from './channel.js';
+import { SAID_STRINGS, createReceiver, sharedNow } from './channel.js';
 import { KIND, openRingOut } from './ring.js';
 import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
@@ -825,7 +825,7 @@ export function serveGraphics(scope, deps){
                 ends.add(()=>roots.delete(id));
             }).catch(e=>{
             // Said on its ring back, which then closes: the root is no more.
-            const said = openRingOut(data.rings.replies, { intern: false });
+            const said = openRingOut(data.rings.replies, { strings: SAID_STRINGS });
             said.writer.value({ type: 'failed', message: String(e?.message ?? e) }, ()=>undefined);
             said.publish(KIND.VALUE, sharedNow());
             said.close();

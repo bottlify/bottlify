@@ -86,9 +86,9 @@ const bodyAt = room=>((room + 7) & ~7) + HEAD;
  * The writing side of a ring.
  *
  * @param {import('../../../../vendor/cellar/cellar.js').RingMemory} memory
- * @param {{ intern?: boolean }} [options]  as `createWriter`'s
+ * @param {{ strings?: number }} [options]  as `createWriter`'s
  */
-export function openRingOut(memory, { intern = true } = {}){
+export function openRingOut(memory, { strings = Infinity } = {}){
     const ring = openRing(memory);
     const data = /** @type {SharedArrayBuffer} */ (ring.bytes.buffer);
     const words = new DataView(data);
@@ -148,7 +148,7 @@ export function openRingOut(memory, { intern = true } = {}){
     const writer = createWriter({ place, unplaced: ()=>{
         ring.abandon();
         room = -1;
-    }, intern });
+    }, strings });
 
     /**
      * Writes the head of the record whose room begins at `at`, then publishes

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { connectGraphicsWorker } from './connect.js';
-import { createSender, sharedNow } from './channel.js';
+import { SAID_STRINGS, createSender, sharedNow } from './channel.js';
 import { KIND, createRingMemory, openRingIn, openRingOut } from './ring.js';
 import { WAIT } from './wire.js';
 import { openGraphicsWorker } from '../../../host/graphics-worker.js';
@@ -33,7 +33,7 @@ async function delivered(){
  * @param {any} root  the `root` message the worker was sent @param {any} message
  */
 function tell(root, message){
-    const back = openRingOut(root.rings.replies, { intern: false });
+    const back = openRingOut(root.rings.replies, { strings: SAID_STRINGS });
     back.writer.value(message, ()=>undefined);
     back.publish(KIND.VALUE, 0);
 }

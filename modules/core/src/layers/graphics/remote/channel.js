@@ -43,12 +43,20 @@
  *                      { type: 'failed', message }     a call could not be played
  */
 
-import { WAIT, createReader } from './wire.js';
+import { WAIT, createReader, createSite } from './wire.js';
 import { createLender } from './lending.js';
 import { KIND, openRingIn, openRingOut } from './ring.js';
 
 /** What a value said back is written with: nothing in it is a device's object. */
 const NO_REF = ()=>undefined;
+
+/**
+ * The strings the played side's ring back numbers, its keys and the names it
+ * repeats; past them a string goes where it stands. What it says may say
+ * something new every time -- a failure, a divergence -- and a table of every
+ * such text, both sides, would grow for the run.
+ */
+export const SAID_STRINGS = 1024;
 
 /**
  * A root's two rings (`ring.js`): its calls to the played side, and what that
@@ -761,10 +769,24 @@ export function createReceiver({ played, rings, serve = true, seen = ()=>{}, mar
 {
     let presented = 0;
     /** What this side says goes back through the root's ring, in place where it fits. */
-    const say = openRingOut(rings.replies, { intern: false });
+    const say = openRingOut(rings.replies, { strings: SAID_STRINGS });
+    /**
+     * Each kind of message's place on the wire: one with the keys it had the
+     * time before goes as its shape's number and its values (`Site`).
+     *
+     * @type {Map<string, import('./wire.js').Site>}
+     */
+    const sites = new Map();
     /** @param {any} message */
     const post = message=>{
-        say.writer.value(message, NO_REF);
+        const kind = String(message?.type);
+        let site = sites.get(kind);
+        if (!site)
+        {
+            site = createSite();
+            sites.set(kind, site);
+        }
+        say.writer.value(message, NO_REF, 0, site);
         say.publish(KIND.VALUE, shared());
     };
     /** @type {WorkerPhases} */

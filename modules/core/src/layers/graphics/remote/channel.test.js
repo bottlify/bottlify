@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createReceiver, createSender } from './channel.js';
+import { SAID_STRINGS, createReceiver, createSender } from './channel.js';
 import { createPlayer } from './replay.js';
 import { KIND, createRingMemory, openRingIn, openRingOut } from './ring.js';
 import { OP, WAIT, createReader } from './wire.js';
@@ -44,7 +44,7 @@ function sender(gapMs){
             sent.push(length);
         }
     });
-    const back = openRingOut(rings.replies, { intern: false });
+    const back = openRingOut(rings.replies, { strings: SAID_STRINGS });
     /** A call nobody waits for, in a turn of its own that then ends. */
     const turn = ()=>{
         made.writer.u8(0x55);

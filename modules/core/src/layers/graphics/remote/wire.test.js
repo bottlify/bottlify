@@ -447,3 +447,70 @@ test('the writer counts the buffers it made and the batches that outgrew theirs'
     assert.deepEqual(writer.figures(), { made: 3, grown: 1, copied: before, spilled: 0 },
         'the grown buffer given back is written on again, as large as it grew');
 });
+
+const NO_REF = ()=>undefined;
+
+/**
+ * A value written by a writer of `options` and read back, and its bytes.
+ *
+ * @param {any} value @param {Parameters<typeof createWriter>[0]} [options]
+ */
+const oneValue = (value, options)=>{
+    const writer = createWriter(options);
+    writer.value(value, NO_REF);
+    const { buffer, length } = writer.give();
+    return { read: createReader({ ref: NO_REF, service: NO_REF }).value(buffer, length), length };
+};
+
+test('a writer that numbers only so many strings writes the rest where they stand, every time,'
+    + ' and they read back as written', ()=>{
+    const long = 'a divergence that says something new every time it is said';
+    const value = ['type', 'answer', long, 'type', long, { key: long, type: 'answer' }];
+    const bounded = oneValue(value, { strings: 2 });
+    assert.deepEqual(bounded.read, value);
+    const numbered = oneValue(value);
+    assert.deepEqual(numbered.read, value);
+    assert.ok(bounded.length >= numbered.length + 2 * long.length,
+        'past the bound the long text went whole each time it came');
+});
+
+test('maps and sets cross as what they are', ()=>{
+    const value = { counts: new Map([[3, 'three'], ['x', [1, 2]]]), seen: new Set(['a', 7]) };
+    const { read } = oneValue(value);
+    assert.ok(read.counts instanceof Map && read.seen instanceof Set);
+    assert.deepEqual([...read.counts], [[3, 'three'], ['x', [1, 2]]]);
+    assert.deepEqual([...read.seen], ['a', 7]);
+});
+
+test('a batch read where it lies in shared memory, at an offset, gives its text copied out and its'
+    + ' bytes in place', ()=>{
+    // A browser decodes no view of shared memory: as one, the decoder refuses it here.
+    const decode = TextDecoder.prototype.decode;
+    TextDecoder.prototype.decode = function(/** @type {any} */ input, /** @type {any} */ options){
+        if (input?.buffer instanceof SharedArrayBuffer)
+        {
+            throw new TypeError('a view of shared memory');
+        }
+        return decode.call(this, input, options);
+    };
+    try
+    {
+        const writer = createWriter();
+        writer.value({ name: 'texture', texels: new Float32Array([1.5, 2.5]) }, NO_REF);
+        const { buffer, length } = writer.give();
+        const ring = new SharedArrayBuffer(4096);
+        new Uint8Array(ring, 64, length).set(new Uint8Array(buffer, 0, length));
+        const read = createReader({ ref: NO_REF, service: NO_REF }).value(ring, length, 64);
+        assert.equal(read.name, 'texture');
+        assert.equal(read.texels.buffer, ring, 'viewed where it lies');
+        assert.deepEqual([...read.texels], [1.5, 2.5]);
+        const owned = createReader({ ref: NO_REF, service: NO_REF, owned: true })
+            .value(ring, length, 64);
+        assert.notEqual(owned.texels.buffer, ring, 'or copied out, for a reader that keeps it');
+        assert.deepEqual([...owned.texels], [1.5, 2.5]);
+    }
+    finally
+    {
+        TextDecoder.prototype.decode = decode;
+    }
+});
