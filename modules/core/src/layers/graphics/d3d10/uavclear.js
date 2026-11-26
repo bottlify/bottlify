@@ -93,7 +93,7 @@ export function halfBits(value){
  *
  * @param {number} value @param {number} mantissa
  */
-export function smallFloatBits(value, mantissa){
+function smallFloatBits(value, mantissa){
     if (Number.isNaN(value))
     {
         return (0x1f << mantissa) | 1;

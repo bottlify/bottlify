@@ -166,7 +166,7 @@ export function writeContainer(chunks){
 }
 
 /** A growing little-endian byte buffer with a table of strings at its end. */
-export class ChunkWriter {
+class ChunkWriter {
     constructor(){
         /** @type {number[]} */
         this.bytes = [];

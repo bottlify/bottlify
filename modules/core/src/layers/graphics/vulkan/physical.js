@@ -118,7 +118,7 @@ export function enumerate(context, pCount, pArray, items, stride, write){
  *
  * @type {Readonly<Record<string, number | readonly number[]>>}
  */
-export const LIMITS = Object.freeze({
+const LIMITS = Object.freeze({
     maxImageDimension1D: 8192,
     maxImageDimension2D: 8192,
     maxImageDimension3D: 2048,

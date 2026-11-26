@@ -70,21 +70,21 @@ export const vPoint = (point, index, components)=>
     register(OPERAND.INPUT, [point, index], components);
 /** A hull shader's output control point, as a later phase reads it.
  *  @param {number} point @param {number} index @param {string} [components] */
-export const vocp = (point, index, components)=>
+const vocp = (point, index, components)=>
     register(OPERAND.OUTPUT_CONTROL_POINT, [point, index], components);
 /** A patch constant, as a join phase or a domain shader reads it.
  *  @param {number} index @param {string} [components] */
 export const vpc = (index, components)=>register(OPERAND.INPUT_PATCH_CONSTANT, [index], components);
 /** @param {string} [components] */
-export const vOutputControlPointID = components=>
+const vOutputControlPointID = components=>
     register(OPERAND.OUTPUT_CONTROL_POINT_ID, [], components);
 /** @param {string} [components] */
-export const vForkInstanceID = components=>
+const vForkInstanceID = components=>
     register(OPERAND.INPUT_FORK_INSTANCE_ID, [], components);
 /** @param {string} [components] */
-export const vDomain = components=>register(OPERAND.INPUT_DOMAIN_POINT, [], components);
+const vDomain = components=>register(OPERAND.INPUT_DOMAIN_POINT, [], components);
 /** @param {string} [components] */
-export const vPrim = components=>register(OPERAND.INPUT_PRIMITIVE_ID, [], components);
+const vPrim = components=>register(OPERAND.INPUT_PRIMITIVE_ID, [], components);
 /** @param {number} slot @param {number} index @param {string} [components] */
 export const cb = (slot, index, components)=>
     register(OPERAND.CONSTANT_BUFFER, [slot, index], components);
@@ -575,7 +575,7 @@ export const dclThreadGroup = (x, y, z)=>op(OPCODE.DCL_THREAD_GROUP, [], { extra
 // 2 line, 3 triangle cw, 4 triangle ccw), as the token numbers them.
 export const hsDecls = ()=>op(OPCODE.HS_DECLS, []);
 export const hsControlPointPhase = ()=>op(OPCODE.HS_CONTROL_POINT_PHASE, []);
-export const hsForkPhase = ()=>op(OPCODE.HS_FORK_PHASE, []);
+const hsForkPhase = ()=>op(OPCODE.HS_FORK_PHASE, []);
 export const hsJoinPhase = ()=>op(OPCODE.HS_JOIN_PHASE, []);
 /** @param {number} count */
 export const dclInputControlPointCount = count=>
@@ -595,22 +595,22 @@ export const dclTessOutputPrimitive = output=>
 // with adjacency, 7 triangle with adjacency), output topology (1 point list, 3
 // line strip, 5 triangle strip), vertices it may emit, and its vertices.
 /** @param {number} primitive */
-export const dclGsInputPrimitive = primitive=>
+const dclGsInputPrimitive = primitive=>
     op(OPCODE.DCL_GS_INPUT_PRIMITIVE, [], { control: primitive });
 /** @param {number} topology */
-export const dclGsOutputTopology = topology=>
+const dclGsOutputTopology = topology=>
     op(OPCODE.DCL_GS_OUTPUT_PRIMITIVE_TOPOLOGY, [], { control: topology });
 /** @param {number} count */
-export const dclMaxOutputVertexCount = count=>
+const dclMaxOutputVertexCount = count=>
     op(OPCODE.DCL_MAX_OUTPUT_VERTEX_COUNT, [], { extra: [count] });
 /** A geometry shader's input: a register of one vertex of its primitive.
  *  @param {number} vertex @param {number} index @param {string} [components] */
-export const vgs = (vertex, index, components)=>
+const vgs = (vertex, index, components)=>
     register(OPERAND.INPUT, [vertex, index], components);
-export const emit = ()=>op(OPCODE.EMIT, []);
-export const cut = ()=>op(OPCODE.CUT, []);
+const emit = ()=>op(OPCODE.EMIT, []);
+const cut = ()=>op(OPCODE.CUT, []);
 /** @param {number} count */
-export const dclHsForkPhaseInstanceCount = count=>
+const dclHsForkPhaseInstanceCount = count=>
     op(OPCODE.DCL_HS_FORK_PHASE_INSTANCE_COUNT, [], { extra: [count] });
 /** @param {number} slot */
 export const dclUavRaw = slot=>op(OPCODE.DCL_UAV_RAW, [u(slot)]);
@@ -806,7 +806,7 @@ export function assemble(shader){
 // --- the programs the render tests draw with ---
 
 /** The position element of an input signature, at register zero. */
-export const POSITION_IN = Object.freeze({ name: 'POSITION', register: 0 });
+const POSITION_IN = Object.freeze({ name: 'POSITION', register: 0 });
 
 /**
  * A vertex shader that passes its position straight through, and a pixel
@@ -1146,7 +1146,7 @@ export const constantBufferShader = ()=>withChunks(solidPixelShader([0, 0, 0, 1]
  * @param {string} [components]
  * @returns {AsmOperand}
  */
-export const icbAt = (relative, components)=>({
+const icbAt = (relative, components)=>({
     ...register(OPERAND.IMMEDIATE_CONSTANT_BUFFER, [0], components), relative });
 
 /**

@@ -84,7 +84,7 @@ import { linkTessellation } from './glsl-link-tess.js';
  */
 
 /** GL_MAX_SUBROUTINES and GL_MAX_SUBROUTINE_UNIFORM_LOCATIONS (4.0 table 6.48). */
-export const SUBROUTINE_LIMITS = Object.freeze({ functions: 256, locations: 1024 });
+const SUBROUTINE_LIMITS = Object.freeze({ functions: 256, locations: 1024 });
 
 /**
  * A value the vertex stage passes the fragment stage (section 4.3.4 of 1.30,
@@ -1607,7 +1607,7 @@ function geometryLayoutOf(units, error){
 }
 
 /** GL_MAX_GEOMETRY_SHADER_INVOCATIONS (4.0 table 6.44): the minimum, 32. */
-export const GEOMETRY_SHADER_INVOCATIONS = 32;
+const GEOMETRY_SHADER_INVOCATIONS = 32;
 
 /** @param {import('./glsl-types.js').StructType} struct @returns {string} */
 function describe(struct){

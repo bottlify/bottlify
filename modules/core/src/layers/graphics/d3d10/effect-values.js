@@ -30,7 +30,7 @@ import { bitsFloat, floatBits } from '../../../system/floats.js';
  * @param {Given} given
  * @param {number} svt  The variable's D3D10_SHADER_VARIABLE_TYPE.
  */
-export function toStored(value, given, svt){
+function toStored(value, given, svt){
     if (svt === D3D10_SVT.BOOL)
     {
         return given === 'bool' ? value >>> 0 : (value !== 0 ? 0xffffffff : 0);
@@ -57,7 +57,7 @@ export function toStored(value, given, svt){
  * @param {number} svt
  * @param {Given} wanted
  */
-export function fromStored(bits, svt, wanted){
+function fromStored(bits, svt, wanted){
     if (svt === D3D10_SVT.BOOL)
     {
         if (wanted === 'bool')

@@ -80,7 +80,7 @@ const KINDS = /** @type {Record<string, [number, number]>} */ ({ ps: [0, 0xffff]
     vs: [1, 0xfffe], gs: [2, 0x4753], cs: [5, 0x4353] });
 
 /** Who wrote the program, as RDEF says. */
-export const CREATOR = 'Bottlify HLSL Shader Compiler';
+const CREATOR = 'Bottlify HLSL Shader Compiler';
 
 /** A failure to fit the target: too many registers, slots past the end. */
 export class BackendError extends Error {
@@ -180,7 +180,7 @@ const EFFECTS = new Set(['discard_nz', 'loop', 'endloop', 'break', 'breakc_nz', 
  * @param {Instr[]} instrs
  * @returns {Instr[]}
  */
-export function liveInstructions(instrs){
+function liveInstructions(instrs){
     let kept = instrs;
     for (;;)
     {

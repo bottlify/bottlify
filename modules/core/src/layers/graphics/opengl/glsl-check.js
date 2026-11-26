@@ -245,7 +245,7 @@ function typeRank(from, to, language){
  *
  * @param {GlslType} from @param {GlslType} to @param {Language | null} [language]
  */
-export function convertible(from, to, language = null){
+function convertible(from, to, language = null){
     return typeRank(from, to, language) !== null;
 }
 
@@ -273,7 +273,7 @@ const castScalar = (value, base)=>{
  * @param {any} node @param {GlslType} type
  * @returns {any}
  */
-export function convertTo(node, type){
+function convertTo(node, type){
     if (node.type === type)
     {
         return node;

@@ -147,7 +147,7 @@ const STAGES = /** @type {Record<string, ReadonlySet<Stage>>} */ ({
 /** @type {Map<string, ModernOverload[]>} */
 const MODERN = new Map();
 /** Prototypes whose types this implementation has none of (Vulkan's), kept for a test. */
-export const SKIPPED_PROTOTYPES = /** @type {string[]} */ ([]);
+const SKIPPED_PROTOTYPES = /** @type {string[]} */ ([]);
 
 /** @param {string} name @returns {GlslType | null} */
 function typeNamed(name){

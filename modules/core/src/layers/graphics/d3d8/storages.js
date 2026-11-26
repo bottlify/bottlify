@@ -14,7 +14,7 @@ const DYNAMIC = 0x200;
  * and the spares a DISCARD in the guest trades it for (`seam/shadow.js`,
  * `BUFFER.SPARES`).
  */
-export const STORAGES = 3;
+const STORAGES = 3;
 
 /**
  * A vertex or index buffer's storages in guest memory, and the two calls that

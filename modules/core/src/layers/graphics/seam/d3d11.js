@@ -145,7 +145,7 @@ export const ID3D11DEVICECONTEXT_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /** ID3D11DeviceContext1, Direct3D 11.1's: copies with flags, discards, offset constants. */
-export const ID3D11DEVICECONTEXT1_SLOTS = /** @type {[string, number][]} */ ([
+const ID3D11DEVICECONTEXT1_SLOTS = /** @type {[string, number][]} */ ([
     ...ID3D11DEVICECONTEXT_SLOTS,
     ['CopySubresourceRegion1', 9], ['UpdateSubresource1', 7], ['DiscardResource', 1],
     ['DiscardView', 1], ['VSSetConstantBuffers1', 5], ['HSSetConstantBuffers1', 5],

@@ -178,7 +178,7 @@ export const RESOURCE_ACCESS = Object.freeze([
  * @param {number} bindFlags
  * @returns {ResourceAccessRow | null}
  */
-export function resourceAccessRow(usage, bindFlags){
+function resourceAccessRow(usage, bindFlags){
     return RESOURCE_ACCESS.find(row=>row.usage === usage && row.bindFlags === bindFlags) ?? null;
 }
 
@@ -267,7 +267,7 @@ export function resourceAccessResult(usage, bindFlags, cpuAccessFlags, rules = N
  */
 
 /** @type {CreateRules} */
-export const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_LEVEL.LEVEL_10_0 });
+const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_LEVEL.LEVEL_10_0 });
 
 /**
  * D3D11_CENTER_MULTISAMPLE_PATTERN; D3D11_STANDARD_MULTISAMPLE_PATTERN is the
@@ -276,7 +276,7 @@ export const NO_RULES = Object.freeze({ d3d11: false, featureLevel: D3D_FEATURE_
 const MULTISAMPLE_PATTERN_CENTER = 0xfffffffe;
 
 /** The bind flags that only a buffer may carry. */
-export const BUFFER_ONLY_BIND_FLAGS =
+const BUFFER_ONLY_BIND_FLAGS =
     D3D10_BIND.VERTEX_BUFFER | D3D10_BIND.INDEX_BUFFER | D3D10_BIND.CONSTANT_BUFFER;
 
 /**
@@ -286,7 +286,7 @@ export const BUFFER_ONLY_BIND_FLAGS =
  *
  * @type {ReadonlySet<number>}
  */
-export const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+const DEPTH_CAPABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .filter(([, info])=>info.kind === FORMAT_KIND.DEPTH)
     .map(([, info])=>info.family));
 
@@ -304,7 +304,7 @@ const STENCIL_FAMILIES = new Set([DXGI_FORMAT.D24_UNORM_S8_UINT,
  *
  * @type {ReadonlySet<number>}
  */
-export const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
+const RENDERABLE_FAMILIES = new Set(Object.entries(FORMAT_INFO)
     .filter(([, info])=>info.kind === FORMAT_KIND.COLOUR && info.renderable)
     .map(([, info])=>info.family));
 
@@ -710,7 +710,7 @@ const SRGB_TWINS = new Map([
  *
  * @type {Readonly<Record<number, SwapEffectRule>>}
  */
-export const SWAP_EFFECT_RULES = Object.freeze({
+const SWAP_EFFECT_RULES = Object.freeze({
     [DXGI_SWAP_EFFECT.DISCARD]: Object.freeze({
         minBuffers: 1, maxBuffers: D3D10_LIMITS.MAX_SWAP_CHAIN_BUFFERS,
         sequentialAccess: false, allowsMultisample: true,

@@ -53,7 +53,7 @@ let carved = 0;
  *
  * @returns {Float64Array}
  */
-export function matrix(){
+function matrix(){
     if (carved === block.byteLength)
     {
         block = new ArrayBuffer(MATRICES_PER_BLOCK * 16 * 8);

@@ -248,7 +248,7 @@ const SETTABLE_FIELDS = DDSD_LPSURFACE | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH |
  * @param {number} bitDepth
  * @returns {import("./structs.js").PixelFormatFields}
  */
-export function depthFormatOfBitDepth(bitDepth){
+function depthFormatOfBitDepth(bitDepth){
     return {
         size: 0x20,
         flags: DDPF_ZBUFFER,

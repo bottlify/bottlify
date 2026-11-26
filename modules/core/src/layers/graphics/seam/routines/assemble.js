@@ -335,7 +335,7 @@ export const laidParts = (parts, width)=>resolveParts(parts, width).map(part=>(
  * @param {Part[]} parts @param {Width} width
  * @returns {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]}
  */
-export const resolveParts = (parts, width)=>parts.flatMap(part=>{
+const resolveParts = (parts, width)=>parts.flatMap(part=>{
     if (Array.isArray(part) || 'label' in part || 'jcc' in part)
     {
         return [part];

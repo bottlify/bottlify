@@ -82,9 +82,9 @@ export const SAMPLER_STATE_KEY = Object.freeze([
 
 /** The number of samplers a pixel stage has, and where the vertex samplers start. */
 export const SAMPLER_COUNT = 16;
-export const D3DDMAPSAMPLER = 256;
+const D3DDMAPSAMPLER = 256;
 export const D3DVERTEXTEXTURESAMPLER0 = 257;
-export const VERTEX_SAMPLER_COUNT = 4;
+const VERTEX_SAMPLER_COUNT = 4;
 
 /**
  * Whether a sampler number names a sampler at all: the sixteen pixel ones,

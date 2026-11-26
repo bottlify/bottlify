@@ -59,14 +59,14 @@ export const TESS = Object.freeze({
 });
 
 /** What TESS_GEN_MODE, TESS_GEN_SPACING and TESS_GEN_VERTEX_ORDER answer, by the layout's word. */
-export const TESS_GEN_ANSWERS = Object.freeze(/** @type {Record<string, number>} */ ({
+const TESS_GEN_ANSWERS = Object.freeze(/** @type {Record<string, number>} */ ({
     triangles: GL.TRIANGLES, quads: GL.QUADS, isolines: TESS.ISOLINES,
     equal_spacing: GL.EQUAL, fractional_odd_spacing: TESS.FRACTIONAL_ODD,
     fractional_even_spacing: TESS.FRACTIONAL_EVEN, ccw: GL.CCW, cw: GL.CW,
 }));
 
 /** The most level the tessellator takes (GL_MAX_TESS_GEN_LEVEL), Direct3D's 64 too. */
-export const MAX_TESS_GEN_LEVEL = 64;
+const MAX_TESS_GEN_LEVEL = 64;
 
 const BLOCK_COMPONENTS = BLOCK_LIMITS.perStage * BLOCK_LIMITS.size / 4;
 

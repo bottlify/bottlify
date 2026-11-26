@@ -472,7 +472,7 @@ export function createFactory(options = {}, secondVersion = false){
  * @param {number} index
  * @returns {{ low: number, high: number }}
  */
-export function adapterLuid(index){
+function adapterLuid(index){
     return { low: index + 1, high: 0 };
 }
 

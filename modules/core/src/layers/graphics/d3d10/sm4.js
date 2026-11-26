@@ -251,7 +251,7 @@ export const OPCODE = Object.freeze({
 });
 
 /** The name each opcode number prints as, for a divergence or a dump. */
-export const OPCODE_NAME = Object.freeze(Object.fromEntries(
+const OPCODE_NAME = Object.freeze(Object.fromEntries(
     Object.entries(OPCODE).map(([name, code])=>[code, name.toLowerCase()])));
 
 /** What an operand token names. */
@@ -358,7 +358,7 @@ export const CUSTOMDATA = Object.freeze({
 });
 
 /** The identity swizzle, `.xyzw`. */
-export const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
+const IDENTITY_SWIZZLE = Object.freeze([0, 1, 2, 3]);
 
 /**
  * @typedef {Object} OperandIndex

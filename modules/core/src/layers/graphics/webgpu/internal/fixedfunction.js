@@ -163,7 +163,7 @@ export function sphereMapOf(reflection){
  *
  * @param {number} texCoordIndex @returns {string}
  */
-export function generatedCoordinate(texCoordIndex){
+function generatedCoordinate(texCoordIndex){
     switch (generationOf(texCoordIndex))
     {
         case TCI.CAMERASPACENORMAL:
@@ -544,7 +544,7 @@ export function argumentsRead(op, arg1, arg2, arg0 = /** @type {number} */ (D3DT
  *
  * @param {readonly import('./pipeline.js').StageKey[]} stages @param {number} source
  */
-export function stagesRead(stages, source){
+function stagesRead(stages, source){
     return stages.some(stage=>[
         ...argumentsRead(stage.colorOp, stage.colorArg1, stage.colorArg2, stage.colorArg0),
         ...argumentsRead(stage.alphaOp, stage.alphaArg1, stage.alphaArg2, stage.alphaArg0),
@@ -1285,7 +1285,7 @@ function uniformStruct(lightCount, tail = { stageConstants: false }){
  * @param {string} depth  the varying carrying the vertex's z times its w
  * @returns {string}
  */
-export function tableFog(position, depth){
+function tableFog(position, depth){
     return `fogFactorOf(select(1.0 / ${position}.w, ${depth} * ${position}.w,`
         + ' uniforms.fogFactors.w != 0.0))';
 }

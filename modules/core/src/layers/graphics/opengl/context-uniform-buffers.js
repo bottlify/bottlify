@@ -36,7 +36,7 @@ import { COUNTER_LIMITS, STORAGE_BUFFER_OFFSET_ALIGNMENT, STORAGE_LIMITS }
     from './glsl-storage.js';
 
 /** UNIFORM_BUFFER_OFFSET_ALIGNMENT: WebGPU's alignment of a uniform binding's offset. */
-export const UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256;
+const UNIFORM_BUFFER_OFFSET_ALIGNMENT = 256;
 
 /** The calls of this file a display list does not record. */
 export const UNIFORM_BUFFER_CALLS_NOT_COMPILED = Object.freeze([

@@ -29,7 +29,7 @@ import { D3DRS, D3DSBT } from './constants.js';
 import { IDENTITY } from './render.js';
 
 /** The render states a pixel block holds, by name. */
-export const PIXEL_RENDER_STATES = Object.freeze([
+const PIXEL_RENDER_STATES = Object.freeze([
     'ZENABLE', 'FILLMODE', 'SHADEMODE', 'LINEPATTERN', 'ZWRITEENABLE', 'ALPHATESTENABLE',
     'LASTPIXEL', 'SRCBLEND', 'DESTBLEND', 'ZFUNC', 'ALPHAREF', 'ALPHAFUNC', 'DITHERENABLE',
     'FOGSTART', 'FOGEND', 'FOGDENSITY', 'ALPHABLENDENABLE', 'EDGEANTIALIAS', 'ZBIAS',
@@ -39,7 +39,7 @@ export const PIXEL_RENDER_STATES = Object.freeze([
 ]);
 
 /** The render states a vertex block holds, by name. */
-export const VERTEX_RENDER_STATES = Object.freeze([
+const VERTEX_RENDER_STATES = Object.freeze([
     'SHADEMODE', 'CULLMODE', 'FOGENABLE', 'SPECULARENABLE', 'FOGCOLOR', 'FOGTABLEMODE',
     'FOGSTART', 'FOGEND', 'FOGDENSITY', 'RANGEFOGENABLE', 'CLIPPING', 'LIGHTING', 'AMBIENT',
     'FOGVERTEXMODE', 'COLORVERTEX', 'LOCALVIEWER', 'NORMALIZENORMALS', 'DIFFUSEMATERIALSOURCE',

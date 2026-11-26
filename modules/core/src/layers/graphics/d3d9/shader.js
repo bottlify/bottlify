@@ -100,7 +100,7 @@ export const REGISTER = Object.freeze({
  *
  * @type {Readonly<Record<number, { name: string, dest: number, sources: number }>>}
  */
-export const OPCODE_INFO = Object.freeze(Object.fromEntries(/** @type {[number, string, number, number][]} */ ([
+const OPCODE_INFO = Object.freeze(Object.fromEntries(/** @type {[number, string, number, number][]} */ ([
     [0, 'nop', 0, 0], [1, 'mov', 1, 1], [2, 'add', 1, 2], [3, 'sub', 1, 2], [4, 'mad', 1, 3],
     [5, 'mul', 1, 2], [6, 'rcp', 1, 1], [7, 'rsq', 1, 1], [8, 'dp3', 1, 2], [9, 'dp4', 1, 2],
     [10, 'min', 1, 2], [11, 'max', 1, 2], [12, 'slt', 1, 2], [13, 'sge', 1, 2],

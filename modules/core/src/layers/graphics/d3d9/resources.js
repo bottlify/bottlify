@@ -421,7 +421,7 @@ const COUNTED = {
  * @param {T} body
  * @returns {NoInfer<T> & { readonly refCount: number, readonly destroyed: boolean }}
  */
-export const counted = body=>Object.setPrototypeOf(body, COUNTED);
+const counted = body=>Object.setPrototypeOf(body, COUNTED);
 
 /** A buffer's prototype: `COUNTED`'s, and how many of its locks are held, which nest. */
 const COUNTED_BUFFER = {
@@ -524,7 +524,7 @@ export function createPriority(pool){
  * since a level has to be made somehow. GenerateMipSubLevels is the
  * renderer's to answer; here it does nothing.
  */
-export function createAutoGenFilter(){
+function createAutoGenFilter(){
     let filter = D3DTEXF_LINEAR;
     return {
         /** @param {number} next @returns {number} */
@@ -1557,7 +1557,7 @@ export function createTexture(options){
  *
  * @param {LockBox} box @param {number} width @param {number} height @param {number} depth
  */
-export function boxWithin(box, width, height, depth){
+function boxWithin(box, width, height, depth){
     return box.left < box.right && box.top < box.bottom && box.front < box.back
         && box.right <= width && box.bottom <= height && box.back <= depth;
 }
@@ -1570,7 +1570,7 @@ export function boxWithin(box, width, height, depth){
  * @param {number} width @param {number} height @param {number} depth  The level's own extent.
  * @returns {LockBox}
  */
-export function boxAtLevel(box, level, width, height, depth){
+function boxAtLevel(box, level, width, height, depth){
     const round = (/** @type {number} */ edge)=>(edge + (1 << level) - 1) >>> level;
     return {
         left: Math.min(box.left >>> level, width - 1),
@@ -1603,7 +1603,7 @@ export function boxAtLevel(box, level, width, height, depth){
  *
  * @param {VolumeOptions} options
  */
-export function createVolume(options){
+function createVolume(options){
     const rowPitch = surfacePitch(options.format, options.width);
     const slicePitch = surfaceBytes(options.format, options.width, options.height);
     const texelBytes = FORMAT_INFO[options.format]?.bytesPerPixel ?? 4;

@@ -31,7 +31,7 @@ import {
 } from './constants.js';
 
 /** DXGI_RATIONAL: the refresh rate, as a fraction rather than a number. */
-export const DXGI_RATIONAL = Object.freeze({
+const DXGI_RATIONAL = Object.freeze({
     Numerator: 0x00,
     Denominator: 0x04,
     SIZE: 0x08,
@@ -66,7 +66,7 @@ export const DXGI_SWAP_CHAIN_DESC = Object.freeze({
 });
 
 /** The same in a 64-bit process: OutputWindow an HWND, eight bytes on an eight-byte boundary. */
-export const DXGI_SWAP_CHAIN_DESC_64 = Object.freeze({
+const DXGI_SWAP_CHAIN_DESC_64 = Object.freeze({
     ...DXGI_SWAP_CHAIN_DESC,
     OutputWindow: 0x30,
     Windowed: 0x38,
@@ -439,7 +439,7 @@ export const VIEW_UNION = Object.freeze({
  * @returns {readonly string[] | null} the union's members for that dimension, or null
  *     for a dimension the kind does not have
  */
-export function viewUnionMembers(union, viewDimension){
+function viewUnionMembers(union, viewDimension){
     const entry = Object.entries(union.dimensions).find(([, value])=>value === viewDimension);
     return entry ? union.members[entry[0]] ?? null : null;
 }

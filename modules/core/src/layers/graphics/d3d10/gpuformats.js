@@ -25,7 +25,7 @@ import { DXGI_FORMAT } from './constants.js';
  *
  * @type {Readonly<Record<number, string>>}
  */
-export const TEXTURE_FORMAT = Object.freeze({
+const TEXTURE_FORMAT = Object.freeze({
     [DXGI_FORMAT.R32G32B32A32_FLOAT]: 'rgba32float',
     [DXGI_FORMAT.R32G32B32A32_UINT]: 'rgba32uint',
     [DXGI_FORMAT.R32G32B32A32_SINT]: 'rgba32sint',

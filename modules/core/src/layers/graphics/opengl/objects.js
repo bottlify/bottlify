@@ -205,7 +205,7 @@ export function createProgramObject(name, target, localParameters){
  *
  * @type {ReadonlyArray<readonly [number, number]>}
  */
-export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
+const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [GL.TEXTURE_MIN_FILTER, GL.NEAREST_MIPMAP_LINEAR],
     [GL.TEXTURE_MAG_FILTER, GL.LINEAR],
     [GL.TEXTURE_WRAP_S, GL.REPEAT],
@@ -470,7 +470,7 @@ export function baseLevelOf(texture, face = 0){
  * @param {number} target @param {TextureLevel} image
  * @returns {number[]} width, height and depth
  */
-export function interiorOf(target, image){
+function interiorOf(target, image){
     const border = image.border ?? 0;
     const flat = target === GL.TEXTURE_1D || target === 0x8c18;
     return [image.width - 2 * border, image.height - (flat ? 0 : 2 * border),

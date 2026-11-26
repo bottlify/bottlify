@@ -29,7 +29,7 @@ const HRESULT_NAMES = new Map([
 const ANSWERS = new Set(['GetRenderTarget:2289436774', 'GetDepthStencilSurface:2289436774']);
 
 /** @param {number} hr */
-export const hresultName = hr=>HRESULT_NAMES.get(hr >>> 0) ?? `0x${(hr >>> 0).toString(16)}`;
+const hresultName = hr=>HRESULT_NAMES.get(hr >>> 0) ?? `0x${(hr >>> 0).toString(16)}`;
 
 /**
  * A reporter for one API's device methods.

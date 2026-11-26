@@ -31,7 +31,7 @@ import { BackendError, writeProgram } from './sm4-backend.js';
 import { PROFILE_NAMES, profile4Of } from './sm4-ir.js';
 
 /** D3DCOMPILE_* (D3D10_SHADER_*), the flags the compiler reads. */
-export const D3DCOMPILE = Object.freeze({
+const D3DCOMPILE = Object.freeze({
     PACK_MATRIX_ROW_MAJOR: 1 << 3,
     PACK_MATRIX_COLUMN_MAJOR: 1 << 4,
     ENABLE_BACKWARDS_COMPATIBILITY: 1 << 12,

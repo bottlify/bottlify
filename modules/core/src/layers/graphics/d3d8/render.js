@@ -323,7 +323,7 @@ export function transformPosition(m, point){
  * @returns {{ points: number[][], behind: number, before: number, beyond: number,
  *            depth: [number, number], eye: [number, number], nearest: number[] }}
  */
-export function screenPositions(draw){
+function screenPositions(draw){
     const { rect } = draw.viewport;
     const bytes = draw.vertices;
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -840,7 +840,7 @@ export function expandTexels(format, pixels, count, float32 = false){
 const DIFFED_UNLOCK = 0x10000;
 
 /** The WebGPU format every uncompressed colour target and texture is. */
-export const COLOR_FORMAT = 'bgra8unorm';
+const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
 const SIGNED_FORMAT = 'rgba8snorm';
 /**
@@ -884,7 +884,7 @@ const FLOAT_FORMAT = Object.freeze({ 1: 'r32float', 2: 'rg32float', 4: 'rgba32fl
  *
  * @type {Readonly<Record<number, string>>}
  */
-export const COMPRESSED_FORMAT = Object.freeze({
+const COMPRESSED_FORMAT = Object.freeze({
     [D3DFMT.DXT1]: 'bc1-rgba-unorm',
     [D3DFMT.DXT2]: 'bc2-rgba-unorm',
     [D3DFMT.DXT3]: 'bc2-rgba-unorm',
@@ -974,7 +974,7 @@ const decodeCompressed = (bytes, format, width, height, into)=>{
  * @param {R} rect
  * @returns {R}
  */
-export const drawnDepthRange = rect=>(rect.maxDepth > rect.minDepth ? rect
+const drawnDepthRange = rect=>(rect.maxDepth > rect.minDepth ? rect
     : { ...rect, maxDepth: rect.minDepth + 0.001 });
 
 /**
@@ -1122,10 +1122,10 @@ export const UNIFORM_AT = Object.freeze({
  * a fourth stage and on sampled with WRAP, linear and its top level only,
  * whatever it was set to.
  */
-export const SAMPLED_STAGES = STAGE_COUNT;
+const SAMPLED_STAGES = STAGE_COUNT;
 
 /** How many stages the block carries a texture transform for: every one. */
-export const TRANSFORM_STAGES = STAGE_COUNT;
+const TRANSFORM_STAGES = STAGE_COUNT;
 
 /** The block's own length, before any light is appended. */
 export const UNIFORM_FLOATS = UNIFORM_AT.lights;
@@ -1884,7 +1884,7 @@ const transformOf = (model, type)=>model.transforms.get(type) ?? IDENTITY;
  * @param {RenderModel} model
  * @returns {Light[]}
  */
-export function enabledLights(model){
+function enabledLights(model){
     const kept = enabledLightsKept.get(model);
     if (kept && kept.version === model.lightsVersion && model.lightsVersion !== undefined)
     {
@@ -1966,7 +1966,7 @@ const enabledLightsKept = new WeakMap();
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
  * @returns {import('../webgpu/internal/pipeline.js').LightingState | null}
  */
-export function lightingOf(model, layout){
+function lightingOf(model, layout){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const lit = rs('LIGHTING') !== 0 && !layout.preTransformed;
     if (!lit)
@@ -2141,7 +2141,7 @@ const writesSrgb = model=>(model.renderStates.get(D3DRS9.SRGBWRITEENABLE) ?? 0) 
  *
  * @param {number} linear
  */
-export const srgbEncode = linear=>(linear <= 0.0031308 ? linear * 12.92
+const srgbEncode = linear=>(linear <= 0.0031308 ? linear * 12.92
     : 1.055 * linear ** (1 / 2.4) - 0.055);
 
 /**
@@ -2590,7 +2590,7 @@ function readsTexture(op, arg1, arg2, arg0){
  * @param {any} texture
  * @returns {'2d' | 'cube' | '3d'}
  */
-export function textureDimensionOf(texture){
+function textureDimensionOf(texture){
     if (texture?.cube === true)
     {
         return 'cube';
@@ -2646,7 +2646,7 @@ export function fogOf(model, applied = true){
  *
  * @param {RenderModel} model
  */
-export const isFlatShaded = model=>
+const isFlatShaded = model=>
     (model.renderStates.get(D3DRS.SHADEMODE) ?? 0) === D3DSHADE.FLAT;
 
 /**
@@ -2926,7 +2926,7 @@ function knownStates(diverge){
  * @param {(detail: string) => void} [diverge]
  * @returns {import('../webgpu/internal/pipeline.js').StencilState}
  */
-export function stencilOf(model, diverge){
+function stencilOf(model, diverge){
     const known = knownStates(diverge);
     /** @param {number} state @param {number} fallback */
     const rs = (state, fallback)=>(model.renderStates.get(state) ?? fallback) >>> 0;
@@ -2955,7 +2955,7 @@ export function stencilOf(model, diverge){
  * @param {RenderModel} model
  * @returns {import('../webgpu/internal/pipeline.js').PointState}
  */
-export function pointsOf(model){
+function pointsOf(model){
     return {
         sprite: (model.renderStates.get(D3DRS.POINTSPRITEENABLE) ?? 0) !== 0,
         scale: (model.renderStates.get(D3DRS.POINTSCALEENABLE) ?? 0) !== 0,

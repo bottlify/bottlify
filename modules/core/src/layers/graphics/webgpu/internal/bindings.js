@@ -256,7 +256,7 @@ function sameWords(stored, words, count){
 }
 
 /** Uniform buffer offsets and sizes are quantised to this in WebGPU. */
-export const UNIFORM_ALIGNMENT = 256;
+const UNIFORM_ALIGNMENT = 256;
 
 /**
  * Hands out uniform blocks from one ring buffer, each at its own offset.

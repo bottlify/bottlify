@@ -74,7 +74,7 @@ export const DEFAULT_VERSION = Object.freeze(/** @type {ContextVersion} */ ({
  * @param {{ major: number, minor: number }} version
  * @param {number} major @param {number} minor
  */
-export function versionAtLeast(version, major, minor){
+function versionAtLeast(version, major, minor){
     return version.major > major || (version.major === major && version.minor >= minor);
 }
 

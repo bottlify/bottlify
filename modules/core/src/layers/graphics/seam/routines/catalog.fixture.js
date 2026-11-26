@@ -34,7 +34,7 @@ import { GL_COMMANDS } from '../../opengl/commands.js';
 
 /** Where every routine is built, and the trap its slow way jumps to. */
 export const ROUTINE_AT = 0x20000;
-export const ROUTINE_TRAP = 0x105000;
+const ROUTINE_TRAP = 0x105000;
 
 /**
  * @typedef {Object} CatalogRoutine

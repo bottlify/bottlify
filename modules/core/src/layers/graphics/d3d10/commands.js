@@ -139,7 +139,7 @@ const TABLE = {
  * the guest made (`seam/d3d10-inguest.js`, `BufferUnmap`), and Direct3D 11's
  * viewports, which are floats where 10's are integers (`ContextRSSetViewports`).
  */
-export const BUFFER_SLOTS = /** @type {[string, number][]} */ ([['Buffer.Unmap', 2],
+const BUFFER_SLOTS = /** @type {[string, number][]} */ ([['Buffer.Unmap', 2],
     ['Context.RSSetViewports', 2]]);
 
 /** The Direct3D 10 device's command set: its table, read by ID3D10Device's slots. */

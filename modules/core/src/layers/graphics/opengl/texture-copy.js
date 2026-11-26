@@ -80,7 +80,7 @@ export const UNSIZED_FORMATS = new Set([
  * @param {SizedFormat} sized
  * @returns {number}
  */
-export function rawTexelBytes(sized){
+function rawTexelBytes(sized){
     if (sized.base === GL.RGB && !sized.packing)
     {
         return 3 * sized.bits[0] / 8;

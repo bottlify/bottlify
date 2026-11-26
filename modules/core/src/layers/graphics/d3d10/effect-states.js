@@ -28,7 +28,7 @@ import { CONSTANT_TYPE } from './effect.js';
  */
 
 /** @type {Readonly<Record<number, StateProperty>>} */
-export const STATE_PROPERTY = Object.freeze({
+const STATE_PROPERTY = Object.freeze({
     0x0c: { block: 'rasterizer', field: 'FillMode', type: 'uint' },
     0x0d: { block: 'rasterizer', field: 'CullMode', type: 'uint' },
     0x0e: { block: 'rasterizer', field: 'FrontCounterClockwise', type: 'bool' },
@@ -81,7 +81,7 @@ export const SAMPLER_TEXTURE = 0x37;
 const FLT_MAX = 3.4028234663852886e38;
 
 /** @param {'rasterizer' | 'depthstencil' | 'blend' | 'sampler'} block */
-export function defaultDesc(block){
+function defaultDesc(block){
     switch (block)
     {
         case 'rasterizer':
@@ -122,7 +122,7 @@ export function defaultDesc(block){
  * @param {StateProperty['type']} type
  * @returns {number | boolean}
  */
-export function convertConstant(constant, type){
+function convertConstant(constant, type){
     const view = new DataView(new ArrayBuffer(4));
     view.setUint32(0, constant.bits, true);
     if (constant.type === CONSTANT_TYPE.AS_TAKEN)

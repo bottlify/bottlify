@@ -153,7 +153,7 @@ export const Decoration = Object.freeze({
  */
 
 /** SPIR-V's magic number (section 3.1). */
-export const SPIRV_MAGIC = 0x07230203;
+const SPIRV_MAGIC = 0x07230203;
 
 /**
  * A literal string's text and how many words it takes (section 2.2.1:
@@ -162,7 +162,7 @@ export const SPIRV_MAGIC = 0x07230203;
  * @param {Uint32Array} words @param {number} at
  * @returns {{ text: string, words: number }}
  */
-export function literalString(words, at){
+function literalString(words, at){
     /** @type {number[]} */
     const bytes = [];
     let k = at;

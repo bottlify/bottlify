@@ -92,7 +92,7 @@ const D3DLIGHT7_DIRECTIONAL = 3;
  * The devices the older versions can make: the software rasteriser and the
  * hardware one. A transform-and-lighting device is Direct3D 7's alone.
  */
-export const LEGACY_DEVICES = /** @type {readonly string[]} */ (
+const LEGACY_DEVICES = /** @type {readonly string[]} */ (
     Object.freeze([DEVICE_IDS.RGB, DEVICE_IDS.HAL]));
 
 /**
