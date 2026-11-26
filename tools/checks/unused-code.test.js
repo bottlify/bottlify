@@ -60,12 +60,16 @@ const FIXTURE = {
 };
 FIXTURE['modules/a/src/index.js'] += "\nimport { at } from './load.js';\nat;\n";
 
-/** The fixture's report, its tree removed after. */
-function report(){
+/**
+ * The fixture's report, its tree removed after.
+ *
+ * @param {Parameters<typeof analyse>[1]} [options]
+ */
+function report(options){
     const root = tree(FIXTURE);
     try
     {
-        return analyse(root);
+        return analyse(root, options);
     }
     finally
     {
@@ -112,4 +116,11 @@ test('an export nobody takes, used in its file or not; one only tests take; a ty
         'a typedef is no export; the constant beside it is one nobody takes');
     assert.deepEqual(of('types.js'), []);
     assert.deepEqual(of('dead.js'), [], 'a dead file\'s exports are the file\'s, not listed again');
+});
+
+test('an export a script takes by a name it puts together is used, as its registry says', ()=>{
+    const { exports } = report({ registries: [{ files: /\/(used)\.js$/,
+        names: match=>[`${match[1].replace('used', 'unused')}Fn`], by: 'a script' }] });
+    assert.deepEqual(exports.filter(e=>e.file === `${A}used.js`).map(e=>e.name).sort(),
+        ['inner', 'testedOnly']);
 });

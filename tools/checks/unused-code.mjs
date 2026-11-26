@@ -62,6 +62,9 @@ const HELPER = /(^|\/)(testing|fixtures?)\/|fixtures?\.m?js$|(^|\/)test-[\w-]+\.
  *     unseen: Unseen[], inside: (local: string) => boolean, lines: number, code: boolean }} Scan
  * @typedef {'run' | 'types' | 'tests' | 'nothing'} Status
  * @typedef {{ file: string, lines: number, notes: string[] }} Row
+ * @typedef {{ files: RegExp, names: (match: RegExpExecArray) => string[], by: string }} Registry
+ *     exports a script loads by a computed name: those of each file whose path (from the root)
+ *     `files` matches, named from the match
  * @typedef {{ file: string, name: string, line: number, takers: 'nobody' | 'tests',
  *     inside: boolean }} Unused
  */
@@ -463,8 +466,9 @@ const runs = (text, dir)=>[...text.matchAll(RUNS)]
  * The whole analysis of one tree: its packages are `modules/*`, its tools `tools/`.
  *
  * @param {string} root
- * @param {{ build?: string, bases?: Record<string, string> }} [options]  the build script and its
- *     names for folders, relative to the root
+ * @param {{ build?: string, bases?: Record<string, string>, registries?: Registry[] }} [options]
+ *     the build script and its names for folders, relative to the root; the exports a script
+ *     takes by a name it puts together
  */
 export function analyse(root, options = {}){
     const packageDirs = existsSync(join(root, 'modules'))
@@ -634,6 +638,19 @@ export function analyse(root, options = {}){
             taken.set(edge.path, entry);
         }
     }
+    for (const registry of options.registries ?? [])
+    {
+        for (const file of sourceFiles)
+        {
+            const match = registry.files.exec(rel(file));
+            const entry = match && (taken.get(file) ?? { product: new Set(), tests: new Set() });
+            if (match && entry)
+            {
+                registry.names(match).forEach(name=>entry.product.add(name));
+                taken.set(file, entry);
+            }
+        }
+    }
     /** @type {Unused[]} */
     const exports = [];
     for (const file of sourceFiles.filter(one=>typed.has(one) && !roots.has(one)))
@@ -713,7 +730,11 @@ if (isMain(import.meta.url))
 {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const report = analyse(root, { build: 'modules/core/scripts/build.mjs',
-        bases: { SRC: 'modules/core/src', CORK_SRC: 'modules/cork/src' } });
+        bases: { SRC: 'modules/core/src', CORK_SRC: 'modules/cork/src' },
+        // check-boundaries (and the checks that build a layer alone) import each layer's
+        // module.js by its folder's name and take `<name>Module` from it.
+        registries: [{ files: /^modules\/core\/src\/layers\/([\w-]+)\/module\.js$/,
+            names: match=>[`${match[1]}Module`], by: 'modules/core/scripts/check-boundaries.mjs' }] });
     console.log(process.argv.includes('--json') ? JSON.stringify(report, null, 1)
         : render(report, { exports: process.argv.includes('--exports'),
             unresolved: process.argv.includes('--unresolved') }));
