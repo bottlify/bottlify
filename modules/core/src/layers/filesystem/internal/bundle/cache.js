@@ -32,7 +32,9 @@
  *
  * Without a disk -- none asked for, a thread with no synchronous handle,
  * another tab holding the bundle's files -- the keeper holds the blocks in
- * memory alone, the least recently read let go for room, never for idling.
+ * memory alone, let go for room, never for idling. The keeper ranks bodies
+ * by when they were last read only as finely as its sweeps (a second): those
+ * read within one go oldest-made first.
  */
 
 import { createReader, openKeeper } from '../../../../../vendor/cellar/cellar.js';
@@ -262,6 +264,38 @@ export async function createBlockCache(options){
         return opened.save();
     };
 
+    /** A save put off for the last one's sake, to come at its time. @type {any} */
+    let later = null;
+    /**
+     * Called when a batch of blocks has been brought in: what is hot and not
+     * on the disk is written out, and an index naming it, for the next run;
+     * every few seconds at most, a batch landing sooner saved when they are
+     * up, so the last of a run is on the disk however the run ends.
+     */
+    const persist = async()=>{
+        if (!backed || closed || later !== null)
+        {
+            return;
+        }
+        const wait = savedAt + SAVE_MS - performance.now();
+        if (wait > 0)
+        {
+            later = setTimeout(()=>{
+                later = null;
+                persist();
+            }, wait);
+            later.unref?.();
+            return;
+        }
+        // Marked now: a batch landing meanwhile waits for the next turn.
+        savedAt = performance.now();
+        await diskReady();
+        if (!closed)
+        {
+            save();
+        }
+    };
+
     return {
         backed,
         reason,
@@ -304,23 +338,7 @@ export async function createBlockCache(options){
         /** What the last run asked for, in the order it asked. */
         order: ()=>previous,
 
-        /**
-         * Called when a batch of blocks has been brought in: every few seconds
-         * at most, what is hot and not on the disk is written out, and an
-         * index naming it, for the next run.
-         */
-        async persist(){
-            if (backed && !closed && performance.now() - savedAt >= SAVE_MS)
-            {
-                // Marked now: a batch landing meanwhile does not save again.
-                savedAt = performance.now();
-                await diskReady();
-                if (!closed)
-                {
-                    save();
-                }
-            }
-        },
+        persist,
 
         /** Why the disk refused a block for room, once it has: the store is full. */
         full: ()=>full,
@@ -344,6 +362,7 @@ export async function createBlockCache(options){
             }
             closed = true;
             clearInterval(sweeping);
+            clearTimeout(later);
             if (backed)
             {
                 save();

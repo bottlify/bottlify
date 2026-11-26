@@ -147,6 +147,26 @@ test('a disk out of room says so once; what it could not take is fetched again',
     cache.close();
 });
 
+test('what a run fetched last is on the disk within seconds, though it never closes', async()=>{
+    // A run killed (a tab closed, a tool's exit) closes nothing: a batch that
+    // landed just after a save is saved when the next one is due all the same.
+    const origin = fakeOpfs();
+    const cache = await open(origin.root);
+    cache.put(0, blockOf(0));
+    await cache.persist();
+    cache.put(1, blockOf(1));
+    await cache.persist();
+    const saved = async()=>[...(await savedBlocks(origin.root, NAME))?.bodies.keys() ?? []].sort();
+    assert.deepEqual(await saved(), ['0'], 'the second batch waits for its turn');
+    // Due two seconds after the first save; looked at for five.
+    for (let look = 0; look < 50 && (await saved()).length < 2; look++)
+    {
+        await sleep(100);
+    }
+    assert.deepEqual(await saved(), ['0', '1']);
+    cache.close();
+});
+
 test('a pack cut short loses the blocks past its end, the others read whole', async()=>{
     const origin = fakeOpfs();
     const first = await open(origin.root);
