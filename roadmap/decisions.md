@@ -2791,3 +2791,16 @@ same checked bytes the fetch did, without a mechanism of our own to keep. Core's
 two packages of this project, `@bottlify/cork` (loaded by URL, never imported) and Cellar (a
 library, bundled into core's build); `check:boundaries` lets a file import a package only by the
 name of a library among them. *2026-11-26.*
+
+**A292. ReadFile and WriteFile do not probe the program's buffer page by page (temporary).** Windows'
+kernel probes a buffer before a transfer and fails the call where a page of it is not accessible
+(Wine's file.c `test_read_write` 3515-3580). Here a transfer into or out of guest memory is
+answered without that probe: probing every page of the count by its page state (`accessibleSpan`,
+which ReadProcessMemory and WriteProcessMemory use, `kernel32/process-memory.js`) doubled the call
+(20000 ReadFile calls of 4 KiB into the program's own data, node 22.23.4, 4 vCPU, median of 5
+after 2 warm-up, 3 invocations: 7.0-7.5 us a call before, 13.9-14.3 after; `regionAnswer` a call
+is the cost). A bridge until the generic work: the memory layer saying in O(1) that a span is
+plain committed read-write memory, so only a span holding a page of its own protection takes the
+slow answer. That work lands the probe for both calls and removes this entry. *2026-11-19,
+recorded here 2026-11-26.*
+
