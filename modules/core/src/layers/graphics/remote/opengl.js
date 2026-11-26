@@ -87,10 +87,10 @@ export function recordedOpengl(factory, services, transport){
  *     is given but for memory, which is the mirror's: `writeMemory` is where what the
  *     played contexts write outside a call goes, and nothing does today
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
- *         length?: number)
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
  *         => number | undefined,
- *     spent: (buffer: ArrayBuffer, give: () => void) => void }}
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  */
 export function playedOpengl(factory, services){
     // Every byte a played context reads is sent with the call that reads it.
@@ -128,10 +128,10 @@ export function playedOpengl(factory, services){
                 playing = false;
             }
         },
-        read: (buffer, each, length)=>{
+        read: (buffer, each, length, start)=>{
             try
             {
-                return live.read(buffer, each, length);
+                return live.read(buffer, each, length, start);
             }
             finally
             {

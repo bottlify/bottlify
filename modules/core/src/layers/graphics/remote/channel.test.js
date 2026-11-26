@@ -7,7 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createReceiver, createSender } from './channel.js';
-import { WAIT } from './wire.js';
+import { createPlayer } from './replay.js';
+import { createRingMemory } from './ring.js';
+import { OP, WAIT } from './wire.js';
 
 /**
  * A sender over a clock and a timer the test moves, the turns' ends run when
@@ -138,6 +140,7 @@ test('the played side counts its batches\' time and says it with its diagnostics
     let batch = 0;
     const played = {
         /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        spent: (/** @type {any} */ _buffer, /** @type {() => void} */ give)=>give(),
         read: (buffer, each)=>{
             each({ m: batch === 2 ? 'diagnostics' : 'Draw', wait: batch === 2 ? WAIT.ANSWER : 0 });
             return swept[batch++];
@@ -174,6 +177,7 @@ test('every present carries what the played device and its thread did, unasked',
     const figures = { draws: 30, gpuFrames: 1, gpuMs: 4, last: null };
     const played = {
         /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        spent: (/** @type {any} */ _buffer, /** @type {() => void} */ give)=>give(),
         read: (buffer, each)=>{
             each({ m: 'Present', wait: WAIT.PACED });
             return undefined;
@@ -203,6 +207,7 @@ test('the played side says how far its GPU ran behind with its diagnostics', ()=
         heldMs: 35, waiting: 0 };
     const played = {
         /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        spent: (/** @type {any} */ _buffer, /** @type {() => void} */ give)=>give(),
         read: (buffer, each)=>{
             each({ m: 'diagnostics', wait: WAIT.ANSWER });
             return undefined;
@@ -301,4 +306,126 @@ test('the sender writes again on buffers any message brings back', ()=>{
     s.made.receive({ type: 'spent', spent: [new ArrayBuffer(16)] });
     s.made.receive({ type: 'answer', id: 0, spent: [new ArrayBuffer(16)] });
     assert.equal(s.made.sent().returned, 4);
+});
+
+/** Turns of the event loop: what crosses a ring is read on one. */
+const turns = async(count = 4)=>{
+    for (let turn = 0; turn < count; turn++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+};
+
+/**
+ * A root's two rings, a small one each way, with a sender writing calls on
+ * a played root's `methods` and its receiver playing them as they come.
+ *
+ * @param {import('node:test').TestContext} t
+ * @param {Record<string, (...args: any[]) => any>} methods
+ */
+function ringed(t, methods){
+    const rings = { calls: createRingMemory(16 << 10), replies: createRingMemory(16 << 10) };
+    const player = createPlayer({ root: { refCount: 1, ...methods }, ship: ()=>{},
+        read: ()=>new Uint8Array(0) });
+    const sent = createSender({ rings, later: ()=>{} });
+    const receiver = createReceiver({ played: /** @type {any} */ (player), rings });
+    // Open rings keep their waits, and the process, alive: closed however the test ends.
+    t.after(()=>{
+        sent.close();
+        receiver.close();
+    });
+    /**
+     * A call on the root with one argument, sent at once.
+     *
+     * @param {string} name @param {any} arg @param {number} wait
+     */
+    const call = (name, arg, wait)=>{
+        const { writer } = sent;
+        writer.u8(OP.CALL);
+        writer.u32(0);
+        writer.string(name);
+        writer.u8(1);
+        writer.value(arg, ()=>undefined);
+        writer.u8(0);
+        const answer = sent.called(wait, name);
+        sent.flush();
+        return answer;
+    };
+    return { sent, receiver, call };
+}
+
+test('a waited call answered later fills a copy of its arguments, and the batches after it are'
+    + ' played meanwhile as they were sent', async t=>{
+    /** @type {(() => void)[]} */
+    const settles = [];
+    /** @type {any[]} */
+    const taken = [];
+    const { sent, receiver, call } = ringed(t, {
+        /** @param {Uint8Array} out */
+        Fill: out=>new Promise(resolve=>settles.push(()=>{
+            out.fill(0xee);
+            resolve(0);
+        })),
+        /** @param {Uint8Array} bytes */
+        Take: bytes=>{
+            taken.push(bytes.every(byte=>byte === bytes[0]) ? bytes[0] : 'torn');
+            return 0;
+        },
+    });
+    const answered = call('Fill', new Uint8Array(1024), WAIT.ANSWER);
+    await turns();
+    // More than the ring holds while the answer is still to come: the ring
+    // goes round over the bytes the waited call came in.
+    for (let batch = 1; batch <= 12; batch++)
+    {
+        call('Take', new Uint8Array(1500).fill(batch), WAIT.NONE);
+        await turns(2);
+    }
+    assert.deepEqual(taken, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        'a waited answer still to come stops no batch after it');
+    settles[0]();
+    const reply = await answered;
+    assert.equal(reply.answer, 0);
+    assert.deepEqual([...new Set(reply.outs[0])], [0xee], 'its argument filled whole');
+    call('Take', new Uint8Array(100).fill(13), WAIT.NONE);
+    await turns();
+    assert.deepEqual(taken.at(-1), 13, 'and nothing it filled landed on a batch after it');
+    sent.close();
+    receiver.close();
+    await receiver.served();
+});
+
+test('an unwaited call answered later holds its batch, read where it lies, and the reading after it'
+    + ' until it settles', async t=>{
+    /** @type {(() => void)[]} */
+    const settles = [];
+    /** @type {any[]} */
+    const seen = [];
+    const { sent, receiver, call } = ringed(t, {
+        /** @param {Uint8Array} bytes */
+        Later: bytes=>new Promise(resolve=>settles.push(()=>{
+            seen.push(`later ${[...new Set(bytes)].join(',')}`);
+            resolve(0);
+        })),
+        /** @param {Uint8Array} bytes */
+        Take: bytes=>{
+            seen.push(`take ${bytes[0]}`);
+            return 0;
+        },
+    });
+    call('Later', new Uint8Array(3000).fill(0x5a), WAIT.NONE);
+    await turns();
+    for (let batch = 1; batch <= 8; batch++)
+    {
+        call('Take', new Uint8Array(1500).fill(batch), WAIT.NONE);
+    }
+    await turns();
+    assert.deepEqual(seen, [], 'nothing after the held batch is played');
+    settles[0]();
+    await turns(40);
+    assert.deepEqual(seen, ['later 90', 'take 1', 'take 2', 'take 3', 'take 4', 'take 5', 'take 6',
+        'take 7', 'take 8'], 'its bytes were as sent when it settled, and the rest came after');
+    sent.close();
+    receiver.close();
+    await receiver.served();
 });

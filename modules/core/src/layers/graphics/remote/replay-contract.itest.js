@@ -37,6 +37,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
+import { CALLS_BYTES, REPLIES_BYTES, createRingMemory } from './ring.js';
 import { createBorrower, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3DUSAGE, D3D_OK } from '../d3d9/constants.js';
 import {
@@ -80,7 +81,24 @@ const FACE_NEGATIVE_X = 1;
  *   so the recording sends pages as they are and compares nothing.
  */
 const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent',
-    'held, watched']);
+    'held, watched', 'ring', 'ring, lent', 'ring, small', 'ring, parts']);
+
+/**
+ * The rings of the ways through them: the engine's own, and small ones whose
+ * batches outgrow the room they are built in, go as parts and wait for room.
+ */
+const RING_BYTES = { calls: CALLS_BYTES, replies: REPLIES_BYTES };
+const SMALL_RING_BYTES = { calls: 32 << 10, replies: 16 << 10 };
+/** One whose texture uploads past 256 KiB go as parts, the rest fitting without a wait. */
+const PARTS_RING_BYTES = { calls: 512 << 10, replies: 16 << 10 };
+
+/**
+ * What the rings' senders did over every run of a way, summed as each run
+ * closes: which of a record's paths the runs took (`openRingOut`'s figures).
+ *
+ * @type {Map<string, Record<string, number>>}
+ */
+const ringPaths = new Map();
 
 /** Turns of the event loop, for what crosses ports and settles in promises. */
 const turns = async(count = 8)=>{
@@ -278,6 +296,46 @@ function rig(version, way, caps = {}){
                     release();
                     await turns(2);
                 }
+            };
+            shipped = ()=>({ ...sender.shippedBytes(),
+                lent: sender.lender?.diagnostics().lentBytes ?? 0 });
+            d3d = recordedDirect3D(factory, services, sender);
+        }
+        else if (way.startsWith('ring'))
+        {
+            const bytes = way.endsWith('small') ? SMALL_RING_BYTES
+                : way.endsWith('parts') ? PARTS_RING_BYTES : RING_BYTES;
+            const rings = { calls: createRingMemory(bytes.calls),
+                replies: createRingMemory(bytes.replies) };
+            const sender = createSender({
+                rings,
+                now: ()=>0,
+                on: { wrote: memory.writeMemory, adopted: ()=>{} },
+                lending: buffers && { ...buffers, memory: memory.ram, base: RAM_BASE },
+            });
+            const receiver = createReceiver({ played, rings });
+            counted = ()=>receiver.counted();
+            toSender = message=>receiver.post(message);
+            // A small ring's records wait for room a turn at a time.
+            settle = async()=>{
+                sender.flush();
+                await turns(12);
+                for (let round = 0; round < 256 && ((sender.sent().waiting ?? 0) > 0
+                    || receiver.unread()); round++)
+                {
+                    await turns(2);
+                }
+                await turns(12);
+            };
+            close = ()=>{
+                const paths = ringPaths.get(way) ?? {};
+                for (const [key, value] of Object.entries(sender.sent()))
+                {
+                    paths[key] = (paths[key] ?? 0) + value;
+                }
+                ringPaths.set(way, paths);
+                sender.close();
+                receiver.close();
             };
             shipped = ()=>({ ...sender.shippedBytes(),
                 lent: sender.lender?.diagnostics().lentBytes ?? 0 });
@@ -593,11 +651,25 @@ function parting(direct, played, what){
  * @param {(run: ReturnType<typeof runner>) => Promise<void>} scenario
  * @param {readonly string[]} [ways]
  * @param {object} [caps]
+ * @param {string} [against]  the run the ways are held to: the device that draws itself,
+ *     or one of the ways
+ * @param {boolean} [queued]  what the GPU was asked compared as its queue runs it
+ *     (`asQueued`), not in the order the calls were made
  * @returns {Promise<string[]>}
  */
-async function divergences(version, scenario, ways = WAYS, caps = {}){
-    const direct = runner(rig(version, 'direct', caps));
-    await scenario(direct);
+async function divergences(version, scenario, ways = WAYS, caps = {}, against = 'direct',
+    queued = false)
+{
+    const order = queued ? asQueued : (/** @type {string[]} */ stream)=>stream;
+    const direct = runner(rig(version, against, caps));
+    try
+    {
+        await scenario(direct);
+    }
+    finally
+    {
+        direct.on.close();
+    }
     /** @type {string[]} */
     const found = [];
     // A frame the GPU refused draws nothing, whichever side it is on, and
@@ -633,7 +705,8 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
             const one = direct.looks[look] ?? { label: '?', made: [], stream: [] };
             const other = played.looks[look] ?? { label: '?', made: [], stream: [] };
             const gpu = parting(one.made, other.made, `the objects the GPU made (${one.label})`)
-                ?? parting(one.stream, other.stream, `what the GPU was asked (${one.label})`);
+                ?? parting(order(one.stream), order(other.stream),
+                    `what the GPU was asked (${one.label})`);
             if (gpu)
             {
                 found.push(`[${way}] ${gpu}`);
@@ -642,6 +715,45 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
         }
     }
     return found;
+}
+
+/** The writes a queue runs where they are called, ahead of any command buffer submitted after. */
+const QUEUE_WRITES = new Set(['writeBuffer', 'writeTexture']);
+
+/**
+ * What the GPU was asked as its queue runs it: between two submits, the
+ * queue's own writes ahead of the commands being encoded, each in its order.
+ * A write lands before the next submit whether it was called before or after
+ * the encoder that submit carries was begun, so a twin that played a
+ * texture's upload a turn later than another asked the GPU the same.
+ *
+ * @param {string[]} stream
+ * @returns {string[]}
+ */
+function asQueued(stream){
+    /** @type {string[]} */
+    const out = [];
+    /** @type {string[]} */
+    let writes = [];
+    /** @type {string[]} */
+    let encoded = [];
+    for (const line of stream)
+    {
+        const op = /"op":"(\w+)"/.exec(line)?.[1] ?? '';
+        if (QUEUE_WRITES.has(op))
+        {
+            writes.push(line);
+            continue;
+        }
+        encoded.push(line);
+        if (op === 'submit')
+        {
+            out.push(...writes, ...encoded);
+            writes = [];
+            encoded = [];
+        }
+    }
+    return [...out, ...writes, ...encoded];
 }
 
 /**
@@ -3080,4 +3192,239 @@ test('Direct3D 9 and 8: a device let go of with its textures and buffers leaves 
             `${version} ${way}: no buffer of a device let go of, once the next drew`);
         on.close();
     }
+});
+
+/**
+ * A seeded stream of numbers (mulberry32): the same programs every run.
+ *
+ * @param {number} seed
+ */
+const seeded = seed=>{
+    let state = seed >>> 0;
+    /** @param {number} below @returns {number} */
+    return below=>{
+        state = (state + 0x6d2b79f5) >>> 0;
+        let mixed = Math.imul(state ^ (state >>> 15), 1 | state);
+        mixed = (mixed + Math.imul(mixed ^ (mixed >>> 7), 61 | mixed)) ^ mixed;
+        return (((mixed ^ (mixed >>> 14)) >>> 0) % below);
+    };
+};
+
+/**
+ * A program made of a seed: buffers written through every kind of lock,
+ * textures of sizes from a few bytes to past what one record of a small
+ * ring holds, draws from buffers and from user memory, state set between
+ * them, occlusion counts waited for, render targets read back, presents and
+ * looks, in an order and with bytes the seed decides.
+ *
+ * @param {number} seed @param {number} steps
+ * @returns {(run: ReturnType<typeof runner>) => Promise<void>}
+ */
+const randomProgram = (seed, steps)=>async run=>{
+    const pick = seeded(seed);
+    const { device, vertices, indices } = await device9(run);
+    /** @type {{ buffer?: any }} */
+    const dynamic = {};
+    await run.call('CreateVertexBuffer dynamic', ()=>device.CreateVertexBuffer(16 * STRIDE,
+        D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_LIT, D3DPOOL.DEFAULT, dynamic), [dynamic]);
+    /** @type {{ query?: any }} */
+    const occlusion = {};
+    await run.call('CreateQuery occlusion', ()=>device.CreateQuery(D3DQUERYTYPE.OCCLUSION,
+        occlusion), [occlusion]);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    await run.call('GetBackBuffer', ()=>device.GetBackBuffer(0, 0, 0, back), [back]);
+    /** @type {{ surface?: any }} */
+    const readBack = {};
+    await run.call('CreateOffscreenPlainSurface read-back', ()=>device.CreateOffscreenPlainSurface(
+        32, 32, D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, readBack), [readBack]);
+    await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+    await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+    await run.call('SetStreamSource', ()=>device.SetStreamSource(0, vertices, 0, STRIDE));
+    await run.call('SetIndices', ()=>device.SetIndices(indices));
+    /** @type {any[]} */
+    const textures = [await makeTexture(run, device, 'first', { seed })];
+    let inScene = false;
+    let frame = 0;
+    const scene = async()=>{
+        if (!inScene)
+        {
+            await run.call('BeginScene', ()=>device.BeginScene());
+            inScene = true;
+        }
+    };
+    const unscene = async()=>{
+        if (inScene)
+        {
+            await run.call('EndScene', ()=>device.EndScene());
+            inScene = false;
+        }
+    };
+    for (let step = 0; step < steps; step++)
+    {
+        const label = `${step}`;
+        switch (pick(9))
+        {
+            case 0:
+            {
+                // A texture of 4 to 256 texels a side: the largest is 256 KiB a level.
+                const size = 4 << pick(7);
+                textures.push(await makeTexture(run, device, `t${label}`,
+                    { size, levels: 1 + pick(2), seed: pick(200) }));
+                break;
+            }
+            case 1:
+            {
+                await scene();
+                await drawQuad9(run, device, label, textures[pick(textures.length)],
+                    pick(8) / 8);
+                break;
+            }
+            case 2:
+            {
+                // Written through the lock a dynamic buffer's draws take, the GPU
+                // idle first: a DISCARD while a frame is drawing renames the buffer
+                // (`carries`), as early or late as that frame's end, which is the
+                // GPU's timing and not what a transport decides.
+                await run.call(`idle before ${label}`, ()=>device.idle());
+                const flags = [D3DLOCK.DISCARD, D3DLOCK.NOOVERWRITE, 0][pick(3)];
+                const first = pick(4) * 4;
+                /** @type {{ pBits?: number }} */
+                const locked = {};
+                await run.call(`Lock dynamic ${label}`, ()=>dynamic.buffer.Lock(first * STRIDE,
+                    4 * STRIDE, locked, flags), [locked]);
+                writeVertices(run, /** @type {number} */ (locked.pBits), pick(64));
+                await run.call(`Unlock dynamic ${label}`, ()=>dynamic.buffer.Unlock());
+                await scene();
+                await run.call(`SetStreamSource dynamic ${label}`, ()=>device.SetStreamSource(0,
+                    dynamic.buffer, 0, STRIDE));
+                await run.call(`DrawPrimitive dynamic ${label}`, ()=>device.DrawPrimitive(
+                    D3DPT.TRIANGLESTRIP, first, 2));
+                await run.call(`SetStreamSource back ${label}`, ()=>device.SetStreamSource(0,
+                    vertices, 0, STRIDE));
+                break;
+            }
+            case 3:
+            {
+                await scene();
+                await run.call(`SetFVF rhw ${label}`, ()=>device.SetFVF(FVF_RHW));
+                await run.call(`DrawPrimitiveUP ${label}`, ()=>device.DrawPrimitiveUP(
+                    D3DPT.TRIANGLESTRIP, 2, screenQuad(1 + pick(32), 1 + pick(32),
+                        0xff000000 | pick(0xffffff)), STRIDE_RHW));
+                await run.call(`SetFVF lit ${label}`, ()=>device.SetFVF(FVF_LIT));
+                break;
+            }
+            case 4:
+            {
+                const [state, values] = /** @type {[number, number[]]} */ ([
+                    [D3DRS.ZENABLE, [0, 1]], [D3DRS.ALPHABLENDENABLE, [0, 1]],
+                    [D3DRS.TEXTUREFACTOR, [pick(0x7fffffff), 0xffffffff]],
+                    [D3DRS.CULLMODE, [1, 2, 3]]][pick(4)]);
+                await run.call(`SetRenderState ${state} ${label}`, ()=>device.SetRenderState(state,
+                    values[pick(values.length)]));
+                break;
+            }
+            case 5:
+            {
+                // A count the program waits for, polled as Wine's test polls it.
+                await scene();
+                await run.call(`Issue BEGIN ${label}`, ()=>occlusion.query.Issue(D3DISSUE.BEGIN));
+                await drawQuad9(run, device, `counted ${label}`, textures[0], 0);
+                await run.call(`Issue END ${label}`, ()=>occlusion.query.Issue(D3DISSUE.END));
+                /** @type {{ value?: number }} */
+                const counted = {};
+                await run.call(`GetData ${label}`, async()=>{
+                    let answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
+                    while (answer === 1)
+                    {
+                        await new Promise(resolve=>setTimeout(resolve, 1));
+                        answer = await occlusion.query.GetData(counted, 4, GETDATA_FLUSH);
+                    }
+                    return answer;
+                }, [counted]);
+                break;
+            }
+            case 6:
+            {
+                // The back buffer's pixels, read back for the program to look at.
+                await unscene();
+                await run.call(`GetRenderTargetData ${label}`, ()=>device.GetRenderTargetData(
+                    back.surface, readBack.surface));
+                /** @type {{ pBits?: number, Pitch?: number }} */
+                const read = {};
+                await run.call(`LockRect read-back ${label}`, ()=>readBack.surface.LockRect(read,
+                    null, D3DLOCK.READONLY), [read]);
+                run.bytes(`read back ${label}`, /** @type {number} */ (read.pBits), 32 * 32 * 4);
+                await run.call(`UnlockRect read-back ${label}`, ()=>readBack.surface.UnlockRect());
+                break;
+            }
+            case 7:
+            {
+                await unscene();
+                await run.call(`Clear ${label}`, ()=>device.Clear(0, null,
+                    D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000 | pick(0xffffff), 1, 0));
+                break;
+            }
+            default:
+            {
+                await unscene();
+                await run.call(`Present ${label}`, ()=>device.Present());
+                if (pick(2) === 0)
+                {
+                    await run.call(`idle ${label}`, ()=>device.idle());
+                    await run.look(`frame ${frame++}`);
+                }
+                break;
+            }
+        }
+    }
+    await unscene();
+    await run.call('Present last', ()=>device.Present());
+    await run.call('idle', ()=>device.idle());
+    await run.look('last');
+    for (const [index, texture] of textures.entries())
+    {
+        await run.call(`Release texture ${index}`, ()=>texture.release());
+    }
+    for (const [name, object] of /** @type {[string, any][]} */ ([['dynamic', dynamic.buffer],
+        ['occlusion', occlusion.query], ['back', back.surface], ['read-back', readBack.surface],
+        ['vertices', vertices], ['indices', indices], ['device', device]]))
+    {
+        await run.call(`Release ${name}`, ()=>object.release());
+    }
+    await run.look('end');
+};
+
+/**
+ * The transports' gate: seeded random programs whose twin plays as late as
+ * it may (`held`) and through each way across threads, every way held to
+ * the first -- what the GPU was asked, with its bytes, every answer and out-
+ * structure the program saw, and guest memory at every look. A transport
+ * that loses, reorders, cuts or misreads a batch, an answer or a write back
+ * parts here, whichever of its paths -- built in place, spilled, in parts,
+ * waiting for room -- the record took.
+ */
+test('seeded random Direct3D 9 programs play the same through every transport, and answer the'
+    + ' program the same', async()=>{
+    for (let seed = 1; seed <= 12; seed++)
+    {
+        const found = await divergences(9, randomProgram(seed, 40),
+            ['ring', 'ring, lent', 'ring, parts'], {}, 'held');
+        assert.deepEqual(found, [], `seed ${seed}:\n${found.join('\n')}`);
+    }
+});
+
+test('the rings\' ways took every path a record may: built in place, spilled out of its room,'
+    + ' sent as parts, and waiting for room', ()=>{
+    // Summed over every run of the tests above in this file: run alone, this
+    // one has nothing to look at and says so.
+    const small = ringPaths.get('ring, small');
+    const parts = ringPaths.get('ring, parts');
+    assert.ok(small && parts, 'the ways through the rings ran before this');
+    for (const path of ['inPlace', 'spilled', 'parts', 'waited'])
+    {
+        assert.ok(small[path] > 0, `a small ring's records took the path ${path}`);
+    }
+    assert.ok(parts.parts > 0 && parts.spilled > 0, 'the seeded programs\' uploads went as parts');
+    assert.equal(small.waiting + parts.waiting, 0, 'nothing was left waiting for room');
 });

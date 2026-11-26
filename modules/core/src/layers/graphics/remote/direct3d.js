@@ -279,10 +279,10 @@ export function createTargetReads(){
  *     shared, reads what the recording lent (`lending.js`)
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     counts: () => import('./replay.js').OcclusionCount[],
- *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void,
- *         length?: number)
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number)
  *         => number | undefined,
- *     spent: (buffer: ArrayBuffer, give: () => void) => void,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void,
  *     figures: () => import('../figures.js').FrameFigures | null }}
  *     `read` reads a batch of calls for `play`, and answers how long the look
  *     at its objects at a count of zero took when the batch made one; `figures`

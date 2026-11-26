@@ -22,6 +22,8 @@
  * and after, and whether -- and as which -- the caller waits for its answer.
  */
 
+import { textOf } from '../../../system/codec.js';
+
 /** What a record is. */
 export const OP = { CALL: 1, GET: 2, SET: 3, WROTE: 4, LENT: 5 };
 
@@ -31,6 +33,7 @@ const NEW_STRING = 0xffffffff;
 const TAG = {
     UNDEFINED: 0, NULL: 1, FALSE: 2, TRUE: 3, INT: 4, DOUBLE: 5, STRING: 6, ARRAY: 7,
     OBJECT: 8, BYTES: 9, REF: 10, SERVICE: 11, NEW_SHAPE: 12, SHAPE: 13, FLAT: 14,
+    TEXT: 15, MAP: 16, SET: 17,
 };
 
 /**
@@ -79,7 +82,6 @@ export const WAIT = { NONE: 0, ANSWER: 1, PACED: 2 };
 export const SERVICE_REF = -1;
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
 /**
  * Buffers given back to a writer, kept to write on again: as many as the
@@ -89,12 +91,36 @@ const decoder = new TextDecoder();
 const SPARE_BUFFERS = 4;
 const SPARE_LARGEST = 1 << 20;
 
-/** The writing end. */
-export function createWriter(){
-    let buffer = new ArrayBuffer(1 << 16);
-    let view = new DataView(buffer);
-    let bytes = new Uint8Array(buffer);
+/** Where a writer that builds its batches in place has none yet: its first write asks for room. */
+const UNPLACED = new Uint8Array(0);
+
+/**
+ * The writing end.
+ *
+ * A writer given `place` builds each batch where it is read -- in a ring's
+ * room (`ring.js`) -- rather than in a buffer of its own that is copied
+ * there: the first write of a batch asks `place` for room, and a batch that
+ * outgrows it, or finds none, goes on in this side's own buffer, which its
+ * sender then copies over (`spilled`). `placed` says which of the two holds
+ * the batch.
+ *
+ * @param {Object} [options]
+ * @param {(least: number) => Uint8Array | null} [options.place]  room for at least
+ *     `least` bytes, at a multiple of eight in its buffer, or null where there is none now
+ * @param {() => void} [options.unplaced]  the room `place` gave goes back unused: the
+ *     batch outgrew it
+ * @param {boolean} [options.intern]  strings among the values are numbered and their
+ *     text sent once, as a program's names are; false writes each where it stands,
+ *     for what says something new every time -- a failure, a divergence
+ */
+export function createWriter({ place = null, unplaced = ()=>{}, intern = true } = {}){
+    /** This side's own buffer, written on when nothing is placed. */
+    let own = new ArrayBuffer(1 << 16);
+    let bytes = place ? UNPLACED : new Uint8Array(own);
+    let view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let at = 0;
+    /** Whether the batch is being built in the room `place` gave. */
+    let placed = false;
     /** @type {Map<string, number>} */
     const strings = new Map();
     /** The strings by number, to forget those defined in what is taken back. @type {string[]} */
@@ -108,29 +134,61 @@ export function createWriter(){
      * the size and a copy of what was written (`copied`, in bytes). A buffer
      * that grew comes back grown and is written on again, so in a steady run
      * both stay still: what moves them is a batch with no buffer back to
-     * write on, or one past `SPARE_LARGEST`.
+     * write on, or one past `SPARE_LARGEST`. `spilled` counts the batches
+     * that outgrew the room they were placed in, copied out of it.
      */
-    const figures = { made: 1, grown: 0, copied: 0 };
+    const figures = { made: 1, grown: 0, copied: 0, spilled: 0 };
 
+    /** @param {Uint8Array} next */
+    const writeOn = next=>{
+        bytes = next;
+        view = new DataView(next.buffer, next.byteOffset, next.byteLength);
+    };
     /** @param {number} more */
     const room = more=>{
-        if (at + more <= buffer.byteLength)
+        if (at + more <= bytes.length)
         {
             return;
         }
-        let size = buffer.byteLength * 2;
+        if (place && !placed && at === 0)
+        {
+            const given = place(more);
+            if (given)
+            {
+                placed = true;
+                writeOn(given);
+                if (more <= given.length)
+                {
+                    return;
+                }
+            }
+        }
+        let size = own.byteLength;
         while (size < at + more)
         {
             size *= 2;
         }
-        const grown = new ArrayBuffer(size);
-        new Uint8Array(grown).set(bytes.subarray(0, at));
-        figures.made++;
-        figures.grown++;
-        figures.copied += at;
-        buffer = grown;
-        view = new DataView(buffer);
-        bytes = new Uint8Array(buffer);
+        if (placed)
+        {
+            placed = false;
+            unplaced();
+            figures.spilled++;
+        }
+        else if (at > 0)
+        {
+            figures.grown++;
+        }
+        if (size > own.byteLength)
+        {
+            own = new ArrayBuffer(size);
+            figures.made++;
+        }
+        if (at > 0)
+        {
+            new Uint8Array(own).set(bytes.subarray(0, at));
+            figures.copied += at;
+        }
+        writeOn(new Uint8Array(own));
     };
     /** @param {number} value */
     const u8 = value=>{
@@ -164,6 +222,16 @@ export function createWriter(){
         bytes.set(encoded, at);
         at += encoded.length;
         return strings.size - 1;
+    };
+    /** @param {string} item  a string written where it stands, not numbered */
+    const text = item=>{
+        const encoded = encoder.encode(item);
+        room(5 + encoded.length);
+        bytes[at++] = TAG.TEXT;
+        view.setUint32(at, encoded.length, true);
+        at += 4;
+        bytes.set(encoded, at);
+        at += encoded.length;
     };
     /**
      * What was written from `start` is taken back, and the strings and
@@ -234,8 +302,13 @@ export function createWriter(){
                 u8(TAG.UNDEFINED);
                 return false;
             case 'string':
-                u8(TAG.STRING);
-                string(item);
+                if (intern)
+                {
+                    u8(TAG.STRING);
+                    string(item);
+                    return false;
+                }
+                text(item);
                 return false;
             case 'object':
                 break;
@@ -266,6 +339,24 @@ export function createWriter(){
                 bytes[at++] = TAG.REF;
                 view.setUint32(at, ref, true);
                 at += 4;
+            }
+            return false;
+        }
+        if (item instanceof Map || item instanceof Set)
+        {
+            u8(item instanceof Map ? TAG.MAP : TAG.SET);
+            u32(item.size);
+            for (const entry of item)
+            {
+                if (item instanceof Map)
+                {
+                    value(entry[0], refOf, depth + 1);
+                    value(entry[1], refOf, depth + 1);
+                }
+                else
+                {
+                    value(entry, refOf, depth + 1);
+                }
             }
             return false;
         }
@@ -460,18 +551,33 @@ export function createWriter(){
          * @returns {{ buffer: ArrayBuffer, length: number }}
          */
         give(){
-            const given = { buffer, length: at };
+            if (placed)
+            {
+                throw new Error('remote: a batch built in place is published where it lies,'
+                    + ' not given');
+            }
+            const given = { buffer: own, length: at };
             let next = spare.pop();
             if (!next)
             {
                 next = new ArrayBuffer(1 << 16);
                 figures.made++;
             }
-            buffer = next;
-            view = new DataView(buffer);
-            bytes = new Uint8Array(buffer);
+            own = next;
+            writeOn(place ? UNPLACED : new Uint8Array(own));
             at = 0;
             return given;
+        },
+        /** Whether the batch written is in the room `place` gave, rather than this side's own buffer. */
+        placed: ()=>placed,
+        /**
+         * The batch built in place has been published where it lies: the
+         * next one asks for room of its own.
+         */
+        published(){
+            placed = false;
+            writeOn(UNPLACED);
+            at = 0;
         },
         /**
          * Takes back a buffer `give` gave, read and done with, to write on
@@ -488,7 +594,7 @@ export function createWriter(){
         },
         /** How many bytes are written. */
         size: ()=>at,
-        /** Buffers made and batches grown so far (`figures` above). */
+        /** Buffers made, batches grown and batches spilled so far (`figures` above). */
         figures: ()=>({ ...figures }),
     };
     return writer;
@@ -525,11 +631,18 @@ const NO_BATCH = new ArrayBuffer(0);
  * field at a time into a layout of its own for each kind of record; and an
  * integer argument, most of them, is read where the arguments are.
  *
+ * A batch may lie in shared memory -- a ring's record, read in place -- at
+ * an offset of its buffer (`read`'s `start`, a multiple of eight as the
+ * writer's room is): its bytes are viewed there, its text copied out first,
+ * as a browser decodes no view of shared memory.
+ *
  * @param {Object} options
  * @param {(number: number) => any} options.ref      a device object by its number
  * @param {() => any} options.service                 what stands in for a caller's service
+ * @param {boolean} [options.owned]  bytes are copied out of the batch rather than
+ *     viewed where they lie: for values kept past the reading, as answers are
  */
-export function createReader({ ref, service }){
+export function createReader({ ref, service, owned = false }){
     /** @type {string[]} */
     const strings = [];
     /**
@@ -544,11 +657,19 @@ export function createReader({ ref, service }){
     let view = new DataView(NO_BATCH);
     let bytes = new Uint8Array(NO_BATCH);
     let at = 0;
+    /** Where in `buffer` the batch begins. */
+    let base = 0;
 
     const u32 = ()=>{
         const value = view.getUint32(at, true);
         at += 4;
         return value;
+    };
+    /** @param {number} length */
+    const textAt = length=>{
+        const text = textOf(bytes.subarray(at, at + length));
+        at += length;
+        return text;
     };
     const string = ()=>{
         const id = u32();
@@ -556,9 +677,7 @@ export function createReader({ ref, service }){
         {
             return strings[id];
         }
-        const length = u32();
-        const text = decoder.decode(bytes.subarray(at, at + length));
-        at += length;
+        const text = textAt(u32());
         strings.push(text);
         return text;
     };
@@ -567,9 +686,9 @@ export function createReader({ ref, service }){
         const length = view.getUint32(at + 1, true);
         at = (at + 12) & ~7;
         const type = ARRAYS[kind];
-        const array = new type(buffer, at, length / type.BYTES_PER_ELEMENT);
+        const array = new type(buffer, base + at, length / type.BYTES_PER_ELEMENT);
         at += length;
-        return array;
+        return owned ? array.slice() : array;
     };
     /**
      * @param {{ keys: string[], kinds: number[] | null }} shape
@@ -616,6 +735,28 @@ export function createReader({ ref, service }){
             case TAG.FALSE: return false;
             case TAG.TRUE: return true;
             case TAG.STRING: return string();
+            case TAG.TEXT: return textAt(u32());
+            case TAG.MAP:
+            case TAG.SET:
+            {
+                const size = u32();
+                if (tag === TAG.SET)
+                {
+                    const out = new Set();
+                    for (let index = 0; index < size; index++)
+                    {
+                        out.add(value());
+                    }
+                    return out;
+                }
+                const out = new Map();
+                for (let index = 0; index < size; index++)
+                {
+                    const key = value();
+                    out.set(key, value());
+                }
+                return out;
+            }
             case TAG.BYTES: return typed();
             case TAG.REF: return ref(u32());
             case TAG.SERVICE: return service();
@@ -787,19 +928,22 @@ export function createReader({ ref, service }){
         /**
          * Every record of a batch, in order. What a record holds of the
          * batch's bytes is a view of them, good until the reading returns:
-         * the buffer is then given back to be written again (`give`), so
-         * what is kept of it past `each` is copied.
+         * the bytes are then written over by a batch to come, so what is
+         * kept of them past `each` is copied.
          *
-         * @param {ArrayBuffer} batch
+         * @param {ArrayBufferLike} batch
          * @param {(call: ReadCall) => boolean | void} each  false stops the reading
          * @param {number} [size]  how much of the buffer the batch is, all of it by default
+         * @param {number} [start]  where in the buffer it begins, a multiple of eight
          */
-        read(batch, each, size = batch.byteLength){
-            const outer = { buffer, view, bytes, at };
+        read(batch, each, size = undefined, start = 0){
+            size ??= batch.byteLength - start;
+            const outer = { buffer, view, bytes, at, base };
             buffer = batch;
-            view = new DataView(batch, 0, size);
-            bytes = new Uint8Array(batch, 0, size);
+            view = new DataView(batch, start, size);
+            bytes = new Uint8Array(batch, start, size);
             at = 0;
+            base = start;
             try
             {
                 let more = at < size;
@@ -810,7 +954,30 @@ export function createReader({ ref, service }){
             }
             finally
             {
-                ({ buffer, view, bytes, at } = outer);
+                ({ buffer, view, bytes, at, base } = outer);
+            }
+        },
+        /**
+         * The one value `size` bytes at `start` of the buffer hold, as a
+         * writer's `value` wrote it.
+         *
+         * @param {ArrayBufferLike} batch @param {number} size @param {number} [start]
+         * @returns {any}
+         */
+        value(batch, size, start = 0){
+            const outer = { buffer, view, bytes, at, base };
+            buffer = batch;
+            view = new DataView(batch, start, size);
+            bytes = new Uint8Array(batch, start, size);
+            at = 0;
+            base = start;
+            try
+            {
+                return value();
+            }
+            finally
+            {
+                ({ buffer, view, bytes, at, base } = outer);
             }
         },
     };

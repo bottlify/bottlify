@@ -431,11 +431,11 @@ test('a batch read while another is being read leaves the outer one where it was
 test('the writer counts the buffers it made and the batches that outgrew theirs', ()=>{
     const writer = createWriter();
     const bytes = new Uint8Array(40 << 10);
-    assert.deepEqual(writer.figures(), { made: 1, grown: 0, copied: 0 });
+    assert.deepEqual(writer.figures(), { made: 1, grown: 0, copied: 0, spilled: 0 });
     writer.value(bytes, ()=>undefined);
     const before = writer.size();
     writer.value(bytes, ()=>undefined);
-    assert.deepEqual(writer.figures(), { made: 2, grown: 1, copied: before },
+    assert.deepEqual(writer.figures(), { made: 2, grown: 1, copied: before, spilled: 0 },
         'a batch past its 64 KiB buffer grows it, copying what was written');
     const first = writer.give();
     assert.equal(first.buffer.byteLength, 128 << 10);
@@ -444,6 +444,6 @@ test('the writer counts the buffers it made and the batches that outgrew theirs'
     writer.give();
     writer.value(bytes, ()=>undefined);
     writer.value(bytes, ()=>undefined);
-    assert.deepEqual(writer.figures(), { made: 3, grown: 1, copied: before },
+    assert.deepEqual(writer.figures(), { made: 3, grown: 1, copied: before, spilled: 0 },
         'the grown buffer given back is written on again, as large as it grew');
 });
