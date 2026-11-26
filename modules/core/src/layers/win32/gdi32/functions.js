@@ -1880,6 +1880,7 @@ export function createGdiFunctions(host){
                 const added = host.graphics?.addFont?.(family, bytes) ?? false;
                 Promise.resolve(added).finally(()=>{
                     metricsCache = new WeakMap();
+                    advanceTables = new WeakMap();
                 });
                 return added;
             }),
@@ -2095,24 +2096,57 @@ export function createGdiFunctions(host){
         {
             return engine;
         }
-        // Without an engine a bitmap face's size measures with its own
-        // advances, as wide again as it is scaled across.
-        const raster = font.raster;
-        const advances = raster?.advances;
-        if (raster && advances)
+        // Laid out a character at a time (an edit control wraps by them):
+        // summed in place over the font's table, made once.
+        const table = advancesOf(font);
+        let width = 0;
+        for (let i = 0; i < text.length; i++)
         {
-            return Array.from(text, character=>{
-                const code = character.charCodeAt(0);
-                return (code >= 0x20 && code <= 0xff ? advances[code - 0x20]
-                    : raster.strike.aveCharWidth) * raster.scaleX;
-            }).reduce((sum, advance)=>sum + advance, 0);
+            const code = text.charCodeAt(i);
+            width += code >= 0x20 && code <= 0xff ? table[code - 0x20] : table[ADVANCE_ELSE];
         }
-        const pitch = metricsOf(font).aveCharWidth;
-        const windows = windowsMetrics(font)?.advances ?? scaledAdvances(font);
-        return windows ? Array.from(text, character=>{
-            const code = character.charCodeAt(0);
-            return code >= 0x20 && code <= 0xff ? windows[code - 0x20] : pitch;
-        }).reduce((sum, advance)=>sum + advance, 0) : text.length * pitch;
+        return width;
+    };
+    /** Where an advance table keeps the width of a character past 0xFF. */
+    const ADVANCE_ELSE = 0xe0;
+    /**
+     * Each font's advances, 0x20 to 0xFF and one for every other character,
+     * without an engine to measure: a bitmap face's own scaled across, else
+     * Windows' for the face, else its pitch.
+     *
+     * @type {WeakMap<import('./structs.js').LogFontFields, Float64Array>}
+     */
+    let advanceTables = new WeakMap();
+    /** @param {import('./structs.js').LogFontFields} font */
+    const advancesOf = font=>{
+        let table = advanceTables.get(font);
+        if (table !== undefined)
+        {
+            return table;
+        }
+        table = new Float64Array(ADVANCE_ELSE + 1);
+        const raster = font.raster;
+        const own = raster?.advances;
+        if (raster && own)
+        {
+            for (let code = 0x20; code <= 0xff; code++)
+            {
+                table[code - 0x20] = own[code - 0x20] * raster.scaleX;
+            }
+            table[ADVANCE_ELSE] = raster.strike.aveCharWidth * raster.scaleX;
+        }
+        else
+        {
+            const pitch = metricsOf(font).aveCharWidth;
+            const windows = windowsMetrics(font)?.advances ?? scaledAdvances(font);
+            for (let code = 0x20; code <= 0xff; code++)
+            {
+                table[code - 0x20] = windows ? windows[code - 0x20] : pitch;
+            }
+            table[ADVANCE_ELSE] = pitch;
+        }
+        advanceTables.set(font, table);
+        return table;
     };
 
     /**
@@ -4592,6 +4626,7 @@ export function createGdiFunctions(host){
                     .then(taken=>{
                         // What was measured of these names before was a stand-in's.
                         metricsCache = new WeakMap();
+                        advanceTables = new WeakMap();
                         if (!taken.some(Boolean))
                         {
                             return 0;
