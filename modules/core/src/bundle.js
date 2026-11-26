@@ -22,6 +22,6 @@ export {
 }
     from './layers/filesystem/internal/bundle/format.js';
 export { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
-export { blockCacheName, bundleResidency, cachedBundle } from './layers/filesystem/internal/bundle/cache.js';
+export { blockCacheName, bundleResidency, cachedBundle } from './layers/filesystem/internal/bundle/saved.js';
 export { decompressZstd } from './zstd.js';
 export { finishBundle, placeFiles } from './bundle-in-place.js';

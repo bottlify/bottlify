@@ -120,7 +120,6 @@ import { openBundle } from '../lib/btl.mjs';
 import { relayFromArgv, rootsFromArgv } from '../lib/relay-option.mjs';
 import { diskDirectory } from '../lib/disk-directory.mjs';
 import { cpuProfiler } from '../lib/thread-profile.mjs';
-import { createOpfsStore } from '../../modules/core/src/layers/filesystem/internal/opfs-store.js';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../../modules/core/src/app.js';
 import { createDirectoryTranslationStore, createMemoryDirectory }
@@ -216,7 +215,7 @@ const layerSpecs = await Promise.all(layerIds.map(async id=>{
             await handle.read(buffer, 0, length, offset);
             return new Uint8Array(buffer);
         },
-        store: await createOpfsStore({ root: diskDirectory(join(bundleDir(id), 'blocks')) }),
+        store: diskDirectory(join(bundleDir(id), 'blocks')),
         prefetch: false,
     };
 }));
@@ -254,8 +253,8 @@ const mountBundle = async id=>{
             // in memory the pool holds 64 MiB, and a program whose libraries
             // are larger than that fetches and inflates every block again on
             // each pass the loader makes over them.
-            store: await createOpfsStore({ root: diskDirectory(argv.includes('--blocks')
-                ? argv[argv.indexOf('--blocks') + 1] : join(directory, 'blocks')) }),
+            store: diskDirectory(argv.includes('--blocks')
+                ? argv[argv.indexOf('--blocks') + 1] : join(directory, 'blocks')),
             prefetch: false,
             prefix: placement.prefix,
             ...layerSpecs.length > 0 ? { layers: layerSpecs } : {},

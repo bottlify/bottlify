@@ -9,13 +9,16 @@
  * (`navigator.storage.estimate()`, its quota, which each browser sets by the
  * system it runs on and the disk it has), less a share left for the run that
  * starts to write into. Past it, the caches go, the least recently written
- * first: a bundle's fetched blocks (`<name>.index`, `.pack.<n>` and `.order` at
- * the root, `cacheFiles` in `cache.js`) and a bundle's
+ * first: a bundle's fetched blocks (the directory `blocks/<name>`, `cache.js`;
+ * the files of its layouts before at the root, `<name>.index`, `.pack.<n>`,
+ * `.order` and those before them) and a bundle's
  * translations (`cork/<name>.v<n>`). Both are made again by the next run
  * that needs them; a session -- the files a program wrote, its saved games --
  * is never touched. Neither are the caches of the
  * run asking, nor those of a bundle a run in another tab holds the lock of.
  */
+
+import { BLOCK_DIRECTORY } from './layers/filesystem/internal/bundle/saved.js';
 
 /** The quota's share the site keeps itself to: room for what the run writes next. */
 export const STORAGE_SHARE = 0.8;
@@ -117,11 +120,18 @@ async function scanStorage(root){
     const out = [];
     /** @type {any} */
     let cork = null;
+    /** @type {any} */
+    let blocks = null;
     for await (const [name, handle] of root.entries())
     {
         if (name === 'cork' && typeof handle?.entries === 'function')
         {
             cork = handle;
+            continue;
+        }
+        if (name === BLOCK_DIRECTORY && typeof handle?.entries === 'function')
+        {
+            blocks = handle;
             continue;
         }
         const session = SESSION_ENTRY.exec(name);
@@ -158,6 +168,20 @@ async function scanStorage(root){
                     await root.removeEntry(file);
                 }
             } });
+    }
+    if (blocks !== null)
+    {
+        for await (const [name, handle] of blocks.entries())
+        {
+            if (typeof handle?.entries !== 'function')
+            {
+                continue;
+            }
+            const facts = await entryFacts(handle);
+            out.push({ kind: 'blocks', name, bottle: name.replace(FINGERPRINT, ''),
+                bytes: facts.size, modified: facts.modified,
+                remove: ()=>blocks.removeEntry(name, { recursive: true }) });
+        }
     }
     if (cork !== null)
     {

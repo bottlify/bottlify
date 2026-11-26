@@ -2160,11 +2160,13 @@ test('a whole file larger than the heap\'s pool of fetched blocks is read whole,
         const { inflateRawSync } = await import('node:zlib');
         const bundle = await openBundle(async(at, length)=>container.subarray(at, at + length),
             (codec, bytes)=>(codec === 1 ? new Uint8Array(inflateRawSync(bytes)) : bytes));
-        /** A run with no store: eight blocks in the heap, as the pool is to a large image. */
+        /**
+         * A run with no store: eight blocks in memory, as the pool is to a large
+         * image (a block takes 4 KiB of it at least).
+         */
         const cache = await createBlockCache({ store: null, name: 'b', blockSize: BLOCK,
-            blockCount: bundle.blockCount, maxHeapBytes: 8 * BLOCK });
-        const source = createBundleSource({ bundle, readBlock: index=>cache.read(index),
-            decode: (_, bytes)=>bytes });
+            blockCount: bundle.blockCount, budget: 8 * 4096 });
+        const source = createBundleSource({ bundle, blocks: cache });
         // The volume's handle reads, which move only by what they answer.
         const filesystem = {
             open: (/** @type {string} */ path)=>({ path, position: 0 }),
@@ -2187,7 +2189,7 @@ test('a whole file larger than the heap\'s pool of fetched blocks is read whole,
                 }
                 for (const { offset, packed, index } of needed)
                 {
-                    await cache.put(index, container.slice(offset, offset + packed));
+                    cache.put(index, container.subarray(offset, offset + packed));
                 }
                 await cache.persist();
             },

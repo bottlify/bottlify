@@ -311,3 +311,23 @@ test('past the budget a segmented cache goes whole, its bitmap first', async()=>
     assert.deepEqual([...root.children.keys()].sort(),
         ['game-cccccccc.blocks.3', 'game-cccccccc.held'], 'every segment went, the run\'s stayed');
 });
+
+test('a bundle\'s blocks kept by its keeper are a directory of their own, counted and let go whole',
+    async()=>{
+        const root = fakeDirectory();
+        const blocks = root.directory('blocks');
+        const old = blocks.directory('old-aaaaaaaa');
+        old.file('pack-0', 900, 1);
+        old.file('index-a', 20, 1);
+        blocks.directory('game-cccccccc').file('pack-0', 500, 9);
+        root.file('old-aaaaaaaa.index', 8, 2);
+        const listed = await bottleStorage(browser(root));
+        const by = Object.fromEntries(listed.bottles.map(one=>[one.bottle, one.blocks]));
+        assert.deepEqual(by, { old: 928, game: 500 }, 'the directory and the old layout added up');
+        const result = await keepStorageWithin({ root, estimate: { usage: 1500, quota: 1000 },
+            keep: { blocks: 'game-cccccccc' } });
+        // 1500 used against 800: the directory, written first, frees enough.
+        assert.deepEqual(result.measured && result.evicted, [
+            { kind: 'blocks', name: 'old-aaaaaaaa', bytes: 920 }]);
+        assert.deepEqual([...blocks.children.keys()], ['game-cccccccc'], 'the run\'s own stays');
+    });

@@ -12,12 +12,10 @@
  */
 
 import { openBundle } from '../layers/filesystem/internal/bundle/format.js';
-import {
-    blockCacheName, createBlockCache, resolveBlockStore, storedLength,
-} from '../layers/filesystem/internal/bundle/cache.js';
+import { createBlockCache, resolveBlockStore } from '../layers/filesystem/internal/bundle/cache.js';
+import { blockCacheName } from '../layers/filesystem/internal/bundle/saved.js';
 import { HEAP_POOLS, NOT_MEASURED } from '../memory-zones.js';
 import { BLOCK_MISS, createBundleSource } from '../layers/filesystem/internal/bundle/source.js';
-import { cacheSpace } from '../layers/cache/module.js';
 import { decompressZstd } from '../zstd.js';
 import { inflateRaw } from '../storage.js';
 import { crc32 } from '../layers/filesystem/internal/bundle/crc32.js';
@@ -456,13 +454,13 @@ export function expectIndex(expected){
  *
  * A miss names the blocks of one bundle, a layer's tagged with its number
  * (`layer`, from 1), and the run's `fetch` hands each to its bundle. The
- * blocks are kept decoded in the run's cache (`deps.runCache`, its reader),
- * once for every process of the run.
+ * blocks are kept decoded in the bundle's cache (`bundle/cache.js`), once
+ * for every process of the run.
  *
  * @param {any} deps
  * @returns {Promise<MountedBundle | null>}
  */
-export async function mountBundle({ options, events, translationStore, runCache = null }){
+export async function mountBundle({ options, events, translationStore }){
     // A run with no bundle of its own - an installer writing its whole
     // volume - may still stand on layers (`layers`): a setup whose wizard is
     // a managed program needs the Framework while it installs.
@@ -519,7 +517,7 @@ export async function mountBundle({ options, events, translationStore, runCache 
     // One bundle that fails fails the run: the others stop waiting for its
     // cache's name, and those already mounted stop fetching and close theirs.
     const outcomes = await Promise.allSettled(specs.map(one=>mountOneBundle({ ...one, held,
-        opened, runCache,
+        opened,
         // A layer's events say whose they are.
         events: one.layer ? { emit: (/** @type {string} */ name, /** @type {any} */ payload)=>
             events.emit(name, { ...payload, layer: one.id }) } : events,
@@ -663,16 +661,14 @@ export function missesNamed(source, layer){
  * are: `prefix` is null for it, and nothing seeds the translator from it.
  *
  * @param {{ spec: any, id: string, layer: boolean, events: any, translationStore?: any,
- *     held: string[], opened: (name: string) => Promise<void>,
- *     runCache?: import('../layers/cache/module.js').Reader | null }} deps
+ *     held: string[], opened: (name: string) => Promise<void> }} deps
  *     `spec`: the bundle's options. `held`: the names of every block cache the
  *     run reads, this one's among them. `opened`: told this bundle's cache's
  *     name once its index is read, and waited on before the cache is opened.
- *     `runCache`: the run's cache, where its blocks are kept decoded.
  * @returns {Promise<MountedBundle>}
  */
 export async function mountOneBundle(deps){
-    const { spec, id, layer, events, translationStore, held, opened, runCache = null } = deps;
+    const { spec, id, layer, events, translationStore, held, opened } = deps;
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.
     const retrying = retryingFetch({
@@ -703,24 +699,24 @@ export async function mountOneBundle(deps){
     const roundTrip = ()=>(recentMs.length === 0 ? 0 : Math.min(...recentMs));
 
     /**
-     * A block, turned back into bytes, without awaiting anything.
-     *
-     * zstd is decoded by this project's own decoder (`zstd.js`), which
-     * answers synchronously. Deflate has
-     * no synchronous decoder in a browser at all, so a deflate block is
-     * inflated when it is *fetched* -- which is already an asynchronous step --
-     * and by the time a read reaches it, it is plain. That is why codec 1 is
-     * passed through rather than refused.
+     * A block, turned back into bytes as it is fetched, which is already an
+     * asynchronous step: deflate by the platform's inflate, zstd by this
+     * project's own decoder (`zstd.js`). A read finds it decoded.
      *
      * @param {number} codec
      * @param {Uint8Array} bytes
      * @param {number | null} expectedLength
+     * @returns {Promise<Uint8Array>}
      */
-    const decode = (codec, bytes, expectedLength)=>{
+    const decode = async(codec, bytes, expectedLength)=>{
+        if (codec === 1)
+        {
+            return inflateRaw(bytes);
+        }
         if (codec === 2)
         {
-            // Counted: the decoding a guest read waits for is what a pool
-            // worker would take off this thread.
+            // Counted: the decoding on the engine's thread a pool worker
+            // would take off it.
             const startedAt = performance.now();
             const plain = decompressZstd(bytes, expectedLength ?? 0);
             decoded.blocks++;
@@ -736,11 +732,10 @@ export async function mountOneBundle(deps){
     // the decoder a guest read cannot.
     const bundle = await openBundle(
         fetchRange,
-        (codec, bytes)=>codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null),
+        (codec, bytes)=>decode(codec, bytes, null),
         { verifyIndex: expectIndex(spec.indexSha256) });
 
     const blockStore = spec.store === undefined ? 'local' : spec.store;
-    const evictOthers = spec.evictOthers !== false;
     await opened(blockCacheName(id, bundle.fingerprint));
     const cache = await createBlockCache({
         // Absent means local, and only an explicit falsy value turns it off --
@@ -751,24 +746,25 @@ export async function mountOneBundle(deps){
         name: blockCacheName(id, bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
-        // Where the blocks have no store but the heap, the heaps' pool for them:
-        // a read in flight keeps its blocks past it, and nothing else does.
-        maxHeapBytes: HEAP_POOLS.blockCache,
-        evictOthers,
-        held,
-        // Nothing left to let go: the run goes on with what it fetches in the
-        // heap, and the person is told there is no room, once.
-        onFull: reason=>events.emit('storage-full', { bundle: id, reason }),
+        // The heaps' pool for the bundle's blocks: what is hot past it goes
+        // to the disk, or, with none, away.
+        budget: HEAP_POOLS.blockCache,
+        // The person is told there is no room, once, and the other bottles'
+        // caches go, the oldest first, for the blocks that come next; the
+        // run's own are named in `held` and stay.
+        onFull: reason=>{
+            events.emit('storage-full', { bundle: id, reason });
+            if (spec.evictOthers !== false)
+            {
+                keepOriginStorageWithin({ blocks: [...held] })
+                    .then(result=>events.emit('storage-budget', result), ()=>{});
+            }
+        },
     });
 
     const source = createBundleSource({
         bundle,
-        /** @param {number} index */
-        readBlock: index=>cache.read(index, storedLength(bundle.block(index))),
-        decode,
-        // Decoded once a run and read where they lie by every process of it,
-        // under the cache's one budget: a block let go is decoded again.
-        decoded: cacheSpace(runCache, 'bundle-blocks'),
+        blocks: cache,
         // A game lives in a directory of its own, the way an installation does.
         // At the root of the volume a program's own directory and the system
         // root are the same place, so every answer to "where do I live" happens
@@ -814,8 +810,7 @@ export async function mountOneBundle(deps){
             const block = bundle.block(at);
             const from = block.offset - first.offset;
             const raw = whole.subarray(from, from + block.packed);
-            const bytes = block.codec === 1 ? await inflateRaw(raw) : decode(block.codec, raw,
-                block.length);
+            const bytes = await decode(block.codec, raw, block.length);
             out.set(bytes, written);
             written += bytes.length;
         }
@@ -882,11 +877,8 @@ export async function mountOneBundle(deps){
      * group with one bad block is asked for again whole. Damage is rare enough
      * that paying for the neighbours beats tracking which part to re-ask for.
      *
-     * A block kept as it came is copied out with `slice`, not viewed with
-     * `subarray`: a view would keep the entire request's buffer alive for as
-     * long as any one block of it is held, which for a 8 MiB request holding
-     * one 256 KiB block is thirty-one blocks of the group nobody wanted. A
-     * deflated block is inflated from a view: what is kept is what it inflates to.
+     * Each block is decoded from a view of the request and put where the
+     * cache holds it, the one copy it takes: the request is let go of whole.
      *
      * @param {{ start: number, end: number, blocks: any[] }} group
      */
@@ -924,12 +916,18 @@ export async function mountOneBundle(deps){
         for (const block of group.blocks)
         {
             const at = block.offset - group.start;
-            // Inflated here, once, rather than on every read: this is the only
-            // place a deflate block can be decoded at all, since the read side
-            // is synchronous and the browser's inflate is not.
-            await cache.put(block.index, bundle.block(block.index).codec === 1
-                ? await inflateRaw(whole.subarray(at, at + block.packed))
-                : whole.slice(at, at + block.packed));
+            const { codec, length } = bundle.block(block.index);
+            const bytes = await decode(codec, whole.subarray(at, at + block.packed), length);
+            if (bytes.length !== length)
+            {
+                // The bundle or the decoder is wrong, not the read: a short
+                // block would otherwise be handed out as zeroes.
+                throw new Error(`Block ${block.index} of this bundle decoded to `
+                    + `${bytes.length} bytes, not ${length}`);
+            }
+            // One the cache had no room for is fetched again by the read
+            // that wanted it.
+            cache.put(block.index, bytes);
         }
     };
 
@@ -1075,7 +1073,7 @@ export async function mountOneBundle(deps){
             {
                 // A store that is full keeps no more: filling it would fetch
                 // the rest of the bundle into the heap and let it go again.
-                if (stopped || cache.diagnostics().full)
+                if (stopped || cache.full())
                 {
                     return false;
                 }
@@ -1195,7 +1193,7 @@ export async function mountOneBundle(deps){
         let bytes = total - missing.reduce((sum, block)=>sum + block.packed, 0);
         progress({ bytes, total });
         await inParallel(groupBlocks(missing), MAX_CONCURRENT_REQUESTS, async group=>{
-            if (cache.diagnostics().full)
+            if (cache.full())
             {
                 return;
             }
@@ -1206,7 +1204,7 @@ export async function mountOneBundle(deps){
         });
         // Past the origin's quota the rest is not kept: the game loads as it
         // plays, which the page says in the words it has for that.
-        const full = cache.diagnostics().full;
+        const full = cache.full();
         if (full)
         {
             progress({ unbacked: full });
