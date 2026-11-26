@@ -22,6 +22,7 @@ import {
 } from './layers/filesystem/internal/bundle/format.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSha256 } from './layers/win32/crypto/digest.js';
+import { writeAll } from './system/opfs-file.js';
 
 /**
  * Random access to the container's bytes, as a worker's
@@ -140,8 +141,8 @@ export function treeInPlace(handle, placed, store){
                 path: /** @type {string} */ (spelt.get(folded)), size: bytes.length })), placed.end);
             for (const file of extra.files)
             {
-                handle.write(/** @type {Uint8Array} */ (added.get(file.path.toLowerCase())),
-                    { at: file.at });
+                writeAll(handle, /** @type {Uint8Array} */ (added.get(file.path.toLowerCase())),
+                    file.at);
             }
             return [...placed.files.filter(file=>!added.has(file.path.toLowerCase())),
                 ...extra.files].sort((a, b)=>comparePaths(a.path, b.path));
@@ -366,8 +367,8 @@ export async function fillInPlace({ handle, files, sources, fetchChunk, intact, 
         {
             await downloadChunks({ files, sources, fetchChunk, jobs, signal,
                 done: number=>(done[number >> 3] & (1 << (number & 7))) !== 0,
-                write: (file, chunk, bytes)=>handle.write(bytes,
-                    { at: /** @type {number} */ (at.get(file.path)) + chunk.offset }),
+                write: (file, chunk, bytes)=>writeAll(handle, bytes,
+                    /** @type {number} */ (at.get(file.path)) + chunk.offset),
                 onChunk: async(bytes, number)=>{
                     done[number >> 3] |= 1 << (number & 7);
                     installed += bytes;
@@ -467,7 +468,7 @@ export async function finishBundle(handle, files, directories,
     const indexBytes = new TextEncoder().encode(
         JSON.stringify({ blockSize, files: index, directories, blocks }));
     await handle.truncate(end + indexBytes.length);
-    handle.write(indexBytes, { at: end });
+    writeAll(handle, indexBytes, end);
     const header = new Uint8Array(HEADER_SIZE);
     const view = new DataView(header.buffer);
     header.set(Array.from(MAGIC, character=>character.charCodeAt(0)));
@@ -476,7 +477,7 @@ export async function finishBundle(handle, files, directories,
     view.setBigUint64(0x10, BigInt(end), true);
     view.setBigUint64(0x18, BigInt(indexBytes.length), true);
     view.setUint32(0x20, Codec.STORED, true);
-    handle.write(header, { at: 0 });
+    writeAll(handle, header, 0);
     await handle.flush();
     const indexDigest = createSha256();
     indexDigest.update(indexBytes);
