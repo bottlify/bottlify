@@ -19,7 +19,7 @@ runners are in [`run/README.md`](run/README.md), the live switches in
 | `bench/` | cork's stand: the same work on every machine and browser, and its speed on this one |
 | `bundles/` | make, inspect and audit bottles, archives and installers |
 | `gates/` | two paths of the engine compared on a real GPU (npm run cdp:*) |
-| `checks/` | the rules of the code check:boundaries holds (and one run by hand) |
+| `checks/` | the rules of the code check:boundaries holds, and audits of the code run by hand |
 | `generators/` | scripts that rewrite a committed file from a specification or a processor |
 | `ci/` | the repository's own jobs in its workflows |
 | `lib/` | modules the tools share, never run alone |
@@ -399,6 +399,33 @@ From `make-btl.mjs tree 3dmark03 2; make-btl.mjs zip list to_install/3dmark11/3d
 ```
 
 From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 layer against its Wine spec; a line per entry that pops another number of bytes, each one a caller's stack moved a call at a time. Run by hand: the specs are fetched once (import-audit --fetch-specs) and not kept in the repository.
+
+### What code does nothing reach: files no entry point runs, files only types or only tests reach, exports nobody takes?
+
+[`checks/unused-code.mjs`](checks/unused-code.mjs): `node tools/checks/unused-code.mjs [--exports] [--unresolved] [--json]`
+
+```
+1604 source files; roots: 33 package exports, 57 scripts, 17 bench, 41 commands in a README, 10 build entries, 10 pages, 3 declarations, 39 tools
+reached by nothing: 12 files, 371 lines
+  78	modules/core/src/layers/log/api.js
+  71	modules/core/src/layers/media/api.js
+  62	modules/core/src/layers/filesystem/api.js
+  ...
+reached only by types (the typecheck needs them, nothing runs them): 10 files, 1588 lines
+  541	modules/core/src/app-options.js  (declares types alone)
+  240	modules/core/src/host/messages.js  (declares types alone)
+  160	modules/core/src/layers/win32/kernel32/pool-types.js  (declares types alone)
+  ...
+reached only from tests: 60 files, 13842 lines
+  957	modules/core/src/layers/win32/d3dx9/effect-commit.x64.js  (a width built, not wired: effect-commit.x86.js is)
+  809	modules/core/scripts/guest-code/equivalence.mjs
+  704	modules/core/src/layers/win32/d3dx9/device.fixture.js  (a test helper by its name)
+  ...
+exports no other code takes: 1258 (1040 used in their own file, 218 used nowhere); taken only by tests: 1810; in 666 files
+cannot see: 88 places that name a file at run time, or a file that is not here (--unresolved lists them)
+```
+
+From `node tools/checks/unused-code.mjs on this repository, 2026-11-26, before the removals it led to (rows cut to three a section)`. "reached by nothing" is code no entry point, page, script, bench, tool or test loads: read each and delete it. "reached only by types" is needed by the typecheck alone; "declares types alone" is a typedef module, "holds code nothing runs" is code to remove from it. "reached only from tests" is a test helper (named so) or code that only its own tests run, or, "a width built, not wired", a guest-code output the product does not load. Of the exports, one used in its own file loses `export`, one used nowhere goes; "cannot see" counts the places a file is named at run time (import(name), a URL from parts): read them before deleting what they could load.
 
 ## Everything else
 

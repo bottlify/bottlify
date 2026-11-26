@@ -419,6 +419,20 @@
    "kind": "instrument"
   },
   {
+   "path": "tools/checks/unused-code.mjs",
+   "category": "checks",
+   "browser": false,
+   "question": "What code does nothing reach: files no entry point runs, files only types or only tests reach, exports nobody takes?",
+   "command": "node tools/checks/unused-code.mjs [--exports] [--unresolved] [--json]",
+   "tests": [
+    "tools/checks/unused-code.test.js"
+   ],
+   "sample": "1604 source files; roots: 33 package exports, 57 scripts, 17 bench, 41 commands in a README, 10 build entries, 10 pages, 3 declarations, 39 tools\nreached by nothing: 12 files, 371 lines\n  78\tmodules/core/src/layers/log/api.js\n  71\tmodules/core/src/layers/media/api.js\n  62\tmodules/core/src/layers/filesystem/api.js\n  ...\nreached only by types (the typecheck needs them, nothing runs them): 10 files, 1588 lines\n  541\tmodules/core/src/app-options.js  (declares types alone)\n  240\tmodules/core/src/host/messages.js  (declares types alone)\n  160\tmodules/core/src/layers/win32/kernel32/pool-types.js  (declares types alone)\n  ...\nreached only from tests: 60 files, 13842 lines\n  957\tmodules/core/src/layers/win32/d3dx9/effect-commit.x64.js  (a width built, not wired: effect-commit.x86.js is)\n  809\tmodules/core/scripts/guest-code/equivalence.mjs\n  704\tmodules/core/src/layers/win32/d3dx9/device.fixture.js  (a test helper by its name)\n  ...\nexports no other code takes: 1258 (1040 used in their own file, 218 used nowhere); taken only by tests: 1810; in 666 files\ncannot see: 88 places that name a file at run time, or a file that is not here (--unresolved lists them)",
+   "source": "node tools/checks/unused-code.mjs on this repository, 2026-11-26, before the removals it led to (rows cut to three a section)",
+   "read": "\"reached by nothing\" is code no entry point, page, script, bench, tool or test loads: read each and delete it. \"reached only by types\" is needed by the typecheck alone; \"declares types alone\" is a typedef module, \"holds code nothing runs\" is code to remove from it. \"reached only from tests\" is a test helper (named so) or code that only its own tests run, or, \"a width built, not wired\", a guest-code output the product does not load. Of the exports, one used in its own file loses `export`, one used nowhere goes; \"cannot see\" counts the places a file is named at run time (import(name), a URL from parts): read them before deleting what they could load.",
+   "kind": "instrument"
+  },
+  {
    "path": "tools/gates/probe.mjs",
    "category": "gates",
    "kind": "gate",
