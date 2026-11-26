@@ -561,7 +561,15 @@ export function createGpuRenderer(services){
     ];
     let spillNames = 0;
     const spills = { levels: 0, bytes: 0, blockBytes: 0, back: 0, backBytes: 0, refused: 0,
-        lost: 0 };
+        lost: 0, forgotten: 0 };
+    /**
+     * The texture each name waiting in the cache is a level of: a level of
+     * one the program deleted is read by nothing, and its name is let go of at
+     * the next `spill`, which is handed the textures that are alive.
+     *
+     * @type {Map<string, object>}
+     */
+    const spilledOf = new Map();
     /** @param {object} image @param {string} property @param {any} value */
     const plain = (image, property, value)=>Object.defineProperty(image, property,
         { value, writable: true, configurable: true, enumerable: true });
@@ -571,11 +579,12 @@ export function createGpuRenderer(services){
      * Made apart from `spillLevel`, so its accessors hold no reference to the
      * bytes they let go of.
      *
-     * @param {Spillable} kind @param {object} image @param {string} name
+     * @param {Spillable} kind @param {object} texture @param {object} image @param {string} name
      * @param {number} length @param {number} format  an S3TC level's format
      */
-    const waiting = (kind, image, name, length, format)=>{
+    const waiting = (kind, texture, image, name, length, format)=>{
         kind.names.set(image, name);
+        spilledOf.set(name, texture);
         Object.defineProperty(image, kind.property, {
             configurable: true, enumerable: true,
             get(){
@@ -584,6 +593,7 @@ export function createGpuRenderer(services){
             set(value){
                 plain(image, kind.property, value);
                 kind.names.delete(image);
+                spilledOf.delete(name);
                 texelCache?.space.drop(name);
             },
         });
@@ -608,6 +618,7 @@ export function createGpuRenderer(services){
         const value = kind.made(bytes, format);
         plain(image, kind.property, value);
         kind.names.delete(image);
+        spilledOf.delete(name);
         texelCache?.space.drop(name);
         spills.back++;
         spills.backBytes += length;
@@ -651,7 +662,7 @@ export function createGpuRenderer(services){
             spills.levels++;
             spills.bytes += bytes.byteLength;
             spills.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
-            waiting(kind, image, name, bytes.byteLength, was?.format ?? 0);
+            waiting(kind, texture, image, name, bytes.byteLength, was?.format ?? 0);
         }, ()=>{
             kind.spilling.delete(image);
             spills.refused++;
@@ -6113,6 +6124,8 @@ export function createGpuRenderer(services){
          * again), so a write into the level in place, a decode, an upload or a
          * read-back meets the same bytes. Room is asked for without waiting; a level
          * changed meanwhile stays here. Small levels stay: a name costs more.
+         * `all` is every texture alive: the levels waiting there of one not
+         * among them, which the program deleted, are let go of.
          *
          * @param {Iterable<any>} all
          */
@@ -6121,7 +6134,17 @@ export function createGpuRenderer(services){
             {
                 return;
             }
-            for (const texture of all)
+            const alive = new Set(all);
+            for (const [name, texture] of spilledOf)
+            {
+                if (!alive.has(texture))
+                {
+                    spilledOf.delete(name);
+                    texelCache.space.drop(name);
+                    spills.forgotten++;
+                }
+            }
+            for (const texture of alive)
             {
                 if (textures.has(texture))
                 {

@@ -60,7 +60,7 @@ async function run(seed, cached){
     if (runCache)
     {
         const joined = runCache.join(message=>texels?.adopt(message));
-        texels = channelSpace(joined, runCache.serve(), 'texels');
+        texels = channelSpace(joined, runCache.serve('texels'));
     }
     const renderer = createGpuRenderer({
         backend,
@@ -181,7 +181,7 @@ test('a level\'s texels and blocks that wait in the run\'s cache are let go here
     /** @type {ReturnType<typeof channelSpace> | null} */
     let texels = null;
     const joined = runCache.join(message=>texels?.adopt(message));
-    texels = channelSpace(joined, runCache.serve(), 'texels');
+    texels = channelSpace(joined, runCache.serve('texels'));
     const renderer = createGpuRenderer({
         backend,
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
@@ -239,7 +239,7 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
     /** @type {ReturnType<typeof channelSpace> | null} */
     let texels = null;
     const joined = runCache.join(message=>texels?.adopt(message));
-    texels = channelSpace(joined, runCache.serve(), 'texels');
+    texels = channelSpace(joined, runCache.serve('texels'));
     const renderer = createGpuRenderer({
         backend,
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
@@ -273,4 +273,56 @@ test('a level of the cache\'s unit of room moves, one below it stays', async()=>
     texels.close();
     assert.deepEqual(moved, { levels: 1, bytes: 4096 }, 'the top level alone moved');
     assert.ok(back, 'and reads back as it was');
+});
+
+test('a texture the program deleted gives back what of it waited in the run\'s cache at the next '
+    + 'look, and the root that goes gives back the rest', async()=>{
+    const fake = createFakeDevice({});
+    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const runCache = await openRunCache({ budget: 64 << 20 });
+    /** @type {ReturnType<typeof channelSpace> | null} */
+    let texels = null;
+    const joined = runCache.join(message=>texels?.adopt(message));
+    texels = channelSpace(joined, runCache.serve('texels'));
+    const renderer = createGpuRenderer({
+        backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        texelCache: texels,
+    });
+    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    const names = gl.glGenTextures(3);
+    for (const name of names)
+    {
+        gl.glBindTexture(GL.TEXTURE_2D, name);
+        gl.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 64, 64, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            new Uint8Array(64 * 64 * 4).fill(name));
+    }
+    const all = ()=>[...gl.shareGroup.textures.objects.values()];
+    renderer.spill(all());
+    const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.levels;
+    for (let turns = 0; turns < 1000 && moved() < 3; turns++)
+    {
+        await turn();
+    }
+    const under = ()=>runCache.under(texels?.prefix ?? '').bodies;
+    const before = under();
+    gl.glDeleteTextures([names[0], names[2]]);
+    // The next look, handed the textures alive.
+    renderer.spill(all());
+    for (let turns = 0; turns < 100 && under() > 1; turns++)
+    {
+        await turn();
+    }
+    const afterDelete = under();
+    const released = await texels.close();
+    const afterClose = under();
+    runCache.close();
+    assert.equal(before, 3, 'every level waited there');
+    assert.equal(afterDelete, 1, 'the deleted textures\' levels let go of');
+    assert.equal(/** @type {any} */ (renderer.diagnostics()).spills.forgotten, 2);
+    assert.deepEqual(released, { bodies: 1, bytes: 64 * 64 * 4, waiting: 0 },
+        'the root that goes takes the level it still held');
+    assert.equal(afterClose, 0, 'nothing left under its names');
+    assert.deepEqual(runCache.figures().ownerTails, { owners: 0, bodies: 0, bytes: 0 });
 });

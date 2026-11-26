@@ -539,9 +539,10 @@ export function serveGraphics(scope, deps){
         /** @type {(message: any, transfer?: Transferable[]) => void} */
         const post = (message, transfer)=>port.postMessage(message, transfer ?? []);
         // The run's cache, where the root keeps what it holds of a program's
-        // textures while no draw needs them (`opengl/gpu.js` `spill`).
+        // textures while no draw needs them (`opengl/gpu.js` `spill`), under
+        // names of its own it lets go of when it ends.
         const texelCache = options.cacheLink
-            ? channelSpace(options.cacheLink, options.cacheLink.channel, 'texels') : null;
+            ? channelSpace(options.cacheLink, options.cacheLink) : null;
         /**
          * What the played device wrote outside a call -- a read-back the
          * program waits on -- into guest memory: in place where it is shared,

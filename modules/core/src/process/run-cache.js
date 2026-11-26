@@ -45,10 +45,13 @@ const SWEEP_MS = 1000;
 
 /**
  * @param {{ budget?: number,
- *     runFolder?: import('../layers/filesystem/internal/run-folder.js').RunFolder | null }} [options]
- *     `runFolder`: where the cache's disk is made; none, a cache in memory alone
+ *     runFolder?: import('../layers/filesystem/internal/run-folder.js').RunFolder | null,
+ *     onTail?: (tail: import('../layers/cache/module.js').OwnerTail) => void }} [options]
+ *     `runFolder`: where the cache's disk is made; none, a cache in memory alone;
+ *     `onTail`: an owner that went left bodies under its names past what it held
  */
-export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null } = {}){
+export async function openRunCache(opened = {}){
+    const { budget = RUN_CACHE_BYTES, runFolder = null, onTail = ()=>{} } = opened;
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
     /**
@@ -108,11 +111,34 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null 
     told.add(message=>reader.adopt(message));
     /** The channels a worker that writes calls the keeper through, served here. @type {Set<{ close: () => void }>} */
     const served = new Set();
+    /** Owners given names of their own, a number each, over every channel. */
+    let owners = 0;
+    /** What owners that went left behind them, summed. */
+    const tails = { owners: 0, bodies: 0, bytes: 0 };
+    /** The keeper as a channel's owners call it. */
+    const channelKeeper = {
+        reserve: (/** @type {string} */ name, /** @type {number} */ length, /** @type {any} */ options)=>
+            keeper.reserve(name, length, options ?? {}),
+        raise: (/** @type {string} */ name, /** @type {any} */ options)=>keeper.raise(name, options ?? {}),
+        drop: (/** @type {string} */ name)=>{
+            keeper.drop(name);
+        },
+        release: (/** @type {string} */ prefix)=>keeper.release(prefix),
+    };
+    /** @param {import('../layers/cache/module.js').OwnerTail} tail */
+    const tailed = tail=>{
+        tails.owners++;
+        tails.bodies += tail.bodies;
+        tails.bytes += tail.bytes;
+        onTail(tail);
+    };
     const look = ()=>{
         const figures = keeper.figures();
         peak.placedBytes = Math.max(peak.placedBytes, figures.placedBytes);
         return { ...figures, budget, peakSegmentBytes: peak.segments * SEGMENT_BYTES,
-            peakPlacedBytes: peak.placedBytes };
+            peakPlacedBytes: peak.placedBytes, owners, ownerTails: { ...tails },
+            // Threads joined but this one's own reader, and owners' channels open.
+            joined: told.size - 1, served: served.size };
     };
     const sweeping = setInterval(()=>{
         // Read before the sweep lets idle bodies and empty segments go.
@@ -154,16 +180,33 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null 
         },
 
         /**
-         * A channel a worker of this thread's (the graphics worker) calls the
-         * keeper through, served on this thread's event loop: the worker asks
-         * for room without waiting and waits only to bring a cold body back.
-         * Its shared memory, which the worker opens its end over.
+         * A channel one owner on a worker of this thread's (a graphics root)
+         * calls the keeper through, served on this thread's event loop: the
+         * worker asks for room without waiting and waits only to bring a cold
+         * body back. Its shared memory, which the worker opens its end over,
+         * and the prefix of the owner's names, `name/<n>/`: let go of when the
+         * owner goes, or when its end of the channel closes.
+         *
+         * @param {string} name
          */
-        serve(){
-            const memory = createChannel();
-            served.add(serveKeeper(openServer(memory), keeper));
-            return memory;
+        serve(name){
+            const channel = createChannel();
+            const prefix = `${name}/${++owners}/`;
+            const one = serveKeeper(openServer(channel), channelKeeper,
+                { owner: prefix, onTail: tailed });
+            served.add(one);
+            // A channel whose owner closed it is not held to the run's end.
+            one.ended.then(()=>served.delete(one));
+            return { channel, prefix };
         },
+
+        /**
+         * What is held under names that begin with `prefix`: an owner's, by
+         * the prefix its space was given.
+         *
+         * @param {string} prefix
+         */
+        under: (/** @type {string} */ prefix)=>keeper.under(prefix),
 
         /** The keeper's figures, with its budget and the most it held at once. */
         figures: look,

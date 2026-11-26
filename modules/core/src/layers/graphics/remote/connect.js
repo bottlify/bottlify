@@ -62,7 +62,7 @@ function plainOf(services){
  * @typedef {Object} GraphicsWorkerEnd
  * @property {(api: 'd3d7' | 'd3d8' | 'd3d9' | 'd3d10' | 'opengl', factory: (services: any) => any,
  *     services: any, cache?: { join: (post: (message: any) => void) => any,
- *     serve: () => SharedArrayBuffer | null } | null) => any} root
+ *     serve: import('../../cache/module.js').Serve } | null) => any} root
  *     a root the program is given, whose twin the worker plays; `cache`, the run's,
  *     which the worker side keeps what no draw needs in
  * @property {() => import('./channel.js').WorkerFrameTimes | null} frameTimes
@@ -377,6 +377,8 @@ export function connectGraphicsWorker(options){
     let surface = null;
     /** @type {MessagePort[]} */
     const ports = [];
+    /** Each OpenGL root's join to the run's cache, let go of with the process. @type {(() => void)[]} */
+    const leaves = [];
     /** @type {ReturnType<typeof createSender>[]} */
     const senders = [];
     let frames = 0;
@@ -511,18 +513,23 @@ export function connectGraphicsWorker(options){
         /**
          * @param {string} api @param {any} factory @param {any} services
          * @param {{ join: (post: (message: any) => void) => any,
-         *     serve: () => SharedArrayBuffer | null } | null} [cache]  the run's cache,
-         *     which the root's worker side keeps idle texels in
+         *     serve: import('../../cache/module.js').Serve } | null} [cache]  the run's cache,
+         *     which an OpenGL root's worker side keeps idle texels in, names of its own
          */
         root(api, factory, services, cache = null){
             const { port1, port2 } = new MessageChannel();
             ports.push(port1);
             // Joined to the run's cache: the segments made and let go after
-            // reach the worker through the root's own port.
-            const channel = cache?.serve() ?? null;
-            const joined = channel === null ? null
+            // reach the worker through the root's own port. The root is the
+            // owner of its texels' names, let go of when it goes.
+            const served = api === 'opengl' ? cache?.serve('texels') ?? null : null;
+            const joined = served === null ? null
                 : cache?.join((/** @type {any} */ message)=>port1.postMessage({ type: 'cache', message }))
                     ?? null;
+            if (joined)
+            {
+                leaves.push(joined.leave);
+            }
             const memory = sharedMemory?.() ?? null;
             const lending = memory && (api === 'd3d8' || api === 'd3d9')
                 && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
@@ -534,8 +541,8 @@ export function connectGraphicsWorker(options){
             // that does not lend has its read-backs written here, as bytes.
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
                 memory: lending ? memory : null, lending, source, frameLatency: maxFrameLatency,
-                cache: joined && channel
-                    ? { shared: joined.shared, segments: joined.segments, channel } : null },
+                cache: joined && served
+                    ? { shared: joined.shared, segments: joined.segments, ...served } : null },
             [port2]);
             if (lending)
             {
@@ -731,6 +738,10 @@ export function connectGraphicsWorker(options){
         },
         dispose(){
             leave();
+            for (const leaveCache of leaves.splice(0))
+            {
+                leaveCache();
+            }
             for (const port of ports.splice(0))
             {
                 port.postMessage({ type: 'close' });

@@ -4060,7 +4060,13 @@ export async function createApp(options){
     // across a link is handed the run's reader (`options.cache`).
     // Both keep what they let go of from memory in the run's own folder.
     const runFolder = options.system ? null : await openRunFolderOf(options);
-    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder });
+    const runCache = options.system ? null : await openRunCache({ ...options.cache, runFolder,
+        // An owner that went (a graphics root) leaving bodies under its names
+        // past what it held: let go of now, said as what it is.
+        onTail: tail=>events.emit('loss', { api: 'cache', detail: `${tail.prefix}: ${tail.bodies} `
+            + `bodies (${tail.bytes} bytes under it) ${tail.why === 'unreleased'
+                ? 'held by an owner that went without letting go of them'
+                : `past the ${tail.held} its owner said it held`}` }) });
 
     // The disk under the run's writable layers is the run's, as its volume is:
     // a process in a worker of its own writes through the run's.

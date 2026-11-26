@@ -62,9 +62,17 @@ const NOTHING = Object.freeze({
  * reader: for a test or a tool that builds a layer alone.
  */
 export const noCache = Object.freeze({ space: ()=>NOTHING, join: /** @type {Join} */ (()=>null),
-    serve: ()=>null });
+    serve: /** @type {Serve} */ (()=>null) });
 
 /** @typedef {import('../../../vendor/cellar/cellar.js').Reader} Reader */
+
+/**
+ * A channel one owner on a worker calls the run's keeper through, and the
+ * prefix of the names it holds alone (`channelSpace`), or null where the run
+ * has no cache to serve.
+ *
+ * @typedef {(name: string) => { channel: SharedArrayBuffer, prefix: string } | null} Serve
+ */
 
 /** Whole names a space keeps made, at most: past it it makes them again. */
 const NAMES_KEPT = 1 << 16;
@@ -151,25 +159,76 @@ const decoder = new TextDecoder();
 const parsed = bytes=>(bytes.length === 0 ? undefined : JSON.parse(decoder.decode(bytes.slice())));
 
 /**
+ * What an owner left behind it in the run's cache: bodies under its names
+ * past what it said it held when it went (`release`), or all it held where it
+ * went without saying (its channel closed with its names still out).
+ *
+ * @typedef {{ prefix: string, bodies: number, bytes: number, held: number,
+ *     why: 'unknown' | 'unreleased' }} OwnerTail
+ */
+
+/**
  * Serves a channel's keeper calls (`channelSpace`) on this thread's event
- * loop, one wait at a time, until it is closed.
+ * loop, one wait at a time, until it is closed. The channel is one owner's,
+ * whose names begin with `owner`: let go of when it goes (`release`) or,
+ * where it never said so, when its end closes the channel; what it left past
+ * what it held is a tail (`onTail`).
  *
  * @param {ReturnType<typeof import('../../../vendor/cellar/cellar.js').openServer>} server
  * @param {{ reserve: (name: string, length: number, options?: any) => any,
  *     raise: (name: string, options?: { known?: number }) => boolean,
- *     drop: (name: string) => void }} keeper
- * @returns {{ close: () => void }}
+ *     drop: (name: string) => void,
+ *     release: (prefix: string) => { bodies: number, bytes: number, waiting: number } }} keeper
+ * @param {{ owner: string, onTail?: (tail: OwnerTail) => void }} options
+ * @returns {{ close: () => void, ended: Promise<void> }}
  */
-export function serveKeeper(server, keeper){
+export function serveKeeper(server, keeper, { owner, onTail = ()=>{} }){
+    /** Whether the owner is still out: not released, its channel open. */
+    let out = true;
+    /** Whether this side closes the channel: the run going, every owner with it. */
+    let closing = false;
+    /**
+     * Lets go of an owner's names: past the `held` it said it had, a tail;
+     * `held` null where it never said, and went (a tail only where this side
+     * did not close the channel).
+     *
+     * @param {string} prefix @param {number | null} held
+     */
+    const release = (prefix, held)=>{
+        out = false;
+        const left = keeper.release(prefix);
+        const owed = held ?? 0;
+        if (left.bodies > owed && !(held === null && closing))
+        {
+            onTail({ prefix, bodies: left.bodies - owed, bytes: left.bytes, held: owed,
+                why: held === null ? 'unreleased' : 'unknown' });
+        }
+        return left;
+    };
     /** @param {Uint8Array} request */
     const handle = request=>{
-        const { op, name, length, options } = parsed(request);
-        const answer = op === 'reserve' ? keeper.reserve(name, length, options ?? {})
-            : op === 'raise' ? keeper.raise(name, options ?? {})
-                : (keeper.drop(name), null);
+        const { op, name, length, options, held } = parsed(request);
+        /** @type {any} */
+        let answer = null;
+        if (op === 'reserve')
+        {
+            answer = keeper.reserve(name, length, options ?? {});
+        }
+        else if (op === 'raise')
+        {
+            answer = keeper.raise(name, options ?? {});
+        }
+        else if (op === 'release')
+        {
+            answer = out ? release(owner, Number(held) || 0) : null;
+        }
+        else
+        {
+            keeper.drop(name);
+        }
         return encoder.encode(JSON.stringify(answer));
     };
-    (async()=>{
+    const ended = (async()=>{
         while (!server.closed())
         {
             try
@@ -177,24 +236,43 @@ export function serveKeeper(server, keeper){
                 await server.serveAsync(handle);
             }
             catch {
-                return;
+                break;
             }
         }
+        // An owner whose channel closed with its names out (its worker gone,
+        // a root that never closed): all it held is let go of, and counted.
+        if (out)
+        {
+            release(owner, null);
+        }
     })();
-    return { close: ()=>server.close() };
+    return {
+        close: ()=>{
+            closing = true;
+            server.close();
+        },
+        ended,
+    };
 }
 
 /**
- * The names `name/...` of the run's cache, read and written from a worker of
- * the thread that holds the keeper (the graphics worker), its keeper calls
- * across `channel` (`serveKeeper`): room is asked for ahead and not waited on
- * (`ask` answers when it is granted, `put` then writes the body in place and
- * makes it readable), and a cold body is brought back by a call the worker
- * waits on. `adopt` takes the messages of segments made and let go.
+ * Names of the run's cache that one owner holds alone, read and written from
+ * a worker of the thread that holds the keeper (the graphics worker), its
+ * keeper calls across its channel (`serveKeeper`): `name/<n>/...`, the
+ * number the run's, so two owners of one kind (two roots' texels) never
+ * share a name. Room is asked for ahead and not waited on (`ask` answers when it is
+ * granted, `put` then writes the body in place and makes it readable), and a
+ * cold body is brought back by a call the worker waits on. One channel is one
+ * owner's. `adopt` takes the
+ * messages of segments made and let go. `close` lets go of every name the
+ * owner held, saying how many it held, so that the keeper's side counts what
+ * it finds past them as a tail (`OwnerTail`).
  *
- * @param {Joined} joined @param {SharedArrayBuffer} channel @param {string} name
+ * @param {Joined} joined
+ * @param {{ channel: SharedArrayBuffer, prefix: string }} served  the owner's channel and
+ *     the prefix of its names, as the keeper's side served them (`RunCache.serve`)
  */
-export function channelSpace(joined, channel, name){
+export function channelSpace(joined, { channel, prefix }){
     const client = openClient(channel);
     /** The segments this side's reader has views of: room is asked for below them. */
     let known = joined.segments.length;
@@ -204,6 +282,11 @@ export function channelSpace(joined, channel, name){
     const askNow = call=>client.ask(encoder.encode(JSON.stringify(call)), { read: parsed });
     /** @param {any} call */
     const askLater = call=>client.call(encoder.encode(JSON.stringify(call)), { read: parsed });
+    /** The keys this owner put and has not let go of, as it counts them. @type {Set<string>} */
+    const held = new Set();
+    /** Room asked for and not answered yet, a reservation the keeper may be holding. */
+    let asking = 0;
+    let closed = false;
     const reader = createReader({
         shared: joined.shared, segments: joined.segments,
         keeper: {
@@ -223,9 +306,30 @@ export function channelSpace(joined, channel, name){
     });
     // Bodies a worker hands over are the only copy of them for this run: to
     // the disk when idle, never away, and nothing the next run reads.
-    const space = cacheSpace(reader, name, { onlyCopy: true, disk: 'run' });
+    const names = cacheSpace(reader, prefix.slice(0, -1), { onlyCopy: true, disk: 'run' });
+    /** @type {CacheSpace} */
+    const space = {
+        look: names.look,
+        with: names.with,
+        put: (key, bytes)=>{
+            const kept = names.put(key, bytes);
+            if (kept)
+            {
+                held.add(key);
+            }
+            return kept;
+        },
+        drop: key=>{
+            held.delete(key);
+            names.drop(key);
+        },
+    };
     return {
         space,
+        /** This owner's names' prefix in the run's cache. */
+        prefix,
+        /** The bodies this owner holds, as it counts them. */
+        held: ()=>held.size,
         /**
          * Room for `key`'s body of `length` bytes, asked for without waiting:
          * true once it is granted (a reserve then takes it at once), false where
@@ -234,9 +338,12 @@ export function channelSpace(joined, channel, name){
          * @param {string} key @param {number} length @returns {Promise<boolean>}
          */
         ask: async(key, length)=>{
-            const whole = `${name}/${key}`;
+            const whole = `${prefix}${key}`;
+            asking++;
             const place = await askLater({ op: 'reserve', name: whole, length,
-                options: { known, onlyCopy: true, disk: 'run' } });
+                options: { known, onlyCopy: true, disk: 'run' } }).finally(()=>{
+                asking--;
+            });
             if (place === null || place === undefined)
             {
                 return false;
@@ -253,7 +360,34 @@ export function channelSpace(joined, channel, name){
                 known = Math.max(known, message.segment + 1);
             }
         },
-        close: ()=>client.close(),
+        /**
+         * The owner goes: every name it held is let go of, after the calls it
+         * sent before (a channel answers in order), and the channel closes
+         * once the keeper has answered. What was there, or null where the
+         * channel was gone first.
+         *
+         * @returns {Promise<{ bodies: number, bytes: number, waiting: number } | null>}
+         */
+        close: async()=>{
+            if (closed)
+            {
+                return null;
+            }
+            closed = true;
+            // A reservation granted and not written is the owner's too.
+            const holding = held.size + granted.size + asking;
+            try
+            {
+                return await askLater({ op: 'release', held: holding });
+            }
+            catch {
+                return null;
+            }
+            finally
+            {
+                client.close();
+            }
+        },
     };
 }
 
@@ -270,14 +404,14 @@ export function createCacheModule(){
 
         /**
          * @param {{ reader?: Reader | null, join?: Join | null,
-         *     serve?: (() => SharedArrayBuffer) | null } | null} config
+         *     serve?: Serve | null } | null} config
          *     `join`: how another thread of this process (an executor) is joined to
          *     the run's cache, to read it in place too; `serve`: a channel a worker
          *     that writes the cache calls the keeper through (`channelSpace`)
          * @returns {Promise<{ space: (name: string,
          *     options?: { onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }) => CacheSpace,
          *     join: Join,
-         *     serve: () => SharedArrayBuffer | null }>}
+         *     serve: Serve }>}
          */
         async create(config){
             reader = config?.reader ?? null;
@@ -293,7 +427,7 @@ export function createCacheModule(){
                 /** @param {string} name @param {{ onlyCopy?: boolean, disk?: 'kept' | 'run' | 'never' }} [options] */
                 space: (name, options)=>cacheSpace(given, name, options),
                 join: post=>join?.(post) ?? null,
-                serve: ()=>serve?.() ?? null,
+                serve: name=>serve?.(name) ?? null,
             };
         },
 
