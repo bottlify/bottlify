@@ -524,8 +524,12 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         /** How many presents the played side still owes. */
         behind: ()=>presents - presented,
 
-        /** The batches posted so far, their bytes, and the buffers given back. */
-        sent: ()=>({ ...sent }),
+        /**
+         * The batches posted so far, their bytes, the buffers given back, and
+         * the buffers the writer made and the batches that outgrew theirs
+         * (`made`, `grown`, `copied`: `createWriter`).
+         */
+        sent: ()=>({ ...sent, ...writer.figures() }),
 
         /** The messages the played side posted back so far, by type. */
         received: ()=>({ ...received }),

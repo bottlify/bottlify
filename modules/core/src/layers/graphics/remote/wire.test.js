@@ -427,3 +427,23 @@ test('a batch read while another is being read leaves the outer one where it was
         { op: OP.LENT, t: 0, lent: [{ address: 0x8000, length: 64, slot: 2 }] },
     ]);
 });
+
+test('the writer counts the buffers it made and the batches that outgrew theirs', ()=>{
+    const writer = createWriter();
+    const bytes = new Uint8Array(40 << 10);
+    assert.deepEqual(writer.figures(), { made: 1, grown: 0, copied: 0 });
+    writer.value(bytes, ()=>undefined);
+    const before = writer.size();
+    writer.value(bytes, ()=>undefined);
+    assert.deepEqual(writer.figures(), { made: 2, grown: 1, copied: before },
+        'a batch past its 64 KiB buffer grows it, copying what was written');
+    const first = writer.give();
+    assert.equal(first.buffer.byteLength, 128 << 10);
+    assert.equal(writer.figures().made, 3, 'with none given back, the next batch has a new buffer');
+    writer.reuse(first.buffer);
+    writer.give();
+    writer.value(bytes, ()=>undefined);
+    writer.value(bytes, ()=>undefined);
+    assert.deepEqual(writer.figures(), { made: 3, grown: 1, copied: before },
+        'the grown buffer given back is written on again, as large as it grew');
+});

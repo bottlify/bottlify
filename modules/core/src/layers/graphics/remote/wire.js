@@ -103,6 +103,14 @@ export function createWriter(){
     const shaped = [];
     /** Buffers given back (`reuse`). @type {ArrayBuffer[]} */
     const spare = [];
+    /**
+     * Buffers made, and the batches that outgrew theirs: each a buffer twice
+     * the size and a copy of what was written (`copied`, in bytes). A buffer
+     * that grew comes back grown and is written on again, so in a steady run
+     * both stay still: what moves them is a batch with no buffer back to
+     * write on, or one past `SPARE_LARGEST`.
+     */
+    const figures = { made: 1, grown: 0, copied: 0 };
 
     /** @param {number} more */
     const room = more=>{
@@ -117,6 +125,9 @@ export function createWriter(){
         }
         const grown = new ArrayBuffer(size);
         new Uint8Array(grown).set(bytes.subarray(0, at));
+        figures.made++;
+        figures.grown++;
+        figures.copied += at;
         buffer = grown;
         view = new DataView(buffer);
         bytes = new Uint8Array(buffer);
@@ -450,7 +461,13 @@ export function createWriter(){
          */
         give(){
             const given = { buffer, length: at };
-            buffer = spare.pop() ?? new ArrayBuffer(1 << 16);
+            let next = spare.pop();
+            if (!next)
+            {
+                next = new ArrayBuffer(1 << 16);
+                figures.made++;
+            }
+            buffer = next;
             view = new DataView(buffer);
             bytes = new Uint8Array(buffer);
             at = 0;
@@ -471,6 +488,8 @@ export function createWriter(){
         },
         /** How many bytes are written. */
         size: ()=>at,
+        /** Buffers made and batches grown so far (`figures` above). */
+        figures: ()=>({ ...figures }),
     };
     return writer;
 }
