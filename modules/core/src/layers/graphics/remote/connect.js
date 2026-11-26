@@ -75,7 +75,8 @@ function plainOf(services){
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
- *     sent: { batches: number, bytes: number, ms: number },
+ *     sent: { batches: number, bytes: number, ms: number, returned: number, made: number,
+ *         grown: number, copied: number },
  *     received: Record<string, number>, shipped: Record<string, number>,
  *     occlusion: { counted: number, ms: number, maxMs: number, polls: number, asks: number,
  *         beside: number, sentAfterMs: number, tripMs: number, under: number[], trace: any[] },
@@ -684,10 +685,12 @@ export function connectGraphicsWorker(options){
                     return sum;
                 }, /** @type {Record<string, number>} */ ({})),
                 sent: senders.reduce((sum, sender)=>{
-                    const { batches, bytes, ms, returned } = sender.sent();
+                    const { batches, bytes, ms, returned, made, grown, copied } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,
-                        ms: Math.round(sum.ms + ms), returned: sum.returned + returned };
-                }, { batches: 0, bytes: 0, ms: 0, returned: 0 }),
+                        ms: Math.round(sum.ms + ms), returned: sum.returned + returned,
+                        made: sum.made + made, grown: sum.grown + grown,
+                        copied: sum.copied + copied };
+                }, { batches: 0, bytes: 0, ms: 0, returned: 0, made: 0, grown: 0, copied: 0 }),
                 // The guest bytes copied into those batches, by what copied
                 // them: what lending buffers would have left in place.
                 // A diagnostic's (`checkDraws`): draws whose bytes the played
