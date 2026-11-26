@@ -235,7 +235,70 @@ test('the sender counts every message the played side posted back, by type', ()=
     assert.deepEqual(s.made.received(), {});
     s.made.receive({ type: 'presented', count: 1 });
     s.made.receive({ type: 'presented', count: 2 });
-    s.made.receive({ type: 'spent', buffer: new ArrayBuffer(16) });
+    s.made.receive({ type: 'spent', spent: [new ArrayBuffer(16)] });
     s.made.receive({ type: 'counts', counts: [] });
     assert.deepEqual(s.made.received(), { presented: 2, spent: 1, counts: 1 });
+});
+
+/**
+ * A played side that reads every batch as one call of `m`, its buffer given
+ * back at once, and the messages its receiver posts with what they moved.
+ */
+function playedBatches(){
+    /** @type {{ message: any, moved: Transferable[] | undefined }[]} */
+    const said = [];
+    let next = 'Draw';
+    const played = {
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        read: (buffer, each)=>{
+            each({ m: next, wait: next === 'Present' ? WAIT.PACED : WAIT.NONE });
+            return undefined;
+        },
+        play: ()=>undefined,
+        /** @param {ArrayBuffer} buffer @param {() => void} give */
+        spent: (buffer, give)=>give(),
+    };
+    const receiver = createReceiver({ played: /** @type {any} */ (played),
+        post: (message, moved)=>said.push({ message, moved }) });
+    /** @param {string} m */
+    const batch = m=>{
+        next = m;
+        const buffer = new ArrayBuffer(8);
+        receiver.receive({ type: 'calls', buffer, length: 8 });
+        return buffer;
+    };
+    return { said, batch };
+}
+
+test('batches read go back on the message a present sends anyway, moved with it', async()=>{
+    const { said, batch } = playedBatches();
+    batch('Draw');
+    batch('Draw');
+    assert.equal(said.length, 0, 'two buffers wait for a message to ride on');
+    batch('Present');
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(said.map(({ message })=>message.type), ['presented'],
+        'one message: no `spent` of its own');
+    const [{ message, moved }] = said;
+    assert.equal(message.spent.length, 3, 'the present\'s own batch with them');
+    assert.deepEqual(moved, message.spent, 'moved, not copied');
+});
+
+test('with no other message to ride on, buffers go back four at a time', ()=>{
+    const { said, batch } = playedBatches();
+    for (let n = 0; n < 9; n++)
+    {
+        batch('Draw');
+    }
+    assert.deepEqual(said.map(({ message })=>[message.type, message.spent.length]),
+        [['spent', 4], ['spent', 4]], 'the ninth waits');
+});
+
+test('the sender writes again on buffers any message brings back', ()=>{
+    const s = sender(0);
+    s.made.receive({ type: 'presented', count: 1,
+        spent: [new ArrayBuffer(16), new ArrayBuffer(16)] });
+    s.made.receive({ type: 'spent', spent: [new ArrayBuffer(16)] });
+    s.made.receive({ type: 'answer', id: 0, spent: [new ArrayBuffer(16)] });
+    assert.equal(s.made.sent().returned, 4);
 });

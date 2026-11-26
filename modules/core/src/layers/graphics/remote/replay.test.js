@@ -1523,20 +1523,24 @@ test('a batch that looks at the objects at zero says how long the look took', ()
     assert.ok(/** @type {number} */ (swept[63]) >= 0);
 });
 
-test('a batch\'s buffer goes back to the sender once read, moved out of the played side, and is '
-    + 'written on again', ()=>{
+test('a batch\'s buffer goes back to the sender once read, moved out of the played side, four '
+    + 'to a message, and is written on again', ()=>{
     // A fresh buffer for every batch was hundreds a second, whose memory
-    // outside the heap drove the played thread's full collections.
+    // outside the heap drove the played thread's full collections; a message
+    // for every buffer given back was hundreds more.
     const { root, play, said, sender, played } = toyAcross(false);
     for (let batch = 0; batch < 8; batch++)
     {
         root.CreateThing({});
         play();
-        const spent = said.filter(message=>message.type === 'spent');
-        assert.equal(spent.length, 1, 'each batch read gives its buffer back at once');
-        said.length = 0;
-        assert.ok(spent[0].buffer.byteLength > 0);
-        sender.receive(spent[0]);
+    }
+    const spent = said.filter(message=>message.type === 'spent');
+    assert.deepEqual(spent.map(message=>message.spent.length), [4, 4]);
+    assert.ok(spent.every(message=>message.spent.every(
+        (/** @type {ArrayBuffer} */ buffer)=>buffer.byteLength > 0)));
+    for (const message of spent)
+    {
+        sender.receive(message);
     }
     assert.equal(sender.sent().returned, 8);
     assert.equal(played.seen.length, 0, 'nothing played wrong');
@@ -1545,20 +1549,28 @@ test('a batch\'s buffer goes back to the sender once read, moved out of the play
 test('a batch\'s buffer an answer still to come keeps a view of goes back only once it has '
     + 'settled and been sent', async()=>{
     const { root, play, said, played } = toyAcross(false);
-    const filled = new Uint8Array([1, 2, 3, 4]);
-    root.Fill(filled);
+    const back = ()=>said.flatMap(message=>message.spent ?? []).length;
+    root.Fill(new Uint8Array([1, 2, 3, 4]));
     play();
-    assert.equal(said.filter(message=>message.type === 'spent').length, 0,
-        'held while the fill is owed');
+    for (let batch = 0; batch < 3; batch++)
+    {
+        root.CreateThing({});
+        play();
+    }
+    assert.equal(back(), 0, 'three given back, the fill\'s held while it is owed: not four yet');
     root.CreateThing({});
     play();
-    assert.equal(said.filter(message=>message.type === 'spent').length, 1,
-        'a batch with nothing owed goes back past it');
+    assert.equal(back(), 4, 'batches with nothing owed go back past it');
     const fill = played.fills.shift();
     assert.ok(fill);
     fill();
     await new Promise(resolve=>setTimeout(resolve, 0));
-    assert.equal(said.filter(message=>message.type === 'spent').length, 2);
+    for (let batch = 0; batch < 3; batch++)
+    {
+        root.CreateThing({});
+        play();
+    }
+    assert.equal(back(), 8, 'the fill\'s too, once settled');
 });
 
 test('a mirror says what it holds of the heap: its pages, the pages kept to be made again and'

@@ -36,7 +36,10 @@
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail, severity? }
- *                      { type: 'spent', buffer }       a batch's buffer, read, to write on again
+ *                      { type: 'spent', spent }        batches' buffers, read, to write on again:
+ *                                                      `RETURN_AT` of them at once; fewer
+ *                                                      ride as `spent` on the next answer,
+ *                                                      present or counts this side sends
  *                      { type: 'lost' }                its GPU went away
  *                      { type: 'failed', message }     a call could not be played
  */
@@ -50,6 +53,16 @@ const CHECKED_EVERY = 64;
 export const OCCLUSION_BOUNDS = Object.freeze([1, 2, 4, 8, 16, 32, 64, 128, Infinity]);
 /** How many occlusion measurements' events are kept, the latest. */
 const OCCLUSION_TRACED = 64;
+
+/**
+ * Buffers read that go back in one message of their own; fewer ride on the
+ * next message the played side sends anyway (an answer, a present, counts).
+ * A message costs each side tens of microseconds whatever it holds, and a
+ * frame sends several batches and one present: one message for all their
+ * buffers rather than one a buffer. The writer makes a buffer of its own
+ * when none is back yet, so at most `RETURN_AT - 1` are out a while longer.
+ */
+const RETURN_AT = 4;
 
 /** The least time between batches sent early for what they lend. */
 const LENT_GAP_MS = 0.25;
@@ -431,6 +444,12 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         receive(message){
             const type = String(message?.type);
             received[type] = (received[type] ?? 0) + 1;
+            // Buffers read on the played side, back with whatever message carries them.
+            for (const buffer of message?.spent ?? [])
+            {
+                sent.returned++;
+                writer.reuse(buffer);
+            }
             switch (message?.type)
             {
                 case 'answer':
@@ -485,8 +504,6 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     on.divergence?.(message.api, message.detail, message.severity);
                     break;
                 case 'spent':
-                    sent.returned++;
-                    writer.reuse(message.buffer);
                     break;
                 case 'lost':
                     on.lost?.();
@@ -673,8 +690,24 @@ export { shared as sharedNow };
  * @param {() => { frames: number, toQueueMs: number, gpuMs: number }} [options.times]
  *     the finished frames' time so far (`latency.js`), sent with every present
  */
-export function createReceiver({ played, post, latency, gpuMemory, times }){
+export function createReceiver({ played, post: postAlone, latency, gpuMemory, times }){
     let presented = 0;
+    /** Buffers read and given back, to go with the next message this side posts. @type {ArrayBuffer[]} */
+    const returning = [];
+    /**
+     * Posts `message` with the buffers given back so far, moved with it.
+     *
+     * @param {any} message
+     */
+    const post = message=>{
+        if (returning.length === 0)
+        {
+            postAlone(message);
+            return;
+        }
+        const spent = returning.splice(0);
+        postAlone({ ...message, spent }, spent);
+    };
     /** @type {WorkerPhases} */
     const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
         'batch-sweep': { count: 0, ms: 0 } };
@@ -784,8 +817,11 @@ export function createReceiver({ played, post, latency, gpuMemory, times }){
                 if (typeof length === 'number')
                 {
                     played.spent(buffer, ()=>{
-                        const back = buffer.transfer?.() ?? buffer;
-                        post({ type: 'spent', buffer: back }, [back]);
+                        returning.push(buffer.transfer?.() ?? buffer);
+                        if (returning.length >= RETURN_AT)
+                        {
+                            post({ type: 'spent' });
+                        }
                     });
                 }
                 if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
