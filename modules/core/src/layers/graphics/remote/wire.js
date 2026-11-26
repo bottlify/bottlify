@@ -605,8 +605,10 @@ export function createWriter({ place = null, unplaced = ()=>{}, strings: most = 
  * @property {any[]} [replies]
  * @property {{ address: number, bytes: Uint8Array }[]} [ship]
  * @property {{ address: number, bytes: Uint8Array }[]} [wrote]
- * @property {{ address: number, length: number, slot: number }[]} [lent]
- *     guest memory the played side reads in place, by its lend's slot (`lending.js`)
+ * @property {Uint32Array} [lent]  guest memory the played side reads in place, by its
+ *     lend's slot (`lending.js`): three words a lend - address, length, slot - in the
+ *     reader's own words, good until the next record
+ * @property {number} lentCount  how many lends `lent` holds
  * @property {number} [wait]       one of `WAIT`
  * @property {number} [serial]     a waited call's number, which its answer comes back under
  */
@@ -836,21 +838,49 @@ export function createReader({ ref, service, owned = false }){
         }
         return out;
     };
+    /** The lends of the record read, three words each, grown to the most a record held. */
+    let lends = new Uint32Array(48);
+    /** Readings under way, one inside another's `each`. */
+    let reading = 0;
     /** @returns {ReadCall} */
-    const record = ()=>{
+    const freshCall = ()=>({ op: 0, t: 0, m: undefined, a: undefined, v: undefined,
+        allocs: undefined, replies: undefined, ship: undefined, wrote: undefined, lent: undefined,
+        lentCount: 0, wait: undefined, serial: undefined });
+    /**
+     * The next record, read into `call`, every field set again: one call a
+     * batch rather than one a record, which with an object a lend was a
+     * measured share of the played side's garbage.
+     *
+     * @param {ReadCall} call @returns {ReadCall}
+     */
+    const record = call=>{
         const op = bytes[at++];
-        /** @type {ReadCall} */
-        const call = { op, t: 0, m: undefined, a: undefined, v: undefined, allocs: undefined,
-            replies: undefined, ship: undefined, wrote: undefined, lent: undefined,
-            wait: undefined, serial: undefined };
+        call.op = op;
+        call.t = 0;
+        call.m = undefined;
+        call.a = undefined;
+        call.v = undefined;
+        call.allocs = undefined;
+        call.replies = undefined;
+        call.ship = undefined;
+        call.wrote = undefined;
+        call.lent = undefined;
+        call.lentCount = 0;
+        call.wait = undefined;
+        call.serial = undefined;
         if (op === OP.LENT)
         {
             const count = u32();
-            const lent = call.lent = new Array(count);
-            for (let index = 0; index < count; index++)
+            if (lends.length < count * 3)
             {
-                lent[index] = { address: u32(), length: u32(), slot: u32() };
+                lends = new Uint32Array(count * 3);
             }
+            for (let index = 0; index < count * 3; index++)
+            {
+                lends[index] = u32();
+            }
+            call.lent = lends;
+            call.lentCount = count;
             return call;
         }
         if (op === OP.WROTE)
@@ -927,10 +957,13 @@ export function createReader({ ref, service, owned = false }){
     };
     return {
         /**
-         * Every record of a batch, in order. What a record holds of the
-         * batch's bytes is a view of them, good until the reading returns:
-         * the bytes are then written over by a batch to come, so what is
-         * kept of them past `each` is copied.
+         * Every record of a batch, in order, each read into the one call of
+         * this reading: a call is good until `each` returns, and what a
+         * waited call needs after (its serial) is taken from it there. What a
+         * record holds of the batch's bytes is a view of them, good until the
+         * reading returns: the bytes are then written over by a batch to
+         * come, so what is kept of them past `each` is copied. Its arguments
+         * are an array of its own, which may be kept.
          *
          * @param {ArrayBufferLike} batch
          * @param {(call: ReadCall) => boolean | void} each  false stops the reading
@@ -940,6 +973,14 @@ export function createReader({ ref, service, owned = false }){
         read(batch, each, size = undefined, start = 0){
             size ??= batch.byteLength - start;
             const outer = { buffer, view, bytes, at, base };
+            // A reading inside another's `each` lends into words of its own:
+            // the outer record's lends are still being read.
+            const outerLends = lends;
+            if (reading > 0)
+            {
+                lends = new Uint32Array(lends.length);
+            }
+            reading++;
             buffer = batch;
             view = new DataView(batch, start, size);
             bytes = new Uint8Array(batch, start, size);
@@ -947,15 +988,18 @@ export function createReader({ ref, service, owned = false }){
             base = start;
             try
             {
+                const call = freshCall();
                 let more = at < size;
                 while (more)
                 {
-                    more = each(record()) !== false && at < size;
+                    more = each(record(call)) !== false && at < size;
                 }
             }
             finally
             {
                 ({ buffer, view, bytes, at, base } = outer);
+                lends = outerLends;
+                reading--;
             }
         },
         /**

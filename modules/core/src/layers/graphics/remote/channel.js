@@ -811,8 +811,11 @@ export function createReceiver({ played, rings, serve = true, seen = ()=>{}, mar
 
     /** @param {any} call @param {any} answered @param {number} queued @param {number} began */
     const reply = (call, answered, queued, began)=>{
+        // Taken now: the call is the reader's, read into again by the next
+        // record, and an answer may come later.
+        const serial = call.serial;
         /** @param {import('./replay.js').PlayedAnswer} settled */
-        const send = settled=>post({ type: 'answer', serial: call.serial,
+        const send = settled=>post({ type: 'answer', serial,
             answer: crossable(settled.answer), outs: crossable(settled.outs),
             counts: settled.counts, queued, held: shared() - began, at: shared() });
         if (answered instanceof Promise)
