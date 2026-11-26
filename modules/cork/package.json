@@ -41,6 +41,9 @@
     "bin",
     "LICENSE"
   ],
+  "dependencies": {
+    "@bottlify/cellar": "~1.0.0"
+  },
   "scripts": {
     "test": "node --test --test-timeout=1200000 \"src/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=1800000 \"src/**/*.itest.js\"",
