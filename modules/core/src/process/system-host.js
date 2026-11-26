@@ -230,16 +230,17 @@ const CALLS_OFF = Object.freeze({
  * goes to a child the moment it starts.
  *
  * @param {{ options: import('../app-options.js').AppOptions, events: any, system: any,
- *     translationStore: any,
+ *     translationStore: any, reader: import('../../vendor/cellar/cellar.js').Reader | null,
  *     now: () => number,
  *     across: () => { image: string, id: number,
  *         link: ReturnType<typeof import('../system/link.js').openLink> }[],
  *     libraries: () => string[] }} deps
  *     `across`: the processes standing in workers, oldest first; `libraries`:
- *     the system libraries the run's own program knew, once it is over
+ *     the system libraries the run's own program knew, once it is over; `reader`:
+ *     the run's cache, which the session's pieces are kept in
  */
 export async function buildSystemHost(deps){
-    const { options, events, system, translationStore, now, across, libraries } = deps;
+    const { options, events, system, translationStore, reader, now, across, libraries } = deps;
     const core = await assembleModules({
         ...Object.fromEntries(defaultModules().map(module=>[module.name, false])),
         log: { categories: { ...CALLS_OFF, ...options.log?.categories },
@@ -267,7 +268,7 @@ export async function buildSystemHost(deps){
         filesystem, registry: system.registry, inherited: false, system });
     // Cork's own decoder reads the bundle's blocks: no processor is asked.
     const blocks = await furnishVolume({ options, events, filesystem,
-        blocks: await mountBundle({ options, events, translationStore }), seeded,
+        blocks: await mountBundle({ options, events, translationStore }), seeded, reader,
         registry: system.registry });
     system.bundle = blocks;
     // The output every process plays into, each in a span of its arena lent

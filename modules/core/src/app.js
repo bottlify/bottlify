@@ -2342,6 +2342,7 @@ async function buildApp(options){
     if (!(filesystem.inherited?.() ?? false))
     {
         blocks = await furnishVolume({ options, events, filesystem, blocks, seeded,
+            reader: options.cache?.reader ?? null,
             registry: registryInherited ? null : core.api('win32').registry() });
         if (options.system && blocks)
         {
@@ -4354,6 +4355,7 @@ export async function createApp(options){
     const rootLibraries = { value: [] };
     let current = rootAcross
         ? await buildSystemHost({ options, events, system, translationStore, now: journalClock,
+            reader: runCache?.reader ?? null,
             across: ()=>[...standingAcross], libraries: ()=>rootLibraries.value })
         : await build();
     // What every process's devices present comes back from the run's
