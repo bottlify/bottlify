@@ -1,0 +1,37 @@
+<!doctype html><meta charset="utf-8"><title>wake latency</title>
+<script type="module">
+// Rounds of three modes, alternated: a 2 KiB batch posted with its buffer
+// transferred, the same as 64 KiB, and the batch's bytes put in shared memory
+// with Atomics.notify to a reader waiting in Atomics.waitAsync. For each
+// batch: what sending it cost the sender, and how long until the reader had
+// it, on the clock both workers read.
+const count = Number(new URLSearchParams(location.search).get('n') ?? 400);
+const rounds = Number(new URLSearchParams(location.search).get('rounds') ?? 6);
+const results = [];
+for (let round = 0; round < rounds; round++)
+{
+    for (const mode of ['post', 'post64', 'ring'])
+    {
+        const sender = new Worker('./sender.js', { type: 'module' });
+        const reader = new Worker('./reader.js', { type: 'module' });
+        const channel = new MessageChannel();
+        const shared = new SharedArrayBuffer(4096 + 16);
+        const read = new Promise(done=>{
+            reader.onmessage = event=>done(event.data);
+        });
+        const sent = new Promise(done=>{
+            sender.onmessage = event=>done(event.data);
+        });
+        reader.postMessage({ mode, port: channel.port2, shared, count }, [channel.port2]);
+        await new Promise(done=>setTimeout(done, 200));
+        sender.postMessage({ mode, port: channel.port1, shared, count }, [channel.port1]);
+        const [fromSender, fromReader] = await Promise.all([sent, read]);
+        results.push({ round, mode, send: fromSender.sendMs,
+            arrival: fromReader.arrived.map((at, index)=>at - fromSender.sentAt[index]) });
+        sender.terminate();
+        reader.terminate();
+    }
+}
+globalThis.__result = results;
+document.title = 'done';
+</script>
