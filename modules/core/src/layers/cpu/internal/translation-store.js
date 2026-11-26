@@ -851,8 +851,11 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 try
                 {
                     const handle = await directory.getFileHandle(generationName(INDEX, generation));
-                    const text = await textOf(await handle.getFile());
-                    indexEnd = new TextEncoder().encode(text).length;
+                    // Its end in bytes as they lie: a text decoded and encoded
+                    // again is longer by any byte that was no UTF-8.
+                    const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+                    indexEnd = bytes.length;
+                    const text = new TextDecoder().decode(bytes);
                     for (const line of text.split('\n'))
                     {
                         const parts = line.split(' ');

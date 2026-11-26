@@ -240,6 +240,26 @@ test('an index entry the records file does not reach is not a record', async()=>
     assert.equal(await reopened.get('cork/1/a'), null, 'a torn write is a miss, not garbage');
 });
 
+test('an index ending in bytes that are no text is appended to at its end in bytes', async()=>{
+    // Its end was taken from its text decoded and encoded again, which a byte
+    // that is no UTF-8 makes longer: the next lines went past the file's end.
+    const root = fakeDirectory();
+    const store = await createDirectoryTranslationStore(root, 'bundle');
+    await store.put('cork/1/a', new Uint8Array([1, 2, 3]));
+    await store.flush();
+    const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+    const index = directory.children.get('index');
+    index.bytes = Uint8Array.of(...index.bytes, 0xff, 0x0a);
+    const reopened = await createDirectoryTranslationStore(root, 'bundle');
+    await reopened.put('cork/1/b', new Uint8Array([4, 5]));
+    await reopened.flush();
+    const after = directory.children.get('index').bytes;
+    assert.equal(after.indexOf(0), -1, 'no gap of zeros before the new lines');
+    const again = await createDirectoryTranslationStore(root, 'bundle');
+    assert.deepEqual([...(await again.get('cork/1/b')) ?? []], [4, 5]);
+    assert.deepEqual([...(await again.get('cork/1/a')) ?? []], [1, 2, 3]);
+});
+
 test('opening a store removes the bundle\'s directories of other layout versions', async()=>{
     const root = fakeDirectory();
     const cork = await root.getDirectoryHandle('cork', { create: true });
