@@ -47,7 +47,7 @@ import { synthesiseProcessInit, synthesiseStartRefused } from './layers/loader/i
 import {
     createSharingMemory, openSharedSharing,
 } from './layers/filesystem/internal/shared-sharing.js';
-import { openPageFile } from './layers/filesystem/internal/page-file.js';
+import { createPageFile } from './layers/filesystem/internal/page-file.js';
 import { openRunFolder } from './layers/filesystem/internal/run-folder.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
@@ -72,6 +72,7 @@ import { createModuleTable, pathKey } from './process/module-table.js';
 import { createSystemModules, shapeOf } from './process/system-modules.js';
 import { bindSidecar } from './process/sidecar.js';
 import { openRunCache } from './process/run-cache.js';
+import { cacheSpace } from './layers/cache/module.js';
 import { processesBeside } from './process/beside.js';
 import { processMemories } from './process/memories.js';
 import { compatibilityOf } from './process/image-resources.js';
@@ -1313,20 +1314,19 @@ async function openRunFolderOf(options){
 }
 
 /**
- * The run's page file (`page-file.js`): the disk its volume's writable layers
- * keep what they let go of from memory, in the run's folder, or null to keep
- * it all in memory. A write to it that fails is said once, and the files stay
- * in memory.
+ * The run's page file (`page-file.js`): its volume's writable layers keep
+ * their pieces in the run's cache, a space of their own (`pages/`), each the
+ * only copy for the run: in its shared memory, and on its disk in the run's
+ * folder for room (none without a folder). A put the cache has no room for is
+ * said once, and the files stay in memory.
  *
- * @param {any} events @param {import('./layers/filesystem/internal/run-folder.js').RunFolder | null} runFolder
+ * @param {any} events @param {import('@bottlify/cellar').Reader} reader  the run's cache
  */
-async function openRunPageFile(events, runFolder){
-    return openPageFile({
-        runFolder,
-        residentBytes: HEAP_POOLS.writableFiles,
+function openRunPageFile(events, reader){
+    return createPageFile(cacheSpace(reader, 'pages', { onlyCopy: true, disk: 'run' }), {
+        workingBytes: HEAP_POOLS.writableFiles,
         onFailure: error=>events.emit('divergence', { api: 'filesystem',
-            detail: `the page file refused a write (${error.message}); what the program `
-                + 'writes is kept in memory from here' }),
+            detail: `${error.message}; what the program writes is kept in memory from here` }),
     });
 }
 
@@ -4069,11 +4069,11 @@ export async function createApp(options){
                 ? 'held by an owner that went without letting go of them'
                 : `past the ${tail.held} its owner said it held`}` }) });
 
-    // The disk under the run's writable layers is the run's, as its volume is:
+    // The pieces of the run's writable layers are the run's, as its volume is:
     // a process in a worker of its own writes through the run's.
-    if (!options.system)
+    if (runCache)
     {
-        system.volume.pageFile = await openRunPageFile(events, runFolder);
+        system.volume.pageFile = openRunPageFile(events, runCache.reader);
     }
 
     const translationPool = await openTranslationPool(options);

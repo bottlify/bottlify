@@ -377,12 +377,14 @@
  *           it wrote; `save` is handed both, and `load` may answer with both
  *           or with a bare list of files.
  * @property {'local' | false | { root: any }} [pageFile]
- *           Where what the program writes goes once more of it is written
- *           than the tab keeps in memory (`HEAP_POOLS.writableFiles`): `'local'`,
- *           the default, a file of the run's own in the origin's private file
- *           system, where the engine's thread has synchronous access to one (a
- *           worker); `false` keeps every byte in memory, as a build with no
- *           such file does; `{ root }` a directory handle of the caller's.
+ *           The run's own folder, where the run's cache puts what is the only
+ *           copy for the run once its memory is full: what the program wrote
+ *           (in the cache's `pages/` space) and the texels the GPU was given.
+ *           `'local'`, the default, a folder of the run's own in the origin's
+ *           private file system, where the engine's thread has synchronous
+ *           access (a worker); `false` keeps it all in memory: past the
+ *           cache's budget what the program writes stays in the tab's memory;
+ *           `{ root }` a directory handle of the caller's.
  * @property {string} [id]           Names the session when storage does not.
  * @property {{ path: string, bytes: Uint8Array }[]} [files]
  *           The person's own edits to the title's files, laid over the

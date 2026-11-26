@@ -259,12 +259,11 @@ test('on a page file, what the program wrote is saved, counted, and the run\'s f
         assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 20000 }), 0);
         const filesystem = app.diagnostics().find((/** @type {any} */ table)=>
             table.name === 'filesystem');
-        assert.equal(filesystem.metrics.pageFile?.disk, true,
+        assert.equal(typeof filesystem.metrics.pageFile?.keptPieces, 'number',
             'the run stands on its page file');
         assert.ok(filesystem.metrics.bytesHeld.heaps.writable >= PAYLOAD.length);
-        assert.equal(typeof filesystem.metrics.bytesHeld.disk.pageFile, 'number');
-        assert.deepEqual(folder(), ['cache', 'pages'],
-            'the page file and the run cache\'s disk, in the run\'s own folder');
+        assert.deepEqual(folder(), ['cache'],
+            'the run cache\'s disk alone in the run\'s own folder: the page file is in the cache');
     }
     finally
     {

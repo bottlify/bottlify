@@ -26,6 +26,8 @@ import { createFilesystemModule } from '../module.js';
 import { ErrorCode } from './errors.js';
 import { createMemoryStore } from './memory-store.js';
 import { createPageFile } from './page-file.js';
+import { pieceSpace } from './page-space.fixture.js';
+import { cacheSpace } from '../../cache/module.js';
 
 const DIRECTORIES = ['Windows', 'Temp', 'System32', 'Game', 'Data'];
 const FILES = ['cpuz.sys', 'Save.DAT', 'a.txt'];
@@ -99,33 +101,6 @@ const everything = fs=>{
 /** @param {string[]} components */
 const onC = components=>`C:\\${components.join('\\')}`;
 
-/**
- * A synchronous access handle over memory, for a page file every piece of
- * which is written out at once.
- */
-function memoryAccess(){
-    let bytes = new Uint8Array(0);
-    return {
-        getSize: ()=>bytes.length,
-        /** @param {Uint8Array} into @param {{ at: number }} where */
-        read: (into, { at })=>{
-            into.set(bytes.subarray(at, at + into.length));
-            return into.length;
-        },
-        /** @param {Uint8Array} from @param {{ at: number }} where */
-        write: (from, { at })=>{
-            if (at + from.length > bytes.length)
-            {
-                const grown = new Uint8Array(at + from.length);
-                grown.set(bytes);
-                bytes = grown;
-            }
-            bytes.set(from, at);
-            return from.length;
-        },
-        close: ()=>{},
-    };
-}
 
 /**
  * @param {number} seed
@@ -274,6 +249,7 @@ test('they agree as well with the writable layer on a page file that holds nothi
     async()=>{
         for (let seed = 1; seed <= 150; seed++)
         {
-            await run(seed, createPageFile(memoryAccess(), { residentBytes: 0 }));
+            const { space } = await pieceSpace(cacheSpace);
+            await run(seed, createPageFile(space, { workingBytes: 0 }));
         }
     });
