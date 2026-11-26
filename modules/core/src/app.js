@@ -4734,6 +4734,15 @@ export async function createApp(options){
          */
         translationPool: ()=>translationPool?.diagnostics() ?? null,
         /**
+         * The run's cache as its keeper stands (`run-cache.js`): its segments,
+         * hot and cold bodies, what went to the run's folder, its budget and
+         * the most it held at once. The run's, not a process's: the keeper is
+         * on this thread whichever process the facade speaks for. A run with
+         * no cache of its own (a process joined to a run elsewhere) says so.
+         */
+        runCache: ()=>runCache?.figures()
+            ?? `${NOT_MEASURED}: the run's cache is kept where the run is, not here`,
+        /**
          * A worker of the run's pool lent to a process of this app: its own
          * (no id) or a child beside it, by id - not the facade's, which speaks
          * for the child started last. One gone already gives the port back.

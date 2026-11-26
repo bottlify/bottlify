@@ -89,3 +89,34 @@ async()=>{
     await new Promise(resolve=>setTimeout(resolve, 0));
     assert.deepEqual(opfs.names('bottlify-runs'), [], 'the run\'s folder goes with it');
 });
+
+test('the run\'s figures carry its budget and the most it held at once, after bodies went',
+    async()=>{
+        const MIB = 1 << 20;
+        const run = await openRunCache({ budget: 48 * MIB });
+        try
+        {
+            const before = run.figures();
+            assert.equal(before.budget, 48 * MIB);
+            assert.equal(before.peakPlacedBytes, 0, 'nothing placed yet');
+            for (const name of ['a', 'b', 'c'])
+            {
+                assert.ok(run.reader.put(name, new Uint8Array(10 * MIB)));
+            }
+            const full = run.figures();
+            assert.ok(full.placedBytes >= 30 * MIB, `placed ${full.placedBytes}`);
+            assert.equal(full.peakSegmentBytes, full.segmentBytes, 'segments counted as made');
+            for (const name of ['a', 'b', 'c'])
+            {
+                run.reader.drop(name);
+            }
+            const after = run.figures();
+            assert.ok(after.placedBytes < full.placedBytes, `placed after ${after.placedBytes}`);
+            assert.equal(after.peakPlacedBytes, full.placedBytes, 'the most placed stays');
+            assert.ok(after.peakSegmentBytes >= full.segmentBytes);
+        }
+        finally
+        {
+            run.close();
+        }
+    });

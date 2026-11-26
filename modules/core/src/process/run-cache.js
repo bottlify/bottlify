@@ -34,6 +34,9 @@ const MIB = 1024 * 1024;
  */
 export const RUN_CACHE_BYTES = 160 * MIB;
 
+/** The shared memory the keeper adds and lets go of at a time. */
+const SEGMENT_BYTES = 16 * MIB;
+
 /** A body idle so long goes: the reads kept before were let go after as long. */
 const IDLE_MS = 30_000;
 
@@ -48,10 +51,22 @@ const SWEEP_MS = 1000;
 export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null } = {}){
     /** What each thread reading is told of a segment made or let go. @type {Set<(message: any) => void>} */
     const told = new Set();
+    /**
+     * The most the keeper held at once: its segments, counted as each is made
+     * and let go of, and the bytes placed in them, read at each sweep and each
+     * look. What the budget is weighed against, which the keeper's figures, as
+     * they stand at the end, do not say.
+     */
+    const peak = { segments: 0, live: 0, placedBytes: 0 };
     /** @param {import('../../vendor/cellar/cellar.js').Disk | null} disk */
     const open = disk=>openKeeper({
-        budget, segmentBytes: 16 * MIB, coldAfterMs: IDLE_MS, disk,
+        budget, segmentBytes: SEGMENT_BYTES, coldAfterMs: IDLE_MS, disk,
         announce: message=>{
+            if (message.segment !== undefined)
+            {
+                peak.live += message.buffer ? 1 : -1;
+                peak.segments = Math.max(peak.segments, peak.live);
+            }
             for (const tell of told)
             {
                 tell(message);
@@ -93,7 +108,17 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null 
     told.add(message=>reader.adopt(message));
     /** The channels a worker that writes calls the keeper through, served here. @type {Set<{ close: () => void }>} */
     const served = new Set();
-    const sweeping = setInterval(()=>keeper.sweep(), SWEEP_MS);
+    const look = ()=>{
+        const figures = keeper.figures();
+        peak.placedBytes = Math.max(peak.placedBytes, figures.placedBytes);
+        return { ...figures, budget, peakSegmentBytes: peak.segments * SEGMENT_BYTES,
+            peakPlacedBytes: peak.placedBytes };
+    };
+    const sweeping = setInterval(()=>{
+        // Read before the sweep lets idle bodies and empty segments go.
+        look();
+        keeper.sweep();
+    }, SWEEP_MS);
     // A run's timer is not what keeps a host's process alive.
     /** @type {any} */ (sweeping).unref?.();
 
@@ -140,7 +165,8 @@ export async function openRunCache({ budget = RUN_CACHE_BYTES, runFolder = null 
             return memory;
         },
 
-        figures: ()=>keeper.figures(),
+        /** The keeper's figures, with its budget and the most it held at once. */
+        figures: look,
 
         close(){
             for (const one of served)
