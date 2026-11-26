@@ -197,6 +197,33 @@ test('a session in the origin file system is kept a file to each file and read b
         [['C:\\Dir\\Ünïcode.cfg', [1]], ['C:\\save.dat', [7, 7]]]);
 });
 
+test('a session read back whole reads each file\'s bytes once, never the entry whole', async()=>{
+    // Read whole and then cut from its head, an entry was held twice: the
+    // whole read and the copy of its bytes.
+    const disk = fakeDirectory();
+    const store = opfsSession('game', async()=>disk.root);
+    const big = new Uint8Array(1 << 20).fill(5);
+    await store.save({ files: [{ path: 'C:\\level.sav', bytes: big }], registry: null });
+    const read = Blob.prototype.arrayBuffer;
+    /** @type {number[]} */
+    const lengths = [];
+    Blob.prototype.arrayBuffer = function(){
+        lengths.push(this.size);
+        return read.call(this);
+    };
+    try
+    {
+        const back = await opfsSession('game', async()=>disk.root).load();
+        assert.equal(back.files[0].bytes.byteLength, big.length);
+        assert.equal(back.files[0].bytes.buffer.byteLength, big.length, 'a buffer of its own');
+    }
+    finally
+    {
+        Blob.prototype.arrayBuffer = read;
+    }
+    assert.ok(Math.max(...lengths) <= big.length, `reads of ${lengths.join(', ')} bytes`);
+});
+
 test('a save the disk refuses for room fails, its stream aborted, and the last save stays',
     async()=>{
         const disk = fakeDirectory();

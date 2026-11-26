@@ -623,58 +623,39 @@ export function opfsSession(key, directory){
             let links = null;
             for await (const file of entryFiles(folder))
             {
+                const head = await headOf(file);
+                if (!head)
+                {
+                    continue;
+                }
+                // The body read alone, its own buffer: read whole and then cut
+                // from its head, an entry's bytes were held twice.
+                const body = async(offset = 0, length = file.size - head.start - offset)=>
+                    new Uint8Array(await file.slice(head.start + offset,
+                        head.start + offset + length).arrayBuffer());
+                if (head.path === REGISTRY_ENTRY || head.path === LINKS_ENTRY)
+                {
+                    const read = JSON.parse(decoder.decode(await body()));
+                    if (head.path === REGISTRY_ENTRY)
+                    {
+                        registry = read;
+                    }
+                    else
+                    {
+                        links = read;
+                    }
+                    continue;
+                }
                 if (options?.lazy)
                 {
-                    const head = await headOf(file);
-                    if (!head)
-                    {
-                        continue;
-                    }
-                    if (head.path === REGISTRY_ENTRY || head.path === LINKS_ENTRY)
-                    {
-                        const read = JSON.parse(decoder.decode(
-                            new Uint8Array(await file.slice(head.start).arrayBuffer())));
-                        if (head.path === REGISTRY_ENTRY)
-                        {
-                            registry = read;
-                        }
-                        else
-                        {
-                            links = read;
-                        }
-                        continue;
-                    }
-                    const start = head.start;
-                    const size = file.size - start;
                     /** @type {LazySessionFile} */
-                    const lazy = { path: head.path, size, modified: file.lastModified,
-                        read: async(offset = 0, length = size - offset)=>new Uint8Array(
-                            await file.slice(start + offset, start + offset + length)
-                                .arrayBuffer()) };
+                    const lazy = { path: head.path, size: file.size - head.start,
+                        modified: file.lastModified, read: body };
                     held.add(lazy);
                     files.push(/** @type {any} */ (lazy));
                     continue;
                 }
-                const raw = new Uint8Array(await file.arrayBuffer());
-                const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
-                if (raw.length < 8 || view.getUint32(0, true) !== ENTRY_MAGIC)
-                {
-                    continue;
-                }
-                const start = 8 + view.getUint32(4, true);
-                const path = decoder.decode(raw.subarray(8, start));
-                if (path === REGISTRY_ENTRY)
-                {
-                    registry = JSON.parse(decoder.decode(raw.subarray(start)));
-                }
-                else if (path === LINKS_ENTRY)
-                {
-                    links = JSON.parse(decoder.decode(raw.subarray(start)));
-                }
-                else
-                {
-                    files.push({ path, bytes: raw.slice(start) });
-                }
+                files.push({ path: head.path, bytes: await body() });
             }
             loadedWhole = true;
             return withLinks({ files, registry }, links);
