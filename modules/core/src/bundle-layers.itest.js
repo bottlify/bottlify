@@ -28,6 +28,7 @@ import {
     BOTTLE_DRIVE_PATH, BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH,
 } from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
+import { fakeOpfs } from './layers/filesystem/internal/opfs.fixture.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_DWORD, REG_SZ } from './layers/win32/advapi32/registry.js';
 import { buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
@@ -401,7 +402,8 @@ test('a layer is cached once, by its own name, whatever bottle stands on it',
         const bottle = await pack(BOTTLE_FILES, BOTTLE_HIVE);
         const layer = await pack(LAYER_FILES, LAYER_HIVE);
         t.after(()=>Promise.all([bottle, layer].map(one=>one.cleanup())));
-        const store = memoryStore();
+        const origin = fakeOpfs();
+        const store = origin.root;
 
         /** @param {string} id */
         const run = async id=>{
@@ -419,7 +421,7 @@ test('a layer is cached once, by its own name, whatever bottle stands on it',
         assert.ok(second.layerBytes < CLR.length / 10,
             `the second bottle read the layer's blocks from the cache, fetching only its index `
             + `(${second.layerBytes})`);
-        const tables = [...store.files.keys()].filter(path=>path.endsWith('.index')).sort();
+        const tables = origin.names('blocks');
         assert.equal(tables.length, 3, `${tables}`);
         assert.equal(tables.filter(path=>path.startsWith('netfx48-')).length, 1,
             'one cache of the layer, named by it');
@@ -432,16 +434,13 @@ test('a layer that fails to mount fails the run, and the bottle mounted beside i
         const bottle = await pack(BOTTLE_FILES, BOTTLE_HIVE);
         const layer = await pack(LAYER_FILES, LAYER_HIVE);
         t.after(()=>Promise.all([bottle, layer].map(one=>one.cleanup())));
-        let closed = 0;
-        const store = { ...memoryStore(), close(){
-            closed++;
-        } };
+        const origin = fakeOpfs();
         // The layer's index and registry arrive; its preload's blocks do not.
         let preloading = false;
         await assert.rejects(createApp({
             executable: probeProgram(),
-            bundle: { id: 'bottle', store, fetch: bottle.fetch,
-                layers: [{ id: 'netfx48', store: memoryStore(), preload: true,
+            bundle: { id: 'bottle', store: origin.root, fetch: bottle.fetch,
+                layers: [{ id: 'netfx48', store: fakeOpfs().root, preload: true,
                     retry: { attempts: 1 },
                     progress: ()=>{
                         preloading = true;
@@ -456,46 +455,12 @@ test('a layer that fails to mount fails the run, and the bottle mounted beside i
             storage: { load: async()=>({ files: [], registry: SESSION_HIVE }) },
         }), /the layer is out of reach/);
         await new Promise(done=>setTimeout(done, 50));
-        assert.equal(closed, 1, 'the bottle\'s cache gave its store\'s files back');
+        const [cache] = origin.names('blocks');
+        const files = origin.names(`blocks/${cache}`);
+        assert.ok(files.includes('index-a'), `the bottle's cache opened (${files})`);
+        assert.ok(files.every(file=>origin.node(`blocks/${cache}/${file}`)?.locked === false),
+            'and gave its files back');
     });
-
-/** Somewhere to keep blocks, over ordinary buffers: Node has no OPFS. */
-function memoryStore(){
-    /** @type {Map<string, Uint8Array>} */
-    const files = new Map();
-    /** @param {string} path @returns {Uint8Array} */
-    const bytesOf = path=>files.get(path) ?? new Uint8Array(0);
-    return {
-        files,
-        /** @param {string} path */
-        async open(path){
-            if (!files.has(path))
-            {
-                files.set(path, new Uint8Array(0));
-            }
-        },
-        /** @param {string} path */
-        stat: path=>(files.has(path) ? { size: bytesOf(path).length } : null),
-        /** @param {string} path @param {number} at @param {number} length */
-        read: (path, at, length)=>bytesOf(path).slice(at, at + length),
-        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
-        write(path, at, bytes){
-            const held = bytesOf(path);
-            const grown = new Uint8Array(Math.max(held.length, at + bytes.length));
-            grown.set(held);
-            grown.set(bytes, at);
-            files.set(path, grown);
-        },
-        /** @param {string} path @param {number} size */
-        truncate(path, size){
-            files.set(path, bytesOf(path).slice(0, size));
-        },
-        /** @param {string} path */
-        remove(path){
-            files.delete(path);
-        },
-    };
-}
 
 test('a run with no bundle of its own stands on the layers it is given, as an installer does',
     { timeout: 120_000 }, async t=>{
