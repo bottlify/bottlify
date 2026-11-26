@@ -3136,16 +3136,17 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
     };
     // A process starts from the user's profile: what a set kept there, and,
     // where the profile holds nothing yet, Windows' default written in, as a
-    // new user's profile holds it. Each value is read once, though several
-    // settings may share it (the effects' mask).
-    if (host.registry)
-    {
+    // new user's profile holds it - the machine's own keys (`asMachine`), no
+    // change of the program's for a session to save. Each value is read once,
+    // though several settings may share it (the effects' mask).
+    const registry = host.registry;
+    registry?.asMachine(()=>{
         for (const values of profileValues.values())
         {
             for (const value of values)
             {
                 const key = profileKey(value.key, false);
-                const found = key ? host.registry.getValue(key, value.name) : null;
+                const found = key ? registry.getValue(key, value.name) : null;
                 if (found)
                 {
                     value.read?.(found);
@@ -3156,7 +3157,7 @@ export function createSystemFunctions({ host, live, windows, elsewhere = ()=>nul
                 }
             }
         }
-    }
+    });
 
     /**
      * What a successful set does past keeping the value for the process:

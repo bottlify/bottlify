@@ -68,6 +68,15 @@ test('a phantom is in the registry marked, registered is unmarked, removed is go
         'one node for one instance, its case aside');
 });
 
+test('the machine\'s own hardware laid in the registry is announced as no change', async()=>{
+    const hive = createHive();
+    let announced = 0;
+    hive.onChanged(()=>announced++);
+    createDeviceStore(hive).seedMachine();
+    await Promise.resolve();
+    assert.equal(announced, 0, 'a session would otherwise save a hive the program never wrote');
+});
+
 test('instances enumerate sorted, the machine\'s hardware among them, and paths are lower case',
     ()=>{
         // Wine's setupapi test_get_class_devs: BAR before FOO before QUX.

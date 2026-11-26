@@ -4236,6 +4236,22 @@ test('a set with SPIF_SENDCHANGE tells every top-level window, the action in wPa
     assert.deepEqual(told(), [[hwnd, 0x000d]]);
 });
 
+test('Windows\' defaults put in a new profile announce no change; the program\'s set does',
+    async()=>{
+        const { registry, value } = profile();
+        let announced = 0;
+        registry.onChanged(()=>announced++);
+        const { fns } = setup({ registry });
+        await Promise.resolve();
+        assert.equal(announced, 0, 'else a session saves a profile the program never wrote');
+        assert.equal(value('Control Panel\\Desktop\\WindowMetrics', 'CaptionFont')?.furnished, true,
+            'and a default an installation\'s registry may replace');
+        const SPI_SETBEEP = 0x0002;
+        fns.SystemParametersInfoA.handler([SPI_SETBEEP, 0, 0, SPIF_UPDATEINIFILE]);
+        await Promise.resolve();
+        assert.equal(announced, 1, 'the program\'s set is a change');
+    });
+
 test('a set with SPIF_UPDATEINIFILE writes the user\'s profile as Windows writes it', ()=>{
     // sysparams.c's test_reg_key and metricfromreg: strings, "Yes"/"No" for
     // the beep, sizes in negative twips, DWORDs for the smoothing type.

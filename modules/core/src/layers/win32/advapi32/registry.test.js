@@ -57,6 +57,31 @@ test('the hive announces a burst of changes once, and a restore not at all', asy
     assert.equal(announced, 1, 'and neither is deleting what was not there');
 });
 
+test('the machine\'s own writes are furnished and announce nothing; a program\'s announce',
+    async()=>{
+        // A layer laying the machine's own keys (setupapi's device classes, the
+        // first time the library is asked for) is putting the machine in place,
+        // as the hive's own furnishing does: a session that announced it would
+        // save a hive the program never wrote.
+        const hive = createHive();
+        let announced = 0;
+        hive.onChanged(()=>announced++);
+        const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+        const made = hive.asMachine(()=>{
+            const { key } = hive.create(local, 'SYSTEM\\Test\\Machine');
+            hive.setValue(key, 'Class', REG_SZ, Uint8Array.of(65, 0));
+            return key;
+        });
+        await Promise.resolve();
+        assert.equal(announced, 0, 'the machine\'s own keys are no change');
+        assert.equal(hive.getValue(made, 'Class')?.furnished, true,
+            'and what an installation\'s registry may replace');
+        hive.setValue(made, 'Class', REG_SZ, Uint8Array.of(66, 0));
+        await Promise.resolve();
+        assert.equal(announced, 1, 'the program writing over it is');
+        assert.equal(hive.getValue(made, 'Class')?.furnished, undefined, 'and no default any more');
+    });
+
 test('the predefined roots exist and nothing else does', ()=>{
     const hive = createHive();
 

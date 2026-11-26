@@ -209,6 +209,12 @@ export function createRegistryService(hive){
         },
 
         revision: ()=>hive.revision(),
+        /**
+         * @template T
+         * @param {() => T} write  the machine laying its own keys (`hive.asMachine`)
+         * @returns {T}
+         */
+        asMachine: write=>hive.asMachine(write),
         /** @param {() => void} listener */
         onChanged: listener=>hive.onChanged(listener),
         toJSON: ()=>hive.toJSON(),

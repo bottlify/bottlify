@@ -940,11 +940,19 @@ export function createHive(
      */
     const listeners = [];
     let announcing = false;
+    /**
+     * Inside `asMachine`: what is written is the machine's own, as `furnish`
+     * lays it - a value marked furnished, and no change announced. A layer
+     * that lays the machine's keys when it is first asked for (setupapi's
+     * device classes) does it there, so a session does not save a hive the
+     * program never wrote.
+     */
+    let machineWrites = 0;
     /** Moves with every change, for a copy kept elsewhere to tell it has none. */
     let revision = 0;
     const changed = ()=>{
         revision++;
-        if (announcing || listeners.length === 0)
+        if (announcing || machineWrites > 0 || listeners.length === 0)
         {
             return;
         }
@@ -1336,7 +1344,7 @@ export function createHive(
          * @returns {RegistryValue}
          */
         setValue(key, name, type, data, exact = false){
-            const value = { name, type: type >>> 0,
+            const value = { ...machineWrites > 0 ? { furnished: true } : {}, name, type: type >>> 0,
                 data: exact ? data : terminate(type >>> 0, data) };
             const node = writable(key);
             // A classes key both sides have since deleted takes the value nowhere.
@@ -1420,6 +1428,27 @@ export function createHive(
 
         /** Moves with every change and never with a restore. */
         revision: ()=>revision,
+
+        /**
+         * Runs `write` as the machine laying its own keys: each value written
+         * is furnished, as `furnish` puts the machine's defaults, and no
+         * change is announced for it. What it returns, it returns.
+         *
+         * @template T
+         * @param {() => T} write
+         * @returns {T}
+         */
+        asMachine(write){
+            machineWrites++;
+            try
+            {
+                return write();
+            }
+            finally
+            {
+                machineWrites--;
+            }
+        },
 
         /**
          * Asks to be told when the hive has changed. A restore is not a change.

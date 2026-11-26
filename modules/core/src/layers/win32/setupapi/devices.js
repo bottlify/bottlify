@@ -526,45 +526,52 @@ export function createDeviceStore(hive){
             };
         },
 
-        /** The machine's own hardware, there unless the registry already has it. */
+        /**
+         * The machine's own hardware, there unless the registry already has
+         * it: laid as the machine's own keys (`asMachine`), furnished and
+         * announced as no change of the program's.
+         */
         seedMachine(){
-            for (const [guid, name] of STANDARD_CLASSES)
-            {
-                const { key: installed } = hive.create(machine(), `${CLASS_KEY}\\${guid}`);
-                if (!hive.getValue(installed, 'Class'))
+            hive.asMachine(()=>{
+                for (const [guid, name] of STANDARD_CLASSES)
                 {
-                    hive.setValue(installed, 'Class', REG_SZ, sz(name));
-                }
-            }
-            for (const device of MACHINE_DEVICES)
-            {
-                if (!store.exists(device.id))
-                {
-                    const { key } = hive.create(machine(), `${ENUM_KEY}\\${device.id}`);
-                    hive.setValue(key, 'ClassGUID', REG_SZ, sz(device.classGuid));
-                    hive.setValue(key, 'Class', REG_SZ, sz(device.className));
-                    hive.setValue(key, 'DeviceDesc', REG_SZ, sz(device.description));
-                    for (const guid of device.interfaces)
+                    const { key: installed } = hive.create(machine(), `${CLASS_KEY}\\${guid}`);
+                    if (!hive.getValue(installed, 'Class'))
                     {
-                        store.addInterface(device.id, guid, '');
+                        hive.setValue(installed, 'Class', REG_SZ, sz(name));
                     }
                 }
-                // Its driver too, on a registry kept from before it had one.
-                const driver = 'driver' in device ? device.driver : null;
-                if (driver && !store.driverPath(device.id))
+                for (const device of MACHINE_DEVICES)
                 {
-                    const driverKey = /** @type {any} */ (open(store.makeDriver(device.id)));
-                    const [year, month, day] = driver.date;
-                    hive.setValue(driverKey, 'DriverDesc', REG_SZ, sz(driver.description));
-                    hive.setValue(driverKey, 'ProviderName', REG_SZ, sz(driver.provider));
-                    hive.setValue(driverKey, 'DriverVersion', REG_SZ, sz(driver.version));
-                    hive.setValue(driverKey, 'DriverDate', REG_SZ, sz(`${month}-${day}-${year}`));
-                    const date = new Uint8Array(8);
-                    new DataView(date.buffer).setBigUint64(0,
-                        msToFileTime(Date.UTC(year, month - 1, day)), true);
-                    hive.setValue(driverKey, 'DriverDateData', REG_BINARY, date);
+                    if (!store.exists(device.id))
+                    {
+                        const { key } = hive.create(machine(), `${ENUM_KEY}\\${device.id}`);
+                        hive.setValue(key, 'ClassGUID', REG_SZ, sz(device.classGuid));
+                        hive.setValue(key, 'Class', REG_SZ, sz(device.className));
+                        hive.setValue(key, 'DeviceDesc', REG_SZ, sz(device.description));
+                        for (const guid of device.interfaces)
+                        {
+                            store.addInterface(device.id, guid, '');
+                        }
+                    }
+                    // Its driver too, on a registry kept from before it had one.
+                    const driver = 'driver' in device ? device.driver : null;
+                    if (driver && !store.driverPath(device.id))
+                    {
+                        const driverKey = /** @type {any} */ (open(store.makeDriver(device.id)));
+                        const [year, month, day] = driver.date;
+                        hive.setValue(driverKey, 'DriverDesc', REG_SZ, sz(driver.description));
+                        hive.setValue(driverKey, 'ProviderName', REG_SZ, sz(driver.provider));
+                        hive.setValue(driverKey, 'DriverVersion', REG_SZ, sz(driver.version));
+                        hive.setValue(driverKey, 'DriverDate', REG_SZ,
+                            sz(`${month}-${day}-${year}`));
+                        const date = new Uint8Array(8);
+                        new DataView(date.buffer).setBigUint64(0,
+                            msToFileTime(Date.UTC(year, month - 1, day)), true);
+                        hive.setValue(driverKey, 'DriverDateData', REG_BINARY, date);
+                    }
                 }
-            }
+            });
         },
     };
     return store;
