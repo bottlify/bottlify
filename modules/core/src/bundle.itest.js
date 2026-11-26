@@ -27,6 +27,7 @@ import {
     BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, READ_AHEAD_BYTES,
 } from './process/bundle-mount.js';
 import { writeBundle } from './bundle-node.js';
+import { fakeOpfs } from './layers/filesystem/internal/opfs.fixture.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
 import { assemble, buildExe } from '../../../tools/fixtures/make-pe.mjs';
 
@@ -194,47 +195,11 @@ test('what the bundle holds is visible to the program, and stays read-only',
     });
 
 /**
- * Somewhere to keep blocks, over ordinary buffers. Node has no OPFS, so without
- * this the cache falls back to the heap and the background filler stays off --
- * which is right, and would leave it untested.
+ * Somewhere to keep blocks: the origin's file system as a test makes it. Node
+ * has no OPFS, so without this the cache holds the blocks in memory alone and
+ * the background filler stays off -- which is right, and would leave it untested.
  */
-function fakeStore(){
-    /** @type {Map<string, Uint8Array>} */
-    const files = new Map();
-    /** @param {string} path @returns {Uint8Array} */
-    const bytesOf = path=>files.get(path) ?? new Uint8Array(0);
-
-    return {
-        /** @param {string} path */
-        async open(path){
-            if (!files.has(path))
-            {
-                files.set(path, new Uint8Array(0));
-            }
-        },
-        /** @param {string} path */
-        stat: path=>files.has(path) ? { size: bytesOf(path).length } : null,
-        /** @param {string} path @param {number} at @param {number} length */
-        read: (path, at, length)=>bytesOf(path).slice(at, at + length),
-        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
-        write(path, at, bytes){
-            const held = bytesOf(path);
-            if (held.length >= at + bytes.length)
-            {
-                held.set(bytes, at);
-                return;
-            }
-            const grown = new Uint8Array(at + bytes.length);
-            grown.set(held);
-            grown.set(bytes, at);
-            files.set(path, grown);
-        },
-        /** @param {string} path @param {number} size */
-        truncate(path, size){
-            files.set(path, new Uint8Array(size));
-        },
-    };
-}
+const fakeStore = ()=>fakeOpfs().root;
 
 test('a session arriving from outside lands on the volume the bundle is mounted on',
     { timeout: 60_000 }, async t=>{
@@ -804,25 +769,11 @@ test('a bundle whose program sits past the quota starts, its late blocks read fi
         const filler = 2048 * BLOCK_SIZE;
         const source = await bundleWith(PLANTED, filler + BLOCK_SIZE);
         t.after(()=>source.cleanup());
-        const quota = filler / 8;
-        const store = fakeStore();
-        const files = new Map();
-        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
-        const write = (path, at, bytes)=>{
-            const size = Math.max(store.stat(path)?.size ?? 0, at + bytes.length);
-            const total = [...files].reduce((sum, [name, held])=>sum + (name === path ? 0 : held),
-                size);
-            if (total > quota)
-            {
-                throw new DOMException('past the quota', 'QuotaExceededError');
-            }
-            files.set(path, size);
-            store.write(path, at, bytes);
-        };
+        const origin = fakeOpfs({ quota: filler / 8 });
         const app = await createApp({
             executable: new Uint8Array(await readFile(FIXTURE)),
             bundle: { fetch: source.fetch, prefix: '', prefetch: false, id: 'late',
-                store: { ...store, write } },
+                store: origin.root },
         });
         t.after(()=>app.dispose());
         let printed = '';
@@ -831,7 +782,9 @@ test('a bundle whose program sits past the quota starts, its late blocks read fi
         });
         assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60_000 }), 0);
         assert.equal(printed, PLANTED);
-        const packs = [...files.keys()].filter(path=>/\.pack\.\d+$/.test(path));
-        assert.ok(packs.length === 1 && (files.get(packs[0]) ?? 0) > BLOCK_SIZE / 2,
-            `kept on the store, as long as the blocks read: ${JSON.stringify([...files])}`);
+        await app.dispose();
+        const [home] = origin.names('blocks');
+        const kept = origin.node(`blocks/${home}/pack-0`)?.data.length ?? 0;
+        assert.ok(kept > BLOCK_SIZE / 2 && kept < filler / 8,
+            `kept on the store, as long as the blocks read: ${kept} bytes`);
     });

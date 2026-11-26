@@ -58,7 +58,7 @@ more (`src/memory-zones.js`):
 | --- | --- | --- |
 | guest | 1 GiB | What the program took of its RAM: its images, its threads' stacks and its heap up to the highest address the heap ever handed out (a page touched once is the tab's for good: a browser cannot give it back, and zeroing it frees nothing). The RAM (`memorySize`) is a limit on that, not memory made: a page the program never touched costs the tab nothing. |
 | translation | 256 MiB | The translator's tables past the RAM, every executor's, and its modules with their compiled code. The cpu layer gives cork what the tables leave, split among the executors' runtimes: all of it to one executor, else three quarters to the process's own executor and the rest shared by the others. Past its part a runtime lets the modules gone longest without running go, and brings one back from the translation store when it is reached again. |
-| heaps | 256 MiB | The engine's own memory: the bundle's blocks held where no storage takes them (64 MiB at most, the least recently read let go first), what the program wrote (64 MiB at most where the run has a page file, the least recently used written out first; all of it where it has none: see `pageFile` in [api.md](api.md)), the run's cache (`cache`: bodies every process reads in place from shared memory, the bundle's blocks decoded, once a run, and the ranges of files a process read twice, one range up to 128 MiB in parts of 8 MiB; 160 MiB at most unless `cache.budget` says, the least recently read let go first, each let go after 30 s unread), mirrors of guest memory behind a played device, kept texels, sound rings, the translation store's index. A loaded image keeps no copy of its file: its resources and thread-local directory are read where it lies in guest memory. |
+| heaps | 256 MiB | The engine's own memory: the bundle's blocks, decoded, in shared memory read in place (64 MiB at most a bundle; idle 30 s or pushed out for room, a block goes to OPFS and is read back from there, or, with no storage, is let go, the least recently put first), what the program wrote (64 MiB at most where the run has a page file, the least recently used written out first; all of it where it has none: see `pageFile` in [api.md](api.md)), the run's cache (`cache`: bodies every process reads in place from shared memory, the ranges of files a process read twice, one range up to 128 MiB in parts of 8 MiB; 160 MiB at most unless `cache.budget` says, the least recently read let go first, each let go after 30 s unread), mirrors of guest memory behind a played device, kept texels, sound rings, the translation store's index. A loaded image keeps no copy of its file: its resources and thread-local directory are read where it lies in guest memory. |
 
 Each layer says what it holds in its diagnostics as `bytesHeld`, by zone and pool; a pool nothing
 measures says `not measured`. The last table of a run's diagnostics, `zones`, sums them: each zone's
@@ -73,12 +73,11 @@ sets by its system and disk): past that, other bundles' block caches and transla
 least recently written first. A session (the files a program wrote) is never touched, nor the
 caches of the run asking (its bottle's and those of the layers under it, `bundle.layers`) or of
 a bundle another tab runs. The `storage-budget` event says what
-went. While a run plays, a block write the browser refuses for lack of room removes a 128 MiB
-segment of fetched blocks and is tried again: the running bottle's own written longest ago, of
-those not written in the last two hours, and where it has none, another bottle's, the oldest
-first, never one of a cache the run reads. `bundle.evictOthers: false` keeps other bottles' blocks, both here and in the budget
-before the run. With nothing left to remove, `storage-full` says so once, and the run goes on
-with what it fetches held in memory. Opening a bundle's translations removes every file of an older generation and any file the
+went. While a run plays, a block write the browser refuses for lack of room says `storage-full`
+once and keeps the origin under the same budget again, other bottles' caches let go, the oldest
+first, never one of a cache the run reads; the block stays in memory while there is room and is
+fetched again after. `bundle.evictOthers: false` keeps other bottles' blocks, both then and before
+the run. Opening a bundle's translations removes every file of an older generation and any file the
 store does not know (`cpu` diagnostics, `store.opened.swept`).
 
 ## kernel

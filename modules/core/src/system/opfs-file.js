@@ -34,14 +34,15 @@
  * The writers: what each writes; on which thread, through which handles;
  * when it flushes; how it survives a write cut short; what reads it back.
  *
- * - `filesystem/internal/opfs-store.js`, under the bundle's block cache
- *   (`bundle/cache.js`): the cache's table, its packs of blocks and the order
- *   the run read in. The engine's worker, a pool of exclusive sync handles,
- *   one a file, kept open (a guest read cannot wait for one). Flushed at
- *   `flush`, `close` and when a handle leaves the pool. Cut short: the table
- *   names a block only once its record is written, and a record's header is
- *   checked against the block it is taken for. Read by the cache, this run
- *   and the next.
+ * - `filesystem/internal/opfs-disk.js`, a Cellar keeper's disk under the
+ *   bundle's block cache (`bundle/cache.js`): the keeper's packs of blocks
+ *   and its two indexes, in `blocks/<name>`. The engine's worker, an
+ *   exclusive sync handle a file, kept open (a guest read cannot wait for
+ *   one). Flushed by the keeper at each sweep and before each index it
+ *   writes. Cut short: an index names only bodies its packs were flushed
+ *   with, the newer whole of the two is read, an entry past its pack's end
+ *   is skipped. Read by the keeper, this run and the next, and by a page
+ *   asking what is here (`savedBlocks`).
  * - `filesystem/internal/page-file.js`: what a program wrote past the pieces
  *   held in memory. The engine's worker, one exclusive sync handle on a file
  *   of the run's own. Never flushed: nothing after the run reads it. Cut

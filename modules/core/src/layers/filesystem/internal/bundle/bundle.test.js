@@ -19,8 +19,9 @@ import zlib from 'node:zlib';
 import { packBlock, writeBundle } from '../../../../bundle-node.js';
 import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
-import { testCache } from '../../../cache/testing.fixture.js';
-import { blockCacheName, cachedBundle, createBlockCache, storedLength } from './cache.js';
+import { createBlockCache } from './cache.js';
+import { cachedBundle } from './saved.js';
+import { fakeOpfs } from '../opfs.fixture.js';
 
 const BLOCK_SIZE = 1024;
 
@@ -103,52 +104,53 @@ function decodeBlock(codec, bytes){
     }
 }
 
-/** Counts what it decodes, which is how the cache is observed. */
-function countingDecoder(){
-    /** @type {{ codec: number, expectedLength: number | null }[]} */
-    const calls = [];
-    /** @type {import('./format.js').Decode} */
-    const decode = (codec, bytes, expectedLength)=>{
-        calls.push({ codec, expectedLength });
-        return decodeBlock(codec, bytes);
-    };
-    return { decode, calls };
-}
-
-/**
- * @param {number[] | null} [resident] block indices that are here; null for all
- */
-function blockReader(resident = null){
-    /** @type {number[]} */
-    const asked = [];
-    /** @type {import('./source.js').ReadBlock} */
-    const readBlock = (index, offset, packed)=>{
-        asked.push(index);
-        if (resident && !resident.includes(index))
-        {
-            return null;
-        }
-        return bundleBytes.subarray(offset, offset + packed);
-    };
-    return { readBlock, asked };
-}
-
 const open = ()=>openBundle(
     async(at, count)=>bundleBytes.subarray(at, at + count),
     decodeBlock);
 
 /**
+ * Block `index` of `bundle` decoded, as the engine puts it in the cache.
+ *
+ * @param {import('./format.js').Bundle} bundle @param {Uint8Array} bytes  the container
+ * @param {number} index
+ */
+const decodedBlock = (bundle, bytes, index)=>{
+    const block = bundle.block(index);
+    return decodeBlock(block.codec, bytes.subarray(block.offset, block.offset + block.packed));
+};
+
+/**
+ * A cache of a bundle's blocks, those of `resident` put (every one for null).
+ *
+ * @param {import('./format.js').Bundle} bundle
+ * @param {{ resident?: number[] | null, budget?: number, store?: any,
+ *     bytes?: Uint8Array }} [options]  `bytes`: the container, the fixture's by default
+ */
+async function cacheOf(bundle, { resident = null, budget, store = null,
+    bytes = bundleBytes } = {})
+{
+    const cache = await createBlockCache({ store, name: `game-${bundle.fingerprint}`,
+        blockSize: bundle.blockSize, blockCount: bundle.blockCount, budget });
+    for (let index = 0; index < bundle.blockCount; index++)
+    {
+        if (resident === null || resident.includes(index))
+        {
+            assert.equal(cache.put(index, decodedBlock(bundle, bytes, index)), true);
+        }
+    }
+    return cache;
+}
+
+/**
  * @param {Object} [options]
- * @param {number[] | null} [options.resident]
- * @param {import('./source.js').DecodedBlocks} [options.decoded]  where decoded
- *     blocks are kept: nowhere by default
+ * @param {number[] | null} [options.resident] block indices that are here; null for all
+ * @param {number} [options.budget]  the cache's
  */
 async function mount(options = {}){
     const bundle = await open();
-    const { decode, calls } = countingDecoder();
-    const { readBlock, asked } = blockReader(options.resident ?? null);
-    const source = createBundleSource({ bundle, readBlock, decode, decoded: options.decoded });
-    return { bundle, source, calls, asked };
+    const cache = await cacheOf(bundle, options);
+    const source = createBundleSource({ bundle, blocks: cache });
+    return { bundle, source, cache };
 }
 
 /** @param {Uint8Array} actual @param {Uint8Array} expected @param {string} [message] */
@@ -276,63 +278,79 @@ test('a miss reports every absent block, not just the first', async()=>{
     });
 });
 
-test('with nowhere to keep decoded blocks, a read decodes what it reads', async()=>{
-    const { source, calls } = await mount();
-    const ramp = CONTENT['Game\\Ramp.dat'];
-    same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16));
-    same(source.read('Game\\Ramp.dat', 32, 16), ramp.subarray(32, 48));
-    assert.equal(calls.length, 2);
-});
-
-test('a block is decoded once a run and read from the run\'s cache by every mount of it', async()=>{
-    // Each process of a run mounts the bundle, and every one reads the same
-    // blocks: decoded once, kept in the run's cache, read where they lie.
-    const cache = await testCache();
-    const first = await mount({ decoded: cache.space('bundle-blocks') });
-    const second = await mount({ decoded: cache.space('bundle-blocks') });
+test('a block is read where the cache holds it by every mount of it', async()=>{
+    // Each process of a run mounts the bundle and reads the same blocks:
+    // decoded once as they were fetched, kept once, read where they lie.
+    const bundle = await open();
+    const cache = await cacheOf(bundle);
+    const first = createBundleSource({ bundle, blocks: cache });
+    const second = createBundleSource({ bundle, blocks: cache });
     const ramp = CONTENT['Game\\Ramp.dat'];
 
-    same(first.source.read('Game\\Ramp.dat', 0, 3000), ramp);
-    assert.equal(first.calls.length, 3);
-    assert.deepEqual(first.calls.map(call=>call.expectedLength), [1024, 1024, 952],
-        'a short final block is decoded to its own length, not the block size');
-    same(first.source.read('Game\\Ramp.dat', 100, 2000), ramp.subarray(100, 2100));
-    assert.equal(first.calls.length, 3, 'read again: nothing decoded');
-    same(second.source.read('Game\\Ramp.dat', 0, 3000), ramp, 'the other mount, the same bytes');
-    assert.equal(second.calls.length, 0, 'and it decoded nothing');
-    assert.deepEqual(second.asked, [], 'nor asked for a stored block');
-    assert.equal(cache.keeper.figures().hot, 3);
+    same(first.read('Game\\Ramp.dat', 0, 3000), ramp);
+    same(first.read('Game\\Ramp.dat', 100, 2000), ramp.subarray(100, 2100));
+    same(second.read('Game\\Ramp.dat', 0, 3000), ramp, 'the other mount, the same bytes');
+    assert.equal(cache.diagnostics().cellar.hot, bundle.blockCount, 'each block kept once');
 
-    const read = second.source.read('Game\\Ramp.dat', 0, 16);
+    const read = second.read('Game\\Ramp.dat', 0, 16);
     read[0] ^= 0xff;
-    same(first.source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
+    same(first.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
         'a reader writing into what it read changes nothing kept');
 });
 
-test('a block the cache let go of is decoded again, every read whole', async()=>{
+test('a block the cache let go of is a miss, fetched again, every read whole', async()=>{
     // A cache of four blocks' room for a bundle of more: what it lets go of
-    // to keep a new block is decoded again on its next read.
-    const cache = await testCache({ budget: 4096, segmentBytes: 4096 });
-    const { source, calls } = await mount({ decoded: cache.space('bundle-blocks') });
+    // to keep another is missed by its next read, which names it. A read
+    // within a block each: the keeper ranks bodies put within one of its
+    // sweeps by their records, not by their reads, and a read of several
+    // blocks in a room of few may push its own blocks out.
+    const bundle = await open();
+    // A body takes 4 KiB of the room at least.
+    const cache = await cacheOf(bundle, { resident: [], budget: 4 * 4096 });
+    const source = createBundleSource({ bundle, blocks: cache });
+    let fetched = 0;
+    /** @param {string} path @param {number} at @param {number} length */
+    const read = (path, at, length)=>{
+        for (let tries = 0; ; tries++)
+        {
+            assert.ok(tries < 4, 'a fetch that does not deliver');
+            try
+            {
+                return source.read(path, at, length);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                assert.equal(miss.code, BLOCK_MISS);
+                for (const block of miss.blocks)
+                {
+                    fetched++;
+                    cache.put(block.index, decodedBlock(bundle, bundleBytes, block.index));
+                }
+            }
+        }
+    };
     const ramp = CONTENT['Game\\Ramp.dat'];
     let seed = 3;
-    for (let read = 0; read < 300; read++)
+    for (let at = 0; at < 300; at++)
     {
         seed = (seed * 1103515245 + 12345) >>> 0;
-        const at = seed % ramp.length;
-        const length = 1 + (seed >>> 8) % (ramp.length - at);
-        same(source.read('Game\\Ramp.dat', at, length), ramp.subarray(at, at + length));
-        if (read % 37 === 0)
+        const from = seed % ramp.length;
+        const length = 1 + (seed >>> 8) % (BLOCK_SIZE - from % BLOCK_SIZE);
+        same(read('Game\\Ramp.dat', from, length), ramp.subarray(from, from + length));
+        if (at % 37 === 0)
         {
             for (const [path, bytes] of Object.entries(CONTENT))
             {
-                same(source.read(path, 0, bytes.length), bytes, path);
+                for (let part = 0; part < bytes.length; part += BLOCK_SIZE)
+                {
+                    same(read(path, part, BLOCK_SIZE), bytes.subarray(part, part + BLOCK_SIZE),
+                        path);
+                }
             }
         }
-        assert.ok(cache.keeper.figures().segmentBytes <= 4096, 'under the cache\'s budget');
+        assert.ok(cache.diagnostics().cellar.segmentBytes <= 4 * 4096, 'under the cache\'s budget');
     }
-    const blocks = (await open()).blockCount;
-    assert.ok(calls.length > blocks, `${calls.length} decodes for ${blocks} blocks: some again`);
+    assert.ok(fetched > bundle.blockCount, `${fetched} fetches for ${bundle.blockCount} blocks`);
 });
 
 test('reading something that is not in the bundle fails as a missing file', async()=>{
@@ -388,7 +406,7 @@ test('a range covers only the blocks it touches', async()=>{
 test('a relocated directory appears where it is mapped, outside the prefix', async()=>{
     const bundle = await open();
     const source = createBundleSource({
-        bundle, readBlock: blockReader().readBlock, decode: decodeBlock, prefix: 'App',
+        bundle, blocks: await cacheOf(bundle), prefix: 'App',
         relocate: { 'game\\DATA': 'WINDOWS\\system32' },
     });
     const notes = CONTENT['Game\\Data\\Notes.txt'];
@@ -409,7 +427,7 @@ test('a directory relocated to the root lands there, with no leading separator',
     // What an installation wrote elsewhere on C: comes back where it was.
     const bundle = await open();
     const source = createBundleSource({
-        bundle, readBlock: blockReader().readBlock, decode: decodeBlock, prefix: 'App',
+        bundle, blocks: await cacheOf(bundle), prefix: 'App',
         relocate: { 'game': '' },
     });
     const notes = CONTENT['Game\\Data\\Notes.txt'];
@@ -422,7 +440,7 @@ test('with no prefix only what is relocated appears, and the rest is counted', a
     // A layer has no program directory: its system files are all it gives.
     const bundle = await open();
     const source = createBundleSource({
-        bundle, readBlock: blockReader().readBlock, decode: decodeBlock, prefix: null,
+        bundle, blocks: await cacheOf(bundle), prefix: null,
         relocate: { 'game\\DATA': 'WINDOWS\\system32' },
     });
     const notes = CONTENT['Game\\Data\\Notes.txt'];
@@ -464,8 +482,8 @@ test('a description written into a bundle opens with it, its files as they were'
     const before = await open();
     assert.equal(before.manifest, null, 'a bundle packed without one has none');
     assert.deepEqual(described.files, before.files);
-    const source = createBundleSource({ bundle: described, decode: decodeBlock,
-        readBlock: (_index, offset, packed)=>joined.subarray(offset, offset + packed) });
+    const source = createBundleSource({ bundle: described,
+        blocks: await cacheOf(described, { bytes: joined }) });
     const notes = CONTENT['Game\\Data\\Notes.txt'];
     same(source.read('Game\\Data\\Notes.txt', 0, notes.length), notes);
     const taken = await withManifest(async(at, count)=>joined.subarray(at, at + count),
@@ -478,112 +496,74 @@ test('a bundle held whole in the block cache is written out from it alone', asyn
     // A game played or downloaded here is saved without fetching it again:
     // the blocks the engine put, laid back to back under a new index.
     const bundle = await open();
-    const name = blockCacheName('game', bundle.fingerprint);
-    // The cache's files, put by the cache itself over a store of buffers.
-    /** @type {Map<string, Uint8Array>} */
-    const files = new Map();
-    const store = {
-        open: async(/** @type {string} */ path)=>{
-            files.set(path, files.get(path) ?? new Uint8Array(0));
-        },
-        stat: (/** @type {string} */ path)=>files.has(path)
-            ? { size: /** @type {Uint8Array} */ (files.get(path)).length } : null,
-        read: (/** @type {string} */ path, /** @type {number} */ at, /** @type {number} */ n)=>
-            (files.get(path) ?? new Uint8Array(0)).slice(at, at + n),
-        write: (/** @type {string} */ path, /** @type {number} */ at, /** @type {Uint8Array} */ b)=>{
-            const held = files.get(path) ?? new Uint8Array(0);
-            const grown = new Uint8Array(Math.max(held.length, at + b.length));
-            grown.set(held);
-            grown.set(b, at);
-            files.set(path, grown);
-        },
-        truncate: (/** @type {string} */ path, /** @type {number} */ size)=>{
-            files.set(path, new Uint8Array(size));
-        },
-        remove: (/** @type {string} */ path)=>{
-            files.delete(path);
-        },
-    };
-    const cache = await createBlockCache({ store, name, blockSize: bundle.blockSize,
-        blockCount: bundle.blockCount });
-    // Last block first, as a program packed at the end reads it.
-    for (let at = bundle.blockCount - 1; at >= 0; at--)
-    {
-        const block = bundle.block(at);
-        const packed = bundleBytes.subarray(block.offset, block.offset + block.packed);
-        // As the engine puts it: a deflate block inflated, any other as it came.
-        const kept = block.codec === Codec.DEFLATE_RAW ? decodeBlock(block.codec, packed) : packed;
-        assert.equal(kept.length, storedLength(block));
-        await cache.put(at, kept);
-    }
-    await cache.persist();
     const codecs = new Set(Array.from({ length: bundle.blockCount },
         (_, at)=>bundle.block(at).codec));
-    assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks kept both ways');
-    /** @param {Map<string, Uint8Array>} held */
-    const root = held=>({
-        // As the origin's file system answers: a file that is not there is refused.
-        getFileHandle: async(/** @type {string} */ file)=>{
-            const bytes = held.get(file);
-            if (bytes === undefined)
-            {
-                throw new DOMException(`no ${file}`, 'NotFoundError');
-            }
-            return { getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([bytes])) };
-        },
-    });
-    const whole = files;
+    assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks of each kind');
+    const origin = fakeOpfs();
+    (await cacheOf(bundle, { store: origin.root })).close();
     const fetchRange = async(/** @type {number} */ at, /** @type {number} */ count)=>
         at === 0 || at >= bundle.block(bundle.blockCount - 1).offset
             ? bundleBytes.subarray(at, at + count)
             : assert.fail(`a block was fetched at ${at}`);
     const manifest = { title: 'A Game' };
-    const written = await cachedBundle({ root: root(whole), id: 'game', fetchRange,
-        decode: decodeBlock, manifest });
-    assert.ok(written);
-    const bytes = new Uint8Array(await written.arrayBuffer());
-    const read = async(/** @type {number} */ at, /** @type {number} */ count)=>
-        bytes.subarray(at, at + count);
-    const opened = await openBundle(read, decodeBlock);
+    /** @param {any} root */
+    const written = root=>cachedBundle({ root, id: 'game', fetchRange, decode: decodeBlock,
+        manifest });
+    const whole = await written(origin.root);
+    assert.ok(whole);
+    const bytes = new Uint8Array(await whole.arrayBuffer());
+    const opened = await openBundle(async(at, count)=>bytes.subarray(at, at + count),
+        decodeBlock);
     assert.deepEqual(opened.manifest, manifest);
     assert.deepEqual(opened.files, bundle.files);
-    const source = createBundleSource({ bundle: opened, decode: decodeBlock,
-        readBlock: (_index, offset, packed)=>bytes.subarray(offset, offset + packed) });
+    assert.ok(Array.from({ length: opened.blockCount }, (_, at)=>opened.block(at).codec)
+        .every(codec=>codec === Codec.STORED), 'every block stored, as the cache keeps it');
+    const source = createBundleSource({ bundle: opened,
+        blocks: await cacheOf(opened, { bytes }) });
     for (const [path, content] of Object.entries(CONTENT))
     {
         same(source.read(path, 0, content.length), content, path);
     }
 
-    const table = /** @type {Uint8Array} */ (files.get(`${name}.index`));
-    const short = new Map(files);
-    short.set(`${name}.index`, table.slice());
-    new DataView(/** @type {Uint8Array} */ (short.get(`${name}.index`)).buffer).setFloat64(0, 0,
-        true);
-    assert.equal(await cachedBundle({ root: root(short), id: 'game', fetchRange,
-        decode: decodeBlock, manifest }), null, 'a block missing from the cache: nothing to write');
+    const short = fakeOpfs();
+    (await cacheOf(bundle, { store: short.root,
+        resident: Array.from({ length: bundle.blockCount - 1 }, (_, at)=>at + 1) })).close();
+    assert.equal(await written(short.root), null, 'a block missing from the cache: nothing');
 
-    const pack = /** @type {Uint8Array} */ (files.get(`${name}.pack.0`));
-    const cut = new Map(files);
-    cut.set(`${name}.pack.0`, pack.subarray(0, pack.length - 1));
-    assert.equal(await cachedBundle({ root: root(cut), id: 'game', fetchRange,
-        decode: decodeBlock, manifest }), null, 'a segment short of its last block: nothing');
+    const home = `blocks/game-${bundle.fingerprint}`;
+    const cut = fakeOpfs();
+    (await cacheOf(bundle, { store: cut.root })).close();
+    const pack = /** @type {any} */ (cut.node(`${home}/pack-0`));
+    pack.data = pack.data.slice(0, pack.data.length - 1);
+    assert.equal(await written(cut.root), null, 'a pack short of its last block: nothing');
 
-    const swapped = new Map(files);
-    const other = table.slice();
-    const view = new DataView(other.buffer);
-    const first = view.getFloat64(0, true);
-    view.setFloat64(0, view.getFloat64(8, true), true);
-    view.setFloat64(8, first, true);
-    swapped.set(`${name}.index`, other);
-    assert.equal(await cachedBundle({ root: root(swapped), id: 'game', fetchRange,
-        decode: decodeBlock, manifest }), null, 'a table naming another block\'s bytes: nothing');
+    // An index naming another block's body under this one's: the short last
+    // block of Ramp.dat and a whole one, their names swapped.
+    const swapped = fakeOpfs();
+    (await cacheOf(bundle, { store: swapped.root })).close();
+    const ramp = /** @type {any} */ (bundle.find('Game\\Ramp.dat'));
+    for (const file of ['index-a', 'index-b'])
+    {
+        const index = swapped.node(`${home}/${file}`);
+        if (index === undefined || index.data.length === 0)
+        {
+            continue;
+        }
+        const saved = JSON.parse(new TextDecoder().decode(index.data));
+        for (const record of saved.records)
+        {
+            record[0] = record[0] === String(ramp.firstBlock) ? String(ramp.firstBlock + 2)
+                : record[0] === String(ramp.firstBlock + 2) ? String(ramp.firstBlock) : record[0];
+        }
+        index.data = new TextEncoder().encode(JSON.stringify(saved));
+    }
+    assert.equal(await written(swapped.root), null, 'a body of another length: nothing');
 });
 
 test('readInto hands each block\'s part where it lies, the run\'s cache read in place', async()=>{
     // ReadFile copies what it reads into guest memory: a read into bytes of
     // its own first was a second copy of every block, made and let go.
-    const cache = await testCache();
-    const { source } = await mount({ decoded: cache.space('bundle-blocks') });
+    const { source } = await mount();
     const ramp = CONTENT['Game\\Ramp.dat'];
     source.read('Game\\Ramp.dat', 0, 3000);
     /** @type {{ at: number, length: number, shared: boolean }[]} */

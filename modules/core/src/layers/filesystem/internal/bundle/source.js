@@ -17,10 +17,9 @@
  * above a synchronous read -- the alternative, parking the guest thread on every
  * read of every cached block, is a different engine.
  *
- * Decompression is injected. In the engine the deflate path is the platform's
- * own and the zstd path is the project's own decoder (`zstd.js`); neither is
- * this layer's business, and importing a compressor here would add the one thing
- * this package does not have.
+ * Nothing is decoded here. A block is kept decoded (`cache.js`) by whoever
+ * fetched it, where waiting is allowed -- the platform's inflate answers with a
+ * promise -- and a block decoded once is read in place by every read after.
  */
 
 import { ErrorCode, fsError } from '../errors.js';
@@ -50,35 +49,12 @@ export const BLOCK_MISS = 'BLOCK_MISS';
  */
 
 /**
- * Hands back the stored (still compressed) bytes of one block, or `null` when
- * they are not here yet. Offset and length are passed so a provider reading a
- * file at an offset needs no index of its own.
+ * Where a bundle's blocks are kept decoded (`cache.js`).
  *
- * @typedef {(index: number, offset: number, packed: number) => Uint8Array | null} ReadBlock
- */
-
-/**
- * Where decoded blocks are kept with no cache to keep them in: nowhere, each
- * read decodes what it reads.
- *
- * @type {DecodedBlocks}
- */
-const DECODED_NOWHERE = Object.freeze({
-    with: ()=>undefined,
-    put: ()=>false,
-});
-
-/**
- * Where a bundle's decoded blocks are kept: a space of the run's cache, by the
- * block's name. Decoded once a run, a block is read in place by every process
- * of the run, under the cache's one budget; one the cache let go is decoded
- * again from its stored bytes.
- *
- * @typedef {Object} DecodedBlocks
- * @property {<T>(name: string, read: (body: Uint8Array) => T) => T | undefined} with
- *     the block read in place inside `read`; undefined where it is not kept
- * @property {(name: string, bytes: Uint8Array) => boolean} put  a copy kept: false
- *     where there was no room
+ * @typedef {Object} KeptBlocks
+ * @property {<T>(index: number, read: (body: Uint8Array) => T) => T | undefined} with
+ *     the block read in place inside `read`, brought back from the disk first
+ *     where it went there; undefined where it is not here
  */
 
 /** The path separator, named so it is not confused with an escape. */
@@ -87,11 +63,7 @@ const SEPARATOR = String.fromCharCode(92);
 /**
  * @param {Object} options
  * @param {import('./format.js').Bundle} options.bundle
- * @param {ReadBlock} options.readBlock
- * @param {import('./format.js').Decode} options.decode
- * @param {DecodedBlocks} [options.decoded]
- *        Where decoded blocks are kept: the run's cache (`cacheSpace`), named
- *        by the bundle's fingerprint and the block's index. Nowhere by default.
+ * @param {KeptBlocks} options.blocks  Its blocks, decoded, as they are here.
  * @param {string | null} [options.prefix]
  *        A directory the whole bundle appears under, without separators at
  *        either end. A game belongs in a directory of its own rather than at
@@ -109,7 +81,7 @@ const SEPARATOR = String.fromCharCode(92);
  *     readInto: NonNullable<import('../memory-store.js').SourceStore['readInto']> }}
  */
 export function createBundleSource({
-    bundle, readBlock, decode, decoded: kept = DECODED_NOWHERE, prefix = '', relocate = {},
+    bundle, blocks, prefix = '', relocate = {},
 })
 {
     /** @type {import('../memory-store.js').StoredEntry[]} */
@@ -177,42 +149,6 @@ export function createBundleSource({
         }
     }
 
-    /**
-     * Each block's name, made once: a read looks a block up by the same
-     * string each time, whose hash the engine keeps.
-     *
-     * @type {string[]}
-     */
-    const names = [];
-    /** @param {number} index */
-    const nameOf = index=>(names[index] ??= `${bundle.fingerprint}/${index}`);
-
-    /**
-     * A block's bytes as stored, decoded and checked, then kept for the run;
-     * null when its stored bytes are not here yet.
-     *
-     * @param {import('./format.js').BundleBlock} block
-     */
-    const decodeBlock = block=>{
-        const stored = readBlock(block.index, block.offset, block.packed);
-        if (!stored)
-        {
-            return null;
-        }
-        const bytes = decode(block.codec, stored, block.length);
-        if (bytes.length !== block.length)
-        {
-            // Not an fsError: nothing the guest asked for is wrong, the
-            // bundle or the decoder is, and a short block would
-            // otherwise be handed out as zeroes.
-            throw new Error(`Block ${block.index} of this bundle decoded to `
-                + `${bytes.length} bytes, not ${block.length}`);
-        }
-        // A cache with no room keeps nothing: this read has the bytes all the same.
-        kept.put(nameOf(block.index), bytes);
-        return bytes;
-    };
-
     const source = {
         unplaced,
 
@@ -233,8 +169,6 @@ export function createBundleSource({
          * `put` where it lies (a kept block inside its `with`), or throws a
          * miss naming the blocks that would make it serviceable once every
          * part here was handed: a retry after the fetch hands them all again.
-         * Whatever could be decoded on the way stays cached, so the retry
-         * costs only the fetched blocks.
          *
          * @param {string} path @param {number} offset @param {number} length
          * @param {import('../memory-store.js').Put} put
@@ -254,22 +188,15 @@ export function createBundleSource({
                 const { block } = range;
                 const into = at;
                 at += range.to - range.from;
-                if (kept.with(nameOf(block.index), body=>{
+                if (blocks.with(block.index, body=>{
                     put(body.subarray(range.from, range.to), into);
                     return true;
-                }) === true)
-                {
-                    continue;
-                }
-                const bytes = decodeBlock(block);
-                if (!bytes)
+                }) !== true)
                 {
                     missing.push({
                         index: block.index, offset: block.offset, packed: block.packed,
                     });
-                    continue;
                 }
-                put(bytes.subarray(range.from, range.to), into);
             }
 
             if (missing.length > 0)
