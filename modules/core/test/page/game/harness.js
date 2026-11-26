@@ -1323,6 +1323,41 @@ export function scalars(layers){
 }
 
 /**
+ * The process a run's report is read from: the one that presented the most
+ * frames. The facade speaks for the process started last, and a benchmark
+ * that starts helpers after itself (a system scanner beside 3DMark) would
+ * otherwise report the helper's empty graphics and none of its own. The
+ * facade's own stays chosen while no other presented more.
+ *
+ * @param {{ image: string, diagnostics: any[] | null, worker?: boolean }[]} found
+ *     every process standing (`app.standing()`)
+ * @param {number} facadeFrames  the frames the facade's process presented
+ * @returns {{ diagnostics: any[] | null,
+ *     processes: { image: string, frames: number | null, worker: boolean, chosen: boolean }[] }}
+ *     `diagnostics`: the chosen process's tables, null for the facade's own
+ */
+export function presentingProcess(found, facadeFrames){
+    const processes = found.map(({ image, diagnostics, worker })=>{
+        const frames = (diagnostics ?? []).find(table=>table.name === 'log')?.metrics?.frames;
+        return { image, frames: typeof frames === 'number' ? frames : null,
+            worker: worker === true, chosen: false };
+    });
+    let best = -1;
+    for (const [index, one] of processes.entries())
+    {
+        if ((one.frames ?? 0) > Math.max(facadeFrames, best < 0 ? 0 : processes[best].frames ?? 0))
+        {
+            best = index;
+        }
+    }
+    if (best >= 0)
+    {
+        processes[best].chosen = true;
+    }
+    return { diagnostics: best >= 0 ? found[best].diagnostics : null, processes };
+}
+
+/**
  * What `standing` reports of each process: the few metrics a stopped run is
  * read from, small enough to cross from a worker every few seconds.
  *
@@ -2122,7 +2157,15 @@ export function createHarness(canvas, how = {}){
         // first ask, and a moment for the answers, before the one the report reads.
         app.diagnostics();
         await new Promise(resolve=>setTimeout(resolve, 500));
-        const layers = app.diagnostics();
+        const facadeLayers = app.diagnostics();
+        const facadeFrames = facadeLayers.find((/** @type {any} */ entry)=>entry.name === 'log')
+            ?.metrics?.frames ?? 0;
+        const presenting = presentingProcess(await app.standing().catch(()=>[]), facadeFrames);
+        const layers = presenting.diagnostics ?? facadeLayers;
+        result.processes = presenting.processes;
+        // The run's, read once: its keeper is on the run's thread, whichever
+        // process the report is of.
+        result.runCache = app.runCache?.() ?? 'not measured: this engine reports no run cache';
         /** @param {string} name */
         const metrics = name=>layers.find((/** @type {any} */ entry)=>entry.name === name)
             ?.metrics ?? {};

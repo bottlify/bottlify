@@ -1009,6 +1009,17 @@
    ]
   },
   {
+   "path": "tools/lib/run-report.mjs",
+   "category": "lib",
+   "kind": "library",
+   "browser": false,
+   "question": "Which process a game report is of and the run's cache as its keeper stood, for game.mjs",
+   "command": "",
+   "tests": [
+    "tools/lib/run-report.test.js"
+   ]
+  },
+  {
    "path": "tools/lib/frame-window.mjs",
    "category": "lib",
    "kind": "library",

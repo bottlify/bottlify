@@ -478,6 +478,7 @@ From `arg-bytes-audit.mjs dbg/wine-specs`. Every stdcall entry of the win32 laye
 - [`lib/connect.mjs`](lib/connect.mjs) - Attach to the shared browser and the launcher tab, for live.mjs
 - [`lib/profile.mjs`](lib/profile.mjs) - Sample the engine's workers and fold a CPU profile, for game.mjs and frames.mjs
 - [`lib/device-lag.mjs`](lib/device-lag.mjs) - How far the device is behind the engine, for game.mjs
+- [`lib/run-report.mjs`](lib/run-report.mjs) - Which process a game report is of and the run's cache as its keeper stood, for game.mjs
 - [`lib/frame-window.mjs`](lib/frame-window.mjs) - The frames a watched window holds, for frames.mjs
 - [`lib/timeout-report.mjs`](lib/timeout-report.mjs) - What a run that did not answer leaves, for game.mjs and drive
 - [`lib/thread-window.mjs`](lib/thread-window.mjs) - A --series window by thread and executor, for game.mjs
