@@ -1035,7 +1035,9 @@
    "browser": false,
    "question": "A static server for the pages, the sources and a bundle",
    "command": "",
-   "tests": []
+   "tests": [
+    "tools/lib/server.test.js"
+   ]
   },
   {
    "path": "tools/lib/connect.mjs",

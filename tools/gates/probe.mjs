@@ -54,7 +54,9 @@ export async function probe({ attempts = 3 } = {}){
  * @returns {Promise<ProbeResult>}
  */
 async function singleProbe(attempt){
-    const server = await serveStatic({ sandboxDir: SANDBOX_DIR, srcDir: SRC_DIR });
+    // Cross-origin isolated: the engine runs only where memory is shared
+    // (roadmap/decisions.md A290).
+    const server = await serveStatic({ sandboxDir: SANDBOX_DIR, srcDir: SRC_DIR, coi: true });
     const browser = await launch();
 
     mkdirSync(REPORTS_DIR, { recursive: true });

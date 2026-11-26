@@ -5,9 +5,10 @@
  */
 
 import { createServer } from 'node:http';
-import { createReadStream, createWriteStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
+import { createReadStream, createWriteStream, existsSync, readFileSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
+import { dirname, extname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /**
  * Tiny static file server for the probe pages and the core sources.
@@ -28,6 +29,57 @@ const MIME = {
     '.webp': 'image/webp',
     '.svg': 'image/svg+xml',
 };
+
+/**
+ * The libraries core imports by name (its `dependencies`), each as a route of
+ * this server and the path its entry is served at. The browser resolves no
+ * bare name, and the sources are served as they are, unbundled: a module that
+ * names a library is served with the name replaced by that path, and the
+ * library's own files, which import one another relatively, from its route.
+ * A worker takes no import map, so the name is replaced in the text.
+ *
+ * @returns {{ prefix: string, root: string, name: string, entry: string }[]}
+ */
+function libraries(){
+    const manifest = fileURLToPath(new URL('../../modules/core/package.json', import.meta.url));
+    const names = Object.keys(JSON.parse(readFileSync(manifest, 'utf8')).dependencies ?? {});
+    return names.flatMap(name=>{
+        let entry;
+        try {
+            entry = fileURLToPath(import.meta.resolve(name));
+        } catch {
+            return [];
+        }
+        let root = dirname(entry);
+        while (!existsSync(join(root, 'package.json')) && dirname(root) !== root)
+        {
+            root = dirname(root);
+        }
+        const prefix = `/packages/${name}/`;
+        const path = relative(root, entry).split('\\').join('/');
+        return [{ prefix, root, name, entry: prefix + path }];
+    });
+}
+
+/**
+ * `code` with every import of a library by its name pointed at the library's
+ * served entry.
+ *
+ * @param {string} code @param {ReturnType<typeof libraries>} served
+ */
+function pointedAtLibraries(code, served){
+    let out = code;
+    for (const { name, entry } of served)
+    {
+        if (out.includes(name))
+        {
+            const quoted = name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+            const by = `(\\bfrom\\s*|\\bimport\\s*\\(\\s*|\\bimport\\s+)(['"])${quoted}\\2`;
+            out = out.replace(new RegExp(by, 'g'), `$1$2${entry}$2`);
+        }
+    }
+    return out;
+}
 
 /**
  * @typedef {Object} StaticServer
@@ -70,9 +122,11 @@ export async function serveStatic({
     sandboxDir, srcDir, extra = [], coi = false, port = 0, receive = [],
 })
 {
+    const served = libraries();
     const routes = [
         { prefix: '/sandbox/', root: sandboxDir },
         { prefix: '/src/', root: srcDir },
+        ...served,
         ...extra,
     ];
 
@@ -135,6 +189,13 @@ export async function serveStatic({
 
         const type = MIME[extname(abs)] ?? 'application/octet-stream';
         const asked = /^bytes=(\d+)-(\d*)$/.exec(String(req.headers.range ?? ''));
+        if (!asked && type.startsWith('text/javascript'))
+        {
+            const code = Buffer.from(pointedAtLibraries(await readFile(abs, 'utf8'), served));
+            res.writeHead(200, { 'Content-Type': type, 'Content-Length': code.length });
+            res.end(code);
+            return;
+        }
         if (!asked)
         {
             res.writeHead(200, {
