@@ -3549,18 +3549,15 @@ async function buildApp(options){
      * open -- the next look a device needs. Null when it has none.
      */
     const nextDeadlineMs = ()=>{
-        /** @type {number | null} */
-        let soonest = null;
-        for (const due of [kernel.nextDeadline(), win32.queue?.()?.nextTimerDue?.() ?? null])
-        {
-            if (due !== null && (soonest === null || due < soonest))
-            {
-                soonest = due;
-            }
-        }
+        // Asked every turn: compared in place, and the open tracks counted
+        // rather than read off the output's report.
+        const thread = kernel.nextDeadline();
+        const timer = win32.queue?.()?.nextTimerDue?.() ?? null;
+        const soonest = thread === null ? timer
+            : timer === null || thread <= timer ? thread : timer;
         let wall = soonest === null ? null : Math.max(0, soonest - clock.virtualTime());
         const feeding = clockSource() - filmTickedAt < FILM_ACTIVE_MS
-            || (sound?.diagnostics().tracks ?? 0) > 0;
+            || (sound?.tracks() ?? 0) > 0;
         if (feeding && (wall === null || wall > DEVICE_LOOK_MS))
         {
             wall = DEVICE_LOOK_MS;

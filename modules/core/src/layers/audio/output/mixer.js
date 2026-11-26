@@ -562,6 +562,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             return 0;
         },
 
+        /** The tracks open: what the run loop asks each turn, without the report. */
+        tracks: ()=>openTracks.size,
+
         diagnostics: ()=>({
             tracks: openTracks.size,
             queuedFrames: [...openTracks].reduce((sum, track)=>sum + track.pending(), 0),
