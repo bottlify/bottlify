@@ -194,8 +194,54 @@ export const SIMD_SCALAR = new Map([
 
 /** A body's touched locals before it touches one: shared, never written. */
 const UNTOUCHED = new Uint8Array(0);
-/** Up to how many bytes `insertAll` copies a piece by hand. */
+/** Up to how many bytes `insertFrom` copies a piece by hand. */
 const SMALL_COPY = 32;
+
+/**
+ * The buffers of big bodies done with (`Body.release`), by size, for the next body that
+ * grows that big: a region's function is written into tens of kilobytes, and a batch of
+ * them made and dropped one buffer a region and more as each grew. A body's bytes past its
+ * length are never read, so a buffer is taken as it was left.
+ * @type {Map<number, Uint8Array[]>}
+ */
+const SPARE = new Map();
+/** The least buffer kept, and how many of a size: as many as bodies grow at once. */
+const SPARE_LEAST = 1024;
+const SPARE_KEPT = 4;
+
+/**
+ * A buffer of at least `size` bytes: a spare one where one of its size is kept, a power of
+ * two from `SPARE_LEAST` on.
+ *
+ * @param {number} size
+ */
+function bufferOf(size){
+    if (size < SPARE_LEAST)
+    {
+        return new Uint8Array(size);
+    }
+    const whole = 2 ** Math.ceil(Math.log2(size));
+    return SPARE.get(whole)?.pop() ?? new Uint8Array(whole);
+}
+
+/** A buffer no body writes any more, kept for `bufferOf`. @param {Uint8Array} buffer */
+function spare(buffer){
+    const size = buffer.length;
+    if (size < SPARE_LEAST || (size & size - 1) !== 0)
+    {
+        return;
+    }
+    let kept = SPARE.get(size);
+    if (kept === undefined)
+    {
+        kept = [];
+        SPARE.set(size, kept);
+    }
+    if (kept.length < SPARE_KEPT)
+    {
+        kept.push(buffer);
+    }
+}
 
 /**
  * An instruction stream, with the block nesting checked as it is written.
@@ -215,7 +261,7 @@ export class Body {
      */
     constructor(capacity = 64){
         /** @type {Uint8Array} */
-        this.buffer = new Uint8Array(capacity);
+        this.buffer = bufferOf(capacity);
         /** Bytes written. */
         this.length = 0;
         this.depth = 0;
@@ -305,14 +351,28 @@ export class Body {
 
     /** @param {number} count */
     grow(count){
-        let size = this.buffer.length * 2;
+        // From one byte at least: a released body's buffer is empty.
+        let size = Math.max(1, this.buffer.length * 2);
         while (size < this.length + count)
         {
             size *= 2;
         }
-        const grown = new Uint8Array(size);
+        const grown = bufferOf(size);
         grown.set(this.buffer.subarray(0, this.length));
+        spare(this.buffer);
         this.buffer = grown;
+    }
+
+    /**
+     * The body is done with, its bytes taken (`toBytes`): its buffer goes to the next body
+     * that grows as big, and this one is left empty, writing into a buffer of its own if
+     * written again.
+     */
+    release(){
+        spare(this.buffer);
+        this.buffer = new Uint8Array(0);
+        this.length = 0;
+        return this;
     }
 
     /** @param {number} value */
@@ -384,28 +444,42 @@ export class Body {
     }
 
     /**
-     * Other bodies put in at the places this one kept for them, in one pass:
-     * what `insert` of each would leave, from the last place to the first,
-     * where each `insert` moved the whole rest of the body along.
+     * Pieces of another body put in at the places this one kept for them, in one pass:
+     * what `insert` of each would leave, from the last place to the first, where each
+     * `insert` moved the whole rest of the body along. The pieces are written one after
+     * another into `source`, so a body with hundreds of them makes no body of each.
      *
-     * @param {{ at: number, body: Body }[]} pieces  by place, and where two share one,
-     *     in the order they are to follow each other
+     * @param {Body} source
+     * @param {readonly number[]} places  three numbers a piece: its place in this body,
+     *     and where it starts and ends in `source`; by place, and where two share one, in
+     *     the order they are to follow each other
      */
-    insertAll(pieces){
+    insertFrom(source, places){
         let added = 0;
-        for (const { body } of pieces)
+        for (let i = 0; i < places.length; i += 3)
         {
-            added += body.length;
+            added += places[i + 2] - places[i + 1];
         }
-        const out = new Uint8Array(Math.max(this.buffer.length, this.length + added));
+        const out = bufferOf(Math.max(this.buffer.length, this.length + added));
+        const { buffer } = source;
+        const own = this.buffer;
+        const pieceHints = source.hints;
         /** @type {number[]} */
         const hints = [];
         let from = 0;
         let written = 0;
         let hint = 0;
-        for (const { at, body } of pieces)
+        for (let i = 0; i < places.length; i += 3)
         {
-            out.set(this.buffer.subarray(from, at), written);
+            const at = places[i];
+            const start = places[i + 1];
+            const end = places[i + 2];
+            // By hand, as the pieces: a view of what lies between two places, made for
+            // each, was most of what the insert made.
+            for (let k = from; k < at; k++)
+            {
+                out[written + k - from] = own[k];
+            }
             // The body's own hints before the ones at its place: an insert puts
             // what was there after what it puts in.
             for (; hint < this.hints.length && this.hints[hint] < at; hint++)
@@ -414,31 +488,34 @@ export class Body {
             }
             written += at - from;
             from = at;
-            const { buffer, length } = body;
-            if (length <= SMALL_COPY)
+            if (end - start <= SMALL_COPY)
             {
                 // Most pieces are a few loads or stores: copied by hand, not through a view
                 // made of each.
-                for (let k = 0; k < length; k++)
+                for (let k = start; k < end; k++)
                 {
-                    out[written + k] = buffer[k];
+                    out[written + k - start] = buffer[k];
                 }
             }
             else
             {
-                out.set(buffer.subarray(0, length), written);
+                out.set(buffer.subarray(start, end), written);
             }
-            for (const one of body.hints)
+            for (let k = 0; k < pieceHints.length; k++)
             {
-                hints.push(one + written);
+                if (pieceHints[k] >= start && pieceHints[k] < end)
+                {
+                    hints.push(pieceHints[k] - start + written);
+                }
             }
-            written += body.length;
+            written += end - start;
         }
-        out.set(this.buffer.subarray(from, this.length), written);
+        out.set(own.subarray(from, this.length), written);
         for (; hint < this.hints.length; hint++)
         {
             hints.push(this.hints[hint] + written - from);
         }
+        spare(own);
         this.buffer = out;
         this.length += added;
         this.hints = hints;
@@ -780,7 +857,20 @@ export class Body {
 
     /** @param {bigint} value */
     i64const(value){
-        return this.op(0x42, leb128s64(value));
+        // A value an i32 holds has the same signed LEB128 at 64 bits: written as one,
+        // with no BigInt made a byte and no array of the bytes.
+        if (value >= -0x80000000 && value <= 0x7fffffff)
+        {
+            return this.byte(0x42).s32(Number(value));
+        }
+        const bytes = leb128s64(value);
+        this.reserve(1 + bytes.length);
+        this.buffer[this.length++] = 0x42;
+        for (const byte of bytes)
+        {
+            this.buffer[this.length++] = byte;
+        }
+        return this;
     }
 
     /** @param {number} value */

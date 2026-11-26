@@ -1926,7 +1926,7 @@ function nearTarget(e, instruction){
  */
 function returnLong(e, instruction){
     const { b } = e;
-    const [dst] = instruction.operands;
+    const dst = instruction.operands[0];
     const popped = 8 + (dst ? /** @type {number} */ (dst.value) : 0);
     stackAccess(e, 8);
     b.localGet(Local.addr).load('i64', ram(e)).localTee(Local.t64b)
@@ -4533,7 +4533,7 @@ function bitTestLong(e, instruction, flagsLive){
  */
 function cmpxchg8b(e, instruction, flagsLive){
     const { b } = e;
-    const [dst] = instruction.operands;
+    const dst = instruction.operands[0];
     prepare(e, dst);
     b.localGet(Local.addr).load('i32', ram(e)).localSet(Local.t1);
     b.localGet(Local.addr).load('i32', ram(e, 4)).localSet(Local.t2);
@@ -4579,7 +4579,7 @@ function cmpxchg8b(e, instruction, flagsLive){
  */
 function cmpxchg16b(e, instruction, flagsLive){
     const { b } = e;
-    const [dst] = instruction.operands;
+    const dst = instruction.operands[0];
     const low = LONG_WIDE;
     const high = LONG_WIDE + 1;
     prepare(e, dst);

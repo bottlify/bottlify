@@ -13,7 +13,8 @@
  * each bound sits above what the stage makes now with room for the sampler, and below
  * what it made before its records were shared or reused. Decoding: an instruction's
  * record, its operands and prefixes; forming: the regions, sharing what forming found
- * (`formShared`) as a batch's regions do.
+ * (`formShared`) as a batch's regions do; emitting: their functions, in batches as a
+ * translator worker emits them.
  */
 
 import { test } from 'node:test';
@@ -22,8 +23,20 @@ import { readFileSync } from 'node:fs';
 import { bytesPerCall } from '../../../tools/fixtures/allocation.mjs';
 import { decode, MODE_64 } from './decode/decoder.js';
 import { formRegion, formShared } from './region.js';
+import { emitBatch } from './runtime/emit-built.js';
+import { ownLayout } from './runtime/layout.js';
 
 const BASE = 0x400000;
+/** Features fixed rather than probed, as the emitted-bytes test fixes them. */
+const FEATURES = { simd: true, tailCalls: true, defaultNaNNegative: false };
+/** A translator worker's batch, at most (`translators.js`), and the regions emitted. */
+const BATCH = 32;
+const EMITTED = 4 * BATCH;
+/** What each stage may make an instruction, by image. */
+const BOUNDS = {
+    x87: { decode: 260, form: 700, emit: 5300 },
+    x64: { decode: 260, form: 800, emit: 4000 },
+};
 
 /**
  * A benchmark image loaded at its base: its bytes, its code's span, and the entries of
@@ -82,35 +95,68 @@ function imageOf(variant){
 
 for (const variant of /** @type {const} */ (['x87', 'x64']))
 {
-    const { read, translatable, mode, regions, instructions } = imageOf(variant);
+    const { read, translatable, mode, wide, regions, instructions } = imageOf(variant);
     const perInstruction = (/** @type {number} */ perRegion)=>perRegion * regions.length
         / instructions;
 
-    test(`decoding an instruction of the ${variant} image makes at most 260 bytes`, async()=>{
-        const at = regions.flatMap(({ blocks })=>blocks.flatMap(block=>block.instructions
-            .filter(instruction=>instruction.op !== 'crt').map(instruction=>instruction.eip)));
+    const bound = BOUNDS[variant];
+
+    test(`decoding an instruction of the ${variant} image makes at most ${bound.decode} bytes`,
+        async t=>{
+            const at = regions.flatMap(({ blocks })=>blocks.flatMap(block=>block.instructions
+                .filter(instruction=>instruction.op !== 'crt').map(instruction=>instruction.eip)));
+            let next = 0;
+            const bytes = await bytesPerCall(()=>{
+                decode(read, at[next], mode);
+                next = next + 1 === at.length ? 0 : next + 1;
+            }, { calls: at.length });
+            t.diagnostic(`${bytes.toFixed(0)} bytes an instruction`);
+            assert.ok(bytes < bound.decode, `${bytes.toFixed(0)} bytes an instruction`);
+        });
+
+    test(`forming the ${variant} image's regions makes at most ${bound.form} bytes an `
+        + 'instruction', async t=>{
         let next = 0;
+        /** @type {ReturnType<typeof formShared>} */
+        let shared = formShared();
         const bytes = await bytesPerCall(()=>{
-            decode(read, at[next], mode);
-            next = next + 1 === at.length ? 0 : next + 1;
-        }, { calls: at.length });
-        assert.ok(bytes < 260, `${bytes.toFixed(0)} bytes an instruction`);
+            if (next === 0)
+            {
+                shared = formShared();
+            }
+            formRegion(read, regions[next].entry, { translatable, mode, shared });
+            next = next + 1 === regions.length ? 0 : next + 1;
+        }, { calls: regions.length });
+        t.diagnostic(`${perInstruction(bytes).toFixed(0)} bytes an instruction`);
+        assert.ok(perInstruction(bytes) < bound.form,
+            `${perInstruction(bytes).toFixed(0)} bytes an instruction`);
     });
 
-    test(`forming the ${variant} image's regions makes at most 700 bytes an instruction`,
-        async()=>{
-            let next = 0;
-            /** @type {ReturnType<typeof formShared>} */
-            let shared = formShared();
-            const bytes = await bytesPerCall(()=>{
-                if (next === 0)
-                {
-                    shared = formShared();
-                }
-                formRegion(read, regions[next].entry, { translatable, mode, shared });
-                next = next + 1 === regions.length ? 0 : next + 1;
-            }, { calls: regions.length });
-            assert.ok(perInstruction(bytes) < 700,
-                `${perInstruction(bytes).toFixed(0)} bytes an instruction`);
-        });
+    test(`emitting the ${variant} image's regions makes at most ${bound.emit} bytes an `
+        + 'instruction', async t=>{
+        const layout = ownLayout({ ramSize: 64 << 20,
+            ...wide ? { ramBase: 0, bits: 64 } : {} });
+            // The first batches alone: emitting is the slow stage, and these are a few
+            // hundred functions of every kind the image has.
+        const emitted = regions.slice(0, EMITTED);
+        const batches = Math.ceil(emitted.length / BATCH);
+        let made = 0;
+        for (const { blocks } of emitted)
+        {
+            for (const block of blocks)
+            {
+                made += block.instructions.length;
+            }
+        }
+        let next = 0;
+        const bytes = await bytesPerCall(()=>{
+            emitBatch(emitted.slice(next * BATCH, (next + 1) * BATCH)
+                .map(region=>({ region, entryTop: 0 })), layout, FEATURES,
+            { hash: true, trapPort: 0xb077, resume: true, callReturn: true });
+            next = next + 1 === batches ? 0 : next + 1;
+        }, { calls: batches });
+        const perEmitted = bytes * batches / made;
+        t.diagnostic(`${perEmitted.toFixed(0)} bytes an instruction`);
+        assert.ok(perEmitted < bound.emit, `${perEmitted.toFixed(0)} bytes an instruction`);
+    });
 }
