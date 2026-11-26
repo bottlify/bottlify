@@ -401,9 +401,10 @@
  *           miss then costs no round trip, and a read waits for its own blocks
  *           alone, the blocks around and ahead of them read behind it.
  * @property {any} [bundle.store]  Where fetched blocks are kept. `'local'` is
- *           the default and means this machine; a synchronous store of your own
- *           is used as given; anything falsy keeps nothing, and a block the
- *           reader has let go is then fetched again.
+ *           the default and means this machine's OPFS; a directory handle of
+ *           your own shaped as OPFS's (synchronous handles on its files) is used
+ *           as given; anything falsy keeps them in memory alone, and a block let
+ *           go there is fetched again.
  * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
  *           a name would read each other's blocks, so it has to be the bundle's.
  * @property {number} [bundle.revision]  The bottle's revision, raised each time it is
@@ -413,9 +414,9 @@
  *           Defaults to the directory a game is installed into.
  * @property {boolean} [bundle.evictOthers]  Whether, when the origin runs out of
  *           room, other bottles' fetched blocks may be let go, the oldest first:
- *           before the run (the origin kept under its budget) and once this
- *           bottle has no blocks of its own older than two hours. On by default;
- *           off, a full store says `storage-full` instead.
+ *           before the run (the origin kept under its budget) and when a write
+ *           of a block is refused for room. On by default; `storage-full` is
+ *           said either way.
  * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
  *           when nothing is being read. On by default, and inert when there is
  *           nowhere durable to keep the blocks.
