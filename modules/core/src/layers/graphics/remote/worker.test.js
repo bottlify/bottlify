@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { serveGraphics } from './worker.js';
 import { createSender, sharedNow } from './channel.js';
 import { recordedDirect3D } from './direct3d.js';
-import { createDirect3D9 } from '../d3d9/device.js';
+import { D3DISSUE, D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
+import { COUNT_STATE, QUERY } from '../seam/block.js';
 import { D3DCLEAR, D3DFMT, D3DSWAPEFFECT, D3D_OK } from '../d3d8/constants.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
@@ -828,3 +829,77 @@ test('a client\'s process gone however it went takes every root made through it 
         assert.deepEqual(gone.sort(), ['client', 'root'],
             'and a second word, or one for a client never seen, closes nothing more');
     });
+
+test('an occlusion count that lands in its query\'s block is not sent to the program\'s thread'
+    + ' as well; one the program is told is', async()=>{
+    const gpu = createFakeDevice({ occlusionSamples: index=>17 + index });
+    Object.assign(gpu.device, { queue: gpu.queue });
+    const memory = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const words = new Int32Array(memory.buffer);
+    /** @type {any} */
+    const scope = { postMessage: ()=>{}, onmessage: null };
+    serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+            transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+    await settle();
+    const { port1, port2 } = new MessageChannel();
+    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2, memory } });
+    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+        transfer), framesAhead: 100 });
+    /** @type {any[]} */
+    const told = [];
+    port1.onmessage = event=>{
+        if (event.data?.type === 'counts' || event.data?.counts)
+        {
+            told.push(event.data.counts);
+        }
+        sender.receive(event.data);
+    };
+    const d3d = recordedDirect3D(createDirect3D9, { countsInGuest: true }, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    const device = out.device;
+    const block = 0x1000;
+    /** @param {boolean} inGuest  whether the count goes into the block @returns {Promise<void>} */
+    const measure = async inGuest=>{
+        /** @type {{ query?: any }} */
+        const made = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+        if (inGuest)
+        {
+            // As the seam numbers a measurement whose count the played side writes.
+            words[(block + QUERY.STATE) >> 2] = (1 << COUNT_STATE.SHIFT) | COUNT_STATE.WRITTEN;
+            made.query.countInto(block, 1);
+        }
+        device.BeginScene();
+        made.query.Issue(D3DISSUE.BEGIN);
+        device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000, 1, 0);
+        made.query.Issue(D3DISSUE.END);
+        device.EndScene();
+        await device.Present();
+        await device.idle();
+        await settle(40);
+    };
+    try
+    {
+        await measure(true);
+        assert.equal(words[(block + QUERY.STATE) >> 2],
+            (1 << COUNT_STATE.SHIFT) | COUNT_STATE.BACK, 'the count landed in the block');
+        assert.deepEqual(told, [], 'and nothing more was sent for it');
+        await measure(false);
+        assert.equal(told.length, 1, 'a count the guest does not read goes to the program');
+        assert.equal(told[0].length, 2, 'with every count held not sent before');
+    }
+    finally
+    {
+        port1.close();
+        port2.close();
+    }
+});

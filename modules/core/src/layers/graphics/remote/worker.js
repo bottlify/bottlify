@@ -570,11 +570,27 @@ export function serveGraphics(scope, deps){
         let words = memory
             ? new Int32Array(memory.buffer, memory.byteOffset, Math.floor(memory.length / 4))
             : null;
+        /**
+         * Whether the count the renderer settled last landed in its block:
+         * the renderer stores a count, then says it has come (`occlusionCounted`),
+         * and one the program reads in its own memory needs no message to its
+         * thread as well: the guest answers its polls from the block, and the
+         * count rides with the next one sent if the host asks after all.
+         */
+        let landed = false;
         const storeCount = words
             ? (/** @type {number} */ block, /** @type {number} */ measurement,
-                /** @type {number} */ count)=>storeCountIn(/** @type {Int32Array} */ (words),
-                block, measurement, count)
+                /** @type {number} */ count)=>(landed = storeCountIn(
+                /** @type {Int32Array} */ (words), block, measurement, count))
             : undefined;
+        const occlusionCounted = ()=>{
+            if (landed)
+            {
+                landed = false;
+                return;
+            }
+            receiver?.counted();
+        };
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
         /** @type {ReturnType<typeof createReceiver> | null} */
@@ -659,7 +675,7 @@ export function serveGraphics(scope, deps){
                     return ()=>losers.delete(watcher);
                 },
                 frameQueued,
-                occlusionCounted: ()=>receiver?.counted(),
+                occlusionCounted,
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
         }
