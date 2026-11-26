@@ -50,7 +50,8 @@ test('the memory is laid out from what it was made with', ()=>{
     assert.equal(memory.records, 8);
     assert.equal(memory.ringBytes, 8192);
     assert.equal(memory.dictBytes, 1024);
-    assert.ok(memory.buffer instanceof SharedArrayBuffer, 'shared');
+    assert.ok(memory.buffer.records.buffer instanceof SharedArrayBuffer, 'records shared');
+    assert.ok(memory.buffer.dictionary instanceof SharedArrayBuffer, 'dictionary shared');
 });
 
 test('a template the dictionary cannot hold travels inline and still reads', ()=>{
@@ -91,7 +92,8 @@ test('bytes written over while the index still points at them are refused too', 
 
 test('the writer never waits for a reader and never grows', ()=>{
     const { memory, writer, cursor } = open({ records: 16, bytes: 4096 });
-    const before = memory.buffer.byteLength;
+    const size = ()=>memory.buffer.records.buffer.byteLength + memory.buffer.dictionary.byteLength;
+    const before = size();
     // A record's cost in this thread's processor time, which other processes
     // on the machine do not stretch as they stretch its wall time.
     const started = threadCpuMs();
@@ -100,7 +102,7 @@ test('the writer never waits for a reader and never grows', ()=>{
         writer.write(at, 3, 0, 'line {0} {1}', 2, at, 'text', undefined, undefined);
     }
     const each = (threadCpuMs() - started) / 200_000;
-    assert.equal(memory.buffer.byteLength, before);
+    assert.equal(size(), before);
     assert.equal(cursor.written(), 200_000);
     assert.ok(each < 0.01, `a record costs ${(each * 1000).toFixed(2)} us; under ten expected`);
 });

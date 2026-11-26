@@ -749,7 +749,9 @@ test('the page reads the journal, the frames and the phases through the keeper',
     assert.deepEqual(await remote.log.guestByModule(), {});
     assert.deepEqual(await remote.log.stats(),
         { written: 2, capacity: 4096, lost: 0, rejected: 0 });
-    assert.ok(remote.log.memory()?.journal instanceof SharedArrayBuffer);
+    const journal = remote.log.memory()?.journal;
+    assert.ok(journal?.records.buffer instanceof SharedArrayBuffer
+        && journal.dictionary instanceof SharedArrayBuffer, 'the journal is shared memory');
 
     assert.equal(remote.traffic().request, crossed,
         'not one of those reads was a message to the engine');
@@ -797,7 +799,7 @@ test('a rebuilt process hands the keeper the next block', async()=>{
     const attach = keeper.sent.filter((/** @type {any} */ message)=>
         message.type === 'attach').pop();
     assert.equal(attach.sequenceBase, 5, 'the base the child begins at reached the keeper');
-    assert.ok(attach.memory.journal instanceof SharedArrayBuffer);
+    assert.ok(attach.memory.journal.records.buffer instanceof SharedArrayBuffer);
     const records = await remote.log.drain(5, 10);
     assert.deepEqual(records.records.map((/** @type {any} */ r)=>r.text), ['after the swap'],
         'and the keeper reads the new block from there');

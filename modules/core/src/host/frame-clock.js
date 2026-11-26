@@ -16,51 +16,66 @@
  * the asking, and one fed by the profiler's per-frame sampler read zero where
  * frames came through the graphics worker.
  *
- * Layout: an Int32 count of frames shown so far at the start, then a ring of
- * `SLOTS` Float64 times (`performance.now()` of the presenting thread, which
- * shares its time origin with nothing - only the gaps between them mean
- * anything) where frame n is at n % SLOTS.
+ * The times are a Cellar journal (`vendor/cellar/`) of one Float64 a frame
+ * (`performance.now()` of the presenting thread, which shares its time origin
+ * with nothing - only the gaps between them mean anything): the presenter
+ * never waits for a reader, and a reader on the page is never handed a time
+ * being written over.
  */
 
-/** Frames the ring keeps: a little over 17 s at 60 fps. */
+import { createJournalMemory, openJournal } from '../../vendor/cellar/cellar.js';
+
+/** Frames the clock keeps, the one being written next included: a little over 17 s at 60 fps. */
 export const SLOTS = 1024;
 
-const HEADER_BYTES = 8;
+/** A frame's record: its time. */
+const RECORD = 8;
 
 /** A clock to tick: its buffer goes to whoever reads it. */
 export function createFrameClock(){
-    const buffer = new SharedArrayBuffer(HEADER_BYTES + SLOTS * 8);
-    const count = new Int32Array(buffer, 0, 1);
-    const times = new Float64Array(buffer, HEADER_BYTES, SLOTS);
+    // The newest SLOTS - 1 times are read, as the ring before kept them; their
+    // records (16 bytes with a journal's header) fill SLOTS * 16 bytes.
+    const memory = createJournalMemory({ records: SLOTS - 1, bytes: SLOTS * 16 });
+    const journal = openJournal(memory);
+    const times = new DataView(memory.buffer);
     return {
-        buffer,
+        buffer: /** @type {SharedArrayBuffer} */ (memory.buffer),
         /** @param {number} at when the frame was put on the canvas */
         tick(at){
-            const n = Atomics.load(count, 0);
-            times[n % SLOTS] = at;
-            Atomics.store(count, 0, n + 1);
+            times.setFloat64(journal.reserve(RECORD), at, true);
+            journal.commit();
         },
         /** Frames shown so far. */
-        count: ()=>Atomics.load(count, 0),
+        count: ()=>journal.written(),
     };
 }
 
 /**
  * The frames shown so far and the times of the newest of them, oldest first:
- * at most `SLOTS`, and only those after the `since`-th frame when it is given.
+ * at most `SLOTS - 1`, and only those after the `since`-th frame when it is
+ * given. A time the presenter wrote over while it was read is left out.
  *
  * @param {SharedArrayBuffer} buffer
  * @param {number} [since]  a count read before
  * @returns {{ count: number, times: number[] }}
  */
 export function readFrameClock(buffer, since = 0){
-    const count = Atomics.load(new Int32Array(buffer, 0, 1), 0);
-    const ring = new Float64Array(buffer, HEADER_BYTES, SLOTS);
-    const from = Math.max(since, count - SLOTS + 1, 0);
+    const journal = openJournal({ buffer });
+    const view = new DataView(buffer);
+    const count = journal.written();
+    const from = Math.max(since, journal.oldest());
     const times = [];
     for (let n = from; n < count; n++)
     {
-        times.push(ring[n % SLOTS]);
+        const at = journal.find(n);
+        if (at >= 0)
+        {
+            const time = view.getFloat64(at, true);
+            if (journal.intact())
+            {
+                times.push(time);
+            }
+        }
     }
     return { count, times };
 }

@@ -114,7 +114,7 @@ function topBuckets(descriptor, count){
 
 /**
  * @typedef {Object} LogMemory
- * @property {ArrayBufferLike} journal
+ * @property {import('./shared-journal.js').JournalBuffers} journal
  * @property {Record<string, Record<string, import('./table.js').TableDescriptor>>} [tables]
  */
 
