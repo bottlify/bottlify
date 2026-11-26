@@ -14,6 +14,17 @@ import {
     STATE_OPEN, STATE_CLOSING, DEVICE_LEAD_MS,
 } from './mix.js';
 
+/**
+ * A view of the sound output's table at `offset`, as the device makes one:
+ * the table is a view of memory the run holds, so offsets count from its start.
+ *
+ * @template {Int32ArrayConstructor | Uint8ArrayConstructor} K
+ * @param {K} Kind @param {Uint8Array} table @param {number} offset @param {number} length
+ * @returns {InstanceType<K>}
+ */
+const tableView = (Kind, table, offset, length)=>/** @type {InstanceType<K>} */ (
+    new Kind(/** @type {ArrayBuffer} */ (table.buffer), table.byteOffset + offset, length));
+
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
 const DIRECT = { sampleRate: 48000, channels: 2, bitsPerSample: 16 };
 
@@ -27,8 +38,8 @@ const pcm16 = samples=>{
 
 /** @param {any} mixer @param {number} slot */
 const slotView = (mixer, slot)=>({
-    header: new Int32Array(mixer.table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-    pcm: new Uint8Array(mixer.table, slotPcmOffset(slot), SLOT_BYTES),
+    header: tableView(Int32Array, mixer.table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+    pcm: tableView(Uint8Array, mixer.table, slotPcmOffset(slot), SLOT_BYTES),
 });
 
 test('with a shared table, write puts the guest\'s own bytes into the slot', ()=>{
@@ -338,7 +349,8 @@ test('a voice written in sequence while it plays is a stream, and a jump moves i
     const mixer = createMixer();
     const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
     assert.ok(voice);
-    const header = new Int32Array(mixer.table, slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
+    const header = tableView(Int32Array, mixer.table,
+        slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
     voice.play(true);
     voice.wrote(0, 4000);
     assert.equal(Atomics.load(header, STREAMING), 0, 'a buffer rewritten once is not one');
@@ -360,7 +372,8 @@ test('a voice written whole again and again while it plays is no stream', ()=>{
     const mixer = createMixer();
     const voice = mixer.openVoice({ ...DIRECT, bytes: 4000 });
     assert.ok(voice);
-    const header = new Int32Array(mixer.table, slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
+    const header = tableView(Int32Array, mixer.table,
+        slotHeaderOffset(voice.slot), SLOT_HEADER_INT32);
     voice.play(true);
     for (let write = 0; write < 5; write++)
     {

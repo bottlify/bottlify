@@ -109,7 +109,8 @@
  * in the memory the page hands to its audio worklet, the log's memory for a
  * reader on the page, and who made the adapter.
  *
- * `audio.memory` is `{ table }` -- one shared track table, resampled and
+ * `audio.memory` is `{ table }` -- one shared track table (a view of the
+ * memory the run's cache holds for it), resampled and
  * mixed on the audio thread -- on an origin with shared memory, and
  * `{ control, samples }` -- the engine mixer's own float ring, mixed on this
  * thread -- where there is none to hand a worklet at all.
@@ -118,7 +119,7 @@
  * thread never reads for it.
  *
  * @typedef {Object} Started
- * @property {{ memory: { table: ArrayBufferLike },
+ * @property {{ memory: { table: Uint8Array },
  *     sampleRate: number, channels: number } | null} audio
  * @property {import('../layers/log/internal/reader.js').LogMemory} log
  * @property {{ vendor: string, architecture: string, description: string }} adapter

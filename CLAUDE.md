@@ -104,7 +104,8 @@ it runs as on Windows. The protection itself is never patched, bypassed or answe
   memory → cpu, log
   kernel, loader → cpu, memory, log                 bridge → cpu, kernel, memory, log
   win32 → bridge, kernel, memory, loader, filesystem, media, cache, log
-  graphics → win32, bridge, memory, cache, log     audio, input → win32, bridge, memory
+  graphics → win32, bridge, memory, cache, log     audio → win32, bridge, memory, cache
+  input → win32, bridge, memory
   ```
 - **Derived from the specification, not a reference implementation**: contract (ABI, signatures,
   struct layout, return codes, edge cases) → test → implementation. Wine is a source of knowledge

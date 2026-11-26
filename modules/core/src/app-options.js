@@ -147,9 +147,10 @@
  *     machine, `journal` and `now` on every process of the run; none is
  *     something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean,
- *     memory?: { table: ArrayBufferLike },
+ *     memory?: { table: Uint8Array },
  *     beside?: { arena: [number, number] | null } }} [audio]
- *     Sound leaves through a shared track table a worklet reads. `drained` says
+ *     Sound leaves through a shared track table a worklet reads (a view of memory
+ *     the run's cache holds). `drained` says
  *     that something on the other side is really reading, which is what decides
  *     whether a program's play cursor follows the sound or a clock. `memory` is
  *     set by `createApp` on a rebuilt machine so the storage outlives the
