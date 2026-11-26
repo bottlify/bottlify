@@ -364,7 +364,8 @@ test('a move that copies blocks not resident waits for them, its partial copy go
 
 /**
  * A volume whose C: stands on a session read a piece at a time
- * (`session-source.js`), two pieces kept at once, and a counted fetch.
+ * (`session-source.js`), keeping no piece past the next fetch, and a counted
+ * fetch.
  *
  * @param {Record<string, Uint8Array>} contents  by path under C:
  */
@@ -373,7 +374,7 @@ async function onSession(contents){
     const session = createSessionSource(Object.entries(contents).map(([path, bytes])=>({ path,
         file: { path: `C:\\${path}`, size: bytes.length,
             read: async(offset = 0, length = bytes.length - offset)=>
-                bytes.slice(offset, offset + length) } })), { residentBytes: 2 * PIECE_SIZE });
+                bytes.slice(offset, offset + length) } })));
     fs.mount('C', { source: session });
     const counted = { fetches: 0 };
     const vol = /** @type {any} */ (createVolume(fs, async blocks=>{

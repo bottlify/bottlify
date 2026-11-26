@@ -10,6 +10,7 @@ import { PIECE_SIZE, createMemoryStore } from './memory-store.js';
 import { createOverlay } from './tree.js';
 import { createUnionSource } from './union-source.js';
 import { SESSION_LAYER, createSessionSource } from './session-source.js';
+import { createReader, openKeeper } from '../../../../vendor/cellar/cellar.js';
 
 /**
  * A session's files as a store hands them out lazily, every read counted.
@@ -95,19 +96,39 @@ test('a session is listed whole and nothing of it is read until a read asks', as
 });
 
 /**
- * A session source that may keep `room` bytes of what it read, and how to let
- * go of all it keeps, as the place it keeps pieces in does under pressure.
+ * A session source over a Cellar keeper (`vendor/cellar/`) of `room` bytes,
+ * as the run's cache keeps its pieces (`process/session.js`): a space of names
+ * of its own, read in place, let go of for room. Closed when the test ends.
  *
- * @param {any[]} files @param {number} room
+ * @param {any} t @param {any[]} files @param {number} room
  */
-const sessionWithRoom = (files, room)=>createSessionSource(files, { residentBytes: room });
+async function sessionWithRoom(t, files, room){
+    const keeper = await openKeeper({ budget: room, segmentBytes: room });
+    t.after(()=>keeper.close());
+    const reader = createReader({ shared: keeper.shared, segments: keeper.segmentBuffers(),
+        keeper: {
+            reserve: (name, length, options)=>keeper.reserve(name, length, options ?? {}),
+            raise: (name, options)=>keeper.raise(name, options),
+            raiseLater: name=>{
+                keeper.raise(name);
+            },
+            drop: name=>{
+                keeper.drop(name);
+            },
+        } });
+    return createSessionSource(files, { kept: {
+        look: key=>reader.look(`session/${key}`),
+        with: (key, read, options)=>reader.with(`session/${key}`, read, options),
+        put: (key, bytes)=>reader.put(`session/${key}`, bytes, { disk: 'never' }),
+    } });
+}
 
 test('the contract: a read answers the bytes or a miss naming every piece it lacks, a fetch'
-    + ' reads exactly those, and a piece let go of is read from the session again', async()=>{
+    + ' reads exactly those, and a piece let go of is read from the session again', async t=>{
     const size = 3 * PIECE_SIZE + 11;
     const bytes = pattern(size, 3);
     const { files, reads } = lazySession({ 'a.bin': bytes, 'b.bin': pattern(7, 8) });
-    const session = sessionWithRoom(files, 2 * PIECE_SIZE);
+    const session = await sessionWithRoom(t, files, 2 * PIECE_SIZE);
 
     // A miss names each piece the range lacks, where it lies and how long it is,
     // and hands nothing.
@@ -170,10 +191,31 @@ test('the contract: a read answers the bytes or a miss naming every piece it lac
     assert.deepEqual(result, bytes.subarray(2 * PIECE_SIZE, 2 * PIECE_SIZE + 4));
     assert.deepEqual(reads.slice(readsNow), [{ path: 'a.bin', offset: 2 * PIECE_SIZE,
         length: PIECE_SIZE }], 'read from the session again, that piece alone');
+    assert.equal(session.reads().unkept, 0, 'every piece was kept by the keeper, none here');
+    assert.deepEqual(session.held(), { sessionUnkept: 0 });
+});
+
+test('with nowhere to keep pieces, a fetch\'s pieces are held until the next fetch: a range'
+    + ' is read after one fetch, and held bytes are said', async()=>{
+    const bytes = pattern(3 * PIECE_SIZE, 9);
+    const { files, reads } = lazySession({ 'a.bin': bytes });
+    const session = createSessionSource(files);
+    const { result, misses } = await fetchedAgain(()=>session.read('a.bin', 5, 2 * PIECE_SIZE),
+        session);
+    assert.equal(misses, 1);
+    assert.deepEqual(result, bytes.subarray(5, 5 + 2 * PIECE_SIZE));
+    assert.deepEqual(session.held(), { sessionUnkept: 3 * PIECE_SIZE });
+    assert.deepEqual(session.reads(), { fetches: 1, pieces: 3, bytes: 3 * PIECE_SIZE, unkept: 3 });
+    // The next fetch lets go of what the last one held.
+    await fetchedAgain(()=>session.read('a.bin', 0, 1), session);
+    assert.equal(reads.length, 3, 'the first piece was held, nothing fetched');
+    await session.fetch([{ index: 2 }]);
+    assert.deepEqual(session.held(), { sessionUnkept: PIECE_SIZE });
+    assert.throws(()=>session.read('a.bin', 0, 1), (/** @type {any} */ e)=>e.code === 'BLOCK_MISS');
 });
 
 test('under a writable layer: a write copies the file up a piece at a time, a delete leaves'
-    + ' a tombstone, and what was not touched is the session\'s own', async()=>{
+    + ' a tombstone, and what was not touched is the session\'s own', async t=>{
     const big = pattern(5 * PIECE_SIZE + 7, 4);
     const { files } = lazySession({
         'Saves\\big.sav': big,
@@ -183,7 +225,7 @@ test('under a writable layer: a write copies the file up a piece at a time, a de
     });
     // Two pieces kept at once: a copy that began again at every miss would
     // never finish.
-    const session = sessionWithRoom(files, 2 * PIECE_SIZE);
+    const session = await sessionWithRoom(t, files, 2 * PIECE_SIZE);
     const bundle = createMemoryStore({ 'config.ini': 'bundle', 'game.exe': 'MZ' });
     const drive = createOverlay({ source: createUnionSource([session, bundle]),
         writable: createMemoryStore() });

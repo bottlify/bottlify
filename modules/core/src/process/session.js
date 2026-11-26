@@ -17,6 +17,7 @@ import {
 import { createUnionSource } from '../layers/filesystem/internal/union-source.js';
 import { foldName } from '../layers/filesystem/internal/paths.js';
 import { mountDiscs } from '../discs.js';
+import { cacheSpace } from '../layers/cache/module.js';
 
 /**
  * The session storage holds for a run, its registry laid into `registry`
@@ -162,6 +163,9 @@ export async function openSession(deps){
     return { seeded, saver: { flush }, stopSavingRegistry };
 }
 
+/** Sessions laid under a volume in this thread: each one's pieces under a name of its own. */
+let sessionsLaid = 0;
+
 /**
  * The run's read-only half with the session's files under C:'s writable layer
  * and over the bundle, where the store hands them out to be read when asked
@@ -170,11 +174,25 @@ export async function openSession(deps){
  * as a bundle's block is. A file of another drive, and one that a link names,
  * which a restored link copies up at once, is laid on whole (`eager`).
  *
+ * The pieces read are kept in the run's cache, in a space of their own
+ * (`session/<n>/`): the run's one budget, read in place by every process
+ * here, let go of idle or for room. Not a keeper of the session's own, as a
+ * bundle has (`bundle/cache.js`): a bundle's keeper is one so that its disk
+ * is the next run's, a layer every bottle stands on fetched once from the
+ * network; a session's pieces are already on this machine, in the store they
+ * are read from, so a disk would only write them a second time beside
+ * themselves, and a keeper of their own a second budget beside the run's.
+ * For the same reason they never go to the run cache's disk (`disk: 'never'`,
+ * not `'run'` or `'kept'`): a piece is a body made again by reading the
+ * session, which is the user's and is never lost by letting a piece go.
+ *
  * @param {any} blocks  The run's bundle, or null.
  * @param {{ files: any[], links?: any[] | null }} seeded
+ * @param {import('../../vendor/cellar/cellar.js').Reader | null} reader  the run's
+ *     cache, or null: pieces held only from their fetch to the next
  * @returns {{ blocks: any, eager: any[] }}
  */
-function sessionUnder(blocks, seeded){
+function sessionUnder(blocks, seeded, reader){
     // A file a further name is given: the record of a file's number or
     // attributes alone gives none, and its file stays lazy.
     const linked = new Set((seeded.links ?? [])
@@ -199,7 +217,8 @@ function sessionUnder(blocks, seeded){
     {
         return { blocks, eager };
     }
-    const session = createSessionSource(lazy);
+    const session = createSessionSource(lazy,
+        { kept: cacheSpace(reader, `session/${++sessionsLaid}`, { disk: 'never' }) });
     return {
         eager,
         blocks: {
@@ -215,6 +234,7 @@ function sessionUnder(blocks, seeded){
                     rest.length > 0 ? blocks?.fetch(rest) : null]).then(()=>{});
             },
             held: ()=>({ ...blocks?.held?.(), ...session.held() }),
+            sessionReads: ()=>session.reads(),
         },
     };
 }
@@ -225,15 +245,17 @@ function sessionUnder(blocks, seeded){
  * registry the installation wrote into `registry`, when there is one to fill.
  *
  * @param {{ options: import('../app-options.js').AppOptions, events: any, filesystem: any,
- *     blocks: any,
+ *     blocks: any, reader?: import('../../vendor/cellar/cellar.js').Reader | null,
  *     seeded: { files: any[], registry?: any, links?: any[] | null }, registry: any }} deps
+ *     `reader`: the run's cache, where the session's pieces are kept (`sessionUnder`)
  * @returns {Promise<any>}  The run's read-only half, the session's files in it
  *     (`sessionUnder`): what fetches every block a read of C: misses.
  */
-export async function furnishVolume({ options, events, filesystem, blocks, seeded, registry }){
+export async function furnishVolume(deps){
+    const { options, events, filesystem, blocks, reader = null, seeded, registry } = deps;
     // The session's files under the writable layer and over the bundle, so
     // that a saved file the bundle also carries is the one the program sees.
-    const laid = sessionUnder(blocks, seeded);
+    const laid = sessionUnder(blocks, seeded, reader);
     if (laid.blocks)
     {
         filesystem.mount('C', { source: laid.blocks.source });

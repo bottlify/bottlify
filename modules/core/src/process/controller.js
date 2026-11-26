@@ -1274,6 +1274,10 @@ export function processController(deps){
                             decoded: blocks()?.decoded?.().blocks ?? 0,
                             decodedBytes: blocks()?.decoded?.().bytes ?? 0,
                             decodeMs: Math.round(blocks()?.decoded?.().ms ?? 0),
+                            // What was read of the session laid under C:, where
+                            // there is one (`session-source.js`); the pieces it
+                            // keeps are the run's cache's (`spaces.session`).
+                            ...blocks()?.sessionReads ? { session: blocks().sessionReads() } : {},
                         },
                         film: { ...film },
                         // Which of the program's own code the machine is spent on

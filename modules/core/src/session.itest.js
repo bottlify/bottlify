@@ -311,6 +311,14 @@ test("a session kept in the origin's storage is read where the program reads it,
         app.on('session', (/** @type {any} */ payload)=>announced.push(...payload.changes));
         assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 20000 }), 0);
         assert.equal(printed, 'RESTORED', 'the saved file is there before the first instruction');
+        // The piece read is a body of the run's cache, in the session's space,
+        // and the session holds nothing of the heap itself.
+        const appTable = app.diagnostics().find((/** @type {any} */ table)=>table.name === 'app');
+        assert.deepEqual(appTable.metrics.bundle.session,
+            { fetches: 1, pieces: 1, bytes: 'RESTORED'.length, unkept: 0 });
+        const space = app.runCache().spaces.session;
+        assert.equal(space?.bodies, 1, 'counted under the run cache\'s space `session`');
+        assert.equal(space?.bytes, 'RESTORED'.length);
 
         const kept = app.session.export();
         assert.equal(kept.length, 301, "the whole session is the volume's");

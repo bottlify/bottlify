@@ -18,8 +18,11 @@
  * whoever can wait fetches them (`fetch`) and reads again. The overlay's rules
  * do the rest: a write copies the file up, a delete leaves a tombstone.
  *
- * Pieces are kept in the heap, the least recently used let go of past
- * `residentBytes`: what was read once is in the store it came from.
+ * Pieces are kept where the caller says (`kept`, a space of the run's cache),
+ * read there in place, and let go of as that place decides: what was read
+ * once is in the store it came from, so a piece let go of is read from there
+ * again. A piece the place had no room for is held here until the next fetch
+ * begins with none in flight, so that the read waiting on it finds it.
  */
 
 import { ErrorCode, fsError } from './errors.js';
@@ -41,11 +44,30 @@ const PIECES_PER_FILE = 2 ** 21;
  */
 
 /**
+ * Where pieces are kept: a space of the run's cache (`cache` layer,
+ * `CacheSpace`), its bodies read in place inside `with`; `put` false where
+ * it had no room.
+ *
+ * @typedef {{ look: (key: string) => 'hot' | 'cold' | null,
+ *     with: <T>(key: string, read: (body: Uint8Array) => T, options?: { wait?: boolean })
+ *         => T | undefined,
+ *     put: (key: string, bytes: Uint8Array) => boolean }} PieceSpace
+ */
+
+/** A place that keeps nothing: every piece is held only from its fetch to the next. */
+const KEEP_NOTHING = Object.freeze(/** @type {PieceSpace} */ ({
+    look: ()=>null,
+    with: ()=>undefined,
+    put: ()=>false,
+}));
+
+/**
  * @param {{ path: string, file: LazyFile }[]} files  `path` relative to the
  *     drive's root; `file` handed back as it is by `kept`
- * @param {{ residentBytes?: number }} [options]
+ * @param {{ kept?: PieceSpace }} [options]  where the pieces read are kept,
+ *     their keys this source's alone
  */
-export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
+export function createSessionSource(files, { kept = KEEP_NOTHING } = {}){
     /** @type {Map<string, { path: string, file: LazyFile, number: number }>} by folded path */
     const byPath = new Map();
     /** @type {Set<string>} folded */
@@ -63,30 +85,36 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
             { path: parts.join('\\'), file, number: numbered.length });
         numbered.push(file);
     }
-    /** @type {Map<number, Uint8Array>} by piece index, the least recently used first */
-    const resident = new Map();
-    let held = 0;
-    const counts = { fetches: 0, pieces: 0, bytes: 0 };
-
-    /** @param {number} index @param {Uint8Array} bytes */
-    const keep = (index, bytes)=>{
-        const before = resident.get(index);
-        if (before)
+    /**
+     * Pieces `kept` had no room for, by index: held from their fetch until a
+     * fetch begins with none in flight, the reads waiting on them done.
+     *
+     * @type {Map<number, Uint8Array>}
+     */
+    const unkept = new Map();
+    let unkeptBytes = 0;
+    let fetching = 0;
+    const counts = { fetches: 0, pieces: 0, bytes: 0, unkept: 0 };
+    /** @param {number} index */
+    const present = index=>unkept.has(index) || kept.look(String(index)) !== null;
+    /**
+     * Hands `index`'s bytes from `from` to `to` (within the piece) to `put`
+     * at `into`: false where the piece is gone since it was looked at.
+     *
+     * @param {number} index @param {number} from @param {number} to
+     * @param {import('./memory-store.js').Put} put @param {number} into
+     */
+    const handOut = (index, from, to, put, into)=>{
+        const held = unkept.get(index);
+        if (held)
         {
-            held -= before.length;
-            resident.delete(index);
+            put(held.subarray(from, to), into);
+            return true;
         }
-        resident.set(index, bytes);
-        held += bytes.length;
-        for (const [oldest, kept] of resident)
-        {
-            if (held <= residentBytes || oldest === index)
-            {
-                break;
-            }
-            resident.delete(oldest);
-            held -= kept.length;
-        }
+        return kept.with(String(index), body=>{
+            put(body.subarray(from, to), into);
+            return true;
+        }, { wait: true }) === true;
     };
 
     /** @param {string} path */
@@ -115,8 +143,11 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
         },
 
         /**
-         * From resident pieces, each part handed to `put` where it lies, or a
+         * From the pieces kept, each part handed to `put` where it lies, or a
          * miss naming every piece of the range not here (nothing handed then).
+         * A piece let go of between the look and its read (another thread
+         * made room) leaves the parts before it handed; the caller fetches
+         * and reads the range again, handed the same bytes again.
          *
          * @param {string} path @param {number} offset @param {number} length
          * @param {import('./memory-store.js').Put} put
@@ -130,37 +161,36 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
             }
             const first = Math.floor(offset / PIECE_SIZE);
             const last = Math.floor((end - 1) / PIECE_SIZE);
+            /** @param {number} piece */
+            const missOf = piece=>{
+                const at = piece * PIECE_SIZE;
+                return { layer: SESSION_LAYER, index: number * PIECES_PER_FILE + piece,
+                    offset: at, packed: Math.min(PIECE_SIZE, file.size - at) };
+            };
             /** @type {{ layer: string, index: number, offset: number, packed: number }[]} */
             const missing = [];
             for (let piece = first; piece <= last; piece++)
             {
-                const index = number * PIECES_PER_FILE + piece;
-                const bytes = resident.get(index);
-                if (bytes)
+                if (!present(number * PIECES_PER_FILE + piece))
                 {
-                    // The most recently used now.
-                    resident.delete(index);
-                    resident.set(index, bytes);
-                    continue;
+                    missing.push(missOf(piece));
                 }
+            }
+            for (let piece = first; piece <= last && missing.length === 0; piece++)
+            {
                 const at = piece * PIECE_SIZE;
-                missing.push({ layer: SESSION_LAYER, index, offset: at,
-                    packed: Math.min(PIECE_SIZE, file.size - at) });
+                const from = Math.max(offset, at) - at;
+                const to = Math.min(end, at + PIECE_SIZE) - at;
+                if (!handOut(number * PIECES_PER_FILE + piece, from, to, put, at + from - offset))
+                {
+                    missing.push(missOf(piece));
+                }
             }
             if (missing.length > 0)
             {
                 throw Object.assign(new Error(
                     `${missing.length} piece(s) of "${path}" are not read from the session yet`),
                 { code: BLOCK_MISS, blocks: missing });
-            }
-            for (let piece = first; piece <= last; piece++)
-            {
-                const bytes = /** @type {Uint8Array} */ (
-                    resident.get(number * PIECES_PER_FILE + piece));
-                const at = piece * PIECE_SIZE;
-                const from = Math.max(offset, at) - at;
-                const to = Math.min(end, at + bytes.length) - at;
-                put(bytes.subarray(from, to), at + from - offset);
             }
             return end - offset;
         },
@@ -187,25 +217,49 @@ export function createSessionSource(files, { residentBytes = 32 << 20 } = {}){
         kept: path=>byPath.get(foldName(path))?.file ?? null,
 
         /**
-         * Reads the pieces a miss named. Each is kept once read.
+         * Reads the pieces a miss named. Each is kept once read, or held here
+         * where `kept` has no room for it.
          *
          * @param {{ index: number }[]} needed
          */
         async fetch(needed){
             counts.fetches++;
-            await Promise.all(needed.map(async({ index })=>{
-                const file = numbered[Math.floor(index / PIECES_PER_FILE)];
-                const at = (index % PIECES_PER_FILE) * PIECE_SIZE;
-                const bytes = await file.read(at, Math.min(PIECE_SIZE, file.size - at));
-                counts.pieces++;
-                counts.bytes += bytes.length;
-                keep(index, bytes);
-            }));
+            if (fetching === 0)
+            {
+                unkept.clear();
+                unkeptBytes = 0;
+            }
+            fetching++;
+            try
+            {
+                await Promise.all(needed.map(async({ index })=>{
+                    const file = numbered[Math.floor(index / PIECES_PER_FILE)];
+                    const at = (index % PIECES_PER_FILE) * PIECE_SIZE;
+                    const bytes = await file.read(at, Math.min(PIECE_SIZE, file.size - at));
+                    counts.pieces++;
+                    counts.bytes += bytes.length;
+                    if (!kept.put(String(index), bytes) && !unkept.has(index))
+                    {
+                        counts.unkept++;
+                        unkept.set(index, bytes);
+                        unkeptBytes += bytes.length;
+                    }
+                }));
+            }
+            finally
+            {
+                fetching--;
+            }
         },
 
-        /** What it holds of the heap, and what it has read. */
-        held: ()=>({ sessionPieces: held, sessionReads: counts.pieces,
-            sessionReadBytes: counts.bytes }),
+        /**
+         * What it holds of the heap itself: the pieces `kept` had no room for.
+         * Those kept are the cache's, counted there.
+         */
+        held: ()=>({ sessionUnkept: unkeptBytes }),
+
+        /** What it read of the session: fetches, pieces and their bytes, and those not kept. */
+        reads: ()=>({ ...counts }),
     };
     return source;
 }
