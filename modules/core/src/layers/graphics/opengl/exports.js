@@ -413,6 +413,8 @@ const LIST_TYPES = new Map([
  *           guest runs again: for the `*v` arguments a draw reads and
  *           consumes before its handler returns. Falls back to `readMemory`
  *           where absent.
+ * @property {() => Uint8Array | null} [sharedMemory]  the RAM over shared memory, byte 0
+ *     at address 0: a context's command ring read where it lies
  * @property {(address: number, count: number, into: Float32Array | number[]) => void}
  *           [readF32sInto]
  *           `count` floats decoded straight into `into`, with nothing else
@@ -744,6 +746,7 @@ export function createOpengl(services){
         };
         const reader = createCommandReader({
             block, ring, readWords,
+            shared: services.sharedMemory,
             readWord: address=>readWords(address, 1)[0],
             writeMemory: services.writeMemory,
             fillMemory: services.fillMemory,

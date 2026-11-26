@@ -57,6 +57,8 @@ const HELD_WAIT_MS = 200;
  * @property {(address: number, length: number) => Uint8Array} [windowMemory]
  *     The bytes themselves where the memory can hand them, valid until the
  *     guest runs again: the ring's records, read and made before it does.
+ * @property {() => Uint8Array | null} [sharedMemory]  the RAM over shared memory, byte 0 at
+ *     address 0: the ring read where it lies
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, value: number, length: number) => void} [fillMemory]
  *     A run of one byte value, with no buffer made for it: the command ring
@@ -120,6 +122,7 @@ export function createDeviceRing(deps){
         ring,
         bytes: ringBytes,
         readWord: memory.readU32,
+        shared: memory.sharedMemory,
         readWords: (address, words)=>{
             // The records where they lie: every call they hold is made before
             // the guest runs again and before the reader zeroes the ring, and

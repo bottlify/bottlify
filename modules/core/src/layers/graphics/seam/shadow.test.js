@@ -1151,6 +1151,126 @@ test('a ring started over keeps the record a routine on another executor took sp
         assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0);
     });
 
+test('with the RAM shared, a take reads the ring where it lies: no copy or window of the memory, '
+    + 'and the records handed on are the RAM\'s own bytes', ()=>{
+    // A window of the memory per word and per take (a view each, and a view
+    // of words over it) was the largest share of the engine's garbage in a
+    // menu of Doom 3.
+    const memory = new Uint8Array(new SharedArrayBuffer(0x20000));
+    const words = new DataView(memory.buffer);
+    const block = 0x1000;
+    const ring = 0x2000;
+    let reads = 0;
+    /** @type {Uint8Array[]} */
+    const handed = [];
+    const reader = createCommandReader({
+        block, ring,
+        shared: ()=>memory,
+        readWord: address=>{
+            reads++;
+            return words.getUint32(address, true);
+        },
+        readWords: (address, count)=>{
+            reads++;
+            return new Uint32Array(memory.buffer, address, count);
+        },
+        loadU32: address=>{
+            reads++;
+            return words.getUint32(address, true);
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        take: records=>{
+            handed.push(records);
+            return records.byteLength / 8;
+        },
+        refuse: detail=>assert.fail(detail),
+    });
+    let head = 0;
+    for (let turn = 0; turn < 50; turn++)
+    {
+        for (let n = 0; n < 4; n++, head += 8)
+        {
+            words.setUint32(ring + head + COMMAND.SLOT, turn, true);
+            words.setUint32(ring + head + COMMAND.BYTES, 8, true);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        reader.take();
+        reader.take();
+    }
+    assert.equal(reads, 0, 'nothing read through the memory\'s copy, window or word reads');
+    assert.equal(handed.length, 50, 'one hand-over a take that found records');
+    assert.ok(handed.every(records=>records.buffer === memory.buffer), 'the RAM\'s own bytes');
+    assert.equal(handed[49].byteOffset, ring + 49 * 32, 'where the records lie');
+    assert.equal(reader.queued(), 0);
+    assert.equal(reader.holds(word=>word === 7), false, 'nothing waits');
+    assert.equal(reads, 0, 'queued and holds read in place too');
+});
+
+test('a take in place and a take through the memory hand on the same records, start the ring '
+    + 'over alike and count alike, over seeded runs', ()=>{
+    for (let seed = 1; seed <= 20; seed++)
+    {
+        /** @type {{ records: number[][], heads: number[], taken: number, queued: number[] }[]} */
+        const seen = [];
+        for (const inPlace of [false, true])
+        {
+            const memory = new Uint8Array(new SharedArrayBuffer(0x20000));
+            const words = new DataView(memory.buffer);
+            const block = 0x1000;
+            const ring = 0x2000;
+            let state = seed;
+            const next = ()=>(state = (Math.imul(state, 1103515245) + 12345) >>> 0);
+            /** @type {number[][]} */
+            const records = [];
+            const reader = createCommandReader({
+                block, ring,
+                ...inPlace ? { shared: ()=>memory } : {},
+                readWord: address=>words.getUint32(address, true),
+                readWords: (address, count)=>new Uint32Array(memory.slice(address,
+                    address + count * 4).buffer),
+                writeMemory: (address, bytes)=>memory.set(bytes, address),
+                compareExchangeU32: (address, expected, value)=>{
+                    const held = words.getUint32(address, true);
+                    if (held === expected)
+                    {
+                        words.setUint32(address, value, true);
+                    }
+                    return held;
+                },
+                take: bytes=>{
+                    records.push([...new Uint32Array(bytes.slice().buffer)]);
+                    return bytes.byteLength >>> 3;
+                },
+                refuse: detail=>assert.fail(detail),
+            });
+            /** @type {number[]} */
+            const heads = [];
+            /** @type {number[]} */
+            const queued = [];
+            // Rounds enough to pass the point the ring starts over at, again and again.
+            for (let round = 0; round < 400; round++)
+            {
+                let head = words.getUint32(block + SHADOW.COMMAND_HEAD, true);
+                const count = next() % 30;
+                for (let n = 0; n < count && head + 16 <= COMMAND_RING_BYTES; n++)
+                {
+                    const length = next() % 2 === 0 ? 8 : 16;
+                    words.setUint32(ring + head + COMMAND.SLOT, next() & 0xffff, true);
+                    words.setUint32(ring + head + COMMAND.BYTES, length, true);
+                    head += length;
+                }
+                words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+                queued.push(reader.queued());
+                reader.take();
+                heads.push(words.getUint32(block + SHADOW.COMMAND_HEAD, true));
+            }
+            assert.ok(heads.includes(0), `seed ${seed}: started over`);
+            seen.push({ records, heads, taken: reader.taken(), queued });
+        }
+        assert.deepEqual(seen[1], seen[0], `seed ${seed}: in place as through the memory`);
+    }
+});
+
 test('a ring started over many times zeroes it from one buffer, made once', ()=>{
     // A buffer the length of what was read, made at every turn of the ring,
     // was the most garbage a frame of Direct3D made (767 MiB in a run).

@@ -717,6 +717,13 @@ export function createGraphicsModule(){
                     ? memory.window(address, length)
                     : memory.readBytes(address, length)),
                 /**
+                 * The RAM over shared memory, byte 0 at address 0, read and
+                 * written in place by any thread; null where it is not shared.
+                 *
+                 * @returns {Uint8Array | null}
+                 */
+                sharedMemory: ()=>memory.shared?.() ?? null,
+                /**
                  * Watches a range for writes: what a draw from a dynamic buffer
                  * compares is the pages written since its last look.
                  *
@@ -940,6 +947,8 @@ export function createGraphicsModule(){
                     waitUntil: config?.waitUntil,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
+                    // A context's command ring read where it lies.
+                    sharedMemory: services.sharedMemory,
                     readF32sInto: services.readF32sInto,
                     writeMemory: services.writeMemory,
                     screen: ()=>services.screen,
