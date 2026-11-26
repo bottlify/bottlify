@@ -271,24 +271,31 @@ test('what is held in memory stays within the bound being written; the rest are 
     }
 });
 
-test('once the cache has no room, a piece written again is held in memory alone, not beside its '
-    + 'body', async()=>{
-    const { keeper, space } = await pieceSpace(cacheSpace,
-        { budget: 2 * PIECE_SIZE, quota: PIECE_SIZE + 65536 });
+test('once the cache has no room, a piece written again is held once, and pieces go back to the '
+    + 'cache once it has room again', async()=>{
+    // No disk: the cache's memory is all it has, as a run with no folder.
+    const { keeper, space } = await pieceSpace(cacheSpace, { budget: 2 * PIECE_SIZE, disk: false });
     const pageFile = createPageFile(space, { workingBytes: PIECE_SIZE });
     const store = createPageFileStore(pageFile);
+    const held = ()=>keeper.under('pages/').bytes + pageFile.workingBytes();
     for (let index = 0; index < 6; index++)
     {
         store.write('big.bin', index * PIECE_SIZE, new Uint8Array(PIECE_SIZE).fill(index + 1));
     }
-    assert.ok(pageFile.diagnostics().failed);
+    assert.ok(pageFile.diagnostics().refused);
+    assert.equal(pageFile.diagnostics().stalled, true);
     for (let index = 0; index < 6; index++)
     {
         store.write('big.bin', index * PIECE_SIZE + 1, Uint8Array.of(9));
+        assert.equal(held(), 6 * PIECE_SIZE, `piece ${index} written again: held once`);
     }
-    const kept = keeper.under('pages/');
-    assert.equal(kept.bodies, 0, 'every piece in memory now, its body let go');
-    assert.equal(pageFile.workingBytes(), 6 * PIECE_SIZE);
+    // The file goes: its bodies with it, and the next file's pieces are put.
+    store.remove('big.bin');
+    store.write('next.bin', 0, new Uint8Array(3 * PIECE_SIZE).fill(5));
+    assert.equal(pageFile.workingBytes(), PIECE_SIZE, 'within the bound again');
+    assert.equal(keeper.under('pages/').bytes, 2 * PIECE_SIZE, 'the rest put in the cache');
+    assert.equal(pageFile.diagnostics().stalled, false);
+    assert.equal(store.read('next.bin', 2 * PIECE_SIZE + 3, 1)[0], 5);
 });
 
 test('a file removed lets its bodies go, and the cache holds nothing of it', async()=>{
@@ -350,7 +357,7 @@ test('a put the cache has no room for is said once, and what was written stays r
         store.write('big.bin', index * PIECE_SIZE, new Uint8Array(PIECE_SIZE).fill(index + 1));
     }
     assert.equal(said.length, 1);
-    assert.match(pageFile.diagnostics().failed ?? '', /no room/);
+    assert.match(pageFile.diagnostics().refused ?? '', /no room/);
     const before = pageFile.diagnostics().takenOut;
     for (let index = 0; index < 6; index++)
     {

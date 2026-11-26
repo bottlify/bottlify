@@ -69,16 +69,25 @@ const SMALLEST_PIECE = 4096;
 export const WORKING_BYTES = 8 * 1024 * 1024;
 
 /**
+ * Trims a cache that had no room skips before it tries to put again, nothing
+ * of this file let go of meanwhile: a refusal costs a look at the cache, and
+ * a trim follows every write.
+ */
+const RETRY_EVERY = 256;
+
+/**
  * A page file over `space`, holding at most `workingBytes` of pieces being
  * written in memory.
  *
- * A put the cache refuses -- no room left in it, its disk refusing too -- is
- * said once through `onFailure`, and from then on nothing more is put: the
- * pieces stay in memory, as they would in a store with no disk, and nothing
- * the program wrote is lost. A piece the cache sent to its disk is brought
- * back to be read; where its memory is all only copies its full disk will
- * not take, this file's own pieces in it are taken into memory and let go
- * of there, until it has room.
+ * A put the cache refuses -- no room left in it, its disk refusing too, or no
+ * disk -- is said once through `onFailure`: the pieces stay in memory, as
+ * they would in a store with no disk, and nothing the program wrote is lost.
+ * They are put again once the cache may have room: a body of this file let
+ * go of (a file deleted or cut, a piece brought in), or every
+ * `RETRY_EVERY` trims for room another space let go of. A piece the cache
+ * sent to its disk is brought back to be read; where its memory is all only
+ * copies its full disk will not take, this file's own pieces in it are taken
+ * into memory and let go of there, until it has room.
  *
  * @param {PieceSpace} space
  * @param {{ workingBytes?: number, onFailure?: (error: Error) => void,
@@ -97,8 +106,10 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
     /** The pieces the cache holds a body of, and their bytes. @type {Set<Piece>} */
     const kept = new Set();
     let keptBytes = 0;
-    /** @type {Error | null} */
-    let failed = null;
+    /** The cache's last refusal, said once. @type {Error | null} */
+    let refused = null;
+    /** Trims since the cache refused with nothing of this file let go of: none try to put. */
+    let stalled = -1;
     let closing = false;
     let closed = false;
     /** Contents handed out and not yet released, which keep the page file past `close`. */
@@ -113,14 +124,24 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
             piece.kept = false;
             kept.delete(piece);
             keptBytes -= piece.length;
+            stalled = -1;
+        }
+    };
+
+    /** The cache had no room: said the first time. */
+    const refuse = ()=>{
+        stalled = 0;
+        if (!refused)
+        {
+            refused = new Error('the run\'s cache has no room for what the program wrote');
+            onFailure?.(refused);
         }
     };
 
     /**
      * Takes one of this file's pieces the cache holds in memory into memory
      * of its own and lets its body go, for room to bring another back; false
-     * where none is left there. Nothing is put from then on: the cache has no
-     * room for it.
+     * where none is left there.
      */
     const takeOut = ()=>{
         for (const piece of kept)
@@ -142,11 +163,7 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
             working.add(piece);
             workingTotal += piece.length;
             counts.takenOut++;
-            if (!failed)
-            {
-                failed = new Error('the run\'s cache has no room for what the program wrote');
-                onFailure?.(failed);
-            }
+            refuse();
             return true;
         }
         return false;
@@ -157,19 +174,23 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
      * fit: each replaces the body it had there.
      */
     const trim = ()=>{
+        if (stalled >= 0 && ++stalled % RETRY_EVERY !== 0)
+        {
+            return;
+        }
         for (const piece of working)
         {
-            if (workingTotal <= workingBytes || failed)
+            if (workingTotal <= workingBytes)
             {
                 return;
             }
             const bytes = /** @type {Uint8Array} */ (piece.bytes);
             if (!space.put(piece.key, bytes))
             {
-                failed = new Error('the run\'s cache has no room for what the program wrote');
-                onFailure?.(failed);
+                refuse();
                 return;
             }
+            stalled = -1;
             if (!piece.kept)
             {
                 piece.kept = true;
@@ -340,7 +361,7 @@ export function createPageFile(space, { workingBytes = WORKING_BYTES, onFailure,
 
         diagnostics(){
             return {
-                ...failed ? { failed: failed.message } : {},
+                ...refused ? { refused: refused.message, stalled: stalled >= 0 } : {},
                 workingBytes: workingTotal,
                 workingPieces: working.size,
                 workingLimit: workingBytes,
