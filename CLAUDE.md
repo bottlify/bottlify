@@ -206,6 +206,11 @@ attribution are first-class.
   raw value and how many runs, the median and the spread, the noise floor, the browser, GPU, driver
   and power plan. A field not recorded is written `not recorded`, never reconstructed. A number is
   a share of something: say of what.
+- **Moving a store under Cellar is not an optimisation.** Every byte the machine holds lives in
+  one store under our control (hot in Cellar, cold on OPFS: one budget, one eviction, one report,
+  read in place); a private heap, buffer or LRU is outside it. Such a move is done for that, its
+  cost measured and said, and is never judged by whether RSS drops nor written down as a negative
+  result.
 - **What did not pay is kept.** An idea measured without a positive signal goes into
   [`roadmap/negative-results.md`](roadmap/negative-results.md) as one dated line: the idea, one
   number with its conditions, its status, and when it is worth trying again; the full write-up is
