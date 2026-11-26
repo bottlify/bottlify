@@ -31,18 +31,20 @@ export const SLOTS = 1024;
 /** A frame's record: its time. */
 const RECORD = 8;
 
+/** @param {DataView} record */
+const timeOf = record=>record.getFloat64(0, true);
+
 /** A clock to tick: its buffer goes to whoever reads it. */
 export function createFrameClock(){
     // The newest SLOTS - 1 times are read, as the ring before kept them; their
     // records (16 bytes with a journal's header) fill SLOTS * 16 bytes.
     const memory = createJournalMemory({ records: SLOTS - 1, bytes: SLOTS * 16 });
     const journal = openJournal(memory);
-    const times = new DataView(memory.buffer);
     return {
         buffer: /** @type {SharedArrayBuffer} */ (memory.buffer),
         /** @param {number} at when the frame was put on the canvas */
         tick(at){
-            times.setFloat64(journal.reserve(RECORD), at, true);
+            journal.draft(RECORD).setFloat64(0, at, true);
             journal.commit();
         },
         /** Frames shown so far. */
@@ -61,20 +63,15 @@ export function createFrameClock(){
  */
 export function readFrameClock(buffer, since = 0){
     const journal = openJournal({ buffer });
-    const view = new DataView(buffer);
     const count = journal.written();
     const from = Math.max(since, journal.oldest());
     const times = [];
     for (let n = from; n < count; n++)
     {
-        const at = journal.find(n);
-        if (at >= 0)
+        const time = journal.read(n, timeOf);
+        if (time !== undefined)
         {
-            const time = view.getFloat64(at, true);
-            if (journal.intact())
-            {
-                times.push(time);
-            }
+            times.push(time);
         }
     }
     return { count, times };

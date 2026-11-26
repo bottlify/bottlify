@@ -129,7 +129,6 @@ const align = (value, to)=>Math.ceil(value / to) * to;
  */
 export function createJournalWriter(memory){
     const { journal, dictControl, dictView, dictBytes } = memory;
-    const view = new DataView(journal.bytes.buffer);
     /** @type {Map<string, number>} */
     const interned = new Map();
     let dictHead = 0;
@@ -208,7 +207,7 @@ export function createJournalWriter(memory){
             {
                 length += stringBytes(message);
             }
-            // Sized before it is reserved: a record is whole in the journal.
+            // Sized before it is drafted: a record is whole in the journal.
             // Anything that is not a number travels as the string it prints
             // as, which is what the reader would have made of it anyway.
             const arg0 = argc > 0 ? asValue(a) : 0;
@@ -224,32 +223,32 @@ export function createJournalWriter(memory){
                 oversized++;
                 return -1;
             }
-            let at = journal.reserve(length);
-            view.setFloat64(at, time, true);
-            view.setUint8(at + 8, level);
-            view.setUint8(at + 9, argc);
-            view.setUint16(at + 10, Math.min(topic, 0xffff), true);
-            view.setUint32(at + 12, template < 0 ? INLINE_TEMPLATE : template, true);
-            at += RECORD_HEADER;
+            const view = journal.draft(length);
+            view.setFloat64(0, time, true);
+            view.setUint8(8, level);
+            view.setUint8(9, argc);
+            view.setUint16(10, Math.min(topic, 0xffff), true);
+            view.setUint32(12, template < 0 ? INLINE_TEMPLATE : template, true);
+            let at = RECORD_HEADER;
             if (template < 0)
             {
                 at += putString(view, at, message, STRING_UNITS);
             }
             if (argc > 0)
             {
-                at += putValue(at, arg0);
+                at += putValue(view, at, arg0);
             }
             if (argc > 1)
             {
-                at += putValue(at, arg1);
+                at += putValue(view, at, arg1);
             }
             if (argc > 2)
             {
-                at += putValue(at, arg2);
+                at += putValue(view, at, arg2);
             }
             if (argc > 3)
             {
-                putValue(at, arg3);
+                putValue(view, at, arg3);
             }
             return journal.commit();
         },
@@ -259,8 +258,11 @@ export function createJournalWriter(memory){
         refused: ()=>Atomics.load(dictControl, DICT_REFUSED),
     };
 
-    /** @param {number} at @param {number | string} value @returns {number} bytes */
-    function putValue(at, value){
+    /**
+     * @param {DataView} view @param {number} at @param {number | string} value
+     * @returns {number} bytes
+     */
+    function putValue(view, at, value){
         if (typeof value === 'number')
         {
             view.setUint32(at, TAG_NUMBER, true);
@@ -307,6 +309,62 @@ const getString = (view, at, limit)=>{
 };
 
 /**
+ * A record from the copy the journal hands a reader, whole by then; null
+ * where its bytes do not say a record (a string longer than any written).
+ *
+ * @param {DataView} view @param {number} length
+ * @returns {DecodedRecord | null}
+ */
+function decode(view, length){
+    if (length < RECORD_HEADER)
+    {
+        return null;
+    }
+    const record = {
+        sequence: 0,
+        time: view.getFloat64(0, true),
+        level: view.getUint8(8),
+        topic: view.getUint16(10, true),
+        template: view.getUint32(12, true),
+        inline: '',
+        /** @type {(number | string)[]} */
+        args: [],
+    };
+    const argc = view.getUint8(9);
+    let at = RECORD_HEADER;
+    if (record.template === INLINE_TEMPLATE)
+    {
+        const text = getString(view, at, STRING_UNITS);
+        if (text === null)
+        {
+            return null;
+        }
+        record.inline = text;
+        at += align(4 + text.length * 2, 4);
+    }
+    for (let i = 0; i < argc && at + 4 <= length; i++)
+    {
+        const tag = view.getUint32(at, true);
+        if (tag === TAG_NUMBER)
+        {
+            record.args.push(view.getFloat64(at + 4, true));
+            at += 12;
+        }
+        else
+        {
+            const text = getString(view, at + 4, STRING_UNITS);
+            if (text === null)
+            {
+                return null;
+            }
+            record.args.push(text);
+            at += 4 + align(4 + text.length * 2, 4);
+        }
+    }
+    return record;
+}
+
+/**
  * A reader's view of the journal: the dictionary as it grows, and the
  * records by sequence. Stateless apart from the dictionary cache, so any
  * number of these can read one journal; what each has and has not seen is
@@ -316,7 +374,6 @@ const getString = (view, at, limit)=>{
  */
 export function createJournalCursor(memory){
     const { journal, dictControl, dictView } = memory;
-    const view = new DataView(journal.bytes.buffer);
     /** @type {string[]} */
     const words = [];
     let dictRead = 0;
@@ -361,60 +418,13 @@ export function createJournalCursor(memory){
          * @returns {DecodedRecord | null}
          */
         read(sequence){
-            const base = journal.find(sequence);
-            if (base < 0)
+            const record = journal.read(sequence, decode);
+            if (!record)
             {
                 return null;
             }
-            const length = journal.lengthAt(base);
-            if (length < RECORD_HEADER)
-            {
-                return null;
-            }
-            const record = {
-                sequence: sequence >>> 0,
-                time: view.getFloat64(base, true),
-                level: view.getUint8(base + 8),
-                topic: view.getUint16(base + 10, true),
-                template: view.getUint32(base + 12, true),
-                inline: '',
-                /** @type {(number | string)[]} */
-                args: [],
-            };
-            const argc = view.getUint8(base + 9);
-            const end = base + length;
-            let at = base + RECORD_HEADER;
-            if (record.template === INLINE_TEMPLATE)
-            {
-                const text = getString(view, at, STRING_UNITS);
-                if (text === null)
-                {
-                    return null;
-                }
-                record.inline = text;
-                at += align(4 + text.length * 2, 4);
-            }
-            for (let i = 0; i < argc && at + 4 <= end; i++)
-            {
-                const tag = view.getUint32(at, true);
-                if (tag === TAG_NUMBER)
-                {
-                    record.args.push(view.getFloat64(at + 4, true));
-                    at += 12;
-                }
-                else
-                {
-                    const text = getString(view, at + 4, STRING_UNITS);
-                    if (text === null)
-                    {
-                        return null;
-                    }
-                    record.args.push(text);
-                    at += 4 + align(4 + text.length * 2, 4);
-                }
-            }
-            // Decoded where it lies: good only if the writer reached none of it.
-            return journal.intact() ? record : null;
+            record.sequence = sequence >>> 0;
+            return record;
         },
     };
 }

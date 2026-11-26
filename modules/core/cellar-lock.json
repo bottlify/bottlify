@@ -1,18 +1,18 @@
 {
   "repo": "bottlify/cellar",
-  "tag": "v0.11.0",
+  "tag": "v0.12.1",
   "files": {
-    "cellar.js": "67a30c28391f58efe2fca6dd0ec1f9ebed3d6f9240f873567306e4ddb40f892e",
-    "types/bell.d.ts": "7f32db0ccc7969a36ea672d8ed472c760874c6207c4688d318ef37ff6900eb0b",
-    "types/buddy.d.ts": "12799e4e9fca4a89aa19ae6e32668a2420c7d9365b1342f473a1eb54871c8eec",
+    "cellar.js": "1299c509d5961db73e2747ae3cc3e2c0bd59f69889cef594dc81447d10678bef",
+    "types/bell.d.ts": "60ebc970b10e7b7524ee56f6048c524b2987fd4f648aea8de6669082a77b76b5",
+    "types/buddy.d.ts": "88357935ddfe26024fc2b7c9a6a9b62500027fccdef98b1b81b43ff46aff7a26",
     "types/bytes.d.ts": "fd87a8ca6bcb4e80876d8e1bf303fd6ea7dcf215ffff5a653c825fdc70e09a13",
-    "types/channel.d.ts": "16b0d982fa0766ee4394261f577c48d33b8df87b05a1800ac3979f85fe2dc7f4",
-    "types/index-file.d.ts": "c50de325c8ad1c98d01cb447717e3dffd2807a265d8eed9c7ec44f53c0954e95",
+    "types/channel.d.ts": "63abb7d92b74f27002b980a52e31b1828cc364daa103de877a2ef572b097f2e1",
+    "types/index-file.d.ts": "57c39cff3f7108ac9566ceda545e8f6c552213852c9edc8c2adc7fe488a3921a",
     "types/index.d.ts": "730e4157279447bd1ee84ed987469c772b7994af091393b2480b1221d7ca144d",
-    "types/journal.d.ts": "704f70df01b2ca8314194342233a69a6e9f559b69b3ccd7cd4962e737f37da7e",
-    "types/keeper.d.ts": "8add1e0907d1641682a3abf4c669780ad7ddbe08a8433c02fdd0a598d0d2692b",
-    "types/reader.d.ts": "196250c35c552dcdb6dabd03f46e49ba519dd6ca3c7c5471204de477529fbce0",
-    "types/ring.d.ts": "d00a700de809e88579e074b058bde401af05345d8bafe1d89c0cb3d5f41c11c9",
-    "types/shared.d.ts": "37dfc8e4233e7be1e8e98fa7a956c93c1a0e0400aa87e01a6605e9f2c7cb1520"
+    "types/journal.d.ts": "ffd55260dbdf245bfb52009e6d0b24393b123f42ca6478d1b1b258aceea7dd78",
+    "types/keeper.d.ts": "c1735b1d31859052cc57a0a6a9812a6586d3795104ad9b6db284e1339f7e467a",
+    "types/reader.d.ts": "67fd744a0622628a79cd572f96f7e50944fefd3193e3c3aa4a3ee0cc70adb68f",
+    "types/ring.d.ts": "21082efcf58422f4fbf31a1fb700fd0c20e76ce79a5d78d2fa005fe901d0ed3c",
+    "types/shared.d.ts": "eb846379054d986434f5d0ef296088cc95e2f385faff4e99ab01a717d227014e"
   }
 }

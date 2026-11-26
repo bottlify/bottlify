@@ -196,7 +196,7 @@ export async function createBlockCache(options){
     catch (e){
         // A store that will not open is a slower run, not a failed one: a
         // thread with no synchronous handle (a page's own), another tab
-        // holding the bundle's files.
+        // holding the bundle's files, an index file the disk failed to read.
         reason = /** @type {Error} */ (e).message;
         disk = null;
         keeper = await open(null);
