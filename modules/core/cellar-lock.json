@@ -1,8 +1,8 @@
 {
   "repo": "bottlify/cellar",
-  "tag": "v0.12.1",
+  "tag": "v0.12.2",
   "files": {
-    "cellar.js": "1299c509d5961db73e2747ae3cc3e2c0bd59f69889cef594dc81447d10678bef",
+    "cellar.js": "03df9a3fcc4bc1d1848341a44ee190291960720a19b41845782daf6536eb179e",
     "types/bell.d.ts": "60ebc970b10e7b7524ee56f6048c524b2987fd4f648aea8de6669082a77b76b5",
     "types/buddy.d.ts": "88357935ddfe26024fc2b7c9a6a9b62500027fccdef98b1b81b43ff46aff7a26",
     "types/bytes.d.ts": "fd87a8ca6bcb4e80876d8e1bf303fd6ea7dcf215ffff5a653c825fdc70e09a13",
