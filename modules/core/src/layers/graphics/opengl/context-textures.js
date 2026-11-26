@@ -1787,6 +1787,21 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
+     * A read-back answered from this side's bytes of a level whose content
+     * the device holds alone (let go once uploaded, or written there) does
+     * not answer what the device holds: a loss, said.
+     *
+     * @param {import('./objects.js').TextureLevel} stored
+     */
+    function readsOwn(stored){
+        if (kernel.gpuBacked() && kernel.deviceHolds?.(stored))
+        {
+            lose('glGetTexImage of a level the device holds alone answered this side\'s bytes'
+                + ' of it, zeros where they were let go');
+        }
+    }
+
+    /**
      * A rectangle of the processor's framebuffer written into a sized level's
      * slice: read as RGBA bytes, then kept as the level's format keeps them.
      *
@@ -2489,12 +2504,18 @@ export function installTextureCalls(context, kernel){
         // device takes no blocks, and not kept: decoded, a level holds four to
         // eight times its blocks for as long as the texture lives (the Doom 3
         // demo's first level, 47 MB of blocks). A processor's rasteriser reads
-        // them every draw and keeps them.
+        // them every draw and keeps them. The blocks are read from the level,
+        // not held apart: the drawing side may move them into the run's cache
+        // while no draw needs them (`gpu.js` `spill`).
         /** @type {Uint8Array | null | undefined} */
         let decoded;
-        const decode = ()=>(kept && width > 0 && height > 0
-            ? decodeS3tc(kept, internal, width, height) : null);
-        return {
+        const decode = ()=>{
+            const blocks = level.compressed?.bytes;
+            return blocks && width > 0 && height > 0
+                ? decodeS3tc(blocks, internal, width, height) : null;
+        };
+        /** @type {import('./objects.js').TextureLevel} */
+        const level = {
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
             get texels(){
@@ -2509,6 +2530,7 @@ export function installTextureCalls(context, kernel){
             compressedBytes: compressedBytes(internal, width, height),
             compressed: kept ? { format: internal, bytes: kept } : null,
         };
+        return level;
     }
 
     /**
@@ -4431,6 +4453,7 @@ export function installTextureCalls(context, kernel){
                     diverge('glGetTexImage was accepted and read zeros: the texels live with'
                         + ' the context that draws, in the graphics worker, and are not read back');
                 }
+                readsOwn(stored);
                 const packed = stored.sized ? packSized(stored, format, type)
                     : checkTransfer(RGBA8, format, type)
                         ? packFromStorage(readBack(stored), stored.width, stored.height, 1,
@@ -4452,6 +4475,7 @@ export function installTextureCalls(context, kernel){
                 diverge('glGetTexImage was accepted and read black: the texels live with'
                     + ' the context that draws, in the graphics worker, and are not read back');
             }
+            readsOwn(stored);
             return readBack(stored);
         },
 

@@ -38,9 +38,10 @@ flowchart TB
   cross by number and are described again when they change. A renderer on the engine thread reads
   the bytes at those same moments, so the picture comes out the same wherever Direct3D draws.
 - **Texels no draw has needed.** An OpenGL level's texels are the device's once a draw uploads
-  them. Until then the graphics thread moves them, about once a second, into the run's cache
-  (Cellar, `opengl/gpu.js` `spill`), which takes idle bodies to the disk. The first reader of
-  the level (a draw, a write in place, a read-back) takes them back as they were. A game loads
+  them. Until then the graphics thread moves them, and the blocks of a level kept as S3TC, about
+  once a second into the run's cache (Cellar, `opengl/gpu.js` `spill`), which takes idle bodies
+  to the disk; nothing on the graphics thread holds them meanwhile. The first reader of the level
+  (a draw, a decode, a write in place, a read-back) takes them back as they were. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of
   2132 textures held 88.5 MB this way.
 - **The Direct3D 8 and 9 command ring.** A program sets states, transforms and textures hundreds

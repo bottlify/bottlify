@@ -65,6 +65,11 @@
  *           glCopyImageSubData on the device: true when the device copies the
  *           box itself (both images live there in one format), false when the
  *           copy is to be made from this side's bytes and uploaded.
+ * @property {((level: import('./objects.js').TextureLevel) => boolean) | null} [deviceHolds]
+ *           Whether a level's content lives on the device alone (its bytes here
+ *           let go once uploaded, or written there): a read-back from this
+ *           side's bytes would not answer it. Null in a build that draws on the
+ *           processor.
  * @property {((texture: import('./objects.js').TextureObject, face?: number) => void)
  *             | null} [generateMipmap]
  *           the levels below the base level made on the device from it, of

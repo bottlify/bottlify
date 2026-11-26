@@ -128,8 +128,8 @@ const BOUND_TARGETS = Object.freeze({
 /** @type {readonly UniformBlockBinding[]} */
 const NO_BLOCKS = Object.freeze([]);
 
-/** Bytes of a level's texels below which it is not moved into the run's cache (`spill`): a
- * name and a record there cost more than a small level's bytes. */
+/** Bytes of a level's texels or blocks below which they are not moved into the run's cache
+ * (`spill`): a name and a record there cost more than a small level's bytes. */
 const SPILL_FROM = 16 * 1024;
 
 /** The formats every drawable is backed by. */
@@ -530,37 +530,125 @@ export function createGpuRenderer(services){
     const liveDump = services.liveDump ?? null;
     /** The run's cache, where texels no draw has needed yet wait (`spill`). */
     const texelCache = services.texelCache ?? null;
-    /** Levels asked room for and not written yet. @type {WeakSet<object>} */
-    const spilling = new WeakSet();
-    /** The cache name a spilled level's texels wait under. @type {WeakMap<object, string>} */
-    const spilledAs = new WeakMap();
+    /**
+     * What of a level can wait in the run's cache (`spill`): its texels, and
+     * the blocks of an S3TC level kept compressed (a device without them
+     * decodes them at the upload). `bytesOf` names the bytes a value holds and
+     * `made` makes the value again from them; `spilling` holds the levels asked
+     * room for and not written yet, `names` the cache name a spilled level's
+     * bytes wait under.
+     *
+     * @typedef {{ property: 'texels' | 'compressed',
+     *     bytesOf: (value: any) => Uint8Array | null,
+     *     made: (bytes: Uint8Array, format: number) => any, spilling: WeakSet<object>,
+     *     names: WeakMap<object, string> }} Spillable
+     */
+    /** @type {readonly Spillable[]} */
+    const spillable = [
+        { property: 'texels', bytesOf: value=>(value instanceof Uint8Array ? value : null),
+            made: bytes=>bytes, spilling: new WeakSet(), names: new WeakMap() },
+        { property: 'compressed',
+            bytesOf: value=>(value?.bytes instanceof Uint8Array ? value.bytes : null),
+            made: (bytes, format)=>({ format, bytes }), spilling: new WeakSet(),
+            names: new WeakMap() },
+    ];
     let spillNames = 0;
-    const spills = { levels: 0, bytes: 0, back: 0, backBytes: 0, refused: 0, lost: 0 };
-    /** @param {object} image @param {Uint8Array | null} value */
-    const plain = (image, value)=>Object.defineProperty(image, 'texels',
+    const spills = { levels: 0, bytes: 0, blockBytes: 0, back: 0, backBytes: 0, refused: 0,
+        lost: 0 };
+    /** @param {object} image @param {string} property @param {any} value */
+    const plain = (image, property, value)=>Object.defineProperty(image, property,
         { value, writable: true, configurable: true, enumerable: true });
     /**
-     * A spilled level's texels back from the cache, the level plain again:
+     * A level whose bytes of one kind wait in the run's cache under `name`:
+     * the property reads them back (`takeBack`) and a write over it drops them.
+     * Made apart from `spillLevel`, so its accessors hold no reference to the
+     * bytes they let go of.
+     *
+     * @param {Spillable} kind @param {object} image @param {string} name
+     * @param {number} length @param {number} format  an S3TC level's format
+     */
+    const waiting = (kind, image, name, length, format)=>{
+        kind.names.set(image, name);
+        Object.defineProperty(image, kind.property, {
+            configurable: true, enumerable: true,
+            get(){
+                return takeBack(kind, image, name, length, format);
+            },
+            set(value){
+                plain(image, kind.property, value);
+                kind.names.delete(image);
+                texelCache?.space.drop(name);
+            },
+        });
+    };
+    /**
+     * A spilled level's bytes back from the cache, the level plain again:
      * brought back from the disk first where they went there.
      *
-     * @param {object} image @param {string} name @param {number} length
+     * @param {Spillable} kind @param {object} image @param {string} name
+     * @param {number} length @param {number} format
      */
-    const takeBack = (image, name, length)=>{
-        const body = texelCache?.space.with(name, (/** @type {Uint8Array} */ bytes)=>bytes.slice(), { wait: true });
-        let texels = body ?? null;
-        if (texels === null)
+    const takeBack = (kind, image, name, length, format)=>{
+        let bytes = texelCache?.space.with(name, (/** @type {Uint8Array} */ body)=>body.slice(),
+            { wait: true }) ?? null;
+        if (bytes === null)
         {
             spills.lost++;
             services.divergence?.('a texture\'s texels kept in the run\'s cache could not be read'
                 + ' back: it draws blank', 'loss');
-            texels = new Uint8Array(length);
+            bytes = new Uint8Array(length);
         }
-        plain(image, texels);
-        spilledAs.delete(image);
+        const value = kind.made(bytes, format);
+        plain(image, kind.property, value);
+        kind.names.delete(image);
         texelCache?.space.drop(name);
         spills.back++;
         spills.backBytes += length;
-        return texels;
+        return value;
+    };
+    /**
+     * One level's bytes of one kind moved into the run's cache (`spill`), if
+     * they are a plain value large enough: room is asked for without waiting,
+     * and a level changed or drawn meanwhile keeps its own.
+     *
+     * @param {Spillable} kind @param {any} texture @param {object} image
+     */
+    const spillLevel = (kind, texture, image)=>{
+        const held = Object.getOwnPropertyDescriptor(image, kind.property);
+        const was = held && 'value' in held ? held.value : null;
+        const bytes = kind.bytesOf(was);
+        if (texelCache === null || bytes === null || bytes.byteLength < SPILL_FROM
+            || kind.spilling.has(image))
+        {
+            return;
+        }
+        const cache = texelCache;
+        kind.spilling.add(image);
+        const name = String(++spillNames);
+        cache.ask(name, bytes.byteLength).then((/** @type {boolean} */ granted)=>{
+            kind.spilling.delete(image);
+            if (!granted)
+            {
+                spills.refused++;
+                return;
+            }
+            // Granted room is taken whatever happened since, so it is not
+            // left half made; a level changed or drawn since keeps its own.
+            cache.put(name, bytes);
+            const now = Object.getOwnPropertyDescriptor(image, kind.property);
+            if (now?.value !== was || textures.has(texture))
+            {
+                cache.space.drop(name);
+                return;
+            }
+            spills.levels++;
+            spills.bytes += bytes.byteLength;
+            spills.blockBytes += kind.property === 'compressed' ? bytes.byteLength : 0;
+            waiting(kind, image, name, bytes.byteLength, was?.format ?? 0);
+        }, ()=>{
+            kind.spilling.delete(image);
+            spills.refused++;
+        });
     };
     // Whether this frame is written down, and which textures' draws it drops:
     // what the run asked at its start, or what a page asked of the running
@@ -713,9 +801,10 @@ export function createGpuRenderer(services){
     const stats = {
         frames: 0, pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0,
         refused: 0, skipped: 0, cut: 0,
-        // Texels let go once on the device, in bytes, and levels carried from
-        // a texture's old copy to the one that replaced it (`textureFor`).
-        letGo: 0, carried: 0, imageCopies: 0,
+        // Texels and S3TC blocks let go once on the device, in bytes, and
+        // levels carried from a texture's old copy to the one that replaced
+        // it (`textureFor`).
+        letGo: 0, blocksLetGo: 0, carried: 0, imageCopies: 0,
         // Compressed levels a device without their blocks took decoded: the
         // blocks' bytes and the texels' they were uploaded as.
         decoded: { levels: 0, blockBytes: 0, texelBytes: 0 },
@@ -2044,20 +2133,32 @@ export function createGpuRenderer(services){
         // rectangle written later goes up alone, from texels made for it, and
         // a copy made again in another shape takes the level from the one it
         // replaces. A level past the chain was never uploaded and keeps its
-        // own; one decoded from blocks never held any. A run that dumps or
-        // probes its draws from its start keeps them for the dump's census.
+        // own. One decoded from S3TC blocks never held texels, and its blocks
+        // go the same way (the Doom 3 demo's drawn textures: 18 MB): the
+        // device holds what they decode to. A run that dumps or probes its
+        // draws from its start keeps them for the dump's census.
         if (!bcFormat && !fixedDump && probeSpec === null)
         {
             for (const [key, image] of texture.levels)
             {
                 const level = key % FACE_STRIDE;
                 const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
-                if (level < levels && texels)
+                const blocks = Object.getOwnPropertyDescriptor(image, 'compressed')?.value;
+                if (level >= levels || !texels && !blocks)
+                {
+                    continue;
+                }
+                if (texels)
                 {
                     stats.letGo += texels.byteLength;
                     image.texels = null;
-                    releasedLevels.add(image);
                 }
+                if (blocks)
+                {
+                    stats.blocksLetGo += blocks.bytes.byteLength;
+                    image.compressed = null;
+                }
+                releasedLevels.add(image);
             }
         }
         return record;
@@ -5659,6 +5760,15 @@ export function createGpuRenderer(services){
         copyImage,
 
         /**
+         * Whether a level's content is the device's alone: its texels or
+         * blocks let go once uploaded, or the level drawn or copied into
+         * there. What this side holds of it is not what a read-back answers.
+         *
+         * @param {object} level @returns {boolean}
+         */
+        deviceHolds: level=>releasedLevels.has(level),
+
+        /**
          * The frame recorded since the last swap is replayed and shown; the
          * next one draws into the other colour surface.
          *
@@ -5949,11 +6059,12 @@ export function createGpuRenderer(services){
         settled: ()=>chain,
 
         /**
-         * The texels of the given textures that no draw has needed, moved into
-         * the run's cache: a level waits there under a name, and its first
-         * reader takes it back as it was (the property reads it and is a plain
-         * array again), so a write into it in place, an upload or a read-back
-         * meets the same bytes. Room is asked for without waiting; a level
+         * The texels of the given textures that no draw has needed, and the
+         * blocks of those kept compressed, moved into the run's cache: a
+         * level's bytes wait there under a name, and their first reader takes
+         * them back as they were (the property reads them and is a plain value
+         * again), so a write into the level in place, a decode, an upload or a
+         * read-back meets the same bytes. Room is asked for without waiting; a level
          * changed meanwhile stays here. Small levels stay: a name costs more.
          *
          * @param {Iterable<any>} all
@@ -5971,49 +6082,10 @@ export function createGpuRenderer(services){
                 }
                 for (const image of texture.levels?.values() ?? [])
                 {
-                    const held = Object.getOwnPropertyDescriptor(image, 'texels');
-                    const texels = held && 'value' in held ? held.value : null;
-                    if (!(texels instanceof Uint8Array) || texels.byteLength < SPILL_FROM
-                        || spilling.has(image))
+                    for (const kind of spillable)
                     {
-                        continue;
+                        spillLevel(kind, texture, image);
                     }
-                    spilling.add(image);
-                    const name = String(++spillNames);
-                    texelCache.ask(name, texels.byteLength).then((/** @type {boolean} */ granted)=>{
-                        spilling.delete(image);
-                        if (!granted)
-                        {
-                            spills.refused++;
-                            return;
-                        }
-                        // Granted room is taken whatever happened since, so it is not
-                        // left half made; a level changed or drawn since keeps its own.
-                        texelCache.put(name, texels);
-                        const now = Object.getOwnPropertyDescriptor(image, 'texels');
-                        if (now?.value !== texels || textures.has(texture))
-                        {
-                            texelCache.space.drop(name);
-                            return;
-                        }
-                        spilledAs.set(image, name);
-                        spills.levels++;
-                        spills.bytes += texels.byteLength;
-                        Object.defineProperty(image, 'texels', {
-                            configurable: true, enumerable: true,
-                            get(){
-                                return takeBack(image, name, texels.byteLength);
-                            },
-                            set(value){
-                                plain(image, value);
-                                spilledAs.delete(image);
-                                texelCache.space.drop(name);
-                            },
-                        });
-                    }, ()=>{
-                        spilling.delete(image);
-                        spills.refused++;
-                    });
                 }
             }
         },
@@ -6022,13 +6094,14 @@ export function createGpuRenderer(services){
          * What the given textures' levels hold of texels and blocks here, by
          * why: a texture never drawn (no copy on the device yet), a level past
          * what its device copy took, and the rest (a dump or probe keeping
-         * them, compressed blocks kept for a device without them).
+         * them), and the compressed blocks kept, those of undrawn textures
+         * apart. Read without taking anything back from the run's cache.
          *
          * @param {Iterable<any>} all
          */
         heldTexels(all){
             const held = { textures: 0, undrawn: 0, undrawnBytes: 0, pastChainBytes: 0,
-                keptBytes: 0, blockBytes: 0, cachedLevels: 0 };
+                keptBytes: 0, blockBytes: 0, undrawnBlockBytes: 0, cachedLevels: 0 };
             for (const texture of all)
             {
                 held.textures++;
@@ -6037,8 +6110,11 @@ export function createGpuRenderer(services){
                 {
                     const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
                     const bytes = texels?.byteLength ?? 0;
-                    held.blockBytes += image.compressed?.bytes?.byteLength ?? 0;
-                    if (spilledAs.has(image))
+                    const blocks = Object.getOwnPropertyDescriptor(image, 'compressed')?.value
+                        ?.bytes?.byteLength ?? 0;
+                    held.blockBytes += blocks;
+                    held.undrawnBlockBytes += copy === undefined ? blocks : 0;
+                    if (spillable.some(kind=>kind.names.has(image)))
                     {
                         held.cachedLevels++;
                     }
@@ -6066,7 +6142,7 @@ export function createGpuRenderer(services){
 
         diagnostics: ()=>({
             ...stats,
-            // Texels moved into the run's cache while undrawn, and taken back.
+            // Texels and blocks moved into the run's cache while undrawn, and taken back.
             spills: texelCache === null ? 'no cache' : { ...spills },
             resident: pipelines.size,
             samplers: samplers.size,

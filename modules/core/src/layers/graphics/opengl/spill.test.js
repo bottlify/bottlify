@@ -21,6 +21,8 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { openRunCache } from '../../../process/run-cache.js';
 import { channelSpace } from '../../cache/module.js';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -34,6 +36,13 @@ function random(seed){
 }
 
 const turn = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+
+/** The side of the textures kept as S3TC blocks: large enough to be spilled. */
+const BLOCKS_SIZE = 256;
+/** A texture's kind by a seeded draw: RGBA texels, or blocks of DXT1 or DXT5. */
+const S3TC = [null,
+    { format: GL.COMPRESSED_RGB_S3TC_DXT1_EXT, bytes: BLOCKS_SIZE * BLOCKS_SIZE / 2 },
+    { format: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, bytes: BLOCKS_SIZE * BLOCKS_SIZE }];
 
 /**
  * One run of a seeded program: what the device was given, and the renderer's
@@ -67,6 +76,15 @@ async function run(seed, cached){
     {
         gl.glBindTexture(GL.TEXTURE_2D, name);
         gl.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+        // Some kept as S3TC blocks, which wait in the cache in their place.
+        const blocks = S3TC[next() % 3];
+        if (blocks)
+        {
+            const bytes = new Uint8Array(blocks.bytes).map(()=>next() & 0xff);
+            gl.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, blocks.format, BLOCKS_SIZE,
+                BLOCKS_SIZE, 0, bytes.length, bytes);
+            continue;
+        }
         const bytes = new Uint8Array(size * size * 4).map(()=>next() & 0xff);
         gl.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, size, size, 0, GL.RGBA, GL.UNSIGNED_BYTE, bytes);
     }
@@ -81,9 +99,21 @@ async function run(seed, cached){
         assert.equal(/** @type {any} */ (renderer.diagnostics()).spills.levels, count, 'every undrawn level moved');
         const held = renderer.heldTexels(all());
         assert.equal(held.undrawnBytes, 0, 'none of their texels left on this thread');
+        assert.equal(held.undrawnBlockBytes, 0, 'none of their blocks left on this thread');
         assert.equal(held.cachedLevels, count);
     }
     gl.glEnable(GL.TEXTURE_2D);
+    /** What a read-back of a level before its first draw answered, on some. */
+    const readBacks = [];
+    for (const name of names)
+    {
+        gl.glBindTexture(GL.TEXTURE_2D, name);
+        if (next() % 2 === 0)
+        {
+            const read = gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
+            readBacks.push([...(read?.packed ?? read ?? [])].join(','));
+        }
+    }
     for (const name of names)
     {
         gl.glBindTexture(GL.TEXTURE_2D, name);
@@ -116,21 +146,88 @@ async function run(seed, cached){
     const left = runCache?.figures().hot ?? 0;
     runCache?.close();
     texels?.close();
-    return { uploads, figures, left };
+    return { uploads, readBacks, figures, left };
 }
 
-test('texels no draw needed wait in the run\'s cache and the device is given the same bytes',
+test('texels and blocks no draw needed wait in the run\'s cache and come back as they were',
     async()=>{
+        let blockBytes = 0;
         for (const seed of [1, 2, 3, 4, 5, 6])
         {
             const plain = await run(seed, false);
             const cached = await run(seed, true);
             assert.ok(plain.uploads.length > 0, `seed ${seed}: textures uploaded`);
             assert.deepEqual(cached.uploads, plain.uploads, `seed ${seed}`);
+            assert.ok(plain.readBacks.length > 0, `seed ${seed}: levels read back`);
+            assert.deepEqual(cached.readBacks, plain.readBacks, `seed ${seed}: read back as made`);
             assert.equal(cached.figures.spills.back, cached.figures.spills.levels,
                 `seed ${seed}: every level taken back at its first draw`);
             assert.equal(cached.figures.spills.lost, 0);
             assert.equal(cached.left, 0, `seed ${seed}: no body left in the cache`);
             assert.equal(plain.figures.spills, 'no cache');
+            blockBytes += cached.figures.spills.blockBytes;
         }
+        assert.ok(blockBytes > 0, 'S3TC blocks among what waited');
     });
+
+test('a level\'s texels and blocks that wait in the run\'s cache are let go here', async()=>{
+    // The bytes moved out are kept nowhere on this thread: an accessor that
+    // held them would leave this heap as it was, the cache's copy beside it.
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc');
+    const fake = createFakeDevice({});
+    const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
+    const runCache = await openRunCache({ budget: 64 << 20 });
+    /** @type {ReturnType<typeof channelSpace> | null} */
+    let texels = null;
+    const joined = runCache.join(message=>texels?.adopt(message));
+    texels = channelSpace(joined, runCache.serve(), 'texels');
+    const renderer = createGpuRenderer({
+        backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        texelCache: texels,
+    });
+    const gl = /** @type {any} */ (createGlContext({ gpu: renderer }));
+    gl.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    const [plainName, blocksName] = gl.glGenTextures(2);
+    gl.glBindTexture(GL.TEXTURE_2D, plainName);
+    gl.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 128, 128, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(128 * 128 * 4).fill(7));
+    gl.glBindTexture(GL.TEXTURE_2D, blocksName);
+    gl.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
+        BLOCKS_SIZE, BLOCKS_SIZE, 0, BLOCKS_SIZE * BLOCKS_SIZE,
+        new Uint8Array(BLOCKS_SIZE * BLOCKS_SIZE).fill(9));
+    const objects = gl.shareGroup.textures.objects;
+    const levelOf = (/** @type {number} */ name)=>objects.get(name).levels.get(0);
+    const own = (/** @type {object} */ level, /** @type {string} */ property)=>
+        Object.getOwnPropertyDescriptor(level, property)?.value;
+    const texelsHeld = new WeakRef(own(levelOf(plainName), 'texels'));
+    const blocksHeld = new WeakRef(own(levelOf(blocksName), 'compressed').bytes);
+    renderer.spill([...objects.values()]);
+    const moved = ()=>/** @type {any} */ (renderer.diagnostics()).spills.levels;
+    for (let turns = 0; turns < 1000 && moved() < 2; turns++)
+    {
+        await turn();
+    }
+    const movedLevels = moved();
+    for (let tries = 0; tries < 4; tries++)
+    {
+        gc();
+        await turn();
+    }
+    const kept = { texels: texelsHeld.deref() !== undefined,
+        blocks: blocksHeld.deref() !== undefined };
+    // And they come back as they were.
+    gl.glBindTexture(GL.TEXTURE_2D, plainName);
+    const texelsBack = gl.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE)
+        .every((/** @type {number} */ byte)=>byte === 7);
+    const blocksBack = levelOf(blocksName).compressed.bytes
+        .every((/** @type {number} */ byte)=>byte === 9);
+    // Closed before judging: an open channel would hold the process.
+    runCache.close();
+    texels.close();
+    assert.equal(movedLevels, 2, 'both levels moved');
+    assert.deepEqual(kept, { texels: false, blocks: false }, 'neither is held here');
+    assert.ok(texelsBack, 'the texels read back as they were');
+    assert.ok(blocksBack, 'the blocks come back as they were');
+});
