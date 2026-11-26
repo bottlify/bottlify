@@ -308,6 +308,38 @@ export function openArena(buffer){
                 unlock();
             }
         },
+        /**
+         * Every live entry, decoded, in the index's order, which says nothing of
+         * their age: what the arena holds, for the bench that weighs it against
+         * other keepers on the same functions (`bench/emit-cache.mjs`).
+         * @returns {{ key: string, shape: number[], kept: KeptFunction }[]}
+         */
+        entries(){
+            const found = [];
+            lock();
+            try
+            {
+                for (let slot = 0; slot < slotCount * SLOT_WORDS; slot += SLOT_WORDS)
+                {
+                    const at = index[slot + 1] - 1;
+                    if (at >= 0 && gens[Math.floor(at / segmentBytes)] === index[slot + 2])
+                    {
+                        const bytes = data.slice(at, at + view.getUint32(at, true));
+                        const keyLength = view.getUint32(at + 4, true);
+                        found.push({ key: decoder.decode(bytes.subarray(ENTRY_WORDS * 4,
+                            ENTRY_WORDS * 4 + keyLength)), bytes });
+                    }
+                }
+            }
+            finally
+            {
+                unlock();
+            }
+            return found.map(({ key, bytes })=>{
+                const { shape, kept } = decodeEntry(bytes);
+                return { key, shape: [...shape], kept };
+            });
+        },
         /** Every worker's counts, as the diagnostics name them. */
         counts(){
             return {
@@ -362,7 +394,7 @@ export function entryOf(key, shape, { typeIndex, locals, body, hints, region }){
  * @param {Uint8Array} bytes  an entry copied out of the arena (its own buffer, aligned)
  * @returns {{ shape: Float64Array, kept: KeptFunction }}
  */
-function decodeEntry(bytes){
+export function decodeEntry(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.length);
     const keyLength = view.getUint32(4, true);
     const shapeCount = view.getUint32(8, true);
@@ -380,7 +412,7 @@ function decodeEntry(bytes){
 }
 
 /** @param {Float64Array} kept @param {number[]} shape */
-function sameShape(kept, shape){
+export function sameShape(kept, shape){
     if (kept.length !== shape.length)
     {
         return false;

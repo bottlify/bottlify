@@ -86,3 +86,24 @@ compiler.
 
 Each rep times the first iteration (`coldMs`) and the best of `--iters` steady ones
 (`usPerIter`); `eax` is the program's checksum and must not change with the engine.
+
+## The emitted functions' keepers
+
+A relink or a merge emits running regions again, and takes each one's function as it was emitted
+before from a keeper: the thread's own LRU (`createEmitCache`) or the process's arena
+(`arena.js`), shared by its executors and translation workers.
+[`emit-cache.mjs`](emit-cache.mjs) runs each micro workload with an arena, the relink brought
+forward so that a short run reaches it, prints the run's lookups and hits, and then gives the
+functions the run emitted to each keeper - the two above and a candidate kept as bodies of a
+Cellar cache, the cache the run's other caches are kept in - timing a keep, a hit and a miss
+(microseconds an op, median and range over the reps). A keeper that hands back anything other
+than what was kept stops the bench.
+
+    node modules/cork/bench/emit-cache.mjs lua calls512            # 32-bit
+    node modules/cork/bench/emit-cache.mjs --bits 64 --reps 15     # the x86-64 twins
+
+The candidate is not the product's keeper yet, for two reasons the bench cannot answer: the run's
+Cellar keeper lets a body idle for 30 s go (`coldAfterMs`, one for every name), and a function is
+read again only at a relink or a merge, typically long after it was written - Cellar would need a
+body that goes only when its room is wanted; and cork, a package of its own with no dependencies,
+has no Cellar of its own for its translation workers to read with.

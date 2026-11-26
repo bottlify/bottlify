@@ -128,6 +128,31 @@ test('the oldest segment goes when the arena is full, and a hit in the older hal
     assert.ok(arena.counts().refreshed > 0, 'the hot one was copied forward');
 });
 
+test('an arena lists what it holds live: each entry once, decoded, none of a segment taken'
+    + ' over', ()=>{
+    const arena = openArena(createArena(64 << 10, { segments: 8 }));
+    arena.set('clé', [2 ** 31 + 4], kept(0));
+    for (let n = 1; n < 600; n++)
+    {
+        arena.set(`k${n}`, [n], kept(n));
+    }
+    const listed = arena.entries();
+    const keys = new Set(listed.map(one=>one.key));
+    assert.equal(keys.size, listed.length, 'no key twice');
+    assert.ok(!keys.has('clé') && !keys.has('k1'), 'the first ones went with their segment');
+    assert.ok(keys.has('k599'));
+    // Compared with what was kept, not looked up: a hit in the older half is
+    // copied forward and may take the next segment over.
+    for (const one of listed)
+    {
+        const n = Number(one.key.slice(1));
+        assert.deepEqual(one, { key: `k${n}`, shape: [n], kept: kept(n) });
+    }
+    const fresh = openArena(createArena(1 << 20));
+    fresh.set('clé', [2 ** 31 + 4], kept(0));
+    assert.deepEqual(fresh.entries(), [{ key: 'clé', shape: [2 ** 31 + 4], kept: kept(0) }]);
+});
+
 test('an entry larger than a segment is not kept', ()=>{
     const arena = openArena(createArena(64 << 10, { segments: 8 }));
     arena.set('big', [], { ...kept(1), body: new Uint8Array(16 << 10) });
