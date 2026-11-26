@@ -94,17 +94,82 @@ test('a session is listed whole and nothing of it is read until a read asks', as
     assert.deepEqual(session.read('save.dat', 20, 4), new Uint8Array(0), 'past the end is empty');
 });
 
-test('what is kept is bounded, the least recently read let go of first', async()=>{
-    const { files, reads } = lazySession({ 'a.bin': pattern(3 * PIECE_SIZE, 3) });
-    const session = createSessionSource(files, { residentBytes: 2 * PIECE_SIZE });
-    for (const piece of [0, 1, 2])
+/**
+ * A session source that may keep `room` bytes of what it read, and how to let
+ * go of all it keeps, as the place it keeps pieces in does under pressure.
+ *
+ * @param {any[]} files @param {number} room
+ */
+const sessionWithRoom = (files, room)=>createSessionSource(files, { residentBytes: room });
+
+test('the contract: a read answers the bytes or a miss naming every piece it lacks, a fetch'
+    + ' reads exactly those, and a piece let go of is read from the session again', async()=>{
+    const size = 3 * PIECE_SIZE + 11;
+    const bytes = pattern(size, 3);
+    const { files, reads } = lazySession({ 'a.bin': bytes, 'b.bin': pattern(7, 8) });
+    const session = sessionWithRoom(files, 2 * PIECE_SIZE);
+
+    // A miss names each piece the range lacks, where it lies and how long it is,
+    // and hands nothing.
+    /** @type {any} */
+    let miss = null;
+    let handed = 0;
+    try
+    {
+        session.readInto('a.bin', PIECE_SIZE + 5, 2 * PIECE_SIZE + 3, ()=>{
+            handed++;
+        });
+    }
+    catch (e){
+        miss = e;
+    }
+    assert.equal(miss?.code, 'BLOCK_MISS');
+    assert.equal(handed, 0, 'a miss hands nothing');
+    assert.deepEqual(miss.blocks.map((/** @type {any} */ block)=>[block.layer, block.offset,
+        block.packed]), [[SESSION_LAYER, PIECE_SIZE, PIECE_SIZE],
+        [SESSION_LAYER, 2 * PIECE_SIZE, PIECE_SIZE], [SESSION_LAYER, 3 * PIECE_SIZE, 11]]);
+    assert.equal(new Set(miss.blocks.map((/** @type {any} */ block)=>block.index)).size, 3);
+    assert.deepEqual(reads, [], 'a miss reads nothing of the session');
+
+    // The last piece, short, and a range inside it.
+    await session.fetch(miss.blocks.slice(2));
+    assert.deepEqual(reads, [{ path: 'a.bin', offset: 3 * PIECE_SIZE, length: 11 }]);
+    assert.deepEqual(session.read('a.bin', 3 * PIECE_SIZE + 2, 100),
+        bytes.subarray(3 * PIECE_SIZE + 2), 'clipped at the file\'s end');
+
+    // Pieces of another file do not answer for this one's.
+    await fetchedAgain(()=>session.read('b.bin', 0, 7), session);
+    assert.deepEqual(session.read('b.bin', 0, 7), pattern(7, 8));
+
+    // readInto hands each part where it lies in the range, from the pieces kept.
+    await fetchedAgain(()=>session.read('a.bin', 0, 1), session);
+    const into = new Uint8Array(PIECE_SIZE + 3);
+    let count = 0;
+    assert.equal(session.readInto('a.bin', PIECE_SIZE, 0, ()=>{}), 0,
+        'an empty range hands nothing');
+    await fetchedAgain(()=>session.read('a.bin', PIECE_SIZE, 1), session);
+    const readsBefore = reads.length;
+    assert.equal(session.readInto('a.bin', PIECE_SIZE - 4, into.length, (part, at)=>{
+        count++;
+        into.set(part, at);
+    }), into.length);
+    assert.equal(count, 2, 'a part a piece');
+    assert.deepEqual(into, bytes.subarray(PIECE_SIZE - 4, PIECE_SIZE - 4 + into.length));
+    assert.equal(reads.length, readsBefore, 'read from what was kept, nothing of the session');
+
+    // Past the room it has, what was read least recently is let go of; read
+    // again, it is fetched from the session again, the same bytes.
+    for (const piece of [2, 3, 0, 1])
     {
         await fetchedAgain(()=>session.read('a.bin', piece * PIECE_SIZE, 1), session);
     }
-    assert.equal(session.held().sessionPieces, 2 * PIECE_SIZE);
-    assert.equal(reads.length, 3);
-    await fetchedAgain(()=>session.read('a.bin', 0, 1), session);
-    assert.equal(reads.length, 4, 'the first piece was let go of and read again');
+    const readsNow = reads.length;
+    const { result, misses } = await fetchedAgain(()=>session.read('a.bin', 2 * PIECE_SIZE, 4),
+        session);
+    assert.equal(misses, 1, 'the piece read longest ago was let go of');
+    assert.deepEqual(result, bytes.subarray(2 * PIECE_SIZE, 2 * PIECE_SIZE + 4));
+    assert.deepEqual(reads.slice(readsNow), [{ path: 'a.bin', offset: 2 * PIECE_SIZE,
+        length: PIECE_SIZE }], 'read from the session again, that piece alone');
 });
 
 test('under a writable layer: a write copies the file up a piece at a time, a delete leaves'
@@ -118,7 +183,7 @@ test('under a writable layer: a write copies the file up a piece at a time, a de
     });
     // Two pieces kept at once: a copy that began again at every miss would
     // never finish.
-    const session = createSessionSource(files, { residentBytes: 2 * PIECE_SIZE });
+    const session = sessionWithRoom(files, 2 * PIECE_SIZE);
     const bundle = createMemoryStore({ 'config.ini': 'bundle', 'game.exe': 'MZ' });
     const drive = createOverlay({ source: createUnionSource([session, bundle]),
         writable: createMemoryStore() });
