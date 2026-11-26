@@ -126,6 +126,8 @@ function randomTexture(pick){
                 depth: target === GL.TEXTURE_3D ? Math.max(1, depth >> step) + 2 * border : depth,
                 internalFormat: pick(20) === 0 ? GL.RGB : GL.RGBA,
                 border: pick(24) === 0 ? 1 - border : border,
+                baseFormat: GL.RGBA,
+                texels: null,
             };
             if (pick(30) === 0)
             {
@@ -158,7 +160,7 @@ test('completeness, asked of a bound texture on every draw, makes nothing for th
         for (let step = 0; step <= 8; step++)
         {
             texture.levels.set(levelKey(step), { width: 256 >> step, height: 256 >> step, depth: 1,
-                internalFormat: GL.RGBA, border: 0 });
+                internalFormat: GL.RGBA, border: 0, baseFormat: GL.RGBA, texels: null });
         }
         assert.equal(isTextureComplete(texture), true);
         // Warm: what compiling the loop makes is not the check's.
