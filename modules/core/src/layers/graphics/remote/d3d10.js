@@ -22,7 +22,7 @@
  * renderer itself says it did.
  */
 
-import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
+import { createRecording, playedOverMirror } from './replay.js';
 
 /** D3D10_QUERY_OCCLUSION and _OCCLUSION_PREDICATE: the GPU's counts. */
 const QUERY_OCCLUSION = 1;
@@ -146,56 +146,24 @@ export function recordedDirect3D10(factory, options, transport){
  *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  */
 export function playedDirect3D10(factory, options){
-    const mirror = createMirror();
-    /** @type {ReturnType<typeof createPlayer> | null} */
-    let player = null;
-    /** Whether a call is being played: what it writes, the recorded one wrote too. */
-    let playing = false;
-    const write = options.writeMemory;
-    const root = factory({
+    return playedOverMirror(memory=>factory({
         ...options,
         guest: {
             // The address the recorded device got; none where it got none, and
             // the resource keeps its bytes on the host on both sides.
-            allocate: ()=>{
+            allocate: bytes=>{
                 try
                 {
-                    return /** @type {ReturnType<typeof createPlayer>} */ (player).allocate();
+                    return memory.allocate(bytes);
                 }
                 catch {
                     return 0;
                 }
             },
-            free: ()=>{},
-            readMemory: (address, length)=>mirror.read(address, length),
-            writeMemory: (address, bytes)=>{
-                mirror.write(address, bytes);
-                if (!playing)
-                {
-                    write?.(address, bytes);
-                }
-            },
-            // Only what is sent writes the mirror, so it says what was written.
-            watchWrites: (address, length)=>mirror.watch(address, length),
+            free: memory.free,
+            readMemory: memory.read,
+            writeMemory: memory.write,
+            watchWrites: memory.watch,
         },
-    });
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read });
-    const live = player;
-    return {
-        root,
-        play: call=>{
-            playing = true;
-            try
-            {
-                return withMirrored(call, live.play(call), mirror);
-            }
-            finally
-            {
-                playing = false;
-            }
-        },
-        read: live.read,
-        spent: live.spent,
-        counts: live.counts,
-    };
+    }), { write: options.writeMemory });
 }

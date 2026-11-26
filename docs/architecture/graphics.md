@@ -44,6 +44,17 @@ flowchart TB
   itself, so whatever a call read goes ahead of it. The DirectDraw surfaces Direct3D 7 draws into
   cross by number and are described again when they change. A renderer on the engine thread reads
   the bytes at those same moments, so the picture comes out the same wherever Direct3D draws.
+- **What the graphics thread keeps of the program's memory.** Each twin reads the bytes it was
+  sent out of a mirror of guest memory in 64 KiB pages (`remote/replay.js` `createMirror`),
+  which keeps a page only while memory the twin holds lies on it - a resource's storage it
+  allocated, a DirectDraw surface Direct3D 7 described to it - or while a write reached it in the
+  last two batches; every other page is let go between batches. A resource's bytes are read at a
+  later batch than the one that sent them (a buffer unlocked at load and drawn from later, a target
+  the program wrote, uploaded at its next draw); everything else is read with the call it came
+  with. So what the mirror holds is the twin's live resources, not everything the program ever
+  sent: a resource let go of, or a surface DirectDraw gave back, takes its pages with it. Every
+  twin is made over the mirror the same way (`playedOverMirror`), and the memory report counts it
+  as `heaps.mirror`.
 - **Texels no draw has needed.** An OpenGL level's texels are the device's once a draw uploads
   them. Until then the graphics thread moves them, and the blocks of a level kept as S3TC, about
   once a second into the run's cache (Cellar, `opengl/gpu.js` `spill`), which takes idle bodies

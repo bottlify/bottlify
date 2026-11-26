@@ -10,7 +10,7 @@
  * and the played root that draws, wherever its calls are carried to.
  */
 
-import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
+import { createRecording, playedOverMirror } from './replay.js';
 import { WAIT, createWriter } from './wire.js';
 
 /** D3DQUERYTYPE_EVENT. */
@@ -289,56 +289,23 @@ export function createTargetReads(){
  *     is the device made last's (`figures.js`), sent with every present
  */
 export function playedDirect3D(factory, services){
-    const mirror = createMirror();
-    /** @type {ReturnType<typeof createPlayer> | null} */
-    let player = null;
-    /** Whether a call is being played: what it writes, the recorded one wrote too. */
-    let playing = false;
-    const write = services.writeMemory;
-    const root = factory({
+    const played = playedOverMirror(memory=>factory({
         ...services,
         // Without memory of the caller's, nor does this one have any: a
         // device that draws refuses to be made so.
-        readMemory: services.readMemory && mirror.read,
-        windowMemory: services.readMemory
-            && ((/** @type {number} */ address, /** @type {number} */ length)=>
-                mirror.window(address, length)),
-        // Only what is sent writes the mirror, so it says what was written:
-        // the renderer uploads that, and compares nothing.
-        watchWrites: services.readMemory
-            && ((/** @type {number} */ address, /** @type {number} */ length)=>
-                mirror.watch(address, length)),
-        writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
-            mirror.write(address, bytes);
-            if (!playing)
-            {
-                write(address, bytes);
-            }
-        }),
-        allocate: ()=>/** @type {ReturnType<typeof createPlayer>} */ (player).allocate(),
-        free: ()=>{},
+        readMemory: services.readMemory && memory.read,
+        windowMemory: services.readMemory && memory.window,
+        watchWrites: services.readMemory && memory.watch,
+        writeMemory: services.writeMemory && memory.write,
+        allocate: memory.allocate,
+        free: memory.free,
         // The ramp reaches the display through the recorded device, which
         // the program sets it on; this one only has to know whether it does.
         gamma: services.gamma && { applies: ()=>services.gamma.applies(), set: ()=>{} },
-    });
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read, borrow: services.borrow });
-    const live = player;
+    }), { write: services.writeMemory, borrow: services.borrow });
+    const { root } = played;
     return {
-        root,
-        play: call=>{
-            playing = true;
-            try
-            {
-                return withMirrored(call, live.play(call), mirror);
-            }
-            finally
-            {
-                playing = false;
-            }
-        },
-        read: live.read,
-        spent: live.spent,
-        counts: live.counts,
+        ...played,
         /** The device made last's figures (`figures.js`), sent with every present. */
         figures: ()=>root.figures?.() ?? null,
     };

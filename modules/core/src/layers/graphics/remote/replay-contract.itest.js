@@ -3337,6 +3337,168 @@ const randomProgram = (seed, steps)=>async run=>{
 };
 
 /**
+ * A program made of a seed whose textures and vertex buffers come and go over
+ * many pages of guest memory, each made at an address none had before: each
+ * drawn from batches after it was written, a texture written again only in a
+ * rectangle long after its first unlock - the rest of it the twin's from
+ * then - and calls that read none of them between, each a batch of its own
+ * where every call is played as it is made. What the twin's mirror lets go of
+ * between batches (`createMirror`) is what nothing it holds lies on: a page it
+ * let go of too soon draws zeros here.
+ *
+ * @param {8 | 9} version @param {number} seed @param {number} steps
+ * @returns {(run: ReturnType<typeof runner>) => Promise<void>}
+ */
+const comingAndGoing = (version, seed, steps)=>async run=>{
+    const pick = seeded(seed);
+    const { device } = version === 9 ? await device9(run) : await device8(run);
+    const draw = version === 9 ? drawQuad9 : drawQuad8;
+    if (version === 9)
+    {
+        await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+        await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+    }
+    /** @param {any} buffer */
+    const stream = buffer=>(version === 9 ? device.SetStreamSource(0, buffer, 0, STRIDE)
+        : device.SetStreamSource(0, buffer, STRIDE));
+    /** @type {{ texture: any, size: number }[]} */
+    const textures = [{ texture: await makeTexture(run, device, 'first', { size: 32, seed }),
+        size: 32 }];
+    /** @type {{ buffer: any, first: number }[]} */
+    const buffers = [];
+    /** @type {{ buffer?: any }} */
+    const bound = {};
+    let made = 0;
+    for (let step = 0; step < steps; step++)
+    {
+        const label = `${step}`;
+        switch (pick(7))
+        {
+            case 0:
+            {
+                // 4 KiB to 64 KiB a level.
+                const size = 32 << pick(4);
+                textures.push({ texture: await makeTexture(run, device, `t${label}`,
+                    { size, levels: 1 + pick(2), seed: pick(200) }), size });
+                break;
+            }
+            case 1:
+            {
+                // 16 KiB to 96 KiB, a quad somewhere in it.
+                const length = (1 + pick(6)) * 16384 - (16384 % STRIDE);
+                /** @type {{ buffer?: any }} */
+                const out = {};
+                await run.call(`CreateVertexBuffer ${label}`, ()=>device.CreateVertexBuffer(length,
+                    0, FVF_LIT, D3DPOOL.MANAGED, out), [out]);
+                const first = pick(length / STRIDE - 4);
+                /** @type {{ pBits?: number }} */
+                const locked = {};
+                await run.call(`Lock ${label}`, ()=>out.buffer.Lock(0, 0, locked, 0), [locked]);
+                writeVertices(run, /** @type {number} */ (locked.pBits) + first * STRIDE,
+                    made++ % 60);
+                await run.call(`Unlock ${label}`, ()=>out.buffer.Unlock());
+                buffers.push({ buffer: out.buffer, first });
+                break;
+            }
+            case 2:
+            {
+                const { texture } = textures[pick(textures.length)];
+                await run.call(`BeginScene ${label}`, ()=>device.BeginScene());
+                if (buffers.length > 0 && pick(2) === 0)
+                {
+                    const { buffer, first } = buffers[pick(buffers.length)];
+                    bound.buffer = buffer;
+                    await run.call(`SetStreamSource ${label}`, ()=>stream(buffer));
+                    await run.call(`SetTexture ${label}`, ()=>device.SetTexture(0, texture));
+                    await run.call(`DrawPrimitive ${label}`, ()=>device.DrawPrimitive(
+                        D3DPT.TRIANGLESTRIP, first, 2));
+                }
+                else
+                {
+                    await draw(run, device, label, texture, pick(8) / 8);
+                }
+                await run.call(`EndScene ${label}`, ()=>device.EndScene());
+                break;
+            }
+            case 3:
+            {
+                // Let go of while unbound, the last texture kept.
+                await run.call(`SetTexture none ${label}`, ()=>device.SetTexture(0, null));
+                if (buffers.length > 0 && pick(2) === 0)
+                {
+                    const [{ buffer }] = buffers.splice(pick(buffers.length), 1);
+                    if (bound.buffer === buffer)
+                    {
+                        bound.buffer = null;
+                        await run.call(`SetStreamSource none ${label}`, ()=>stream(null));
+                    }
+                    await run.call(`Release buffer ${label}`, ()=>buffer.release());
+                }
+                else if (textures.length > 1)
+                {
+                    const [{ texture }] = textures.splice(pick(textures.length), 1);
+                    await run.call(`Release texture ${label}`, ()=>texture.release());
+                }
+                break;
+            }
+            case 4:
+            {
+                const { texture, size } = textures[pick(textures.length)];
+                const left = pick(size / 2);
+                const top = pick(size / 2);
+                await fillLevel(run, texture, `rect ${label}`, 0, pick(200), { size,
+                    rect: { left, top, right: left + 1 + pick(size / 2),
+                        bottom: top + 1 + pick(size / 2) } });
+                break;
+            }
+            case 5:
+            {
+                for (let call = 0; call < 1 + pick(4); call++)
+                {
+                    await run.call(`SetRenderState ${label}.${call}`, ()=>device.SetRenderState(
+                        D3DRS.TEXTUREFACTOR, pick(0x7fffffff)));
+                }
+                break;
+            }
+            default:
+            {
+                await run.call(`Present ${label}`, ()=>device.Present(null, null, 0, null));
+                await run.call(`idle ${label}`, ()=>device.idle());
+                await run.look(`step ${label}`);
+                break;
+            }
+        }
+    }
+    await run.call('Present last', ()=>device.Present(null, null, 0, null));
+    await run.call('idle', ()=>device.idle());
+    await run.look('last');
+    await run.call('SetTexture none', ()=>device.SetTexture(0, null));
+    await run.call('SetStreamSource none', ()=>stream(null));
+    for (const [index, { texture }] of textures.entries())
+    {
+        await run.call(`Release texture ${index}`, ()=>texture.release());
+    }
+    for (const [index, { buffer }] of buffers.entries())
+    {
+        await run.call(`Release buffer ${index}`, ()=>buffer.release());
+    }
+    await run.look('end');
+};
+
+test('seeded Direct3D 9 and 8 programs whose textures and buffers come and go over many pages,'
+    + ' drawn batches after they were written, play what the device drew itself', async()=>{
+    for (const version of /** @type {const} */ ([9, 8]))
+    {
+        for (let seed = 1; seed <= 4; seed++)
+        {
+            const found = await divergences(version, comingAndGoing(version, seed, 60),
+                ['at once', 'held', 'held, lent', 'ring']);
+            assert.deepEqual(found, [], `Direct3D ${version}, seed ${seed}:\n${found.join('\n')}`);
+        }
+    }
+});
+
+/**
  * The transports' gate: seeded random programs whose twin plays as late as
  * it may (`held`) and as its rings' bells ring, every way held to the first --
  * every call the played device was given, with its bytes, in its order, every

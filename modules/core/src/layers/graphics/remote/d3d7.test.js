@@ -368,6 +368,100 @@ test('Direct3D 7 frames played from a record ask of the GPU what the device itse
         assert.equal(played.claims.size, 0, 'and the addresses drawn into went with the device');
     });
 
+/**
+ * Two frames whose draws read bytes sent batches before them: a vertex
+ * buffer unlocked, and the target's pixels the program wrote, each followed
+ * by calls that read neither - each its own batch when played at once -
+ * before the draw that reads it. A twin's memory that let go of them would
+ * draw zeros. Each allocation lies in a 64 KiB page of its own, the mirror's
+ * grain, so what one holds keeps nothing of another's.
+ *
+ * @param {(ddraw: any, services: any) => any} make
+ */
+async function lateDraws(make){
+    const gpu = createFakeDevice();
+    const ram = new Uint8Array(4 << 20);
+    let next = 0x10000;
+    const root = createDirectDraw({ version: 7, screenWidth: 16, screenHeight: 16,
+        allocate: bytes=>{
+            const at = next;
+            next += bytes + 0xffff & ~0xffff;
+            return at;
+        } });
+    root.setCooperativeLevel(0x00010044, DDSCL_NORMAL);
+    /** @type {Map<number, () => unknown>} */
+    const claims = new Map();
+    const d3d = make(root, {
+        backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+            now: ()=>0 }),
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            ram.slice(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            ram.set(bytes, address),
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
+            id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),
+        presenter: {
+            claim: (/** @type {number} */ buffer, /** @type {() => unknown} */ show)=>
+                claims.set(buffer, show),
+            release: (/** @type {number} */ buffer)=>claims.delete(buffer),
+        },
+    });
+    const made = root.createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8 });
+    assert.equal(made.hr, D3D_OK);
+    const target = /** @type {any} */ (made.surface);
+    const created = d3d.createDevice(DEVICE_IDS.TNLHAL, target);
+    assert.equal(created.hr, D3D_OK);
+    const device = created.device;
+    const ok = (/** @type {number} */ hr)=>assert.equal(hr, D3D_OK);
+    const vb = d3d.createVertexBuffer({ caps: 0, fvf: FVF_TL, numVertices: 4 });
+    assert.equal(vb.hr, D3D_OK);
+    /** @type {{ data?: number }} */
+    const lock = {};
+    ok(vb.buffer.Lock(0, lock));
+    ram.set(corners([[0, 0], [8, 1], [1, 8], [7, 7]], false), /** @type {number} */ (lock.data));
+    ok(vb.buffer.Unlock());
+    const elsewhere = ()=>{
+        for (let call = 0; call < 6; call++)
+        {
+            ok(device.SetRenderState(D3DRENDERSTATE.DITHERENABLE, call & 1));
+        }
+    };
+    /** @type {string[]} */
+    const frames = [];
+    const frame = async()=>{
+        ok(device.BeginScene());
+        ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4));
+        ok(device.EndScene());
+        await /** @type {() => unknown} */ (claims.get(target.buffer))();
+        await device.idle();
+        frames.push(JSON.stringify(plain(gpu.calls)));
+        gpu.reset();
+    };
+    elsewhere();
+    await frame();
+    await target.pixelsCurrent();
+    assert.equal(target.lock(null, 0).hr, D3D_OK);
+    ram.fill(0x5a, target.buffer, target.buffer + target.pitch * target.height);
+    assert.equal(target.unlock(null), D3D_OK);
+    elsewhere();
+    await frame();
+    assert.equal(vb.buffer.release(), 0);
+    assert.equal(device.release(), 0);
+    return frames;
+}
+
+test('Direct3D 7 draws played from a record read what was sent batches before them as the'
+    + ' device itself reads it', async()=>{
+    const direct = await lateDraws(createDirect3D7);
+    const played = await lateDraws(loopback);
+    assert.ok(direct.every(frame=>frame.includes('draw')), 'every frame drew');
+    assert.ok(direct[1].includes('90,90,90,255,90,90,90,255'),
+        'the second frame uploaded the pixels the program wrote');
+    played.forEach((frame, index)=>assert.ok(frame === direct[index],
+        `frame ${index} asked the same`));
+});
+
 test('Direct3D 7 frames made from command rings ask of the GPU what the calls asked, on the'
     + ' device and played from a record', async()=>{
     const direct = await framesThrough(createDirect3D7);

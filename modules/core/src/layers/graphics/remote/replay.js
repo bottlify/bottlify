@@ -2741,21 +2741,134 @@ export const withMirrored = (call, answer, mirror)=>(call.m === 'diagnostics' &&
     ? { ...answer, mirrored: mirror.figures() } : answer);
 
 /**
+ * The guest memory a played device is given: the mirror's, through which it
+ * reads, watches, writes, and holds what it allocates (`createMirror`).
+ *
+ * @typedef {Object} PlayedMemory
+ * @property {(address: number, length: number) => Uint8Array} read
+ * @property {(address: number, length: number) => Uint8Array} window
+ * @property {(address: number, length: number) => { take: (from: number, bytes: number)
+ *     => number[] }} watch
+ * @property {(address: number, bytes: Uint8Array) => void} write  what the device
+ *     writes: outside a call, the caller's too (pixels read back)
+ * @property {(bytes: number) => number} allocate  the address the recorded device got,
+ *     held until it is given back
+ * @property {(address: number) => void} free
+ * @property {(address: number, length: number) => void} hold  memory the device reads
+ *     later that it did not allocate: a surface it was described
+ * @property {(address: number, length: number) => void} release
+ */
+
+/**
+ * A played root over a mirror of the program's memory: the device `make`
+ * builds on that memory, the player of its calls, and the mirror let go of
+ * what nothing holds between batches. Every played root is made so, and so
+ * is bounded by the same rule.
+ *
+ * @template {Record<string, any>} R
+ * @param {(memory: PlayedMemory) => R} make
+ * @param {{ write?: (address: number, bytes: Uint8Array) => void,
+ *     borrow?: ReturnType<typeof import('./lending.js').createBorrower> }} [options]
+ *     `write`, where what the device writes outside a call goes; `borrow`, where
+ *     guest memory is shared, reads what the recording lent
+ * @returns {{ root: R, play: (call: import('./wire.js').ReadCall) => any,
+ *     read: (buffer: ArrayBufferLike, each: (call: import('./wire.js').ReadCall) => boolean | void,
+ *         length?: number, start?: number) => number | undefined,
+ *     spent: (buffer: ArrayBufferLike, give: () => void) => void,
+ *     counts: () => OcclusionCount[] }}
+ */
+export function playedOverMirror(make, { write, borrow } = {}){
+    const mirror = createMirror();
+    /** The bytes of each allocation the device holds, by its address. @type {Map<number, number>} */
+    const allocations = new Map();
+    /** @type {ReturnType<typeof createPlayer> | null} */
+    let player = null;
+    /** Whether a call is being played: what it writes, the recorded one wrote too. */
+    let playing = false;
+    const root = make({
+        read: mirror.read,
+        window: (address, length)=>mirror.window(address, length),
+        // Only what is sent writes the mirror, so it says what was written:
+        // the renderer uploads that, and compares nothing.
+        watch: mirror.watch,
+        write: (address, bytes)=>{
+            mirror.write(address, bytes);
+            if (!playing)
+            {
+                write?.(address, bytes);
+            }
+        },
+        allocate: bytes=>{
+            const address = /** @type {ReturnType<typeof createPlayer>} */ (player).allocate();
+            if (address !== 0)
+            {
+                allocations.set(address, Math.max(bytes, 1));
+                mirror.hold(address, Math.max(bytes, 1));
+            }
+            return address;
+        },
+        free: address=>{
+            const bytes = allocations.get(address);
+            if (bytes !== undefined)
+            {
+                allocations.delete(address);
+                mirror.release(address, bytes);
+            }
+        },
+        hold: mirror.hold,
+        release: mirror.release,
+    });
+    const live = createPlayer({ root, ship: mirror.write, read: mirror.read, borrow });
+    player = live;
+    return {
+        root,
+        play: call=>{
+            playing = true;
+            try
+            {
+                return withMirrored(call, live.play(call), mirror);
+            }
+            finally
+            {
+                playing = false;
+            }
+        },
+        read: (buffer, each, length, start)=>{
+            try
+            {
+                return live.read(buffer, each, length, start);
+            }
+            finally
+            {
+                mirror.settle();
+            }
+        },
+        spent: live.spent,
+        counts: live.counts,
+    };
+}
+
+/**
  * A guest memory of only the bytes sent to it, in 64 KiB pages made as they
  * are written: what a renderer behind a played device reads. It is written
  * only by what is sent, so it says which 4 KiB pages were written since a
  * reader last looked (`watch`), as the engine's write watch does for guest
  * memory: a dynamic buffer's upload is those pages, not a comparison.
  *
- * With `forget`, for a reader sent every byte it reads with the call that
- * reads it (OpenGL's), a page not written since the batch before the last
- * is let go at `settle`: kept, every page a program ever handed its pixels or
- * vertices from stays, as the Doom 3 demo's temporary buffers did. A page let
- * go is made again, zeroed, from the few kept for it.
- *
- * @param {{ forget?: boolean }} [options]
+ * What it keeps is what its device may still read, by one rule: a page some
+ * memory the device holds lies on (`hold`: a resource's storage, a surface it
+ * was described), or one a write reached since the settle before the last.
+ * Every other page is let go at `settle`, between batches. A device reads
+ * what it holds at a later batch than the one that sent it - a buffer
+ * unlocked at load and drawn from a level later, a target's pixels the
+ * program wrote, uploaded at its next draw - and everything else with the
+ * call it was sent with: a draw's vertices out of the program's memory, an
+ * OpenGL call's pixels. Were every page kept, every page a program handed
+ * its bytes from would stay, and every resource it let go of at an address it
+ * never uses again. A page let go is made again, zeroed, from the few kept
+ * for it.
  */
-export function createMirror({ forget = false } = {}){
+export function createMirror(){
     const SHIFT = 16;
     const SIZE = 1 << SHIFT;
     /** Pages let go, kept to be made again rather than allocated: at most this many. */
@@ -2764,6 +2877,24 @@ export function createMirror({ forget = false } = {}){
     const pages = new Map();
     /** @type {Uint8Array[]} */
     const spare = [];
+    /** How many holds lie on each 64 KiB page that has any. @type {Map<number, number>} */
+    const holds = new Map();
+    /** @param {number} address @param {number} length @param {number} by */
+    const holdOver = (address, length, by)=>{
+        const last = (address + Math.max(length, 1) - 1) >>> SHIFT;
+        for (let page = address >>> SHIFT; page <= last; page++)
+        {
+            const count = (holds.get(page) ?? 0) + by;
+            if (count > 0)
+            {
+                holds.set(page, count);
+            }
+            else
+            {
+                holds.delete(page);
+            }
+        }
+    };
     /** The write count at the last two settles, the older first. */
     const settled = [0, 0];
     /**
@@ -2884,20 +3015,29 @@ export function createMirror({ forget = false } = {}){
             };
         },
         /**
-         * Lets go of the pages no write reached since the settle before the
-         * last, where the mirror forgets: called between batches, so the bytes
-         * a call was sent are never let go before it is played, however a
-         * batch was cut.
+         * Keeps the pages of a range the device holds, however long ago they
+         * were written, until it is let go of as often (`release`).
+         *
+         * @param {number} address @param {number} length
+         */
+        hold(address, length){
+            holdOver(address, length, 1);
+        },
+        /** @param {number} address @param {number} length  a range held */
+        release(address, length){
+            holdOver(address, length, -1);
+        },
+        /**
+         * Lets go of the pages no hold lies on and no write reached since the
+         * settle before the last: called between batches, so the bytes a call
+         * was sent are never let go before it is played, however a batch was
+         * cut.
          */
         settle(){
-            if (!forget)
-            {
-                return;
-            }
             const before = settled[0];
             for (const [page, bytes] of pages)
             {
-                if (largeStamps[page] <= before)
+                if (largeStamps[page] <= before && !holds.has(page))
                 {
                     pages.delete(page);
                     if (spare.length < SPARE)
@@ -2921,7 +3061,7 @@ export function createMirror({ forget = false } = {}){
                 pages: pages.size, spare: spare.length, stampBytes,
                 reached: largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0) };
         },
-        /** The bytes of every 64 KiB page ever written: what it holds if it forgets none. */
+        /** The bytes of every 64 KiB page ever written: what it would hold if it let go of none. */
         reached: ()=>largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0),
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         read(address, length){

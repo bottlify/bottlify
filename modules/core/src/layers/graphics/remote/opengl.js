@@ -15,7 +15,7 @@
  * and the played one reads the same bytes at the same call.
  */
 
-import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
+import { createRecording, playedOverMirror } from './replay.js';
 
 /** The calls whose answers only the renderer has: what it says of itself, and the pixels it drew. */
 const ANSWERED = new Set(['diagnostics', 'glReadPixels', 'glGetQueryObject', 'readDrawable',
@@ -93,51 +93,13 @@ export function recordedOpengl(factory, services, transport){
  *     spent: (buffer: ArrayBufferLike, give: () => void) => void }}
  */
 export function playedOpengl(factory, services){
-    // Every byte a played context reads is sent with the call that reads it.
-    const mirror = createMirror({ forget: true });
-    /** @type {ReturnType<typeof createPlayer> | null} */
-    let player = null;
-    let playing = false;
-    const write = services.writeMemory;
-    const root = factory({
+    return playedOverMirror(memory=>factory({
         ...services,
         model: false,
-        readMemory: mirror.read,
-        windowMemory: (address, length)=>mirror.window(address, length),
-        writeMemory: (address, bytes)=>{
-            mirror.write(address, bytes);
-            if (!playing)
-            {
-                write?.(address, bytes);
-            }
-        },
-        allocate: ()=>/** @type {ReturnType<typeof createPlayer>} */ (player).allocate(),
-    });
-    player = createPlayer({ root, ship: mirror.write, read: mirror.read });
-    const live = player;
-    return {
-        root,
-        play: call=>{
-            playing = true;
-            try
-            {
-                return withMirrored(call, live.play(call), mirror);
-            }
-            finally
-            {
-                playing = false;
-            }
-        },
-        read: (buffer, each, length, start)=>{
-            try
-            {
-                return live.read(buffer, each, length, start);
-            }
-            finally
-            {
-                mirror.settle();
-            }
-        },
-        spent: live.spent,
-    };
+        readMemory: memory.read,
+        windowMemory: memory.window,
+        writeMemory: memory.write,
+        allocate: memory.allocate,
+        free: memory.free,
+    }), { write: services.writeMemory });
 }
