@@ -4700,10 +4700,10 @@ export function installTextureCalls(context, kernel){
         },
 
         /**
-         * A level of a compressed sized format hands back its blocks. An S3TC
-         * level's are not kept here, only their decoding, so there is nothing
-         * to hand back: an operation error, and a divergence, because the
-         * real driver would have answered.
+         * A compressed level hands back its blocks as they were given. An
+         * S3TC level's go once a device that decodes them holds the decoding,
+         * and there is then nothing to hand back: an operation error, and a
+         * loss, because the real driver would have answered.
          *
          * @param {number} target
          * @param {number} level
@@ -4724,14 +4724,29 @@ export function installTextureCalls(context, kernel){
                 return stored.data ?? new Uint8Array(storageBytes(sized, stored.width,
                     stored.height, stored.depth ?? 1));
             }
-            if (stored && !stored.compressedFormat)
+            if (!stored?.compressedFormat)
             {
                 // Not a compressed level at all (OpenGL 4.6 section 8.11).
                 setError(GL.INVALID_OPERATION);
                 return null;
             }
-            diverge('glGetCompressedTexImage was refused: compressed levels are kept decoded'
-                + ' and the original blocks are gone');
+            // An S3TC level's blocks as they were given, where this side
+            // holds them (or the run's cache does, `spill`).
+            const blocks = stored.compressed?.bytes;
+            if (blocks)
+            {
+                return blocks;
+            }
+            if (kernel.gpuBacked() && kernel.deviceHolds?.(stored))
+            {
+                lose('glGetCompressedTexImage was refused: the level\'s blocks were let go once'
+                    + ' the device held what they decode to');
+            }
+            else
+            {
+                diverge('glGetCompressedTexImage was refused: the level\'s blocks are not held'
+                    + ' on this side');
+            }
             setError(GL.INVALID_OPERATION);
             return null;
         },

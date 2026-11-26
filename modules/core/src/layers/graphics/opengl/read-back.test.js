@@ -59,7 +59,7 @@ function rig(){
         assert.equal(level.texels, null, 'the rig lets the level go');
     };
     const losses = ()=>divergences.filter(d=>/device holds|read back/.test(d));
-    return { gpu, renderer, context, drawn, losses };
+    return { gpu, renderer, context, drawn, losses, divergences };
 }
 
 test('glGetTexImage of a let-go level answers the device\'s texels', async()=>{
@@ -126,6 +126,34 @@ test('a sized level the device drew into is read from this side, a loss said', a
     assert.ok(!(r.context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.FLOAT) instanceof Promise),
         'answered here');
     assert.equal(r.losses().length, 1, 'and said: the device hands back RGBA levels alone');
+});
+
+test('glGetCompressedTexImage answers an S3TC level\'s blocks while they are held', async()=>{
+    const r = rig();
+    const blocks = Uint8Array.from([0x00, 0xf8, 0x1f, 0x00, 0xe4, 0xe4, 0xe4, 0xe4]);
+    r.context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, GL.COMPRESSED_RGB_S3TC_DXT1_EXT, 4, 4,
+        0, 8, blocks);
+    assert.equal(r.context.glGetError(), GL.NO_ERROR);
+    assert.deepEqual([...r.context.glGetCompressedTexImageARB(GL.TEXTURE_2D, 0)], [...blocks],
+        'as they were given');
+    assert.equal(r.context.glGetError(), GL.NO_ERROR);
+    const decoded = r.context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
+    // Drawn on a device that decodes them, the blocks go: the decoding is
+    // read back from it, the blocks are not there to hand back.
+    r.context.glEnable(GL.TEXTURE_2D);
+    r.context.glBegin(GL.TRIANGLES);
+    r.context.glVertex2f(0, 0);
+    r.context.glVertex2f(1, 0);
+    r.context.glVertex2f(1, 1);
+    r.context.glEnd();
+    r.renderer.present(r.context);
+    await r.renderer.settled();
+    assert.deepEqual([...await r.context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA,
+        GL.UNSIGNED_BYTE)], [...decoded], 'the device\'s decoding');
+    assert.equal(r.context.glGetCompressedTexImageARB(GL.TEXTURE_2D, 0), null);
+    assert.equal(r.context.glGetError(), GL.INVALID_OPERATION);
+    assert.equal(r.divergences.filter(d=>/glGetCompressedTexImage .*let go/.test(d)).length, 1,
+        'refused, a loss said');
 });
 
 test('a read before the level is drawn answers at once from this side', ()=>{

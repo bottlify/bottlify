@@ -55,7 +55,9 @@
   the program's own thread, `glGetTexImage`, `glGetTextureImage`, `glGetTextureSubImage` and
   `glGetnTexImage` read such a level back from the device, the calling thread waiting as for
   `glReadPixels`; a sized level the device drew into is answered from the bytes kept here, a
-  loss said. Where a graphics worker draws, those reads answer black and say so as a divergence.
+  loss said. `glGetCompressedTexImage` answers an S3TC level's blocks while they are held and
+  refuses them (`GL_INVALID_OPERATION`, a loss said) once they were let go. Where a graphics
+  worker draws, those reads answer black and say so as a divergence.
 - OpenGL goes up to 4.6, compatibility and core profiles (`wglCreateContextAttribsARB`), with
   GLSL 1.10 to 4.60. A feature the shader translator does not write fails the program's link
   with its reason. Doubles are single precision; a geometry shader's streams past 0 are not
