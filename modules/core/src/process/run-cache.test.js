@@ -57,6 +57,27 @@ test('a thread joined after the index grew finds every name, the ones put before
         }
     });
 
+test('the figures weigh each space on its own: its bodies, those in memory, the blocks they take',
+    async()=>{
+        const run = await openRunCache({ budget: 64 << 20 });
+        try
+        {
+            assert.ok(run.reader.put('reads/a', new Uint8Array(256)));
+            assert.ok(run.reader.put('reads/b', new Uint8Array(4096)));
+            // Through the handlers a process in a worker of its own calls.
+            const place = run.handlers.cache.reserve('translations/m', 5000, {});
+            assert.ok(place !== null);
+            assert.deepEqual(run.figures().spaces, {
+                reads: { bodies: 2, bytes: 4352, hotBytes: 4352, placedBytes: 2 * 4096 },
+                translations: { bodies: 1, bytes: 5000, hotBytes: 5000, placedBytes: 8192 },
+            });
+        }
+        finally
+        {
+            run.close();
+        }
+    });
+
 test('with a run\'s folder, a body that is the only copy for the run goes to its disk for room '
     + 'and comes back; one that can be made again goes away, and nothing stays past the run',
 async()=>{

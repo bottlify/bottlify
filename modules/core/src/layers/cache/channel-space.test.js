@@ -136,8 +136,10 @@ test('two owners of one kind - two roots\' texels - the run serves names of thei
             post({ a: read(a), b: read(b) });`,
         { joined: { shared: joined.shared, segments: joined.segments }, channels: served });
         assert.deepEqual([said.a, said.b], [1, 2], 'each owner reads what it put');
-        assert.deepEqual(run.under(served[0].prefix), { bodies: 1, bytes: 64 });
-        assert.deepEqual(run.under(served[1].prefix), { bodies: 1, bytes: 64 });
+        assert.deepEqual(run.under(served[0].prefix),
+            { bodies: 1, bytes: 64, hotBytes: 64, placedBytes: 4096 });
+        assert.deepEqual(run.under(served[1].prefix),
+            { bodies: 1, bytes: 64, hotBytes: 64, placedBytes: 4096 });
     }
     finally
     {
@@ -168,7 +170,8 @@ test('an owner that goes lets go of every name it held, after the calls it sent 
         assert.deepEqual(said.released, { bodies: 5, bytes: 500, waiting: 1 },
             'the four it held and the room granted it, which waits for a writer that is gone');
         await served[0].ended;
-        assert.deepEqual(keeper.under(said.prefix), { bodies: 1, bytes: 100 },
+        assert.deepEqual(keeper.under(said.prefix),
+            { bodies: 1, bytes: 100, hotBytes: 100, placedBytes: 4096 },
             'only the reservation left, which the keeper takes back after its age');
         assert.deepEqual(tails, []);
     }
@@ -213,7 +216,8 @@ test('an owner that leaves bodies past what it held, or goes without letting go,
             await served[0].ended;
             assert.deepEqual(tails,
                 [{ prefix: said.prefix, bodies: 2, bytes: 30, held: 0, why: 'unreleased' }]);
-            assert.deepEqual(keeper.under(said.prefix), { bodies: 0, bytes: 0 });
+            assert.deepEqual(keeper.under(said.prefix),
+                { bodies: 0, bytes: 0, hotBytes: 0, placedBytes: 0 });
         }
         finally
         {

@@ -95,10 +95,26 @@ export async function openRunCache(opened = {}){
         letGo = ()=>{};
         keeper = await open(null);
     }
+    /**
+     * The spaces names were reserved under, by what comes before a name's
+     * first '/': a cache module's space, an owner's kind (`texels`). Each is
+     * weighed on its own when the figures are asked for: which owner's
+     * bodies the rounding to blocks costs.
+     */
+    const spaces = new Set();
+    /** @param {string} name @param {number} length @param {any} [options] */
+    const reserve = (name, length, options)=>{
+        const slash = name.indexOf('/');
+        if (slash > 0)
+        {
+            spaces.add(name.slice(0, slash));
+        }
+        return keeper.reserve(name, length, options ?? {});
+    };
     const reader = createReader({
         shared: keeper.shared, segments: keeper.segmentBuffers(),
         keeper: {
-            reserve: (name, length, options)=>keeper.reserve(name, length, options),
+            reserve,
             raise: (name, options)=>keeper.raise(name, options),
             raiseLater: name=>{
                 keeper.raise(name);
@@ -117,8 +133,7 @@ export async function openRunCache(opened = {}){
     const tails = { owners: 0, bodies: 0, bytes: 0 };
     /** The keeper as a channel's owners call it. */
     const channelKeeper = {
-        reserve: (/** @type {string} */ name, /** @type {number} */ length, /** @type {any} */ options)=>
-            keeper.reserve(name, length, options ?? {}),
+        reserve,
         raise: (/** @type {string} */ name, /** @type {any} */ options)=>keeper.raise(name, options ?? {}),
         drop: (/** @type {string} */ name)=>{
             keeper.drop(name);
@@ -154,8 +169,7 @@ export async function openRunCache(opened = {}){
         /** The link handlers a process in a worker of its own calls the keeper through. */
         handlers: {
             cache: {
-                /** @param {string} name @param {number} length @param {any} options */
-                reserve: (name, length, options)=>keeper.reserve(name, length, options ?? {}),
+                reserve,
                 /** @param {string} name @param {{ known?: number }} [options] */
                 raise: (name, options)=>keeper.raise(name, options ?? {}),
                 /** @param {string} name */
@@ -208,8 +222,13 @@ export async function openRunCache(opened = {}){
          */
         under: (/** @type {string} */ prefix)=>keeper.under(prefix),
 
-        /** The keeper's figures, with its budget and the most it held at once. */
-        figures: look,
+        /**
+         * The keeper's figures, with its budget and the most it held at once,
+         * and by space (`spaces`): each one's bodies, their bytes, those in
+         * memory and the blocks they take.
+         */
+        figures: ()=>({ ...look(), spaces: Object.fromEntries([...spaces].sort()
+            .map(space=>[space, keeper.under(`${space}/`)])) }),
 
         close(){
             for (const one of served)
