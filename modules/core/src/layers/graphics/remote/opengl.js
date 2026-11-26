@@ -18,7 +18,10 @@
 import { createMirror, createPlayer, createRecording, withMirrored } from './replay.js';
 
 /** The calls whose answers only the renderer has: what it says of itself, and the pixels it drew. */
-const ANSWERED = new Set(['diagnostics', 'glReadPixels', 'glGetQueryObject', 'readDrawable']);
+const ANSWERED = new Set(['diagnostics', 'glReadPixels', 'glGetQueryObject', 'readDrawable',
+    // A level's image: this side keeps no texels, the side that draws reads the device.
+    'glGetTexImage', 'glGetTextureImage', 'glGetTextureSubImage', 'getnTexImage',
+    'glGetCompressedTexImageARB']);
 
 /**
  * The root the program's contexts are made by: every call on it and on the

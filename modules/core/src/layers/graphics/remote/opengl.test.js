@@ -393,6 +393,78 @@ test('glReadPixels on a device writes what was drawn, wherever the device is', a
 });
 
 /**
+ * A texture's level read back through OPENGL32's exports once a draw has put
+ * it on the device: uploaded, drawn with, the window swapped, then
+ * glGetTexImage into the program's memory.
+ *
+ * @param {(factory: any, services: any) => any} [remote]
+ * @returns {Promise<number[]>}
+ */
+async function texelsThrough(remote){
+    const gpu = createFakeDevice();
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const bytes = new Uint8Array(0x10000);
+    /** @param {number} at @param {number} length */
+    const read = (at, length)=>bytes.subarray(at, at + length);
+    const opengl = createOpengl({
+        readMemory: read,
+        windowMemory: read,
+        writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ value)=>
+            bytes.set(value, at),
+        scratch: { allocate: ()=>0x8000 },
+        screen: ()=>({ width: 16, height: 16 }),
+        present: ()=>{},
+        presenter: ()=>({ claim: ()=>{} }),
+        backend: ()=>backend,
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }),
+        frameQueued: ()=>null,
+        remote,
+    });
+    const table = /** @type {Record<string, { handler: (args: number[]) => any }>} */ (
+        opengl.table);
+    /** @param {string} name @param {number[]} args */
+    const gl = (name, ...args)=>table[name].handler(args);
+    assert.equal(gl('wglSetPixelFormat', 0x900d, 1, 0), 1);
+    assert.equal(gl('wglMakeCurrent', 0x900d, gl('wglCreateContext', 0x900d)), 1);
+    gl('glGenTextures', 1, 0x4000);
+    const name = new DataView(bytes.buffer).getUint32(0x4000, true);
+    gl('glBindTexture', GL.TEXTURE_2D, name);
+    gl('glTexParameteri', GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    bytes.set(Uint8Array.from({ length: 64 }, (_, at)=>(at * 7 + 3) & 0xff), 0x6000);
+    gl('glTexImage2D', GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x6000);
+    gl('glEnable', GL.TEXTURE_2D);
+    gl('glBegin', GL.TRIANGLES);
+    gl('glVertex2f', floatBits(0), floatBits(0));
+    gl('glVertex2f', floatBits(1), floatBits(0));
+    gl('glVertex2f', floatBits(0), floatBits(1));
+    gl('glEnd');
+    await gl('wglSwapBuffers', 0x900d);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    await gl('glGetTexImage', GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE, 0x7000);
+    return [...bytes.subarray(0x7000, 0x7040)];
+}
+
+test('a level read back answers what was uploaded, wherever the device is', async()=>{
+    // The program's side of a graphics worker keeps no texels at all: the
+    // read is answered by the side that draws, which reads the device.
+    const expected = Array.from({ length: 64 }, (_, at)=>(at * 7 + 3) & 0xff);
+    assert.deepEqual(await texelsThrough(), expected);
+    assert.deepEqual(await texelsThrough(loopback), expected);
+    try
+    {
+        assert.deepEqual(await texelsThrough(acrossAPort), expected);
+    }
+    finally
+    {
+        for (const port of ports.splice(0))
+        {
+            port.close();
+        }
+    }
+});
+
+/**
  * A recorded OpenGL root whose calls cross a port to their played twin, as
  * they cross to the graphics worker.
  *

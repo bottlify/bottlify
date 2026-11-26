@@ -51,13 +51,13 @@
   (decision A236). `D3DX10CreateThreadPump` and `D3DX11CreateThreadPump` make one IO thread and
   two processing threads when the program leaves the counts to D3DX.
 - OpenGL keeps a texture's data only where it draws, and lets a level's texels, and an S3TC
-  level's blocks where the device decodes them, go once the device holds them. Where it draws in
-  the program's own thread, `glGetTexImage`, `glGetTextureImage`, `glGetTextureSubImage` and
-  `glGetnTexImage` read such a level back from the device, the calling thread waiting as for
-  `glReadPixels`; a sized level the device drew into is answered from the bytes kept here, a
-  loss said. `glGetCompressedTexImage` answers an S3TC level's blocks while they are held and
-  refuses them (`GL_INVALID_OPERATION`, a loss said) once they were let go. Where a graphics
-  worker draws, those reads answer black and say so as a divergence.
+  level's blocks where the device decodes them, go once the device holds them.
+  `glGetTexImage`, `glGetTextureImage`, `glGetTextureSubImage` and `glGetnTexImage` are answered
+  by the side that draws (the program's own thread, or the graphics worker), which reads such a
+  level back from the device, the calling thread waiting as for `glReadPixels`; a sized level the
+  device drew into is answered from the bytes kept there, a loss said. `glGetCompressedTexImage`
+  answers an S3TC level's blocks while they are held and refuses them (`GL_INVALID_OPERATION`, a
+  loss said) once they were let go.
 - OpenGL goes up to 4.6, compatibility and core profiles (`wglCreateContextAttribsARB`), with
   GLSL 1.10 to 4.60. A feature the shader translator does not write fails the program's link
   with its reason. Doubles are single precision; a geometry shader's streams past 0 are not
