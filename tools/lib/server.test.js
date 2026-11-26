@@ -6,10 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { serveStatic } from './server.mjs';
+import { libraries, serveStatic } from './server.mjs';
 
 test('a source that imports a library core depends on by its name is served with a path the '
     + 'server answers, and that path serves the library', async()=>{
@@ -37,4 +37,12 @@ test('a source that imports a library core depends on by its name is served with
         await server.close();
         rmSync(root, { recursive: true, force: true });
     }
+});
+
+test('every library core or cork depends on is served, each once', ()=>{
+    const named = ['core', 'cork'].flatMap(one=>Object.keys(JSON.parse(readFileSync(
+        new URL(`../../modules/${one}/package.json`, import.meta.url), 'utf8')).dependencies ?? {}));
+    const served = libraries().map(one=>one.name);
+    assert.deepEqual([...new Set(served)].sort(), [...new Set(named)].sort());
+    assert.equal(served.length, new Set(served).size, 'no route twice');
 });
