@@ -33,7 +33,14 @@ test('the run cache line weighs each space: its bodies, their blocks, what round
         + ' rounding 88 %'), line);
     assert.ok(line.includes('; texels: 1 bodies'), line);
     assert.ok(line.includes('rounding 0 %'), line);
-    assert.ok(describeRunCache(figures).endsWith('; spaces not measured'));
+    assert.ok(describeRunCache(figures)
+        .endsWith('; spaces not measured; at the most placed: not measured'));
+    const peaked = describeRunCache({ ...figures, spaces: {}, peakPlacedBytes: 2 * MIB,
+        peakRoundingBytes: MIB, peakSpaces: { texels: { bodies: 9, bytes: MIB, hotBytes: MIB,
+            placedBytes: 2 * MIB } } });
+    assert.ok(peaked.includes('; at the most placed (2.0 MiB), rounding 1.0 MiB; texels: 9 bodies'),
+        peaked);
+    assert.ok(peaked.endsWith('rounding 50 %'), peaked);
 });
 
 test('a run cache that did not answer says so, never a zero', ()=>{

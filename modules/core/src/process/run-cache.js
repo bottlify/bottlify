@@ -60,7 +60,14 @@ export async function openRunCache(opened = {}){
      * look. What the budget is weighed against, which the keeper's figures, as
      * they stand at the end, do not say.
      */
-    const peak = { segments: 0, live: 0, placedBytes: 0 };
+    const peak = { segments: 0, live: 0, placedBytes: 0,
+        /**
+         * At the most placed: what rounding to blocks cost then, and each space
+         * as it stood. A run's bodies go cold as it goes on, so at its end the
+         * blocks it held are gone and their rounding with them.
+         */
+        roundingBytes: 0, spaces: /** @type {Record<string, { bodies: number, bytes: number,
+            hotBytes: number, placedBytes: number }>} */ ({}) };
     /** @param {import('../../vendor/cellar/cellar.js').Disk | null} disk */
     const open = disk=>openKeeper({
         budget, segmentBytes: SEGMENT_BYTES, coldAfterMs: IDLE_MS, disk,
@@ -147,11 +154,19 @@ export async function openRunCache(opened = {}){
         tails.bytes += tail.bytes;
         onTail(tail);
     };
+    const weighSpaces = ()=>Object.fromEntries([...spaces].sort()
+        .map(space=>[space, keeper.under(`${space}/`)]));
     const look = ()=>{
         const figures = keeper.figures();
-        peak.placedBytes = Math.max(peak.placedBytes, figures.placedBytes);
+        if (figures.placedBytes > peak.placedBytes)
+        {
+            peak.placedBytes = figures.placedBytes;
+            peak.roundingBytes = figures.roundingBytes;
+            peak.spaces = weighSpaces();
+        }
         return { ...figures, budget, peakSegmentBytes: peak.segments * SEGMENT_BYTES,
-            peakPlacedBytes: peak.placedBytes, owners, ownerTails: { ...tails },
+            peakPlacedBytes: peak.placedBytes, peakRoundingBytes: peak.roundingBytes,
+            peakSpaces: peak.spaces, owners, ownerTails: { ...tails },
             // Threads joined but this one's own reader, and owners' channels open.
             joined: told.size - 1, served: served.size };
     };
@@ -225,10 +240,10 @@ export async function openRunCache(opened = {}){
         /**
          * The keeper's figures, with its budget and the most it held at once,
          * and by space (`spaces`): each one's bodies, their bytes, those in
-         * memory and the blocks they take.
+         * memory and the blocks they take; and as the cache stood when it had
+         * the most placed (`peakSpaces`, `peakRoundingBytes`).
          */
-        figures: ()=>({ ...look(), spaces: Object.fromEntries([...spaces].sort()
-            .map(space=>[space, keeper.under(`${space}/`)])) }),
+        figures: ()=>({ ...look(), spaces: weighSpaces() }),
 
         close(){
             for (const one of served)

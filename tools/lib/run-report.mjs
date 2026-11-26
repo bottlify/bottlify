@@ -34,7 +34,10 @@ export function describeRunCache(figures){
         + ` (${mib(figures.writtenBytes)} MiB), cooled ${figures.cooled ?? 0},`
         + ` raised ${figures.raised ?? 0}, gone ${figures.gone},`
         + ` refused for room ${figures.refusedRoom ?? 0}, too large ${figures.refusedLarge ?? 0}`
-        + describeSpaces(figures.spaces);
+        + describeSpaces(figures.spaces)
+        + (figures.peakRoundingBytes === undefined ? '; at the most placed: not measured'
+            : `; at the most placed (${mib(figures.peakPlacedBytes)} MiB), rounding`
+                + ` ${mib(figures.peakRoundingBytes)} MiB${describeSpaces(figures.peakSpaces)}`);
 }
 
 /** What rounding to blocks costs a space: a share of the blocks it holds. */

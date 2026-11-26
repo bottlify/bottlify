@@ -67,10 +67,20 @@ test('the figures weigh each space on its own: its bodies, those in memory, the 
             // Through the handlers a process in a worker of its own calls.
             const place = run.handlers.cache.reserve('translations/m', 5000, {});
             assert.ok(place !== null);
-            assert.deepEqual(run.figures().spaces, {
+            const standing = {
                 reads: { bodies: 2, bytes: 4352, hotBytes: 4352, placedBytes: 2 * 4096 },
                 translations: { bodies: 1, bytes: 5000, hotBytes: 5000, placedBytes: 8192 },
-            });
+            };
+            const figures = run.figures();
+            assert.deepEqual(figures.spaces, standing);
+            assert.deepEqual(figures.peakSpaces, standing, 'the most placed is now');
+            assert.equal(figures.peakRoundingBytes, 2 * 4096 + 8192 - 4352 - 5000);
+            // Let go of: the spaces are empty now, the peak keeps them as they stood.
+            run.reader.drop('reads/a');
+            run.reader.drop('reads/b');
+            const after = run.figures();
+            assert.equal(after.spaces.reads.placedBytes, 0);
+            assert.deepEqual(after.peakSpaces, standing);
         }
         finally
         {
