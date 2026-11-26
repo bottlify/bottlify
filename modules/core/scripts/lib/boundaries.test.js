@@ -52,7 +52,8 @@ function issuesWith(extra, dependencies = []){
     const requires = new Map([['a', new Set()], ['b', new Set()], ['cpu', new Set()]]);
     try
     {
-        return findBoundaryIssues({ src, vendor, requires, dependencies: new Set(dependencies) }).issues;
+        return findBoundaryIssues({ src, vendor, requires,
+            dependencies: new Set(dependencies) }).issues;
     }
     finally
     {
