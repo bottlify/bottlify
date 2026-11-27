@@ -361,7 +361,7 @@ export function createShlwapiFunctions(host){
             }
             const result = combine(read(directory), read(file));
             host.writeMemory(wholeAddress(destination), encode(result ?? ''));
-            return result === null ? 0 : destination >>> 0;
+            return result === null ? 0 : wholeAddress(destination);
         },
     });
 
@@ -378,7 +378,7 @@ export function createShlwapiFunctions(host){
         /** @param {number[]} args */
         handler: ([pointer])=>{
             const path = read(pointer);
-            return path === null ? 0 : (pointer >>> 0) + extensionIndex(path) * unit;
+            return path === null ? 0 : wholeAddress(pointer) + extensionIndex(path) * unit;
         },
     });
 
@@ -428,7 +428,7 @@ export function createShlwapiFunctions(host){
             {
                 return 0;
             }
-            return (pointer >>> 0) + fileNameStart(path) * unit;
+            return wholeAddress(pointer) + fileNameStart(path) * unit;
         },
     });
 

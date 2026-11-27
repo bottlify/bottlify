@@ -101,7 +101,7 @@ export function gdiPixels(host, system){
 
     /** @param {number} handle */
     const bitmapOf = handle=>{
-        const at = host.heap.allocate(64) >>> 0;
+        const at = wholeAddress(host.heap.allocate(64));
         if (at === 0)
         {
             return null;
@@ -124,7 +124,7 @@ export function gdiPixels(host, system){
             header.setUint16(12, 1, true);
             header.setUint16(14, 32, true);
             host.writeMemory(at + 24, new Uint8Array(header.buffer));
-            const pixels = host.heap.allocate(width * height * 4) >>> 0;
+            const pixels = wholeAddress(host.heap.allocate(width * height * 4));
             const dc = call('gdi32', 'CreateCompatibleDC', [0]);
             try
             {
@@ -151,7 +151,7 @@ export function gdiPixels(host, system){
 
     /** @param {number} handle */
     const iconOf = handle=>{
-        const at = host.heap.allocate(20) >>> 0;
+        const at = wholeAddress(host.heap.allocate(20));
         if (at === 0)
         {
             return null;
@@ -276,7 +276,8 @@ export function createWindowscodecs(host){
         /** HRESULT WICConvertBitmapSource(REFWICPixelFormatGUID, IWICBitmapSource *, IWICBitmapSource **) */
         WICConvertBitmapSource: { argBytes: 12,
             handler: (/** @type {number[]} */ [format, source, out])=>
-                codecs.convertBitmapSource(format >>> 0, wholeAddress(source), wholeAddress(out)) },
+                codecs.convertBitmapSource(wholeAddress(format), wholeAddress(source),
+                    wholeAddress(out)) },
         WICCreateBitmapFromSection: { argBytes: 28,
             handler: (/** @type {number[]} */ args)=>codecs.bitmapFromSection(args.map(a=>a >>> 0)) },
         WICCreateBitmapFromSectionEx: { argBytes: 32,

@@ -159,7 +159,7 @@ export function createOleUtil(env){
      * @param {Uint8Array} bytes
      */
     const lend = bytes=>{
-        const block = env.heap.allocate(Math.max(bytes.length, 4)) >>> 0;
+        const block = wholeAddress(env.heap.allocate(Math.max(bytes.length, 4)));
         if (block !== 0)
         {
             env.writeMemory(block, bytes);
@@ -224,7 +224,7 @@ export function createOleUtil(env){
             return null;
         }
         const room = 256;
-        const block = env.heap.allocate(room * 2) >>> 0;
+        const block = wholeAddress(env.heap.allocate(room * 2));
         if (block === 0)
         {
             return null;
@@ -245,7 +245,7 @@ export function createOleUtil(env){
      * @returns {Promise<T | null>} null when there was no memory for it
      */
     const withScratch = async(bytes, use)=>{
-        const block = env.heap.allocate(bytes) >>> 0;
+        const block = wholeAddress(env.heap.allocate(bytes));
         if (block === 0)
         {
             return null;
@@ -285,7 +285,7 @@ export function createOleUtil(env){
      */
     const openStream = async(storage, name, mode, create, thread)=>{
         const text = lendWide(name);
-        const out = env.heap.allocate(4) >>> 0;
+        const out = wholeAddress(env.heap.allocate(4));
         if (text === 0 || out === 0)
         {
             for (const block of [text, out].filter(address=>address !== 0))
@@ -311,7 +311,7 @@ export function createOleUtil(env){
      * @returns {Promise<{ hr: number, bytes: Uint8Array }>}
      */
     const readStream = async(stream, thread)=>{
-        const block = env.heap.allocate(READ_PIECE + 4) >>> 0;
+        const block = wholeAddress(env.heap.allocate(READ_PIECE + 4));
         if (block === 0)
         {
             return { hr: 0x8007000e | 0, bytes: new Uint8Array(0) };
@@ -463,7 +463,7 @@ export function createOleUtil(env){
         {
             return 0;
         }
-        const copy = env.heap.allocate(Math.max(bytes.size, 1)) >>> 0;
+        const copy = wholeAddress(env.heap.allocate(Math.max(bytes.size, 1)));
         if (copy !== 0 && bytes.size !== 0)
         {
             env.writeMemory(copy, env.readMemory(bytes.at, bytes.size).slice());

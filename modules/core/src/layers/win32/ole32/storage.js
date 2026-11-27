@@ -2269,7 +2269,7 @@ export function createStorageFunctions(host){
                 {
                     return STG_E_ACCESSDENIED;
                 }
-                state.entry.clsid = readGuid(host, rclsid >>> 0);
+                state.entry.clsid = readGuid(host, wholeAddress(rclsid));
                 return S_OK;
             },
         },
@@ -2408,7 +2408,7 @@ export function createStorageFunctions(host){
                         + 'only a compound file is');
                     return STG_E_INVALIDPARAMETER;
                 }
-                if ((riid >>> 0) === 0 || readGuid(host, riid >>> 0) !== IID_ISTORAGE)
+                if ((riid >>> 0) === 0 || readGuid(host, wholeAddress(riid)) !== IID_ISTORAGE)
                 {
                     return E_NOINTERFACE;
                 }
@@ -2448,7 +2448,7 @@ export function createStorageFunctions(host){
                         + 'only a compound file is');
                     return STG_E_INVALIDPARAMETER;
                 }
-                if ((riid >>> 0) === 0 || readGuid(host, riid >>> 0) !== IID_ISTORAGE)
+                if ((riid >>> 0) === 0 || readGuid(host, wholeAddress(riid)) !== IID_ISTORAGE)
                 {
                     return E_NOINTERFACE;
                 }

@@ -273,7 +273,7 @@ export function createPathFunctions(host){
      * @param {number[]} args
      */
     const convert = ([dos, nt, filePart, relative])=>{
-        const name = objectName(dos >>> 0);
+        const name = objectName(wholeAddress(dos));
         if (name === null)
         {
             return STATUS.OBJECT_NAME_INVALID;

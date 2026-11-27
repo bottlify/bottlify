@@ -924,7 +924,7 @@ export function createOle2Functions(env){
             (await util.system('USER32.dll', name, args, thread)) ?? 0;
         // A point, an effect and a MSG; the strings lent for the window's
         // class and the target's property.
-        const block = env.heap.allocate(DRAG_POINT + 4 + MSG_SIZE) >>> 0;
+        const block = wholeAddress(env.heap.allocate(DRAG_POINT + 4 + MSG_SIZE));
         const className = util.lendWide('STATIC');
         const property = util.lendWide('OleDropTargetInterface');
         if (block === 0 || className === 0 || property === 0)
@@ -1240,7 +1240,8 @@ export function createOle2Functions(env){
                 }
                 // The storage is the class's from here on, as OleLoad reads
                 // it back (ole2.c: the storage's class after OleCreate).
-                await env.callMethod(wholeAddress(storage), SLOT.STORAGE_SET_CLASS, [rclsid >>> 0],
+                await env.callMethod(wholeAddress(storage), SLOT.STORAGE_SET_CLASS,
+                    [wholeAddress(rclsid)],
                     thread);
                 let hr = await prepare(made.unknown, wholeAddress(site), async persist=>
                     (await env.callMethod(persist, PERSIST.INIT_NEW, [storage], thread)) | 0,
@@ -1262,7 +1263,7 @@ export function createOle2Functions(env){
                         await release(cache, thread);
                     }
                 }
-                return handOut(made.unknown, riid >>> 0, wholeAddress(out), hr, thread);
+                return handOut(made.unknown, wholeAddress(riid), wholeAddress(out), hr, thread);
             },
         },
 
@@ -1313,7 +1314,7 @@ export function createOle2Functions(env){
                 }
                 const hr = await prepare(made.unknown, wholeAddress(site), async persist=>
                     (await env.callMethod(persist, PERSIST.LOAD, [storage], thread)) | 0, thread);
-                return handOut(made.unknown, riid >>> 0, wholeAddress(out), hr, thread);
+                return handOut(made.unknown, wholeAddress(riid), wholeAddress(out), hr, thread);
             },
         },
 
@@ -1971,7 +1972,7 @@ export function createOle2Functions(env){
                 }
                 return makeStatic(wholeAddress(data), cf, clsid, wholeAddress(formatEtc),
                     wholeAddress(storage),
-                    riid >>> 0, wholeAddress(out));
+                    wholeAddress(riid), wholeAddress(out));
             },
         },
 

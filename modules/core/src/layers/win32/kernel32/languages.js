@@ -16,6 +16,8 @@
  * in it is named as the neutral language is.
  */
 
+import { wholeAddress } from '../common/pointers.js';
+
 /** @type {ReadonlyMap<number, string>} */
 const LANGUAGE_NAMES = new Map([
     [0x0000, 'Language Neutral'],
@@ -127,7 +129,7 @@ export function verLanguageName(write){
             const room = size >>> 0;
             if ((buffer >>> 0) !== 0 && room > 0)
             {
-                write(buffer >>> 0, `${name.slice(0, room - 1)}\0`);
+                write(wholeAddress(buffer), `${name.slice(0, room - 1)}\0`);
             }
             return name.length;
         },

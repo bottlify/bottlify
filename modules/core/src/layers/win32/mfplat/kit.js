@@ -158,7 +158,7 @@ export function createMfKit(host){
      * @param {Uint8Array} bytes
      */
     const taskCopy = bytes=>{
-        const at = host.heap.allocate(Math.max(bytes.length, 1)) >>> 0;
+        const at = wholeAddress(host.heap.allocate(Math.max(bytes.length, 1)));
         if (at !== 0 && bytes.length > 0)
         {
             host.writeMemory(at, bytes);

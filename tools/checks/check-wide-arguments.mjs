@@ -36,12 +36,17 @@
  * whose types are typedefs it does not know -- and whether a handler reads the
  * dwords it declared. KNOWN lists the signatures left as they are, with why.
  *
+ * It also fails a handler that cuts back to a dword (`>>> 0`, `| 0`) an
+ * address the bridge hands it whole: one its spec lists (`addresses`) or one
+ * the signature table declares it (`checkTableCuts`, for a spec under its
+ * comment, in every layer). KNOWN_CUTS lists those left, with why.
+ *
  *     node tools/checks/check-wide-arguments.mjs [src] [--verbose]
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isMain } from '../lib/common.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -76,6 +81,18 @@ export const KNOWN = new Map([
 ]);
 
 /**
+ * Handlers left cutting an address the signature table hands them whole
+ * (`checkTableCuts`), by `file :: name`, with why: the list only shrinks.
+ *
+ * @type {Map<string, string>}
+ */
+export const KNOWN_CUTS = new Map([
+    ['modules/core/src/layers/win32/advapi32/security.js :: BuildTrusteeWithObjectsAndSid',
+        'OBJECTS_AND_SID and TRUSTEE are laid out 32-bit, the pointers in them dwords:'
+            + ' their 64-bit layout is the fix, not the argument'],
+]);
+
+/**
  * @typedef {Object} Layout
  * @property {number[]} quad  Each eight-byte integer's first dword.
  * @property {Record<number, 'f32' | 'f64'>} floats  Each float's first dword.
@@ -86,12 +103,45 @@ export const KNOWN = new Map([
 /**
  * A parameter list's parameters, each type written for both forms of a
  * function (`LPCSTR/LPCWSTR`, `LOCALE_ENUMPROCA/W`) taken as its first: the
- * two spellings are the same size and kind.
+ * two spellings are the same size and kind. A pointer named bare after a
+ * typed one (`GLdouble *objX, *objY`), and a bare name after a float
+ * (`GLdouble winX, winY`, `REAL dstx, dsty`), are of that type, as C declares
+ * them. Any other bare word is a parameter left unnamed or untyped (`HANDLE`,
+ * `int`, `dwFlags` after `LPCWSTR szDescription` in a comment that types only
+ * some): what it was is not guessed.
  *
  * @param {string} list
  */
-const paramsOf = list=>list.split(',')
-    .map(each=>each.trim().replace(/(\w)(?:\/\w+)+/g, '$1')).filter(Boolean);
+const paramsOf = list=>{
+    /** @type {string[]} */
+    const params = [];
+    let base = '';
+    for (const each of list.split(','))
+    {
+        let param = each.trim().replace(/(\w)(?:\/\w+)+/g, '$1');
+        if (!param)
+        {
+            continue;
+        }
+        const bare = /^(\**)\s*([a-z_]\w*)$/.exec(param);
+        const float = DOUBLE.has(base.split(/\s+/).pop() ?? '')
+            || SINGLE.has(base.split(/\s+/).pop() ?? '');
+        if (bare && base && (bare[1] || (float && !C_TYPES.test(bare[2]))))
+        {
+            param = `${base} ${bare[1]}${bare[2]}`;
+        }
+        else
+        {
+            const typed = /^(.*?[\w\]])\s*\**\s*[A-Za-z_]\w*(?:\s*\[[^\]]*\])?$/.exec(param);
+            base = typed && /\s|\*/.test(param.slice(typed[1].length)) ? typed[1] : '';
+        }
+        params.push(param);
+    }
+    return params;
+};
+
+/** The lowercase words of C that are a type, not a parameter's name. */
+const C_TYPES = /^(?:void|int|char|short|long|float|double|unsigned|signed|bool|va_list|\w+_t)$/;
 
 /**
  * The functions a signature names, where one comment is written for several
@@ -438,7 +488,7 @@ export const POINTER_RESULTS = new Set(['PVOID', 'PSTR', 'PWSTR', 'PCSTR', 'PCWS
     'PCCERT_CONTEXT', 'PCCRL_CONTEXT', 'PCCTL_CONTEXT', 'PIDLIST_ABSOLUTE', 'PIDLIST_RELATIVE',
     'PITEMID_CHILD', '_invalid_parameter_handler', '_purecall_handler', '_PNH',
     'PTOP_LEVEL_EXCEPTION_FILTER',
-    'PRUNTIME_FUNCTION', 'PEXCEPTION_ROUTINE', 'PVECTORED_EXCEPTION_HANDLER']);
+    'PRUNTIME_FUNCTION', 'PEXCEPTION_ROUTINE', 'PVECTORED_EXCEPTION_HANDLER', 'va_list']);
 
 /** Words a signature's return type may carry that are not its type. */
 const NOT_TYPE = new RegExp(String.raw`\b(WINAPI|CALLBACK|APIENTRY|__stdcall|__cdecl|CDECL|`
@@ -511,7 +561,11 @@ export function returnsPointer(written){
     }
     const type = written.replace(NOT_TYPE, ' ').trim().split(/\s+/).pop() ?? '';
     return POINTER_RESULTS.has(type) || (/^LP[A-Z]/.test(type) && !NOT_POINTERS.has(type))
-        || (/^P[A-Z]/.test(type) && !NOT_POINTERS.has(type));
+        || (/^P[A-Z]/.test(type) && !NOT_POINTERS.has(type))
+        // REFIID, REFCLSID, REFGUID, REFPROPVARIANT: `const X *` in the SDK's C
+        // headers (a C++ reference is an address too); REFERENCE_TIME and REFTIME
+        // are a count and a double by value.
+        || (/^REF[A-Z]/.test(type) && !QUAD.has(type) && !DOUBLE.has(type));
 }
 
 /**
@@ -861,23 +915,88 @@ export function checkAddresses(text){
 }
 
 /**
+ * Each spec of `text` that declares no addresses of its own but whose
+ * signature the table names (`pointer-arguments.js`, which `declareAddresses`
+ * gives it), with the places its handler cuts back to a dword (`cutAddresses`):
+ * the bridge hands it those arguments whole as surely as a literal list. A COM
+ * method (`invoke`, `name: '...'`), a hook and a call site are declared no
+ * places by the table and are not read.
+ *
+ * @param {string} text @param {Readonly<Record<string, readonly number[]>>} table
+ * @returns {{ name: string, line: number, problem: string }[]}
+ */
+export function checkTableCuts(text, table){
+    const found = [];
+    const comment = /\/\*\*\s*(?:\r?\n\s*\*)?\s*(?:[A-Za-z_]\w*\s+)+?\**\s*(\w+(?:\/\w+)*)\s*\(/g;
+    for (const match of text.matchAll(comment))
+    {
+        const end = text.indexOf('*/', match.index);
+        if (end < 0)
+        {
+            continue;
+        }
+        // The object the comment is over, and nothing after it: a spec
+        // (`Name: {`) or the one a helper makes (`const make = wide=>({`).
+        const open = text.indexOf('{', end);
+        const gap = open < 0 ? '' : text.slice(end + 2, open);
+        const spec = open < 0 || /[;},]|\*\//.test(gap) || gap.length > 200 ? null
+            : balanced(text, open);
+        if (spec === null
+            || /\baddresses\s*:|\binvoke\s*:|\bname\s*:\s*['"]|\bhook\s*:|\bsite\s*:/.test(spec))
+        {
+            continue;
+        }
+        const places = [...new Set(namesOf(match[1])
+            .flatMap(name=>(Object.hasOwn(table, name) ? table[name] : [])))];
+        const cut = places.length > 0 ? cutAddresses(spec, places) : [];
+        if (cut.length > 0)
+        {
+            found.push({ name: match[1], line: line0(text, match.index) + 1,
+                problem: `cuts an address the signature table hands it whole to a dword: ${
+                    cut.join(', ')} (keep it with wholeAddress)` });
+        }
+    }
+    return found;
+}
+
+/**
  * Where a spec's own handler cuts an argument it declared whole back to a
  * dword (`name >>> 0`, `name | 0`): the address past 4 GiB the bridge joined
- * is its low half again. A cut that only asks whether the argument is null
- * (`(name >>> 0) === 0`) keeps the answer and is let be.
+ * is its low half again. The spec's text is read from its `handler:` on.
  *
  * @param {string} spec  the spec's text @param {number[]} named  the dwords declared
  * @returns {string[]}  each cut as written
  */
 export function cutAddresses(spec, named){
-    const listed = /\bhandler\s*:\s*(?:async\s*)?\(?\s*\[([^\]]*)\]/.exec(spec);
-    const whole = /\bhandler\s*:\s*(?:async\s*)?\(?\s*(\w+)\s*\)?\s*=>/.exec(spec);
+    const at = /\bhandler\s*:\s*/.exec(spec);
+    return at ? cutsIn(spec.slice(at.index + at[0].length), named) : [];
+}
+
+/**
+ * Where a handler, by its own source (`spec.handler.toString()`, or the text
+ * after `handler:`), cuts one of the dwords `named` back to a dword: each read
+ * by its parameter's name where it destructures its arguments
+ * (`([type, proc])=>`), as `args[n]` where it takes them whole. A cut that only
+ * asks whether the argument is null - `(name >>> 0) === 0`, `!== 0`,
+ * `!(name >>> 0)`, `if (name >>> 0)`, `(name >>> 0) ? ...` - keeps the answer
+ * and is let be. What the handler hands a helper of its own is not read here.
+ *
+ * @param {string} source @param {readonly number[]} named
+ * @returns {string[]}  each cut as written
+ */
+export function cutsIn(source, named){
+    const text = source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:'"`\\])\/\/[^\n]*/g, '$1 ');
+    const head = text.trimStart().replace(/^async\b\s*/, '').replace(/^function\b\s*\w*\s*/, '')
+        .replace(/^\w+\s*(?=\()/, '');
+    const listed = /^\(\s*\[([^\]]*)\]/.exec(head);
+    const whole = listed ? null
+        : /^\(?\s*(?:\.\.\.)?(\w+)\s*(?:=\s*\[\s*\])?\s*\)?\s*(?:=>|\{)/.exec(head);
     /** @type {string[]} */
     const names = [];
     for (const word of named)
     {
-        const name = listed ? listed[1].split(',')[word]?.trim() : undefined;
-        if (name)
+        const name = listed?.[1].split(',')[word]?.trim().replace(/\s*=[\s\S]*$/, '');
+        if (name && /^[\w$]+$/.test(name))
         {
             names.push(name.replace(/[$]/g, '\\$&'));
         }
@@ -890,9 +1009,30 @@ export function cutAddresses(spec, named){
     const cuts = [];
     for (const name of names)
     {
-        const cut = new RegExp(String.raw`(?<![\w.])${name}\s*(?:>>>|\|)\s*0\b`
-            + String.raw`(?!\s*\)\s*[!=]==\s*0)`, 'g');
-        for (const one of spec.matchAll(cut))
+        const cut = new RegExp(String.raw`(?<![\w.$])${name}\s*(?:>>>|\|)\s*0\b`, 'g');
+        for (const one of text.matchAll(cut))
+        {
+            const before = text.slice(0, one.index).trimEnd();
+            const after = text.slice((one.index ?? 0) + one[0].length).trimStart();
+            const asked = /^[!=]==?\s*0\b/.test(after)
+                || (before.endsWith('(') && (/^\)\s*(?:[!=]==?\s*0\b|\?|&&|\|\|)/.test(after)
+                    || (/^\)/.test(after) && /(?:\bif\s*|!\s*)\($/.test(before))));
+            if (!asked)
+            {
+                cuts.push(one[0].replace(/\s+/g, ' '));
+            }
+        }
+    }
+    // Every argument at once: `args.map(value=>value >>> 0)` hands the body the
+    // low dword of each, the addresses among them too.
+    const items = listed?.[1].split(',').map(each=>each.trim()) ?? [];
+    const rest = items.findIndex(each=>each.startsWith('...'));
+    const spread = whole?.[1] ?? (rest < 0 ? undefined : items[rest].slice(3));
+    if (spread && named.some(word=>word >= Math.max(rest, 0)))
+    {
+        const all = new RegExp(String.raw`(?<![\w.$])${spread}\s*\.map\(\s*\(?(\w+)\)?\s*=>\s*\1`
+            + String.raw`\s*(?:>>>|\|)\s*0\s*\)`, 'g');
+        for (const one of text.matchAll(all))
         {
             cuts.push(one[0].replace(/\s+/g, ' '));
         }
@@ -901,7 +1041,7 @@ export function cutAddresses(spec, named){
 }
 
 /** @param {string} text @param {number | undefined} at */
-const line0 = (text, at)=>text.slice(0, at).split('\n').length - 1;
+const line0 =(text, at)=>text.slice(0, at).split('\n').length - 1;
 
 /**
  * A signature's parameter list, as its comment writes it - across lines, the
@@ -1006,6 +1146,29 @@ if (isMain(import.meta.url))
             }
         }
     }
+    const { POINTER_ARGUMENTS } = await import(pathToFileURL(join(ROOT, 'modules', 'core', 'src',
+        'layers', 'win32', 'common', 'pointer-arguments.js')).href);
+    /** @type {Set<string>} */
+    const cutNow = new Set();
+    for (const file of sources(src))
+    {
+        const where = relative(ROOT, file).replace(/\\/g, '/');
+        for (const one of checkTableCuts(readFileSync(file, 'utf8'), POINTER_ARGUMENTS))
+        {
+            cutNow.add(`${where} :: ${one.name}`);
+            if (!KNOWN_CUTS.has(`${where} :: ${one.name}`))
+            {
+                failures.push(`${where}:${one.line} ${one.name}: ${one.problem}`);
+            }
+        }
+    }
+    for (const key of KNOWN_CUTS.keys())
+    {
+        if (!cutNow.has(key) && !args.some(arg=>!arg.startsWith('--')))
+        {
+            failures.push(`${key} no longer cuts an address: take it off KNOWN_CUTS`);
+        }
+    }
     if (failures.length > 0)
     {
         console.error(`check-wide-arguments: ${failures.length} of ${checked} signatures with a`
@@ -1018,5 +1181,6 @@ if (isMain(import.meta.url))
     }
     console.log(`check-wide-arguments: ${checked} signatures with a wide argument, each declared;`
         + ` ${results} results, the ${addresses} addresses among them declared;`
-        + ` ${whole} specs take arguments whole, each an address of its signature`);
+        + ` ${whole} specs take arguments whole, each an address of its signature;`
+        + ` ${KNOWN_CUTS.size} handlers known to cut an address the table hands them whole`);
 }

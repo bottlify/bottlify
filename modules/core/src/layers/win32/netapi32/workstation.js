@@ -47,7 +47,7 @@ export function createWorkstationFunctions(host){
 
     /** @param {number} bytes @returns {number} */
     const allocate = bytes=>{
-        const at = host.allocate(Math.max(bytes, 1)) >>> 0;
+        const at = wholeAddress(host.allocate(Math.max(bytes, 1)));
         if (at !== 0)
         {
             buffers.set(at, bytes);

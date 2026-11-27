@@ -666,7 +666,7 @@ export function createShellFunctions(host){
             {
                 return 0;
             }
-            const icon = `${dwordAt(data >>> 0, 4)}:${dwordAt(data >>> 0, 8)}`;
+            const icon = `${dwordAt(wholeAddress(data), 4)}:${dwordAt(wholeAddress(data), 8)}`;
             const known = trayIcons.has(icon);
             switch (message >>> 0)
             {
@@ -1163,8 +1163,8 @@ export function createShellFunctions(host){
         argBytes: 8,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [list, path])=>{
-            const found = pathOf(list >>> 0);
-            (wide ? writeWidePath : writePath)(path >>> 0, found ?? '');
+            const found = pathOf(wholeAddress(list));
+            (wide ? writeWidePath : writePath)(wholeAddress(path), found ?? '');
             return found === null ? 0 : 1;
         },
     });
@@ -1376,16 +1376,16 @@ export function createShellFunctions(host){
             {
                 if (host.launcher.imageOf(name) === null)
                 {
-                    write(result >>> 0, '');
+                    write(wholeAddress(result), '');
                     return SE_ERR_FNF;
                 }
-                write(result >>> 0, NOTEPAD);
+                write(wholeAddress(result), NOTEPAD);
                 return LAUNCH_SUCCESS;
             }
             const volume = readableVolume();
             if (name === null || !host.resolve || !volume)
             {
-                write(result >>> 0, '');
+                write(wholeAddress(result), '');
                 return SE_ERR_NOASSOC;
             }
             // The file is found before its type is asked about: in the
@@ -1396,20 +1396,20 @@ export function createShellFunctions(host){
             const found = placed !== spelled ? placed : programOf(spelled);
             if (found === null || volume.stat(found)?.isDirectory)
             {
-                write(result >>> 0, '');
+                write(wholeAddress(result), '');
                 return found === null ? SE_ERR_FNF : SE_ERR_NOASSOC;
             }
             const extension = extensionOf(found);
             if (SELF_EXECUTABLE.has(extension))
             {
-                write(result >>> 0, host.resolve(found));
+                write(wholeAddress(result), host.resolve(found));
                 return LAUNCH_SUCCESS;
             }
             const named = extension === '' ? null : associations?.classOf(`.${extension}`);
             const command = named ? associations?.commandOf(named, null) : null;
             const image = command
                 ? imageOfCommand(argify(command.value, host.resolve(found), '').trim()) : null;
-            write(result >>> 0, image ?? '');
+            write(wholeAddress(result), image ?? '');
             return image === null ? SE_ERR_NOASSOC : LAUNCH_SUCCESS;
         },
     });
@@ -1442,8 +1442,8 @@ export function createShellFunctions(host){
             }
             const wanted = first < -1 ? Math.min(1, count >>> 0)
                 : Math.min(count >>> 0, MAX_EXTRACTED);
-            const arrays = /** @type {[number, number][]} */ ([[large >>> 0, LARGE_ICON],
-                [small >>> 0, SMALL_ICON]]).filter(([array])=>array !== 0);
+            const arrays = /** @type {[number, number][]} */ ([[wholeAddress(large), LARGE_ICON],
+                [wholeAddress(small), SMALL_ICON]]).filter(([array])=>array !== 0);
             if (!host.icon)
             {
                 host.divergence?.('ExtractIconEx',
@@ -1539,7 +1539,7 @@ export function createShellFunctions(host){
         argBytes: 20,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ [, list, format, out, size])=>{
-            const path = pathOf(list >>> 0);
+            const path = pathOf(wholeAddress(list));
             const needed = (format | 0) === SHGDFIL_FINDDATA
                 ? wide ? WIN32_FIND_DATAW_SIZE : WIN32_FIND_DATAA.SIZE
                 : (format | 0) === SHGDFIL_DESCRIPTIONID ? SHDESCRIPTIONID_SIZE : 0;
@@ -2093,7 +2093,7 @@ export function createShellFunctions(host){
                 const entry = u32(u32(folder) + 5 * 4);
                 return host.drive((function* (){
                     return yield { entry,
-                        args: [wholeAddress(folder), wholeAddress(list), 0, riid >>> 0,
+                        args: [wholeAddress(folder), wholeAddress(list), 0, wholeAddress(riid),
                             wholeAddress(out)] };
                 })());
             },
@@ -2132,7 +2132,8 @@ export function createShellFunctions(host){
                     host.divergence?.('SHBindToParent', 'no shell namespace: E_FAIL');
                     return E_FAIL;
                 }
-                const bound = namespace.parent(wholeAddress(list), riid >>> 0, wholeAddress(out));
+                const bound = namespace.parent(wholeAddress(list), wholeAddress(riid),
+                    wholeAddress(out));
                 if (bound.hr === S_OK && wholeAddress(last) !== 0)
                 {
                     host.writeMemory(wholeAddress(last), dword(bound.last));

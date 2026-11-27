@@ -26,6 +26,7 @@ import { withLineMarkers } from '../../win32/d3dx9/hlsl-compile.js';
 import { parseDxbc } from '../d3d10/dxbc.js';
 import { D3DERR_INVALIDCALL } from '../d3d10/reflection.js';
 import { E_FAIL, E_INVALIDARG, E_NOTIMPL, S_OK } from '../d3d10/constants.js';
+import { wholeAddress } from '../../../system/address.js';
 
 /** D3D_BLOB_PART: the chunks each part is, and whether it comes as a container. */
 const PARTS = /** @type {Record<number, { chunks: string[], container: boolean }>} */ ({
@@ -464,7 +465,7 @@ export function createCompilerSeam(deps){
                 {
                     return 0x80070057 | 0;
                 }
-                return deps.reflect(memory.readMemory(data >>> 0, size >>> 0), riid, out);
+                return deps.reflect(memory.readMemory(wholeAddress(data), size >>> 0), riid, out);
             },
         },
     };

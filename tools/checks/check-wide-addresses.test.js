@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    HIGH, LOW, mangledPointers, raxOf, sameAnswer, writeDifferences,
+    HIGH, LOW, cutHandlers, mangledPointers, raxOf, sameAnswer, writeDifferences,
 } from './check-wide-addresses.mjs';
 
 test('RAX is a dword sign-extended, a bigint whole, nothing for no number', ()=>{
@@ -90,3 +90,26 @@ test('an MSVC name says which of its arguments are addresses', ()=>{
     assert.deepEqual(mangledPointers('?max_size@?$allocator@D@std@@QBEIXZ'), [0], 'const, 32-bit');
     assert.equal(mangledPointers('GetProcessHeap'), null);
 });
+
+test('a handler that cuts an address it is handed whole is found by its own source', ()=>{
+    // A helper makes both spellings' spec, under no signature comment of its
+    // own; one cuts the declared address, the other keeps it.
+    const make = (/** @type {boolean} */ keep)=>({
+        argBytes: 8, addresses: [1],
+        handler: keep ? (/** @type {number[]} */ [, out])=>write(wholeAddress(out))
+            : (/** @type {number[]} */ [, out])=>write(out >>> 0),
+    });
+    const shared = make(false);
+    const libraries = {
+        'A.dll': { CutA: shared, CutW: shared, Kept: make(true),
+            Undeclared: { argBytes: 4, handler: (/** @type {number[]} */ [at])=>at >>> 0 } },
+    };
+    assert.deepEqual([...cutHandlers(libraries)], [['A.dll!CutA', ['out >>> 0']]],
+        'once for a spec under two names; none where nothing is handed whole');
+    assert.deepEqual([...cutHandlers(libraries, /Kept/)], []);
+});
+
+/** @param {number} at */
+const write = at=>at;
+/** @param {number} at */
+const wholeAddress = at=>at;

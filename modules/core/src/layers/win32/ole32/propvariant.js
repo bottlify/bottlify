@@ -217,7 +217,7 @@ export function createPropVariantFunctions(host){
      * @param {number} source @param {number} length @param {Made} made
      */
     const duplicate = (source, length, made)=>{
-        const block = host.heap.allocate(length) >>> 0;
+        const block = wholeAddress(host.heap.allocate(length));
         if (block !== 0)
         {
             made.blocks.push(block);
@@ -255,7 +255,7 @@ export function createPropVariantFunctions(host){
             {
                 return record;
             }
-            const slot = host.heap.allocate(4) >>> 0;
+            const slot = wholeAddress(host.heap.allocate(4));
             if (!host.safeArray || slot === 0)
             {
                 if (slot !== 0)
@@ -421,7 +421,7 @@ export function createPropVariantFunctions(host){
                     host.writeMemory(at, header);
                     return S_OK;
                 }
-                const block = host.heap.allocate(CLIPDATA_SIZE) >>> 0;
+                const block = wholeAddress(host.heap.allocate(CLIPDATA_SIZE));
                 if (block === 0)
                 {
                     return E_OUTOFMEMORY;

@@ -157,7 +157,7 @@ export function createSteamclientFunctions(host){
         if (!constants.has(text))
         {
             const bytes = utf8.encode(text);
-            const at = host.allocate(bytes.length + 1) >>> 0;
+            const at = wholeAddress(host.allocate(bytes.length + 1));
             host.writeMemory(at, Uint8Array.of(...bytes, 0));
             constants.set(text, at);
         }
@@ -608,7 +608,7 @@ export function createSteamclientFunctions(host){
                 return 0;
             }
             host.log?.(`callback ${next.id} (${next.data.length} bytes) to pipe ${pipe}`);
-            message = host.allocate(next.data.length) >>> 0;
+            message = wholeAddress(host.allocate(next.data.length));
             host.writeMemory(message, next.data);
             const layout = callbackMsg(pointerSize);
             const record = new Uint8Array(layout.size);

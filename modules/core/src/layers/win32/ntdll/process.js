@@ -293,7 +293,7 @@ export function createProcessFunctions(host){
     /** A terminated wide copy in the process heap, or 0. @param {string} text */
     const heapString = text=>{
         const bytes = utf16z(text);
-        const at = host.allocate(bytes.length) >>> 0;
+        const at = wholeAddress(host.allocate(bytes.length));
         if (at !== 0)
         {
             host.writeMemory(at, bytes);
@@ -427,7 +427,7 @@ export function createProcessFunctions(host){
         const size = (cursor + 3) & ~3;
         const environmentCopy = environmentBytes(environment >>> 0, own);
         const total = (size + environmentCopy.length + 3) & ~3;
-        const block = host.allocate(total) >>> 0;
+        const block = wholeAddress(host.allocate(total));
         if (block === 0)
         {
             return STATUS.NO_MEMORY;
@@ -501,7 +501,7 @@ export function createProcessFunctions(host){
         const application = heapString(path);
         const line = heapString(commandLine);
         const folder = directory === '' ? 0 : heapString(directory);
-        const scratch = host.allocate(STARTUPINFO_SIZE + 16) >>> 0;
+        const scratch = wholeAddress(host.allocate(STARTUPINFO_SIZE + 16));
         const held = [application, line, folder, scratch].filter(at=>at !== 0);
         const release = ()=>held.forEach(at=>host.free(at));
         if (application === 0 || line === 0 || scratch === 0)
@@ -545,7 +545,7 @@ export function createProcessFunctions(host){
      * @returns {any}  `{ handle, id }` or `{ status }`, or a promise of one
      */
     const makeThread = asked=>{
-        const scratch = host.allocate(4) >>> 0;
+        const scratch = wholeAddress(host.allocate(4));
         if (scratch === 0)
         {
             return { status: STATUS.NO_MEMORY };
@@ -586,7 +586,7 @@ export function createProcessFunctions(host){
      */
     const markSkipThreadAttach = (process, handle)=>{
         const scratch = (process >>> 0) === OWN_PROCESS && (host.pointerSize ?? 4) === 4
-            ? host.allocate(THREAD_BASIC_INFORMATION_BYTES) >>> 0 : 0;
+            ? wholeAddress(host.allocate(THREAD_BASIC_INFORMATION_BYTES)) : 0;
         const asked = scratch === 0 ? null : host.native?.('NtQueryInformationThread')
             ?.handler([handle, THREAD_BASIC_INFORMATION, scratch, THREAD_BASIC_INFORMATION_BYTES,
                 0]);
