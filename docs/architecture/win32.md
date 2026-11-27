@@ -111,7 +111,13 @@ read a value where it lies, `set8` to `setPtr` and `set32s` write one, `cstr` an
 string to its terminator or to a limit in bytes (cut there, a fault only where memory ends),
 `writeAnsi` and `writeWide` write one cut to its room, `guid` and `setGuid` a GUID in its
 canonical form, and `bytes` is the one read that copies, into a buffer it is given or into one it
-makes. `ptr` and `setPtr` are as wide as the process's pointers. A library makes no accessor of
+makes. `ptr` and `setPtr` are as wide as the process's pointers. A write whose length is the
+program's is never made on the host first: `fill` is the memory layer's own, and `setMade`
+(`writeMade` for a library handed only a write, `writeZeros` for zeros) makes a pattern or random
+bytes a 64 KiB chunk at a time as it writes them, so a length the destination does not have
+faults where it ends, as Windows' loop does, rather than allocating gigabytes first
+(`tools/checks/check-guest-pointers.mjs` fails a call that grows the host's memory by more than
+64 MiB). A library makes no accessor of
 its own and copies no read again: `tools/checks/check-guest-access.mjs` (`npm run
 check:boundaries`) fails a new one, and lists in its baseline the ones the layer still has, which
 only shrinks.

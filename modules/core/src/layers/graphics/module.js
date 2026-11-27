@@ -510,7 +510,7 @@ export function createGraphicsModule(){
              * @type {{ backend: any, factories: any, created: string[], seam: any,
              *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
              *     gammaOwners: Set<any>, remote: any, blockCompression: any,
-             *     leaveLoss: (() => void) | null }}
+             *     leaveLoss: (() => void) | null, texelOwners: { close: () => any }[] }}
              */
             const state = {
                 remote: null,
@@ -525,6 +525,7 @@ export function createGraphicsModule(){
                 disposed: false,
                 gammaOwners: new Set(),
                 leaveLoss: null,
+                texelOwners: [],
             };
 
             /**
@@ -682,6 +683,22 @@ export function createGraphicsModule(){
                 : null;
             state.remote = remote;
             /**
+             * Names of the run's cache a root drawn on this thread keeps its
+             * texels under (`internal/texel-store.js`), as a root in the
+             * graphics worker is given its own there (`remote/connect.js`): one
+             * owner a root, numbered by the run's keeper, let go of with this
+             * machine. None where the run serves no names, and the root keeps
+             * them in plain memory.
+             */
+            const ownTexels = ()=>{
+                const owned = cache?.owner?.('texels') ?? null;
+                if (owned)
+                {
+                    state.texelOwners.push(owned);
+                }
+                return owned;
+            };
+            /**
              * A Direct3D 8 or 9 root, drawn here or in the graphics worker.
              *
              * @param {'d3d8' | 'd3d9'} name @param {(services: any) => any} factory
@@ -689,7 +706,7 @@ export function createGraphicsModule(){
              */
             const direct3d = (name, factory, services)=>(remote
                 ? remote.root(name, factory, services, cache)
-                : factory(services));
+                : factory({ ...services, texelCache: device ? ownTexels() : null }));
             /**
              * Direct3D 10's root, drawn here or in the graphics worker.
              *
@@ -967,6 +984,9 @@ export function createGraphicsModule(){
                     // guest's own code.
                     compressedTextures,
                     astcTextures,
+                    // Made only where the contexts draw here: a root in the
+                    // graphics worker is given names of its own there.
+                    texelCache: device && !remote ? ownTexels() : null,
                     presenter: ()=>state.shown,
                     frameQueued,
                     // The same per-draw account the Direct3D 8 device takes, on
@@ -1928,6 +1948,10 @@ export function createGraphicsModule(){
             if (instance)
             {
                 instance.remote?.dispose();
+                for (const owned of instance.texelOwners.splice(0))
+                {
+                    owned.close();
+                }
                 if (instance.backend)
                 {
                     instance.backend.dispose();

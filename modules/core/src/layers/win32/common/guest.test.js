@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { bytesPerCall } from '../../../../../../tools/fixtures/allocation.mjs';
 import { memoryModule } from '../../memory/module.js';
 import { createGuest } from './guest.js';
-import { guestOver } from './guest.fixture.js';
+import { IN_PLACE, externalGrowth, guestOver } from './guest.fixture.js';
 
 const SIZE = 0x10000;
 
@@ -217,4 +217,33 @@ test('bytes are one copy, or none into a buffer given; a copy moves as memmove',
     guest.setBytes(0x12, Uint8Array.of(7));
     assert.deepEqual([...ram.subarray(0x10, 0x13)], [0xaa, 0xaa, 7]);
     assert.throws(()=>guest.u32(0xfe), /./, 'memory that is not there is a fault');
+});
+
+test('bytes made to a length are written a chunk at a time, a fault before the rest is made', ()=>{
+    const ram = new Uint8Array(0x30000);
+    const guest = guestOver(ram);
+    /** @type {number[]} */
+    const offsets = [];
+    guest.setMade(0x10, 0x20004, (chunk, offset)=>{
+        offsets.push(offset);
+        for (let at = 0; at < chunk.length; at++)
+        {
+            chunk[at] = (offset + at) % 251;
+        }
+    });
+    assert.deepEqual(offsets, [0, 0x10000, 0x20000], 'chunks of 64 KiB, the last what is left');
+    assert.equal(ram[0x10 + 0x1fffe], 0x1fffe % 251);
+    assert.equal(ram[0x10 + 0x20003], 0x20003 % 251);
+    assert.equal(ram[0x10 + 0x20004], 0, 'nothing past the length');
+    guest.setMade(0x10, 0, ()=>assert.fail('nothing made for no length'));
+
+    offsets.length = 0;
+    const { grown, error } = externalGrowth(()=>guest.setMade(0x2fff0, 0xdeadbeef,
+        (chunk, offset)=>{
+            offsets.push(offset);
+            chunk.fill(1);
+        }));
+    assert.equal(error?.code, 'GUEST_ACCESS', 'past the memory is a fault');
+    assert.deepEqual(offsets, [0], 'at the first chunk, the rest never made');
+    assert.ok(grown < IN_PLACE, `${grown} bytes grown`);
 });

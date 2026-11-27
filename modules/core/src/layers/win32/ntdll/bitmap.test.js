@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createBitmapFunctions } from './bitmap.js';
+import { IN_PLACE, externalGrowth, guestOver } from '../common/guest.fixture.js';
 
 const HEADER = 0x10;
 const RUNS = 0x40;
@@ -24,6 +25,7 @@ function machine(){
     const fns = createBitmapFunctions({
         readMemory: (at, length)=>memory.slice(at, at + length),
         writeMemory: (at, bytes)=>memory.set(bytes, at),
+        guest: guestOver(memory),
     });
     /** @param {string} name @param {...number} args */
     const call = (name, ...args)=>/** @type {any} */ (fns)[name].handler([HEADER, ...args]);
@@ -42,6 +44,20 @@ test('initialising writes the header only; all bits go to whole ULONGs', ()=>{
     buff.fill(0xff);
     call('RtlClearAllBits');
     assert.deepEqual([...buff.subarray(0, 5)], [0, 0, 0, 0, 0xff]);
+});
+
+test('all bits of a size the buffer does not have fault where it ends, nothing made for them', ()=>{
+    // Windows' memset of the buffer faults at the first byte not there; a
+    // host buffer of the header's size first is half a gigabyte for 2^32 bits.
+    const { call, view } = machine();
+    call('RtlInitializeBitMap', 0xf00, 0xfffffff0);
+    for (const name of ['RtlSetAllBits', 'RtlClearAllBits'])
+    {
+        const { grown, error } = externalGrowth(()=>call(name));
+        assert.equal(error?.code, 'GUEST_ACCESS', `${name}: a fault`);
+        assert.ok(grown < IN_PLACE, `${name}: ${grown} bytes grown`);
+    }
+    assert.equal(view.getUint32(HEADER, true), 0xfffffff0, 'the header as it was');
 });
 
 test('setting, clearing and testing runs across bytes', ()=>{

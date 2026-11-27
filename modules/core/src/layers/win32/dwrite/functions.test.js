@@ -194,6 +194,18 @@ test('the system collection: families, the nearest font, its face', async()=>{
     assert.equal(await h.call(face, 'GetGlyphIndices', codes, 2, glyphs), S_OK);
     assert.deepEqual([h.view.getUint16(glyphs, true), h.view.getUint16(glyphs + 2, true)],
         [0x41, 0]);
+    // No code points: the indices cleared to the count where they lie, a
+    // count the buffer does not have refused where the memory ends, never a
+    // host buffer of that count first.
+    h.view.setUint32(glyphs, 0xffffffff, true);
+    assert.equal(await h.call(face, 'GetGlyphIndices', 0, 2, glyphs), E_INVALIDARG);
+    assert.equal(h.u32(glyphs), 0, 'cleared');
+    const before = process.memoryUsage().external;
+    const refused = await Promise.resolve().then(()=>h.call(face, 'GetGlyphIndices', 0,
+        0x7fffffff, glyphs)).then(()=>null, e=>e);
+    const grown = process.memoryUsage().external - before;
+    assert.ok(refused !== null, 'past the memory, the write refused');
+    assert.ok(grown < 4 * 2 ** 20, `${grown} bytes grown`);
     const metrics = h.alloc(20);
     await h.call(face, 'GetMetrics', metrics);
     assert.equal(h.view.getUint16(metrics, true), 2048);

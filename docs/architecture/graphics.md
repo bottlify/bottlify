@@ -58,9 +58,12 @@ flowchart TB
 - **Texels a device keeps.** Every device keeps the texels it holds past the call that made them
   in one texel store (`internal/texel-store.js`): a body handed over is readable at once, in
   place, and moves into the run's cache (Cellar) under the root's own names once the cache grants
-  its room, asked for without waiting; idle there, it goes to the disk. A body under 4 KiB (the
-  cache's unit of room), one refused room, and every body of a device with no names in the cache
-  (one drawing on the program's thread) stay in plain memory under the same contract. A body the
+  its room, asked for without waiting; idle there, it goes to the disk. A root drawn in the
+  graphics worker is given its names there; one drawn on the process's own thread takes them from
+  the cache layer (`owner('texels')`, numbered by the run's keeper, its room taken through that
+  thread's reader as a body is put), let go of with the graphics layer. A body under 4 KiB (the
+  cache's unit of room), one refused room, and every body of a device the run serves no names
+  (a process in a worker of its own) stay in plain memory under the same contract. A body the
   cache cannot give back is a `loss` and reads as zeros. An OpenGL level's texels are the
   device's once a draw uploads them. Until then the graphics thread hands them, and the blocks of
   a level kept as S3TC, about once a second to the store (`opengl/gpu.js` `spill`); nothing on
@@ -72,7 +75,9 @@ flowchart TB
   samples it) hands its bytes to the store as they stood, and the replay reads them there: an
   OpenGL frame lets them go once it is replayed (`opengl/gpu.js` `keptForReplay`), a Direct3D 8
   or 9 frame with its arena (`d3d8/render.js` `releaseFrame`). An upload that goes to the queue
-  at once keeps nothing. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
+  at once keeps nothing: what it decodes or converts on the way (Direct3D 8 and 9's S3TC on a
+  device without block compression, into one room for a call's levels; Direct3D 10's converted
+  formats, each volume slice in its place) is bytes of the call, gone when it returns. An OpenGL sized level's RGBA, which a read-back or a copy makes from its
   bytes on a device, is made again at each read and not kept; the processor's rasteriser keeps
   it while the level is unchanged. A game loads
   every texture of a level and draws a part of them: in the Doom 3 demo's first level, 1323 of

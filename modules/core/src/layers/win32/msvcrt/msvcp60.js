@@ -91,6 +91,20 @@ const copierOf = name=>(name === 'exception' ? '??0exception@@QAE@ABV0@@Z'
     : `??0${name}@std@@QAE@ABV01@@Z`);
 
 /**
+ * `length` bytes of one element value, written where they go.
+ *
+ * @typedef {{ length: number, value: number }} Fill
+ */
+
+/**
+ * What a member that puts elements into a string is handed, `length` in
+ * bytes: elements read already, a fill, or a program's pointer and count not
+ * read until the member has refused what it refuses.
+ *
+ * @typedef {Uint8Array | Fill | { length: number, from: number }} Elements
+ */
+
+/**
  * @typedef {Object} StringMembers
  * @property {(self: number, built?: boolean) => void} tidy
  * @property {(self: number, elements: Uint8Array) => number} assignElements
@@ -226,16 +240,75 @@ export function createMsvcp60Functions(crt, host){
         const read = (at, count)=>(count === 0 ? new Uint8Array(0)
             : guest.bytes(at, count * unit));
         /**
-         * Elements written at a place: none written is no access, as a
-         * string of no text has no place (its `_Ptr` is null).
+         * The elements a program's pointer and count name, read only once the
+         * member has judged its positions and lengths (`take`), as the
+         * library judges them before it copies: a count past max_size() is
+         * its length_error, whether or not the memory is there.
          *
-         * @param {number} at @param {Uint8Array} elements
+         * @param {number} at @param {number} count
+         * @returns {Elements}
+         */
+        const source = (at, count)=>(count === 0 ? new Uint8Array(0)
+            : { length: count * unit, from: at });
+        /**
+         * `n` elements of value c, written where they go once the string has
+         * room for them: a count is the program's, and one the allocator
+         * cannot give is its failure, never a host buffer of that size first.
+         *
+         * @param {number} n @param {number} c
+         * @returns {Fill}
+         */
+        const filled = (n, c)=>({ length: n * unit, value: c });
+        /**
+         * The elements as bytes, a fill as it is: what a member writes,
+         * once nothing is left to refuse them.
+         *
+         * @param {Elements} elements
+         * @returns {Uint8Array | Fill}
+         */
+        const take = elements=>{
+            if (!('from' in elements))
+            {
+                return elements;
+            }
+            if (MAX < elements.length / unit)
+            {
+                return fail('length');
+            }
+            return read(elements.from, elements.length / unit);
+        };
+        /**
+         * Elements written at a place: none written is no access, as a
+         * string of no text has no place (its `_Ptr` is null). A fill is
+         * the memory layer's where its bytes are one value, and made a
+         * chunk at a time where a wide element's two bytes differ.
+         *
+         * @param {number} at @param {Uint8Array | Fill} elements
          */
         const write = (at, elements)=>{
-            if (elements.length > 0)
+            if (elements.length === 0)
+            {
+                return;
+            }
+            if (elements instanceof Uint8Array)
             {
                 guest.setBytes(at, elements);
+                return;
             }
+            const low = elements.value & 0xff;
+            const high = unit === 1 ? low : elements.value >>> 8 & 0xff;
+            if (low === high)
+            {
+                guest.fill(at, low, elements.length);
+                return;
+            }
+            guest.setMade(at, elements.length, chunk=>{
+                for (let i = 0; i < chunk.length; i += 2)
+                {
+                    chunk[i] = low;
+                    chunk[i + 1] = high;
+                }
+            });
         };
         /** @param {number} at */
         const lengthAt = at=>{
@@ -377,12 +450,17 @@ export function createMsvcp60Functions(crt, host){
             }
         };
 
-        /** assign(const E *, n), the elements already read. @param {number} self @param {Uint8Array} elements */
+        /** assign(const E *, n). @param {number} self @param {Elements} elements */
         const assignElements = (self, elements)=>{
             const n = elements.length / unit;
+            if (MAX < n)
+            {
+                return fail('length');
+            }
+            const taken = take(elements);
             if (grow(self, n, true))
             {
-                write(textOf(self), elements);
+                write(textOf(self), taken);
                 eos(self, n);
             }
             return self;
@@ -430,21 +508,7 @@ export function createMsvcp60Functions(crt, host){
             return self;
         };
 
-        /** n elements of value c. @param {number} n @param {number} c */
-        const filled = (n, c)=>{
-            const bytes = new Uint8Array(n * unit);
-            for (let i = 0; i < n; i++)
-            {
-                bytes[i * unit] = c & 0xff;
-                if (unit === 2)
-                {
-                    bytes[i * 2 + 1] = c >>> 8 & 0xff;
-                }
-            }
-            return bytes;
-        };
-
-        /** append of elements already read. @param {number} self @param {Uint8Array} elements */
+        /** append(const E *, n). @param {number} self @param {Elements} elements */
         const appendElements = (self, elements)=>{
             const m = elements.length / unit;
             const length = len(self);
@@ -452,9 +516,10 @@ export function createMsvcp60Functions(crt, host){
             {
                 return fail('length');
             }
+            const taken = take(elements);
             if (m > 0 && grow(self, length + m))
             {
-                write(textOf(self) + length * unit, elements);
+                write(textOf(self) + length * unit, taken);
                 eos(self, length + m);
             }
             return self;
@@ -498,7 +563,7 @@ export function createMsvcp60Functions(crt, host){
          * `count` at `pos`.
          *
          * @param {number} self @param {number} pos @param {number} count
-         * @param {Uint8Array} elements
+         * @param {Elements} elements
          */
         const replaceElements = (self, pos, count, elements)=>{
             const length = len(self);
@@ -512,13 +577,14 @@ export function createMsvcp60Functions(crt, host){
             {
                 return fail('length');
             }
+            const taken = take(elements);
             split(self);
             const tail = read(textOf(self) + (pos + n0) * unit, length - pos - n0);
             const n = length - n0 + m;
             if (grow(self, n))
             {
                 const text = textOf(self);
-                write(text + pos * unit, elements);
+                write(text + pos * unit, taken);
                 write(text + (pos + m) * unit, tail);
                 eos(self, n);
             }
@@ -628,14 +694,15 @@ export function createMsvcp60Functions(crt, host){
         };
 
         /** The result object of a function returning a string, made from elements. */
-        const made = (/** @type {number} */ out, /** @type {Uint8Array} */ elements)=>{
+        const made = (/** @type {number} */ out, /** @type {Elements} */ elements)=>{
             tidy(out);
             assignElements(out, elements);
             return out;
         };
 
         /** One element as a run. @param {number} c */
-        const one = c=>filled(1, c);
+        const one = c=>(unit === 1 ? Uint8Array.of(c & 0xff)
+            : Uint8Array.of(c & 0xff, c >>> 8 & 0xff));
 
         const T = `${element}U?$char_traits@${element}@std@@V?$allocator@${element}@1@@std@@`;
         const ARG = `$basic_string@${element}U?$char_traits@${element}@std@@`
@@ -683,7 +750,7 @@ export function createMsvcp60Functions(crt, host){
             }),
             [`??0${STRING}QAE@${CPTR}I${allocator}@Z`]: thiscall(16, ([self, from, count])=>{
                 tidy(self);
-                return assignElements(self, read(from, count >>> 0));
+                return assignElements(self, source(from, count >>> 0));
             }),
             [`??0${STRING}QAE@${CPTR}${allocator}@Z`]: thiscall(12, ([self, from])=>{
                 tidy(self);
@@ -695,7 +762,7 @@ export function createMsvcp60Functions(crt, host){
             }),
             [`??0${STRING}QAE@${CPTR}0${allocator}@Z`]: thiscall(16, ([self, first, last])=>{
                 tidy(self);
-                return assignElements(self, read(first, ((last >>> 0) - (first >>> 0)) / unit));
+                return assignElements(self, between(first, last));
             }),
             [`??1${STRING}QAE@XZ`]: thiscall(4, ([self])=>{
                 tidy(self, true);
@@ -715,11 +782,11 @@ export function createMsvcp60Functions(crt, host){
             [`?assign@${STRING}QAEAAV12@I${element}@Z`]: thiscall(12, ([self, count, c])=>
                 assignFill(self, count, c)),
             [`?assign@${STRING}QAEAAV12@${CPTR}0@Z`]: thiscall(12, ([self, first, last])=>
-                assignElements(self, read(first, ((last >>> 0) - (first >>> 0)) / unit))),
+                assignElements(self, between(first, last))),
             [`?assign@${STRING}QAEAAV12@${CPTR}@Z`]: thiscall(8, ([self, from])=>
                 assignElements(self, zeroTerminated(from))),
             [`?assign@${STRING}QAEAAV12@${CPTR}I@Z`]: thiscall(12, ([self, from, count])=>
-                assignElements(self, read(from, count >>> 0))),
+                assignElements(self, source(from, count >>> 0))),
 
             [`??Y${STRING}QAEAAV01@ABV01@@Z`]: thiscall(8, ([self, other])=>
                 appendString(self, other)),
@@ -735,11 +802,11 @@ export function createMsvcp60Functions(crt, host){
                 ((count >>> 0) === npos ? fail('length')
                     : appendElements(self, filled(count >>> 0, c)))),
             [`?append@${STRING}QAEAAV12@${CPTR}0@Z`]: thiscall(12, ([self, first, last])=>
-                appendElements(self, read(first, ((last >>> 0) - (first >>> 0)) / unit))),
+                appendElements(self, between(first, last))),
             [`?append@${STRING}QAEAAV12@${CPTR}@Z`]: thiscall(8, ([self, from])=>
                 appendElements(self, zeroTerminated(from))),
             [`?append@${STRING}QAEAAV12@${CPTR}I@Z`]: thiscall(12, ([self, from, count])=>
-                appendElements(self, read(from, count >>> 0))),
+                appendElements(self, source(from, count >>> 0))),
 
             [`?c_str@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>cText(self)),
             [`?data@${STRING}QBE${CPTR}XZ`]: thiscall(4, ([self])=>cText(self)),
@@ -869,7 +936,7 @@ export function createMsvcp60Functions(crt, host){
                 replaceElements(self, pos >>> 0, count, zeroTerminated(from))),
             [`?replace@${STRING}QAEAAV12@II${CPTR}I@Z`]: thiscall(20,
                 ([self, pos, count, from, n])=>replaceElements(self, pos >>> 0, count,
-                    read(from, n >>> 0))),
+                    source(from, n >>> 0))),
             [`?replace@${STRING}QAEAAV12@III${element}@Z`]: thiscall(20,
                 ([self, pos, count, n, c])=>replaceElements(self, pos >>> 0, count,
                     filled(n >>> 0, c))),
@@ -878,7 +945,7 @@ export function createMsvcp60Functions(crt, host){
             [`?insert@${STRING}QAEAAV12@I${CPTR}@Z`]: thiscall(12, ([self, pos, from])=>
                 replaceElements(self, pos >>> 0, 0, zeroTerminated(from))),
             [`?insert@${STRING}QAEAAV12@I${CPTR}I@Z`]: thiscall(16, ([self, pos, from, n])=>
-                replaceElements(self, pos >>> 0, 0, read(from, n >>> 0))),
+                replaceElements(self, pos >>> 0, 0, source(from, n >>> 0))),
             [`?insert@${STRING}QAEAAV12@II${element}@Z`]: thiscall(16, ([self, pos, n, c])=>
                 replaceElements(self, pos >>> 0, 0, filled(n >>> 0, c))),
 
@@ -962,7 +1029,7 @@ export function createMsvcp60Functions(crt, host){
         }
         /** The elements of a run [first, last). @param {number} first @param {number} last */
         function between(first, last){
-            return read(first, ((last >>> 0) - (first >>> 0)) / unit);
+            return source(first, ((last >>> 0) - (first >>> 0)) / unit);
         }
 
         /**
@@ -973,7 +1040,7 @@ export function createMsvcp60Functions(crt, host){
          */
         function iteratorReplaces(){
             const name = (/** @type {string} */ args)=>`?replace@${STRING}QAEAAV12@${PTRN}0${args}@Z`;
-            /** @param {number} self @param {number} first @param {number} last @param {Uint8Array} elements */
+            /** @param {number} self @param {number} first @param {number} last @param {Elements} elements */
             const put = (self, first, last, elements)=>replaceElements(self, offsetOf(self, first),
                 ((last >>> 0) - (first >>> 0)) / unit, elements);
             return [
@@ -986,7 +1053,7 @@ export function createMsvcp60Functions(crt, host){
                 [name(CPTR), thiscall(16, ([self, first, last, from])=>
                     put(self, first, last, zeroTerminated(from)))],
                 [name(`${CPTR}I`), thiscall(20, ([self, first, last, from, n])=>
-                    put(self, first, last, read(from, n >>> 0)))],
+                    put(self, first, last, source(from, n >>> 0)))],
             ];
         }
 

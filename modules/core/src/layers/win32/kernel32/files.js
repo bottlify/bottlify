@@ -50,6 +50,7 @@ import {
 } from './reparse.js';
 import { pointerArg, pointerWidth, wholeAddress } from '../common/pointers.js';
 import { readSecurityAttributes } from '../common/security-attributes.js';
+import { writeZeros } from '../common/guest.js';
 import { utf16 } from '../common/utf16.js';
 
 /** Codes this surface reports through the last-error slot. */
@@ -4632,9 +4633,9 @@ export function createFileFunctions(host){
                     return held !== null && held !== 'pipe' && !FILE_OBJECT_KINDS.has(held)
                         ? STATUS_OBJECT_TYPE_MISMATCH : STATUS_INVALID_HANDLE;
                 }
-                if (wholeAddress(buffer) !== 0 && (length >>> 0) !== 0)
+                if (wholeAddress(buffer) !== 0)
                 {
-                    host.writeMemory(wholeAddress(buffer), new Uint8Array(length >>> 0));
+                    writeZeros(host.writeMemory, wholeAddress(buffer), length >>> 0);
                 }
                 return STATUS_NO_EAS_ON_FILE;
             },

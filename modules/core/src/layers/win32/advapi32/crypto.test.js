@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { createCryptoFunctions } from './crypto.js';
 import { createHive } from './registry.js';
 import { createRegistryService } from './registry-service.js';
+import { IN_PLACE, externalGrowth } from '../common/guest.fixture.js';
 
 /* The contract's numbers, restated here so a wrong constant in the module
  * cannot be hidden by the test importing it. */
@@ -367,6 +368,12 @@ test('a generated RC4 key round-trips and CryptGenRandom fills the buffer', ()=>
     putBytes(BUFFER, zeros);
     assert.equal(fns.CryptGenRandom.handler([prov, 32, BUFFER]), 1);
     assert.notEqual(hex(getBytes(BUFFER, 32)), hex(zeros));
+    // A length the buffer does not have: drawn as it is written, the write
+    // refused where the memory ends, never gigabytes drawn first.
+    const { grown, error } = externalGrowth(()=>fns.CryptGenRandom.handler([prov, 0xdeadbeef,
+        BUFFER]));
+    assert.ok(error !== null, 'past the memory, the write refused');
+    assert.ok(grown < IN_PLACE, `${grown} bytes grown`);
 });
 
 test('SystemFunction036 fills its buffer from the generator CryptGenRandom draws on', ()=>{

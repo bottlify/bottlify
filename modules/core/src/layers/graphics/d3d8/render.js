@@ -928,9 +928,6 @@ const DEPTH_FORMAT = Object.freeze({
  */
 const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
 
-/** The largest level `decodeRoom` keeps bytes for: a 1024-texel square of RGBA. */
-const DECODE_ROOM_LIMIT = 1024 * 1024 * 4;
-
 /**
  * A compressed level decoded into the texel order every other format is
  * expanded to: the decoder answers R, G, B, A and the textures here are
@@ -5973,28 +5970,6 @@ export function createRenderer(options){
     };
 
     /**
-     * Where a compressed level is decoded on its way up, kept from one level
-     * to the next: the upload copies the texels before it returns, so bytes
-     * made for each level would only be garbage. A frame command keeps its
-     * texels, so an ordered upload decodes into bytes of its own, as a dump
-     * does; so does a level larger than a 1024-texel square, rather than the
-     * renderer holding that much for good.
-     */
-    let decodeBytes = new Uint8Array(0);
-    /** @param {number} length @returns {Uint8Array | undefined} */
-    const decodeRoom = length=>{
-        if (length > DECODE_ROOM_LIMIT)
-        {
-            return undefined;
-        }
-        if (decodeBytes.length < length)
-        {
-            decodeBytes = new Uint8Array(length);
-        }
-        return decodeBytes;
-    };
-
-    /**
      * The GPU texture behind a d3d8 texture, with level zero uploaded if the
      * program has written it since the last draw that read it.
      *
@@ -6049,6 +6024,17 @@ export function createRenderer(options){
             // further still -- follows the same choice.
             const keepsBlocks = COMPRESSED_FORMAT[record.format] !== undefined
                 && compressedTextures && blockAligned(record.width, record.height);
+            /**
+             * Where a compressed level is decoded on its way up, the next one
+             * into the same bytes: the upload copies the texels before it
+             * returns. Made for this call's largest level and let go of with
+             * it, so the renderer keeps no room of its own between calls. An
+             * ordered upload or a dump keeps its texels, and decodes into
+             * bytes of its own.
+             *
+             * @type {Uint8Array | undefined}
+             */
+            let room;
             for (const subresource of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
                 const level = subresource % record.levels;
@@ -6112,12 +6098,15 @@ export function createRenderer(options){
                 // format expandTexels does not know), so it is decompressed
                 // instead of expanded; everything else is widened to the one
                 // uncompressed format the backend samples.
-                const room = decodes && !ordered && !dumpDraws
-                    ? decodeRoom(width * height * 4) : undefined;
+                if (decodes && !ordered && !dumpDraws && (room?.length ?? 0) < width * height * 4)
+                {
+                    room = new Uint8Array(width * height * 4);
+                }
                 const texels = keepsBlocks
                     ? bytes
                     : decodes
-                        ? decodeCompressed(bytes, record.format, width, height, room)
+                        ? decodeCompressed(bytes, record.format, width, height,
+                            ordered || dumpDraws ? undefined : room)
                         : texelsFrom(bytes, record.format, width, height, pitch, width * height,
                             keeps);
                 uploadTexels(record.gpu,
