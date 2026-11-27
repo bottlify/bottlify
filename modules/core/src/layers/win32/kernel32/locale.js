@@ -22,6 +22,7 @@ import { LCMAP_LINGUISTIC_CASING, LCMAP_SORTKEY, LCMAP_TITLECASE, mapText, valid
 import { DAYS, GENITIVE, HEX_TYPES, LCTYPE, MONTHS, isNumberType, localeValues }
     from './locale-data.js';
 import { bytesOfUnits, utf16 } from '../common/utf16.js';
+import { downcaseUnit, foldName, upcaseUnit } from '../../../system/text.js';
 
 /**
  * Code pages and the string conversions built on them.
@@ -174,44 +175,6 @@ const LOCALE_SMONTHNAME13 = 0x100E;
 /** CompareString's answers. Note that none of them is zero: zero is failure. */
 const CSTR_LESS_THAN = 1;
 const CSTR_GREATER_THAN = 3;
-
-/**
- * Where Windows' case table keeps a character that Unicode's maps: the micro
- * sign stays (its upper case would be the Greek capital mu), and the Greek
- * capital theta symbol keeps its own lower case.
- */
-const KEEPS_CASE = { upper: new Set([0x00b5]), lower: new Set([0x03f4]) };
-
-/**
- * A UTF-16 unit in upper case, as Windows' one-to-one table has it: one whose
- * upper case is longer than one unit (\u00df) stays as it is.
- *
- * @param {number} unit
- * @returns {number}
- */
-export const upcaseUnit = unit=>{
-    if (KEEPS_CASE.upper.has(unit))
-    {
-        return unit;
-    }
-    const upper = String.fromCharCode(unit).toUpperCase();
-    return upper.length === 1 ? upper.charCodeAt(0) : unit;
-};
-
-/**
- * A UTF-16 unit in lower case, by the same table.
- *
- * @param {number} unit
- * @returns {number}
- */
-export const downcaseUnit = unit=>{
-    if (KEEPS_CASE.lower.has(unit))
-    {
-        return unit;
-    }
-    const lower = String.fromCharCode(unit).toLowerCase();
-    return lower.length === 1 ? lower.charCodeAt(0) : unit;
-};
 
 /** CompareString's flags: the NORM_, LINGUISTIC_ and SORT_ ones, and LOCALE_USE_CP_ACP. */
 const SORT_DIGITSASNUMBERS = 0x00000008;
@@ -742,10 +705,9 @@ export const charToOem = text=>encodeSingleByte(text, OEM_PAGE, 0x5f, true).byte
 /**
  * Bytes of the ANSI page with their case changed, one byte to one byte.
  *
- * What CharUpper and CharLower do to a buffer: a byte whose mapping is not
- * itself one character of the page -- a sharp s, which Unicode uppercases to
- * two letters -- is left as it was, because a buffer being converted in place
- * has no room for it to grow.
+ * What CharUpper and CharLower do to a buffer: each character through
+ * Windows' one-to-one case table, and one whose other case the page cannot
+ * write left as it was.
  *
  * @param {Uint8Array} bytes @param {boolean} upper
  * @returns {Uint8Array}
@@ -755,10 +717,10 @@ export const mapCaseAnsi = (bytes, upper)=>{
     const mapped = new Uint8Array(bytes.length);
     for (let at = 0; at < text.length; at++)
     {
-        const character = text[at];
-        const changed = upper ? character.toUpperCase() : character.toLowerCase();
+        const unit = text.charCodeAt(at);
+        const changed = String.fromCharCode(upper ? upcaseUnit(unit) : downcaseUnit(unit));
         const { bytes: encoded, usedDefault } = encodeSingleByte(changed, ANSI_CODE_PAGE);
-        mapped[at] = changed.length === 1 && !usedDefault ? encoded[0] : bytes[at];
+        mapped[at] = !usedDefault ? encoded[0] : bytes[at];
     }
     return mapped;
 };
@@ -2575,8 +2537,7 @@ export function createLocaleFunctions(host){
                     return refuse(ERROR_INVALID_PARAMETER);
                 }
                 const upper = (/** @type {string} */ text)=>((ignoreCase >>> 0) === 0 ? text
-                    : String.fromCharCode(...Array.from(text,
-                        unit=>upcaseUnit(unit.charCodeAt(0)))));
+                    : foldName(text));
                 const left = upper(readWideCounted(wholeAddress(first), firstLength | 0));
                 const right = upper(readWideCounted(wholeAddress(second), secondLength | 0));
                 for (let at = 0; at < Math.min(left.length, right.length); at++)

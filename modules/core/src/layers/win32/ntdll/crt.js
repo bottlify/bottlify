@@ -23,7 +23,8 @@
  * (`functions.js`).
  */
 
-import { decodeAnsi, encodeAnsi, upcaseUnit } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { upcaseUnit } from '../../../system/text.js';
 import { WIDE_READINGS } from '../msvcrt/convert.js';
 import { KERNEL_SCAN } from '../msvcrt/scan.js';
 import { WINDOWS_SORT } from '../msvcrt/sort.js';

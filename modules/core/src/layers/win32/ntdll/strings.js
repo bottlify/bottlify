@@ -21,13 +21,10 @@
  */
 
 import { STATUS } from './status.js';
-import { decodeAnsi, decodeOem, encodeAnsi, encodeOem, upcaseUnit } from '../kernel32/locale.js';
+import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from '../kernel32/locale.js';
+import { foldName } from '../../../system/text.js';
 import { wholeAddress } from '../common/pointers.js';
 import { utf16z } from '../common/utf16.js';
-
-/** @param {string} text */
-export const upcaseText = text=>Array.from(text,
-    c=>String.fromCharCode(upcaseUnit(c.charCodeAt(0)))).join('');
 
 /** UNICODE_STRING and ANSI_STRING, which differ only in what they point at. */
 export const COUNTED_STRING = Object.freeze({
@@ -251,7 +248,7 @@ export function createCountedStringFunctions(host){
         handler: ([destination, source, allocateDestination])=>{
             const from = readDescriptor(wholeAddress(source));
             const read = wideAt(from.buffer, from.length);
-            const text = upcase ? upcaseText(read) : read;
+            const text = upcase ? foldName(read) : read;
             const terminator = counted ? 0 : 1;
             const total = text.length + terminator;
             if (total > MAX_MAXIMUM)

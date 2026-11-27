@@ -1638,3 +1638,29 @@ test('IsValidLanguageGroup: the one locale\'s group installed, seventeen known',
     assert.equal(fns.IsValidLanguageGroup.handler([1, 3]), 0, 'both flags at once');
     assert.equal(host.errors.at(-1), 1004, 'ERROR_INVALID_FLAGS');
 });
+
+test('CompareStringOrdinal ignoring case compares through RtlUpcaseUnicodeChar', ()=>{
+    // Wine's test_CompareStringOrdinal: one unit against another, the ignoring-case
+    // answer the sign of their RtlUpcaseUnicodeChar difference.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const upcase = fns.CompareStringOrdinal.natives.RtlUpcaseUnicodeChar.handler;
+    const ask = (/** @type {string} */ a, /** @type {string} */ b, /** @type {number} */ ignore)=>{
+        host.plantWide(0x100, a);
+        host.plantWide(0x400, b);
+        return fns.CompareStringOrdinal.handler([0x100, a.length, 0x400, b.length, ignore]);
+    };
+    const CSTR = [1, 2, 3];
+    for (const [a, b] of [['a', 'A'], ['ÿ', 'Ÿ'], ['ı', 'I'], ['ı', 'i'], ['\u212a', 'k'],
+        ['ς', 'Σ'], ['ǅ', 'Ǆ'], ['ß', '\u1e9e'], ['µ', 'Μ']])
+    {
+        const diff = upcase([a.charCodeAt(0)]) - upcase([b.charCodeAt(0)]);
+        assert.equal(ask(a, b, 1), CSTR[Math.sign(diff) + 1], `${a} ${b}`);
+    }
+    assert.equal(ask('ÿ', 'Ÿ', 1), 2);
+    assert.equal(ask('ı', 'i', 1), 3, 'the dotless i is not i');
+    assert.equal(ask('\u212a', 'k', 1), 3, 'the Kelvin sign is not k');
+    assert.equal(ask('ς', 'σ', 1), 3, 'final sigma is not sigma');
+    assert.equal(upcase([0x131]), 0x131);
+    assert.equal(fns.CompareStringOrdinal.natives.RtlDowncaseUnicodeChar.handler([0x212a]), 0x212a);
+});
