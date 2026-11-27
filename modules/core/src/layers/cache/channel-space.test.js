@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createChannel, openClient, openKeeper, openServer } from '@bottlify/cellar';
-import { serveKeeper } from './module.js';
+import { createCacheModule, serveKeeper } from './module.js';
 import { openRunCache } from '../../process/run-cache.js';
 
 test('a worker\'s bodies reach the keeper as the only copy for this run, to its disk and never '
@@ -235,5 +235,40 @@ test('an owner that leaves bodies past what it held, or goes without letting go,
         await served[0].ended;
         assert.deepEqual(tails, []);
         keeper.close();
+    }
+});
+
+test('an owner on the keeper\'s own thread - an in-thread root\'s texels - is numbered by the run, '
+    + 'reads and writes through the thread\'s reader, and lets go of every name it held',
+{ timeout: 60_000 }, async()=>{
+    /** @type {import('./module.js').OwnerTail[]} */
+    const tails = [];
+    const run = await openRunCache({ onTail: tail=>tails.push(tail) });
+    try
+    {
+        const api = await createCacheModule().create({ reader: run.reader, join: run.join,
+            serve: run.serve });
+        const worker = run.serve('texels');
+        const owned = /** @type {NonNullable<ReturnType<typeof api.owner>>} */ (api.owner('texels'));
+        assert.ok(owned, 'a run that serves names gives one');
+        assert.notEqual(owned.prefix, worker.prefix, 'apart from a worker\'s root of the run');
+        assert.equal(await owned.ask('1', 8192), true, 'granted at once');
+        assert.equal(owned.put('1', new Uint8Array(8192).fill(3)), true);
+        assert.equal(owned.put('2', new Uint8Array(8192).fill(4)), true);
+        owned.space.drop('2');
+        assert.equal(owned.space.with('1', body=>body[8191], { wait: true }), 3, 'read in place');
+        assert.equal(owned.held(), 1);
+        assert.equal(run.under(owned.prefix).bodies, 1);
+        assert.deepEqual(await owned.close(), { bodies: 1, bytes: 8192, waiting: 0 });
+        assert.equal(await owned.ask('3', 8192), false, 'nothing granted once it went');
+        assert.equal(owned.put('3', new Uint8Array(8192)), false);
+        assert.equal(run.under(owned.prefix).bodies, 0, 'nothing left under its names');
+        assert.deepEqual(tails, []);
+        const alone = await createCacheModule().create({ reader: run.reader });
+        assert.equal(alone.owner('texels'), null, 'none where the run serves no names');
+    }
+    finally
+    {
+        run.close();
     }
 });

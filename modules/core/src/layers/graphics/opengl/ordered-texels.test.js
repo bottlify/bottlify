@@ -12,9 +12,11 @@
  * their key. Seeded programs of textures in several kinds - legacy RGBA,
  * sized red-green, S3TC decoded on the way up or kept as blocks on a device
  * that samples them, depth - written whole and in part between draws that
- * sample them, run with the run's cache under the store and without one. The
- * device must be given the same calls with the same bytes, and nothing may be
- * left in the store or under the root's names once the frames are replayed.
+ * sample them, run with the run's cache under the store and without one: the
+ * names a root in the graphics worker holds (`channelSpace`) and those a root
+ * drawn on the run's own thread holds (`ownedSpace`). The device must be
+ * given the same calls with the same bytes, and nothing may be left in the
+ * store or under the root's names once the frames are replayed.
  */
 
 import { test } from 'node:test';
@@ -26,7 +28,7 @@ import { createGpuRenderer } from './gpu.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { openRunCache } from '../../../process/run-cache.js';
-import { channelSpace } from '../../cache/module.js';
+import { channelSpace, ownedSpace } from '../../cache/module.js';
 
 /** @param {number} seed @returns {() => number} 0 up to 2^32 */
 function random(seed){
@@ -101,31 +103,39 @@ const KINDS = [
  * figures, the losses said, and what the cache held under the root's names
  * at the end.
  *
- * @param {number} seed @param {boolean} cached
+ * @param {number} seed @param {'plain' | 'worker' | 'thread'} where  the texels' store:
+ *     plain memory, or the run's cache from the graphics worker or from the run's thread
  * @param {{ mutate?: boolean }} [options]  `mutate`: the cache's read of a body is wrong
  *     in its first byte, which the gate must see
  */
-async function run(seed, cached, { mutate = false } = {}){
+async function run(seed, where, { mutate = false } = {}){
     const next = random(seed);
     const fake = createFakeDevice({});
     const backend = createBackend({ device: fake.device, queue: fake.queue, presentTo: ()=>{} });
-    const runCache = cached ? await openRunCache({ budget: 64 << 20 }) : null;
-    /** @type {ReturnType<typeof channelSpace> | null} */
+    const runCache = where === 'plain' ? null : await openRunCache({ budget: 64 << 20 });
+    /** @type {ReturnType<typeof channelSpace> | ReturnType<typeof ownedSpace> | null} */
     let texels = null;
-    if (runCache)
+    if (runCache && where === 'worker')
     {
-        const joined = runCache.join(message=>texels?.adopt(message));
-        texels = channelSpace(joined, runCache.serve('texels'));
-        if (mutate)
-        {
-            const space = texels.space;
-            const read = space.with;
-            space.with = (key, reader, options)=>read(key, body=>{
-                const wrong = body.slice();
-                wrong[0] ^= 0xff;
-                return reader(wrong);
-            }, options);
-        }
+        /** @type {ReturnType<typeof channelSpace> | null} */
+        let worker = null;
+        worker = channelSpace(runCache.join(message=>worker?.adopt(message)),
+            runCache.serve('texels'));
+        texels = worker;
+    }
+    else if (runCache)
+    {
+        texels = ownedSpace(runCache.reader, runCache.serve('texels'));
+    }
+    if (texels && mutate)
+    {
+        const space = texels.space;
+        const read = space.with;
+        space.with = (key, reader, options)=>read(key, body=>{
+            const wrong = body.slice();
+            wrong[0] ^= 0xff;
+            return reader(wrong);
+        }, options);
     }
     /** @type {string[]} */
     const losses = [];
@@ -220,53 +230,61 @@ async function run(seed, cached, { mutate = false } = {}){
 const SEEDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 test('a frame\'s uploads and depth writes give the device the same bytes from the run\'s cache as '
-    + 'from plain memory, and leave nothing there', { timeout: 120_000 }, async()=>{
-    let moved = 0;
-    let puts = 0;
-    let inPlace = 0;
-    /** @type {Set<string>} */
-    const kinds = new Set();
-    for (const seed of SEEDS)
+    + 'from plain memory, and leave nothing there', { timeout: 240_000 }, async()=>{
+    for (const where of /** @type {const} */ (['worker', 'thread']))
     {
-        const plain = await run(seed, false);
-        const cached = await run(seed, true);
-        assert.ok(plain.calls.some(call=>call.includes('"writeTexture"')), `seed ${seed}`);
-        assert.equal(cached.calls.length, plain.calls.length, `seed ${seed}`);
-        for (let at = 0; at < plain.calls.length; at++)
+        let moved = 0;
+        let puts = 0;
+        let inPlace = 0;
+        /** @type {Set<string>} */
+        const kinds = new Set();
+        for (const seed of SEEDS)
         {
-            assert.equal(cached.calls[at], plain.calls[at], `seed ${seed}: call ${at}`);
+            const plain = await run(seed, 'plain');
+            const cached = await run(seed, where);
+            const at = `${where}, seed ${seed}`;
+            assert.ok(plain.calls.some(call=>call.includes('"writeTexture"')), at);
+            assert.equal(cached.calls.length, plain.calls.length, at);
+            for (let call = 0; call < plain.calls.length; call++)
+            {
+                assert.equal(cached.calls[call], plain.calls[call], `${at}: call ${call}`);
+            }
+            // The cache's run puts the levels that wait into the store as well.
+            assert.equal(cached.kept.put - cached.spilledLevels, plain.kept.put,
+                `${at}: the same bytes kept for the frames`);
+            assert.deepEqual([...plain.losses, ...cached.losses], [], at);
+            assert.equal(cached.kept.lost, 0, at);
+            assert.equal(cached.kept.bodies, 0, `${at}: every frame let its bytes go`);
+            assert.equal(plain.kept.bodies, 0, at);
+            assert.equal(cached.left, 0, `${at}: nothing left under the root's names`);
+            assert.deepEqual(cached.released, { bodies: 0, bytes: 0, waiting: 0 }, at);
+            assert.equal(plain.kept.cache, false);
+            moved += cached.kept.moved;
+            puts += plain.kept.put;
+            inPlace += cached.inPlace;
+            for (const kind of cached.kinds)
+            {
+                kinds.add(kind);
+            }
         }
-        // The cache's run puts the levels that wait into the store as well.
-        assert.equal(cached.kept.put - cached.spilledLevels, plain.kept.put,
-            `seed ${seed}: the same bytes kept for the frames`);
-        assert.deepEqual([...plain.losses, ...cached.losses], [], `seed ${seed}`);
-        assert.equal(cached.kept.lost, 0, `seed ${seed}`);
-        assert.equal(cached.kept.bodies, 0, `seed ${seed}: every frame let its bytes go`);
-        assert.equal(plain.kept.bodies, 0, `seed ${seed}`);
-        assert.equal(cached.left, 0, `seed ${seed}: nothing left under the root's names`);
-        assert.deepEqual(cached.released, { bodies: 0, bytes: 0, waiting: 0 }, `seed ${seed}`);
-        assert.equal(plain.kept.cache, false);
-        moved += cached.kept.moved;
-        puts += plain.kept.put;
-        inPlace += cached.inPlace;
-        for (const kind of cached.kinds)
-        {
-            kinds.add(kind);
-        }
+        assert.ok(puts > 0, `${where}: uploads waited for their frames`);
+        assert.ok(moved > 0, `${where}: some of their bytes waited in the run's cache`);
+        assert.ok(inPlace > 0, `${where}: levels uploaded from where they waited`);
+        assert.deepEqual([...kinds].sort(), KINDS.map(kind=>kind.name).sort(),
+            `${where}: every kind made`);
     }
-    assert.ok(puts > 0, 'uploads waited for their frames');
-    assert.ok(moved > 0, 'some of their bytes waited in the run\'s cache');
-    assert.ok(inPlace > 0, 'levels uploaded from where they waited');
-    assert.deepEqual([...kinds].sort(), KINDS.map(kind=>kind.name).sort(), 'every kind made');
 });
 
-test('the gate sees a wrong read of the run\'s cache', { timeout: 120_000 }, async()=>{
-    let differed = 0;
-    for (const seed of SEEDS)
+test('the gate sees a wrong read of the run\'s cache', { timeout: 240_000 }, async()=>{
+    for (const where of /** @type {const} */ (['worker', 'thread']))
     {
-        const plain = await run(seed, false);
-        const wrong = await run(seed, true, { mutate: true });
-        differed += wrong.calls.some((call, at)=>call !== plain.calls[at]) ? 1 : 0;
+        let differed = 0;
+        for (const seed of SEEDS)
+        {
+            const plain = await run(seed, 'plain');
+            const wrong = await run(seed, where, { mutate: true });
+            differed += wrong.calls.some((call, at)=>call !== plain.calls[at]) ? 1 : 0;
+        }
+        assert.ok(differed > 0, `${where}: a body read wrong reaches the device`);
     }
-    assert.ok(differed > 0, 'a body read wrong reaches the device');
 });
