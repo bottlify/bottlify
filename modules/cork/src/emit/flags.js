@@ -634,7 +634,7 @@ export function addMaterialiseHelper(m, wide = false){
         b.br(cases.length - i - 1);
     }
     b.end();
-    return m.function(type, [ValType.f64, ValType.f64], b.toBytes());
+    return m.function(type, [ValType.f64, ValType.f64], b);
 }
 
 /**
@@ -693,7 +693,7 @@ function foldOf(wide){
     {
         b.localGet(i);
     }
-    m.function(type, [], b.call(helper).toBytes(), { exportAs: 'fold' });
+    m.function(type, [], b.call(helper), { exportAs: 'fold' });
     const instance = new WebAssembly.Instance(new WebAssembly.Module(m.toBytes()), {});
     return /** @type {any} */ (instance.exports).fold;
 }

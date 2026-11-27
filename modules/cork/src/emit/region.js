@@ -618,7 +618,7 @@ export function prepareModule(m, layout, features, memory = {},
     {
         // The transfer's index is taken before any region's, which call it;
         // its body waits for the module's last region (`finishModule`).
-        context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
+        context.transfer = m.reserveFunction(regionType);
         if (resume)
         {
             context.resume = addResume(m, layout, bases, materialise, context.transfer, width);
@@ -848,11 +848,8 @@ export function finishModule(context, functions){
     {
         b.i32const(Exit.UNTRANSLATED);
     }
-    m.functions[transfer - m.importedFunctions] = {
-        typeIndex: regionType,
-        locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
-        body: b.toBytes(), hints: b.hints,
-    };
+    m.function(regionType, [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32], b,
+        { hints: b.hints, at: transfer });
 }
 
 /**
@@ -1017,7 +1014,7 @@ function addResume(m, layout, bases, materialise, transfer, width = WIDTH_32){
     b.end();
     b.localGet(code).i32const(0xff).op(I32.and).i32const(8).op(I32.shl)
         .i32const(Exit.INTERPRETED).op(I32.or);
-    return m.function(tierType, [ValType.i32, ValType.i32], b.toBytes());
+    return m.function(tierType, [ValType.i32, ValType.i32], b);
 }
 
 /**
@@ -1883,9 +1880,8 @@ export class RegionEmitter {
         }
         this.fillDeferred();
         const functionIndex = this.context.m.function(
-            this.context.regionType, this.localTypes, this.b.toBytes(),
+            this.context.regionType, this.localTypes, this.b,
             { hints: this.b.hints, ...this.selfIndex >= 0 ? { at: this.selfIndex } : {} });
-        this.b.release();
         return {
             functionIndex, copiesIndex: this.copiesIndex,
             // A callee's copy has no entry: its blocks are no labels of the region's.

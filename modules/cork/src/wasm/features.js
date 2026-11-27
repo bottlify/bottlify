@@ -42,7 +42,7 @@ function defaultNaNBits(){
     {
         const m = new ModuleBuilder();
         const type = m.type({ params: [], results: [ValType.i32] });
-        m.function(type, [], new Body().f32const(0).f32const(0).op(0x95).op(0xbc).toBytes(),
+        m.function(type, [], new Body().f32const(0).f32const(0).op(0x95).op(0xbc),
             { exportAs: 'f' });
         const { f } = /** @type {{ f: () => number }} */ (
             new WebAssembly.Instance(new WebAssembly.Module(m.toBytes()), {}).exports);
@@ -73,12 +73,12 @@ export function features(){
         // A function that splats a constant into a v128 and drops it.
         simd: validates(m=>{
             const type = m.type({ params: [], results: [] });
-            m.function(type, [], new Body().i32const(1).simd(15).drop().toBytes());
+            m.function(type, [], new Body().i32const(1).simd(15).drop());
         }),
         // A function that returns by calling itself.
         tailCalls: validates(m=>{
             const type = m.type({ params: [], results: [] });
-            m.function(type, [], new Body().returnCall(0).toBytes());
+            m.function(type, [], new Body().returnCall(0));
         }),
         sharedMemory: (()=>{
             try
@@ -157,7 +157,7 @@ export function wideLanes(ram){
             {
                 b.storeV128();
             }
-            m.function(type, [ValType.v128], b.toBytes(), { exportAs: `f${index}` });
+            m.function(type, [ValType.v128], b, { exportAs: `f${index}` });
         }
         const exports = /** @type {Record<string, (address: bigint) => void>} */ (
             new WebAssembly.Instance(new WebAssembly.Module(m.toBytes()),

@@ -4845,7 +4845,7 @@ export function addInvalidHelper(m, layout){
     b.op(0x0f);
     b.end();
     b.i32const(0);
-    return m.function(type, [], b.toBytes());
+    return m.function(type, [], b);
 }
 
 /**
@@ -4965,7 +4965,7 @@ export function addRemainderHelper(m){
     b.localGet(Q).i32const(2).op(I32.and).i32const(13).op(I32.shl).op(I32.or);
     b.localGet(Q).i32const(1).op(I32.and).i32const(9).op(I32.shl).op(I32.or);
     b.end();
-    return m.function(type, [i64, i64, i32, i32, i32, i32, i32, i32, i64], b.toBytes());
+    return m.function(type, [i64, i64, i32, i32, i32, i32, i32, i32, i64], b);
 }
 
 /**
@@ -4993,7 +4993,7 @@ export function addRoundHelper(m){
     b.localGet(0).op(F64.trunc);
     b.localGet(2).i32const(3).op(I32.ne);
     b.select();
-    return m.function(type, [ValType.i32], b.toBytes());
+    return m.function(type, [ValType.i32], b);
 }
 
 /**
@@ -5057,7 +5057,7 @@ export function addF80Helpers(m, memory){
         b.end();
         b.localGet(3);
         return m.function(type, [ValType.i64, ValType.i32, ValType.f64, ValType.i32, ValType.i32],
-            b.toBytes());
+            b);
     })();
     const f64ToF80 = (()=>{
         const type = m.type({ params: [ValType.f64, address], results: [] });
@@ -5100,7 +5100,7 @@ export function addF80Helpers(m, memory){
         b.localGet(1).localGet(5).store('i64', { offset: 0, memory });
         b.localGet(1).localGet(6).store('i32_16', { offset: 8, memory });
         return m.function(type, [ValType.i64, ValType.i64, ValType.i32, ValType.i64, ValType.i32,
-            ValType.i32], b.toBytes());
+            ValType.i32], b);
     })();
     return { f80ToF64, f64ToF80 };
 }
@@ -5163,5 +5163,5 @@ export function addBcdHelper(m, memory){
     b.localGet(1).localGet(3).i32const(7).op(I32.shl).store('i32_8', { offset: 9, memory });
     return m.function(type,
         [ValType.i64, ValType.i32, ValType.f64, ValType.i64, ValType.i64, ValType.i32,
-            ValType.i64, ValType.i64], b.toBytes());
+            ValType.i64, ValType.i64], b);
 }
